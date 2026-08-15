@@ -416,8 +416,11 @@ fn comparing_a_bare_parameter_is_refused_and_value_is_the_way_to_do_it() {
         "{% if mode != 'fast' %}A{% endif %}",
         "{% if 1 > 0 %}{% elif mode >= 'f' %}A{% endif %}",
     ] {
+        // `expect`, not `unwrap_err`: a bare `unwrap_err` panics without the
+        // template, and every case in this loop shares one line number.
+        let err = render(tpl, &ctx).expect_err(tpl);
         assert_eq!(
-            render(tpl, &ctx).unwrap_err(),
+            err,
             RenderError::BareParameterComparison("mode".into()),
             "template: {tpl}"
         );
@@ -440,6 +443,246 @@ fn the_comparison_lint_does_not_fire_on_non_parameters() {
     .unwrap();
     assert_eq!(sql, "SELECT ?, ?");
     assert_eq!(binds.len(), 2);
+}
+
+/// **Every rule here is opened by one character** if the scanner trims only `-`.
+/// `Whitespace::from_byte` maps `+` to Preserve and the lexer skips it, so
+/// `{%+ filter %}` is an ordinary filter block whose keyword a `-`-only scanner
+/// reads as `"+"`. Three of these are backstopped by the placeholder==bind
+/// invariant; the fourth is not — `{%+ if mode == 'fast' %}` rendered `""` with
+/// no binds and no error, a publishable silently-false template.
+#[test]
+fn a_whitespace_control_marker_does_not_open_a_hole_in_any_rule() {
+    let mut ctx = ParamValues::new();
+    ctx.insert("a", Param::Str(EVIL.into()));
+    ctx.insert("mode", Param::Str("fast".into()));
+    ctx.insert_list("xs", vec![Param::I64(1)]);
+
+    for (tpl, want) in [
+        (
+            "{%+ filter upper %}{{ a }}{%+ endfilter %}",
+            RenderError::CaptureConstruct("filter"),
+        ),
+        (
+            "{%+ set x %}{{ a }}{%+ endset %}{{ x }}",
+            RenderError::CaptureConstruct("endset"),
+        ),
+        (
+            "{%+ macro m() %}{{ a }}{%+ endmacro %}",
+            RenderError::CaptureConstruct("macro"),
+        ),
+        (
+            "{%+ for x in xs recursive %}{{ x }}{%+ endfor %}",
+            RenderError::RecursiveLoop,
+        ),
+        (
+            "{%+ if mode == 'fast' %}FAST{%+ endif %}",
+            RenderError::BareParameterComparison("mode".into()),
+        ),
+        (
+            "{%- if mode == 'fast' -%}FAST{%- endif -%}",
+            RenderError::BareParameterComparison("mode".into()),
+        ),
+    ] {
+        assert_eq!(render(tpl, &ctx).unwrap_err(), want, "template: {tpl}");
+    }
+}
+
+/// The operator spelling is not the only spelling. `eq`/`equalto`/`ne`/`lt`/`le`/
+/// `gt`/`ge`/`in`/`sameas` are registered as TESTS routing to the same
+/// `ops::coerce`, so `mode is eq('fast')` is `==` in disguise; and a comparison
+/// is just as silently false inside `{% set %}`, inside a for-loop's condition
+/// and inside a bare `{{ … }}` as it is inside `{% if %}`. Every one of these
+/// took the wrong branch with no error before the lint reached it.
+#[test]
+fn comparison_shaped_constructs_are_refused_wherever_they_are_written() {
+    let mut ctx = ParamValues::new();
+    ctx.insert("mode", Param::Str("fast".into()));
+    ctx.insert_list("xs", vec![Param::I64(1)]);
+
+    for tpl in [
+        "{% if mode is eq('fast') %}FAST{% endif %}",
+        "{% if mode is equalto('fast') %}FAST{% endif %}",
+        "{% if mode is not eq('fast') %}FAST{% endif %}",
+        "{% if 'fast' is eq(mode) %}FAST{% endif %}",
+        "{% if mode is ge('f') %}FAST{% endif %}",
+        // The type tests are the same silence: a parameter is an object, so it
+        // is never a string, a number or none.
+        "{% if mode is string %}FAST{% endif %}",
+        "{% if mode is none %}FAST{% endif %}",
+        "{% set f = mode == 'fast' %}{% if f %}FAST{% endif %}",
+        "{{ 'FAST' if mode == 'fast' else 'SLOW' }}",
+        "{{ mode == 'fast' }}",
+        "{% if mode in ['fast'] %}FAST{% endif %}",
+        "{% if mode not in ['fast'] %}FAST{% endif %}",
+        "{% for x in xs if mode == 'fast' %}{{ x }}{% endfor %}",
+    ] {
+        // `expect`, not `unwrap_err`: a bare `unwrap_err` panics without the
+        // template, and every case in this loop shares one line number.
+        let err = render(tpl, &ctx).expect_err(tpl);
+        assert_eq!(
+            err,
+            RenderError::BareParameterComparison("mode".into()),
+            "template: {tpl}"
+        );
+    }
+}
+
+/// One rename would otherwise defeat the whole rule: a `{% with %}`/`{% set %}`
+/// binding and a loop variable each hold the same opaque value, so comparing
+/// them is silently false one level of indirection away.
+#[test]
+fn a_renamed_parameter_is_still_a_parameter() {
+    let mut ctx = ParamValues::new();
+    ctx.insert("mode", Param::Str("fast".into()));
+    ctx.insert_list("regions", vec![Param::Str("EU".into())]);
+
+    for (tpl, want) in [
+        (
+            "{% with m = mode %}{% if m == 'fast' %}FAST{% endif %}{% endwith %}",
+            "m",
+        ),
+        ("{% set m = mode %}{% if m == 'fast' %}FAST{% endif %}", "m"),
+        (
+            "{% for r in regions %}{% if r == 'EU' %}X{% endif %}{% endfor %}",
+            "r",
+        ),
+        (
+            "{% for r in regions %}{% if r is eq('EU') %}X{% endif %}{% endfor %}",
+            "r",
+        ),
+    ] {
+        let err = render(tpl, &ctx).expect_err(tpl);
+        assert_eq!(
+            err,
+            RenderError::BareParameterComparison(want.into()),
+            "template: {tpl}"
+        );
+    }
+
+    // …and a name bound to something that is NOT a parameter is left alone.
+    let (sql, _) = render(
+        "{% set label = 'x' %}{% if label == 'x' %}A{% endif %}",
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(sql, "A", "an ordinary template local must still compare");
+}
+
+/// The two things that must keep working: presence, and a loop header's `in`.
+#[test]
+fn presence_tests_and_the_loop_header_are_untouched() {
+    let mut ctx = ParamValues::new();
+    ctx.insert("mode", Param::Str("fast".into()));
+    ctx.insert_absent("missing");
+    ctx.insert_list("regions", vec![Param::Str("EU".into())]);
+
+    let (sql, _) = render("{% if mode is defined %}A{% endif %}", &ctx).unwrap();
+    assert_eq!(sql, "A");
+    let (sql, _) = render("{% if missing is not defined %}A{% endif %}", &ctx).unwrap();
+    assert_eq!(sql, "");
+    let (sql, binds) = render("{% for r in regions %}{{ r }}{% endfor %}", &ctx).unwrap();
+    assert_eq!(sql, "?");
+    assert_eq!(binds.len(), 1);
+}
+
+/// `{# … #}` is skipped by the lexer, so `{# {% #}` contains no tag. A
+/// comment-blind scan pairs that `{%` with the NEXT `%}` and desyncs for the rest
+/// of the template, stepping straight over a real `{% filter %}`.
+#[test]
+fn a_template_comment_cannot_desync_the_scanner() {
+    let ctx = ctx_with_a("x");
+    // The `filter` case below is caught by its CLOSING tag even when the scan
+    // desyncs. This one is not: with the opening tag swallowed, the keyword read
+    // is `#}` and the `recursive` rule never fires at all.
+    let mut with_list = ParamValues::new();
+    with_list.insert_list("xs", vec![Param::I64(1)]);
+    assert_eq!(
+        render(
+            "{# {% #} {% for x in xs recursive %}{{ x }}{% endfor %}",
+            &with_list
+        )
+        .unwrap_err(),
+        RenderError::RecursiveLoop
+    );
+    assert_eq!(
+        render("{# {% #} {% filter upper %}{{ a }}{% endfilter %}", &ctx).unwrap_err(),
+        RenderError::CaptureConstruct("filter")
+    );
+
+    let (sql, binds) = render("SELECT {# a comment #}{{ a }}", &ctx).unwrap();
+    assert_eq!(sql, "SELECT ?");
+    assert_eq!(binds.len(), 1);
+}
+
+/// Inside a block the lexer tokenises strings, so a `%}` or `}}` in one does not
+/// close it — and an operator in one is text, not a comparison.
+#[test]
+fn a_string_literal_inside_a_block_cannot_desync_the_scanner() {
+    let mut ctx = ParamValues::new();
+    ctx.insert("mode", Param::Str("fast".into()));
+
+    let (sql, binds) = render("{{ '}}' }}", &ctx).unwrap();
+    assert_eq!(sql, "?");
+    assert_eq!(binds, vec![Param::Str("}}".into())]);
+
+    let (sql, binds) = render("{% if mode %}{{ 'mode == x' }}{% endif %}", &ctx).unwrap();
+    assert_eq!(sql, "?");
+    assert_eq!(binds, vec![Param::Str("mode == x".into())]);
+}
+
+/// The sink caps the SQL; nothing capped the other half of a render's memory.
+/// `{{ 'a' * 20000000 }}` is an eight-byte statement and 20 MB of bound value,
+/// produced in milliseconds — author-privileged rather than a caller vector, but
+/// it runs at publish time too, where it would take the process with it.
+#[test]
+fn the_bound_values_are_size_capped() {
+    // Matched rather than unwrapped: without the cap this binds 20 MB, and a
+    // failing `unwrap_err` would print all of it.
+    match render("SELECT {{ 'a' * 20000000 }}", &ParamValues::new()) {
+        Err(e) => assert_eq!(e, RenderError::BindsTooLarge),
+        Ok((sql, binds)) => panic!(
+            "no refusal: {} value(s) bound, {} byte(s), sql {sql:?}",
+            binds.len(),
+            binds
+                .iter()
+                .map(|p| match p {
+                    Param::Str(s) => s.len(),
+                    _ => 0,
+                })
+                .sum::<usize>()
+        ),
+    }
+}
+
+/// The scanner walks bytes, and a `&str` cannot be sliced at a byte that is not
+/// a char boundary. Every non-ASCII byte in a definition — a `'café'` literal, a
+/// Vietnamese column comment — is one, and SQL carries plenty of them.
+#[test]
+fn a_definition_containing_non_ascii_text_does_not_panic() {
+    let mut ctx = ParamValues::new();
+    ctx.insert("mode", Param::Str("nhanh".into()));
+
+    for tpl in [
+        "SELECT 'café' , {{ mode }}",
+        "SELECT {# lọc theo chế độ #}{{ mode }}",
+        "{% if mode %}-- chế độ\n{{ mode }}{% endif %}",
+        "{% if mode | value == 'nhanh' %}SELECT 'khách hàng'{% endif %}",
+    ] {
+        let out = render(tpl, &ctx);
+        assert!(out.is_ok(), "template {tpl} gave {out:?}");
+    }
+
+    // Non-ASCII INSIDE a block, and outside a string literal: this is where the
+    // scanner slices. The outcome is an undefined-name error either way — what
+    // this asserts is that it is an error rather than a panic.
+    for tpl in [
+        "{{ chế_độ }}",
+        "{% if chế_độ %}A{% endif %}",
+        "{{ 'x' ~ chế }}",
+    ] {
+        assert!(render(tpl, &ctx).is_err(), "template: {tpl}");
+    }
 }
 
 /// `check_static` is what publish-time validation calls; it must refuse the same

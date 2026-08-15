@@ -72,11 +72,22 @@
 //! that is what carries a `Date` through the template as a `Date` rather than as
 //! a string (see [`Cell`]'s own comment). minijinja compares an object against a
 //! string as **not equal**, so `{% if mode == 'fast' %}` would be silently false
-//! forever. [`check_static`] rejects that form at render time and the `value`
-//! filter is the supported spelling: `{% if mode | value == 'fast' %}`. The `in`
-//! operator (`{% if p in [...] %}`) has the same weakness and is **not** linted —
-//! rejecting it would need to tell a `{% for x in xs %}` header from an `in`
-//! expression, which this scanner cannot do.
+//! forever. [`check_static`] rejects every comparison-shaped form it can see and
+//! the `value` filter is the supported spelling: `{% if mode | value == 'fast' %}`.
+//!
+//! "Comparison-shaped" is wider than the operators. `eq`/`equalto`/`ne`/`lt`/
+//! `le`/`gt`/`ge`/`in`/`sameas` are registered as **tests** routing to the same
+//! `ops::coerce`, so `mode is eq('fast')` is `==` under another spelling; the
+//! type tests (`is string`, `is none`) are silently false on a parameter for the
+//! same reason; and a comparison is just as silent inside `{% set %}`, inside a
+//! for-loop's filter condition and inside a bare `{{ … }}` as inside `{% if %}`.
+//! So the lint reads every tag and every expression, `is <test>` is refused
+//! unless the test is `defined`/`undefined`, and the only `in` that survives is
+//! the one in a `{% for %}` header.
+//!
+//! A rename does not defeat it: `{% with m = mode %}`, `{% set m = mode %}` and
+//! a `{% for r in regions %}` loop variable all bind a parameter's value to a new
+//! name, and those names are linted too.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -144,6 +155,8 @@ pub enum RenderError {
     Template(String),
     #[error("the rendered SQL exceeds the {MAX_SQL_BYTES} byte cap")]
     TooLarge,
+    #[error("the values bound by this definition exceed the {MAX_BIND_BYTES} byte cap")]
+    BindsTooLarge,
     /// The invariant that survives a regression in [`check_static`]'s rules.
     ///
     /// Not merely tidiness: on StarRocks an arity mismatch is raised
@@ -414,12 +427,46 @@ fn value_filter(value: &Value) -> Value {
     }
 }
 
+/// The values bound so far, and how many bytes they hold.
+///
+/// The byte count is why this is a struct: [`MAX_SQL_BYTES`] caps the SQL, but
+/// the bind list is the other half of a render's memory and nothing bounded it.
+/// `{{ 'a' * 20000000 }}` produces an 8-byte statement and 20 MB of bound value
+/// in a few milliseconds — author-privileged rather than a caller vector, but it
+/// runs at PUBLISH time too, where an author's mistake would take the process
+/// with it.
+#[derive(Default)]
+struct Binds {
+    list: Vec<Param>,
+    bytes: usize,
+}
+
+/// Cap on the total size of the bound values. Request-sized by construction: a
+/// caller's parameters travel in a query string or a small JSON body.
+const MAX_BIND_BYTES: usize = 1 << 20;
+
+impl Binds {
+    fn push(&mut self, param: Param) -> Result<(), MjError> {
+        self.bytes += match &param {
+            Param::Decimal(s) | Param::Str(s) | Param::Date(s) | Param::Timestamp(s) => s.len(),
+            _ => std::mem::size_of::<Param>(),
+        };
+        if self.bytes > MAX_BIND_BYTES {
+            return Err(MjError::new(MjErrorKind::InvalidOperation, BINDS_TOO_LARGE));
+        }
+        self.list.push(param);
+        Ok(())
+    }
+}
+
+const BINDS_TOO_LARGE: &str = "the values bound by this definition exceed the size cap";
+
 /// Writes `?` and binds. The only thing a `{{ … }}` can do.
 ///
 /// The bind list is captured by the closure rather than carried in the template
 /// context, so no context key exists for a template to collide with or read.
 fn bind_formatter(
-    binds: Arc<Mutex<Vec<Param>>>,
+    binds: Arc<Mutex<Binds>>,
 ) -> impl Fn(&mut Output, &State, &Value) -> Result<(), MjError> + Send + Sync + 'static {
     move |out, _state, value| {
         // The one raw write in this module. See `Ident`: the text is the
@@ -431,7 +478,7 @@ fn bind_formatter(
         binds
             .lock()
             .expect("bind list mutex poisoned by a panic inside the renderer")
-            .push(param);
+            .push(param)?;
         out.write_str(PLACEHOLDER).map_err(MjError::from)
     }
 }
@@ -473,7 +520,7 @@ fn to_param(value: &Value) -> Result<Param, MjError> {
 
 /// The hardened environment. **Read [`render`]'s comment before changing the
 /// order or removing a line.**
-fn environment(binds: Arc<Mutex<Vec<Param>>>) -> Environment<'static> {
+fn environment(binds: Arc<Mutex<Binds>>) -> Environment<'static> {
     let mut env = Environment::new();
     // `debug()` is `format!("{state:#?}")`. A probe against 2.24.0 recovered the
     // entire template context plus an inventory of every registered filter, test
@@ -520,7 +567,7 @@ fn environment(binds: Arc<Mutex<Vec<Param>>>) -> Environment<'static> {
 pub fn render(sql: &str, ctx: &ParamValues) -> Result<(String, Vec<Param>), RenderError> {
     check_static(sql, ctx)?;
 
-    let binds = Arc::new(Mutex::new(Vec::new()));
+    let binds = Arc::new(Mutex::new(Binds::default()));
     let mut env = environment(binds.clone());
     env.add_template_owned("endpoint", sql.to_owned())
         .map_err(mj_err)?;
@@ -537,9 +584,10 @@ pub fn render(sql: &str, ctx: &ParamValues) -> Result<(String, Vec<Param>), Rend
     // Taken, not unwrapped: the environment (and so the formatter's clone of the
     // `Arc`) is still alive here because `template` borrows it.
     let binds = std::mem::take(
-        &mut *binds
+        &mut binds
             .lock()
-            .expect("bind list mutex poisoned by a panic inside the renderer"),
+            .expect("bind list mutex poisoned by a panic inside the renderer")
+            .list,
     );
 
     let placeholders = structural_placeholders(&rendered)?;
@@ -578,133 +626,394 @@ fn structural_placeholders(rendered: &str) -> Result<usize, RenderError> {
 /// Exposed for publish-time validation (Task 7), and called by [`render`] itself
 /// so a definition that slipped past publish still cannot serve.
 pub fn check_static(sql: &str, ctx: &ParamValues) -> Result<(), RenderError> {
-    for tag in tags(sql) {
-        let body = tag.trim_start_matches('-').trim();
-        let keyword = body
-            .split(|c: char| c.is_whitespace() || c == '(')
-            .next()
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        // `{% filter %}` and `{% set x %}…{% endset %}` buffer their body and
-        // re-emit it through the formatter, binding the literal text `?` as a
-        // parameter: measured, `{% filter upper %}{{ a }}{% endfilter %}` gives
-        // ONE placeholder and TWO binds, and `{% call %}` gave three. No cargo
-        // feature removes those two — they parse unconditionally — so rejecting
-        // them here is the only lever.
-        //
-        // `macro`/`call`/`include`/`extends`/`import`/`from`/`block` do not parse
-        // at all with `macros` and `multi_template` off, and are listed anyway:
-        // cargo features are ADDITIVE ACROSS THE WORKSPACE, so one crate adding
-        // minijinja with default features would turn them back on here, silently.
-        let forbidden = match keyword.as_str() {
-            "filter" => Some("filter"),
-            "endfilter" => Some("endfilter"),
-            "endset" => Some("endset"),
-            "macro" | "endmacro" => Some("macro"),
-            "call" | "endcall" => Some("call"),
-            "include" => Some("include"),
-            "extends" => Some("extends"),
-            "import" | "from" => Some("import"),
-            "block" | "endblock" => Some("block"),
-            _ => None,
-        };
-        if let Some(name) = forbidden {
-            return Err(RenderError::CaptureConstruct(name));
-        }
-        // A `recursive` for-loop is the third capture path: `{{ loop(x) }}` used
-        // as a value (not as the whole emit) captures the loop body and re-emits
-        // it, desyncing exactly as `{% filter %}` does. Not named in the spec;
-        // found by reading the VM.
-        if keyword == "for" && body.split_whitespace().any(|w| w == "recursive") {
-            return Err(RenderError::RecursiveLoop);
-        }
-        if keyword == "if" || keyword == "elif" {
-            if let Some(name) = bare_comparison(body, ctx) {
-                return Err(RenderError::BareParameterComparison(name));
+    // Names that are not parameters but hold one: `{% with m = mode %}` and a
+    // loop variable both carry a `Cell`, so comparing THEM is silently false in
+    // exactly the same way. Accumulated in source order, which is the order a
+    // template can use them in.
+    let mut aliases: Vec<String> = Vec::new();
+    for block in blocks(sql) {
+        let body = block.body();
+        if let Block::Tag(_) = block {
+            let keyword = body
+                .split(|c: char| c.is_whitespace() || c == '(')
+                .next()
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            // `{% filter %}` and `{% set x %}…{% endset %}` buffer their body and
+            // re-emit it through the formatter, binding the literal text `?` as a
+            // parameter: measured, `{% filter upper %}{{ a }}{% endfilter %}` gives
+            // ONE placeholder and TWO binds, and `{% call %}` gave three. No cargo
+            // feature removes those two — they parse unconditionally — so rejecting
+            // them here is the only lever.
+            //
+            // `macro`/`call`/`include`/`extends`/`import`/`from`/`block` do not parse
+            // at all with `macros` and `multi_template` off, and are listed anyway:
+            // cargo features are ADDITIVE ACROSS THE WORKSPACE (the workspace is on
+            // resolver 2), so one member adding minijinja with default features
+            // would turn them back on here, silently, without touching this crate.
+            let forbidden = match keyword.as_str() {
+                "filter" => Some("filter"),
+                "endfilter" => Some("endfilter"),
+                "endset" => Some("endset"),
+                "macro" | "endmacro" => Some("macro"),
+                "call" | "endcall" => Some("call"),
+                "include" => Some("include"),
+                "extends" => Some("extends"),
+                "import" | "from" => Some("import"),
+                "block" | "endblock" => Some("block"),
+                _ => None,
+            };
+            if let Some(name) = forbidden {
+                return Err(RenderError::CaptureConstruct(name));
             }
+            // A `recursive` for-loop is the third capture path: `{{ loop(x) }}` used
+            // as a value (not as the whole emit) captures the loop body and re-emits
+            // it, desyncing exactly as `{% filter %}` does. Not named in the spec;
+            // found by reading the VM.
+            if keyword == "for" && body.split_whitespace().any(|w| w == "recursive") {
+                return Err(RenderError::RecursiveLoop);
+            }
+        }
+        // EVERY block, not only `{% if %}`: a comparison against a bare parameter
+        // is meaningless wherever it is written, and it was silently taking the
+        // wrong branch from `{% set f = mode == 'fast' %}`, from a for-loop's
+        // filter condition, and from a bare `{{ 'FAST' if mode == 'fast' else … }}`.
+        if let Some(name) = bare_comparison(body, ctx, &aliases, matches!(block, Block::Tag(_))) {
+            return Err(RenderError::BareParameterComparison(name));
+        }
+        if let Block::Tag(_) = block {
+            collect_aliases(body, ctx, &mut aliases);
         }
     }
     Ok(())
 }
 
-/// The bodies of every `{% … %}` tag, in order.
+/// Records the names a `{% set %}`, `{% with %}` or `{% for %}` binds to a value
+/// that came from a parameter.
 ///
-/// A scanner, not a parser: minijinja does the parsing. It over-approximates —
-/// a `{% filter %}` written inside `{% raw %}` is inert but still rejected — and
-/// over-approximating is the safe direction for a rejection rule.
-fn tags(sql: &str) -> impl Iterator<Item = &str> {
-    let mut rest = sql;
-    std::iter::from_fn(move || {
-        let open = rest.find("{%")?;
-        let after = &rest[open + 2..];
-        let Some(close) = after.find("%}") else {
-            // An unterminated tag: minijinja will refuse it as a syntax error,
-            // and there is nothing further to scan.
-            rest = "";
-            return None;
-        };
-        let body = &after[..close];
-        rest = &after[close + 2..];
-        Some(body)
-    })
+/// Without this, one rename defeats the comparison rule:
+/// `{% with m = mode %}{% if m == 'fast' %}` is the same silent falsehood one
+/// level of indirection away, and so is `{% for r in regions %}{% if r == 'EU' %}`
+/// — a loop variable holds a [`Cell`] too.
+fn collect_aliases(body: &str, ctx: &ParamValues, aliases: &mut Vec<String>) {
+    let toks = tokens(body);
+    let Some(keyword) = toks.first().filter(|t| t.kind == Tok::Word) else {
+        return;
+    };
+    match keyword.text {
+        "set" | "with" => {
+            // `<name> = <expr>`: alias `<name>` when `<expr>` mentions a
+            // parameter or an alias.
+            for (i, tok) in toks.iter().enumerate() {
+                if tok.kind != Tok::Other || tok.text != "=" {
+                    continue;
+                }
+                let Some(lhs) = toks[..i].iter().rev().find(|t| t.kind == Tok::Word) else {
+                    continue;
+                };
+                if toks[i + 1..]
+                    .iter()
+                    .any(|t| t.kind == Tok::Word && is_param(t.text, ctx, aliases))
+                {
+                    aliases.push(lhs.text.to_string());
+                }
+            }
+        }
+        "for" => {
+            let Some(at) = toks
+                .iter()
+                .position(|t| t.kind == Tok::Word && t.text == "in")
+            else {
+                return;
+            };
+            if toks[at + 1..]
+                .iter()
+                .any(|t| t.kind == Tok::Word && is_param(t.text, ctx, aliases))
+            {
+                for t in &toks[1..at] {
+                    if t.kind == Tok::Word {
+                        aliases.push(t.text.to_string());
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
-/// The parameter compared directly against something, if any.
+/// A `{% … %}` tag or a `{{ … }}` expression, body only.
+enum Block<'a> {
+    Tag(&'a str),
+    Expr(&'a str),
+}
+
+impl<'a> Block<'a> {
+    fn body(&self) -> &'a str {
+        match self {
+            Block::Tag(b) | Block::Expr(b) => b,
+        }
+    }
+}
+
+/// Every tag and expression in the template, in order.
 ///
-/// The operand taken is the identifier **immediately** adjacent to the operator,
-/// which is what makes the supported spelling pass: in `region | value == 'EU'`
-/// the adjacent identifier is `value`, not `region`.
-fn bare_comparison(body: &str, ctx: &ParamValues) -> Option<String> {
-    let b = body.as_bytes();
+/// A scanner, not a parser — minijinja does the parsing — but it has to agree
+/// with the lexer on three things it originally did not:
+///
+/// * **Whitespace markers.** `Whitespace::from_byte` maps `-` to Trim and `+` to
+///   Preserve, and `find_start_marker` skips both. `{%+ filter upper %}` is a
+///   perfectly ordinary filter block, and a scanner that trims only `-` reads its
+///   keyword as `"+"` and matches nothing. Three of the four rules here were
+///   backstopped by the placeholder==bind invariant; the comparison rule was not,
+///   and `{%+ if mode == 'fast' %}` was a publishable silently-false template.
+/// * **Comments.** `{# … #}` is skipped by the lexer, so `{# {% #}` contains no
+///   tag — while a comment-blind scan pairs that `{%` with the NEXT `%}` and
+///   desyncs for the rest of the template, stepping over a real `{% filter %}`.
+/// * **String literals.** Inside a block the lexer tokenises strings, so `%}` and
+///   `}}` inside one do not close it.
+///
+/// It still over-approximates — a `{% filter %}` written inside `{% raw %}` is
+/// inert but rejected anyway — and over-approximating is the safe direction for a
+/// rejection rule.
+fn blocks(sql: &str) -> Vec<Block<'_>> {
+    let b = sql.as_bytes();
+    let mut out = Vec::new();
     let mut i = 0;
-    while i < b.len() {
-        let op_len = match (b[i], b.get(i + 1)) {
-            (b'=', Some(b'=')) | (b'!', Some(b'=')) => 2,
-            (b'<', Some(b'=')) | (b'>', Some(b'=')) => 2,
-            (b'<', _) | (b'>', _) => 1,
-            _ => 0,
-        };
-        if op_len == 0 {
+    while i + 1 < b.len() {
+        if b[i] != b'{' {
             i += 1;
             continue;
         }
-        for name in [ident_before(body, i), ident_after(body, i + op_len)]
-            .into_iter()
-            .flatten()
-        {
-            if ctx.names().any(|n| n == name) {
-                return Some(name.to_string());
+        let (close, is_tag) = match b[i + 1] {
+            b'%' => ("%}", true),
+            b'{' => ("}}", false),
+            b'#' => {
+                // A comment: skip it whole, so nothing inside is read as a tag.
+                match sql[i + 2..].find("#}") {
+                    Some(at) => i += 2 + at + 2,
+                    None => break,
+                }
+                continue;
             }
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+        let body_start = i + 2;
+        match find_block_end(sql, body_start, close) {
+            Some(at) => {
+                let body = trim_markers(&sql[body_start..at]);
+                out.push(if is_tag {
+                    Block::Tag(body)
+                } else {
+                    Block::Expr(body)
+                });
+                i = at + 2;
+            }
+            // Unterminated: minijinja refuses it as a syntax error, and there is
+            // nothing further to scan.
+            None => break,
         }
-        i += op_len;
+    }
+    out
+}
+
+/// The offset of `close`, skipping over string literals the way the lexer does.
+///
+/// Compared as BYTES throughout. `sql[i..]` panics the moment `i` lands inside a
+/// multi-byte character, and a definition carrying one — a `'café'` literal, a
+/// Vietnamese comment — is ordinary SQL, not an edge case.
+fn find_block_end(sql: &str, from: usize, close: &str) -> Option<usize> {
+    let b = sql.as_bytes();
+    let close = close.as_bytes();
+    let mut i = from;
+    while i < b.len() {
+        match b[i] {
+            q @ (b'\'' | b'"') => {
+                i += 1;
+                while i < b.len() && b[i] != q {
+                    // minijinja's lexer honours `\` escapes inside a string.
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+                i += 1;
+            }
+            _ if b[i..].starts_with(close) => return Some(i),
+            _ => i += 1,
+        }
     }
     None
 }
 
-fn ident_before(body: &str, at: usize) -> Option<&str> {
-    let b = body.as_bytes();
-    let mut end = at;
-    while end > 0 && b[end - 1].is_ascii_whitespace() {
-        end -= 1;
-    }
-    let mut start = end;
-    while start > 0 && (b[start - 1].is_ascii_alphanumeric() || b[start - 1] == b'_') {
-        start -= 1;
-    }
-    (start < end).then(|| &body[start..end])
+/// Both whitespace-control markers, and the trailing one too.
+fn trim_markers(body: &str) -> &str {
+    body.trim_start_matches(['-', '+'])
+        .trim_end_matches(['-', '+'])
+        .trim()
 }
 
-fn ident_after(body: &str, at: usize) -> Option<&str> {
+/// The parameter compared directly against something, if any.
+///
+/// A parameter is an opaque value (see [`Cell`]), and minijinja compares an
+/// object against a string as NOT EQUAL with no error, so every form recognised
+/// here is silently false rather than wrong-and-loud. `| value` is the supported
+/// spelling and passes, because the identifier this looks at is the one
+/// **immediately** adjacent to the operator: in `region | value == 'EU'` that is
+/// `value`, not `region`.
+///
+/// `in_tag` says whether a `for` header's `in` may appear — that one `in` is a
+/// loop header, and every other `in` is the containment operator, which has the
+/// same weakness as `==` and is refused.
+fn bare_comparison(
+    body: &str,
+    ctx: &ParamValues,
+    aliases: &[String],
+    in_tag: bool,
+) -> Option<String> {
+    let toks = tokens(body);
+    let is_for = in_tag && toks.first().is_some_and(|t| t.text == "for");
+    let mut for_header_in_seen = false;
+    for (i, tok) in toks.iter().enumerate() {
+        match tok.kind {
+            Tok::Op => {
+                if let Some(name) = operand_param(&toks, i, ctx, aliases) {
+                    return Some(name);
+                }
+            }
+            Tok::Word if tok.text == "in" => {
+                if is_for && !for_header_in_seen {
+                    for_header_in_seen = true;
+                    continue;
+                }
+                if let Some(name) = operand_param(&toks, i, ctx, aliases) {
+                    return Some(name);
+                }
+            }
+            // `eq`/`equalto`/`ne`/`lt`/`le`/`gt`/`ge`/`in`/`sameas` are registered
+            // as TESTS routing to the same `ops::coerce`, so `mode is eq('fast')`
+            // is `==` under a spelling no operator scan can see. The type tests
+            // (`is string`, `is none`, `is number`) are silently false on a
+            // parameter for the same reason. Only `defined`/`undefined` mean on a
+            // parameter what an author expects, so they are the allowlist.
+            Tok::Word if tok.text == "is" => {
+                let subject = toks[..i].iter().rev().find(|t| t.kind == Tok::Word);
+                let test = toks[i + 1..]
+                    .iter()
+                    .find(|t| t.kind == Tok::Word && t.text != "not");
+                let benign = test.is_some_and(|t| matches!(t.text, "defined" | "undefined"));
+                if benign {
+                    continue;
+                }
+                let subject = subject
+                    .map(|t| t.text)
+                    .filter(|n| is_param(n, ctx, aliases));
+                if let Some(name) = subject {
+                    return Some(name.to_string());
+                }
+                // `'fast' is eq(mode)` — the parameter is the ARGUMENT.
+                for t in &toks[i + 1..] {
+                    if t.kind == Tok::Word && is_param(t.text, ctx, aliases) {
+                        return Some(t.text.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The parameter standing on either side of the operator at `i`, skipping a
+/// `not` (`mode not in xs`).
+fn operand_param(
+    toks: &[Token<'_>],
+    i: usize,
+    ctx: &ParamValues,
+    aliases: &[String],
+) -> Option<String> {
+    let mut before = i;
+    while before > 0 && toks[before - 1].text == "not" {
+        before -= 1;
+    }
+    for side in [before.checked_sub(1), Some(i + 1)].into_iter().flatten() {
+        if let Some(t) = toks.get(side) {
+            if t.kind == Tok::Word && is_param(t.text, ctx, aliases) {
+                return Some(t.text.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn is_param(name: &str, ctx: &ParamValues, aliases: &[String]) -> bool {
+    ctx.names().any(|n| n == name) || aliases.iter().any(|a| a == name)
+}
+
+#[derive(PartialEq, Clone, Copy)]
+enum Tok {
+    Word,
+    Op,
+    Other,
+}
+
+struct Token<'a> {
+    text: &'a str,
+    kind: Tok,
+}
+
+/// Identifiers, comparison operators and everything else, with string literals
+/// dropped so `'a == b'` is text rather than a comparison.
+fn tokens(body: &str) -> Vec<Token<'_>> {
     let b = body.as_bytes();
-    let mut start = at;
-    while start < b.len() && b[start].is_ascii_whitespace() {
-        start += 1;
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if c.is_ascii_whitespace() {
+            i += 1;
+        } else if c == b'\'' || c == b'"' {
+            i += 1;
+            while i < b.len() && b[i] != c {
+                i += if b[i] == b'\\' { 2 } else { 1 };
+            }
+            i += 1;
+        } else if c.is_ascii_alphanumeric() || c == b'_' {
+            let start = i;
+            while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
+                i += 1;
+            }
+            out.push(Token {
+                text: &body[start..i],
+                kind: Tok::Word,
+            });
+        } else {
+            let len = match (c, b.get(i + 1)) {
+                (b'=', Some(b'=')) | (b'!', Some(b'=')) => 2,
+                (b'<', Some(b'=')) | (b'>', Some(b'=')) => 2,
+                (b'<', _) | (b'>', _) => 1,
+                _ => 0,
+            };
+            if len > 0 {
+                out.push(Token {
+                    text: &body[i..i + len],
+                    kind: Tok::Op,
+                });
+                i += len;
+            } else {
+                // A non-ASCII byte lands here too, and `&body[i..i + 1]` would
+                // panic on one. Every operator and every parameter name is ASCII
+                // (P3 refuses a placeholder name that is not), so a multi-byte
+                // character can only ever be an opaque separator — which is
+                // exactly what an empty `Other` token is.
+                out.push(Token {
+                    text: if c.is_ascii() { &body[i..i + 1] } else { "" },
+                    kind: Tok::Other,
+                });
+                i += 1;
+            }
+        }
     }
-    let mut end = start;
-    while end < b.len() && (b[end].is_ascii_alphanumeric() || b[end] == b'_') {
-        end += 1;
-    }
-    (start < end).then(|| &body[start..end])
+    out
 }
 
 /// A sink that stops accepting bytes past [`MAX_SQL_BYTES`].
@@ -740,8 +1049,11 @@ impl std::io::Write for CappedSink {
 /// The chain matters: a filter's own message (`ident` refusing a value) is the
 /// `source`, and the top-level display is only "invalid operation".
 fn mj_err(e: MjError) -> RenderError {
-    if is_ident_error(&e) {
+    if chain_contains(&e, IDENT_MSG) {
         return RenderError::Ident;
+    }
+    if chain_contains(&e, BINDS_TOO_LARGE) {
+        return RenderError::BindsTooLarge;
     }
     let mut msg = e.to_string();
     let mut source = std::error::Error::source(&e);
@@ -753,10 +1065,10 @@ fn mj_err(e: MjError) -> RenderError {
     RenderError::Template(msg)
 }
 
-fn is_ident_error(e: &MjError) -> bool {
+fn chain_contains(e: &MjError, needle: &str) -> bool {
     let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(e);
     while let Some(err) = cur {
-        if err.to_string().contains(IDENT_MSG) {
+        if err.to_string().contains(needle) {
             return true;
         }
         cur = std::error::Error::source(err);
