@@ -51,9 +51,17 @@ use uuid::Uuid;
 ///
 /// | marker | what it stands for |
 /// |---|---|
-/// | `55` | the underlying table DRIFTED — `execute` returns a column set the publish-time `describe` did not |
+/// | `55` | drift by NAME — same count, `describe` froze `n` and `execute` returns `m` |
 /// | `66` | two columns whose `camel` forms collide (`total_revenue`, `totalRevenue`) |
+/// | `77` | drift by COUNT — `execute` returns a column `describe` did not (an added table column) |
+/// | `88` | drift by ORDER — the same names in a different position |
 /// | `99` | the connector fetched `max_rows + 1`, saw the extra row, and set `truncated` |
+///
+/// The three drift markers are separate because they pin three separate clauses
+/// of one predicate. One marker would show that *a* check exists, not that each
+/// clause is load-bearing — and the count clause in particular is the only thing
+/// standing between an `arrays` response and rows longer than its own
+/// `meta.columns`.
 struct FakePort;
 
 fn first_int(sql: &str) -> i64 {
@@ -70,10 +78,12 @@ fn col(name: &str) -> ColumnMeta {
     }
 }
 
-/// What publish freezes into the snapshot for this SQL.
+/// What publish freezes into the snapshot for this SQL — i.e. what `describe_as`
+/// resolved in the publish window.
 fn frozen_columns(sql: &str) -> Vec<ColumnMeta> {
     match first_int(sql) {
         66 => vec![col("total_revenue"), col("totalRevenue")],
+        88 => vec![col("a"), col("b")],
         _ => vec![col("n")],
     }
 }
@@ -99,13 +109,14 @@ impl egret_query_api::QueryExecPort for FakePort {
         _limits: egret_query_api::Limits,
     ) -> Result<TabularResult, Error> {
         let n = first_int(sql);
-        // The drift: `describe` froze `n` at publish time, `execute` now returns
-        // `m`. A real engine produces this when the underlying table is altered
-        // between publish and call; nothing else can.
-        let columns = if n == 55 {
-            vec![col("m")]
-        } else {
-            frozen_columns(sql)
+        // The three drifts. A real engine produces each of these when the
+        // underlying table is altered between publish and call — renamed (55),
+        // a column added (77), reordered (88) — and nothing else can.
+        let columns = match n {
+            55 => vec![col("m")],
+            77 => vec![col("n"), col("added_later")],
+            88 => vec![col("b"), col("a")],
+            _ => frozen_columns(sql),
         };
         let rows = vec![columns
             .iter()
@@ -826,6 +837,89 @@ async fn a_naming_collision_is_refused_rather_than_dropping_a_column() {
         res.status,
         StatusCode::SERVICE_UNAVAILABLE,
         "a naming collision must be refused, not served one column short: {} {}",
+        res.status,
+        res.body
+    );
+}
+
+#[tokio::test]
+async fn an_arrays_shape_serves_positional_rows() {
+    // The `arrays` branch had no serving test at all, which is how the gap below
+    // stayed invisible: every shaping test drove `objects`.
+    //
+    // `arrays` is positional — a client indexes `data[i][j]` against
+    // `meta.columns[j]` — which is why the drift check compares column ORDER and
+    // not just the set, and why the count clause matters more here than in
+    // `objects` (there is no per-row arity guard on this branch: the row is
+    // cloned through verbatim).
+    let f = skip_without_db!();
+    f.publish_endpoint_with_output(
+        "GET",
+        "/arr",
+        "SELECT 66 AS total_revenue",
+        serde_json::json!({ "shape": "arrays" }),
+    )
+    .await;
+
+    let res = f.call("arr").await;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.body);
+    assert_eq!(
+        res.body["data"],
+        serde_json::json!([[66, 67]]),
+        "rows must be arrays, positionally aligned to meta.columns: {}",
+        res.body
+    );
+    // The alignment the client depends on, asserted rather than assumed.
+    let cols = res.body["meta"]["columns"].as_array().unwrap();
+    assert_eq!(cols.len(), res.body["data"][0].as_array().unwrap().len());
+    assert_eq!(cols[0]["name"], "total_revenue");
+    assert_eq!(cols[1]["name"], "totalRevenue");
+}
+
+#[tokio::test]
+async fn a_wider_live_result_is_refused_even_in_arrays_shape() {
+    // Pins the COUNT clause of the drift check specifically, on the branch where
+    // its absence is silent: `arrays` clones each row through verbatim with no
+    // arity guard, so an added table column emits rows of 2 values under a
+    // `meta.columns` of 1 — a body contradicting its own metadata, with a 200.
+    //
+    // The `objects` branch degrades to a 500 instead (the per-row arity guard
+    // catches it), which is wrong but loud. This is the quiet one.
+    let f = skip_without_db!();
+    f.publish_endpoint_with_output(
+        "GET",
+        "/wider",
+        "SELECT 77 AS n",
+        serde_json::json!({ "shape": "arrays" }),
+    )
+    .await;
+
+    let res = f.call("wider").await;
+    assert_eq!(
+        res.status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "a live result with MORE columns than the snapshot froze must be refused: {} {}",
+        res.status,
+        res.body
+    );
+}
+
+#[tokio::test]
+async fn a_reordered_live_result_is_refused() {
+    // Pins the ORDER sensitivity of the drift check. The frozen columns are
+    // [a, b] and the engine now returns [b, a] — the same SET, so a comparison
+    // "simplified" to a sorted or set-based one passes every other test in this
+    // file while `arrays` responses silently transpose two columns and `objects`
+    // responses attach each value to the wrong name.
+    let f = skip_without_db!();
+    f.publish_endpoint("GET", "/reordered", "SELECT 88 AS a")
+        .await;
+
+    let res = f.call("reordered").await;
+    assert_eq!(
+        res.status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "the same names in a different order are still a different contract: {} {}",
         res.status,
         res.body
     );

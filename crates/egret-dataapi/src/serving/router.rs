@@ -30,17 +30,26 @@
 //! one**, because the port already owns the mechanism a caller-supplied token
 //! would duplicate:
 //!
-//! * `port_impl::execute_as` creates its OWN `CancellationToken`, wraps the
-//!   connector call in `tokio::time::timeout(limits.timeout, …)` and cancels on
-//!   expiry (`egret-query/src/execution/port_impl.rs:201-210`).
-//! * The connectors react to that: `StarRocksConnector::execute` drops the
-//!   result set and calls `conn.disconnect()` — closing the MySQL connection is
-//!   its cancel path (`connector/starrocks.rs:238-242`). Trino additionally
-//!   bounds the coordinator with `query_max_run_time`, derived from the same
-//!   `limits.timeout`.
+//! * `port_impl::execute_as` wraps the connector call in
+//!   `tokio::time::timeout(limits.timeout, …)`
+//!   (`egret-query/src/execution/port_impl.rs:201-210`). **Expiry releases egret
+//!   by DROPPING the connector future**, which drops the connection with it.
 //! * On client disconnect axum drops this handler's future, which drops the
 //!   `execute_as` future, which drops the connector's — the same release path,
 //!   with no token threaded anywhere.
+//! * Trino additionally bounds the coordinator with `query_max_run_time`,
+//!   derived from the same `limits.timeout`.
+//!
+//! **Note what is NOT the mechanism, because it reads like it is.**
+//! `port_impl::execute_as` does create a `CancellationToken` and call
+//! `cancel()`, and `StarRocksConnector::execute` does check
+//! `cancel.is_cancelled()` and call `conn.disconnect()`
+//! (`egret-query/src/execution/connector/starrocks.rs:238-242`) — but those two
+//! never meet on this path: `tokio::time::timeout` drops the connector future
+//! *before* `cancel()` runs, so the connector is gone before it could observe
+//! the token. `port_impl`'s own comment says as much — that `cancel()` is "only
+//! load-bearing if a future caller holds a clone of the token (as the JobManager
+//! does)". Crediting it here would be crediting dead code.
 //!
 //! So a caller-supplied token adds nothing that dropping the future does not
 //! already do, while costing 2 impls plus 4 test fakes now and a cross-crate
@@ -52,6 +61,13 @@
 //! connector (a StarRocks `KILL QUERY <id>` on a second connection, say), not in
 //! this port's signature — but do not treat that as the only thing worth doing
 //! here.
+//!
+//! **This paragraph has now been wrong three times while its conclusion stayed
+//! right** — first "StarRocks is unbounded server-side", then "`disconnect()` is
+//! the reaction to the timeout", both asserted from reading and both false. A
+//! conclusion that survives a wrong mechanism is a conclusion nobody has checked
+//! the reasoning for; it is agreed with, not verified. If you are about to
+//! restate any of this, open the two files first.
 //!
 //! # What is deliberately NOT here yet
 //!
@@ -67,6 +83,14 @@
 //! * step 5 — rate limiting (Task 4).
 //! * step 6 — the cache, and with it the `delegated` re-check against the live
 //!   `query.databases` column (Task 4).
+//!
+//!   **Both of those keys must be built from the NORMALISED path**, the `path`
+//!   binding below and not the raw capture. `reports%2Fdaily` and
+//!   `reports/daily` reach the same endpoint (that is what `normalize_path`
+//!   before the lookup guarantees), so keying off the raw form gives one
+//!   endpoint two cache entries and two rate-limit buckets — a cache that
+//!   under-hits and a limit a caller can double by alternating spellings.
+//!   Keying off `endpoint_id` sidesteps it entirely and is the better answer.
 //! * step 7 — rendering declared `params` into the SQL. Until it lands, a
 //!   snapshot containing `{{placeholder}}` is sent to the engine verbatim and
 //!   fails there as a syntax error. That is a broken endpoint, not an injection:
@@ -627,6 +651,14 @@ impl IntoResponse for ServingError {
             // published contract has stopped matching its data (or was never
             // satisfiable) and an AUTHOR has to act. Same shape spec §7 gives
             // `cache_scope_stale`, whose situation is the same one.
+            //
+            // TASK 5 MUST DECIDE `Retry-After` FOR BOTH, deliberately. A bare 503
+            // is a "come back later" on a condition that never self-heals —
+            // only a human re-publishing clears it — so well-behaved clients and
+            // the proxies in front of them will retry-storm a permanent state.
+            // Neither spec §7's table nor Task 5's has a 503 row in either
+            // language yet; these two variants are the first, so the table has
+            // to grow rather than be matched against.
             ServingError::SchemaDrift => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "this endpoint's published output schema no longer matches its data; re-publish it",

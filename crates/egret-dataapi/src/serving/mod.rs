@@ -73,6 +73,16 @@ pub enum ServingError {
     /// in `meta.columns` would vanish from every row. Separate from
     /// [`Self::SchemaDrift`] because the fix is different: change `naming` or
     /// alias the column, not re-publish the same thing.
+    ///
+    /// **This should be refused at PUBLISH time, and this check kept only as a
+    /// backstop.** Unlike [`Self::SchemaDrift`] the condition is deterministic
+    /// and permanent for a given snapshot — nothing about the world has to
+    /// change for it to fire — and it is fully determinable when the snapshot is
+    /// built: `lifecycle::snapshot_from` holds the `describe`-resolved `columns`
+    /// and the `output` spec in the same window (`lifecycle.rs:910`,
+    /// `:962-967`). As it stands an endpoint publishes green and then fails
+    /// every single call, which is the worst place to learn it. Recorded as P3
+    /// territory rather than fixed here.
     #[error("output naming maps two columns onto one key")]
     OutputNamingCollision,
     /// Something on egret's side failed — the IdP key store was unreachable, say.
