@@ -418,6 +418,31 @@ async fn serve(
         }
     };
 
+    // Unconditional, INCLUDING the 429 and the 404 — accepted deliberately, not
+    // overlooked. The reasoning, because "the rate limiter protects the
+    // database" is what a reader will otherwise assume:
+    //
+    // 1. **It never did.** The limiter is spec §6.2 step 5, and it is keyed on
+    //    `endpoint_id` — which only exists once `live_snapshot` has resolved it.
+    //    So a refused request has already paid an RSA signature verification and
+    //    TWO SELECTs (`get_by_slug`, `live_snapshot`) by the time the bucket
+    //    says no. The limiter sheds ENGINE load, which is the expensive thing it
+    //    was built for; it has never shed database load and cannot be moved
+    //    earlier without giving up the key it limits on.
+    // 2. **These are the rows most worth having.** A client hammering an
+    //    exhausted bucket and someone walking a workspace's URL space are the
+    //    two things an operator most wants to see in this table. Dropping them
+    //    to save a write would make the abuse invisible in the one place it is
+    //    visible at all.
+    // 3. **Sampling is the wrong bound.** Spec §8's statistics — call count,
+    //    error rate — are counts. A sampled table answers them wrongly and
+    //    silently, which is worse than answering them expensively.
+    //
+    // If this is ever MEASURED to matter, the fix with a precedent in-tree is
+    // `egret-audit`'s `AuditSink` + `AuditWriter`: a bounded channel and a batch
+    // writer, trading durability at shutdown for amortised writes. It is not
+    // adopted now for the same reason partitioning is not — nothing has been
+    // measured, and the simple version cannot lose a row.
     AccessLogStore::new(st.db.clone()).record(&entry).await;
     response
 }
@@ -735,10 +760,31 @@ fn execution_limits(snap: &EndpointSnapshot) -> egret_query_api::Limits {
 ///   crate's message string — a check that keeps compiling and silently stops
 ///   working the day someone rewords it.
 ///
-/// Making those two codes real means widening `QueryExecPort`'s error type,
-/// which is a cross-crate contract change. Until then the answer is 500 with the
-/// detail in the log, which is safe — nothing from the engine reaches the body —
-/// and honest, which a guessed 502 would not be. See `ServingError`'s comment.
+/// # What the widening must bring, when someone does it
+///
+/// Recorded here because this is the function they will open, and because two
+/// of the three are easy to miss while thinking only about 502 and 504:
+///
+/// 1. **`execute_as` needs its own timeout error, not `describe_as`'s.** They
+///    share one `engine_error` table today, and that table maps
+///    `EngineError::Timeout` to `InvalidInput("query timed out")` for a reason
+///    that is true only of `describe_as` — a `LIMIT 0` plan that times out
+///    really is a query problem. For `execute_as` it means the caller's
+///    published budget was exceeded. Widening the error type without splitting
+///    that arm leaves 504 undecidable forever.
+/// 2. **A distinct AUTHOR-FAULT code, not only 502/504.**
+///    `EngineError::BadRequest`/`Engine`/`Limit` all become
+///    `Error::InvalidInput` and land here on `500 internal`, so a published
+///    endpoint whose SQL stopped parsing is indistinguishable in
+///    `access_log.error_code` from an egret fault. Spec §7's `internal` row does
+///    cover it — it is disclosed, not hidden — but an operator scanning the log
+///    for "which endpoints are broken" cannot separate the two, and those are
+///    different people's problems.
+/// 3. It must not become a 400. The caller did nothing wrong; the endpoint did.
+///
+/// Until then the answer is 500 with the detail in the log, which is safe —
+/// nothing from the engine reaches the body — and honest, which a guessed 502
+/// would not be. See `ServingError`'s comment.
 fn engine_error(e: egret_core::Error) -> ServingError {
     match e {
         egret_core::Error::Forbidden => ServingError::DataAccessDenied,

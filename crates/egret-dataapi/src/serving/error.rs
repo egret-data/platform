@@ -196,11 +196,17 @@ pub(crate) fn to_wire(e: &ServingError) -> Wire {
              change it and re-publish"
                 .into(),
         ),
+        // BOTH fixes are named. Spec §7 says the operator can re-publish the
+        // endpoint OR put the connection back, and the message used to offer
+        // only the first — sending someone to re-publish when the real event was
+        // a connection being flipped to delegated, which re-publishing does not
+        // undo and may not even be the change they want to keep.
         ServingError::CacheScopeStale => (
             StatusCode::SERVICE_UNAVAILABLE,
             "cache_scope_stale",
             "this endpoint's shared cache was published against a different \
-             connection setting; re-publish it"
+             connection setting; re-publish it, or restore the connection's \
+             delegation setting"
                 .into(),
         ),
         // The source is NOT rendered. It is the only thing in this file that

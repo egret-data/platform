@@ -26,14 +26,31 @@
 //! `AuditStore::prune`, which has served `audit.audit_log` — a table with the
 //! same append-only, ts-ordered growth — since it was written.
 //!
-//! **It does not log unauthenticated calls.** `workspace_id` is `NOT NULL`, and
-//! before the bearer token verifies there is no workspace to name: the slug in
-//! the URL is caller-supplied and unverified, and a nil uuid would either
-//! violate the foreign key or invent a tenant bucket that no operator owns. A
-//! 401 is therefore a `tracing` event only. That is a real gap for anyone who
-//! wants to count credential-stuffing attempts per workspace, and it is a
-//! consequence of the schema rather than an oversight — closing it means either
-//! a nullable `workspace_id` or a second table.
+//! **It does not log unauthenticated calls, and filling the gap naively would be
+//! worse than the gap.** `workspace_id` is `NOT NULL`, and before the bearer
+//! token verifies the only workspace identifier in hand is the slug in the URL —
+//! caller-supplied and unverified.
+//!
+//! Writing that slug's workspace would let an **unauthenticated** caller create
+//! rows attributed to any workspace whose slug they can guess, inflating that
+//! tenant's error rate in the statistics computed from this table. That is not a
+//! smaller version of the current gap; it is a worse outcome than having no row
+//! at all, because a missing row is visibly missing and a forged one is not.
+//! Making `workspace_id` nullable does not help either — it stores nothing and
+//! still cannot restore a per-workspace count.
+//!
+//! The only real fixes are a SEPARATE table for pre-authentication refusals, or
+//! an explicitly-named `claimed_slug` column that no aggregate ever joins on.
+//! Until one exists, a 401 is a `tracing` event carrying the same `request_id`,
+//! so it is correlatable but not countable.
+//!
+//! **The related blind spot is bigger than this one:** the rate limiter runs
+//! AFTER token verification (spec §6.2 step 5, keyed on `endpoint_id`), so an
+//! unauthenticated flood is bounded by nothing in this crate and appears in no
+//! table at all. That belongs to the authentication surface and to whatever
+//! fronts it, not to the access log — but it is the same hole from the other
+//! side, and it is why "we would see it in the access log" is not true of the
+//! traffic most worth seeing.
 //!
 //! **It does not fail a request.** A write failure is warned and swallowed. The
 //! alternative — 500ing a request whose rows were already produced because the
@@ -123,6 +140,31 @@ fn client_ip(headers: &HeaderMap) -> Option<IpAddr> {
         .and_then(|s| s.split(',').next())
         .map(str::trim)
         .and_then(|s| s.parse().ok())
+}
+
+/// What a configured retention means to the SCHEDULER: `Some(days)` to prune
+/// hourly, `None` to not schedule the prune at all.
+///
+/// # Why this exists as a function instead of an `if` at the call site
+///
+/// It is the one place the `prune(0)` trap is closed, and it is closed in the
+/// crate that owns the trap rather than in `egret-bin`, so it can be tested
+/// without booting a server and so a second caller cannot reintroduce the trap
+/// by writing the comparison differently.
+///
+/// [`AccessLogStore::prune`] treats `0` as "keep nothing", because
+/// `ts < now() - 0 days` really is every row already written and that is the
+/// correct primitive. A CONFIG key is not a primitive: `0` is what an operator
+/// writes when they mean "off", and what a blank `EGRET_DATA_API__…` env var or
+/// a half-written TOML produces by accident. On the fastest-growing table in
+/// the system the difference between those two readings is the whole log,
+/// deleted an hour after boot, with nothing having gone wrong.
+///
+/// So: the store keeps its meaning, and the scheduler refuses to call it with a
+/// number that would wipe. An operator who genuinely wants an empty table can
+/// call `prune(0)` themselves.
+pub fn scheduled_retention(retention_days: i64) -> Option<i64> {
+    (retention_days > 0).then_some(retention_days)
 }
 
 /// Writes and prunes `dataapi.access_log`.
@@ -258,6 +300,26 @@ mod tests {
             Some("2001:db8::1".parse::<IpAddr>().unwrap()),
             "IPv6 and surrounding whitespace are both ordinary here"
         );
+    }
+
+    /// The `prune(0)` trap, closed at the config boundary.
+    ///
+    /// The two halves must disagree, and that is the point: the STORE reads 0 as
+    /// "keep nothing" (mirroring `AuditStore::prune`), and the SCHEDULER reads a
+    /// configured 0 as "off". Rewriting this as `retention_days.max(0)` — the
+    /// shape that looks like the store's — would schedule `prune(0)` and empty
+    /// the table an hour after boot.
+    #[test]
+    fn a_non_positive_retention_does_not_schedule_a_prune() {
+        assert_eq!(
+            scheduled_retention(0),
+            None,
+            "a configured 0 means OFF, not 'delete everything an hour from now'"
+        );
+        assert_eq!(scheduled_retention(-1), None);
+        assert_eq!(scheduled_retention(i64::MIN), None);
+        assert_eq!(scheduled_retention(1), Some(1));
+        assert_eq!(scheduled_retention(90), Some(90));
     }
 
     #[test]

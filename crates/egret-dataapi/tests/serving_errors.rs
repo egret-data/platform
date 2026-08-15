@@ -366,6 +366,36 @@ impl Fixture {
         self.send(path, None).await
     }
 
+    /// A raw request at an arbitrary method and URI, for the two answers axum
+    /// gives BEFORE `serve` is reached.
+    async fn raw(&self, method: &str, uri: &str) -> Res {
+        let token = mint(self.ws_id, self.sa_user, "client-a");
+        let res = self
+            .serving
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = res.status();
+        let bytes = axum::body::to_bytes(res.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        Res {
+            status,
+            body: serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+            text,
+            retry_after: None,
+        }
+    }
+
     async fn send(&self, path: &str, token: Option<&str>) -> Res {
         let uri = format!("/data-api/v1/{}/{path}", self.ws_slug);
         let mut b = Request::builder().method("GET").uri(&uri);
@@ -663,6 +693,44 @@ async fn every_error_carries_the_same_envelope() {
             res.request_id()
         );
     }
+}
+
+/// The two answers that are NOT the envelope, pinned so the exception is a
+/// known one rather than a discovery.
+///
+/// Spec §7 promises "one stable, machine-readable envelope". axum answers both
+/// of these before `serve` is reached — a method outside `endpoints.method`'s
+/// CHECK pair, and a URI that does not match `/{ws}/{*path}` at all — so no
+/// code of ours runs and there is nothing to put an envelope around. Both are
+/// leak-free (empty body, no detail), and both are now stated in §7 rather than
+/// only in a Rust comment.
+///
+/// If this ever needs to change, the fix is a router fallback, not a handler.
+#[tokio::test]
+async fn axum_answers_before_the_handler_and_those_two_answers_carry_no_envelope() {
+    let f = skip_without_db!();
+
+    // A method the route does not declare. Same answer for every path under
+    // this router, existing or not, so it leaks nothing.
+    let res = f
+        .raw("DELETE", &format!("/data-api/v1/{}/anything", f.ws_slug))
+        .await;
+    assert_eq!(res.status, StatusCode::METHOD_NOT_ALLOWED);
+    assert!(
+        res.text.is_empty(),
+        "405 must stay empty rather than grow a body with detail in it: {}",
+        res.text
+    );
+
+    // A single-segment URI: `{*path}` needs at least one segment, so this
+    // matches no route.
+    let res = f.raw("GET", &format!("/data-api/v1/{}", f.ws_slug)).await;
+    assert_eq!(res.status, StatusCode::NOT_FOUND);
+    assert!(
+        res.text.is_empty(),
+        "an unmatched URI is axum's 404, not ours: {}",
+        res.text
+    );
 }
 
 /// The three 503s state a floor so that a fleet of clients does not default to

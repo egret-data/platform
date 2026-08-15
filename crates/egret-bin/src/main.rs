@@ -1086,6 +1086,56 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         });
     }
 
+    // The Data API's access log has its own retention, on the same hourly tick
+    // and in the same shape — spec §8. It is spawned HERE, beside the audit
+    // prune, rather than near the `DataApiState` construction 700 lines below,
+    // because the two are one operational concern: an operator asking "what
+    // prunes, and how often" should find both answers in one place.
+    //
+    // It is NOT gated on `config.audit.enabled`. That flag means "do not record
+    // authorization decisions"; the access log is a different table with a
+    // different purpose, and reading one switch as governing both would leave
+    // the fastest-growing table in the system unpruned for a reason nobody
+    // wrote down.
+    //
+    // A retention of 0 or less means DO NOT PRUNE, and is logged when it is
+    // taken. `AccessLogStore::prune(0)` deletes everything — `ts < now() - 0
+    // days` is every row already written — so treating a config `0` as "off"
+    // (which is what an operator writing `0` means, and what a blank env var
+    // deserialises to) is the difference between a knob that is off and a knob
+    // that empties the table an hour after boot. The store keeps its meaning;
+    // only the scheduler refuses to call it with a number that would wipe.
+    {
+        let configured = config.data_api.access_log_retention_days;
+        if let Some(retention) = egret_dataapi::serving::scheduled_retention(configured) {
+            let prune_store = egret_dataapi::serving::AccessLogStore::new(db.clone());
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
+                loop {
+                    tick.tick().await;
+                    match prune_store.prune(retention).await {
+                        Ok(n) if n > 0 => {
+                            tracing::info!(
+                                deleted = n,
+                                retention_days = retention,
+                                "data-api access log pruned"
+                            )
+                        }
+                        Ok(_) => {}
+                        Err(e) => tracing::warn!(error=%e, "data-api access log prune failed"),
+                    }
+                }
+            });
+        } else {
+            tracing::warn!(
+                retention_days = configured,
+                "data-api access log retention is not positive; prune NOT scheduled. \
+                 dataapi.access_log will grow without bound — set \
+                 data_api.access_log_retention_days to a positive number of days."
+            );
+        }
+    }
+
     let users = UserRepo::new(db.clone());
     let sessions = SessionService::new(
         db.clone(),
