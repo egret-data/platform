@@ -789,6 +789,144 @@ cargo test -p egret-dataapi -p egret-dataapi-api -p egret-query -p egret-query-a
 
 ---
 
+### Task 6: `dataapi:invoke` — the missing authorization step
+
+**Files:**
+- Modify: `crates/egret-core/src/rbac.rs`, `crates/egret-dataapi/src/routes.rs`, `crates/egret-dataapi/src/serving/router.rs`
+- Create: `migrations/0124_dataapi_invoke_permission.sql`
+- Test: `crates/egret-dataapi/tests/serving_authz.rs` (create)
+
+**This task exists because the plan was wrong.** Spec §6.2's chain has ten steps and this plan's Tasks 1–5 implement nine of them. Step 4 — *Cedar: `dataapi:invoke` on `Object data_api_endpoint:{id}`* — had no owner, and the review of Task 3 confirmed the consequence by reading the handler:
+
+> any valid, unexpired `data-api` token for workspace W reaches **every** live endpoint in W. A service account created for one consumer can invoke every other consumer's published endpoint in the same workspace and receive its full result set. Service-account granularity collapses to workspace granularity; the endpoint is not an access-control boundary at all.
+
+The residual defence is thinner than it looks. The query does run as the service account, so **where Ranger is enforcing**, per-principal row filtering still applies. On a connection to an engine without Ranger, or on StarRocks where enforcement is resource-only, there is no second line and the token is a workspace-wide read capability over every published endpoint's SQL.
+
+**And the grant it would check does not exist either.** Spec §5 says granting a service account access to an endpoint is one `access_grants` row with `scope_type='object'`, `object_type='data_api_endpoint'`. `grep` finds no route in P2 or P3 that writes such a row, and no `dataapi:invoke` in the permission catalog. So this task builds both halves: the way to grant, and the check that reads it.
+
+- [ ] **Step 1: Add the permission and seed it**
+
+In `crates/egret-core/src/rbac.rs`, beside the existing `data_api_endpoint:*` entries:
+
+```rust
+    perm!(
+        "data_api_endpoint:invoke",
+        "Data API",
+        "Call a published Data API endpoint",
+        Scope::Workspace
+    ),
+```
+
+`migrations/0124_dataapi_invoke_permission.sql` seeds it onto `ws_admin`, mirroring `0122` **including its disclosure comment** — and add one sentence that this permission is the one intended to be granted *object-scoped to service accounts*, not held workspace-wide by humans, so a reader does not assume the role seed is the whole story.
+
+- [ ] **Step 2: Write the failing tests**
+
+```rust
+#[tokio::test]
+async fn a_token_cannot_invoke_an_endpoint_it_was_not_granted() {
+    // The finding this task exists for: before it, ANY valid token for the
+    // workspace reached EVERY live endpoint in it.
+    let f = fixture().await;
+    let mine = f.publish_endpoint("GET", "/mine", "SELECT 1 AS n").await;
+    let theirs = f.publish_endpoint("GET", "/theirs", "SELECT 2 AS n").await;
+    f.grant_invoke(f.service_account, mine).await;
+
+    assert_eq!(f.call("/mine").await.status(), 200);
+    assert_eq!(f.call("/theirs").await.status(), 403,
+        "a grant on one endpoint must not reach another");
+}
+
+#[tokio::test]
+async fn revoking_the_grant_stops_the_calls() {
+    let f = fixture().await;
+    let ep = f.publish_endpoint("GET", "/x", "SELECT 1").await;
+    f.grant_invoke(f.service_account, ep).await;
+    assert_eq!(f.call("/x").await.status(), 200);
+
+    f.revoke_invoke(f.service_account, ep).await;
+    assert_eq!(f.call("/x").await.status(), 403,
+        "unlike the token itself, a grant revocation IS immediate");
+}
+
+#[tokio::test]
+async fn granting_requires_manage_not_read() {
+    let f = fixture().await;
+    let ep = f.publish_endpoint("GET", "/x", "SELECT 1").await;
+    let reader = f.principal_with(&["data_api_endpoint:read"]).await;
+    let res = f.grant_as(reader, f.service_account, ep).await;
+    assert_eq!(res.status(), 403, "handing out invoke rights is a manage operation");
+}
+
+#[tokio::test]
+async fn a_grant_cannot_be_written_across_workspaces() {
+    let f = fixture().await;
+    let ep = f.publish_endpoint("GET", "/x", "SELECT 1").await;
+    let other = f.create_workspace("other").await;
+    let mgr = f.principal_with_in(&["data_api_endpoint:manage"], other).await;
+    let res = f.grant_as_in(mgr, other, f.service_account, ep).await;
+    assert_eq!(res.status(), 404, "the endpoint does not belong to that workspace");
+}
+```
+
+Note what the second test pins: **grant revocation is immediate, while token revocation is not.** The 600s TTL bounds the credential; it does not bound the grant, because the grant is read per request. That asymmetry is worth stating in the spec — it is the answer to "how do I cut off one consumer right now".
+
+- [ ] **Step 3: The management routes**
+
+```text
+GET    /api/ws/{workspace}/data-api/endpoints/{id}/grants
+POST   /api/ws/{workspace}/data-api/endpoints/{id}/grants   { "service_account_id": … }
+DELETE /api/ws/{workspace}/data-api/endpoints/{id}/grants/{service_account_id}
+```
+
+All gate on `data_api_endpoint:manage` — handing out invoke rights is a mutation of the authorization graph, not a read. Both ids are scoped: the endpoint through `EndpointStore`'s workspace predicate, the service account through P2's `scoped_account`. A row is `access_grants (principal_type='user', principal_id=<service account>, scope_type='object', object_type='data_api_endpoint', scope_id=<endpoint id>, role_id=<the role carrying data_api_endpoint:invoke>)`.
+
+Read `crates/egret-auth/src/grants.rs` first: `grants_for` is the reader, and it already handles `scope_type='object'` with `object_type`. You are writing rows it can already read — do not invent a second path.
+
+- [ ] **Step 4: The check in the serving handler**
+
+In `serving/router.rs`, after the snapshot is resolved and **before** `execute_as`:
+
+```rust
+    // Step 4 of spec §6.2. Authentication told us WHO; this is the first thing
+    // that asks WHETHER. Without it a token is a workspace-wide read capability
+    // over every published endpoint — see this task's rationale.
+    //
+    // Denial is 403, not 404: by this point the caller has proved it holds a
+    // valid credential for this workspace, so "this endpoint exists and you may
+    // not call it" tells it nothing it could not already enumerate. That is the
+    // opposite of the earlier steps, where 404 hides existence from a caller
+    // who has proved nothing.
+    if !st
+        .pdp
+        .authorize(
+            &principal.subject(),
+            "data_api_endpoint:invoke",
+            &Resource::Object(ObjectRef { workspace_id: ws.id, kind: "data_api_endpoint", id: endpoint_id }),
+        )
+        .await
+        .map_err(ServingError::internal)?
+        .allow
+    {
+        return Err(ServingError::Forbidden);
+    }
+```
+
+Check `ObjectRef`'s real field names and `Pdp::authorize`'s real signature before writing this — `crates/egret-core/src/authz.rs:108` shows `require_object`'s shape, but that helper takes a `WorkspaceContext` and the serving path has a `ServingPrincipal`, so you are calling `authorize` directly. If constructing the subject from a `ServingPrincipal` is awkward, say so rather than fabricating a `WorkspaceContext`.
+
+- [ ] **Step 5: Mutation-verify**
+
+Remove the `authorize` call. Expected: `a_token_cannot_invoke_an_endpoint_it_was_not_granted` FAILS with 200 where it wanted 403 — i.e. the finding reproduces. Revert.
+
+Then remove the workspace predicate from the grant-write path. Expected: `a_grant_cannot_be_written_across_workspaces` FAILS.
+
+- [ ] **Step 6: Reconcile the spec**
+
+§6.2 step 4 and §7's `403 forbidden` row now describe implemented behaviour — check both languages say so accurately. Add the grant/revoke routes to §5, and add the asymmetry from Step 2: a grant revocation takes effect on the next request, while a token revocation is bounded by the TTL. That is the operational answer to "cut off one consumer now", and it is currently nowhere.
+
+- [ ] **Step 7: Commit**
+
+---
+
 ## Done when
 
 - All five tasks' tests green, each observed FAILING against its stated mutation.
