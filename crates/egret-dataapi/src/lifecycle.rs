@@ -1020,9 +1020,10 @@ impl EndpointStore {
             ));
         }
 
-        // Same statement as `connection_is_delegated`, issued on the transaction
-        // so the validation below and the value frozen into the snapshot are the
-        // same read.
+        // Same statement as `connection_per_principal_pair`, issued on the
+        // transaction so the validation below and the values frozen into the
+        // snapshot are the same read — and one statement, so the two halves of
+        // the pair cannot come from two different moments.
         //
         // That is all it buys. It does NOT pin the column: there is no `FOR SHARE`
         // on `query.databases` and the isolation level is READ COMMITTED, so a
