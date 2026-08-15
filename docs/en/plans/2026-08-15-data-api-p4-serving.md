@@ -299,6 +299,22 @@ async fn a_disabled_endpoint_is_404_not_403() {
 }
 
 #[tokio::test]
+async fn an_archived_workspace_stops_serving() {
+    // P2's ClientStore::verify refuses to MINT for an archived workspace but
+    // cannot recall a token already issued. The workspace row is already in
+    // hand here, so the archive case costs nothing to close — and archiving is
+    // the operator's most natural decommission action.
+    let f = fixture().await;
+    f.publish_endpoint("GET", "/x", "SELECT 1").await;
+    let token = f.token().await;
+    assert_eq!(f.call_with("/x", &token).await.status(), 200);
+
+    f.archive_workspace().await;
+    assert_eq!(f.call_with("/x", &token).await.status(), 404,
+        "the same still-unexpired token must stop working");
+}
+
+#[tokio::test]
 async fn a_token_for_another_workspace_is_404() {
     // Not 403: a caller must not learn the endpoint exists.
     let f = fixture().await;
@@ -368,12 +384,21 @@ async fn serve(
 
     // The workspace comes from the TOKEN, and the slug in the path must agree.
     // Disagreement is 404, never 403 — see the module comment.
+    //
+    // `status` is checked here too, and it is not redundant with P2's
+    // ClientStore::verify. That refuses to MINT a token for an archived
+    // workspace; it cannot recall one already issued, and the design accepts up
+    // to `exp` of exposure. The workspace row is already in hand, so closing the
+    // archive case for the serving path costs nothing — and archiving is the
+    // operator's most natural decommission action. P2 shipped a version where
+    // that action locked the admin out of the revoke routes while leaving the
+    // credential working; do not rebuild the same shape one layer up.
     let ws = st
         .workspaces
         .get_by_slug(&ws_slug)
         .await
         .map_err(ServingError::internal)?
-        .filter(|w| w.id == principal.workspace_id)
+        .filter(|w| w.id == principal.workspace_id && w.status == "active")
         .ok_or(ServingError::NotFound)?;
 
     let (endpoint_id, version, snap) =
