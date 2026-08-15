@@ -723,6 +723,21 @@ pub fn runs_per_principal(delegated: bool, impersonate: bool) -> bool {
 /// **That is a coupling by string**, which is why it lives in one function with
 /// a test rather than being inlined at each of the three call sites.
 ///
+/// **The test in THIS crate is the weaker half of the guard, deliberately
+/// paired.** It can only assert that this crate still spells what it always
+/// spelled; it cannot see a rename in `ConnOptions`, which is the change that
+/// would break it — every consumer would keep compiling while this function
+/// silently started returning `false`, re-permitting a `shared` cache on a
+/// connection that runs queries as the caller. The guard that catches THAT is
+/// `wire_names` in `egret-query-api/src/lib.rs`, raised by the crate that owns
+/// the type at the point of the rename. Both are needed: one pins the reader,
+/// the other pins the writer.
+///
+/// The real close is a shared type across the two crates, and it is
+/// deliberately not done: it would cross the seam boundary that keeps this
+/// crate free of `egret-query` (see the module comment), which is a P5-or-later
+/// architectural decision rather than something to change while fixing a leak.
+///
 /// Anything that is not literally JSON `true` reads as `false`: absent, `null`,
 /// the string `"true"`, a number. That is the fail-SAFE direction for the
 /// PUBLISH check and the fail-OPEN direction for nothing — the serving-side
