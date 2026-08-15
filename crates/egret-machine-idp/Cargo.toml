@@ -16,7 +16,15 @@ tracing.workspace = true
 sqlx.workspace = true
 uuid.workspace = true
 chrono.workspace = true
-jsonwebtoken.workspace = true
+# `aws_lc_rs` is named EXPLICITLY, not inherited. jsonwebtoken 10 selects its
+# crypto backend from features and PANICS at the first sign/verify when neither
+# `rust_crypto` nor `aws_lc_rs` is on. In the full binary the feature arrives by
+# unification from lakekeeper's `limes`, so the server works — but any build that
+# does not pull lakekeeper in (this crate's own tests, `-p egret-dataapi`) gets a
+# crate that compiles and then panics on every token. Declaring it here makes the
+# backend this crate's own choice; it adds nothing to the server's feature set,
+# which already resolved to exactly this one.
+jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }
 rsa.workspace = true
 rand.workspace = true
 base64.workspace = true
