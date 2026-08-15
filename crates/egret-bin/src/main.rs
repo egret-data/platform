@@ -1780,8 +1780,13 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // EB-3: the real ClientVerifier is the Catalog Client registry (CatalogStore).
     // `issuer` is egret's public root URL (the JWT `iss` + OIDC issuer lakekeeper
     // will trust in EB-3's Authorizer integration).
+    // One key store, shared: the IdP signs with it and the Data API serving path
+    // (P4) verifies against it. Two independent stores would drift the moment a
+    // key rotates and reject tokens egret itself had just minted.
+    let signing_keys: std::sync::Arc<dyn egret_machine_idp::SigningKeyStore> =
+        std::sync::Arc::new(egret_machine_idp::PgSigningKeyStore::new(db.clone()));
     let idp = Some(egret_machine_idp::IdpState {
-        keys: std::sync::Arc::new(egret_machine_idp::PgSigningKeyStore::new(db.clone())),
+        keys: signing_keys.clone(),
         issuer: egret_public_url.clone(),
         verifiers: vec![
             std::sync::Arc::new(egret_catalog_engine::CatalogStore::new(db.clone())),
@@ -1809,6 +1814,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         workspaces: WorkspaceRepo::new(db.clone()),
         authz: Authorizer::new(db.clone()),
         pdp: pdp.clone(),
+        // The SAME store the machine-IdP above signs with (P4 Task 2), so the
+        // serving path verifies a token against the key that actually signed it.
+        keys: signing_keys.clone(),
         issuer: egret_public_url.clone(),
         // The SAME sink `CpState` and every other seam receives (P3 Task 5), so
         // publishing an endpoint or minting a client lands in the one `audit_log`

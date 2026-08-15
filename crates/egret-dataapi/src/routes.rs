@@ -115,6 +115,14 @@ pub struct DataApiState {
     /// depends on `egret-query` and the seam can move to its own binary by
     /// swapping the implementation.
     pub query: Arc<dyn egret_query_api::QueryExecPort>,
+    /// The machine-IdP's signing keys — the SAME store `IdpState` mints with, so
+    /// the serving path verifies against the key that signed the token rather
+    /// than against a second copy that could rotate independently.
+    ///
+    /// Read only by [`crate::serving`]: `verify_serving_token` takes the active
+    /// key's public JWK. The management routes above authenticate a HUMAN
+    /// through `WsContext`/`SessionService` and never touch this.
+    pub keys: Arc<dyn egret_machine_idp::SigningKeyStore>,
     /// egret's public root URL — the machine-IdP's `iss`. The `token_endpoint`
     /// handed back with a new client is derived from it so a caller never has to
     /// guess where to exchange the credential.

@@ -179,9 +179,12 @@ fn build_state(db: Db, pdp: Arc<dyn egret_core::authz::Pdp>, port: Arc<FakePort>
             chrono::Duration::minutes(60),
         ),
         workspaces: egret_workspace::workspaces::WorkspaceRepo::new(db.clone()),
-        authz: egret_workspace::rbac::Authorizer::new(db),
+        authz: egret_workspace::rbac::Authorizer::new(db.clone()),
         pdp,
         query: port,
+        // The real Postgres key store. Nothing in this file authenticates a
+        // machine token, so `active()` is never called and no key is generated.
+        keys: Arc::new(egret_machine_idp::PgSigningKeyStore::new(db.clone())),
         issuer: "https://egret.test".into(),
         // Best-effort sink with its receiver dropped — see `audit.rs` for the
         // suite that actually reads the events.

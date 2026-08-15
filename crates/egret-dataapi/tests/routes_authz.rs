@@ -74,8 +74,11 @@ fn build_state(db: Db, pdp: Arc<dyn egret_core::authz::Pdp>) -> DataApiState {
             chrono::Duration::minutes(60),
         ),
         workspaces: egret_workspace::workspaces::WorkspaceRepo::new(db.clone()),
-        authz: egret_workspace::rbac::Authorizer::new(db),
+        authz: egret_workspace::rbac::Authorizer::new(db.clone()),
         pdp,
+        // The real Postgres key store. Nothing in this file authenticates a
+        // machine token, so `active()` is never called and no key is generated.
+        keys: Arc::new(egret_machine_idp::PgSigningKeyStore::new(db.clone())),
         issuer: "https://egret.test".into(),
         // A sink whose receiver is dropped immediately: `emit` is best-effort
         // and logs rather than failing when the channel is closed, so nothing in

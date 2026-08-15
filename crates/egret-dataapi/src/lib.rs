@@ -24,11 +24,18 @@
 //! the only thing P4's serving path may read to decide what a request returns**;
 //! `lifecycle`'s module comment carries the full contract, including why routing
 //! is the one thing that still comes from the endpoint row.
+//!
+//! P4 Task 2 opens the [`serving`] surface with its authentication half:
+//! [`serving::verify_serving_token`] turns a bearer token into a principal and a
+//! workspace. It asserts `aud` and `exp` ITSELF, because
+//! `egret_machine_idp::verify_with_jwk` checks NEITHER and accepts a token
+//! carrying no `exp` at all — that module's comment carries the reasoning.
 
 pub mod clients;
 pub mod endpoints;
 pub mod lifecycle;
 pub mod routes;
+pub mod serving;
 
 pub use clients::{ClientStore, NewClient, DATA_API_TTL_SECS};
 pub use endpoints::{
@@ -44,3 +51,4 @@ pub use routes::{
     DataApiError, DataApiNewClientDto, DataApiServiceAccountDto, DataApiState, IssueClientInput,
     PublishEndpointInput, RollbackEndpointInput,
 };
+pub use serving::{verify_serving_token, ServingError, ServingPrincipal, DATA_API_AUDIENCE};
