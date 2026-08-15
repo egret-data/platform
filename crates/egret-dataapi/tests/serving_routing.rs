@@ -51,6 +51,7 @@ use uuid::Uuid;
 ///
 /// | marker | what it stands for |
 /// |---|---|
+/// | `44` | a connector bug — a ROW longer than the column list the connector itself reported |
 /// | `55` | drift by NAME — same count, `describe` froze `n` and `execute` returns `m` |
 /// | `66` | two columns whose `camel` forms collide (`total_revenue`, `totalRevenue`) |
 /// | `77` | drift by COUNT — `execute` returns a column `describe` did not (an added table column) |
@@ -118,10 +119,16 @@ impl egret_query_api::QueryExecPort for FakePort {
             88 => vec![col("b"), col("a")],
             _ => frozen_columns(sql),
         };
-        let rows = vec![columns
-            .iter()
-            .enumerate()
-            .map(|(i, _)| serde_json::json!(n + i as i64))
+        // Rows are length-matched to `columns` BY CONSTRUCTION, which is what a
+        // well-behaved connector guarantees — and precisely why the arity guard
+        // needs a marker to reach at all. `44` emits one extra value so the row
+        // disagrees with the column list the connector itself just reported.
+        // That is a connector bug, not engine drift: the column LISTS still
+        // agree, so the drift check above passes and the arity guard is the only
+        // thing left.
+        let width = columns.len() + usize::from(n == 44);
+        let rows = vec![(0..width)
+            .map(|i| serde_json::json!(n + i as i64))
             .collect()];
         Ok(TabularResult {
             columns,
@@ -922,5 +929,54 @@ async fn a_reordered_live_result_is_refused() {
         "the same names in a different order are still a different contract: {} {}",
         res.status,
         res.body
+    );
+}
+
+#[tokio::test]
+async fn a_row_wider_than_its_own_column_list_is_refused_in_both_shapes() {
+    // The case the column-list drift check cannot see. Here the live and frozen
+    // column lists AGREE — so `SchemaDrift` does not fire — and it is the ROW
+    // that carries an extra value. A connector bug rather than table drift.
+    //
+    // The guard used to live inside the `objects` loop only, so `arrays` cloned
+    // such a row through verbatim and served `[[44,45]]` under a one-column
+    // `meta.columns`, silently, while `objects` refused the identical result.
+    // Both shapes are asserted here because the asymmetry — not either shape on
+    // its own — was the defect.
+    let f = skip_without_db!();
+    f.publish_endpoint_with_output(
+        "GET",
+        "/wide-row-arrays",
+        "SELECT 44 AS n",
+        serde_json::json!({ "shape": "arrays" }),
+    )
+    .await;
+    f.publish_endpoint_with_output(
+        "GET",
+        "/wide-row-objects",
+        "SELECT 44 AS n",
+        serde_json::json!({ "shape": "objects" }),
+    )
+    .await;
+
+    // Both are collected before either is asserted, so a regression reports what
+    // BOTH shapes did. Asserting inside the loop would stop at `arrays` and hide
+    // whether `objects` had regressed with it — which, now that the guard is
+    // shared, is exactly the thing that would move together.
+    let arrays = f.call("wide-row-arrays").await;
+    let objects = f.call("wide-row-objects").await;
+    assert_eq!(
+        (arrays.status, objects.status),
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::INTERNAL_SERVER_ERROR
+        ),
+        "a row wider than its column list must be refused in BOTH shapes.\n\
+         arrays:  {} {}\n\
+         objects: {} {}",
+        arrays.status,
+        arrays.body,
+        objects.status,
+        objects.body
     );
 }

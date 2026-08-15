@@ -62,12 +62,18 @@
 //! this port's signature — but do not treat that as the only thing worth doing
 //! here.
 //!
-//! **This paragraph has now been wrong three times while its conclusion stayed
-//! right** — first "StarRocks is unbounded server-side", then "`disconnect()` is
-//! the reaction to the timeout", both asserted from reading and both false. A
-//! conclusion that survives a wrong mechanism is a conclusion nobody has checked
-//! the reasoning for; it is agreed with, not verified. If you are about to
-//! restate any of this, open the two files first.
+//! **This paragraph has now been wrong twice while its conclusion stayed
+//! right** — first "StarRocks is unbounded server-side", then "`disconnect()`
+//! is the reaction to the timeout", both asserted from reading and both false.
+//! Across P3 and P4 together the count is five wrong mechanism claims in two
+//! files (the other three were in `lifecycle.rs`, about `#` as a MySQL comment,
+//! `#` as a syntax error, and a CLI-artifact measurement), and **at least two of
+//! the five originated in review rather than in implementation** — so this is
+//! not a discipline only implementers need.
+//!
+//! A conclusion that survives a wrong mechanism is a conclusion nobody has
+//! checked the reasoning for; it is agreed with, not verified. If you are about
+//! to restate any of this, open the two files first.
 //!
 //! # What is deliberately NOT here yet
 //!
@@ -520,6 +526,29 @@ fn shape_rows(
     // makes that true by construction rather than by the check above holding.
     let frozen: Vec<&str> = snap.columns.iter().map(|c| c.name.as_str()).collect();
 
+    // Row arity, checked for BOTH shapes and BEFORE the branch on `shape`.
+    //
+    // The column LISTS agreeing does not imply each row has that many values —
+    // a connector can return a row whose own length disagrees with the column
+    // list it just reported. This guard used to live inside the `objects` loop
+    // only, and the asymmetry was the bug: `arrays` cloned each row through
+    // verbatim, so such a row was served as `[[v1,v2,v3]]` under a two-column
+    // `meta.columns`, silently, while `objects` refused it. Hoisted above the
+    // branch rather than duplicated, so the two shapes cannot drift apart again.
+    //
+    // It is a connector bug, not a caller's or an author's problem, so it is
+    // `Internal` rather than one of the contract variants — but it is refused
+    // rather than zipped past, which is the whole point of this function.
+    for row in &out.rows {
+        if row.len() != frozen.len() {
+            return Err(ServingError::internal(format!(
+                "connector returned a row of {} values for {} columns",
+                row.len(),
+                frozen.len()
+            )));
+        }
+    }
+
     if snap.output.shape == "arrays" {
         return Ok(serde_json::Value::Array(
             out.rows
@@ -552,18 +581,10 @@ fn shape_rows(
         return Err(ServingError::OutputNamingCollision);
     }
 
+    // `names` is `frozen` mapped one-to-one, so every row's arity was already
+    // checked against it above and the zip below cannot truncate.
     let mut shaped = Vec::with_capacity(out.rows.len());
     for row in &out.rows {
-        // The connector aligns rows to columns; a disagreement here is a bug in
-        // it, not a caller's or an author's problem — and zipping past it is
-        // exactly the silent truncation this function exists to stop.
-        if row.len() != names.len() {
-            return Err(ServingError::internal(format!(
-                "connector returned a row of {} values for {} columns",
-                row.len(),
-                names.len()
-            )));
-        }
         shaped.push(serde_json::Value::Object(
             names
                 .iter()
