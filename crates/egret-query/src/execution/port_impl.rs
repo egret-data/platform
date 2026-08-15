@@ -30,7 +30,11 @@ const DESCRIBE_TIMEOUT: Duration = Duration::from_secs(30);
 ///
 /// A pure function over `EngineError` so the distinction is unit-testable
 /// without a live engine, and so adding a variant forces a decision here.
-fn describe_error(e: EngineError) -> Error {
+///
+/// Named for the *input*, not for one caller: it stopped being describe-specific
+/// the moment `execute_as` started sharing it, which is why two of its strings
+/// are verb-neutral.
+fn engine_error(e: EngineError) -> Error {
     let detail = e.to_string();
     match e {
         // The caller's policy denied the table. This is the whole point of
@@ -50,9 +54,13 @@ fn describe_error(e: EngineError) -> Error {
         // Infrastructure. Nothing the author can do, and the detail (host:port,
         // SQL state) must not reach them — `Error::Internal` redacts to
         // "internal error" on the wire.
-        // `Cancelled` is unreachable today: both port methods build their own
-        // `CancellationToken` and never trigger it. Internal rather than a 400,
-        // so if it ever does fire it reads as the bug it would be.
+        // `Cancelled` is unreachable today: `describe_as` never triggers its
+        // token, and `execute_as` triggers its own only AFTER
+        // `tokio::time::timeout` has already dropped the connector future — so
+        // the connector is never around to observe it and report `Cancelled`.
+        // (That path surfaces as `Timeout` instead, mapped above.) Internal
+        // rather than a 400, so if it ever does fire it reads as the bug it
+        // would be.
         EngineError::Connect(_)
         | EngineError::Storage(_)
         | EngineError::Db(_)
@@ -148,7 +156,7 @@ impl egret_query_api::QueryExecPort for EngineState {
         build_connector(&spec)
             .describe(sql, DESCRIBE_TIMEOUT)
             .await
-            .map_err(describe_error)
+            .map_err(engine_error)
     }
 
     async fn execute_as(
@@ -162,25 +170,50 @@ impl egret_query_api::QueryExecPort for EngineState {
         // Same prelude, same scoping guarantee, same error table as `describe_as`
         // — only the verb differs.
         let spec = connect_as(self, ws, database_id, principal).await?;
-        // No JobManager here: the Data API serves synchronously, so the caller's
-        // `limits.timeout` is the whole budget and there is nothing to cancel
-        // out of band. A fresh token rather than `None` keeps the connector's
-        // cooperative-cancellation path on one code path.
+        // The serving path has no JobManager, so it must impose the budget that
+        // `run_query` imposes for the async path — see `job.rs::run_query`, which
+        // this mirrors deliberately.
         //
-        // `limits.max_rows` is not applied here — the connector fetches
-        // `max_rows + 1` and sets `truncated`, so the caller can tell a complete
-        // answer from a prefix. Capping the SQL with a `LIMIT` instead would
-        // erase that distinction.
-        build_connector(&spec)
-            .execute(sql, &limits, CancellationToken::new())
-            .await
-            .map_err(describe_error)
+        // `Connector::execute` does NOT bound itself to `limits.timeout`, and the
+        // two engines fail differently, so the wrap is not belt-and-braces:
+        //   * StarRocks never reads `limits.timeout` at all, and its `mysql_async`
+        //     `Opts` set no read/wait timeout — without this wrap a serving
+        //     request hangs until the connection dies. StarRocks is in scope for
+        //     the Data API, so this is the case that matters.
+        //   * Trino turns `limits.timeout` into a PER-REQUEST reqwest timeout and
+        //     a `query_max_run_time` session property, but its `nextUri`
+        //     pagination loop restarts that per-request clock on every poll, so
+        //     total wall-clock is unbounded without this.
+        // `describe_as` needs no equivalent only because `Connector::describe`
+        // takes a timeout argument and both engines honour it.
+        //
+        // On expiry `tokio::time::timeout` drops the inner future, so the client
+        // is released either way; the `cancel()` below is deliberately kept to
+        // match `run_query` exactly, and is only load-bearing if a future caller
+        // holds a clone of the token (as the JobManager does). It is NOT what
+        // stops the engine-side query — for Trino that is the `query_max_run_time`
+        // session property the connector derives from this same `limits.timeout`.
+        //
+        // `limits.max_rows` is deliberately NOT applied as a SQL `LIMIT` — the
+        // connector fetches `max_rows + 1` and sets `truncated`, so the caller
+        // can tell a complete answer from a prefix. Rewriting the SQL would erase
+        // that distinction.
+        let cancel = CancellationToken::new();
+        let connector = build_connector(&spec);
+        let fut = connector.execute(sql, &limits, cancel.clone());
+        match tokio::time::timeout(limits.timeout, fut).await {
+            Ok(r) => r.map_err(engine_error),
+            Err(_) => {
+                cancel.cancel();
+                Err(engine_error(EngineError::Timeout))
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::describe_error;
+    use super::engine_error;
     use crate::execution::EngineError;
     use egret_core::Error;
 
@@ -192,14 +225,14 @@ mod tests {
     #[test]
     fn a_policy_denial_stays_forbidden() {
         assert!(
-            matches!(describe_error(EngineError::Forbidden), Error::Forbidden),
+            matches!(engine_error(EngineError::Forbidden), Error::Forbidden),
             "a Ranger deny must surface as Forbidden, not InvalidInput"
         );
     }
 
     #[test]
     fn a_missing_relation_stays_not_found() {
-        let e = describe_error(EngineError::NotFound("tpch.tiny.nope".into()));
+        let e = engine_error(EngineError::NotFound("tpch.tiny.nope".into()));
         match e {
             Error::NotFound(s) => assert_eq!(s, "tpch.tiny.nope"),
             other => panic!("expected NotFound, got {other:?}"),
@@ -215,12 +248,12 @@ mod tests {
             EngineError::Limit("too many rows".into()),
         ] {
             assert!(
-                matches!(describe_error(e), Error::InvalidInput(_)),
+                matches!(engine_error(e), Error::InvalidInput(_)),
                 "author-facing engine failures must be InvalidInput"
             );
         }
         assert!(matches!(
-            describe_error(EngineError::Timeout),
+            engine_error(EngineError::Timeout),
             Error::InvalidInput(_)
         ));
     }
@@ -229,7 +262,7 @@ mod tests {
     /// host:port into a client-facing 400 body.
     #[test]
     fn connect_failures_are_internal_and_do_not_leak_the_host() {
-        let e = describe_error(EngineError::Connect(
+        let e = engine_error(EngineError::Connect(
             "error sending request for url (https://trino.internal:8443/v1/statement)".into(),
         ));
         assert!(
@@ -250,7 +283,7 @@ mod tests {
     #[test]
     fn cancelled_is_internal_not_a_client_error() {
         assert!(matches!(
-            describe_error(EngineError::Cancelled),
+            engine_error(EngineError::Cancelled),
             Error::Internal(_)
         ));
     }
