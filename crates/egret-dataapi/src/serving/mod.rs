@@ -151,15 +151,26 @@ pub enum ServingError {
     /// refills, and `Retry-After` is how it learns when.
     #[error("rate limited")]
     RateLimited { retry_after: std::time::Duration },
-    /// A `cache.scope = shared` version whose frozen `delegated` no longer
-    /// matches the live `query.databases.delegated`.
+    /// A `cache.scope = shared` version whose frozen
+    /// `(delegated, options.impersonate)` pair no longer matches the live
+    /// `query.databases` row.
+    ///
+    /// **Both halves, not just `delegated`.** Either one on its own makes the
+    /// engine run the query as the caller — see
+    /// [`crate::lifecycle::runs_per_principal`] — so either drifting is enough
+    /// to turn a published shared cache into a cross-identity leak. This doc
+    /// said `delegated` alone for as long as the check did, and the check being
+    /// fixed without the doc is how the next reader learns the old rule.
     ///
     /// Refused rather than downgraded to a per-principal key: the operator
     /// published a configuration that is no longer safe, and serving it a
     /// different way hides that from the person whose job it is to fix it (spec
     /// §6.3). 503 with code `cache_scope_stale` — the endpoint is not
-    /// permanently broken, its configuration has drifted, and a re-publish
-    /// clears it.
+    /// permanently broken, its configuration has drifted, and a re-publish (or
+    /// putting the connection back) clears it. The wire message names both
+    /// settings for the same reason this doc does: an operator sent to look at
+    /// `delegated` after changing `impersonate` finds it unchanged and concludes
+    /// the error is wrong.
     #[error("cache scope is stale")]
     CacheScopeStale,
     /// Something on egret's side failed — the IdP key store was unreachable, say.

@@ -128,6 +128,19 @@ pub struct AuditConfig {
     /// When false, the PDP is not wrapped and no events are emitted.
     pub enabled: bool,
     /// Rows older than this are pruned. Default 90.
+    ///
+    /// **`0` means "do not prune", not "keep nothing".** `AuditStore::prune(0)`
+    /// really would delete every row — `ts < now() - 0 days` is everything
+    /// already written — and that is the correct primitive, but a config key is
+    /// not a primitive: `0` is what an operator writes when they mean "off", and
+    /// what `EGRET_AUDIT__RETENTION_DAYS=` deserialises to when it is blank. On
+    /// the authorization-decision record, passed through on an hourly tick
+    /// inside a default-on `enabled`, that spelling emptied the table an hour
+    /// after boot. `egret-bin` routes this through
+    /// `egret_dataapi::serving::scheduled_retention` — the same guard
+    /// [`DataApiConfig::access_log_retention_days`] uses, deliberately the same
+    /// function and not a second spelling of the same comparison — and logs when
+    /// it declines to schedule.
     pub retention_days: i64,
     /// Bounded channel capacity; on overflow events are dropped (best-effort).
     pub channel_capacity: usize,
@@ -160,8 +173,14 @@ pub struct DataApiConfig {
     /// did — the store's meaning is untouched, and the trap is closed at the one
     /// place a human types a number.
     ///
-    /// `AuditConfig::retention_days` still carries the trap unguarded. Fixing it
-    /// is a behaviour change to another subsystem and is not being made here.
+    /// `AuditConfig::retention_days` carries the identical trap and is guarded
+    /// the identical way — `egret-bin` routes it through the same
+    /// `scheduled_retention` rather than a second spelling of the same
+    /// comparison. This comment used to say the audit knob was "still unguarded"
+    /// and that fixing it was out of scope; that stopped being true and the
+    /// sentence stayed, which is the kind of note that tells the next reader not
+    /// to look. **If you add a third retention knob, route it through the same
+    /// function** — the danger is not this field, it is the shape.
     pub access_log_retention_days: i64,
 }
 

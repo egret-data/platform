@@ -33,16 +33,23 @@
 //! oversight: a URL is a property of the endpoint object (uniquely constrained,
 //! renameable), whereas behaviour is a property of the version (frozen).
 //!
-//! **The one snapshot-external input P4 must re-check:**
-//! `EndpointSnapshot::delegated` records whether the connection delegated
-//! per-user credentials when the version was published. `query.databases.delegated`
-//! is mutable, and flipping it to `true` after a `cache.scope = shared` version
-//! was published turns a legitimately-published snapshot into the exact
-//! cross-principal leak [`check_cache_scope`] refuses — with no re-validation
-//! anywhere. P4 must compare the frozen value against the live one before serving
-//! from a shared cache, and refuse when they disagree. Everything else in the
-//! snapshot is self-contained; this field is a witness, and a witness nobody
-//! questions is decoration.
+//! **The snapshot-external input P4 must re-check is a PAIR:**
+//! `EndpointSnapshot::delegated` and `EndpointSnapshot::impersonate` record the
+//! two mutable things on `query.databases` that decide whether the engine runs a
+//! query AS THE CALLER — see [`runs_per_principal`], which is the single
+//! expression of that condition. Switching either on after a
+//! `cache.scope = shared` version was published turns a legitimately-published
+//! snapshot into the exact cross-principal leak [`check_cache_scope`] refuses —
+//! with no re-validation anywhere. P4 must compare BOTH frozen halves against the
+//! live row before serving from a shared cache, and refuse when either disagrees.
+//! Everything else in the snapshot is self-contained; these two are a witness,
+//! and a witness nobody questions is decoration.
+//!
+//! **It was `delegated` alone, and half a witness was worse than none** — it read
+//! as though the question were being asked. `options.impersonate` makes the
+//! engine run as the caller independently of `delegated`, so a connection could
+//! be per-principal at the engine and look shared-safe to every check that
+//! consulted `delegated`.
 //!
 //! # Why validation runs here and not at serve time
 //!
@@ -717,8 +724,8 @@ pub fn runs_per_principal(delegated: bool, impersonate: bool) -> bool {
 /// Read `options.impersonate` out of a `query.databases.options` JSONB value.
 ///
 /// This crate depends on no other feature seam (see the module comment), so
-/// `DbOptions` is not in scope and the column is read as raw JSON. The key is
-/// spelled exactly as `egret_query_api::DbOptions::impersonate` serialises it —
+/// `ConnOptions` is not in scope and the column is read as raw JSON. The key is
+/// spelled exactly as `egret_query_api::ConnOptions::impersonate` serialises it —
 /// that field carries no `#[serde(rename)]`, so the wire name is the Rust name.
 /// **That is a coupling by string**, which is why it lives in one function with
 /// a test rather than being inlined at each of the three call sites.
@@ -743,7 +750,7 @@ pub fn runs_per_principal(delegated: bool, impersonate: bool) -> bool {
 /// PUBLISH check and the fail-OPEN direction for nothing — the serving-side
 /// comparison uses the same function on both the frozen and the live value, so a
 /// value this cannot parse is simply "not impersonating" at both ends and the
-/// pair still agrees. If `DbOptions` ever starts accepting a looser spelling,
+/// pair still agrees. If `ConnOptions` ever starts accepting a looser spelling,
 /// this function is the one place that has to learn it.
 pub fn impersonate_flag(options: &serde_json::Value) -> bool {
     options.get("impersonate") == Some(&serde_json::Value::Bool(true))
@@ -1044,15 +1051,17 @@ impl EndpointStore {
         // on `query.databases` and the isolation level is READ COMMITTED, so a
         // concurrent flip can commit before this transaction does. Locking it
         // would not help either, because the flip is equally free the instant
-        // after the commit. That residual is precisely what the frozen
-        // `delegated` witness exists for — P4 compares it against the live column
-        // and refuses a shared cache when they disagree — and it is not something
+        // after the commit. That residual is precisely what the frozen witness
+        // PAIR exists for — P4 compares both halves against the live row and
+        // refuses a shared cache when either disagrees — and it is not something
         // publish can close on its own.
-        // The witness PAIR, read in one statement so the two halves cannot come
-        // from two different moments. `options` is JSONB and the key is spelled
-        // exactly as `egret_query_api::DbOptions::impersonate` serialises it —
-        // this crate deliberately depends on no other feature seam, so the
-        // coupling is by name and is asserted in `impersonate_flag`.
+        //
+        // Read in ONE statement so the two halves cannot come from two different
+        // moments. `options` is JSONB and the key is spelled exactly as
+        // `egret_query_api::ConnOptions::impersonate` serialises it — this crate
+        // deliberately depends on no other feature seam, so the coupling is by
+        // name, read through `impersonate_flag`, and pinned from the owning side
+        // by `egret-query-api`'s `wire_names`.
         let (delegated, options): (bool, serde_json::Value) = sqlx::query_as(
             "SELECT delegated, options FROM query.databases WHERE id = $1 AND workspace_id = $2",
         )
@@ -1771,7 +1780,7 @@ mod tests {
         assert!(runs_per_principal(true, true));
     }
 
-    /// The JSONB key is a string coupling to `egret_query_api::DbOptions`, so it
+    /// The JSONB key is a string coupling to `egret_query_api::ConnOptions`, so it
     /// is pinned in one place rather than trusted at three call sites.
     #[test]
     fn the_impersonate_flag_reads_only_a_real_json_true() {

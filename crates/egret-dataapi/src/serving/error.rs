@@ -218,14 +218,27 @@ pub(crate) fn to_wire(e: &ServingError) -> Wire {
         // BOTH fixes are named. Spec §7 says the operator can re-publish the
         // endpoint OR put the connection back, and the message used to offer
         // only the first — sending someone to re-publish when the real event was
-        // a connection being flipped to delegated, which re-publishing does not
-        // undo and may not even be the change they want to keep.
+        // a connection being changed, which re-publishing does not undo and may
+        // not even be the change they want to keep.
+        //
+        // **And BOTH halves of the pair are named, which is the correction that
+        // matters most on this line.** This error fires when EITHER the frozen
+        // `delegated` or the frozen `options.impersonate` disagrees with the live
+        // row. The message used to say only "delegation setting" — so an
+        // operator hitting the impersonate case would go and look at
+        // `delegated`, find it unchanged, and reasonably conclude the error was
+        // wrong. That is the worst outcome available for a message whose only
+        // job is to point at the thing that moved: it does not merely fail to
+        // help, it actively sends them away from the setting they changed. The
+        // `tracing::warn!` in `shared_cache_allowed` names which half moved; the
+        // body cannot (it is a fixed string on a public surface), so it names
+        // both.
         ServingError::CacheScopeStale => (
             StatusCode::SERVICE_UNAVAILABLE,
             "cache_scope_stale",
-            "this endpoint's shared cache was published against a different \
-             connection setting; re-publish it, or restore the connection's \
-             delegation setting"
+            "this endpoint's shared cache was published against different \
+             connection settings; re-publish it, or restore the connection's \
+             `delegated` and `options.impersonate` settings"
                 .into(),
         ),
         // The source is NOT rendered. It is the only thing in this file that

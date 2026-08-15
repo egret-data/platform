@@ -244,7 +244,7 @@ async fn insert_database(db: &Db, ws: Uuid, owner: Uuid, delegated: bool) -> Uui
 /// Both halves of the pair that decides whether the engine runs per principal.
 ///
 /// `options` is written as raw JSON with the key spelled exactly as
-/// `egret_query_api::DbOptions::impersonate` serialises it — the same string the
+/// `egret_query_api::ConnOptions::impersonate` serialises it — the same string the
 /// production code reads through `lifecycle::impersonate_flag`. Written here
 /// rather than through the databases route so a test can construct the
 /// combination the route accepts but nothing validates.
@@ -524,8 +524,9 @@ impl Fixture {
 
     /// Insert a draft carrying `cache`/`rate_limit` and publish it through the
     /// REAL publish route, so the frozen snapshot is the one publish produces —
-    /// including its `delegated` witness, which is the field the shared-cache
-    /// check reads.
+    /// including its `(delegated, impersonate)` witness pair, which is what the
+    /// shared-cache check reads. Both halves come from publish, so a fixture
+    /// cannot accidentally freeze a pair the real path would not.
     pub async fn publish(
         &self,
         path: &str,

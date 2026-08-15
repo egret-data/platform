@@ -174,7 +174,8 @@ pub fn cache_key(
 ///
 /// Returns `Ok(false)` for every `per_principal` snapshot without touching the
 /// database — the common case costs nothing. For a `shared` one it reads the
-/// LIVE `query.databases.delegated` and compares it against the frozen witness.
+/// LIVE `(delegated, options.impersonate)` pair and compares it against the
+/// frozen witness pair.
 ///
 /// **Deliberately not gated on `cache.enabled`.** `check_cache_scope` refuses a
 /// `shared` scope at publish time whether or not the cache is currently on,
