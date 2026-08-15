@@ -273,6 +273,31 @@ async fn grant(db: &Db, user: Uuid, ws: Uuid, perms: &[&str]) {
     .expect("grant role");
 }
 
+/// Give `user` `data_api_endpoint:invoke` on ONE endpoint — spec §6.2 step 4's
+/// grant, written as one `access_grants` row against the `data_api_invoker` role
+/// migration 0124 seeds.
+///
+/// [`Fixture::publish_with_params`] issues it for BOTH principals, because these
+/// two suites are about steps 5 and 6 and every call in them is meant to reach
+/// the limiter and the cache. Step 4 itself is `serving_authz.rs`'s subject, and
+/// it uses the real `POST …/endpoints/{id}/grants` route; this is SQL because
+/// these principals are plain `users` rows with no `dataapi.service_accounts`
+/// binding, which that route (correctly) refuses.
+pub async fn grant_invoke(db: &Db, user: UserId, endpoint: Uuid) {
+    sqlx::query(
+        "INSERT INTO access_grants \
+           (principal_type, principal_id, role_id, scope_type, object_type, scope_id, effect) \
+         SELECT 'user', $1, r.id, 'object', 'data_api_endpoint', $2, 'allow' \
+           FROM roles r WHERE r.scope = 'workspace' AND r.name = 'data_api_invoker' \
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(user.0)
+    .bind(endpoint)
+    .execute(&db.pool)
+    .await
+    .expect("grant invoke");
+}
+
 pub async fn fixture() -> Option<Fixture> {
     let url = std::env::var("DATABASE_URL").ok()?;
     let db = Db::connect(&url, 5).await.expect("connect");
@@ -533,6 +558,11 @@ impl Fixture {
             )
             .await;
         assert_eq!(status, StatusCode::OK, "publish failed: {body}");
+        // Both principals, so a cache or rate-limit test comparing two
+        // identities is comparing what it thinks it is rather than one 200
+        // against one 403.
+        grant_invoke(&self.db, self.principal_a, ep).await;
+        grant_invoke(&self.db, self.principal_b, ep).await;
         ep
     }
 

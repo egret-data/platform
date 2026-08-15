@@ -332,6 +332,22 @@ POST   /api/ws/{workspace}/data-api/service-accounts/{id}/clients   -> secret, �
 DELETE /api/ws/{workspace}/data-api/clients/{id}
 ```
 
+**Cấp cho một service account quyền gọi một endpoint** (P4, cùng bề mặt, cùng nhóm session + CSRF):
+
+```text
+GET    /api/ws/{workspace}/data-api/endpoints/{id}/grants
+POST   /api/ws/{workspace}/data-api/endpoints/{id}/grants   { "service_account_id": … }
+DELETE /api/ws/{workspace}/data-api/endpoints/{id}/grants/{service_account_id}
+```
+
+Cả ba đều gate trên `data_api_endpoint:manage`, **kể cả route liệt kê**: ghi một grant là thay đổi đồ thị phân quyền và mạnh hơn hẳn việc đọc một endpoint, còn liệt kê grantee là liệt kê mọi consumer của endpoint đó. Cả hai id đều được giới hạn theo workspace của caller — endpoint qua `EndpointStore` (các câu lệnh của nó tự mang sẵn predicate), service account qua `scoped_account` — và lệch bên nào cũng là 404. Thiếu một trong hai, một người giữ `:manage` ở workspace này có thể cấp account của workspace này trên endpoint của workspace kia bằng một request trông hoàn toàn bình thường.
+
+Một grant là một hàng: `access_grants (principal_type='user', principal_id=<service account>, scope_type='object', object_type='data_api_endpoint', scope_id=<endpoint id>, role_id=<data_api_invoker>, effect='allow')`. `data_api_invoker` là role built-in scope workspace (migration 0124) mang **đúng một** permission, `data_api_endpoint:invoke`. Nó phải là role riêng và phải giữ nguyên một permission: một grant scope object link TOÀN BỘ tập hành động hiệu dụng của role lên object đó, nên dùng lại `ws_viewer` (như share API của `egret-bi`) sẽ trao cho service account mọi hành động viewer trên chính endpoint mà nó chỉ được phép gọi, còn thêm một permission thứ hai vào `data_api_invoker` sẽ nới rộng mọi grant đã ghi trên mọi endpoint cùng một lúc. Nó scope workspace chứ không scope platform vì chỉ template Cedar của role workspace dùng dạng `resource in ?resource` có tính lan xuống để khớp một resource Object; một role scope platform ở đây sẽ link một policy không bao giờ khớp và grant sẽ vô hiệu trong im lặng.
+
+**Thu hồi grant có hiệu lực ngay ở request kế tiếp; thu hồi token thì không.** Grant được đọc lại mỗi request, nên `DELETE …/grants/{service_account_id}` chặn đúng cuộc gọi tiếp theo. Thu hồi CLIENT không làm được vậy — serving path verify JWT theo kiểu stateless (§6.2 bước 1), nên token đã cấp vẫn hợp lệ tới `exp` và TTL 600s ở §6.1 là cận không rút ngắn được. Chính sự bất đối xứng đó là câu trả lời vận hành cho *"cắt consumer này ngay bây giờ"*: thu hồi grant, đừng thu hồi client. Thu hồi client là nước đi đúng khi *credential* bị lộ, và nó chặn việc mint token kế tiếp; nó không chặn token đang bay.
+
+Grant gắn với ENDPOINT chứ không gắn với version, nên nó sống sót qua một lần publish lại. Gắn theo version nghe có vẻ hợp lý ("consumer đã đồng ý với hợp đồng này") và sẽ phá mọi consumer trong im lặng ngay khi tác giả publish một bản sửa.
+
 Hai permission, đều `Scope::Workspace` và đều chỉ seed cho `ws_admin` (migration 0120): `service_account:read` để xem account và client, `service_account:manage` để tạo, xoá và **cấp client**. Cấp client gate trên `:manage`, không bao giờ trên `:read` — client là credential bearer cho quyền truy cập dữ liệu của account đó, nên phát nó ra mạnh hơn hẳn việc đọc danh sách. Mọi handler đều resolve account (hoặc client) theo workspace lấy từ extractor `WsContext`, không bao giờ đọc lại path segment lần hai, và trả **404 chứ không phải 403** khi không khớp — đúng luật như §6.2 bước 3.
 
 ### 6.2 Chuỗi xử lý mỗi request
@@ -342,7 +358,8 @@ GET /data-api/v1/{ws}/{path}
  1. verify JWT qua JWKS → principal + workspace từ claims        ✗→ 401
  2. (ws, method, path) → endpoint → live_version_id → snapshot   ✗→ 404
  3. workspace của service account == {ws} trong path             ✗→ 404
- 4. Cedar: dataapi:invoke trên Object data_api_endpoint:{id}     ✗→ 403
+ 4. Cedar: data_api_endpoint:invoke trên Object                  ✗→ 403
+    data_api_endpoint:{id}
  5. rate limit (theo endpoint và theo client)                    ✗→ 429 + Retry-After
  6. cache lookup                                                 hit → trả
  7. render params → SQL an toàn theo dialect                     ✗→ 400
@@ -355,6 +372,14 @@ GET /data-api/v1/{ws}/{path}
 **Bước 1 là stateless và không tốn round-trip DB nào.** Bearer token là JWT do chính machine-IdP của egret ký, nên serving path chỉ verify chữ ký với JWKS rồi đọc thẳng `egret_user_id` và `ws` từ claim — không có tra cứu credential, và không có Argon2, trên hot path. Đó chính là lý do §6.1 chọn đổi token thay vì key kiểm mỗi request. Cái giá là cửa sổ thu hồi mà §6.1 chặn ở 600s.
 
 Bước 3 trả **404 chứ không phải 403** là cố ý: một token thuộc workspace khác không được phép phân biệt "không có endpoint đó" với "có, nhưng anh không được gọi". Management API áp dụng đúng luật đó cho service account và client (§6.1).
+
+**Bước 4 trả 403, và sự đảo chiều đó là cố ý.** Tới lúc bước 4 chạy, caller đã chứng minh nó giữ một credential hợp lệ, chưa hết hạn, *cho chính workspace này* — nên việc một endpoint tồn tại trong đó không còn là bí mật mà câu trả lời có thể giữ, và một 404 sẽ không mua được tính bí mật nào trong khi làm operator mất một chẩn đoán thật ("endpoint biến mất" thay vì "thiếu grant"). Luật là: 404 khi caller chưa chứng minh được gì, 403 một khi nó đã chứng minh.
+
+**Bước 4 là `data_api_endpoint:invoke`, không phải `dataapi:invoke`.** Các bản nháp trước của tài liệu này viết tên ngắn; catalog permission (`egret-core/src/rbac.rs`) đặt khoá là `data_api_endpoint:invoke`, khớp với hai anh em `:read` và `:manage`, và đó là chuỗi mà serving path kiểm tra. Permission này là `Scope::Workspace` như hai cái kia, nhưng khác chúng ở chỗ nó **được thiết kế để giữ ở scope object bởi một service account** chứ không phải giữ toàn workspace bởi con người: mỗi cặp (service account, endpoint) là một hàng `access_grants`. Migration 0124 seed nó cho `ws_admin` để catalog nhất quán, và ở đó nó vô hiệu — serving surface chỉ nhận token audience `data-api` mint cho service account, nên một session của con người không dùng được nó.
+
+**Từ chối là `403 not_granted`, một code KHÁC với `403 data_access_denied`**, vì đó là vấn đề của hai hệ thống khác nhau: `not_granted` nghĩa là egret từ chối CUỘC GỌI và cách sửa là cấp grant trên endpoint; `data_access_denied` nghĩa là engine từ chối DỮ LIỆU và cách sửa là một grant trong Ranger. Dùng chung một code sẽ đẩy operator sang nhầm hệ thống, và biến "các 403 trên endpoint này" thành một dòng không hành động được trong `access_log.error_code`.
+
+**Khi chưa có bước 4, một token là năng lực đọc trên phạm vi toàn workspace.** Ghi lại vì lỗ hổng này đã đi qua năm task trước khi được bịt: mọi token hợp lệ, chưa hết hạn của workspace W đều với tới MỌI endpoint live trong W, nên một service account tạo cho một consumer có thể gọi endpoint của mọi consumer khác và nhận về toàn bộ tập kết quả. Thứ duy nhất đứng sau đó là bộ lọc dòng của chính engine — thứ không có khi Ranger không cưỡng chế, và chỉ ở mức resource trên StarRocks.
 
 ### 6.3 Cache phải scope theo principal
 
@@ -407,6 +432,7 @@ Một envelope ổn định, máy đọc được:
 | 400 | `row_limit_exceeded` | kết quả vượt row cap đã cấu hình; message nói rõ cap là bao nhiêu |
 | 401 | `key_invalid` | token thiếu, sai định dạng, hết hạn, sai audience, hoặc không verify được — MỘT câu trả lời cho tất cả (§6.2) |
 | 403 | `data_access_denied` | Ranger từ chối — service account chưa được cấp quyền dữ liệu (§5.3) |
+| 403 | `not_granted` | egret từ chối — service account không có grant `data_api_endpoint:invoke` trên endpoint này (§6.2 bước 4). Cố ý là một code khác với hàng trên: cách sửa là cấp grant trên endpoint, không phải grant trong Ranger |
 | 404 | `not_found` | không tồn tại, đã disable, sai workspace, workspace đã archive, hoặc path không chuẩn hoá được — MỘT câu trả lời cho tất cả |
 | 429 | `rate_limited` | kèm `Retry-After`, tính từ thời điểm bucket đầy lại |
 | 500 | `internal` | lỗi phía egret, và mọi lỗi engine mà P4 chưa phân loại được sâu hơn (xem dưới) |
@@ -425,7 +451,6 @@ Mỗi cái là một quyết định, không phải một thiếu sót. Một co
 | HTTP | code | Vì sao chưa sống |
 |---|---|---|
 | 400 | `param_invalid` / `param_missing` | §6.2 bước 7 (render `params` đã khai báo vào SQL) chưa làm, nên chưa có input nào của caller được validate ở đâu cả. Chúng đến cùng bước 7 — và khi đó, cả hai đều không được nêu TÊN tham số: tên là của tác giả, nêu ra tức là biến bề mặt lỗi thành danh mục các tham số mà endpoint khai báo. |
-| 403 | `forbidden` | bước kiểm tra Cedar `data_api_endpoint:invoke` là task riêng. Chừng nào chưa có, mọi token hợp lệ của một workspace đều với tới MỌI endpoint live trong workspace đó — đó là một lỗ hổng, không chỉ là một bước chưa xong. |
 | 502 | `engine_unavailable` | **không quyết định được ở seam này.** `QueryExecPort` trả `egret_core::Error`, và `port_impl` gộp CẢ lỗi hạ tầng của engine (`Connect`/`Storage`/`Db`) LẪN lỗi của chính egret — resolve email của principal, mở secret của database — vào cùng một `Error::Internal`. Trả 502 sẽ gọi người vận hành dậy vì Trino trong khi thứ hỏng là metastore. |
 | 504 | `timeout` | cùng seam đó. `engine_error` map `EngineError::Timeout` thành `Error::InvalidInput("query timed out")`, một cách cố ý, vì với `describe_as` thì timeout nghĩa là query quá đắt để lập kế hoạch. Nhận ra nó ở serving path sẽ phải so khớp chuỗi message của một crate khác — một phép kiểm tra vẫn biên dịch được và âm thầm hết tác dụng đúng ngày ai đó sửa lại câu chữ. |
 

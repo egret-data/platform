@@ -52,7 +52,6 @@ pub use router::{serving_openapi, serving_router, ServingMeta, ServingResponse};
 /// * `param_invalid` / `param_missing` — spec §6.2 step 7 (rendering declared
 ///   `params` into the SQL) is not implemented, so no caller input is ever
 ///   validated. They arrive with step 7.
-/// * `forbidden` — the Cedar `data_api_endpoint:invoke` check is its own task.
 /// * `engine_unavailable` (502) and `timeout` (504) — **not decidable at this
 ///   seam.** `QueryExecPort` returns `egret_core::Error`, and `port_impl` folds
 ///   BOTH the engine's infrastructure failures (`Connect`/`Storage`/`Db`) AND
@@ -85,6 +84,28 @@ pub enum ServingError {
     /// otherwise sends them to debug the wrong thing.
     #[error("data access denied")]
     DataAccessDenied,
+    /// **egret** refused the CALL: the service account holds no
+    /// `data_api_endpoint:invoke` grant on this endpoint (spec §6.2 step 4).
+    ///
+    /// Kept distinct from [`Self::DataAccessDenied`] because they are two
+    /// different people's problems with two different fixes, and collapsing them
+    /// would send an operator to the wrong system:
+    ///
+    /// * `DataAccessDenied` — the ENGINE refused the DATA. egret let the call
+    ///   through, the query ran as the service account, and Ranger filtered it
+    ///   to nothing or refused the relation. The fix is a Ranger grant.
+    /// * `NotGranted` — egret refused before the engine was ever contacted. The
+    ///   fix is `POST …/endpoints/{id}/grants` naming this service account.
+    ///
+    /// **403 and not 404**, which is the opposite of every earlier step. By this
+    /// point the caller has proved it holds a valid credential for this
+    /// workspace, so "this endpoint exists and you may not call it" tells it
+    /// nothing it could not already enumerate through the management API or by
+    /// walking its own grants. The 404s above hide existence from a caller who
+    /// has proved nothing; there is nothing left to hide here, and a 404 would
+    /// instead send an operator hunting for a deleted endpoint.
+    #[error("endpoint not granted to this service account")]
+    NotGranted,
     /// The result did not fit under the snapshot's `limits.max_rows`.
     ///
     /// An error rather than a truncated 200: a client that believes it has every

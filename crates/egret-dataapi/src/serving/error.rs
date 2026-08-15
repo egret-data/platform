@@ -166,6 +166,25 @@ pub(crate) fn to_wire(e: &ServingError) -> Wire {
             "data_access_denied",
             "the service account is not granted access to this data".into(),
         ),
+        // Same status as the row above, a DIFFERENT code, because the fix is in
+        // a different system: this one is cleared by granting the service
+        // account invoke on the endpoint, that one by a Ranger grant on the
+        // data. A client branches on `code`, and an operator reading
+        // `access_log.error_code` needs the two separable — "403s on this
+        // endpoint" is not an actionable statement if it means either.
+        //
+        // The message names the endpoint's OWNER as the person to ask rather
+        // than describing the grant mechanics, because the caller is a machine
+        // client in someone else's organisation: it cannot write the grant, and
+        // spelling out where the row goes tells it about egret's authorization
+        // model for nothing.
+        ServingError::NotGranted => (
+            StatusCode::FORBIDDEN,
+            "not_granted",
+            "this service account is not granted access to this endpoint; \
+             ask the endpoint's owner to grant it"
+                .into(),
+        ),
         // An error, never a truncated 200: a client that believes it has every
         // row produces wrong numbers with no signal.
         ServingError::RowLimitExceeded { cap } => (
@@ -228,6 +247,7 @@ pub(crate) fn to_wire(e: &ServingError) -> Wire {
         ServingError::Unauthorized
         | ServingError::NotFound
         | ServingError::DataAccessDenied
+        | ServingError::NotGranted
         | ServingError::RowLimitExceeded { .. }
         | ServingError::Internal(_) => None,
     };
@@ -274,6 +294,7 @@ mod tests {
             (ServingError::Unauthorized, 401, "key_invalid"),
             (ServingError::NotFound, 404, "not_found"),
             (ServingError::DataAccessDenied, 403, "data_access_denied"),
+            (ServingError::NotGranted, 403, "not_granted"),
             (
                 ServingError::RowLimitExceeded { cap: 100 },
                 400,
@@ -372,6 +393,7 @@ mod tests {
             ServingError::Unauthorized,
             ServingError::NotFound,
             ServingError::DataAccessDenied,
+            ServingError::NotGranted,
             ServingError::RowLimitExceeded { cap: 1 },
             ServingError::Internal(anyhow::anyhow!("boom")),
         ] {
@@ -392,6 +414,10 @@ mod tests {
             to_wire(&ServingError::Unauthorized).code,
             to_wire(&ServingError::NotFound).code,
             to_wire(&ServingError::DataAccessDenied).code,
+            // The pair this test exists for most: two variants that share a
+            // STATUS must not share a code, or the wire cannot tell "ask egret
+            // for a grant" from "ask Ranger for a grant".
+            to_wire(&ServingError::NotGranted).code,
             to_wire(&ServingError::RowLimitExceeded { cap: 1 }).code,
             to_wire(&ServingError::RateLimited {
                 retry_after: Duration::from_secs(1),

@@ -291,6 +291,17 @@ pub const ALLOWED_METHODS: [&str; 2] = ["GET", "POST"];
 /// but a field that lands before its guard is a hole.
 pub const FOLDER_ENTITY_TYPE: &str = "data_api_endpoint";
 
+/// The Cedar object KIND an endpoint appears as in an authorization decision,
+/// and the `access_grants.object_type` of an invoke grant (spec §5, §6.2 step 4).
+///
+/// It happens to spell the same string as [`FOLDER_ENTITY_TYPE`] and is a
+/// separate constant on purpose: one names a row in `analytics.folders`, the
+/// other namespaces `Egret::Object::"<kind>:<uuid>"` in the PDP and is written
+/// into `access_grants`. Aliasing them would make a rename of either silently
+/// re-point every invoke grant at a kind nothing checks — grants that keep
+/// matching the schema and stop matching the decision.
+pub const OBJECT_KIND: &str = "data_api_endpoint";
+
 /// The longest a stored endpoint path may be, in bytes.
 ///
 /// Not a product limit — a limit that already exists further down, made visible.

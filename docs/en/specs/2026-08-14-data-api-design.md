@@ -340,6 +340,22 @@ POST   /api/ws/{workspace}/data-api/service-accounts/{id}/clients   -> the secre
 DELETE /api/ws/{workspace}/data-api/clients/{id}
 ```
 
+**Granting a service account access to an endpoint** (P4, same surface, same session + CSRF group):
+
+```text
+GET    /api/ws/{workspace}/data-api/endpoints/{id}/grants
+POST   /api/ws/{workspace}/data-api/endpoints/{id}/grants   { "service_account_id": … }
+DELETE /api/ws/{workspace}/data-api/endpoints/{id}/grants/{service_account_id}
+```
+
+All three gate on `data_api_endpoint:manage`, **including the list**: writing a grant mutates the authorization graph and is strictly more powerful than reading an endpoint, and listing the grantees enumerates every consumer of it. Both ids are scoped to the caller's workspace — the endpoint through `EndpointStore` (whose statements carry the predicate themselves), the service account through `scoped_account` — and either mismatch is a 404. Without both, a `:manage` holder in one workspace could grant one workspace's account on another's endpoint with a call that looks entirely ordinary.
+
+A grant is one row: `access_grants (principal_type='user', principal_id=<service account>, scope_type='object', object_type='data_api_endpoint', scope_id=<endpoint id>, role_id=<data_api_invoker>, effect='allow')`. `data_api_invoker` is a workspace-scoped built-in role (migration 0124) carrying **exactly one** permission, `data_api_endpoint:invoke`. It has to be its own role and it has to stay single-permission: an object-scoped grant links its role's whole effective action set onto the object, so reusing `ws_viewer` (as `egret-bi`'s share API does) would hand a service account every viewer action on the endpoint it was merely meant to call, and adding a second permission to `data_api_invoker` would widen every already-written grant on every endpoint at once. It is workspace-scoped rather than platform-scoped because only a workspace role's Cedar template uses the cascading `resource in ?resource` form that matches an Object resource; a platform-scoped role there would link a policy that never fires and the grant would be silently inert.
+
+**A grant revocation takes effect on the next request; a token revocation does not.** The grant is read per request, so `DELETE …/grants/{service_account_id}` stops the very next call. Revoking the CLIENT cannot do that — the serving path verifies a stateless JWT (§6.2 step 1), so an already-issued token stays valid until `exp` and the 600s TTL of §6.1 is the irreducible bound. That asymmetry is the operational answer to *"cut this consumer off right now"*: revoke the grant, not the client. Revoking the client is the right move for a leaked *credential*, and it stops the next token being minted; it does not stop the token already in flight.
+
+A grant is on the ENDPOINT, not on a version, so it survives a re-publish. Keying it to the version would be superficially attractive ("the consumer agreed to this contract") and would silently break every consumer the moment an author published a fix.
+
 Two permissions, both `Scope::Workspace` and both seeded on `ws_admin` only (migration 0120): `service_account:read` to view accounts and clients, `service_account:manage` to create, delete and **issue**. Issuing gates on `:manage` and never on `:read` — a client is a bearer credential for that account's data access, so handing one out is strictly more powerful than reading the list. Every handler resolves the account (or client) against the workspace from the `WsContext` extractor, never from a second read of the path segment, and returns **404 rather than 403** on a mismatch — the same rule as §6.2 step 3.
 
 ### 6.2 Per-request chain
@@ -350,7 +366,8 @@ GET /data-api/v1/{ws}/{path}
  1. verify JWT via JWKS → principal + workspace from claims      ✗→ 401
  2. (ws, method, path) → endpoint → live_version_id → snapshot   ✗→ 404
  3. service account's workspace == {ws} in path                  ✗→ 404
- 4. Cedar: dataapi:invoke on Object data_api_endpoint:{id}       ✗→ 403
+ 4. Cedar: data_api_endpoint:invoke on Object                     ✗→ 403
+    data_api_endpoint:{id}
  5. rate limit (per endpoint and per client)                     ✗→ 429 + Retry-After
  6. cache lookup                                                 hit → return
  7. render params → dialect-safe SQL                             ✗→ 400
@@ -363,6 +380,14 @@ GET /data-api/v1/{ws}/{path}
 **Step 1 is stateless and costs no DB round-trip.** The bearer token is a JWT signed by egret's own machine-IdP, so the serving path verifies a signature against JWKS and reads `egret_user_id` and `ws` straight out of the claims — there is no credential lookup, and no Argon2, on the hot path. That is the whole reason §6.1 chose a token exchange over a per-request key. The price is the revocation window §6.1 bounds at 600s.
 
 Step 3 returns **404, not 403**, on purpose: a token belonging to another workspace must not be able to distinguish "no such endpoint" from "exists, but you may not call it". The management API applies the same rule to service accounts and clients (§6.1).
+
+**Step 4 returns 403, and that reversal is deliberate.** By the time it runs, the caller has proved it holds a valid, unexpired credential for *this* workspace — so the existence of an endpoint in it is not a secret the answer could keep, and a 404 would buy no confidentiality while costing an operator a real diagnosis ("the endpoint is gone" instead of "the grant is missing"). The rule is: 404 while the caller has proved nothing, 403 once it has.
+
+**Step 4 is `data_api_endpoint:invoke`, not `dataapi:invoke`.** Earlier drafts of this document wrote the shorter name; the permission catalog (`egret-core/src/rbac.rs`) keys it `data_api_endpoint:invoke`, matching its `:read` and `:manage` siblings, and that is the string the serving path checks. The permission is `Scope::Workspace` like the other two, but unlike them it is **meant to be held object-scoped by a service account** rather than workspace-wide by a human: one `access_grants` row per (service account, endpoint). Migration 0124 seeds it on `ws_admin` for catalog consistency, where it is inert — the serving surface only accepts a `data-api` audience token minted for a service account, so a human session cannot use it.
+
+**Denial is `403 not_granted`, a different code from `403 data_access_denied`**, because they are two different systems' problems: `not_granted` means egret refused the CALL and the fix is a grant on the endpoint; `data_access_denied` means the engine refused the DATA and the fix is a Ranger grant. Sharing one code would send the operator to the wrong system, and would make "403s on this endpoint" an unactionable line in `access_log.error_code`.
+
+**Without step 4 a token was a workspace-wide read capability.** Recorded because the gap shipped through five tasks before it was closed: any valid, unexpired token for workspace W reached every live endpoint in W, so a service account created for one consumer could invoke every other consumer's endpoint and receive its full result set. The engine's own row filtering was the only thing behind it — absent where Ranger is not enforcing, and resource-only on StarRocks.
 
 ### 6.3 Cache must be principal-scoped
 
@@ -415,6 +440,7 @@ One stable, machine-readable envelope:
 | 400 | `row_limit_exceeded` | result exceeded the configured row cap; the message states the cap |
 | 401 | `key_invalid` | token missing, malformed, expired, wrong audience, or unverifiable — one answer for all of them (§6.2) |
 | 403 | `data_access_denied` | Ranger denied — the service account lacks a data grant (§5.3) |
+| 403 | `not_granted` | egret denied — the service account holds no `data_api_endpoint:invoke` grant on this endpoint (§6.2 step 4). A different code from the row above on purpose: the fix is a grant on the endpoint, not a Ranger grant |
 | 404 | `not_found` | absent, disabled, wrong workspace, archived workspace, or an unparseable path — one answer for all of them |
 | 429 | `rate_limited` | with `Retry-After`, computed from the bucket's refill |
 | 500 | `internal` | an egret-side fault, and any engine failure P4 cannot classify further (see below) |
@@ -433,7 +459,6 @@ Each is a decision, not an omission. A code in a published table that nothing ca
 | HTTP | code | Why it is not live |
 |---|---|---|
 | 400 | `param_invalid` / `param_missing` | §6.2 step 7 (rendering declared `params` into the SQL) is not implemented, so no caller input is validated anywhere yet. They arrive with step 7 — and when they do, neither may name the parameter: the name is the author's, and naming it turns the error surface into a directory of which parameters an endpoint declares. |
-| 403 | `forbidden` | the Cedar `data_api_endpoint:invoke` check is its own task. Until it lands, any valid token for a workspace reaches every live endpoint in it — a hole, not merely an unfinished step. |
 | 502 | `engine_unavailable` | **not decidable at this seam.** `QueryExecPort` returns `egret_core::Error`, and `port_impl` folds the engine's `Connect`/`Storage`/`Db` failures AND egret's own faults — resolving the principal's email, opening the database secret — into the same `Error::Internal`. Answering 502 would page an operator about Trino when the metastore is what failed. |
 | 504 | `timeout` | same seam. `engine_error` maps `EngineError::Timeout` to `Error::InvalidInput("query timed out")`, deliberately, because for `describe_as` a timeout means the query is too expensive to plan. Recognising it in the serving path would mean matching another crate's message string — a check that keeps compiling and silently stops working the day someone rewords it. |
 

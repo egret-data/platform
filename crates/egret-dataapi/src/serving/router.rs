@@ -1,6 +1,6 @@
 //! URL → published snapshot → rows. The serving surface's request chain
-//! (spec §6.2 steps 1-3, 5-6 and 8-10; steps 4 and 7 are noted below and belong
-//! to later tasks).
+//! (spec §6.2 steps 1-6 and 8-10; step 7 is noted below and belongs to a later
+//! task).
 //!
 //! # The one invariant this module exists to hold
 //!
@@ -14,7 +14,7 @@
 //! edit would change behaviour under every already-deployed client and P3's
 //! versioning would be decoration. See `crate::lifecycle`'s module comment.
 //!
-//! # Why nothing here answers 403
+//! # Where 404 stops and 403 starts
 //!
 //! Unknown endpoint, disabled endpoint, an endpoint in another workspace and an
 //! endpoint in an ARCHIVED workspace are all [`ServingError::NotFound`]. A
@@ -22,6 +22,15 @@
 //! endpoint" from "exists, but not yours" — that difference is a free directory
 //! of another tenant's URLs. The management API applies the same rule (spec
 //! §6.1), and so does [`super::auth`] one layer up for authentication reasons.
+//!
+//! **Step 4 is where that reverses, and the reversal is the point rather than an
+//! inconsistency.** Those 404s hide existence from a caller that has proved
+//! nothing about itself. By the time [`invoke_allowed`] runs, the caller has
+//! proved it holds a valid, unexpired credential for THIS workspace — so the
+//! existence of an endpoint in it is not a secret the answer could keep, and
+//! [`ServingError::NotGranted`] is a 403. Choosing 404 there would buy no
+//! confidentiality and would cost an operator a real diagnosis: "the endpoint is
+//! gone" instead of "the grant is missing".
 //!
 //! # Cancellation: decided, not deferred
 //!
@@ -79,13 +88,6 @@
 //!
 //! Named so nothing reads as done that is not:
 //!
-//! * spec §6.2 step 4 — the Cedar `dataapi:invoke` check, and it is **a hole
-//!   wherever Ranger is not enforcing**, not merely an unfinished step. Without
-//!   it, any valid token for a workspace reaches EVERY live endpoint in that
-//!   workspace: service-account granularity collapses to workspace granularity
-//!   and an endpoint stops being an access-control boundary at all. The only
-//!   thing standing behind it is the engine's own row filtering, and on
-//!   StarRocks that enforcement is resource-only. Being tracked as its own task.
 //! * step 7 — rendering declared `params` into the SQL. Until it lands, a
 //!   snapshot containing `{{placeholder}}` is sent to the engine verbatim and
 //!   fails there as a syntax error. That is a broken endpoint, not an injection:
@@ -506,9 +508,20 @@ async fn run(
     entry.endpoint_id = Some(endpoint_id);
     entry.version = Some(version);
 
-    // …spec §6.2 step 4 (the Cedar `dataapi:invoke` check) is its own task; see
-    // the module comment for why its absence is a hole and not merely an
-    // unfinished step. Step 7 (param rendering) likewise.
+    // Step 4 — the authorization check. Authentication told us WHO; this is the
+    // first thing on the chain that asks WHETHER. Without it a `data-api` token
+    // is a workspace-wide read capability over every published endpoint's result
+    // set, and service-account granularity collapses to workspace granularity —
+    // see the module comment.
+    //
+    // **Denial is 403, not 404**, deliberately the opposite of steps 2 and 3
+    // above. By this point the caller has proved it holds a valid, unexpired
+    // credential for THIS workspace, so "this endpoint exists and you may not
+    // call it" tells it nothing it could not already enumerate. Up there a 404
+    // hides existence from a caller who has proved nothing; here there is
+    // nothing left to hide, and a 404 would send the operator hunting for an
+    // endpoint someone had supposedly deleted.
+    invoke_allowed(st, &principal, ws.id, endpoint_id).await?;
 
     // Step 5 — rate limit. BOTH published keys: the client's own allowance and
     // the endpoint-wide one. Keyed on `endpoint_id`, never on the path.
@@ -667,6 +680,90 @@ fn declared_query_params(
         out.entry(k.to_string()).or_default().push(v.to_string());
     }
     out
+}
+
+/// Spec §6.2 step 4: does this service account hold `data_api_endpoint:invoke`
+/// on THIS endpoint?
+///
+/// # Why `Pdp::authorize` directly and not `egret_core::authz::require_object`
+///
+/// That helper takes a `WorkspaceContext` — a human's session principal, its
+/// group memberships and its workspace — and the serving path has a
+/// [`ServingPrincipal`], which is three fields read out of a JWT. Fabricating a
+/// `WorkspaceContext` to satisfy the signature would mean inventing values for
+/// everything the token does not carry, and the invented parts would be exactly
+/// the parts an authorization decision reads. `Pdp::authorize` is the actual
+/// decision point; `require_object` is a convenience over it for the surface
+/// that has a `WorkspaceContext`.
+///
+/// # What the [`Subject`] carries, and what it deliberately does not
+///
+/// `group_ids` is EMPTY, and that is not a shortcut that happens to work — it is
+/// what the token supports. A `data-api` JWT carries `egret_user_id` and `ws`
+/// and nothing about groups, and resolving them here would be a database read on
+/// the hot path that spec §6.2 step 1 exists to avoid.
+///
+/// It also costs nothing for the decision this function makes, for a reason
+/// worth stating because it is not obvious: `AccessGrantStore::grants_for`
+/// resolves group membership in SQL (`principal_id IN (SELECT group_id FROM
+/// user_groups WHERE user_id = $1)`), so a grant held through a GROUP is still
+/// loaded, and `link_grants` binds `?principal` to the user either way. The only
+/// consumer of `Subject::group_ids` is the classification `forbid`'s
+/// clearance-by-group `unless` clause — a DENY gate. An empty list there means
+/// the `unless` cannot be satisfied by group membership, so the gate stays shut.
+/// Fail-closed, which is the right direction for the field to be wrong in.
+///
+/// # `folder_id` is `None`, so a folder grant does not cascade to invoke
+///
+/// Endpoints carry a `folder_id` and the PDP would cascade a folder-scoped grant
+/// to the items inside it, but this passes `None` — only a grant on the endpoint
+/// ITSELF can allow the call. That is deliberate for now: endpoint folders are
+/// not creatable (`egret-bi`'s `kind_perms` has no entry for them, see
+/// [`crate::endpoints::FOLDER_ENTITY_TYPE`]), so a cascade would be a code path
+/// nothing can currently exercise and nothing tests. Reading the folder would
+/// also cost a second query per request for that unreachable case. When P5 makes
+/// folders reachable, whoever wires them must decide whether "invoke everything
+/// in this folder" is a grant an operator should be able to write, and pass the
+/// real `folder_id` here if so — it widens access, so it is a decision, not a
+/// fix.
+async fn invoke_allowed(
+    st: &DataApiState,
+    principal: &super::ServingPrincipal,
+    ws: egret_core::WorkspaceId,
+    endpoint_id: Uuid,
+) -> Result<(), ServingError> {
+    let allowed = st
+        .pdp
+        .authorize(
+            &egret_core::authz::Subject {
+                user_id: principal.user_id,
+                group_ids: Vec::new(),
+            },
+            crate::routes::EP_INVOKE,
+            &egret_core::authz::Resource::Object(egret_core::authz::ObjectRef {
+                kind: crate::endpoints::OBJECT_KIND.to_string(),
+                id: endpoint_id,
+                folder_id: None,
+                workspace_id: ws,
+            }),
+        )
+        .await
+        // A PDP that could not answer is OUR fault, and it must not read as a
+        // refusal: `Internal` (500) sends an operator to egret, `NotGranted`
+        // (403) would send them to write a grant that already exists.
+        .map_err(ServingError::internal)?
+        .allow;
+    if allowed {
+        Ok(())
+    } else {
+        tracing::debug!(
+            %endpoint_id,
+            service_account_id = %principal.user_id.0,
+            client_id = %principal.client_id,
+            "data-api call refused: no invoke grant on this endpoint"
+        );
+        Err(ServingError::NotGranted)
+    }
 }
 
 /// Resolve an inbound request to a live snapshot.

@@ -20,6 +20,10 @@
 //! POST   /api/ws/{workspace}/data-api/endpoints/{id}/disable
 //! POST   /api/ws/{workspace}/data-api/endpoints/{id}/enable
 //! GET    /api/ws/{workspace}/data-api/endpoints/{id}/versions
+//!
+//! GET    /api/ws/{workspace}/data-api/endpoints/{id}/grants
+//! POST   /api/ws/{workspace}/data-api/endpoints/{id}/grants
+//! DELETE /api/ws/{workspace}/data-api/endpoints/{id}/grants/{service_account_id}
 //! ```
 //!
 //! Three invariants this module exists to hold, all of them security properties
@@ -27,7 +31,11 @@
 //!
 //! 1. **Issuing a client gates on `service_account:manage`, never `:read`.** A
 //!    client is a bearer credential for the account's data access; handing one
-//!    out is strictly more powerful than looking at the list.
+//!    out is strictly more powerful than looking at the list. The same rule puts
+//!    the three `/grants` routes — including the LIST — on
+//!    `data_api_endpoint:manage`: an invoke grant is what makes an endpoint
+//!    callable at all, so writing one mutates the authorization graph and
+//!    reading them enumerates every consumer of the endpoint.
 //! 2. **The workspace comes from [`WsContext`], never from the `{workspace}`
 //!    path segment read a second time.** Gating on one and querying with the
 //!    other is exactly how a cross-workspace hole opens. A service account or
@@ -90,6 +98,24 @@ const EP_READ: &str = "data_api_endpoint:read";
 /// Author endpoints. Flat, like every permission here: it implies no `:read`,
 /// and `:read` implies none of it.
 const EP_MANAGE: &str = "data_api_endpoint:manage";
+/// Call a published endpoint (spec §6.2 step 4).
+///
+/// Never checked by a route in this module — it is the action the SERVING path
+/// checks, object-scoped, against a service account (see
+/// [`crate::serving::router`]). It lives here beside its siblings so the three
+/// action strings are one list rather than a literal in each file that needs
+/// one; the routes below hand it out, they do not require it.
+pub(crate) const EP_INVOKE: &str = "data_api_endpoint:invoke";
+
+/// The built-in role an invoke grant names.
+///
+/// Seeded by migration 0124 with EXACTLY one permission, [`EP_INVOKE`], and
+/// workspace-scoped so the PDP's cascading `resource in ?resource` form matches
+/// an object resource. An object-scoped grant links its role's whole effective
+/// action set onto the object, so this cannot be `ws_viewer` (as `egret-bi`'s
+/// share API uses) without handing a service account every viewer action on the
+/// endpoint it was merely meant to call.
+const INVOKE_ROLE: &str = "data_api_invoker";
 
 /// Handler error type. The Data API management surface has no domain-specific
 /// failure mode of its own — every arm is already expressible as an
@@ -1260,6 +1286,263 @@ async fn list_endpoint_versions(
     Ok(Json(st.endpoints.versions(ctx.workspace_id.0, id).await?))
 }
 
+// ── Invoke grants (spec §5, §6.2 step 4) ─────────────────────────────────────
+//
+// The write half of the serving path's authorization check. One `access_grants`
+// row per (service account, endpoint) says "this account may call this
+// endpoint"; `crate::serving::router::invoke_allowed` is the only reader, and it
+// reads through the PDP rather than through this module.
+//
+// **All three gate on `data_api_endpoint:manage`, including the LIST.** Handing
+// out invoke rights mutates the authorization graph — it is strictly more
+// powerful than reading an endpoint, so `:read` must not reach it, exactly as
+// issuing a client gates on `service_account:manage` and never `:read`. The list
+// is manage-only for the reason `egret-bi`'s `grant_list` is: enumerating an
+// object's ACL exposes every grantee, and a caller who may only look at the
+// endpoint has no business knowing which consumers call it.
+//
+// **Both ids are scoped to the caller's workspace**, and through the existing
+// helpers rather than a new predicate: the endpoint through `EndpointStore::get`
+// (whose statement carries `AND workspace_id = $n` itself) and the service
+// account through `scoped_account`. Either mismatch is a 404. Without both, a
+// `:manage` holder in workspace A could grant one of A's service accounts on B's
+// endpoint — a cross-tenant grant written by an entirely legitimate-looking
+// call, and one that the serving path would then honour.
+//
+// **Revocation is immediate, and that asymmetry with token revocation is the
+// operational point of this table.** The grant is read on EVERY request, so a
+// DELETE here stops the next call. Revoking the CLIENT does not: the serving
+// surface verifies a stateless JWT (spec §6.2 step 1), so an already-issued
+// token stays good until `exp` and the 600s TTL is an irreducible bound. When
+// the answer to "cut this consumer off right now" has to be *now*, it is a grant
+// revocation; revoking the client only stops the next token being minted.
+
+/// One service account's invoke grant on an endpoint.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct DataApiEndpointGrantDto {
+    /// The `access_grants` row id.
+    pub id: Uuid,
+    /// The granted service account (its `users.id`).
+    pub service_account_id: Uuid,
+    /// The account's display name, so the list is readable without a second
+    /// call. `None` if the account row has since been deleted.
+    pub service_account_name: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct GrantInvokeInput {
+    /// The service account to grant. Must live in this workspace.
+    pub service_account_id: Uuid,
+}
+
+/// The id of the built-in [`INVOKE_ROLE`] role.
+///
+/// Resolved per call rather than cached in [`DataApiState`]: it is one indexed
+/// lookup on a route that already does several, and a cached id would be a
+/// second source of truth for something migration 0124 owns. `Internal`, not
+/// `NotFound`, when it is missing — the row is seeded by a migration, so its
+/// absence is a broken deployment and not anything the caller did.
+async fn invoke_role_id(st: &DataApiState) -> Result<Uuid, DataApiError> {
+    sqlx::query_scalar("SELECT id FROM roles WHERE scope = 'workspace' AND name = $1")
+        .bind(INVOKE_ROLE)
+        .fetch_optional(&st.db.pool)
+        .await
+        .map_err(db_err)?
+        .ok_or_else(|| {
+            Error::Internal(anyhow::anyhow!(
+                "built-in role `{INVOKE_ROLE}` is missing; migration 0124 has not run"
+            ))
+        })
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/data-api/endpoints/{id}/grants",
+    tag = "data-api",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Endpoint id"),
+    ),
+    responses(
+        (status = 200, description = "Service accounts granted invoke on this endpoint", body = Vec<DataApiEndpointGrantDto>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing data_api_endpoint:manage — listing the grantees is a manage operation, not a read", body = ErrorBody),
+        (status = 404, description = "No such endpoint in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn list_endpoint_grants(
+    State(st): State<DataApiState>,
+    WsContext(ctx): WsContext,
+    Path((_ws_ignored, id)): Path<(String, Uuid)>,
+) -> Result<Json<Vec<DataApiEndpointGrantDto>>, DataApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, EP_MANAGE).await?;
+    // 404s an endpoint outside `ctx.workspace_id` before anything is read.
+    st.endpoints.get(ctx.workspace_id.0, id).await?;
+    let role = invoke_role_id(&st).await?;
+    // Joined to `service_accounts` on the WORKSPACE too, so a row somehow
+    // written across workspaces is not listed as if it belonged here.
+    let rows: Vec<(Uuid, Uuid, Option<String>, DateTime<Utc>)> = sqlx::query_as(
+        "SELECT ag.id, ag.principal_id, sa.name, ag.created_at \
+         FROM access_grants ag \
+         LEFT JOIN dataapi.service_accounts sa \
+           ON sa.user_id = ag.principal_id AND sa.workspace_id = $3 \
+         WHERE ag.scope_type = 'object' AND ag.object_type = $1 \
+           AND ag.scope_id = $2 AND ag.role_id = $4 \
+           AND ag.principal_type = 'user' \
+         ORDER BY ag.created_at",
+    )
+    .bind(crate::endpoints::OBJECT_KIND)
+    .bind(id)
+    .bind(ctx.workspace_id.0)
+    .bind(role)
+    .fetch_all(&st.db.pool)
+    .await
+    .map_err(db_err)?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|(gid, sa, name, created_at)| DataApiEndpointGrantDto {
+                id: gid,
+                service_account_id: sa,
+                service_account_name: name,
+                created_at,
+            })
+            .collect(),
+    ))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/data-api/endpoints/{id}/grants",
+    tag = "data-api",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Endpoint id"),
+    ),
+    request_body = GrantInvokeInput,
+    responses(
+        (status = 200, description = "Granted (idempotent)", body = DataApiEndpointGrantDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing data_api_endpoint:manage — granting invoke rights mutates the authorization graph, so :read does not reach it", body = ErrorBody),
+        (status = 404, description = "No such endpoint, or no such service account, in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn grant_endpoint_invoke(
+    State(st): State<DataApiState>,
+    WsContext(ctx): WsContext,
+    Path((_ws_ignored, id)): Path<(String, Uuid)>,
+    Json(body): Json<GrantInvokeInput>,
+) -> Result<Json<DataApiEndpointGrantDto>, DataApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, EP_MANAGE).await?;
+    // BOTH ids against `ctx.workspace_id`. Dropping either predicate is how a
+    // cross-workspace grant gets written by a call that looks entirely ordinary.
+    let ep = st.endpoints.get(ctx.workspace_id.0, id).await?;
+    let sa = scoped_account(&st, ctx.workspace_id.0, body.service_account_id).await?;
+    let role = invoke_role_id(&st).await?;
+
+    // `ON CONFLICT DO NOTHING` against the `(principal_type, principal_id,
+    // role_id, scope_type, scope_id, effect)` unique key, so re-granting is a
+    // no-op rather than a 500 — and the row is re-read afterwards so the
+    // response describes the stored grant either way.
+    sqlx::query(
+        "INSERT INTO access_grants \
+           (principal_type, principal_id, role_id, scope_type, object_type, scope_id, effect, granted_by) \
+         VALUES ('user', $1, $2, 'object', $3, $4, 'allow', $5) ON CONFLICT DO NOTHING",
+    )
+    .bind(sa)
+    .bind(role)
+    .bind(crate::endpoints::OBJECT_KIND)
+    .bind(id)
+    .bind(ctx.principal.user_id.0)
+    .execute(&st.db.pool)
+    .await
+    .map_err(db_err)?;
+
+    let (grant_id, created_at): (Uuid, DateTime<Utc>) = sqlx::query_as(
+        "SELECT id, created_at FROM access_grants \
+         WHERE principal_type = 'user' AND principal_id = $1 AND role_id = $2 \
+           AND scope_type = 'object' AND scope_id = $3 AND effect = 'allow'",
+    )
+    .bind(sa)
+    .bind(role)
+    .bind(id)
+    .fetch_one(&st.db.pool)
+    .await
+    .map_err(db_err)?;
+
+    st.audit.emit(egret_audit::mutation_for(
+        &ctx.principal,
+        Some(ctx.workspace_id.0),
+        "data_api_endpoint:grant_invoke",
+        "data_api_endpoint",
+        Some(id.to_string()),
+        serde_json::json!({ "service_account_id": sa, "path": ep.path, "method": ep.method }),
+    ));
+
+    Ok(Json(DataApiEndpointGrantDto {
+        id: grant_id,
+        service_account_id: sa,
+        // The UI re-fetches the list (which resolves names) after a write, so
+        // resolving one here would be a query for a field nothing reads.
+        service_account_name: None,
+        created_at,
+    }))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/ws/{workspace}/data-api/endpoints/{id}/grants/{service_account_id}",
+    tag = "data-api",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Endpoint id"),
+        ("service_account_id" = Uuid, Path, description = "Service account to revoke"),
+    ),
+    responses(
+        (status = 200, description = "Revoked (idempotent). Takes effect on the caller's NEXT request — unlike revoking a client, which cannot recall an already-issued token before its 600s TTL expires", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing data_api_endpoint:manage", body = ErrorBody),
+        (status = 404, description = "No such endpoint, or no such service account, in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn revoke_endpoint_invoke(
+    State(st): State<DataApiState>,
+    WsContext(ctx): WsContext,
+    Path((_ws_ignored, id, sa_id)): Path<(String, Uuid, Uuid)>,
+) -> Result<Json<Ack>, DataApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, EP_MANAGE).await?;
+    let ep = st.endpoints.get(ctx.workspace_id.0, id).await?;
+    let sa = scoped_account(&st, ctx.workspace_id.0, sa_id).await?;
+    let role = invoke_role_id(&st).await?;
+    // Scoped by the endpoint AND the invoke role, so this route cannot delete
+    // some other grant that happens to name the same principal — a share on a
+    // dashboard, say, or a future second endpoint role.
+    sqlx::query(
+        "DELETE FROM access_grants \
+         WHERE principal_type = 'user' AND principal_id = $1 AND role_id = $2 \
+           AND scope_type = 'object' AND object_type = $3 AND scope_id = $4",
+    )
+    .bind(sa)
+    .bind(role)
+    .bind(crate::endpoints::OBJECT_KIND)
+    .bind(id)
+    .execute(&st.db.pool)
+    .await
+    .map_err(db_err)?;
+    st.audit.emit(egret_audit::mutation_for(
+        &ctx.principal,
+        Some(ctx.workspace_id.0),
+        "data_api_endpoint:revoke_invoke",
+        "data_api_endpoint",
+        Some(id.to_string()),
+        serde_json::json!({ "service_account_id": sa, "path": ep.path, "method": ep.method }),
+    ));
+    Ok(Json(Ack::ok()))
+}
+
 /// The Data API management router. Mount under `/api` so the live paths are
 /// `/api/ws/{workspace}/data-api/…` — `WsContext`'s feature gate only recognises
 /// a path beginning `/api/ws/` or `/ws/`, and `egret-server`'s
@@ -1316,6 +1599,14 @@ pub fn management_router() -> Router<DataApiState> {
             "/ws/{workspace}/data-api/endpoints/{id}/versions",
             get(list_endpoint_versions),
         )
+        .route(
+            "/ws/{workspace}/data-api/endpoints/{id}/grants",
+            get(list_endpoint_grants).post(grant_endpoint_invoke),
+        )
+        .route(
+            "/ws/{workspace}/data-api/endpoints/{id}/grants/{service_account_id}",
+            delete(revoke_endpoint_invoke),
+        )
 }
 
 #[derive(utoipa::OpenApi)]
@@ -1338,6 +1629,9 @@ pub fn management_router() -> Router<DataApiState> {
         disable_endpoint,
         enable_endpoint,
         list_endpoint_versions,
+        list_endpoint_grants,
+        grant_endpoint_invoke,
+        revoke_endpoint_invoke,
     ),
     components(schemas(
         DataApiServiceAccountDto,
@@ -1358,6 +1652,8 @@ pub fn management_router() -> Router<DataApiState> {
         DataApiValidationDto,
         DataApiPublishedDto,
         DataApiEndpointVersionDto,
+        DataApiEndpointGrantDto,
+        GrantInvokeInput,
         egret_dataapi_api::EndpointSnapshot,
         egret_dataapi_api::ColumnSpec,
     )),

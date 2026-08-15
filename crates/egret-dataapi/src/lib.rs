@@ -44,7 +44,7 @@ pub mod serving;
 pub use clients::{ClientStore, NewClient, DATA_API_TTL_SECS};
 pub use endpoints::{
     CreateEndpointInput, DataApiEndpointDto, DeletedEndpoint, EndpointStore, UpdateEndpointInput,
-    ALLOWED_METHODS,
+    ALLOWED_METHODS, OBJECT_KIND,
 };
 pub use lifecycle::{
     check_cache_scope, check_enum_params, check_params, check_single_select, validate,
@@ -52,8 +52,8 @@ pub use lifecycle::{
 };
 pub use routes::{
     management_router, openapi, CreateServiceAccountInput, DataApiAdminApi, DataApiClientDto,
-    DataApiError, DataApiNewClientDto, DataApiServiceAccountDto, DataApiState, IssueClientInput,
-    PublishEndpointInput, RollbackEndpointInput,
+    DataApiEndpointGrantDto, DataApiError, DataApiNewClientDto, DataApiServiceAccountDto,
+    DataApiState, GrantInvokeInput, IssueClientInput, PublishEndpointInput, RollbackEndpointInput,
 };
 pub use serving::{
     serving_openapi, serving_router, verify_serving_token, ServingError, ServingMeta,

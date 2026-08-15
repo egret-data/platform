@@ -257,6 +257,31 @@ async fn grant(db: &Db, user: Uuid, ws: Uuid, perms: &[&str]) {
     .expect("grant role");
 }
 
+/// Give `user` `data_api_endpoint:invoke` on ONE endpoint — spec §6.2 step 4's
+/// grant, written as one `access_grants` row against the `data_api_invoker` role
+/// migration 0124 seeds.
+///
+/// Every fixture that publishes an endpoint and then expects a 200 needs this
+/// now: without a grant the serving path answers 403 before it reaches anything
+/// this file is about. It is issued in SQL rather than through
+/// `POST …/endpoints/{id}/grants` because these suites' serving principal is a
+/// plain `users` row with no `dataapi.service_accounts` binding, which that
+/// route (correctly) refuses. The ROUTE is exercised in `serving_authz.rs`.
+async fn grant_invoke(db: &Db, user: Uuid, endpoint: Uuid) {
+    sqlx::query(
+        "INSERT INTO access_grants \
+           (principal_type, principal_id, role_id, scope_type, object_type, scope_id, effect) \
+         SELECT 'user', $1, r.id, 'object', 'data_api_endpoint', $2, 'allow' \
+           FROM roles r WHERE r.scope = 'workspace' AND r.name = 'data_api_invoker' \
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(user)
+    .bind(endpoint)
+    .execute(&db.pool)
+    .await
+    .expect("grant invoke");
+}
+
 fn build_state(db: &Db, pdp: Arc<dyn egret_core::authz::Pdp>) -> DataApiState {
     DataApiState {
         db: db.clone(),
@@ -486,6 +511,7 @@ impl Fixture {
             )
             .await;
         assert_eq!(status, StatusCode::OK, "publish failed: {body}");
+        grant_invoke(&self.db, self.sa_user, ep).await;
         ep
     }
 
