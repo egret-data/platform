@@ -197,11 +197,29 @@ pub fn cache_key(
 /// afterwards, which is the leak. It is also the reason the check returns early
 /// for `per_principal` — the common case must not pay for it.
 ///
-/// If that round-trip ever matters, memoise `(database_id → delegated)` with a
-/// short TTL rather than moving the check: the window a memo opens is bounded
-/// and stated, while a re-ordered check is unbounded. Nothing memoises today,
-/// because a single indexed primary-key read next to a query execution is not
-/// yet worth the staleness.
+/// If that round-trip ever matters, memoise
+/// `(database_id → (delegated, impersonate))` with a short TTL rather than
+/// moving the check: the window a memo opens is bounded and stated, while a
+/// re-ordered check is unbounded. Nothing memoises today, because a single
+/// indexed primary-key read next to a query execution is not yet worth the
+/// staleness.
+///
+/// # Why this compares a PAIR rather than refusing on live `impersonate`
+///
+/// Kept because the rejected option is the one a reader will reach for — it is
+/// two lines and obviously safe. Refusing whenever the live row has
+/// `impersonate == true`, regardless of `delegated`, IS safe. But it answers
+/// [`ServingError::CacheScopeStale`], whose entire meaning to an operator is
+/// "the published configuration has drifted and a re-publish clears it" — and
+/// for that condition a re-publish would be refused too, by
+/// [`crate::lifecycle::check_cache_scope`]. The operator would be sent to do a
+/// thing that cannot work, and told the same wrong thing again when it failed.
+///
+/// The pair makes publish refuse the combination up front, with a message naming
+/// `options.impersonate` rather than a `delegated` the author can see is
+/// `false` — so `cache_scope_stale` keeps meaning only what it says: something
+/// changed after publish, and re-publishing against what is there now will
+/// succeed.
 pub async fn shared_cache_allowed(db: &Db, snap: &EndpointSnapshot) -> Result<bool, ServingError> {
     if snap.cache.scope != CacheScope::Shared {
         return Ok(false);
