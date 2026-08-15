@@ -24337,6 +24337,9 @@
               }
             }
           },
+          "400": {
+            "description": "The result exceeded the endpoint's row cap"
+          },
           "401": {
             "description": "Bearer token missing, expired, or not for this audience"
           },
@@ -24348,11 +24351,14 @@
           },
           "500": {
             "description": "Internal error"
+          },
+          "503": {
+            "description": "The published output contract no longer matches the data"
           }
         },
         "security": [
           {
-            "bearer": []
+            "data_api_bearer": []
           }
         ]
       },
@@ -24392,6 +24398,9 @@
               }
             }
           },
+          "400": {
+            "description": "The result exceeded the endpoint's row cap"
+          },
           "401": {
             "description": "Bearer token missing, expired, or not for this audience"
           },
@@ -24403,11 +24412,14 @@
           },
           "500": {
             "description": "Internal error"
+          },
+          "503": {
+            "description": "The published output contract no longer matches the data"
           }
         },
         "security": [
           {
-            "bearer": []
+            "data_api_bearer": []
           }
         ]
       }
@@ -33441,6 +33453,14 @@
             }
           }
         }
+      }
+    },
+    "securitySchemes": {
+      "data_api_bearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "A `data-api` audience JWT from `POST /oauth/token` (OAuth2 client_credentials). TTL 600s."
       }
     }
   },

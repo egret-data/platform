@@ -57,6 +57,24 @@ pub enum ServingError {
     /// from "over".
     #[error("row limit exceeded")]
     RowLimitExceeded { cap: u32 },
+    /// The engine's columns no longer match the ones the snapshot froze.
+    ///
+    /// Refused rather than reshaped. `ServingMeta::columns` advertises the
+    /// frozen contract, so serving rows built from a different column set would
+    /// return a body that contradicts its own metadata with no signal — the
+    /// exact drift the frozen snapshot exists to make visible. The operator's
+    /// fix is to re-publish, which is why this is not [`Self::Internal`].
+    #[error("published output schema no longer matches the data")]
+    SchemaDrift,
+    /// `output.naming` maps two frozen columns onto one key.
+    ///
+    /// `total_revenue` and `totalRevenue` both become `totalRevenue` under
+    /// `camel`, and a JSON object keeps only the last — so a column advertised
+    /// in `meta.columns` would vanish from every row. Separate from
+    /// [`Self::SchemaDrift`] because the fix is different: change `naming` or
+    /// alias the column, not re-publish the same thing.
+    #[error("output naming maps two columns onto one key")]
+    OutputNamingCollision,
     /// Something on egret's side failed — the IdP key store was unreachable, say.
     /// Deliberately NOT folded into [`Self::Unauthorized`]: a 401 tells an
     /// operator their credential is bad and sends them to rotate it, while the

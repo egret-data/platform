@@ -25,36 +25,45 @@
 //!
 //! # Cancellation: decided, not deferred
 //!
-//! `QueryExecPort::execute_as` takes no `CancellationToken`, so
-//! `limits.timeout` is the whole budget. **The decision is not to add one**, and
-//! the reasoning has to be read together with its known gap:
+//! `QueryExecPort::execute_as` takes no `CancellationToken` parameter, so
+//! `limits.timeout` is this handler's whole budget. **The decision is not to add
+//! one**, because the port already owns the mechanism a caller-supplied token
+//! would duplicate:
 //!
-//! * axum drops the handler future when the client disconnects, which drops the
-//!   `execute_as` future, which drops the connector's future — so egret stops
-//!   waiting and frees its own pool slot without any token being threaded.
-//! * On Trino the ENGINE side is bounded too: `execute_as` sets
-//!   `query_max_run_time` from `limits.timeout`, so the coordinator kills the
-//!   query itself.
-//! * **On StarRocks it is not.** There is no `query_max_run_time` equivalent,
-//!   so a query that outlives its budget keeps running server-side until it
-//!   finishes; the timeout bounds egret, not the engine.
+//! * `port_impl::execute_as` creates its OWN `CancellationToken`, wraps the
+//!   connector call in `tokio::time::timeout(limits.timeout, …)` and cancels on
+//!   expiry (`egret-query/src/execution/port_impl.rs:201-210`).
+//! * The connectors react to that: `StarRocksConnector::execute` drops the
+//!   result set and calls `conn.disconnect()` — closing the MySQL connection is
+//!   its cancel path (`connector/starrocks.rs:238-242`). Trino additionally
+//!   bounds the coordinator with `query_max_run_time`, derived from the same
+//!   `limits.timeout`.
+//! * On client disconnect axum drops this handler's future, which drops the
+//!   `execute_as` future, which drops the connector's — the same release path,
+//!   with no token threaded anywhere.
 //!
-//! A `CancellationToken` would not close that gap either — cancelling a Rust
-//! future does not kill a running StarRocks query. Closing it needs a
-//! StarRocks-side `KILL QUERY <id>`, i.e. capturing the connection/query id and
-//! issuing a second statement on a second connection, which is a connector-level
-//! change and not a port-signature one. Adding the parameter now would cost 2
-//! impls plus 4 test fakes, and become a cross-crate contract revision once the
-//! Data API moves to its own binary, in exchange for a guarantee it does not
-//! actually provide. **Revisit it only alongside a StarRocks `KILL`
-//! implementation** — that is the change that would make a token meaningful.
+//! So a caller-supplied token adds nothing that dropping the future does not
+//! already do, while costing 2 impls plus 4 test fakes now and a cross-crate
+//! contract revision once the Data API moves to its own binary.
+//!
+//! What has NOT been measured, and should not be asserted either way until it
+//! is: how completely each engine terminates a query server-side once its
+//! connection goes away. If that turns out to need work, the change is in the
+//! connector (a StarRocks `KILL QUERY <id>` on a second connection, say), not in
+//! this port's signature — but do not treat that as the only thing worth doing
+//! here.
 //!
 //! # What is deliberately NOT here yet
 //!
 //! Named so nothing reads as done that is not:
 //!
-//! * spec §6.2 step 4 — the Cedar `dataapi:invoke` check. Not assigned to any
-//!   P4 task; it is the one chain step with no owner.
+//! * spec §6.2 step 4 — the Cedar `dataapi:invoke` check, and it is **a hole
+//!   wherever Ranger is not enforcing**, not merely an unfinished step. Without
+//!   it, any valid token for a workspace reaches EVERY live endpoint in that
+//!   workspace: service-account granularity collapses to workspace granularity
+//!   and an endpoint stops being an access-control boundary at all. The only
+//!   thing standing behind it is the engine's own row filtering, and on
+//!   StarRocks that enforcement is resource-only. Being tracked as its own task.
 //! * step 5 — rate limiting (Task 4).
 //! * step 6 — the cache, and with it the `delegated` re-check against the live
 //!   `query.databases` column (Task 4).
@@ -157,12 +166,42 @@ pub fn serving_openapi() -> utoipa::openapi::OpenApi {
 #[openapi(
     paths(serve_get, serve_post),
     components(schemas(ServingResponse, ServingMeta, egret_dataapi_api::ColumnSpec)),
+    modifiers(&BearerAddon),
     tags((
         name = "data-api-serving",
         description = "Published Data API endpoints, called by service accounts with a bearer token"
     )),
 )]
 struct DataApiServingApi;
+
+/// Declares the `data_api_bearer` security scheme the two operations require.
+///
+/// Without it the operations name a scheme that `components.securitySchemes`
+/// never defines, which is an invalid document — and this is the only `security`
+/// requirement in the whole merged doc, so nothing else would have declared it.
+/// A `security` requirement pointing at nothing is worse than none: it reads as
+/// documented auth while telling a generator nothing it can act on.
+struct BearerAddon;
+
+impl utoipa::Modify for BearerAddon {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
+        let components = openapi.components.get_or_insert_with(Default::default);
+        components.add_security_scheme(
+            "data_api_bearer",
+            SecurityScheme::Http(
+                HttpBuilder::new()
+                    .scheme(HttpAuthScheme::Bearer)
+                    .bearer_format("JWT")
+                    .description(Some(
+                        "A `data-api` audience JWT from `POST /oauth/token` \
+                         (OAuth2 client_credentials). TTL 600s.",
+                    ))
+                    .build(),
+            ),
+        );
+    }
+}
 
 #[utoipa::path(
     get,
@@ -174,12 +213,14 @@ struct DataApiServingApi;
     ),
     responses(
         (status = 200, description = "Rows from the published snapshot", body = ServingResponse),
+        (status = 400, description = "The result exceeded the endpoint's row cap"),
         (status = 401, description = "Bearer token missing, expired, or not for this audience"),
         (status = 403, description = "The engine denied the data to this service account"),
         (status = 404, description = "No such live endpoint in this workspace"),
         (status = 500, description = "Internal error"),
+        (status = 503, description = "The published output contract no longer matches the data"),
     ),
-    security(("bearer" = [])),
+    security(("data_api_bearer" = [])),
 )]
 async fn serve_get(
     state: State<DataApiState>,
@@ -200,12 +241,14 @@ async fn serve_get(
     ),
     responses(
         (status = 200, description = "Rows from the published snapshot", body = ServingResponse),
+        (status = 400, description = "The result exceeded the endpoint's row cap"),
         (status = 401, description = "Bearer token missing, expired, or not for this audience"),
         (status = 403, description = "The engine denied the data to this service account"),
         (status = 404, description = "No such live endpoint in this workspace"),
         (status = 500, description = "Internal error"),
+        (status = 503, description = "The published output contract no longer matches the data"),
     ),
-    security(("bearer" = [])),
+    security(("data_api_bearer" = [])),
 )]
 async fn serve_post(
     state: State<DataApiState>,
@@ -293,7 +336,7 @@ async fn serve(
     );
 
     Ok(Json(ServingResponse {
-        data: shape_rows(&out, &snap.output),
+        data: shape_rows(&out, &snap)?,
         meta: ServingMeta {
             columns: snap.columns.clone(),
             row_count: out.row_count,
@@ -390,53 +433,134 @@ fn engine_error(e: egret_core::Error) -> ServingError {
     }
 }
 
-/// Shape rows per the snapshot's frozen `output` spec.
+/// Shape rows per the snapshot's frozen `output` spec, refusing anything that
+/// would silently contradict the frozen contract.
 ///
-/// `shape` and `naming` are unvalidated author input, exactly like `limits` (spec
-/// §5.3 freezes them with no rule anywhere). An unrecognised value has no
+/// # The contract is checked, not assumed
+///
+/// [`ServingMeta::columns`] reports the FROZEN columns, so every key and every
+/// position in `data` must come from those same frozen columns or the response
+/// contradicts its own advertised shape with no signal. Three ways that
+/// happened before this function refused anything, each of which produced a
+/// perfectly ordinary-looking 200:
+///
+/// * keys taken from the LIVE `out.columns` while `meta.columns` reported the
+///   frozen ones — a drifted endpoint returning rows whose keys disagree with
+///   its contract;
+/// * `names.zip(row)` truncating to the shorter side, so an extra live column
+///   was dropped and a missing one shortened every object;
+/// * `apply_naming` CREATING a collision — `total_revenue` and `totalRevenue`
+///   both become `totalRevenue` under `camel`, so one column vanishes from
+///   every row while `meta.columns` still advertises it.
+///
+/// So: drift is [`ServingError::SchemaDrift`] and a collision is
+/// [`ServingError::OutputNamingCollision`], both before any row is shaped. The
+/// operator's fix differs (re-publish vs. change `naming` or alias the column),
+/// which is why they are two variants and two log lines rather than one.
+///
+/// # What is still a fallback rather than a refusal
+///
+/// `shape` and `naming` are unvalidated author input, exactly like `limits`
+/// (spec §5.3 freezes them with no rule anywhere). An unrecognised value has no
 /// meaning to honour, so it falls back to the documented default and logs —
-/// rather than refusing, which would make a published endpoint permanently dead
-/// over a cosmetic field.
+/// refusing would make a published endpoint permanently dead over a cosmetic
+/// field, and unlike the two cases above it cannot silently lose a column.
+///
+/// Column TYPES are deliberately not compared: a widened `integer` → `bigint`
+/// does not change any key or position, and refusing it would break endpoints
+/// over a change their clients cannot observe. Names and arity are what the
+/// response shape actually depends on.
 fn shape_rows(
     out: &egret_core::TabularResult,
-    output: &egret_dataapi_api::OutputSpec,
-) -> serde_json::Value {
-    if output.shape == "arrays" {
-        return serde_json::Value::Array(
+    snap: &EndpointSnapshot,
+) -> Result<serde_json::Value, ServingError> {
+    // Order-sensitive, because `arrays` shape is positional: two identical name
+    // SETS in a different order are still a different contract.
+    let drifted = out.columns.len() != snap.columns.len()
+        || out
+            .columns
+            .iter()
+            .zip(snap.columns.iter())
+            .any(|(live, frozen)| live.name != frozen.name);
+    if drifted {
+        tracing::warn!(
+            frozen = ?snap.columns.iter().map(|c| &c.name).collect::<Vec<_>>(),
+            live = ?out.columns.iter().map(|c| &c.name).collect::<Vec<_>>(),
+            "published output contract no longer matches the engine's columns"
+        );
+        return Err(ServingError::SchemaDrift);
+    }
+
+    // From here the two sets are equal, so the FROZEN names are used throughout:
+    // the contract is the thing being served, and reading them from the snapshot
+    // makes that true by construction rather than by the check above holding.
+    let frozen: Vec<&str> = snap.columns.iter().map(|c| c.name.as_str()).collect();
+
+    if snap.output.shape == "arrays" {
+        return Ok(serde_json::Value::Array(
             out.rows
                 .iter()
                 .map(|r| serde_json::Value::Array(r.clone()))
                 .collect(),
-        );
+        ));
     }
-    if output.shape != "objects" {
+    if snap.output.shape != "objects" {
         tracing::warn!(
-            shape = %output.shape,
+            shape = %snap.output.shape,
             "published snapshot carries an unrecognised output.shape; serving the default"
         );
     }
-    let names: Vec<String> = out
-        .columns
+
+    let names: Vec<String> = frozen
         .iter()
-        .map(|c| apply_naming(&c.name, &output.naming))
+        .map(|n| apply_naming(n, &snap.output.naming))
         .collect();
-    serde_json::Value::Array(
-        out.rows
-            .iter()
-            .map(|row| {
-                serde_json::Value::Object(
-                    names
-                        .iter()
-                        .cloned()
-                        .zip(row.iter().cloned())
-                        .collect::<serde_json::Map<_, _>>(),
-                )
-            })
-            .collect(),
-    )
+    // A `Map` silently keeps the LAST value for a duplicated key, which is how a
+    // whole column disappears from every row without a single error.
+    let mut seen = std::collections::HashSet::with_capacity(names.len());
+    if let Some(dup) = names.iter().find(|n| !seen.insert(n.as_str())) {
+        tracing::warn!(
+            key = %dup,
+            naming = %snap.output.naming,
+            frozen = ?frozen,
+            "output.naming maps two frozen columns onto one key"
+        );
+        return Err(ServingError::OutputNamingCollision);
+    }
+
+    let mut shaped = Vec::with_capacity(out.rows.len());
+    for row in &out.rows {
+        // The connector aligns rows to columns; a disagreement here is a bug in
+        // it, not a caller's or an author's problem — and zipping past it is
+        // exactly the silent truncation this function exists to stop.
+        if row.len() != names.len() {
+            return Err(ServingError::internal(format!(
+                "connector returned a row of {} values for {} columns",
+                row.len(),
+                names.len()
+            )));
+        }
+        shaped.push(serde_json::Value::Object(
+            names
+                .iter()
+                .cloned()
+                .zip(row.iter().cloned())
+                .collect::<serde_json::Map<_, _>>(),
+        ));
+    }
+    Ok(serde_json::Value::Array(shaped))
 }
 
 /// `as_is` (default) | `camel` | `snake`. Unrecognised falls back to `as_is`.
+///
+/// **`camel` lowercases only the FIRST character.** An earlier version
+/// lowercased every character that did not follow a separator, which turned an
+/// already-camel `totalRevenue` into `totalrevenue` — a name the author never
+/// wrote, under a setting that should have left it alone. It also hid the
+/// collision `camel` genuinely creates: `total_revenue` and `totalRevenue` must
+/// both map to `totalRevenue`, which is what [`shape_rows`] refuses. The lossy
+/// version made those two *different* keys and looked correct while quietly
+/// mangling one of them.
 fn apply_naming(name: &str, naming: &str) -> String {
     match naming {
         "camel" => {
@@ -448,8 +572,10 @@ fn apply_naming(name: &str, naming: &str) -> String {
                 } else if upper_next {
                     out.extend(c.to_uppercase());
                     upper_next = false;
-                } else {
+                } else if out.is_empty() {
                     out.extend(c.to_lowercase());
+                } else {
+                    out.push(c);
                 }
             }
             out
@@ -497,6 +623,18 @@ impl IntoResponse for ServingError {
             ServingError::RowLimitExceeded { .. } => {
                 (StatusCode::BAD_REQUEST, "result exceeded the row cap")
             }
+            // 503 and not 500: nothing is broken on egret's side, the endpoint's
+            // published contract has stopped matching its data (or was never
+            // satisfiable) and an AUTHOR has to act. Same shape spec §7 gives
+            // `cache_scope_stale`, whose situation is the same one.
+            ServingError::SchemaDrift => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "this endpoint's published output schema no longer matches its data; re-publish it",
+            ),
+            ServingError::OutputNamingCollision => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "this endpoint's output naming maps two columns onto one key; change it and re-publish",
+            ),
             ServingError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
         };
         // The only place the internal detail appears.
@@ -521,6 +659,22 @@ mod tests {
         assert_eq!(apply_naming("total_revenue", "as_is"), "total_revenue");
         // An unrecognised value is `as_is`, not a panic and not an empty name.
         assert_eq!(apply_naming("total_revenue", "kebab"), "total_revenue");
+        // `camel` must be IDEMPOTENT on an already-camel name. The earlier
+        // version returned "totalrevenue" here — a name the author never wrote,
+        // and the reason the collision below was invisible.
+        assert_eq!(apply_naming("totalRevenue", "camel"), "totalRevenue");
+        assert_eq!(apply_naming("TotalRevenue", "camel"), "totalRevenue");
+    }
+
+    /// The collision `shape_rows` refuses. Asserted on `apply_naming` too, so
+    /// the refusal's premise is pinned independently of the serving path.
+    #[test]
+    fn camel_maps_two_distinct_frozen_names_onto_one_key() {
+        assert_eq!(
+            apply_naming("total_revenue", "camel"),
+            apply_naming("totalRevenue", "camel"),
+            "these two must collide — it is why shape_rows checks for duplicates"
+        );
     }
 
     #[test]

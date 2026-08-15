@@ -238,3 +238,43 @@ async fn the_serving_route_is_mounted_where_the_spec_says() {
     // here would mean nothing is mounted at this path.
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 }
+
+#[test]
+fn the_serving_operations_security_requirement_resolves_to_a_declared_scheme() {
+    // `security(("data_api_bearer" = []))` on the two operations is the ONLY
+    // security requirement in the whole merged document, so nothing else would
+    // have declared the scheme. A requirement naming a scheme that
+    // `components.securitySchemes` does not define is an invalid document — it
+    // reads as documented auth while telling the FE codegen that consumes
+    // openapi.json nothing it can act on.
+    //
+    // Asserted through `openapi_doc()` — the merged document — because the
+    // scheme is contributed by a `Modify` on ONE of two docs merged from the
+    // same crate, and whether `merge` carries it across is the part that could
+    // silently regress.
+    let doc = egret_server::openapi_doc();
+    let json = serde_json::to_value(&doc).unwrap();
+
+    let op = &json["paths"]["/data-api/v1/{ws}/{path}"]["get"];
+    assert!(
+        !op.is_null(),
+        "the serving operation is missing from the doc"
+    );
+
+    let required: Vec<String> = op["security"]
+        .as_array()
+        .expect("the serving operation must carry a security requirement")
+        .iter()
+        .flat_map(|r| r.as_object().unwrap().keys().cloned())
+        .collect();
+    assert!(!required.is_empty(), "no scheme named");
+
+    let declared = &json["components"]["securitySchemes"];
+    for name in &required {
+        assert!(
+            !declared[name].is_null(),
+            "operation requires `{name}` but components.securitySchemes declares only {:?}",
+            declared.as_object().map(|o| o.keys().collect::<Vec<_>>())
+        );
+    }
+}

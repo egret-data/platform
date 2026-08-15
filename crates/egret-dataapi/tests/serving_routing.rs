@@ -39,12 +39,21 @@ use uuid::Uuid;
 // A query engine under the test's control.
 // ---------------------------------------------------------------------------
 
-/// Returns one row holding the first integer literal in the SQL it was handed.
+/// A fake engine driven entirely by the first integer literal in the SQL.
 ///
-/// That is the whole trick behind [`a_draft_edit_does_not_change_what_is_served`]:
-/// `SELECT 1 AS n` and `SELECT 2 AS n` are distinguishable in the RESPONSE, so
-/// the test can tell which text actually reached the engine without inspecting
-/// any internal state.
+/// Keying off the SQL rather than off shared mutable state is what makes
+/// [`a_draft_edit_does_not_change_what_is_served`] evidence: `SELECT 1 AS n` and
+/// `SELECT 2 AS n` are distinguishable in the RESPONSE, so the test can tell
+/// which text actually reached the engine without inspecting anything internal.
+///
+/// The other markers exist because their branches are not reachable from a
+/// well-behaved engine at all:
+///
+/// | marker | what it stands for |
+/// |---|---|
+/// | `55` | the underlying table DRIFTED — `execute` returns a column set the publish-time `describe` did not |
+/// | `66` | two columns whose `camel` forms collide (`total_revenue`, `totalRevenue`) |
+/// | `99` | the connector fetched `max_rows + 1`, saw the extra row, and set `truncated` |
 struct FakePort;
 
 fn first_int(sql: &str) -> i64 {
@@ -54,6 +63,21 @@ fn first_int(sql: &str) -> i64 {
         .unwrap_or(-1)
 }
 
+fn col(name: &str) -> ColumnMeta {
+    ColumnMeta {
+        name: name.into(),
+        ty: "integer".into(),
+    }
+}
+
+/// What publish freezes into the snapshot for this SQL.
+fn frozen_columns(sql: &str) -> Vec<ColumnMeta> {
+    match first_int(sql) {
+        66 => vec![col("total_revenue"), col("totalRevenue")],
+        _ => vec![col("n")],
+    }
+}
+
 #[async_trait::async_trait]
 impl egret_query_api::QueryExecPort for FakePort {
     async fn describe_as(
@@ -61,12 +85,9 @@ impl egret_query_api::QueryExecPort for FakePort {
         _ws: Uuid,
         _database_id: Uuid,
         _principal: UserId,
-        _sql: &str,
+        sql: &str,
     ) -> Result<Vec<ColumnMeta>, Error> {
-        Ok(vec![ColumnMeta {
-            name: "n".into(),
-            ty: "integer".into(),
-        }])
+        Ok(frozen_columns(sql))
     }
 
     async fn execute_as(
@@ -78,17 +99,24 @@ impl egret_query_api::QueryExecPort for FakePort {
         _limits: egret_query_api::Limits,
     ) -> Result<TabularResult, Error> {
         let n = first_int(sql);
+        // The drift: `describe` froze `n` at publish time, `execute` now returns
+        // `m`. A real engine produces this when the underlying table is altered
+        // between publish and call; nothing else can.
+        let columns = if n == 55 {
+            vec![col("m")]
+        } else {
+            frozen_columns(sql)
+        };
+        let rows = vec![columns
+            .iter()
+            .enumerate()
+            .map(|(i, _)| serde_json::json!(n + i as i64))
+            .collect()];
         Ok(TabularResult {
-            columns: vec![ColumnMeta {
-                name: "n".into(),
-                ty: "integer".into(),
-            }],
-            rows: vec![vec![serde_json::json!(n)]],
+            columns,
+            rows,
             row_count: 1,
             bytes_scanned: None,
-            // `SELECT 99 …` is the fixture's way of saying "the connector fetched
-            // `max_rows + 1` and saw the extra row". A real connector sets this
-            // flag; there is no other honest way to reach the branch from a test.
             truncated: n == 99,
         })
     }
@@ -402,10 +430,21 @@ impl Fixture {
     /// Create a draft and publish it through the REAL publish route, so the
     /// snapshot under test is the one publish actually freezes.
     async fn publish_endpoint(&self, method: &str, path: &str, sql: &str) -> Uuid {
+        self.publish_endpoint_with_output(method, path, sql, serde_json::json!({}))
+            .await
+    }
+
+    async fn publish_endpoint_with_output(
+        &self,
+        method: &str,
+        path: &str,
+        sql: &str,
+        output: serde_json::Value,
+    ) -> Uuid {
         let ep: Uuid = sqlx::query_scalar(
             "INSERT INTO dataapi.endpoints \
-               (workspace_id, name, path, method, database_id, sql, created_by) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
+               (workspace_id, name, path, method, database_id, sql, output, created_by) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
         )
         .bind(self.ws_id)
         .bind(format!("ep-{}", Uuid::new_v4().simple()))
@@ -413,6 +452,7 @@ impl Fixture {
         .bind(method)
         .bind(self.database_id)
         .bind(sql)
+        .bind(&output)
         .bind(self.admin)
         .fetch_one(&self.db.pool)
         .await
@@ -474,10 +514,22 @@ async fn an_inbound_path_is_normalised_before_lookup() {
     f.publish_endpoint("GET", "/reports/daily", "SELECT 1 AS n")
         .await;
 
-    // `reports/daily` is the capture axum ALWAYS produces, and it differs from
-    // the stored `/reports/daily` — a raw `WHERE path = $1` fails on this one.
-    // The trailing-slash variant is the copy-paste case `normalize_path` absorbs.
-    for variant in ["reports/daily", "reports/daily/"] {
+    // All three are producible, and each hands the handler a DIFFERENT capture.
+    // Measured against matchit 0.8.4 (the version in Cargo.lock) through this
+    // exact route:
+    //
+    //   /data-api/v1/w/reports/daily    -> path = "reports/daily"
+    //   /data-api/v1/w//reports/daily   -> path = "/reports/daily"
+    //   /data-api/v1/w/reports/daily/   -> path = "reports/daily/"
+    //
+    // `reports/daily` is the capture axum produces for an ordinary URL, and it
+    // differs from the stored `/reports/daily` — a raw `WHERE path = $1` fails on
+    // this one alone. `//` in the URI is the one way to produce a LEADING-slash
+    // capture, and `normalize_path` absorbs exactly one leading slash, so it must
+    // still hit; it is not an empty segment (`endpoints.rs:379` strips the
+    // prefix before the segment check ever runs). The trailing slash is the
+    // copy-paste case, absorbed the same way.
+    for variant in ["reports/daily", "/reports/daily", "reports/daily/"] {
         let res = f.call(variant).await;
         assert_eq!(
             res.status,
@@ -491,10 +543,17 @@ async fn an_inbound_path_is_normalised_before_lookup() {
 
 #[tokio::test]
 async fn a_path_that_cannot_be_canonicalised_is_404_not_400() {
-    // `%2F` decodes to a slash before we ever see it, `.` and `..` are dot
-    // segments, `//` is an empty segment — all rejected by `normalize_path`.
-    // Each is a 404 rather than a 400, so a caller cannot tell "malformed" from
-    // "absent" and use the difference to probe.
+    // These are the captures `normalize_path` genuinely REFUSES: an INTERIOR
+    // `//` is an empty segment, and `.`/`..` are dot segments. Each is a 404
+    // rather than a 400, so a caller cannot tell "malformed" from "absent" and
+    // use the difference to probe.
+    //
+    // Note what is deliberately NOT in this list. A LEADING `//` is absorbed and
+    // hits (see the test above), and `%2F` is percent-decoded by axum into an
+    // ordinary separator — `/data-api/v1/w/reports%2Fdaily` arrives as
+    // `reports/daily` and reaches the endpoint. Both were measured; neither is a
+    // refusal, and writing them here as one would be a false claim about a
+    // security-relevant function.
     let f = skip_without_db!();
     f.publish_endpoint("GET", "/reports/daily", "SELECT 1 AS n")
         .await;
@@ -684,4 +743,90 @@ async fn a_truncated_result_is_an_error_not_a_partial_200() {
 
     let res = f.call("big").await;
     assert_eq!(res.status, StatusCode::BAD_REQUEST, "{}", res.body);
+}
+
+#[tokio::test]
+async fn a_percent_encoded_slash_is_a_separator_not_a_refusal() {
+    // Pinned because the opposite was asserted in a comment before it was
+    // measured. axum percent-decodes the `{*path}` capture BEFORE the handler
+    // sees it, so `%2F` is indistinguishable from a literal `/` by the time
+    // `normalize_path` runs — there is no encoding left to reject.
+    //
+    // This is the behaviour P3's `normalize_path` doc describes and the reason
+    // it refuses to STORE a percent-encoded path: the two sides must agree on
+    // one spelling, and the decoded one is the only spelling serving can see.
+    let f = skip_without_db!();
+    f.publish_endpoint("GET", "/reports/daily", "SELECT 1 AS n")
+        .await;
+
+    let res = f.call("reports%2Fdaily").await;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.body);
+    assert_eq!(res.ns(), vec![1]);
+}
+
+#[tokio::test]
+async fn a_drifted_output_schema_is_refused_rather_than_reshaped() {
+    // `meta.columns` advertises the FROZEN contract. If the engine now returns a
+    // different column set, every honest option except refusing produces a body
+    // that contradicts its own metadata: keys from the live set disagree with
+    // the advertised names, and zipping the two truncates to the shorter side —
+    // silently dropping a column from every row.
+    //
+    // The `55` marker makes publish freeze `n` (via `describe_as`) and serving
+    // receive `m` (via `execute_as`), which is what altering the underlying
+    // table between publish and call does.
+    let f = skip_without_db!();
+    f.publish_endpoint("GET", "/drift", "SELECT 55 AS n").await;
+
+    let res = f.call("drift").await;
+    assert_eq!(
+        res.status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "a drifted schema must be refused, not reshaped: {} {}",
+        res.status,
+        res.body
+    );
+}
+
+#[tokio::test]
+async fn a_naming_collision_is_refused_rather_than_dropping_a_column() {
+    // `apply_naming` can CREATE a collision that the frozen columns do not have:
+    // `total_revenue` and `totalRevenue` both become `totalRevenue` under
+    // `camel`, and a JSON object keeps only the last value — so one column
+    // vanishes from every row while `meta.columns` still advertises it.
+    //
+    // Anti-triviality: the same endpoint with `as_is` must serve BOTH columns,
+    // so the refusal is caused by the naming rule and not by the column pair.
+    let f = skip_without_db!();
+    f.publish_endpoint_with_output(
+        "GET",
+        "/asis",
+        "SELECT 66 AS total_revenue",
+        serde_json::json!({ "naming": "as_is" }),
+    )
+    .await;
+    let ok = f.call("asis").await;
+    assert_eq!(ok.status, StatusCode::OK, "{}", ok.body);
+    assert_eq!(
+        ok.body["data"][0].as_object().map(|o| o.len()),
+        Some(2),
+        "both frozen columns must survive under as_is: {}",
+        ok.body
+    );
+
+    f.publish_endpoint_with_output(
+        "GET",
+        "/camel",
+        "SELECT 66 AS total_revenue",
+        serde_json::json!({ "naming": "camel" }),
+    )
+    .await;
+    let res = f.call("camel").await;
+    assert_eq!(
+        res.status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "a naming collision must be refused, not served one column short: {} {}",
+        res.status,
+        res.body
+    );
 }
