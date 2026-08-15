@@ -1073,17 +1073,51 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             config.audit.batch_size,
             std::time::Duration::from_millis(config.audit.flush_interval_ms),
         ));
-        let prune_store = audit_store.clone();
-        let retention = config.audit.retention_days;
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
-            loop {
-                tick.tick().await;
-                if let Err(e) = prune_store.prune(retention).await {
-                    tracing::warn!(error=%e, "audit prune failed");
+        // The SAME `prune(0)` trap the Data API access log closes below, on the
+        // table that matters most: `audit.audit_log` is the authorization-decision
+        // record. `AuditStore::prune(0)` deletes everything — `ts < now() - 0
+        // days` is every row already written, and that is the correct primitive —
+        // but a CONFIG key is not a primitive. `0` is what an operator writes
+        // when they mean "off", and what `EGRET_AUDIT__RETENTION_DAYS=`
+        // deserialises to when it is blank or half-written. Passed straight
+        // through, on an hourly tick inside the default-on `audit.enabled`, that
+        // empties the audit trail one hour after boot, silently, with nothing
+        // having gone wrong and no operator action that looks like a mistake.
+        //
+        // `egret_dataapi::serving::scheduled_retention` is reused rather than
+        // re-implemented here: it is the same decision, and two spellings of it
+        // are how one of them ends up wrong. (The dependency direction is
+        // acceptable — this binary already composes every seam — but if
+        // `egret-audit` ever grows its own scheduler, the guard should move
+        // there and both call sites should use that one.)
+        //
+        // The store keeps its meaning; only the SCHEDULER refuses to call it with
+        // a number that would wipe. An operator who genuinely wants an empty
+        // table still has `prune(0)`.
+        let configured_audit_retention = config.audit.retention_days;
+        if let Some(retention) =
+            egret_dataapi::serving::scheduled_retention(configured_audit_retention)
+        {
+            let prune_store = audit_store.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
+                loop {
+                    tick.tick().await;
+                    if let Err(e) = prune_store.prune(retention).await {
+                        tracing::warn!(error=%e, "audit prune failed");
+                    }
                 }
-            }
-        });
+            });
+        } else {
+            tracing::warn!(
+                retention_days = configured_audit_retention,
+                "audit retention is not positive; prune NOT scheduled. \
+                 audit.audit_log will grow without bound — set \
+                 audit.retention_days to a positive number of days. \
+                 (This is deliberately not a wipe: a retention of 0 reads as \
+                 'off', never as 'keep nothing'.)"
+            );
+        }
     }
 
     // The Data API's access log has its own retention, on the same hourly tick
