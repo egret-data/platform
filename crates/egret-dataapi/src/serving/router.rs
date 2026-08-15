@@ -92,9 +92,21 @@
 //!   P3's `check_params` already refuses to publish a placeholder that does not
 //!   stand where a value stands, and no caller input reaches the SQL at all
 //!   until step 7 exists.
-//! * the error envelope and the access log (Task 5). [`ServingError`]'s
-//!   `IntoResponse` below is a placeholder with a fixed body and no
-//!   `request_id`; `serving/error.rs` replaces it.
+//!
+//! # What Task 5 added: one id, and one place the request is described
+//!
+//! The `request_id` is minted ONCE, at the top of [`serve`], before anything can
+//! fail — not at the two points where a response happened to be built, as it was
+//! before. That is what lets the success body, the error body, every `tracing`
+//! line for the call, and the `dataapi.access_log` row all carry the same id;
+//! with three mints there were three ids and nothing correlated.
+//!
+//! [`serve`] therefore returns a `Response` rather than a
+//! `Result<_, ServingError>`, and the whole request chain moved into [`run`].
+//! `ServingError` no longer implements `IntoResponse` at all: the only route to
+//! the wire is [`super::error::to_wire`], which needs a `request_id` it cannot
+//! invent. Removing the impl is deliberate — leaving it would leave a second,
+//! shorter path that compiles fine and produces an uncorrelatable body.
 //!
 //! # What Task 4 added, and what it keyed on
 //!
@@ -122,7 +134,9 @@ use egret_metastore::Db;
 use serde::Serialize;
 use uuid::Uuid;
 
+use super::access_log::{AccessLogEntry, AccessLogStore};
 use super::cache::{cache_key, cache_ttl, shared_cache_allowed};
+use super::error::{to_wire, ServingErrorBody};
 use super::ratelimit::{check_request, retry_after_secs};
 use super::{verify_serving_token, ServingError};
 use crate::routes::DataApiState;
@@ -202,7 +216,13 @@ pub fn serving_openapi() -> utoipa::openapi::OpenApi {
 #[derive(utoipa::OpenApi)]
 #[openapi(
     paths(serve_get, serve_post),
-    components(schemas(ServingResponse, ServingMeta, egret_dataapi_api::ColumnSpec)),
+    components(schemas(
+        ServingResponse,
+        ServingMeta,
+        ServingErrorBody,
+        super::error::ServingErrorDetail,
+        egret_dataapi_api::ColumnSpec
+    )),
     modifiers(&BearerAddon),
     tags((
         name = "data-api-serving",
@@ -250,13 +270,13 @@ impl utoipa::Modify for BearerAddon {
     ),
     responses(
         (status = 200, description = "Rows from the published snapshot", body = ServingResponse),
-        (status = 400, description = "The result exceeded the endpoint's row cap"),
-        (status = 401, description = "Bearer token missing, expired, or not for this audience"),
-        (status = 403, description = "The engine denied the data to this service account"),
-        (status = 404, description = "No such live endpoint in this workspace"),
-        (status = 429, description = "A published rate limit was exceeded; `Retry-After` states the wait"),
-        (status = 500, description = "Internal error"),
-        (status = 503, description = "The published output contract, or a shared cache's connection setting, no longer matches"),
+        (status = 400, description = "`row_limit_exceeded` — the result exceeded the endpoint's row cap", body = ServingErrorBody),
+        (status = 401, description = "`key_invalid` — bearer token missing, expired, or not for this audience", body = ServingErrorBody),
+        (status = 403, description = "`data_access_denied` — the engine denied the data to this service account", body = ServingErrorBody),
+        (status = 404, description = "`not_found` — no such live endpoint in this workspace", body = ServingErrorBody),
+        (status = 429, description = "`rate_limited` — a published rate limit was exceeded; `Retry-After` states when the bucket refills", body = ServingErrorBody),
+        (status = 500, description = "`internal` — an egret-side fault; quote `request_id` to support", body = ServingErrorBody),
+        (status = 503, description = "`schema_drift` / `output_naming_collision` / `cache_scope_stale` — the published configuration no longer describes the data. `Retry-After` is a floor, not a forecast: only a re-publish clears these", body = ServingErrorBody),
     ),
     security(("data_api_bearer" = [])),
 )]
@@ -266,7 +286,7 @@ async fn serve_get(
     query: RawQuery,
     method: Method,
     headers: HeaderMap,
-) -> Result<Json<ServingResponse>, ServingError> {
+) -> Response {
     serve(state, path, query, method, headers).await
 }
 
@@ -280,13 +300,13 @@ async fn serve_get(
     ),
     responses(
         (status = 200, description = "Rows from the published snapshot", body = ServingResponse),
-        (status = 400, description = "The result exceeded the endpoint's row cap"),
-        (status = 401, description = "Bearer token missing, expired, or not for this audience"),
-        (status = 403, description = "The engine denied the data to this service account"),
-        (status = 404, description = "No such live endpoint in this workspace"),
-        (status = 429, description = "A published rate limit was exceeded; `Retry-After` states the wait"),
-        (status = 500, description = "Internal error"),
-        (status = 503, description = "The published output contract, or a shared cache's connection setting, no longer matches"),
+        (status = 400, description = "`row_limit_exceeded` — the result exceeded the endpoint's row cap", body = ServingErrorBody),
+        (status = 401, description = "`key_invalid` — bearer token missing, expired, or not for this audience", body = ServingErrorBody),
+        (status = 403, description = "`data_access_denied` — the engine denied the data to this service account", body = ServingErrorBody),
+        (status = 404, description = "`not_found` — no such live endpoint in this workspace", body = ServingErrorBody),
+        (status = 429, description = "`rate_limited` — a published rate limit was exceeded; `Retry-After` states when the bucket refills", body = ServingErrorBody),
+        (status = 500, description = "`internal` — an egret-side fault; quote `request_id` to support", body = ServingErrorBody),
+        (status = 503, description = "`schema_drift` / `output_naming_collision` / `cache_scope_stale` — the published configuration no longer describes the data. `Retry-After` is a floor, not a forecast: only a re-publish clears these", body = ServingErrorBody),
     ),
     security(("data_api_bearer" = [])),
 )]
@@ -296,18 +316,132 @@ async fn serve_post(
     query: RawQuery,
     method: Method,
     headers: HeaderMap,
-) -> Result<Json<ServingResponse>, ServingError> {
+) -> Response {
     serve(state, path, query, method, headers).await
 }
 
+/// The outer half of a served call: mint the correlation id, run the chain,
+/// render the answer, and record the row.
+///
+/// # Why the id is minted here and not where a response is built
+///
+/// `request_id` is the only thing tying four artefacts together: the body the
+/// caller holds, the `tracing` line carrying the detail the body was denied, the
+/// `dataapi.access_log` row, and — once `QueryExecPort` returns one — the
+/// engine's own query id. Minting it inside the success paths (which is what
+/// this used to do, twice, with a third id nowhere) made every one of those a
+/// different id, so "quote your request_id" was advice that could not be acted
+/// on.
+///
+/// # Why the access-log write is synchronous
+///
+/// `egret-audit` batches through a channel and a background writer, and that is
+/// the pattern to reach for IF this shows up in a measurement. It has not been
+/// measured, and until it is, the cost of the simple version is one insert on a
+/// path that has already done a network round trip to an engine, while its
+/// benefit is that a row cannot be lost to a shutdown between the response and
+/// the flush. A dropped access-log row is the kind of gap nobody notices until
+/// an incident needs it.
+///
+/// The insert happens AFTER `duration_ms` is computed, so the recorded duration
+/// is what the caller experienced and not what the bookkeeping cost.
 async fn serve(
     State(st): State<DataApiState>,
-    Path((ws_slug, raw_path)): Path<(String, String)>,
-    RawQuery(raw_query): RawQuery,
+    path: Path<(String, String)>,
+    query: RawQuery,
     method: Method,
     headers: HeaderMap,
-) -> Result<Json<ServingResponse>, ServingError> {
-    let principal = verify_serving_token(&*st.keys, bearer(&headers)?).await?;
+) -> Response {
+    // One clock reading for the whole request, so the rate limit, the cache and
+    // the recorded duration all agree about when "now" was. Monotonic, so an NTP
+    // step cannot make a cache entry immortal, refill every bucket at once, or
+    // record a negative duration.
+    let started = Instant::now();
+    let request_id = Uuid::new_v4().to_string();
+    let mut entry = AccessLogStore::entry(&request_id, &headers);
+
+    let outcome = run(
+        &st,
+        path,
+        query,
+        &method,
+        &headers,
+        started,
+        &request_id,
+        &mut entry,
+    )
+    .await;
+
+    // Measured before the log write, and saturating rather than wrapping: a
+    // request that somehow ran for 25 days should record `i32::MAX`, not a
+    // negative duration that poisons every average computed over the column.
+    entry.duration_ms = started.elapsed().as_millis().min(i32::MAX as u128) as i32;
+
+    let response = match outcome {
+        Ok(body) => {
+            entry.status_code = StatusCode::OK.as_u16() as i32;
+            entry.row_count = Some(body.meta.row_count as i64);
+            entry.cache_hit = body.meta.cached;
+            // Fires only once the response actually EXISTS. It used to fire
+            // before `shape_rows`, so a drift or naming-collision 503 was logged
+            // as served — the one line an operator would read to decide the call
+            // was fine said so about a call that failed.
+            tracing::debug!(
+                %request_id,
+                endpoint_id = ?entry.endpoint_id,
+                version = ?entry.version,
+                client_id = entry.client_id.as_deref().unwrap_or(""),
+                row_count = body.meta.row_count,
+                cached = body.meta.cached,
+                duration_ms = entry.duration_ms,
+                "data-api request served"
+            );
+            Json(body).into_response()
+        }
+        Err(e) => {
+            let wire = to_wire(&e);
+            entry.status_code = wire.status.as_u16() as i32;
+            entry.error_code = Some(wire.code.to_string());
+            // THE ONLY place the internal detail is allowed to appear. `?e`
+            // renders the variant and, for `Internal`, its source — which is
+            // exactly what the body must not carry.
+            tracing::warn!(
+                %request_id,
+                code = wire.code,
+                status = wire.status.as_u16(),
+                error = ?e,
+                endpoint_id = ?entry.endpoint_id,
+                client_id = entry.client_id.as_deref().unwrap_or(""),
+                "data-api request failed"
+            );
+            wire.into_response(&request_id)
+        }
+    };
+
+    AccessLogStore::new(st.db.clone()).record(&entry).await;
+    response
+}
+
+/// The request chain proper (spec §6.2). Fills `entry` as each step resolves a
+/// field, so a call refused at step 3 still records the workspace and the caller
+/// that reached it.
+#[allow(clippy::too_many_arguments)]
+async fn run(
+    st: &DataApiState,
+    Path((ws_slug, raw_path)): Path<(String, String)>,
+    RawQuery(raw_query): RawQuery,
+    method: &Method,
+    headers: &HeaderMap,
+    now: Instant,
+    request_id: &str,
+    entry: &mut AccessLogEntry,
+) -> Result<ServingResponse, ServingError> {
+    let principal = verify_serving_token(&*st.keys, bearer(headers)?).await?;
+    // Recorded the moment it is known, so every answer from here on — including
+    // a 404 — is attributable to a workspace and a client.
+    entry.workspace_id = Some(principal.workspace_id);
+    entry.service_account_id = Some(principal.user_id.0);
+    entry.client_id = Some(principal.client_id.clone());
 
     // axum percent-decodes a `{*path}` capture and hands it over WITHOUT a
     // leading slash; stored paths were never encoded and P3 stores them
@@ -341,15 +475,15 @@ async fn serve(
     let (endpoint_id, version, snap) = live_snapshot(&st.db, ws.id.0, method.as_str(), &path)
         .await?
         .ok_or(ServingError::NotFound)?;
+    // From here every failure is attributable to a specific published version,
+    // which is what makes "this endpoint started 503ing at 14:02" answerable
+    // from the log alone.
+    entry.endpoint_id = Some(endpoint_id);
+    entry.version = Some(version);
 
     // …spec §6.2 step 4 (the Cedar `dataapi:invoke` check) is its own task; see
     // the module comment for why its absence is a hole and not merely an
     // unfinished step. Step 7 (param rendering) likewise.
-
-    // One clock reading for the whole request, so the rate limit and the cache
-    // agree about when "now" was. Monotonic, so an NTP step cannot make an entry
-    // immortal or refill every bucket at once.
-    let now = Instant::now();
 
     // Step 5 — rate limit. BOTH published keys: the client's own allowance and
     // the endpoint-wide one. Keyed on `endpoint_id`, never on the path.
@@ -394,15 +528,10 @@ async fn serve(
     let ttl = cache_ttl(&snap);
     if ttl.is_some() {
         if let Some(hit) = st.cache.get_at(&key, now) {
-            let request_id = Uuid::new_v4().to_string();
-            tracing::debug!(
-                %request_id,
-                endpoint_id = %endpoint_id,
-                version,
-                client_id = %principal.client_id,
-                "data-api request served from cache"
-            );
-            return Ok(Json(ServingResponse {
+            // The id comes from the caller, not from a fresh `Uuid::new_v4()`.
+            // A hit that minted its own would be uncorrelatable with the
+            // access-log row describing the very same call.
+            return Ok(ServingResponse {
                 // One clone per hit. The alternative is `Arc` in the response
                 // type, which needs serde's `rc` feature and leaks a caching
                 // detail into the public wire type.
@@ -412,9 +541,9 @@ async fn serve(
                     row_count: hit.row_count,
                     version,
                     cached: true,
-                    request_id,
+                    request_id: request_id.to_string(),
                 },
-            }));
+            });
         }
     }
 
@@ -440,36 +569,31 @@ async fn serve(
         return Err(ServingError::RowLimitExceeded { cap });
     }
 
-    let request_id = Uuid::new_v4().to_string();
-    tracing::debug!(
-        %request_id,
-        endpoint_id = %endpoint_id,
-        version,
-        client_id = %principal.client_id,
-        row_count = out.row_count,
-        "data-api request served"
-    );
-
     // Shaped BEFORE it is cached, and the shaped form is what is stored: shaping
     // is where `output.shape`/`naming` and the drift refusal apply, so caching
     // the raw result would let a hit and a miss disagree about whether the
     // endpoint had drifted.
+    //
+    // Nothing is logged as SERVED before this line. `shape_rows` is the last
+    // thing that can refuse the call, and the "served" line used to sit above it
+    // — so a drift or naming-collision 503 produced a log saying the request had
+    // been served with N rows. That line now lives in `serve`, on the Ok arm.
     let data = shape_rows(&out, &snap)?;
     if let Some(ttl) = ttl {
         st.cache
             .put_at(key, Arc::new(data.clone()), out.row_count, ttl, now);
     }
 
-    Ok(Json(ServingResponse {
+    Ok(ServingResponse {
         data,
         meta: ServingMeta {
             columns: snap.columns.clone(),
             row_count: out.row_count,
             version,
             cached: false,
-            request_id,
+            request_id: request_id.to_string(),
         },
-    }))
+    })
 }
 
 /// The DECLARED query parameters of this request, as the cache key's map.
@@ -589,15 +713,32 @@ fn execution_limits(snap: &EndpointSnapshot) -> egret_query_api::Limits {
 
 /// Map an engine failure onto the serving vocabulary.
 ///
-/// Only the Ranger denial is given its own answer here, because it is the one
-/// the operator can act on and the one that must never be reported as bad input.
-/// **Everything else collapses to `Internal`, which Task 5 must split**: a
-/// published snapshot whose SQL no longer parses, a relation that has been
-/// dropped, an unreachable coordinator and a timeout are four different
-/// operator stories and spec §7 gives three of them their own codes
-/// (`engine_unavailable`, `timeout`, and the bad-SQL case which the table does
-/// not yet name). Collapsing them is safe — nothing from the engine reaches the
-/// body — but it is not finished.
+/// Only the Ranger denial is given its own answer, because it is the one the
+/// operator can act on and the one that must never be reported as bad input.
+///
+/// # Everything else is `Internal`, and that is now a decision rather than a gap
+///
+/// A published snapshot whose SQL no longer parses, a relation that has been
+/// dropped, an unreachable coordinator and a timeout are four different operator
+/// stories, and spec §7 names two of them (`engine_unavailable`, `timeout`).
+/// **Neither is decidable here**, and the reason is upstream of this function:
+///
+/// * `port_impl::connect_as` produces `egret_core::Error::Internal` for EGRET's
+///   own faults — resolving the principal's email, opening the database secret
+///   (`egret-query/src/execution/port_impl.rs:120-137`) — using the same variant
+///   `engine_error` produces for the engine's `Connect`/`Storage`/`Db`. So
+///   `Internal` does not mean "the engine is unreachable", and answering 502
+///   would page an operator about Trino when the metastore is what failed.
+/// * `EngineError::Timeout` becomes `Error::InvalidInput("query timed out")`,
+///   deliberately and for `describe_as`'s sake
+///   (`port_impl.rs:53`). Recognising it here would mean matching another
+///   crate's message string — a check that keeps compiling and silently stops
+///   working the day someone rewords it.
+///
+/// Making those two codes real means widening `QueryExecPort`'s error type,
+/// which is a cross-crate contract change. Until then the answer is 500 with the
+/// detail in the log, which is safe — nothing from the engine reaches the body —
+/// and honest, which a guessed 502 would not be. See `ServingError`'s comment.
 fn engine_error(e: egret_core::Error) -> ServingError {
     match e {
         egret_core::Error::Forbidden => ServingError::DataAccessDenied,
@@ -787,82 +928,14 @@ fn apply_naming(name: &str, naming: &str) -> String {
     }
 }
 
-// ---------------------------------------------------------------------------
-// PLACEHOLDER wire mapping. Task 5 replaces this whole block with
-// `serving/error.rs`: spec §7's fixed code table, the
-// `{ "error": { code, message, request_id } }` envelope, and the `request_id`
-// correlation into `dataapi.access_log`.
+// The wire mapping lives in `serving/error.rs` and NOWHERE else.
 //
-// What it already gets right, and what Task 5 must keep: the body is a FIXED
-// string per variant and never renders the source. Engine errors carry table
-// names, column names and sometimes hosts; on a key-authenticated public surface
-// that is a metadata leak.
-// ---------------------------------------------------------------------------
-impl IntoResponse for ServingError {
-    fn into_response(self) -> Response {
-        // Handled ahead of the table because it is the one answer carrying a
-        // HEADER. A 429 without `Retry-After` tells a client it was refused and
-        // not when to come back, which every retry loop resolves by guessing —
-        // usually immediately, and usually again.
-        if let ServingError::RateLimited { retry_after } = &self {
-            return (
-                StatusCode::TOO_MANY_REQUESTS,
-                [("Retry-After", retry_after_secs(*retry_after).to_string())],
-                "rate limit exceeded",
-            )
-                .into_response();
-        }
-        let (status, message) = match &self {
-            ServingError::Unauthorized => (StatusCode::UNAUTHORIZED, "authentication failed"),
-            ServingError::NotFound => (StatusCode::NOT_FOUND, "no such endpoint"),
-            ServingError::DataAccessDenied => (
-                StatusCode::FORBIDDEN,
-                "the service account is not granted access to this data",
-            ),
-            ServingError::RowLimitExceeded { .. } => {
-                (StatusCode::BAD_REQUEST, "result exceeded the row cap")
-            }
-            // 503 and not 500: nothing is broken on egret's side, the endpoint's
-            // published contract has stopped matching its data (or was never
-            // satisfiable) and an AUTHOR has to act. Same shape spec §7 gives
-            // `cache_scope_stale`, whose situation is the same one.
-            //
-            // TASK 5 MUST DECIDE `Retry-After` FOR BOTH, deliberately. A bare 503
-            // is a "come back later" on a condition that never self-heals —
-            // only a human re-publishing clears it — so well-behaved clients and
-            // the proxies in front of them will retry-storm a permanent state.
-            // Neither spec §7's table nor Task 5's has a 503 row in either
-            // language yet; these two variants are the first, so the table has
-            // to grow rather than be matched against.
-            ServingError::SchemaDrift => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "this endpoint's published output schema no longer matches its data; re-publish it",
-            ),
-            ServingError::OutputNamingCollision => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "this endpoint's output naming maps two columns onto one key; change it and re-publish",
-            ),
-            // Deliberately NOT a downgrade to a per-principal answer: the
-            // published configuration is no longer safe and the operator has to
-            // see that. Same 503 shape as the two above, and the same reason —
-            // an author or operator acts, nothing on egret's side is broken.
-            ServingError::CacheScopeStale => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "this endpoint's shared cache was published against a different connection setting; re-publish it",
-            ),
-            // Answered above, with its header.
-            ServingError::RateLimited { .. } => {
-                (StatusCode::TOO_MANY_REQUESTS, "rate limit exceeded")
-            }
-            ServingError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
-        };
-        // The only place the internal detail appears.
-        if let ServingError::Internal(e) = &self {
-            tracing::warn!(error = %e, "data-api serving request failed");
-        }
-        (status, message).into_response()
-    }
-}
+// `ServingError` deliberately does NOT implement `IntoResponse`. It used to, as
+// a placeholder with a fixed body and no `request_id`, and leaving it would
+// leave a second path to the wire that compiles fine, skips the access log, and
+// hands the caller an error they cannot quote to anyone. `error::to_wire` takes
+// a `request_id` it cannot invent, so the only way to answer is through `serve`,
+// which has one.
 
 #[cfg(test)]
 mod tests {

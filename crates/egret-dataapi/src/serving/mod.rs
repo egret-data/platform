@@ -5,16 +5,20 @@
 //!
 //! Task 2 lands [`auth`]: bearer token → [`ServingPrincipal`]. Task 3 lands
 //! [`router`]: URL → published snapshot → rows. Task 4 lands [`cache`] and
-//! [`ratelimit`] — steps 6 and 5 of spec §6.2. The full error envelope and the
-//! access log arrive in Task 5.
+//! [`ratelimit`] — steps 6 and 5 of spec §6.2. Task 5 lands [`error`] (spec §7's
+//! envelope and its fixed code table) and [`access_log`] (spec §8).
 
+pub mod access_log;
 pub mod auth;
 pub mod cache;
+pub mod error;
 pub mod ratelimit;
 pub mod router;
 
+pub use access_log::{AccessLogEntry, AccessLogStore};
 pub use auth::{verify_serving_token, ServingPrincipal, DATA_API_AUDIENCE};
 pub use cache::{cache_key, shared_cache_allowed, CachedResponse, ResponseCache};
+pub use error::{ServingErrorBody, ServingErrorDetail};
 pub use ratelimit::{Rate, RateLimitStore, TokenBucket};
 pub use router::{serving_openapi, serving_router, ServingMeta, ServingResponse};
 
@@ -32,13 +36,40 @@ pub use router::{serving_openapi, serving_router, ServingMeta, ServingResponse};
 /// workspace and a path that is not even well-formed are one variant, so a
 /// caller cannot learn that an endpoint exists in a workspace it cannot reach.
 ///
-/// **Task 5 owns the wire mapping** (`serving/error.rs`): the fixed code table
-/// from spec §7, the `{ "error": { code, message, request_id } }` envelope and
-/// the remaining variants (`ParamInvalid`, `ParamMissing`, `EngineUnavailable`,
-/// `Timeout`). [`Self::RateLimited`] and [`Self::CacheScopeStale`] arrived with
-/// Task 4 because its two mechanisms cannot answer without them. What is here
-/// is the minimum the handler needs to answer at all — deliberately a plain
-/// status + fixed string, so that nothing about it reads as a finished envelope.
+/// [`super::error::to_wire`] owns the wire mapping — spec §7's fixed code table
+/// and the `{ "error": { code, message, request_id } }` envelope — and matches
+/// this enum EXHAUSTIVELY. Adding a variant here is a compile error there, on
+/// purpose: a wildcard arm would turn a new, specific, actionable condition into
+/// a silent 500, and would inherit whatever the wildcard did with any engine
+/// message the new variant carried.
+///
+/// # The variants spec §7 names that do NOT exist here
+///
+/// Recorded so their absence reads as a decision rather than as an oversight.
+/// None of them is constructible on today's serving path, and a dead variant
+/// would make the table look finished while nothing could ever produce the code:
+///
+/// * `param_invalid` / `param_missing` — spec §6.2 step 7 (rendering declared
+///   `params` into the SQL) is not implemented, so no caller input is ever
+///   validated. They arrive with step 7.
+/// * `forbidden` — the Cedar `data_api_endpoint:invoke` check is its own task.
+/// * `engine_unavailable` (502) and `timeout` (504) — **not decidable at this
+///   seam.** `QueryExecPort` returns `egret_core::Error`, and `port_impl` folds
+///   BOTH the engine's infrastructure failures (`Connect`/`Storage`/`Db`) AND
+///   its own egret-side faults — resolving the principal's email, opening the
+///   database secret (`egret-query/src/execution/port_impl.rs:120-137`) — into
+///   the same `Error::Internal`. Mapping that to 502 would page an operator
+///   about the engine when the metastore is what failed. `Timeout` is worse:
+///   `engine_error` maps `EngineError::Timeout` to
+///   `Error::InvalidInput("query timed out")`, deliberately, because for
+///   `describe_as` a timeout means the query is too expensive to plan — so the
+///   only way to recognise it here would be to match another crate's message
+///   string, which breaks silently the day someone rewords it. Making these two
+///   real means widening the port's error type, which is a cross-crate contract
+///   change and not this task's.
+///
+/// Everything a caller CAN receive today is in the table, and everything in the
+/// table is reachable.
 #[derive(Debug, thiserror::Error)]
 pub enum ServingError {
     #[error("unauthorized")]

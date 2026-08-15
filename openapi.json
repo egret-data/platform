@@ -24338,25 +24338,74 @@
             }
           },
           "400": {
-            "description": "The result exceeded the endpoint's row cap"
+            "description": "`row_limit_exceeded` — the result exceeded the endpoint's row cap",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServingErrorBody"
+                }
+              }
+            }
           },
           "401": {
-            "description": "Bearer token missing, expired, or not for this audience"
+            "description": "`key_invalid` — bearer token missing, expired, or not for this audience",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServingErrorBody"
+                }
+              }
+            }
           },
           "403": {
-            "description": "The engine denied the data to this service account"
+            "description": "`data_access_denied` — the engine denied the data to this service account",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServingErrorBody"
+                }
+              }
+            }
           },
           "404": {
-            "description": "No such live endpoint in this workspace"
+            "description": "`not_found` — no such live endpoint in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServingErrorBody"
+                }
+              }
+            }
           },
           "429": {
-            "description": "A published rate limit was exceeded; `Retry-After` states the wait"
+            "description": "`rate_limited` — a published rate limit was exceeded; `Retry-After` states when the bucket refills",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServingErrorBody"
+                }
+              }
+            }
           },
           "500": {
-            "description": "Internal error"
+            "description": "`internal` — an egret-side fault; quote `request_id` to support",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServingErrorBody"
+                }
+              }
+            }
           },
           "503": {
-            "description": "The published output contract, or a shared cache's connection setting, no longer matches"
+            "description": "`schema_drift` / `output_naming_collision` / `cache_scope_stale` — the published configuration no longer describes the data. `Retry-After` is a floor, not a forecast: only a re-publish clears these",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServingErrorBody"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -24402,25 +24451,74 @@
             }
           },
           "400": {
-            "description": "The result exceeded the endpoint's row cap"
+            "description": "`row_limit_exceeded` — the result exceeded the endpoint's row cap",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServingErrorBody"
+                }
+              }
+            }
           },
           "401": {
-            "description": "Bearer token missing, expired, or not for this audience"
+            "description": "`key_invalid` — bearer token missing, expired, or not for this audience",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServingErrorBody"
+                }
+              }
+            }
           },
           "403": {
-            "description": "The engine denied the data to this service account"
+            "description": "`data_access_denied` — the engine denied the data to this service account",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServingErrorBody"
+                }
+              }
+            }
           },
           "404": {
-            "description": "No such live endpoint in this workspace"
+            "description": "`not_found` — no such live endpoint in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServingErrorBody"
+                }
+              }
+            }
           },
           "429": {
-            "description": "A published rate limit was exceeded; `Retry-After` states the wait"
+            "description": "`rate_limited` — a published rate limit was exceeded; `Retry-After` states when the bucket refills",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServingErrorBody"
+                }
+              }
+            }
           },
           "500": {
-            "description": "Internal error"
+            "description": "`internal` — an egret-side fault; quote `request_id` to support",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServingErrorBody"
+                }
+              }
+            }
           },
           "503": {
-            "description": "The published output contract, or a shared cache's connection setting, no longer matches"
+            "description": "`schema_drift` / `output_naming_collision` / `cache_scope_stale` — the published configuration no longer describes the data. `Retry-After` is a floor, not a forecast: only a re-publish clears these",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServingErrorBody"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -31382,6 +31480,41 @@
             "type": "integer",
             "format": "int64",
             "description": "How many default policies were created (0 if the profile already had any)."
+          }
+        }
+      },
+      "ServingErrorBody": {
+        "type": "object",
+        "description": "The serving surface's error envelope (spec §7).\n\nNamed `ServingErrorBody` and not `ErrorBody` on purpose. `egret_core::http`\nalready exports an `ErrorBody`, it is a DIFFERENT shape (`{\"error\":\n\"<string>\"}`), and `egret_server::openapi_doc` merges this crate's serving\ndocument with the rest of the API into one OpenAPI document — where two\nschemas sharing a name silently overwrite each other. A generated client\nwould then be typed against whichever won.",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ServingErrorDetail"
+          }
+        }
+      },
+      "ServingErrorDetail": {
+        "type": "object",
+        "required": [
+          "code",
+          "message",
+          "request_id"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "The stable, machine-readable code from spec §7. Clients branch on this;\n`message` is for humans and may be reworded.",
+            "example": "row_limit_exceeded"
+          },
+          "message": {
+            "type": "string",
+            "description": "A fixed string per code. Never rendered from an internal error — see the\nmodule comment."
+          },
+          "request_id": {
+            "type": "string",
+            "description": "The correlation id, also written to `dataapi.access_log.request_id` and\nto every `tracing` line for this call. Quoting it is how a caller gets\nsupport to the detail they were deliberately not given."
           }
         }
       },
