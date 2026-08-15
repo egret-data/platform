@@ -164,6 +164,18 @@ pub static PERMISSIONS: &[Permission] = &[
         Scope::Workspace
     ),
     perm!(
+        "data_api_endpoint:read",
+        "Data API",
+        "View Data API endpoints and their versions",
+        Scope::Workspace
+    ),
+    perm!(
+        "data_api_endpoint:manage",
+        "Data API",
+        "Create, edit, publish and roll back Data API endpoints",
+        Scope::Workspace
+    ),
+    perm!(
         "policy:read",
         "Policies",
         "View Ranger policies",

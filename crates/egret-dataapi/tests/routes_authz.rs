@@ -33,10 +33,29 @@ struct Caller {
     tok: String,
 }
 
+/// A `QueryExecPort` that must never be consulted: nothing in this file drives
+/// the publish lifecycle, and a route that reached the engine anyway would be
+/// doing something none of these tests asked for.
+struct UnreachablePort;
+#[async_trait::async_trait]
+impl egret_query_api::QueryExecPort for UnreachablePort {
+    async fn describe_as(
+        &self,
+        _ws: Uuid,
+        _database_id: Uuid,
+        _principal: egret_core::UserId,
+        _sql: &str,
+    ) -> Result<Vec<egret_core::ColumnMeta>, egret_core::Error> {
+        unreachable!("no route in this test should reach the query engine")
+    }
+}
+
 fn build_state(db: Db, pdp: Arc<dyn egret_core::authz::Pdp>) -> DataApiState {
     DataApiState {
         db: db.clone(),
         clients: ClientStore::new(db.clone()),
+        endpoints: egret_dataapi::EndpointStore::new(db.clone()),
+        query: Arc::new(UnreachablePort),
         users: egret_auth::users::UserRepo::new(db.clone()),
         sessions: egret_auth::session::SessionService::new(
             db.clone(),
@@ -47,6 +66,11 @@ fn build_state(db: Db, pdp: Arc<dyn egret_core::authz::Pdp>) -> DataApiState {
         authz: egret_workspace::rbac::Authorizer::new(db),
         pdp,
         issuer: "https://egret.test".into(),
+        // A sink whose receiver is dropped immediately: `emit` is best-effort
+        // and logs rather than failing when the channel is closed, so nothing in
+        // this file depends on it. What the audited routes emit is asserted in
+        // `audit.rs`, which keeps the receiver.
+        audit: egret_audit::AuditSink::new(1).0,
     }
 }
 

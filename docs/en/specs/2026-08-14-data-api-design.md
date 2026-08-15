@@ -1,6 +1,6 @@
 # Data API — design
 
-> **Status:** P2 (service accounts + OAuth2 clients + management routes) SHIPPED; P3–P5 not yet implemented · **Date:** 2026-08-14 · **Reference:** [sqlrest](https://github.com/inrgihc/sqlrest) v1.9.0 (domain model + UX only; no code reuse — sqlrest is Java/Spring, egret is Rust)
+> **Status:** P2 (service accounts + OAuth2 clients + management routes) and P3 (endpoint drafts, validate/publish/rollback/disable, audit) SHIPPED; **no endpoint is callable yet** — the serving surface `/data-api/v1` is P4, the frontend P5 · **Date:** 2026-08-14 · **Reference:** [sqlrest](https://github.com/inrgihc/sqlrest) v1.9.0 (domain model + UX only; no code reuse — sqlrest is Java/Spring, egret is Rust)
 
 ## 1. Problem
 
@@ -197,11 +197,10 @@ The four jsonb config columns, and the shape frozen into `endpoint_versions.snap
 // location: query | body        (never path — the path is free-form, §5.2)
 // allowed:  required for enum; the only safe form for an identifier (§3)
 
-// output — response shaping
+// output — response shaping. These two fields are the whole of it; there is
+// no per-column rename or format list.
 { "shape": "objects",            // objects | arrays
-  "naming": "as_is",             // as_is | camel | snake
-  "columns": [ { "source": "total_revenue", "name": "revenue",
-                 "format": "number:2" } ] }
+  "naming": "as_is" }            // as_is | camel | snake
 
 // cache
 { "enabled": true, "ttl_seconds": 60, "scope": "per_principal" }
@@ -210,8 +209,12 @@ The four jsonb config columns, and the shape frozen into `endpoint_versions.snap
 { "max_rows": 10000, "timeout_seconds": 30 }
 
 // rate_limit
-{ "per_client_qps": 5, "burst": 10, "per_endpoint_qps": 50 }
+{ "per_key_qps": 5, "burst": 10, "per_endpoint_qps": 50 }
 ```
+
+**A misspelled key on the request body is a 400, not a silently dropped value.** The endpoint create (`POST`) and update (`PATCH`) bodies carry `#[serde(deny_unknown_fields)]`, and so do the nested config objects `params`, `output`, `cache`, `limits` and `rate_limit`. Both layers are needed: the attribute on the request body does not reach a nested struct, and nested is where the damage was — `{"rate_limit": {"per_client_qps": 5}}`, the spelling an earlier draft of this document specified, used to return 201 with `per_key_qps` defaulted to `0`. A rate limit the author believes they set and did not is worse than an error. Every field is either required or defaulted, so nothing legitimate is refused; the shapes above are the exact spellings.
+
+The two snapshot-internal types, `EndpointSnapshot` and its `columns`, deliberately do **not** carry the attribute: the server writes them for itself, so an author typo is impossible there. Note the cost this buys on the config types — they are also how the stored `jsonb` is read back, so adding a field in a later version and then rolling the binary back makes the older code refuse rows the newer one wrote, as a 500 on read rather than a silent misparse.
 
 ### 5.1.2 Success response
 
@@ -231,7 +234,7 @@ The four jsonb config columns, and the shape frozen into `endpoint_versions.snap
 
 `meta.version` is the published version that served the call — it makes a client-side bug reproducible against the exact snapshot that produced it. `meta.cached` is not cosmetic either: without it, a stale-looking result is indistinguishable from a fresh one during debugging.
 
-`dataapi.endpoints.folder_id` and `dataapi.service_accounts.user_id` / `.workspace_id` are **cross-schema FKs** into `public.folders(id)`, `public.users(id)` and `public.workspaces(id)`. This bends the schema-per-seam ownership rule, but `folders` and `users` are already shared cross-cutting tables and duplicating them would be worse. Accepted and recorded here.
+`dataapi.endpoints.folder_id` and `dataapi.service_accounts.user_id` / `.workspace_id` are **cross-schema FKs** into `analytics.folders(id)`, `public.users(id)` and `public.workspaces(id)`. This bends the schema-per-seam ownership rule, but `folders` and `users` are already shared cross-cutting tables and duplicating them would be worse. Accepted and recorded here.
 
 ### 5.2 Folders are not URL segments
 
@@ -261,7 +264,7 @@ draft ──validate──> publish(v N) ──> live
                     disable  ──> state='disabled', serving returns 404
 ```
 
-**Invariant: the serving path never reads `dataapi.endpoints`.** It reads `endpoint_versions.snapshot` via `live_version_id`, only. This is what makes "editing the SQL does not change behaviour for running clients" true structurally rather than by discipline. If serving read the draft table, versioning would be decoration.
+**Invariant: routing comes from the endpoint row, behaviour comes from the snapshot.** P4 must match an inbound request against `dataapi.endpoints (method, path)` restricted to `state = 'live'`. That pair of columns is the one carrying `UNIQUE (workspace_id, method, path)`, so it is the only place where "two endpoints claiming one URL" is impossible; the snapshot's own `method`/`path` are the record of where a version was published, not a routing key, and routing on them would lose the constraint. Everything that decides what the request **returns** — `sql`, `params`, `output`, `cache`, `limits`, `rate_limit` and the frozen `columns` — is then read from the snapshot reached through `live_version_id`, and from nowhere else. That second half is what makes "editing the SQL does not change behaviour for running clients" true structurally rather than by discipline. If serving took its content from the draft table, versioning would be decoration. §6.2 step 2 is this same flow, per request.
 
 `validate` runs before publish and rejects anything that fails:
 
@@ -270,9 +273,33 @@ draft ──validate──> publish(v N) ──> live
 - `describe_as` (§4.3) resolves the output schema, which is frozen into the snapshot.
 - If `cache.scope` is `shared`, the target connection must not be delegated (§6.3).
 
+**The one snapshot-external input P4 must re-check: `delegated`.** `EndpointSnapshot.delegated` records whether the connection delegated per-user credentials at the moment the version was published. `query.databases.delegated` is a **mutable** column: flipping it to `true` after a `cache.scope = shared` version was published turns a legitimately-published snapshot into exactly the cross-principal leak the check above exists to refuse, and nothing re-validates when it moves. **P4 must therefore compare the frozen `delegated` against the live column before serving from a shared cache, and refuse when they disagree.** Every other field in the snapshot is self-contained; this one is a witness, and a witness nobody questions is decoration.
+
+**`output`, `limits` and `rate_limit` are frozen, but they are not validated.** The list above is the whole of validation, and it covers `sql`, `params` and `cache` only — there is no rule for those three fields anywhere: not before the publish lock, not in the re-validation after it, and not at serve time. What they gain from the lock is **consistency**, not validation: they are frozen from the same read that was validated rather than from a row nobody looked at. A nonsensical `max_rows` or an unknown `output.shape` is frozen into the snapshot exactly as written, so **P4 must treat all three as untrusted author input** and bound them itself.
+
 **Allowed methods in v1 are `GET` and `POST`, both read-only.** `POST` exists only for parameter payloads too large or too structured for a query string; it carries the same single-SELECT restriction. `PUT`/`PATCH`/`DELETE` are rejected — accepting them would imply a write semantics v1 does not have.
 
-Publish and rollback will be emitted as `egret-audit` events — no extra table. **Client issue and client revocation are P3 too, and are not emitted today**: the P2 management routes exist and mint credentials, but `DataApiState` carries no audit sink, so issuing or revoking a client currently leaves no audit record. That is a stated gap, not an oversight to be read past — until P3 wires the sink, the only trace of a credential's life is the `dataapi.clients` row itself (`created_by`, `created_at`, `revoked_at`, `last_used_at`).
+**Seven mutations are emitted as `egret-audit` events** — no extra table. `DataApiState` carries the same `AuditSink` every other seam receives, so they land in the one `audit_log` an operator already queries rather than in a Data-API-local trail:
+
+| Route | `action` | `resource_type` | `detail` |
+|---|---|---|---|
+| `POST …/endpoints/{id}/publish` | `data_api_endpoint:publish` | `data_api_endpoint` | `version`, `version_id`, `note` |
+| `POST …/endpoints/{id}/rollback` | `data_api_endpoint:rollback` | `data_api_endpoint` | `version`, `version_id` — the version made LIVE, not the `VersionRef` the caller typed |
+| `POST …/endpoints/{id}/disable` | `data_api_endpoint:disable` | `data_api_endpoint` | `state` |
+| `POST …/endpoints/{id}/enable` | `data_api_endpoint:enable` | `data_api_endpoint` | `state`, `live_version_id` |
+| `DELETE …/endpoints/{id}` | `data_api_endpoint:delete` | `data_api_endpoint` | `name`, `path`, `method`, `database_id` |
+| `POST …/service-accounts/{id}/clients` | `data_api_client:issue` | `data_api_client` | `client_id`, `service_account_id`, `name`, `expires_at` |
+| `DELETE …/clients/{id}` | `data_api_client:revoke` | `data_api_client` | — |
+
+All seven go through `egret_audit::mutation_for`, so the workspace, the acting principal and any impersonator are stamped by construction. `resource_id` is the endpoint or client uuid.
+
+**Why `delete` carries columns and `revoke` does not.** Every audited route but one leaves its subject behind for an auditor to join to: `revoke` is a soft `UPDATE revoked_at`, so the `dataapi.clients` row keeps its `client_id`, name and account; `disable` keeps the endpoint row and its version pointer. `DELETE …/endpoints/{id}` is a hard `DELETE` and `dataapi.endpoint_versions` cascades with it, so its event is the **only surviving record that the endpoint existed** — a bare uuid there would resolve to nothing and say that something was deleted without ever saying which URL stopped being served. The columns come from the `DELETE`'s own `RETURNING`, so there is no second query and nothing to race.
+
+**A `client_secret` is never in the detail, and that is a rule rather than an omission.** The issue event records `client_id` and the account — which credential was minted, the question an auditor actually asks — and not the secret, which answers none of it. `audit_log` is append-only and read by more people, for longer, than the one-shot issue response ever reaches: a secret written there outlives every rotation, every revocation and the `dataapi.clients` row itself, and is the one credential lifetime nothing in the product can shorten. `crates/egret-dataapi/tests/audit.rs` asserts both that no `client_secret` key is present **and** that the secret's own bytes appear nowhere in the detail, since a renamed field would walk past a key-only check; the second half is applied to every event of every test in that file, so it is a crate-wide guard and not one assertion on one handler.
+
+**The table above is the whole audited set, and the rest of the Data API management surface is NOT audited yet.** Stated positively so it cannot be read as a list with one footnote: the four mutating routes that emit nothing today are `POST …/service-accounts` (create), `DELETE …/service-accounts/{id}` (delete), `POST …/endpoints` (create draft) and `PATCH …/endpoints/{id}` (edit draft). The most significant of those is the service-account delete: it hard-deletes a machine principal along with its `access_grants` and every client it owns, and leaves no audit record of having done so. Closing these is not scheduled; it belongs with P5's management UI, where the surface stops changing shape.
+
+**One further honest bound.** `AuditSink::emit` is a non-blocking `try_send` that drops the event (with a warning) on a full channel, so an audit record is best-effort evidence and never a precondition of the mutation it describes.
 
 **Operational caveat that must surface in the UI:** publishing an endpoint does **not** grant data access. Because queries run as the service account under Ranger enforcement, an admin must also grant that service account in Ranger. An endpoint published without that step fails with an engine permission error, which must be mapped to a message saying so rather than leaking the raw engine error.
 
@@ -346,7 +373,7 @@ The cache config therefore carries a `scope`:
 - `per_principal` (default) — the cache key includes `service_account_id`.
 - `shared` — permitted **only when the connection is not delegated**. Checked at validate time, so a misconfiguration cannot be published in the first place.
 
-Placing this check at validate time rather than at runtime means the unsafe configuration never reaches production.
+Placing this check at validate time rather than at runtime means the unsafe **shape** can never enter `endpoint_versions`. That is precisely what publish-time validation guarantees, and it is not the whole problem: `query.databases.delegated` is mutable, so a connection can be flipped to delegated *after* a `shared` version was published, and no re-validation runs when it is. The residual is closed on the serving side, by the frozen witness §5.3 describes — **P4 compares `EndpointSnapshot.delegated` against the live column before serving from a shared cache and refuses when they disagree.**
 
 ### 6.4 Rate limiting
 
@@ -382,12 +409,14 @@ One stable, machine-readable envelope:
 
 **Exceeding the row cap is an error, not a silent truncation.** Returning 200 with truncated data is the worst available failure mode for a data API: the client believes it has every row and produces wrong numbers with no signal. `400 row_limit_exceeded`, stating the cap.
 
+**The cap it states is unvalidated author input.** `limits`, `rate_limit` and `output` are frozen into the snapshot with no validation rule anywhere (§5.3), so the serving path must sanity-check `limits.max_rows` and `limits.timeout_seconds` before acting on them rather than assume a published value is sensible. The same applies to `rate_limit` before §6.4's bucket is sized from it, and to `output.shape` / `output.naming` before §5.1.2's response is shaped by them.
+
 ## 8. Observability
 
 - `dataapi.access_log` records every call. It is the fastest-growing table in the system: partition monthly plus a retention job, reusing the existing gc-worker pattern from catalog CE6 rather than writing a new one.
 - Management UI statistics (call count, error rate, p50/p95, cache hit rate per endpoint) are computed from `access_log` — the equivalent of sqlrest's `HourCount` / `DateCount` / `NameCount`.
 - `request_id` is propagated to the engine and stored alongside `engine_query_id`, so a slow API call traces back to the exact query on Trino/StarRocks.
-- Publish, rollback, client issue and client revocation are to be `egret-audit` events. All four are **P3** — none is emitted as of P2 (§5.3).
+- Publish, rollback, disable, enable, endpoint deletion, client issue and client revocation ARE `egret-audit` events as of P3 — see §5.3 for the exact `action`/`resource_type`/`detail` of each, for why no `client_secret` is ever in a detail, for why the endpoint delete is the one event that must carry columns, and for the four mutating routes that are still not audited.
 
 ## 9. Testing
 

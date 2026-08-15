@@ -47,11 +47,13 @@ Spec §6.2–6.4, §7, §8.
 
 - `serving_router()` under `/data-api/v1`, no cookie, no CSRF.
 - The ten-step request chain, including 404-not-403 for a cross-workspace key.
-- Principal-scoped response cache; `shared` rejected at validate time on delegated connections.
+- Principal-scoped response cache. `shared` is rejected at validate time on a delegated connection — but that check alone is NOT sufficient: `query.databases.delegated` is mutable, so a snapshot published as `shared` against a non-delegated database becomes a cross-principal leak the moment someone flips that database to delegated. `EndpointSnapshot.delegated` freezes the value seen at publish; **P4 must compare it against the live column and refuse to serve a shared cache when they disagree.**
 - `TokenBucket` behind `RateLimitStore`, `check_at(key, now)` with an injected clock.
 - Error envelope and code table; serving-path timeout; `dataapi.access_log` with monthly partitioning and a gc worker.
 
 Depends on P1, P2, P3.
+
+**Read this before writing a single route:** the stored `path` is canonical — exactly one optional leading slash, no trailing slash, and every segment matching `[A-Za-z0-9._~-]+`. `egret_dataapi::endpoints::normalize_path` is the one function that decides this, and **P4 must call it on the INBOUND path too**. axum percent-decodes a `{*path}` wildcard capture, so an inbound path arrives decoded while the stored one was never encoded — a `WHERE path = $1` written without normalising will miss, and the endpoint becomes permanently unreachable. An inbound path that fails the rule cannot match any stored row, so it is a 404, not a 400.
 
 **The risky part to get right:** two things.
 

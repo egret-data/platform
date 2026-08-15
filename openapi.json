@@ -14319,6 +14319,1070 @@
         }
       }
     },
+    "/api/ws/{workspace}/data-api/endpoints": {
+      "get": {
+        "tags": [
+          "data-api"
+        ],
+        "operationId": "list_endpoints",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Endpoint drafts in the workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DataApiEndpointDto"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing data_api_endpoint:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "data-api"
+        ],
+        "operationId": "create_endpoint",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateEndpointInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Draft created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataApiEndpointDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Empty name or path, or an unsupported method",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing data_api_endpoint:manage permission — :read does not imply authoring",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such database in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Another endpoint already serves that method and path",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/data-api/endpoints/{id}": {
+      "get": {
+        "tags": [
+          "data-api"
+        ],
+        "operationId": "get_endpoint",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Endpoint id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The endpoint draft",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataApiEndpointDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing data_api_endpoint:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such endpoint in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "data-api"
+        ],
+        "operationId": "delete_endpoint",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Endpoint id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Endpoint and its published versions deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ack"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing data_api_endpoint:manage permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such endpoint in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "data-api"
+        ],
+        "operationId": "update_endpoint",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Endpoint id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateEndpointInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Draft updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataApiEndpointDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Empty name or path, or an unsupported method",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing data_api_endpoint:manage permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such endpoint, or no such database, in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Another endpoint already serves that method and path",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/data-api/endpoints/{id}/disable": {
+      "post": {
+        "tags": [
+          "data-api"
+        ],
+        "operationId": "disable_endpoint",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Endpoint id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Stopped serving. The live version pointer is kept, so re-enabling needs no re-publish.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataApiEndpointDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing data_api_endpoint:manage permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such endpoint in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/data-api/endpoints/{id}/enable": {
+      "post": {
+        "tags": [
+          "data-api"
+        ],
+        "summary": "The other half of `disable`, and the reason `disable` keeps\n`live_version_id`: without this route that promise is unfalsifiable, and an\nendpoint taken out of service could only come back by publishing a NEW\nversion — a fresh describe, a new version number, and a fresh chance for the\ndefinition to have drifted in the meantime.",
+        "operationId": "enable_endpoint",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Endpoint id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Serving again, from the same version that was live before",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataApiEndpointDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing data_api_endpoint:manage permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such endpoint in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The endpoint has never been published, so there is nothing to serve",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/data-api/endpoints/{id}/publish": {
+      "post": {
+        "tags": [
+          "data-api"
+        ],
+        "operationId": "publish_endpoint",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Endpoint id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PublishEndpointInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "A new immutable version was frozen and is now live",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataApiPublishedDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The definition does not validate",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing data_api_endpoint:manage permission, or the engine's policy denies a table",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such endpoint in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The draft was edited while it was being published",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/data-api/endpoints/{id}/rollback": {
+      "post": {
+        "tags": [
+          "data-api"
+        ],
+        "operationId": "rollback_endpoint",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Endpoint id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RollbackEndpointInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The named version is live again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataApiPublishedDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Name exactly one of `version` or `version_id`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing data_api_endpoint:manage permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such endpoint here, or no such version OF THIS ENDPOINT",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/data-api/endpoints/{id}/validate": {
+      "post": {
+        "tags": [
+          "data-api"
+        ],
+        "operationId": "validate_endpoint",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Endpoint id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The definition is publishable; the resolved output schema is returned",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataApiValidationDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Not a single SELECT, a parameter mismatch, an enum without an allowed list, a shared cache on a delegated connection, or SQL the engine rejects",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing data_api_endpoint:manage permission, or the engine's policy denies a table the query names",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such endpoint in this workspace, or the query names a relation that does not exist",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/data-api/endpoints/{id}/versions": {
+      "get": {
+        "tags": [
+          "data-api"
+        ],
+        "operationId": "list_endpoint_versions",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Endpoint id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Published versions, newest first, each with its frozen snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DataApiEndpointVersionDto"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing data_api_endpoint:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such endpoint in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/data-api/service-accounts": {
       "get": {
         "tags": [
@@ -24161,6 +25225,31 @@
           }
         }
       },
+      "CacheScope": {
+        "type": "string",
+        "enum": [
+          "per_principal",
+          "shared"
+        ]
+      },
+      "CacheSpec": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "ttl_seconds": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "scope": {
+            "$ref": "#/components/schemas/CacheScope",
+            "description": "`Shared` is refused at validate time on a delegated connection: Ranger\nfilters per principal, so a shared cache would leak across identities."
+          }
+        },
+        "additionalProperties": false
+      },
       "CardInput": {
         "type": "object",
         "description": "Card as supplied by the client when saving a layout.",
@@ -24543,6 +25632,22 @@
           }
         }
       },
+      "ColumnSpec": {
+        "type": "object",
+        "description": "The frozen form of a `ColumnMeta`. Deliberately its own type rather than\nre-using `egret_core::ColumnMeta`: this one is persisted inside a published\nsnapshot, so it must stay stable even if the engine-facing type gains or\nrenames a field.",
+        "required": [
+          "name",
+          "ty"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "ty": {
+            "type": "string"
+          }
+        }
+      },
       "ConfigFile": {
         "type": "object",
         "required": [
@@ -24793,6 +25898,112 @@
             "$ref": "#/components/schemas/CreateSource"
           }
         }
+      },
+      "CreateEndpointInput": {
+        "type": "object",
+        "description": "The `POST` body.\n\nThe spec fields are `Option<T>` rather than `#[serde(default)] T` because\n`CacheSpec`/`LimitsSpec`/`RateLimitSpec` deliberately have no `Default` impl —\n`OutputSpec`'s hand-written one exists precisely because a derive would have\ndiverged from serde's defaults. An absent field is stored as `'{}'::jsonb` and\nread back through the same serde defaults, so there is exactly one definition\nof \"the default\" and no Rust-side copy of it to drift.\n`deny_unknown_fields`: a misspelled TOP-LEVEL key is a 400 naming the field,\nnot a silently discarded value. Every field here is either required or\n`#[serde(default)]`, so nothing legitimate is refused.\n\nThis attribute covers only this struct's own keys — it does not reach a\nnested one. The nested config types carry their own; see the note above\n`ParamSpec` in `egret-dataapi-api`, which is where the reported case\n(`{\"rate_limit\": {\"per_client_qps\": 5}}` returning 201 with the limit\ndefaulted to `0`) is actually refused. Both layers are needed.",
+        "required": [
+          "name",
+          "path",
+          "database_id",
+          "sql"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string",
+            "description": "Free-form and user-typed. **Total-reject, not normalised**: a leading\nslash is optional and one trailing slash is absorbed, but anything else\nout of shape — an empty segment, a `.`/`..` segment, percent-encoding, a\nquery string, a fragment, whitespace, a character outside\n`[A-Za-z0-9._~-]`, or a value over [`MAX_PATH_LEN`] bytes — is a 400\nnaming the reason. Nothing is silently rewritten. See [`normalize_path`]."
+          },
+          "database_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The connection this endpoint queries. Validated against the CALLER's\nworkspace by the route before it is stored — it arrives from the request\nbody, so nothing else would stop it naming another workspace's database."
+          },
+          "sql": {
+            "type": "string"
+          },
+          "method": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "description": {
+            "type": "string"
+          },
+          "folder_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "params": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/ParamSpec"
+            }
+          },
+          "output": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/OutputSpec"
+              }
+            ]
+          },
+          "cache": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CacheSpec"
+              }
+            ]
+          },
+          "limits": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/LimitsSpec"
+              }
+            ]
+          },
+          "rate_limit": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RateLimitSpec"
+              }
+            ]
+          },
+          "source_kind": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source_ref": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          }
+        },
+        "additionalProperties": false
       },
       "CreateEngineBody": {
         "type": "object",
@@ -25703,6 +26914,158 @@
           }
         }
       },
+      "DataApiEndpointDto": {
+        "type": "object",
+        "description": "An endpoint draft as the management UI sees it.\n\nNamed with the `DataApi` prefix for the same reason `DataApiClientDto` is:\nutoipa keys components by Rust type name and those names are GLOBAL once\n`openapi_doc()` merges the seams, so a bare `EndpointDto` is a collision\nwaiting for the next seam that wants the word.",
+        "required": [
+          "id",
+          "name",
+          "description",
+          "path",
+          "method",
+          "database_id",
+          "sql",
+          "params",
+          "output",
+          "cache",
+          "limits",
+          "rate_limit",
+          "source_kind",
+          "state",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "folder_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "method": {
+            "type": "string"
+          },
+          "database_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "sql": {
+            "type": "string"
+          },
+          "params": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ParamSpec"
+            }
+          },
+          "output": {
+            "$ref": "#/components/schemas/OutputSpec"
+          },
+          "cache": {
+            "$ref": "#/components/schemas/CacheSpec"
+          },
+          "limits": {
+            "$ref": "#/components/schemas/LimitsSpec"
+          },
+          "rate_limit": {
+            "$ref": "#/components/schemas/RateLimitSpec"
+          },
+          "source_kind": {
+            "type": "string"
+          },
+          "source_ref": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "live_version_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The version currently served. Never written by this module — publishing\nis a separate lifecycle."
+          },
+          "state": {
+            "type": "string"
+          },
+          "created_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "DataApiEndpointVersionDto": {
+        "type": "object",
+        "description": "A published version, as the API reports it.",
+        "required": [
+          "id",
+          "version",
+          "note",
+          "is_live",
+          "created_at",
+          "snapshot"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "note": {
+            "type": "string"
+          },
+          "is_live": {
+            "type": "boolean",
+            "description": "True for the version `endpoints.live_version_id` points at."
+          },
+          "created_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "snapshot": {
+            "$ref": "#/components/schemas/EndpointSnapshot",
+            "description": "The frozen definition. **This is the only thing P4 may read to decide what\na request returns** — see the module comment."
+          }
+        }
+      },
       "DataApiNewClientDto": {
         "type": "object",
         "description": "The issue response, and the only type in the crate carrying secret material.",
@@ -25727,6 +27090,28 @@
           "token_endpoint": {
             "type": "string",
             "description": "Where to exchange these for a token."
+          }
+        }
+      },
+      "DataApiPublishedDto": {
+        "type": "object",
+        "description": "What `publish`/`rollback` report back about the version now being served.",
+        "required": [
+          "version_id",
+          "version",
+          "state"
+        ],
+        "properties": {
+          "version_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "state": {
+            "type": "string"
           }
         }
       },
@@ -25758,6 +27143,22 @@
           "created_at": {
             "type": "string",
             "format": "date-time"
+          }
+        }
+      },
+      "DataApiValidationDto": {
+        "type": "object",
+        "description": "What `POST /validate` answers with.",
+        "required": [
+          "columns"
+        ],
+        "properties": {
+          "columns": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ColumnSpec"
+            },
+            "description": "The output schema `describe` resolved. This is what `publish` would\nfreeze, so an author sees the contract before committing to it."
           }
         }
       },
@@ -26400,6 +27801,67 @@
           }
         }
       },
+      "EndpointSnapshot": {
+        "type": "object",
+        "description": "What a published version freezes. Self-contained on purpose: P4's serving\npath must be able to answer a request from this alone, without reading the\ndraft row.",
+        "required": [
+          "sql",
+          "method",
+          "path",
+          "database_id",
+          "params",
+          "output",
+          "cache",
+          "limits",
+          "rate_limit",
+          "delegated",
+          "columns"
+        ],
+        "properties": {
+          "sql": {
+            "type": "string"
+          },
+          "method": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "database_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "params": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ParamSpec"
+            }
+          },
+          "output": {
+            "$ref": "#/components/schemas/OutputSpec"
+          },
+          "cache": {
+            "$ref": "#/components/schemas/CacheSpec"
+          },
+          "limits": {
+            "$ref": "#/components/schemas/LimitsSpec"
+          },
+          "rate_limit": {
+            "$ref": "#/components/schemas/RateLimitSpec"
+          },
+          "delegated": {
+            "type": "boolean",
+            "description": "Whether `database_id` delegated per-user credentials to the engine at the\nmoment this version was published.\n\n**The one input to the frozen contract that lives outside the snapshot.**\n`query.databases.delegated` is a mutable column: `cache.scope = shared` is\nrefused at publish time on a delegated connection (Ranger filters rows per\nprincipal, so a shared cache serves one caller's rows to another), but a\nnon-delegated connection can be flipped to delegated afterwards, and no\nre-validation runs anywhere when it is. Freezing the value publish\nvalidated against is what lets the serving path notice.\n\n**P4 must compare this against the live `delegated` before serving from a\nshared cache, and refuse when they disagree.** Every other field here is\nself-contained; this one is a witness, and it is only useful if it is\nchecked."
+          },
+          "columns": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ColumnSpec"
+            },
+            "description": "Resolved by `describe_as` at publish time and frozen here, so the\npublished contract does not drift when the underlying table changes."
+          }
+        }
+      },
       "Engine": {
         "type": "string",
         "description": "Supported query engines.",
@@ -27029,6 +28491,22 @@
             "type": "string"
           }
         }
+      },
+      "LimitsSpec": {
+        "type": "object",
+        "properties": {
+          "max_rows": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
       },
       "ListingDto": {
         "type": "object",
@@ -27832,6 +29310,18 @@
           }
         }
       },
+      "OutputSpec": {
+        "type": "object",
+        "properties": {
+          "shape": {
+            "type": "string"
+          },
+          "naming": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
       "OwnerDto": {
         "type": "object",
         "description": "A schedule owner. The owner is a security-relevant field, not decoration:\nthe alert's query runs with this user's permissions at run time (§5.2).",
@@ -27847,6 +29337,67 @@
             "type": "string"
           }
         }
+      },
+      "ParamLocation": {
+        "type": "string",
+        "enum": [
+          "query",
+          "body"
+        ]
+      },
+      "ParamSpec": {
+        "type": "object",
+        "description": "`deny_unknown_fields` on the author-supplied config types.\n\n`#[serde(deny_unknown_fields)]` on the request-body struct does NOT reach a\nnested one, and the nested one is where the damage was: posting the\ndocumented-but-wrong `{\"rate_limit\": {\"per_client_qps\": 5}}` returned 201\nwith `per_key_qps` silently defaulted to `0`. A rate limit the author\nbelieves they set and did not is worse than an error.\n\nApplied to the five types an AUTHOR fills in — [`ParamSpec`], [`CacheSpec`],\n[`LimitsSpec`], [`RateLimitSpec`], [`OutputSpec`] — and deliberately NOT to\n[`EndpointSnapshot`] or [`ColumnSpec`], which the server writes for itself\nand where a typo is impossible.\n\n**The cost, stated because it is a real constraint on a persisted format.**\nThese types are also how a stored `jsonb` column is read back. Adding a field\nin some future version and then rolling the binary back would make the older\ncode refuse to deserialize rows the newer one wrote, as a 500 on read. That is\na loud failure rather than a silent one, and it is the standard price of\nstrict deserialization; a future field that must be readable by older code has\nto be introduced some other way.",
+        "required": [
+          "name",
+          "type",
+          "location"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "$ref": "#/components/schemas/ParamType"
+          },
+          "location": {
+            "$ref": "#/components/schemas/ParamLocation"
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "default": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "allowed": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Required when `ty` is `Enum`. The ONLY safe form for anything that\nreaches an identifier position — see spec §3."
+          },
+          "description": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ParamType": {
+        "type": "string",
+        "enum": [
+          "string",
+          "number",
+          "boolean",
+          "date",
+          "timestamp",
+          "enum"
+        ]
       },
       "PartitionDto": {
         "type": "object",
@@ -28138,6 +29689,16 @@
         "properties": {
           "protected": {
             "type": "boolean"
+          }
+        }
+      },
+      "PublishEndpointInput": {
+        "type": "object",
+        "description": "The `POST /publish` body. Every field optional, so `{}` is a valid publish.",
+        "properties": {
+          "note": {
+            "type": "string",
+            "description": "Free-form \"what changed\", stored on the version."
           }
         }
       },
@@ -28546,6 +30107,27 @@
           }
         }
       },
+      "RateLimitSpec": {
+        "type": "object",
+        "properties": {
+          "per_key_qps": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "burst": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "per_endpoint_qps": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
       "RecipientDto": {
         "type": "object",
         "description": "A delivery destination. `config` is kind-dependent — `{\"addresses\": [...]}`\nfor email, `{\"url\": \"...\", \"secret_id\": \"...\"}` for webhook — and is\nvalidated against `kind` on the way in.",
@@ -28945,6 +30527,26 @@
           },
           "source": {
             "type": "string"
+          }
+        }
+      },
+      "RollbackEndpointInput": {
+        "type": "object",
+        "description": "The `POST /rollback` body: name the version by NUMBER or by ID, not both.\n\n`version` is scoped to the endpoint by construction — version numbers are only\nunique within one endpoint's history — so that spelling cannot name another\nendpoint's version even in principle. `version_id` is a bare uuid and\ntherefore CAN, which is precisely why the store's statement carries\n`v.endpoint_id = e.id`. Both exist because a UI listing versions has their ids\nto hand while a human types a number.",
+        "properties": {
+          "version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "version_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
           }
         }
       },
@@ -30874,6 +32476,119 @@
             ]
           }
         }
+      },
+      "UpdateEndpointInput": {
+        "type": "object",
+        "description": "The `PATCH` body: every field absent means \"leave it alone\".\n\n`folder_id` and `source_ref` are nullable columns, so \"absent\" and \"set to\nnull\" are different requests and a plain `Option<Uuid>` cannot tell them\napart — an author moving an endpoint back to the root would silently get \"no\nchange\". They use [`double_option`], where absent is `None` and an explicit\n`null` is `Some(None)`.\n\n`state` and `live_version_id` are NOT here. They are the publish lifecycle,\nand a draft edit must never be able to put an endpoint live or repoint what a\nlive one serves.\n`deny_unknown_fields` for the same reason as [`CreateEndpointInput`]: on a\nPATCH the failure mode is worse, because a typo'd key looks exactly like\n\"leave it alone\" and the author sees the OLD value persist rather than a\nzeroed one.",
+        "properties": {
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "method": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "database_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "sql": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "params": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/ParamSpec"
+            }
+          },
+          "output": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/OutputSpec"
+              }
+            ]
+          },
+          "cache": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CacheSpec"
+              }
+            ]
+          },
+          "limits": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/LimitsSpec"
+              }
+            ]
+          },
+          "rate_limit": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RateLimitSpec"
+              }
+            ]
+          },
+          "source_kind": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "folder_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "source_ref": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          }
+        },
+        "additionalProperties": false
       },
       "UpdateNotebook": {
         "type": "object",

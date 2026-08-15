@@ -19,3 +19,6 @@ egret-core.workspace = true
 serde.workspace = true
 uuid.workspace = true
 utoipa.workspace = true
+# `QueryExecPort` is the seam's one async trait (the Data API reaches execution
+# through it). A proc-macro + no runtime deps, so the leaf stays light.
+async-trait.workspace = true

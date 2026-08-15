@@ -66,17 +66,35 @@ impl UserRepo {
 
     /// Insert a service account: a user row that can never log in.
     ///
+    /// Generic over the executor so a caller inside a transaction (the Data API
+    /// service-account create path, which must write this row and its
+    /// `dataapi.service_accounts` binding atomically) and a caller on the pool
+    /// use the SAME write.
+    ///
+    /// P2 could not do that and inlined an equivalent INSERT instead, which left
+    /// [`UserRepo::insert_service`] with zero production callers: two statements
+    /// free to drift, and a test suite pinning the one production had stopped
+    /// taking. Taking `E: PgExecutor` costs nothing and removes the second copy —
+    /// `&pool`, `&mut PgConnection` and `&mut *tx` all satisfy it.
+    ///
+    /// An associated function rather than a method: there is no `&self` to be had
+    /// inside someone else's transaction, and the repo holds nothing this write
+    /// needs.
+    ///
     /// `password_hash` is deliberately not a parameter — a service account
     /// authenticates via an OAuth2 client, and `users_service_has_no_password`
     /// (migration 0119) rejects a row that has one.
-    pub async fn insert_service(&self, email: &str, name: &str) -> Result<UserId> {
+    pub async fn insert_service_with<'e, E>(exec: E, email: &str, name: &str) -> Result<UserId>
+    where
+        E: sqlx::PgExecutor<'e>,
+    {
         let res = sqlx::query_scalar::<_, Uuid>(
             "INSERT INTO users (provider, email, name) \
              VALUES ('service', $1, $2) RETURNING id",
         )
         .bind(email)
         .bind(name)
-        .fetch_one(&self.db.pool)
+        .fetch_one(exec)
         .await;
         match res {
             Ok(id) => Ok(UserId(id)),
@@ -85,6 +103,20 @@ impl UserRepo {
             ),
             Err(e) => Err(db_err(e)),
         }
+    }
+
+    /// [`insert_service_with`](Self::insert_service_with) on this repo's pool.
+    ///
+    /// **Its only callers are tests, and that is now correct rather than a
+    /// smell.** Production writes this row inside a transaction (the Data API
+    /// service-account create path) and so calls `insert_service_with` directly;
+    /// the previous round's finding — "zero production callers" — was about a
+    /// second, INLINED copy of the statement, which is gone. This wrapper shares
+    /// that one statement, so a test calling it exercises the write production
+    /// takes. It stays because `egret-auth`'s and `egret-controlplane`'s suites
+    /// have no transaction to hand and should not open one to seed a fixture.
+    pub async fn insert_service(&self, email: &str, name: &str) -> Result<UserId> {
+        Self::insert_service_with(&self.db.pool, email, name).await
     }
 
     /// Human users, newest first. Service accounts (`provider = 'service'`) are

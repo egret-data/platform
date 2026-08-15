@@ -14,3 +14,9 @@ egret-core.workspace = true
 serde.workspace = true
 uuid.workspace = true
 utoipa.workspace = true
+
+[dev-dependencies]
+# Unit-test only: proves `OutputSpec::default()` cannot diverge from
+# `serde_json::from_str("{}")`. Does not touch the leaf's normal dependency
+# graph — no downstream consumer pulls this in.
+serde_json.workspace = true

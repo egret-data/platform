@@ -11,6 +11,77 @@ use super::{ConnSpec, Connector};
 use crate::execution::error::EngineError;
 use crate::execution::model::Limits;
 
+/// Refuse any submission that could be split into more than one statement.
+///
+/// # Why this is a byte test and not a SQL scan
+///
+/// StarRocks executes EVERY statement in a `COM_QUERY` payload, and it does so
+/// **regardless of the client's capability flags**. Measured on live StarRocks
+/// 4.1.3 through this connector: clearing `CLIENT_MULTI_STATEMENTS` from the
+/// handshake — and then `CLIENT_MULTI_RESULTS` as well — changed nothing.
+/// `SELECT 1 AS a; DROP TABLE db.t` still dropped the table and still returned a
+/// clean one-column result. So there is no protocol-level "single statement
+/// only" mode to ask for; the negotiation MySQL documents is advisory here.
+///
+/// Nor can the answer be to inspect the response: by the time a second result
+/// set (or OK packet) arrives, the `DROP TABLE` has already run. Detection is
+/// not prevention.
+///
+/// That leaves exactly one property that is a PROOF rather than a deny-list: a
+/// payload containing no `;` byte cannot be split on `;`. This function tests
+/// bytes. It does not lex, so it cannot disagree with the server's lexer — which
+/// is the entire failure mode it exists to remove. The Data API's SEV-0 was a
+/// scanner that believed `#` opened a comment while StarRocks accepts and
+/// IGNORES `#`, letting `#) AS _egret_ds LIMIT 0 ;` close [`Connector::describe`]'s
+/// own wrapper and promote the `;` to a top-level separator. Any future
+/// scanner-vs-lexer gap would be just as catastrophic; this check is immune to
+/// all of them because it makes no claim about what the bytes MEAN.
+///
+/// # What it costs
+///
+/// A `;` anywhere but a trailing position is refused **even when it is genuinely
+/// inert** — inside a string literal (`WHERE label = 'a;b'`) or a comment. That
+/// is a real false rejection, taken deliberately: deciding that a given `;` is
+/// inert requires exactly the lexer agreement this function refuses to assume.
+/// The author's workaround is `concat('a', char(59), 'b')`, and the refusal is a
+/// loud error at authoring time rather than a silent DDL at validate time.
+///
+/// Trailing separators are trimmed before the test, because a `;` at the end
+/// cannot separate anything. That does NOT make `SELECT 1;` describable: the
+/// wrapper puts it inside `SELECT * FROM ( … ) AS _egret_ds`, where StarRocks
+/// rejects it as a syntax error. That predates this function and is unchanged by
+/// it — the trim only keeps the trailing case out of THIS refusal, so the error
+/// an author sees names the real cause. Both halves are pinned in
+/// `tests/connector_starrocks.rs`.
+///
+/// # Where it is applied, and where it is NOT
+///
+/// Applied to [`StarRocksConnector::describe`], whose contract is "tell me the
+/// columns of this SELECT" — a caller that asked for introspection has already
+/// decided nothing should execute, so a batched DDL there breaks describe's own
+/// promise no matter who called it (Data API validate, dataset preview, typegen).
+///
+/// NOT applied to [`StarRocksConnector::execute`]. That is SQL Lab's deliberate
+/// arbitrary-SQL channel — `execution::job::apply_sql_limit` explicitly carries a
+/// multi-statement branch — and a caller holding `query:run` on the connection
+/// can already send `DROP TABLE` as statement one, so batching is not an
+/// escalation there. **The consequence P4 must not inherit:** a serving path that
+/// hands snapshot SQL to `execute` gets no protection from this function. What
+/// keeps that safe is that `egret-dataapi`'s validator now refuses a `;` in the
+/// RAW definition by the same byte test, so no `;` can reach a published
+/// snapshot in the first place.
+fn reject_statement_separator(sql: &str) -> Result<(), EngineError> {
+    if sql.trim_end().trim_end_matches(';').contains(';') {
+        return Err(EngineError::Engine(
+            "refusing to introspect SQL containing a statement separator `;`: StarRocks \
+             executes every statement in one submission regardless of client capability \
+             flags, so a `;` outside a trailing position cannot be sent safely"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 pub struct StarRocksConnector {
     opts: mysql_async::Opts,
     /// Set on the impersonate path (service-user login + run AS this user).
@@ -203,6 +274,10 @@ impl Connector for StarRocksConnector {
 
     async fn describe(&self, sql: &str, timeout: Duration) -> Result<Vec<ColumnMeta>, EngineError> {
         self.guard()?;
+        // Before the wrapper, not after: the attack closes the wrapper, so a check
+        // on `wrapped` would be checking a string the attacker already controls the
+        // shape of. See `reject_statement_separator` for why this is a byte test.
+        reject_statement_separator(sql)?;
         let wrapped = format!("SELECT * FROM (\n{sql}\n) AS _egret_ds LIMIT 0");
         let opts = self.opts.clone();
         let execute_as = self.execute_as.clone();
@@ -443,6 +518,36 @@ mod tests {
         // no bearer (service user / impersonate), no tls → never flagged
         let plain = base_spec();
         assert!(StarRocksConnector::new(&plain).insecure_bearer().is_none());
+    }
+
+    /// The byte test, pinned in both directions so it cannot quietly become a
+    /// no-op (accept everything) or a blanket ban (reject the ordinary trailing
+    /// `;` every SQL editor emits).
+    #[test]
+    fn statement_separator_is_refused_but_a_trailing_one_is_not() {
+        use super::reject_statement_separator as chk;
+        // The ordinary shapes must still pass, or describe breaks for everyone.
+        assert!(chk("SELECT 1 AS a").is_ok());
+        assert!(chk("SELECT 1 AS a;").is_ok());
+        assert!(chk("SELECT 1 AS a;  \n").is_ok());
+        assert!(chk("SELECT 1 AS a;;").is_ok());
+
+        // A real separator.
+        assert!(chk("SELECT 1 AS a; DROP TABLE t").is_err());
+
+        // The SEV-0 payload itself: `#` is accepted and IGNORED by StarRocks, so
+        // `#)` closes `describe`'s own wrapper and the `;` becomes top-level.
+        // Measured to drop the table before this check existed.
+        assert!(chk(
+            "SELECT 1 AS a #) AS _egret_ds LIMIT 0 ; DROP TABLE revtest.t ; SELECT * FROM (SELECT 1"
+        )
+        .is_err());
+
+        // The documented false rejections — an inert `;` in a literal or a
+        // comment is refused too, because knowing it is inert needs the lexer
+        // agreement this check exists in order not to assume.
+        assert!(chk("SELECT * FROM t WHERE label = 'a;b'").is_err());
+        assert!(chk("SELECT 1 -- a; b\nFROM t").is_err());
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # Data API — thiết kế
 
-> **Trạng thái:** P2 (service account + client OAuth2 + route quản trị) ĐÃ SHIP; P3–P5 chưa triển khai · **Ngày:** 2026-08-14 · **Tham chiếu:** [sqlrest](https://github.com/inrgihc/sqlrest) v1.9.0 (chỉ tham chiếu domain model + UX; không tái sử dụng code — sqlrest là Java/Spring, egret là Rust)
+> **Trạng thái:** P2 (service account + client OAuth2 + route quản trị) và P3 (draft endpoint, validate/publish/rollback/disable, audit) ĐÃ SHIP; **chưa endpoint nào gọi được** — bề mặt phục vụ `/data-api/v1` thuộc P4, frontend thuộc P5 · **Ngày:** 2026-08-14 · **Tham chiếu:** [sqlrest](https://github.com/inrgihc/sqlrest) v1.9.0 (chỉ tham chiếu domain model + UX; không tái sử dụng code — sqlrest là Java/Spring, egret là Rust)
 >
 > *Bản tiếng Việt tham chiếu. Bản chuẩn là [docs/en/specs/2026-08-14-data-api-design.md](../../en/specs/2026-08-14-data-api-design.md).*
 
@@ -189,11 +189,10 @@ Bốn cột cấu hình jsonb, cũng là hình dạng được đóng băng vào
 // location: query | body        (không bao giờ là path — path là tự do, §5.2)
 // allowed:  bắt buộc với enum; dạng an toàn duy nhất cho định danh (§3)
 
-// output — định hình response
+// output — định hình response. Hai trường này là TOÀN BỘ nó; không có danh
+// sách đổi tên hay định dạng theo từng cột.
 { "shape": "objects",            // objects | arrays
-  "naming": "as_is",             // as_is | camel | snake
-  "columns": [ { "source": "total_revenue", "name": "revenue",
-                 "format": "number:2" } ] }
+  "naming": "as_is" }            // as_is | camel | snake
 
 // cache
 { "enabled": true, "ttl_seconds": 60, "scope": "per_principal" }
@@ -202,8 +201,12 @@ Bốn cột cấu hình jsonb, cũng là hình dạng được đóng băng vào
 { "max_rows": 10000, "timeout_seconds": 30 }
 
 // rate_limit
-{ "per_client_qps": 5, "burst": 10, "per_endpoint_qps": 50 }
+{ "per_key_qps": 5, "burst": 10, "per_endpoint_qps": 50 }
 ```
+
+**Gõ sai một key trong request body là 400, không phải một giá trị bị âm thầm bỏ đi.** Body tạo (`POST`) và sửa (`PATCH`) endpoint mang `#[serde(deny_unknown_fields)]`, và các object cấu hình lồng bên trong — `params`, `output`, `cache`, `limits`, `rate_limit` — cũng vậy. Cần cả hai lớp: attribute trên request body **không** lan tới struct lồng bên trong, mà chính lớp lồng mới là nơi gây thiệt hại — `{"rate_limit": {"per_client_qps": 5}}`, đúng cách viết mà một bản nháp trước của tài liệu này đã đặc tả, từng trả về 201 với `per_key_qps` rơi về `0`. Một rate limit mà tác giả tin là mình đã đặt nhưng thực tế thì không còn tệ hơn một lỗi. Mọi trường đều hoặc bắt buộc hoặc có default, nên không có gì hợp lệ bị từ chối; các hình dạng ở trên là cách viết chính xác.
+
+Hai kiểu thuộc về nội bộ snapshot, `EndpointSnapshot` và `columns` của nó, cố ý **không** mang attribute này: server tự ghi chúng, nên tác giả không thể gõ sai ở đó. Lưu ý cái giá phải trả trên các kiểu cấu hình — chúng cũng chính là cách đọc lại `jsonb` đã lưu, nên nếu một phiên bản sau thêm trường rồi binary bị roll back, code cũ sẽ từ chối các row do code mới ghi, dưới dạng 500 khi đọc thay vì parse sai âm thầm.
 
 ### 5.1.2 Response thành công
 
@@ -223,7 +226,7 @@ Bốn cột cấu hình jsonb, cũng là hình dạng được đóng băng vào
 
 `meta.version` là version đã phục vụ lời gọi đó — nó giúp một bug phía client tái hiện được trên đúng snapshot đã sinh ra nó. `meta.cached` cũng không phải trang trí: thiếu nó thì khi debug không phân biệt được kết quả cũ với kết quả vừa lấy.
 
-`dataapi.endpoints.folder_id` và `dataapi.service_accounts.user_id` / `.workspace_id` là **FK xuyên schema** trỏ vào `public.folders(id)`, `public.users(id)` và `public.workspaces(id)`. Điều này hơi nghịch với nguyên tắc mỗi seam sở hữu schema riêng, nhưng `folders` và `users` vốn đã là bảng dùng chung xuyên suốt, và nhân bản chúng còn tệ hơn. Chấp nhận và ghi nhận tại đây.
+`dataapi.endpoints.folder_id` và `dataapi.service_accounts.user_id` / `.workspace_id` là **FK xuyên schema** trỏ vào `analytics.folders(id)`, `public.users(id)` và `public.workspaces(id)`. Điều này hơi nghịch với nguyên tắc mỗi seam sở hữu schema riêng, nhưng `folders` và `users` vốn đã là bảng dùng chung xuyên suốt, và nhân bản chúng còn tệ hơn. Chấp nhận và ghi nhận tại đây.
 
 ### 5.2 Folder không phải là segment của URL
 
@@ -253,7 +256,7 @@ draft ──validate──> publish(v N) ──> live
                     disable  ──> state='disabled', serving trả 404
 ```
 
-**Bất biến: serving path không bao giờ đọc `dataapi.endpoints`.** Nó chỉ đọc `endpoint_versions.snapshot` qua `live_version_id`. Đây là thứ làm cho "sửa SQL không đổi hành vi của client đang chạy" thành đúng theo cấu trúc chứ không phải theo kỷ luật. Nếu serving đọc bảng draft thì tính năng version chỉ còn là trang trí.
+**Bất biến: định tuyến lấy từ hàng endpoint, hành vi lấy từ snapshot.** P4 phải khớp request đến với `dataapi.endpoints (method, path)` giới hạn ở `state = 'live'`. Chính cặp cột đó mang `UNIQUE (workspace_id, method, path)`, nên nó là chỗ duy nhất mà "hai endpoint cùng giành một URL" là không thể xảy ra; `method`/`path` của bản thân snapshot chỉ là bản ghi nhận version đó được publish ở đâu, không phải khoá định tuyến, và định tuyến theo chúng sẽ đánh mất ràng buộc kia. Mọi thứ quyết định request **trả về** cái gì — `sql`, `params`, `output`, `cache`, `limits`, `rate_limit` và `columns` đã đóng băng — sau đó đều đọc từ snapshot tới được qua `live_version_id`, và không từ đâu khác. Chính nửa sau đó làm cho "sửa SQL không đổi hành vi của client đang chạy" thành đúng theo cấu trúc chứ không phải theo kỷ luật. Nếu serving lấy nội dung từ bảng draft thì tính năng version chỉ còn là trang trí. §6.2 bước 2 chính là luồng này, ở mức từng request.
 
 `validate` chạy trước publish và từ chối mọi thứ không đạt:
 
@@ -262,9 +265,33 @@ draft ──validate──> publish(v N) ──> live
 - `describe_as` (§4.3) phân giải được schema output, và schema đó được đóng băng vào snapshot.
 - Nếu `cache.scope` là `shared`, connection đích không được là delegated (§6.3).
 
+**Đầu vào duy nhất nằm ngoài snapshot mà P4 buộc phải kiểm lại: `delegated`.** `EndpointSnapshot.delegated` ghi lại việc connection có delegate credential theo từng user hay không tại thời điểm version đó được publish. `query.databases.delegated` là một cột **có thể đổi**: lật nó thành `true` sau khi một version `cache.scope = shared` đã publish sẽ biến một snapshot được publish hợp lệ thành đúng cái rò rỉ xuyên principal mà kiểm tra ở trên tồn tại để từ chối, và không có chỗ nào validate lại khi nó đổi. **Vì vậy P4 phải so `delegated` đã đóng băng với cột đang sống trước khi phục vụ từ một cache shared, và từ chối khi hai giá trị lệch nhau.** Mọi trường khác trong snapshot đều tự chứa; riêng trường này là một nhân chứng, mà nhân chứng không ai chất vấn thì chỉ là trang trí.
+
+**`output`, `limits` và `rate_limit` được đóng băng, nhưng KHÔNG được validate.** Danh sách trên là toàn bộ phần validate, và nó chỉ phủ `sql`, `params` và `cache` — không có luật nào cho ba trường kia ở bất cứ đâu: không trước lock publish, không trong lần validate lại sau lock, và cũng không lúc serve. Thứ chúng nhận được từ lock là **tính nhất quán**, không phải validate: chúng được đóng băng từ đúng lần đọc đã được validate, chứ không phải từ một hàng không ai nhìn tới. Một `max_rows` vô nghĩa hay một `output.shape` lạ sẽ được đóng băng vào snapshot y như đã ghi, nên **P4 phải coi cả ba là dữ liệu tác giả không tin cậy được** và tự đặt cận cho chúng.
+
 **Method cho phép ở v1 là `GET` và `POST`, cả hai đều chỉ đọc.** `POST` tồn tại chỉ để nhận payload tham số quá lớn hoặc quá có cấu trúc cho query string; nó chịu cùng ràng buộc một-câu-SELECT. `PUT`/`PATCH`/`DELETE` bị từ chối — chấp nhận chúng sẽ ngụ ý một ngữ nghĩa ghi mà v1 không có.
 
-Publish và rollback sẽ được phát ra dưới dạng sự kiện `egret-audit` — không thêm bảng. **Cấp client và thu hồi client cũng thuộc P3, và hiện chưa được phát ra**: các route quản trị P2 đã tồn tại và đã mint credential, nhưng `DataApiState` không mang audit sink nào, nên việc cấp hay thu hồi một client hiện không để lại bản ghi audit. Đây là một khoảng trống được nói rõ, không phải chi tiết để đọc lướt — cho tới khi P3 đấu sink vào, dấu vết duy nhất về vòng đời của một credential là chính dòng `dataapi.clients` (`created_by`, `created_at`, `revoked_at`, `last_used_at`).
+**Bảy mutation được phát ra dưới dạng sự kiện `egret-audit`** — không thêm bảng. `DataApiState` mang đúng cái `AuditSink` mà mọi seam khác nhận, nên chúng rơi vào cùng một `audit_log` mà người vận hành vẫn truy vấn, chứ không phải một dấu vết riêng của Data API:
+
+| Route | `action` | `resource_type` | `detail` |
+|---|---|---|---|
+| `POST …/endpoints/{id}/publish` | `data_api_endpoint:publish` | `data_api_endpoint` | `version`, `version_id`, `note` |
+| `POST …/endpoints/{id}/rollback` | `data_api_endpoint:rollback` | `data_api_endpoint` | `version`, `version_id` — là version được đưa LÊN LIVE, không phải `VersionRef` mà caller gõ |
+| `POST …/endpoints/{id}/disable` | `data_api_endpoint:disable` | `data_api_endpoint` | `state` |
+| `POST …/endpoints/{id}/enable` | `data_api_endpoint:enable` | `data_api_endpoint` | `state`, `live_version_id` |
+| `DELETE …/endpoints/{id}` | `data_api_endpoint:delete` | `data_api_endpoint` | `name`, `path`, `method`, `database_id` |
+| `POST …/service-accounts/{id}/clients` | `data_api_client:issue` | `data_api_client` | `client_id`, `service_account_id`, `name`, `expires_at` |
+| `DELETE …/clients/{id}` | `data_api_client:revoke` | `data_api_client` | — |
+
+Cả bảy đều đi qua `egret_audit::mutation_for`, nên workspace, principal thực hiện và impersonator (nếu có) được đóng dấu theo cấu trúc. `resource_id` là uuid của endpoint hoặc client.
+
+**Vì sao `delete` mang theo các cột còn `revoke` thì không.** Mọi route được audit, trừ một, đều để lại đối tượng của nó cho người audit join tới: `revoke` là `UPDATE revoked_at` mềm, nên dòng `dataapi.clients` vẫn giữ `client_id`, tên và service account; `disable` vẫn giữ dòng endpoint và con trỏ version. `DELETE …/endpoints/{id}` là `DELETE` cứng và `dataapi.endpoint_versions` cascade theo, nên sự kiện của nó là **bản ghi duy nhất còn sót lại chứng minh endpoint từng tồn tại** — một uuid trơ ở đó sẽ không phân giải được về đâu cả, và chỉ nói rằng có thứ gì đó đã bị xoá mà không bao giờ nói URL nào đã ngừng phục vụ. Các cột lấy từ chính mệnh đề `RETURNING` của `DELETE`, nên không có query thứ hai và không có gì để race.
+
+**`client_secret` không bao giờ nằm trong `detail`, và đây là một quy tắc chứ không phải một chỗ quên.** Sự kiện cấp client ghi `client_id` và service account — tức là credential nào đã được mint, đúng câu hỏi mà người audit thực sự đặt ra — chứ không ghi secret, thứ không trả lời câu hỏi nào cả. `audit_log` là append-only và được nhiều người đọc, trong thời gian dài hơn, so với response cấp-một-lần: một secret ghi vào đó sống lâu hơn mọi lần xoay vòng, mọi lần thu hồi, và lâu hơn cả chính dòng `dataapi.clients` — đó là vòng đời credential duy nhất mà sản phẩm không rút ngắn được. `crates/egret-dataapi/tests/audit.rs` khẳng định cả hai điều: không có key `client_secret`, **và** các byte của chính secret đó không xuất hiện ở bất kỳ đâu trong `detail`, vì một field bị đổi tên sẽ lọt qua phép kiểm tra chỉ theo key; nửa thứ hai được áp cho mọi sự kiện của mọi test trong file đó, nên đây là một hàng rào cấp-crate chứ không phải một assertion trên một handler.
+
+**Bảng trên là TOÀN BỘ tập được audit, và phần còn lại của bề mặt quản trị Data API thì CHƯA được audit.** Nói theo hướng khẳng định để không bị đọc thành "một danh sách kèm một chú thích": bốn route mutating hiện không phát ra gì là `POST …/service-accounts` (tạo), `DELETE …/service-accounts/{id}` (xoá), `POST …/endpoints` (tạo draft) và `PATCH …/endpoints/{id}` (sửa draft). Đáng kể nhất là xoá service account: nó xoá cứng một machine principal cùng với `access_grants` và mọi client mà nó sở hữu, và không để lại bản ghi audit nào về việc đó. Việc bịt các lỗ này chưa được lên lịch; nó thuộc về P5 cùng với UI quản trị, khi bề mặt đã thôi đổi hình.
+
+**Thêm một giới hạn cần nói thẳng.** `AuditSink::emit` là `try_send` không chặn, sẽ bỏ sự kiện (kèm cảnh báo) khi kênh đầy — nên bản ghi audit là bằng chứng nỗ-lực-tối-đa, không bao giờ là điều kiện tiên quyết của mutation mà nó mô tả.
 
 **Cảnh báo vận hành phải hiện lên UI:** publish endpoint **không** cấp quyền dữ liệu. Vì query chạy dưới danh nghĩa service account với Ranger enforcement, admin còn phải cấp quyền cho chính service account đó trong Ranger. Endpoint publish mà thiếu bước này sẽ lỗi permission từ engine, và lỗi đó phải được map thành thông báo nói rõ điều này thay vì để lộ raw engine error.
 
@@ -338,7 +365,7 @@ Vì vậy cấu hình cache mang theo một `scope`:
 - `per_principal` (mặc định) — cache key gồm `service_account_id`.
 - `shared` — **chỉ được phép khi connection không delegated**. Kiểm tại validate time, để cấu hình sai không thể publish ngay từ đầu.
 
-Đặt kiểm tra này ở validate time thay vì runtime nghĩa là cấu hình không an toàn không bao giờ tới được production.
+Đặt kiểm tra này ở validate time thay vì runtime nghĩa là **hình dạng** không an toàn không bao giờ vào được `endpoint_versions`. Đó chính xác là thứ mà validate lúc publish bảo đảm, và nó không phải toàn bộ vấn đề: `query.databases.delegated` có thể đổi, nên một connection có thể bị lật thành delegated *sau khi* một version `shared` đã publish, và không có lần validate lại nào chạy khi đó. Phần dư được bịt ở phía serving, bằng nhân chứng đã đóng băng mà §5.3 mô tả — **P4 so `EndpointSnapshot.delegated` với cột đang sống trước khi phục vụ từ một cache shared và từ chối khi hai giá trị lệch nhau.**
 
 ### 6.4 Rate limit
 
@@ -374,12 +401,14 @@ Một envelope ổn định, máy đọc được:
 
 **Vượt row cap là lỗi, không phải cắt bớt im lặng.** Trả 200 kèm dữ liệu đã bị cắt là kiểu hỏng tệ nhất có thể có với một API dữ liệu: client tin rằng mình có đủ mọi dòng và cho ra số liệu sai mà không có tín hiệu nào. `400 row_limit_exceeded`, nói rõ cap là bao nhiêu.
 
+**Nhưng cái cap được nói ra đó là dữ liệu tác giả chưa qua validate.** `limits`, `rate_limit` và `output` được đóng băng vào snapshot mà không có luật validate nào ở bất cứ đâu (§5.3), nên serving path phải tự kiểm tra tính hợp lý của `limits.max_rows` và `limits.timeout_seconds` trước khi hành động theo chúng, thay vì mặc định rằng một giá trị đã publish là hợp lý. Điều tương tự áp cho `rate_limit` trước khi bucket ở §6.4 được định cỡ theo nó, và cho `output.shape` / `output.naming` trước khi response ở §5.1.2 được định hình theo chúng.
+
 ## 8. Observability
 
 - `dataapi.access_log` ghi lại mọi lời gọi. Đây là bảng tăng nhanh nhất hệ thống: partition theo tháng cộng một job dọn theo retention, tái dùng gc-worker pattern có sẵn từ catalog CE6 thay vì viết mới.
 - Thống kê trên management UI (số lần gọi, tỉ lệ lỗi, p50/p95, cache hit rate theo endpoint) tính từ `access_log` — tương đương `HourCount` / `DateCount` / `NameCount` của sqlrest.
 - `request_id` được truyền xuống engine và lưu cạnh `engine_query_id`, để một lời gọi API chậm truy ngược về đúng query trên Trino/StarRocks.
-- Publish, rollback, cấp client và thu hồi client sẽ là sự kiện `egret-audit`. Cả bốn đều thuộc **P3** — chưa cái nào được phát ra tính đến P2 (§5.3).
+- Publish, rollback, disable, enable, xoá endpoint, cấp client và thu hồi client ĐÃ là sự kiện `egret-audit` kể từ P3 — xem §5.3 để biết `action`/`resource_type`/`detail` chính xác của từng cái, vì sao không bao giờ có `client_secret` trong `detail`, vì sao sự kiện xoá endpoint là cái duy nhất buộc phải mang theo các cột, và bốn route mutating vẫn chưa được audit.
 
 ## 9. Kiểm thử
 

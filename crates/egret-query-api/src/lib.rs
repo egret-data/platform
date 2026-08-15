@@ -7,11 +7,13 @@
 //! machinery. Also re-exports the core tabular result type so the seam's result
 //! shape is reachable via the contract crate too.
 //!
-//! Pure-serde DTOs, plus one deliberate exception: no sqlx `FromRow`/`Type`, no
-//! axum, no `QueryPort` trait (the seam's runtime surface is the concrete
-//! `Connector` data-plane) — but the crate does additionally hold the
-//! dialect-escaping primitive [`dialect::quote_string`], which is behaviour, not
-//! a DTO. It lives here on purpose: it is the single implementation of the
+//! No sqlx `FromRow`/`Type` and no axum. Pure-serde DTOs plus two behavioural
+//! exceptions, both deliberate: the dialect-escaping primitive both query
+//! consumers must share ([`dialect::quote_string`]), and [`QueryExecPort`] —
+//! the seam the Data API reaches execution through, so it never depends on
+//! `egret-query` itself.
+//!
+//! `quote_string` lives here on purpose: it is the single implementation of the
 //! SQL-literal escaping rule that every consumer (`egret-query`'s SQL Lab
 //! templating, `egret-bi`'s chart/dashboard filters, `egret-engine-mgmt`'s
 //! StarRocks `CREATE USER` DDL) must share, and this leaf contract crate is the
@@ -28,6 +30,9 @@ pub use egret_core::{ColumnMeta, TabularResult};
 
 pub mod dialect;
 pub use dialect::quote_string;
+
+pub mod port;
+pub use port::QueryExecPort;
 
 /// Supported query engines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
