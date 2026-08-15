@@ -789,14 +789,14 @@ cargo test -p egret-dataapi -p egret-dataapi-api -p egret-query -p egret-query-a
 
 ---
 
-### Task 6: `dataapi:invoke` — the missing authorization step
+### Task 6: `data_api_endpoint:invoke` — the missing authorization step
 
 **Files:**
 - Modify: `crates/egret-core/src/rbac.rs`, `crates/egret-dataapi/src/routes.rs`, `crates/egret-dataapi/src/serving/router.rs`
 - Create: `migrations/0124_dataapi_invoke_permission.sql`
 - Test: `crates/egret-dataapi/tests/serving_authz.rs` (create)
 
-**This task exists because the plan was wrong.** Spec §6.2's chain has ten steps and this plan's Tasks 1–5 implement nine of them. Step 4 — *Cedar: `dataapi:invoke` on `Object data_api_endpoint:{id}`* — had no owner, and the review of Task 3 confirmed the consequence by reading the handler:
+**This task exists because the plan was wrong.** Spec §6.2's chain has ten steps and this plan's Tasks 1–5 implement nine of them. Step 4 — *Cedar: `data_api_endpoint:invoke` on `Object data_api_endpoint:{id}`* (spec §6.2 writes this as `dataapi:invoke`; the permission key in `rbac.rs` is `data_api_endpoint:invoke`, matching its `:read`/`:manage` siblings — reconcile the spec to the code, not the other way round) — had no owner, and the review of Task 3 confirmed the consequence by reading the handler:
 
 > any valid, unexpired `data-api` token for workspace W reaches **every** live endpoint in W. A service account created for one consumer can invoke every other consumer's published endpoint in the same workspace and receive its full result set. Service-account granularity collapses to workspace granularity; the endpoint is not an access-control boundary at all.
 
@@ -907,7 +907,13 @@ In `serving/router.rs`, after the snapshot is resolved and **before** `execute_a
         .map_err(ServingError::internal)?
         .allow
     {
-        return Err(ServingError::Forbidden);
+        // NOTE: `ServingError` has no `Forbidden` variant today (it carries
+        // Unauthorized / NotFound / DataAccessDenied / RowLimitExceeded /
+        // SchemaDrift / OutputNamingCollision / Internal). Add one — and keep it
+        // distinct from `DataAccessDenied`, which means the ENGINE refused the
+        // data. This one means egret refused the CALL, and the operator's fix is
+        // a grant on the endpoint rather than a grant in Ranger.
+        return Err(ServingError::NotGranted);
     }
 ```
 
