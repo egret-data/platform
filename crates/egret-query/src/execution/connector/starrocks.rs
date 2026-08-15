@@ -433,20 +433,23 @@ async fn drain_rows<P: mysql_async::prelude::Protocol>(
 /// preserves exact precision.
 ///
 /// `F64` in particular goes over as text rather than `Value::Double` (an
-/// 8-byte binary float) on a reviewer-reported precision loss (binding
-/// `1234567.891` as `Value::Double` allegedly returns `1234567.875`, and
-/// `? = 1234567.891` evaluates false even under `CAST(? AS DOUBLE)`). Three
-/// direct measurements against a live StarRocks 4.1.3 through this exact
-/// `exec_iter` path — see
+/// 8-byte binary float) — **not because a StarRocks/driver bug was
+/// confirmed**. A reviewer originally reported that binding `1234567.891` as
+/// `Value::Double` returns `1234567.875`, with `? = 1234567.891` evaluating
+/// false even under `CAST(? AS DOUBLE)`. Three direct measurements against a
+/// live StarRocks 4.1.3 through this exact `exec_iter` path — see
 /// `bound_f64_round_trips_exactly_through_a_backend_table_filter` in
 /// `tests/connector_starrocks_params.rs`, including a genuine backend
-/// table-scan `WHERE v = ?` filter — did NOT reproduce the loss; `Value::Double`
-/// round-tripped exactly every time. `1234567.875` is precisely the `f32`
-/// rounding of `1234567.891`, which points at the reviewer's measurement tool
-/// rather than this driver. Routing through text anyway because it is
-/// zero-cost and consistent with `Decimal`: JSON cannot express NaN/Infinity,
-/// so `Param::F64` can never carry a value `{f}` (shortest round-trip
-/// `Display`) fails to round-trip.
+/// table-scan `WHERE v = ?` filter — found no loss; `Value::Double`
+/// round-tripped exactly every time. **This finding is retracted**:
+/// `1234567.891f64 as f32 as f64 == 1234567.875` exactly, so the reported
+/// value is textbook float32 rounding, not a byte-level bug in this driver or
+/// engine. The reviewer's own measurement instrument went through an f32
+/// somewhere; this connector never has. Routed through text anyway because it
+/// is zero-cost and consistent with `Decimal` — JSON cannot express
+/// NaN/Infinity, so no `Param::F64` value can fail to round-trip through
+/// `{f}` (shortest round-trip `Display`) — but this change fixes nothing
+/// demonstrated, and should not be cited as a bugfix.
 fn param_to_value(p: &Param) -> mysql_async::Value {
     use mysql_async::Value as V;
     match p {

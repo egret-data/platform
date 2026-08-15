@@ -193,6 +193,14 @@ async fn bound_query_returning_time_is_refused_not_garbled() {
         msg.to_ascii_uppercase().contains("TIME"),
         "the refusal must name the problem: {msg}"
     );
+    // Product constraint, not just an implementation detail: a parameterised
+    // endpoint author who hits this has no other path forward on StarRocks,
+    // so the error must tell them what to do, not just that it failed.
+    assert!(
+        msg.contains("CAST") && msg.contains("VARCHAR"),
+        "the refusal must tell the caller how to work around it (cast to \
+         VARCHAR), not merely that TIME is unsupported: {msg}"
+    );
 
     // Control: the text protocol must still return TIME correctly — this is
     // not a blanket TIME failure, only the binary/bound-parameter path.
