@@ -413,7 +413,27 @@ impl Connector for TrinoConnector {
             return Err(EngineError::Connect(reason.clone()));
         }
         let client = self.build_client(limits.timeout)?;
+        let req = self.prepared_request(&client, sql, params, limits);
 
+        self.run_statement(&client, req, limits, cancel).await
+    }
+}
+
+impl TrinoConnector {
+    /// Build the (unsent) POST request for a prepared-statement execution —
+    /// the `X-Trino-Prepared-Statement` header and the `EXECUTE p1 USING
+    /// <literal>, …` body. Split out of `execute_with_params` so its exact
+    /// shape can be pinned by an OFFLINE test: with `EGRET_TEST_TRINO_URL`
+    /// unset, `connector_trino_params.rs` self-skips entirely, so nothing in
+    /// CI would otherwise notice a wrong header name or a dropped
+    /// `percent_encode` call.
+    fn prepared_request(
+        &self,
+        client: &reqwest::Client,
+        sql: &str,
+        params: &[Param],
+        limits: &Limits,
+    ) -> reqwest::RequestBuilder {
         let session = format!("query_max_run_time={}s", limits.timeout.as_secs().max(1));
         let name = "p1";
         let using = params
@@ -423,15 +443,13 @@ impl Connector for TrinoConnector {
             .join(", ");
         let body = format!("EXECUTE {name} USING {using}");
         let prepared_header = format!("{name}={}", percent_encode(sql));
-        let req = self.auth(
+        self.auth(
             client
                 .post(format!("{}/v1/statement", self.base_url))
                 .header("X-Trino-Session", session)
                 .header("X-Trino-Prepared-Statement", prepared_header)
                 .body(body),
-        );
-
-        self.run_statement(&client, req, limits, cancel).await
+        )
     }
 }
 
@@ -544,6 +562,62 @@ mod tests {
         );
     }
 
+    // --- typed-variant hostile content (fix round 1, Important 2) ---
+    //
+    // `Decimal`/`Date`/`Timestamp` carry unvalidated caller text through
+    // `format!("<TYPE> {}", quote_string(...))`. Nothing upstream enforces
+    // that a `Date` actually looks like `YYYY-MM-DD` — so the property that
+    // matters is not "the content is well-formed" but "the content, however
+    // malformed, still goes through `quote_string` and stays inside ONE
+    // typed literal". These three pin the EXACT escaped output (not just
+    // "no panic"), so a future rewrite to `format!("DATE '{s}'")` — reasoning
+    // that a date can't contain a quote — fails here immediately, offline,
+    // rather than only being caught by the live containment tests in
+    // `connector_trino_params.rs`.
+
+    /// Reviewer-verified live (in the parenthesised form `"1) OR (1=1"`):
+    /// Trino rejects hostile `DECIMAL` content as `not a valid DECIMAL
+    /// literal`. That payload contains no `'`, so it happens to render
+    /// identically whether or not `quote_string` doubles quotes — it cannot
+    /// tell escaping-correct from escaping-broken apart. This variant adds
+    /// an embedded quote (mirroring the `Date`/`Timestamp` payloads below)
+    /// specifically so the mutation in `connector_trino_params.rs`'s live
+    /// twin of this test is meaningful: measured to fail differently
+    /// (`TYPE_MISMATCH: Logical expression term must evaluate to a
+    /// boolean`) once quote-doubling is removed.
+    #[test]
+    fn decimal_hostile_content_still_goes_through_quote_string() {
+        assert_eq!(
+            render_literal(&Param::Decimal("1' OR '1'='1".into())),
+            "DECIMAL '1'' OR ''1''=''1'"
+        );
+    }
+
+    #[test]
+    fn date_hostile_content_still_goes_through_quote_string() {
+        assert_eq!(
+            render_literal(&Param::Date("2020-01-01' OR '1'='1".into())),
+            "DATE '2020-01-01'' OR ''1''=''1'"
+        );
+    }
+
+    /// The exact shape of the attack the reviewer constructed: a naive
+    /// `format!("TIMESTAMP '{s}'")` would let this ONE param expand into
+    /// THREE `USING` items (a timestamp literal, a bare `current_user`
+    /// expression, and a second timestamp literal), evaluating
+    /// `current_user` and shifting every subsequent bind position. Routed
+    /// through `quote_string`, the embedded quotes are doubled and the whole
+    /// string stays inside a single `TIMESTAMP '…'` token.
+    #[test]
+    fn timestamp_hostile_content_still_goes_through_quote_string() {
+        assert_eq!(
+            render_literal(&Param::Timestamp(
+                "2020-01-01 00:00:00', current_user, TIMESTAMP '2020-01-01 00:00:00".into()
+            )),
+            "TIMESTAMP '2020-01-01 00:00:00'', current_user, TIMESTAMP ''2020-01-01 00:00:00'"
+        );
+    }
+
     // --- percent_encode (Step 2 plumbing) ---
 
     #[test]
@@ -564,6 +638,88 @@ mod tests {
         // "日" is 3 UTF-8 bytes (E6 97 A5); each must become its own %XX, not
         // one escape per `char`.
         assert_eq!(percent_encode("日"), "%E6%97%A5");
+    }
+
+    /// The realistic shape of a Data API template: multi-line SQL with `=`
+    /// and `,` in it. `=` and `,` matter specifically — Trino's own header
+    /// value is `name=sql`, and a literal (unencoded) `=` or `,` reaching
+    /// that header would be ambiguous with the name/value separator or a
+    /// future multi-statement extension of it. CR/LF must never survive
+    /// either: a bare newline in a header value is a request-splitting
+    /// vector, and `reqwest::HeaderValue` refuses to construct one — so if
+    /// this encoder ever regressed to passing raw control bytes through,
+    /// `.build()` on the actual request would panic/error rather than
+    /// silently mis-behave, but this test catches it at the string level
+    /// first.
+    #[test]
+    fn percent_encode_handles_a_multiline_statement_with_cr_lf_and_punctuation() {
+        let sql = "SELECT ?\r\nFROM t\nWHERE x = ?,\ty";
+        let enc = percent_encode(sql);
+        assert_eq!(
+            enc,
+            "SELECT%20%3F%0D%0AFROM%20t%0AWHERE%20x%20%3D%20%3F%2C%09y"
+        );
+        assert!(
+            !enc.contains(['\r', '\n', '=', ',']),
+            "no raw control byte or header-structural character may survive: {enc:?}"
+        );
+    }
+
+    // --- offline request shape (fix round 1, Minor 2) ---
+    //
+    // With `EGRET_TEST_TRINO_URL` unset, every test in
+    // `connector_trino_params.rs` self-skips — so nothing in a normal CI run
+    // exercises `execute_with_params`'s actual header/body construction. This
+    // test needs no network call: `prepared_request(..).build()` materializes
+    // the `reqwest::Request` without sending it, the same pattern
+    // `bearer_path_sends_authorization_and_xtrino_user` already uses below.
+    #[test]
+    fn execute_with_params_emits_the_prepared_statement_header_and_execute_using_body() {
+        let c = TrinoConnector::new(&ConnSpec {
+            engine: Engine::Trino,
+            host: "h".into(),
+            port: 8080,
+            options: ConnOptions::default(),
+            secret: None,
+            session_user: Some("alice".into()),
+            bearer_token: None,
+        });
+        let client = reqwest::Client::new();
+        let limits = Limits {
+            max_rows: 100,
+            timeout: std::time::Duration::from_secs(30),
+        };
+        let req = c
+            .prepared_request(
+                &client,
+                "SELECT ? AS s, ? AS n",
+                &[Param::Str("hi".into()), Param::I64(42)],
+                &limits,
+            )
+            .build()
+            .unwrap();
+
+        assert_eq!(req.method(), reqwest::Method::POST);
+        assert_eq!(req.url().as_str(), "http://h:8080/v1/statement");
+
+        let h = req.headers();
+        assert_eq!(
+            h.get("X-Trino-Prepared-Statement").unwrap(),
+            "p1=SELECT%20%3F%20AS%20s%2C%20%3F%20AS%20n",
+            "the header name must be `p1`, matching the `EXECUTE p1 …` body below, \
+             and the SQL must be percent-encoded, not raw"
+        );
+
+        let body_bytes = req
+            .body()
+            .expect("execute_with_params always sets a body")
+            .as_bytes()
+            .expect("body was built from a String, so it's fully buffered");
+        assert_eq!(
+            std::str::from_utf8(body_bytes).unwrap(),
+            "EXECUTE p1 USING 'hi', 42",
+            "the USING list must be rendered literals, comma-joined, matching render_literal"
+        );
     }
 
     #[test]
