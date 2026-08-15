@@ -25,6 +25,10 @@
 //! `lifecycle`'s module comment carries the full contract, including why routing
 //! is the one thing that still comes from the endpoint row.
 //!
+//! P4 Task 3 adds [`serving::serving_router`]: `/data-api/v1/{ws}/{*path}` →
+//! the live snapshot → rows. It is mounted as its OWN group with no CSRF layer
+//! (nothing is ambient on a bearer-authenticated surface) and outside `/api`.
+//!
 //! P4 Task 2 opens the [`serving`] surface with its authentication half:
 //! [`serving::verify_serving_token`] turns a bearer token into a principal and a
 //! workspace. It asserts `aud` and `exp` ITSELF, because
@@ -51,4 +55,7 @@ pub use routes::{
     DataApiError, DataApiNewClientDto, DataApiServiceAccountDto, DataApiState, IssueClientInput,
     PublishEndpointInput, RollbackEndpointInput,
 };
-pub use serving::{verify_serving_token, ServingError, ServingPrincipal, DATA_API_AUDIENCE};
+pub use serving::{
+    serving_openapi, serving_router, verify_serving_token, ServingError, ServingMeta,
+    ServingPrincipal, ServingResponse, DATA_API_AUDIENCE,
+};

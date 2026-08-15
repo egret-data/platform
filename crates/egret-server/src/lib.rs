@@ -80,6 +80,22 @@ impl AppState {
             dataapi: None,
         }
     }
+
+    /// Attach the Data API seam to an otherwise-empty test state.
+    ///
+    /// Exists because no test had ever built the COMPOSED router with this group
+    /// merged: [`Self::without_db`] leaves `dataapi: None`, so
+    /// `build_router(without_db())` mounts nothing of it. That gap matters for
+    /// one property in particular — whether the serving group inherited the CSRF
+    /// layer. A test that calls `serving_router()` directly never mounts the
+    /// layer and therefore passes whether or not the group carries it, which is
+    /// exactly how `render_router` shipped a POST that was rejected in
+    /// production and green in CI (`egret-automation/src/routes.rs:115-126`).
+    /// Only the composed router can answer that question.
+    pub fn with_dataapi(mut self, dataapi: egret_dataapi::DataApiState) -> Self {
+        self.dataapi = Some(dataapi);
+        self
+    }
 }
 
 /// The aggregated OpenAPI 3.1 document for the whole API (E0·P4).
@@ -134,6 +150,11 @@ pub fn openapi_doc() -> utoipa::openapi::OpenApi {
     doc.merge(egret_engine_mgmt::openapi());
     doc.merge(egret_machine_idp::openapi());
     doc.merge(egret_dataapi::openapi());
+    // A SECOND document from the same crate, kept as its own line rather than
+    // folded into the one above: the management surface is a browser-session API
+    // under `/api/ws/{workspace}/…` and the serving surface is a machine API
+    // under `/data-api/v1/{ws}/…`, with different auth and a different audience.
+    doc.merge(egret_dataapi::serving_openapi());
     doc
 }
 
@@ -326,13 +347,28 @@ pub fn build_router(state: AppState) -> Router {
     if let Some(dataapi) = state.dataapi.clone() {
         // Data API management (P2): workspace-scoped, session-authenticated,
         // browser-facing — so it sits inside the CSRF layer like every other
-        // `/api/ws/…` group. The SERVING surface (P4) will be a separate,
-        // token-authenticated router with no CSRF, like the catalog's.
+        // `/api/ws/…` group.
         let group = Router::new()
             .nest("/api", egret_dataapi::management_router())
             .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))
-            .with_state(dataapi);
+            .with_state(dataapi.clone());
         router = router.merge(group);
+
+        // The serving surface (P4), WITHOUT the CSRF layer and outside `/api` —
+        // the same reasoning `render_router` above carries. Double-submit CSRF
+        // defends requests a browser authenticates AMBIENTLY; nothing is ambient
+        // here, because the caller sets an `Authorization` header itself and a
+        // cross-site page cannot. Requiring a CSRF cookie an external client can
+        // never have would simply make every POST endpoint impossible — which is
+        // exactly what shipping the renderer inside the layered group did, and
+        // no router-level test could see it because the integration tests called
+        // that router directly. `tests/dataapi_serving_mount.rs` is the test that
+        // can: it goes through THIS composed router, which is also why
+        // `AppState::with_dataapi` exists.
+        let serving = Router::new()
+            .nest("/data-api/v1", egret_dataapi::serving_router())
+            .with_state(dataapi);
+        router = router.merge(serving);
     }
 
     if let Some(catalog_engine) = state.catalog_engine.clone() {

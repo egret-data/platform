@@ -24300,6 +24300,118 @@
         }
       }
     },
+    "/data-api/v1/{ws}/{path}": {
+      "get": {
+        "tags": [
+          "data-api-serving"
+        ],
+        "operationId": "serve_get",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace slug; must match the token's `ws` claim",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "path",
+            "description": "The endpoint's published path, e.g. `reports/daily`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Rows from the published snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServingResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Bearer token missing, expired, or not for this audience"
+          },
+          "403": {
+            "description": "The engine denied the data to this service account"
+          },
+          "404": {
+            "description": "No such live endpoint in this workspace"
+          },
+          "500": {
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "data-api-serving"
+        ],
+        "operationId": "serve_post",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace slug; must match the token's `ws` claim",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "path",
+            "description": "The endpoint's published path, e.g. `reports/daily`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Rows from the published snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServingResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Bearer token missing, expired, or not for this audience"
+          },
+          "403": {
+            "description": "The engine denied the data to this service account"
+          },
+          "404": {
+            "description": "No such live endpoint in this workspace"
+          },
+          "500": {
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/oauth/token": {
       "post": {
         "tags": [
@@ -31255,6 +31367,60 @@
           }
         }
       },
+      "ServingMeta": {
+        "type": "object",
+        "required": [
+          "columns",
+          "row_count",
+          "version",
+          "cached",
+          "request_id"
+        ],
+        "properties": {
+          "columns": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ColumnSpec"
+            },
+            "description": "The FROZEN columns from the snapshot, not the ones this execution\nhappened to return. The published contract is what a client codes\nagainst; if the underlying table has drifted, the difference is a defect\nto surface, not something to paper over by reporting today's shape."
+          },
+          "row_count": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "cached": {
+            "type": "boolean"
+          },
+          "request_id": {
+            "type": "string"
+          }
+        }
+      },
+      "ServingResponse": {
+        "type": "object",
+        "description": "The success body (spec §5.1.2).\n\n`meta.version` is the published version that served the call, so a\nclient-side bug is reproducible against the exact snapshot that produced it.\n`meta.cached` is likewise not cosmetic: without it a stale-looking result is\nindistinguishable from a fresh one while debugging. It is hard-`false` until\nTask 4 lands the cache — a field that lies would be worse than no field.",
+        "required": [
+          "data",
+          "meta"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            },
+            "description": "Rows, shaped by the snapshot's `output.shape`: an array of objects\n(default) or an array of arrays."
+          },
+          "meta": {
+            "$ref": "#/components/schemas/ServingMeta"
+          }
+        }
+      },
       "SetAccessPolicy": {
         "type": "object",
         "properties": {
@@ -33394,6 +33560,10 @@
     {
       "name": "data-api",
       "description": "Data API service accounts and OAuth2 clients"
+    },
+    {
+      "name": "data-api-serving",
+      "description": "Published Data API endpoints, called by service accounts with a bearer token"
     }
   ]
 }
