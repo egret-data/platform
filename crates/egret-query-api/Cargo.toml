@@ -22,3 +22,10 @@ utoipa.workspace = true
 # `QueryExecPort` is the seam's one async trait (the Data API reaches execution
 # through it). A proc-macro + no runtime deps, so the leaf stays light.
 async-trait.workspace = true
+
+# Test-only. `serde_json` is NOT a runtime dependency of this leaf and must not
+# become one — it is here so the crate can assert the WIRE SPELLING of its own
+# `ConnOptions` fields, which another crate reads out of jsonb by name. See
+# `wire_names` in lib.rs.
+[dev-dependencies]
+serde_json.workspace = true

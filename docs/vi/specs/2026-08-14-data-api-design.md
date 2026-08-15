@@ -263,9 +263,15 @@ draft ──validate──> publish(v N) ──> live
 - SQL là **đúng một** statement, và statement đó là `SELECT`. Cho phép mở đầu bằng `WITH … SELECT` (CTE); mọi thứ khác — DML, DDL, `SET`, hoặc một statement thứ hai sau dấu `;` — đều bị từ chối.
 - Mọi `{{param}}` phân giải được về một tham số đã khai báo, và mọi tham số đã khai báo đều được tham chiếu.
 - `describe_as` (§4.3) phân giải được schema output, và schema đó được đóng băng vào snapshot.
-- Nếu `cache.scope` là `shared`, connection đích không được là delegated (§6.3).
+- Nếu `cache.scope` là `shared`, connection đích không được chạy query **dưới danh nghĩa caller** — tức là không `delegated` và cũng không `options.impersonate` (§6.3).
 
-**Đầu vào duy nhất nằm ngoài snapshot mà P4 buộc phải kiểm lại: `delegated`.** `EndpointSnapshot.delegated` ghi lại việc connection có delegate credential theo từng user hay không tại thời điểm version đó được publish. `query.databases.delegated` là một cột **có thể đổi**: lật nó thành `true` sau khi một version `cache.scope = shared` đã publish sẽ biến một snapshot được publish hợp lệ thành đúng cái rò rỉ xuyên principal mà kiểm tra ở trên tồn tại để từ chối, và không có chỗ nào validate lại khi nó đổi. **Vì vậy P4 phải so `delegated` đã đóng băng với cột đang sống trước khi phục vụ từ một cache shared, và từ chối khi hai giá trị lệch nhau.** Mọi trường khác trong snapshot đều tự chứa; riêng trường này là một nhân chứng, mà nhân chứng không ai chất vấn thì chỉ là trang trí.
+**Đầu vào ngoài snapshot mà P4 buộc phải kiểm lại là một CẶP: `delegated` VÀ `options.impersonate`.** `EndpointSnapshot.delegated` và `EndpointSnapshot.impersonate` ghi lại, tại thời điểm version được publish, hai thứ có thể đổi trên `query.databases` quyết định việc engine có chạy query **dưới danh nghĩa caller** hay không. Bật bất kỳ nửa nào sau khi một version `cache.scope = shared` đã publish sẽ biến một snapshot publish hợp lệ thành đúng cái rò rỉ xuyên principal mà kiểm tra ở trên tồn tại để từ chối, và không có chỗ nào validate lại khi một trong hai đổi. **Vì vậy P4 phải so CẢ HAI nửa đã đóng băng với hàng đang sống trước khi phục vụ từ một cache shared, và từ chối khi bất kỳ nửa nào lệch.** Mọi trường khác trong snapshot đều tự chứa; riêng hai trường này là một nhân chứng, mà nhân chứng không ai chất vấn thì chỉ là trang trí.
+
+**Trước đây chỉ có `delegated`, và đó là một lỗ rò thật chứ không phải một thiếu sót cho đủ.** Nhánh KHÔNG delegated của `delegation_for` vẫn truyền caller làm session user (`egret-query/src/execution/mod.rs:86`), và mỗi connector tự hành động theo `options.impersonate` — Trino gửi `X-Trino-User: <caller>` (`connector/trino.rs:43`), StarRocks chạy `EXECUTE AS <caller> WITH NO REVERT` (`connector/starrocks.rs:129`). Hai trường trong CSDL là độc lập và không được validate, nên `{"delegated": false, "options": {"impersonate": true}}` — thứ mà `create`/`update` đều nhận — là một connection per-principal hoàn toàn nhưng lại đọc ra như an toàn cho cache shared với bất kỳ chỗ nào chỉ nhìn `delegated`. Một endpoint `shared` trên connection đó đã cache các dòng đã bị Ranger lọc của principal A dưới một key KHÔNG có principal rồi phục vụ chúng cho principal B với 200 và `meta.cached: true`, trong khi nhân chứng im lặng vì `delegated` sống vẫn bằng `delegated` đóng băng. `runs_per_principal(delegated, impersonate)` giờ là cách diễn đạt duy nhất của điều kiện này, và cả kiểm tra lúc publish lẫn kiểm tra lúc serve đều đi qua nó.
+
+**Vì sao operator lại chọn `impersonate` ngay từ đầu — đo ngày 2026-08-15, và không giống vẻ ngoài của nó.** Giả thuyết hiển nhiên là service account không dùng được JWT delegation, vì `delegation_for` ánh xạ `NoRefreshToken` thành 403 còn token `client_credentials` thì không có refresh token. **Giả thuyết đó sai.** Machine-IdP đúc engine JWT cho principal `client_credentials` bình thường — đó đúng là việc của một machine IdP. Rào chắn nằm ở **transport, không phải danh tính**: `connect` từ chối đặt một engine JWT per-user lên connection không có TLS hoặc cert đã ghim (`EGRET_ENGINE_TLS_INSECURE=1` ghi đè, nhưng mất an toàn). Nên trên một connection engine **plaintext**, `delegated: true` hỏng với lỗi 500 mà nguyên nhân chỉ hiện trong log server, và lối lui tự nhiên là `impersonate: true` — đúng cấu hình đã mang lỗ rò ở trên. Triển khai có engine bật TLS thì không bị đẩy vào lối đó.
+
+*Dụng cụ đo:* quan sát trên dev stack sống — bước mint **thành công** và chốt chặn TLS mới bắn (nếu là `NoRefreshToken` thì đã là 403, nhưng ta nhận 500 kèm thông điệp TLS; không thể từ chối *gửi* một token mà đã thất bại khi *đúc*). *Chưa chứng minh:* một truy vấn JWT-delegated chạy trọn vẹn qua TLS, vì dev stack không có cert engine ký bởi CA. Lưu ý cái bẫy cho ai kiểm lại: 403 duy nhất trong ma trận là 403 của chính Trino, trả về ở cấu hình `impersonate` — chỉ đọc mã trạng thái là kết luận ngược.
 
 **`output`, `limits` và `rate_limit` được đóng băng, nhưng KHÔNG được validate.** Danh sách trên là toàn bộ phần validate, và nó chỉ phủ `sql`, `params` và `cache` — không có luật nào cho ba trường kia ở bất cứ đâu: không trước lock publish, không trong lần validate lại sau lock, và cũng không lúc serve. Thứ chúng nhận được từ lock là **tính nhất quán**, không phải validate: chúng được đóng băng từ đúng lần đọc đã được validate, chứ không phải từ một hàng không ai nhìn tới. Một `max_rows` vô nghĩa hay một `output.shape` lạ sẽ được đóng băng vào snapshot y như đã ghi, nên **P4 phải coi cả ba là dữ liệu tác giả không tin cậy được** và tự đặt cận cho chúng.
 
@@ -332,6 +338,22 @@ POST   /api/ws/{workspace}/data-api/service-accounts/{id}/clients   -> secret, �
 DELETE /api/ws/{workspace}/data-api/clients/{id}
 ```
 
+**Cấp cho một service account quyền gọi một endpoint** (P4, cùng bề mặt, cùng nhóm session + CSRF):
+
+```text
+GET    /api/ws/{workspace}/data-api/endpoints/{id}/grants
+POST   /api/ws/{workspace}/data-api/endpoints/{id}/grants   { "service_account_id": … }
+DELETE /api/ws/{workspace}/data-api/endpoints/{id}/grants/{service_account_id}
+```
+
+Cả ba đều gate trên `data_api_endpoint:manage`, **kể cả route liệt kê**: ghi một grant là thay đổi đồ thị phân quyền và mạnh hơn hẳn việc đọc một endpoint, còn liệt kê grantee là liệt kê mọi consumer của endpoint đó. Cả hai id đều được giới hạn theo workspace của caller — endpoint qua `EndpointStore` (các câu lệnh của nó tự mang sẵn predicate), service account qua `scoped_account` — và lệch bên nào cũng là 404. Thiếu một trong hai, một người giữ `:manage` ở workspace này có thể cấp account của workspace này trên endpoint của workspace kia bằng một request trông hoàn toàn bình thường.
+
+Một grant là một hàng: `access_grants (principal_type='user', principal_id=<service account>, scope_type='object', object_type='data_api_endpoint', scope_id=<endpoint id>, role_id=<data_api_invoker>, effect='allow')`. `data_api_invoker` là role built-in scope workspace (migration 0124) mang **đúng một** permission, `data_api_endpoint:invoke`. Nó phải là role riêng và phải giữ nguyên một permission: một grant scope object link TOÀN BỘ tập hành động hiệu dụng của role lên object đó, nên dùng lại `ws_viewer` (như share API của `egret-bi`) sẽ trao cho service account mọi hành động viewer trên chính endpoint mà nó chỉ được phép gọi, còn thêm một permission thứ hai vào `data_api_invoker` sẽ nới rộng mọi grant đã ghi trên mọi endpoint cùng một lúc. Nó scope workspace chứ không scope platform vì chỉ template Cedar của role workspace dùng dạng `resource in ?resource` có tính lan xuống để khớp một resource Object; một role scope platform ở đây sẽ link một policy không bao giờ khớp và grant sẽ vô hiệu trong im lặng.
+
+**Thu hồi grant có hiệu lực ngay ở request kế tiếp; thu hồi token thì không.** Grant được đọc lại mỗi request, nên `DELETE …/grants/{service_account_id}` chặn đúng cuộc gọi tiếp theo. Thu hồi CLIENT không làm được vậy — serving path verify JWT theo kiểu stateless (§6.2 bước 1), nên token đã cấp vẫn hợp lệ tới `exp` và TTL 600s ở §6.1 là cận không rút ngắn được. Chính sự bất đối xứng đó là câu trả lời vận hành cho *"cắt consumer này ngay bây giờ"*: thu hồi grant, đừng thu hồi client. Thu hồi client là nước đi đúng khi *credential* bị lộ, và nó chặn việc mint token kế tiếp; nó không chặn token đang bay.
+
+Grant gắn với ENDPOINT chứ không gắn với version, nên nó sống sót qua một lần publish lại. Gắn theo version nghe có vẻ hợp lý ("consumer đã đồng ý với hợp đồng này") và sẽ phá mọi consumer trong im lặng ngay khi tác giả publish một bản sửa.
+
 Hai permission, đều `Scope::Workspace` và đều chỉ seed cho `ws_admin` (migration 0120): `service_account:read` để xem account và client, `service_account:manage` để tạo, xoá và **cấp client**. Cấp client gate trên `:manage`, không bao giờ trên `:read` — client là credential bearer cho quyền truy cập dữ liệu của account đó, nên phát nó ra mạnh hơn hẳn việc đọc danh sách. Mọi handler đều resolve account (hoặc client) theo workspace lấy từ extractor `WsContext`, không bao giờ đọc lại path segment lần hai, và trả **404 chứ không phải 403** khi không khớp — đúng luật như §6.2 bước 3.
 
 ### 6.2 Chuỗi xử lý mỗi request
@@ -342,7 +364,8 @@ GET /data-api/v1/{ws}/{path}
  1. verify JWT qua JWKS → principal + workspace từ claims        ✗→ 401
  2. (ws, method, path) → endpoint → live_version_id → snapshot   ✗→ 404
  3. workspace của service account == {ws} trong path             ✗→ 404
- 4. Cedar: dataapi:invoke trên Object data_api_endpoint:{id}     ✗→ 403
+ 4. Cedar: data_api_endpoint:invoke trên Object                  ✗→ 403
+    data_api_endpoint:{id}
  5. rate limit (theo endpoint và theo client)                    ✗→ 429 + Retry-After
  6. cache lookup                                                 hit → trả
  7. render params → SQL an toàn theo dialect                     ✗→ 400
@@ -356,6 +379,14 @@ GET /data-api/v1/{ws}/{path}
 
 Bước 3 trả **404 chứ không phải 403** là cố ý: một token thuộc workspace khác không được phép phân biệt "không có endpoint đó" với "có, nhưng anh không được gọi". Management API áp dụng đúng luật đó cho service account và client (§6.1).
 
+**Bước 4 trả 403, và sự đảo chiều đó là cố ý.** Tới lúc bước 4 chạy, caller đã chứng minh nó giữ một credential hợp lệ, chưa hết hạn, *cho chính workspace này* — nên việc một endpoint tồn tại trong đó không còn là bí mật mà câu trả lời có thể giữ, và một 404 sẽ không mua được tính bí mật nào trong khi làm operator mất một chẩn đoán thật ("endpoint biến mất" thay vì "thiếu grant"). Luật là: 404 khi caller chưa chứng minh được gì, 403 một khi nó đã chứng minh.
+
+**Bước 4 là `data_api_endpoint:invoke`, không phải `dataapi:invoke`.** Các bản nháp trước của tài liệu này viết tên ngắn; catalog permission (`egret-core/src/rbac.rs`) đặt khoá là `data_api_endpoint:invoke`, khớp với hai anh em `:read` và `:manage`, và đó là chuỗi mà serving path kiểm tra. Permission này là `Scope::Workspace` như hai cái kia, nhưng khác chúng ở chỗ nó **được thiết kế để giữ ở scope object bởi một service account** chứ không phải giữ toàn workspace bởi con người: mỗi cặp (service account, endpoint) là một hàng `access_grants`. Migration 0124 seed nó cho `ws_admin` để catalog nhất quán, và ở đó nó vô hiệu — serving surface chỉ nhận token audience `data-api` mint cho service account, nên một session của con người không dùng được nó.
+
+**Từ chối là `403 not_granted`, một code KHÁC với `403 data_access_denied`**, vì đó là vấn đề của hai hệ thống khác nhau: `not_granted` nghĩa là egret từ chối CUỘC GỌI và cách sửa là cấp grant trên endpoint; `data_access_denied` nghĩa là engine từ chối DỮ LIỆU và cách sửa là một grant trong Ranger. Dùng chung một code sẽ đẩy operator sang nhầm hệ thống, và biến "các 403 trên endpoint này" thành một dòng không hành động được trong `access_log.error_code`.
+
+**Khi chưa có bước 4, một token là năng lực đọc trên phạm vi toàn workspace.** Ghi lại vì lỗ hổng này đã đi qua năm task trước khi được bịt: mọi token hợp lệ, chưa hết hạn của workspace W đều với tới MỌI endpoint live trong W, nên một service account tạo cho một consumer có thể gọi endpoint của mọi consumer khác và nhận về toàn bộ tập kết quả. Thứ duy nhất đứng sau đó là bộ lọc dòng của chính engine — thứ không có khi Ranger không cưỡng chế, và chỉ ở mức resource trên StarRocks.
+
 ### 6.3 Cache phải scope theo principal
 
 Bước 9 lọc dữ liệu **theo từng principal**, nên hai service account gọi cùng endpoint với cùng tham số có thể nhận về số dòng khác nhau một cách hợp lệ. Cache key thiếu principal là rò rỉ dữ liệu xuyên thẳng qua Ranger.
@@ -363,9 +394,20 @@ Bước 9 lọc dữ liệu **theo từng principal**, nên hai service account 
 Vì vậy cấu hình cache mang theo một `scope`:
 
 - `per_principal` (mặc định) — cache key gồm `service_account_id`.
-- `shared` — **chỉ được phép khi connection không delegated**. Kiểm tại validate time, để cấu hình sai không thể publish ngay từ đầu.
+- `shared` — **chỉ được phép khi connection không chạy query dưới danh nghĩa caller**: không `delegated` và cũng không `options.impersonate`. Kiểm tại validate time, để cấu hình sai không thể publish ngay từ đầu. Cả hai trường đều tính, và chỉ một trong hai cũng đủ để loại — xem §5.3.
 
-Đặt kiểm tra này ở validate time thay vì runtime nghĩa là **hình dạng** không an toàn không bao giờ vào được `endpoint_versions`. Đó chính xác là thứ mà validate lúc publish bảo đảm, và nó không phải toàn bộ vấn đề: `query.databases.delegated` có thể đổi, nên một connection có thể bị lật thành delegated *sau khi* một version `shared` đã publish, và không có lần validate lại nào chạy khi đó. Phần dư được bịt ở phía serving, bằng nhân chứng đã đóng băng mà §5.3 mô tả — **P4 so `EndpointSnapshot.delegated` với cột đang sống trước khi phục vụ từ một cache shared và từ chối khi hai giá trị lệch nhau.**
+Bản thân key là `endpoint_id ‖ version ‖ tham số đã khai báo ‖ principal`, băm với **mọi trường có tiền tố độ dài** và principal nằm CUỐI. Hai quy tắc mà bước 7 không được phá khi thay map tham số bằng bản đã render:
+
+- **Chỉ băm tham số ĐÃ KHAI BÁO.** Tham số không khai báo không thể ảnh hưởng đến response, nên cũng không được ảnh hưởng đến entry — băm cả query string cho phép một client đã xác thực tạo ra vô hạn entry trong cache dùng chung cho mọi workspace trong process.
+- **Tiền tố độ dài, không dùng ký tự phân tách.** Ký tự phân tách chỉ an toàn khi giá trị không thể chứa nó, hôm nay đúng vì `http::Uri` từ chối các byte điều khiển trong query string thô — một tính chất do một crate mà cache không hề nhắc tới nắm giữ, và nó biến mất ngay khi tham số được GIẢI MÃ. Với ký tự phân tách `0x00`, `?a=1%00b%002` băm ra y hệt `?a=1&b=2`. Cùng principal, nên không bao giờ là rò rỉ xuyên danh tính, nhưng khi tham số đi vào SQL thì đó là số dòng của bộ lọc này được phục vụ cho bộ lọc khác.
+
+Va chạm xuyên danh tính bị chặn bởi CÁCH XẾP chứ không bởi ký tự phân tách: hai chuỗi byte bằng nhau thì bằng độ dài, và principal là 16 byte cuối, nên `params_a ‖ A == params_b ‖ B` bắt buộc `A == B` bất kể tham số chứa gì.
+
+Đặt kiểm tra này ở validate time thay vì runtime nghĩa là **hình dạng** không an toàn không bao giờ vào được `endpoint_versions`. Đó chính xác là thứ mà validate lúc publish bảo đảm, và nó không phải toàn bộ vấn đề: **cả** `query.databases.delegated` **lẫn** `query.databases.options.impersonate` đều có thể đổi, nên một connection có thể bị chuyển thành per-principal *sau khi* một version `shared` đã publish, và không có lần validate lại nào chạy khi đó. Phần dư được bịt ở phía serving, bằng CẶP nhân chứng đã đóng băng mà §5.3 mô tả — **P4 so cả `EndpointSnapshot.delegated` lẫn `EndpointSnapshot.impersonate` với hàng đang sống trước khi phục vụ từ một cache shared và từ chối khi bất kỳ nửa nào lệch.**
+
+Phép so ở phía serving **không phụ thuộc `cache.enabled`**, khớp với kiểm tra lúc publish — vốn cũng từ chối scope `shared` bất kể cache đang bật hay tắt: cấu hình trông an toàn chỉ cách cấu hình không an toàn một lần sửa draft. Cái giá của lựa chọn đó, nói thẳng ra thay vì để người sau tự phát hiện — endpoint có `enabled: false` và `scope: shared` còn sót lại sẽ **503 cứng khi delegated bị lật, dù nó không cache gì và chứng minh được là không thể rò rỉ**. Đó là một false positive. Chấp nhận nó vì cách sửa của người vận hành là như nhau trong cả hai trường hợp (publish lại, hoặc đưa connection về cũ), và vì một lời từ chối họ xử lý được thì hơn một cấu hình sai nằm im đến ngày có người bật cache lên.
+
+Phép so là một lượt đọc metastore cho mọi lời gọi tới endpoint `shared`, **kể cả những lời gọi lẽ ra là cache hit** — kiểm sau khi hit nghĩa là đã phục vụ entry cũ rồi mới hỏi, và đó chính là chỗ rò. Endpoint `per_principal` trả về trước lượt đọc đó. Nếu chi phí này thành vấn đề, hãy memoise `(database_id → (delegated, impersonate))` với TTL ngắn thay vì đổi thứ tự kiểm: cửa sổ cũ của một memo là hữu hạn và được nói rõ, còn của một phép kiểm bị đổi chỗ thì không.
 
 ### 6.4 Rate limit
 
@@ -375,27 +417,52 @@ Viết `TokenBucket` trong `egret-dataapi`, nhưng **giữ nguyên hình dạng 
 
 Đặt sau một trait `RateLimitStore`. v1 in-memory theo process; khi serving surface tách thành binary nhiều replica, một implementation dùng store chung sẽ thay vào mà không đụng call site.
 
+**`RateLimitSpec.burst` chỉ định cỡ bucket theo CLIENT.** Chỉ có một trường `burst` và nó được viết cạnh `per_key_qps`; dùng lại nó cho bucket toàn endpoint là định cỡ một giới hạn dùng chung bằng con số tác giả chọn cho một client — endpoint `{per_key_qps: 1, burst: 1, per_endpoint_qps: 1000}` khi đó chỉ nhận một request mỗi giây trên tổng thể, và client thứ hai bị từ chối bởi một giới hạn đặt là 1000. Bucket toàn endpoint lấy một giây theo chính rate của nó làm burst. Cả hai key đều là `endpoint_id` (cộng client id với bucket theo client), không bao giờ là path: axum giải mã percent cho wildcard capture, nên key theo path là hai bucket mà caller có thể luân phiên.
+
 ## 7. Xử lý lỗi
 
 Một envelope ổn định, máy đọc được:
 
 ```json
-{ "error": { "code": "param_invalid", "message": "...", "request_id": "01J..." } }
+{ "error": { "code": "row_limit_exceeded", "message": "...", "request_id": "01J..." } }
 ```
+
+**Có đúng hai câu trả lời cố ý nằm NGOÀI envelope này**, và chỉ hai: một method ngoài `GET`/`POST`, được axum trả `405` với body rỗng, và một URI không khớp `/{ws}/{*path}` chút nào, được axum trả `404` với body rỗng. Cả hai do router quyết định trước khi bất kỳ dòng code nào của ta chạy, nên không có gì để bọc; cả hai đều là cùng một câu trả lời cho mọi path dưới bề mặt này, tồn tại hay không, nên không rò rỉ gì. Muốn đổi thì phải thêm fallback ở router, không phải ở handler. Được pin bởi `axum_answers_before_the_handler_and_those_two_answers_carry_no_envelope`.
 
 **Không bao giờ trả raw engine error cho caller bên ngoài.** Lỗi Trino/StarRocks mang theo tên bảng, tên cột và đôi khi cả thông tin host — trên một endpoint công khai sau một credential cho máy thì đó là rò rỉ metadata. Map sang code cố định và ghi chi tiết đầy đủ vào log nội bộ kèm `request_id` để support tra được.
 
+**Mọi code dưới đây đều có thể xảy ra, và mọi code có thể xảy ra đều nằm dưới đây.** Bảng này đã được đối chiếu lại với các variant của `ServingError`, mà `serving/error.rs::to_wire` match EXHAUSTIVE — thêm một variant sẽ là lỗi biên dịch ở đó, thay vì âm thầm thành 500 mang theo message của engine.
+
 | HTTP | code | Khi nào |
 |---|---|---|
-| 400 | `param_invalid` / `param_missing` | sai kiểu, thiếu, hoặc ngoài allow-list |
-| 400 | `row_limit_exceeded` | kết quả vượt row cap đã cấu hình |
-| 401 | `key_invalid` | key không tồn tại, hết hạn, hoặc đã thu hồi |
-| 403 | `forbidden` | Cedar từ chối `dataapi:invoke` |
-| 403 | `data_access_denied` | Ranger từ chối — message nói rõ service account chưa được cấp quyền dữ liệu (§5.3) |
-| 404 | `not_found` | không tồn tại, đã disable, hoặc sai workspace |
-| 429 | `rate_limited` | kèm `Retry-After` |
-| 502 | `engine_unavailable` | không kết nối được engine |
-| 504 | `timeout` | vượt timeout trong snapshot |
+| 400 | `row_limit_exceeded` | kết quả vượt row cap đã cấu hình; message nói rõ cap là bao nhiêu |
+| 401 | `key_invalid` | token thiếu, sai định dạng, hết hạn, sai audience, hoặc không verify được — MỘT câu trả lời cho tất cả (§6.2) |
+| 403 | `data_access_denied` | Ranger từ chối — service account chưa được cấp quyền dữ liệu (§5.3) |
+| 403 | `not_granted` | egret từ chối — service account không có grant `data_api_endpoint:invoke` trên endpoint này (§6.2 bước 4). Cố ý là một code khác với hàng trên: cách sửa là cấp grant trên endpoint, không phải grant trong Ranger |
+| 404 | `not_found` | không tồn tại, đã disable, sai workspace, workspace đã archive, hoặc path không chuẩn hoá được — MỘT câu trả lời cho tất cả |
+| 429 | `rate_limited` | kèm `Retry-After`, tính từ thời điểm bucket đầy lại |
+| 500 | `internal` | lỗi phía egret, và mọi lỗi engine mà P4 chưa phân loại được sâu hơn (xem dưới) |
+| 503 | `schema_drift` | cột engine trả về không còn khớp cột đã đóng băng trong version; từ chối chứ không định hình lại (§5.1.2) |
+| 503 | `output_naming_collision` | `output.naming` ánh xạ hai cột đã đóng băng vào cùng một key, khiến một cột được quảng cáo trong `meta.columns` biến mất khỏi mọi dòng |
+| 503 | `cache_scope_stale` | bản `shared` có cặp `(delegated, options.impersonate)` đã đóng băng không còn khớp hàng `query.databases` hiện tại (§6.3) |
+
+**Cả ba cái 503 là 503 chứ không phải 500** vì một lý do: phía egret không hỏng gì cả. Cấu hình đã publish của endpoint thôi không còn mô tả đúng dữ liệu của nó, và việc sửa thuộc về tác giả hoặc người vận hành — publish lại, đổi `naming`, hoặc đưa connection về như cũ. Riêng `cache_scope_stale` cố ý KHÔNG âm thầm hạ xuống khóa theo principal: phục vụ endpoint theo kiểu khác sẽ giữ cho nó chạy được nhưng che mất chỗ lệch khỏi đúng người có thể sửa.
+
+**Cả ba đều mang `Retry-After: 300`, và con số đó là một CẬN DƯỚI chứ không phải một dự báo.** Không cái nào tự lành — chỉ con người mới xoá được — nên bản năng là không gửi header nào cả. Bản năng đó hiểu sai một 503 trống làm gì: nó không dừng retry, nó để khoảng cách retry cho mặc định của client, mà với các thư viện retry phổ biến là exponential backoff bắt đầu từ khoảng một giây. Cả một đội client vì thế sẽ dập mạnh nhất đúng vào lúc con người cần nhận ra vấn đề. RFC 9110 §10.2.3 định nghĩa `Retry-After` trên 503 là *khoảng thời gian TỐI THIỂU user agent được yêu cầu chờ*, rõ ràng không phải lời hứa rằng tình trạng đã hết — nên nói năm phút vừa đúng vừa yên tĩnh hơn hẳn. Lưu ý `Retry-After` của 429 là một thứ khác mang cùng cái tên: nó tính từ bucket và LÀ một dự báo về lúc lệnh từ chối được gỡ.
+
+### Những code bảng này từng hứa, và vì sao P4 không phát ra chúng
+
+Mỗi cái là một quyết định, không phải một thiếu sót. Một code nằm trong bảng đã publish mà không gì tạo ra được thì tệ hơn là không có: client sẽ đọc nó như một hợp đồng để rẽ nhánh.
+
+| HTTP | code | Vì sao chưa sống |
+|---|---|---|
+| 400 | `param_invalid` / `param_missing` | §6.2 bước 7 (render `params` đã khai báo vào SQL) chưa làm, nên chưa có input nào của caller được validate ở đâu cả. Chúng đến cùng bước 7 — và khi đó, cả hai đều không được nêu TÊN tham số: tên là của tác giả, nêu ra tức là biến bề mặt lỗi thành danh mục các tham số mà endpoint khai báo. |
+| 502 | `engine_unavailable` | **không quyết định được ở seam này.** `QueryExecPort` trả `egret_core::Error`, và `port_impl` gộp CẢ lỗi hạ tầng của engine (`Connect`/`Storage`/`Db`) LẪN lỗi của chính egret — resolve email của principal, mở secret của database — vào cùng một `Error::Internal`. Trả 502 sẽ gọi người vận hành dậy vì Trino trong khi thứ hỏng là metastore. |
+| 504 | `timeout` | cùng seam đó. `engine_error` map `EngineError::Timeout` thành `Error::InvalidInput("query timed out")`, một cách cố ý, vì với `describe_as` thì timeout nghĩa là query quá đắt để lập kế hoạch. Nhận ra nó ở serving path sẽ phải so khớp chuỗi message của một crate khác — một phép kiểm tra vẫn biên dịch được và âm thầm hết tác dụng đúng ngày ai đó sửa lại câu chữ. |
+
+Muốn 502 và 504 thành thật thì phải mở rộng kiểu lỗi của `QueryExecPort`, tức là đổi hợp đồng xuyên crate. Chừng đó chưa xảy ra, các lỗi ấy là `500 internal` với chi tiết nằm trong log — an toàn, vì không gì từ engine lọt vào body, và trung thực, điều mà một cái 502 đoán mò thì không.
+
+**Khi việc mở rộng đó xảy ra, nó phải mang theo ba thứ chứ không phải một.** (a) `execute_as` cần lỗi timeout của riêng nó thay vì dùng chung bảng của `describe_as`: nhánh dùng chung map `EngineError::Timeout` thành `InvalidInput("query timed out")` vì một lý do chỉ đúng với `describe_as`, nên mở rộng mà không tách nhánh đó sẽ khiến 504 mãi mãi không quyết định được. (b) Một code **lỗi-do-tác-giả** riêng, vì `EngineError::BadRequest`/`Engine`/`Limit` đều thành `Error::InvalidInput` và cũng rơi vào `500 internal` — nên hôm nay, một endpoint đã publish mà SQL thôi không parse được là không phân biệt nổi với một lỗi của egret trong `access_log.error_code`, và người vận hành đang rà "endpoint nào đang hỏng" không tách được hai vấn đề của hai người khác nhau. (c) Code đó không được là 400: caller không làm gì sai, endpoint mới sai.
 
 **Serving path tự áp timeout của mình** thay vì dựa vào JobManager. `describe()` (`connector/mod.rs:81`) đã mang ghi chú y hệt — nó tự bọc timeout vì được gọi trực tiếp, không có JobManager bọc ngoài. Serving path cũng đi thẳng, nên gánh cùng nghĩa vụ.
 
@@ -405,9 +472,14 @@ Một envelope ổn định, máy đọc được:
 
 ## 8. Observability
 
-- `dataapi.access_log` ghi lại mọi lời gọi. Đây là bảng tăng nhanh nhất hệ thống: partition theo tháng cộng một job dọn theo retention, tái dùng gc-worker pattern có sẵn từ catalog CE6 thay vì viết mới.
+- `dataapi.access_log` ghi lại mọi lời gọi đi đủ xa để biết được workspace. Đây là bảng tăng nhanh nhất hệ thống, và nó **không có foreign key trên `endpoint_id` hay `service_account_id`** — cố ý ngược lại với `RESTRICT` mà `0121` đặt cho `endpoints.database_id`, và vì lý do ngược lại: access log là bản ghi về việc ĐÃ xảy ra, nên `CASCADE` sẽ xoá đúng phần lịch sử mà một sự cố cần, còn `RESTRICT` sẽ khiến một endpoint không xoá được chỉ vì nó từng được gọi. `workspace_id` là ngoại lệ và CÓ cascade, vì nó là ranh giới tenancy chứ không phải một nhãn.
+- **Retention là một job dọn; không có partition.** `AccessLogStore::prune(retention_days)` cùng hình dạng `DELETE … WHERE ts < now() - make_interval(days => $1)` với `AuditStore::prune`, và được **lên lịch ngay cạnh nó** trên cùng nhịp mỗi giờ trong `egret-bin`, để người vận hành đã biết một núm retention thì không phải học núm thứ hai. Key là `data_api.access_log_retention_days` (`EGRET_DATA_API__ACCESS_LOG_RETENTION_DAYS`), mặc định 90. Partition theo tháng đã được đặc tả và **không** được làm: trong repo không có bảng partition nào để mô phỏng theo, cũng không có phép đo nào nói một bảng đơn là không đủ — và scheme partition đầu tiên của hệ thống không phải thứ nên dựng lên từ phỏng đoán.
+- **`access_log_retention_days = 0` nghĩa là KHÔNG BAO GIỜ DỌN, và đó cố ý không phải nghĩa của `prune(0)`.** Store đọc 0 là "không giữ gì", vì `ts < now() - 0 days` đúng là mọi dòng đã ghi — nghĩa đúng cho một primitive, và cũng là nghĩa của `AuditStore::prune`. Một config key thì không phải primitive: `0` là thứ người vận hành viết khi họ muốn nói "tắt", và là thứ một biến môi trường để trống hay một file TOML viết dở tạo ra một cách tình cờ — nên trên bảng tăng nhanh nhất hệ thống, hai cách đọc đó khác nhau đúng bằng toàn bộ cái log, bị xoá một giờ sau khi boot. Vì vậy scheduler từ chối lên lịch với retention không dương **và ghi cảnh báo rằng bảng sẽ phình vô hạn**. `audit.retention_days` vẫn mang cái bẫy đó mà không có rào chắn; đó là hành vi của một subsystem khác và không được đổi ở đây.
+- **Mọi lời gọi đều có một dòng, kể cả 429 và 404 — CHẤP NHẬN, không phải bỏ sót.** Một request bị từ chối tốn một INSERT đồng bộ, trên đúng con đường mà việc của nó là nói "dừng lại". Ba lý do giữ nguyên: (a) rate limiter chưa bao giờ giảm tải database và về cấu trúc thì không thể, vì nó key theo `endpoint_id` nên chạy *sau* `get_by_slug` và `live_snapshot` — một request bị từ chối đã trả giá một lần verify RSA và hai SELECT trước khi bucket lên tiếng; thứ limiter giảm tải là ENGINE, cái đắt đỏ mà nó sinh ra để chặn; (b) một client dập vào bucket đã cạn và một kẻ đang dò không gian URL của workspace chính là hai thứ đáng nhìn thấy nhất trong bảng này, bỏ chúng đi để tiết kiệm một lần ghi sẽ làm hành vi lạm dụng vô hình đúng ở chỗ nó đang hữu hình; (c) lấy mẫu là cách chặn sai, vì các thống kê bên dưới là ĐẾM, và một bảng lấy mẫu trả lời sai một cách âm thầm. Nếu điều này *được đo* là có ảnh hưởng thật, tiền lệ sẵn có trong repo là `AuditSink` + `AuditWriter` của `egret-audit` — một channel có giới hạn cộng một batch writer, đánh đổi độ bền lúc shutdown lấy việc ghi được khấu hao.
+- **Lời gọi bị từ chối trước khi token verify thì không nằm trong bảng, và điền đại vào sẽ tệ hơn là để trống.** `workspace_id` là `NOT NULL`, mà định danh workspace duy nhất một cái 401 có được là slug trên URL — do caller cung cấp và chưa xác thực. Ghi nó vào sẽ cho phép một caller *chưa xác thực* tạo ra các dòng gán cho bất kỳ workspace nào mà họ đoán được slug, thổi phồng tỉ lệ lỗi của tenant đó trong thống kê tính từ bảng này. Cho `workspace_id` nullable cũng không cứu được: nó không lưu gì cả và vẫn không khôi phục được con số đếm theo workspace. Cách sửa thật sự chỉ có hai: một bảng riêng cho các lần từ chối trước xác thực, hoặc một cột tên rõ ràng là `claimed_slug` mà không aggregate nào join vào. Chừng nào chưa có, một 401 là sự kiện `tracing` mang cùng `request_id` — tra ngược được, nhưng đếm thì không.
+- **Điểm mù liên quan, và nó lớn hơn:** rate limiter chạy *sau* khi verify token, nên một trận lụt chưa xác thực không bị chặn bởi bất cứ thứ gì trong crate này và không xuất hiện trong bảng nào cả. Đó thuộc về bề mặt xác thực và về thứ đứng trước nó, không phải access log — nhưng là cùng một cái lỗ nhìn từ phía bên kia.
 - Thống kê trên management UI (số lần gọi, tỉ lệ lỗi, p50/p95, cache hit rate theo endpoint) tính từ `access_log` — tương đương `HourCount` / `DateCount` / `NameCount` của sqlrest.
-- `request_id` được truyền xuống engine và lưu cạnh `engine_query_id`, để một lời gọi API chậm truy ngược về đúng query trên Trino/StarRocks.
+- `request_id` được sinh MỘT lần cho mỗi lời gọi, trước khi bất cứ thứ gì có thể hỏng, và là cùng một id trong response body, trong mọi dòng `tracing` của lời gọi đó, và trong `access_log.request_id` — đó là thứ khiến câu "đọc request_id của bạn cho chúng tôi" thực sự dùng được. `engine_query_id` đã được đặc tả và cột đã có, nhưng P4 luôn ghi NULL: `QueryExecPort` không trả về query id của engine, nên việc truyền `request_id` xuống engine và đọc ngược một id về vẫn còn nợ.
 - Publish, rollback, disable, enable, xoá endpoint, cấp client và thu hồi client ĐÃ là sự kiện `egret-audit` kể từ P3 — xem §5.3 để biết `action`/`resource_type`/`detail` chính xác của từng cái, vì sao không bao giờ có `client_secret` trong `detail`, vì sao sự kiện xoá endpoint là cái duy nhất buộc phải mang theo các cột, và bốn route mutating vẫn chưa được audit.
 
 ## 9. Kiểm thử
@@ -428,7 +500,21 @@ CI chạy đầy đủ ở local trước khi merge, gồm cả `cargo fmt`. Kh�
 Cố ý hoãn, mỗi mục đều được ghi lại để nó là một quyết định chứ không phải một thiếu sót:
 
 - **Ghi (INSERT/UPDATE/DELETE)** và transaction nhiều statement — cần transaction boundary, rollback, audit ghi, và chính sách về việc ai được publish endpoint ghi.
-- **Bound parameter ở tầng connector** — xem §3.
+- **Bound parameter ở tầng connector.** Đây là mục hoãn lớn nhất trong tài liệu này và là mục dễ bị đọc sai nhất, nên lập luận đặt ở đây chứ không chỉ ở §3.
+
+  sqlrest — bản triển khai mà thiết kế này lấy làm mẫu — **không** nội suy. `#{param}` của MyBatis trở thành một `ParameterMapping` thật, tức là driver bind. Chúng ta thì ghép một literal đã escape. Vậy trên trục tham số, bản tham chiếu *an toàn hơn về mặt cấu trúc* so với thứ chúng ta đã dựng.
+
+  Mọi lỗi escaping mà tính năng này từng gặp đều bắt nguồn từ đúng lựa chọn đó: quoting mù backslash trên StarRocks (P1), `{{param}}` publish được bên trong một string literal, scanner đọc `#` là comment trong khi StarRocks đọc nó là whitespace, và dấu `;` thoát khỏi wrapper của `describe` (đều ở P3). Một bound parameter không thể thoát khỏi vị trí của chính nó, nên cả lớp lỗi đó không với tới được.
+
+  **Nó bị hoãn vì chi phí, không phải vì nội suy được đánh giá là đủ tốt.** `Connector::execute` nhận `sql: &str` và không có kênh tham số; StarRocks bind được trực tiếp qua `mysql_async`, nhưng Trino cần `X-Trino-Prepared-Statement` cộng `EXECUTE … USING`, tức là đổi trait `Connector` và thêm một đường giao thức thứ hai. Làm nó sẽ **xoá bỏ** escaper theo dialect, phép kiểm statement trên byte thô, và phép kiểm vị trí placeholder — bản vá mang tính trừ đi, và đó là lập luận mạnh nhất ủng hộ nó.
+
+- **Dynamic SQL** — mệnh đề điều kiện chỉ xuất hiện khi tham số được truyền. sqlrest có nhờ MyBatis `<if>`, `<where>`, `<set>`, `<choose>`/`<when>`, `<foreach>`; chúng ta không có gì. `{{param}}` thay thế vô điều kiện, nên một filter tuỳ chọn phải viết thành `WHERE (region = {{r}} OR {{r}} IS NULL)` — vừa gượng vừa thường làm hỏng chính index mà mệnh đề đó sinh ra để dùng.
+
+  **`rbatis` không giải quyết được việc này**, và lý do đáng ghi lại để không ai đề xuất lại. Dynamic SQL của nó là compile-time: `rb_html(args: TokenStream, func: TokenStream) -> TokenStream` là một proc macro trên `syn::ItemFn`, nên template phải là literal trong source Rust lúc build. Còn một endpoint của Data API là một hàng trong `dataapi.endpoint_versions.snapshot`, do người dùng viết và publish khi hệ thống đang chạy — không macro nào chạy trên nó được. Nó cũng không tách rời khỏi tầng driver `rbdc` của chính nó, mà `rbdc` không có driver Trino và dùng nó nghĩa là dựng lại delegation per-user, engine JWT và Ranger.
+
+  Nếu có ngày làm, nó phải là bộ render **runtime**, và hình dạng quan trọng hơn bản thân tính năng: một template engine tổng quát (họ Jinja) sẽ đánh giá template do người dùng viết trên một endpoint công khai — đó là vùng rủi ro đã biết của Superset và sẽ là một bề mặt tấn công mới ở đây. Hãy làm thứ nhỏ nhất trả lời được câu "tham số này có được truyền không": không ngôn ngữ biểu thức, không gọi hàm, không truy cập thuộc tính.
+
+  **Nếu làm cả hai thì thứ tự quan trọng: bound parameter trước.** Thêm render có điều kiện lên trên nội suy chuỗi là cộng dồn hai rủi ro; thêm nó lên trên binding thì không cộng dồn gì cả.
 - **Engine thực thi Groovy/script** (`ExecuteEngineEnum::SCRIPT` của sqlrest) — bài toán sandbox lớn đổi lấy lợi ích không đáng kể so với SQL.
 - **Xuất MCP tool** (`McpToolEntity` của sqlrest) — việc tiếp nối tự nhiên ở v2 khi endpoint đã ổn định.
 - **Danh sách IP allow/deny** (`FirewallRulesEntity` của sqlrest) — giải ở tầng ingress tốt hơn trong application code.

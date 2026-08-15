@@ -175,6 +175,15 @@ pub static PERMISSIONS: &[Permission] = &[
         "Create, edit, publish and roll back Data API endpoints",
         Scope::Workspace
     ),
+    // Spec §6.2 step 4. Unlike its two siblings this one is meant to be held
+    // OBJECT-scoped by a service account (one `access_grants` row per endpoint),
+    // not workspace-wide by a human — see migration 0124.
+    perm!(
+        "data_api_endpoint:invoke",
+        "Data API",
+        "Call a published Data API endpoint",
+        Scope::Workspace
+    ),
     perm!(
         "policy:read",
         "Policies",

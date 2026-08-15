@@ -2920,11 +2920,13 @@ dependencies = [
  "rand 0.8.7",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "sqlx",
  "thiserror 2.0.20",
  "tokio",
  "tower",
  "tracing",
+ "tracing-subscriber",
  "utoipa",
  "uuid",
 ]
@@ -3211,6 +3213,7 @@ dependencies = [
  "async-trait",
  "egret-core",
  "serde",
+ "serde_json",
  "utoipa",
  "uuid",
 ]
@@ -3256,6 +3259,7 @@ dependencies = [
  "egret-notebook",
  "egret-policy",
  "egret-query",
+ "egret-query-api",
  "egret-workspace",
  "http-body-util",
  "serde_json",
@@ -3264,6 +3268,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "utoipa",
+ "uuid",
 ]
 
 [[package]]

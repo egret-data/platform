@@ -1,7 +1,5 @@
 //! Engine domain types + request/response DTOs.
 
-use std::time::Duration;
-
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -38,11 +36,13 @@ impl QueryStatus {
 }
 
 /// Execution guards.
-#[derive(Debug, Clone)]
-pub struct Limits {
-    pub max_rows: usize,
-    pub timeout: Duration,
-}
+///
+/// Defined in the leaf contract crate, not here: [`egret_query_api::QueryExecPort`]
+/// takes it on `execute_as`, and the seam crate is exactly what the port exists
+/// to keep out of the Data API's dependency graph. Re-exported so every existing
+/// `egret_query::execution::model::Limits` caller keeps compiling — one struct,
+/// two paths, never two definitions.
+pub use egret_query_api::Limits;
 
 // ── Request / response DTOs ───────────────────────────────────────────────────
 

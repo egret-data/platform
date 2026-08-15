@@ -54,6 +54,19 @@ impl egret_query_api::QueryExecPort for OkPort {
             ty: "integer".into(),
         }])
     }
+
+    /// This file exercises the AUTHORING mutations only; nothing here serves a
+    /// request, so a call would mean a route reached the engine unexpectedly.
+    async fn execute_as(
+        &self,
+        _ws: Uuid,
+        _database_id: Uuid,
+        _principal: UserId,
+        _sql: &str,
+        _limits: egret_query_api::Limits,
+    ) -> Result<egret_core::TabularResult, Error> {
+        unreachable!("authoring mutations must never execute a query")
+    }
 }
 
 /// One emitted mutation, flattened to what an assertion actually reads.
@@ -106,11 +119,16 @@ fn build_state(db: Db, pdp: Arc<dyn egret_core::authz::Pdp>, audit: AuditSink) -
             chrono::Duration::minutes(60),
         ),
         workspaces: egret_workspace::workspaces::WorkspaceRepo::new(db.clone()),
-        authz: egret_workspace::rbac::Authorizer::new(db),
+        authz: egret_workspace::rbac::Authorizer::new(db.clone()),
         pdp,
         query: Arc::new(OkPort),
+        // The real Postgres key store. Nothing in this file authenticates a
+        // machine token, so `active()` is never called and no key is generated.
+        keys: Arc::new(egret_machine_idp::PgSigningKeyStore::new(db.clone())),
         issuer: "https://egret.test".into(),
         audit,
+        cache: egret_dataapi::serving::ResponseCache::new(),
+        rate_limits: std::sync::Arc::new(egret_dataapi::serving::TokenBucket::new()),
     }
 }
 

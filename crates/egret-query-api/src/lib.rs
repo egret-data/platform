@@ -34,6 +34,26 @@ pub use dialect::quote_string;
 pub mod port;
 pub use port::QueryExecPort;
 
+/// Execution guards for one query: the row cap and the wall-clock budget.
+///
+/// Lives in the contract crate because [`QueryExecPort::execute_as`] takes it,
+/// and the whole point of that port is that the Data API can name it without
+/// depending on `egret-query`. `egret_query::execution::model` re-exports this
+/// exact type, so the seam's callers (the JobManager, the BI chart runner, the
+/// connection tester) are unchanged — one definition, two paths. Do not add a
+/// second `Limits` in the seam: two that drift is the failure mode this crate
+/// exists to prevent, the same reason `quote_string` lives here.
+///
+/// `max_rows` is a cap the connector detects rather than obeys silently: it
+/// fetches `max_rows + 1` and, if the extra row appears, sets
+/// [`TabularResult::truncated`] and drops it — so a caller can always tell a
+/// complete answer from a prefix of one.
+#[derive(Debug, Clone)]
+pub struct Limits {
+    pub max_rows: usize,
+    pub timeout: std::time::Duration,
+}
+
 /// Supported query engines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
@@ -109,4 +129,112 @@ pub struct Database {
     /// per-user-delegated) and links it back to the source engine.
     #[serde(default)]
     pub engine_id: Option<Uuid>,
+}
+
+/// Wire-name guards for fields another crate reads out of jsonb **by string**.
+///
+/// # Why this lives here and not with the reader
+///
+/// `egret-dataapi` deliberately depends on no other feature seam, so it cannot
+/// name [`ConnOptions`]. Its `lifecycle::impersonate_flag` therefore reaches into
+/// the raw `query.databases.options` JSONB and looks for a key spelled
+/// `"impersonate"`. It has a test of its own — but that test can only assert that
+/// `egret-dataapi` still spells what `egret-dataapi` always spelled. **It cannot
+/// see a rename here**, which is precisely the change that would break it: add a
+/// `#[serde(rename = …)]` or rename the field below and every consumer keeps
+/// compiling while the flag silently starts reading `false`.
+///
+/// The guard belongs where the rename happens, so it goes red at the point of the
+/// rename, raised by the crate that owns the type.
+///
+/// # What reading `false` costs, so the next person knows what they are unpinning
+///
+/// `impersonate` is one half of the pair that decides whether the engine runs a
+/// query **as the caller** — Trino sends `X-Trino-User: <caller>` and StarRocks
+/// issues `EXECUTE AS <caller> WITH NO REVERT` on it, independently of
+/// `delegated`. The Data API refuses a `shared` response cache on any such
+/// connection, because a shared cache stores one principal's Ranger-filtered rows
+/// under a principal-less key and serves them to another. If this key stops being
+/// found, that refusal silently stops happening and the cross-identity leak comes
+/// back with a 200 and `meta.cached: true`.
+///
+/// So: if you rename the field, update `egret-dataapi`'s `impersonate_flag` in
+/// the same change. The real fix is a shared type across the two crates, which is
+/// deliberately not done — it would cross the seam boundary that keeps
+/// `egret-dataapi` free of `egret-query`, and that is a P5-or-later architectural
+/// call rather than something to slip in behind a test.
+#[cfg(test)]
+mod wire_names {
+    use super::*;
+
+    #[test]
+    fn conn_options_serialises_impersonate_under_that_exact_key() {
+        let opts = ConnOptions {
+            impersonate: Some(true),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&opts).expect("serialise ConnOptions");
+        assert_eq!(
+            v.get("impersonate"),
+            Some(&serde_json::Value::Bool(true)),
+            "`ConnOptions::impersonate` must serialise under the literal key \
+             `impersonate`: egret-dataapi's `lifecycle::impersonate_flag` reads it \
+             out of jsonb by that name and cannot see a rename here. If this is \
+             failing because you renamed the field, fix that function in the same \
+             change — otherwise a `shared` response cache is silently permitted on \
+             a connection that runs queries as the caller. Serialised as: {v}"
+        );
+    }
+
+    /// The false/absent case, so the guard covers what the reader actually does:
+    /// `impersonate_flag` treats anything that is not JSON `true` as `false`, and
+    /// `skip_serializing_if` means an unset option is ABSENT rather than `null`.
+    /// Both readings must stay "not impersonating".
+    #[test]
+    fn an_unset_impersonate_is_absent_rather_than_a_surprising_value() {
+        let v = serde_json::to_value(ConnOptions::default()).expect("serialise");
+        assert_eq!(
+            v.get("impersonate"),
+            None,
+            "an unset `impersonate` must be absent, not null or false-as-string: {v}"
+        );
+        let v = serde_json::to_value(&ConnOptions {
+            impersonate: Some(false),
+            ..Default::default()
+        })
+        .expect("serialise");
+        assert_eq!(
+            v.get("impersonate"),
+            Some(&serde_json::Value::Bool(false)),
+            "an explicit false must be a JSON bool, not a string: {v}"
+        );
+    }
+
+    /// `delegated` is the other half of the pair, and it lives on [`Database`]
+    /// rather than in the options blob. Pinned in the same place so the two halves
+    /// are one story: whoever renames either finds the same explanation.
+    #[test]
+    fn database_serialises_delegated_under_that_exact_key() {
+        let db = Database {
+            id: Uuid::nil(),
+            name: String::new(),
+            engine: Engine::Trino,
+            host: String::new(),
+            port: 0,
+            options: ConnOptions::default(),
+            has_secret: false,
+            status: String::new(),
+            delegated: true,
+            engine_id: None,
+        };
+        let v = serde_json::to_value(&db).expect("serialise Database");
+        assert_eq!(
+            v.get("delegated"),
+            Some(&serde_json::Value::Bool(true)),
+            "`delegated` is the other half of the pair the Data API's shared-cache \
+             witness freezes; it is read by name in SQL (`SELECT delegated, \
+             options ...`), so a rename is a schema change and not only a serde \
+             one: {v}"
+        );
+    }
 }

@@ -271,9 +271,15 @@ draft ──validate──> publish(v N) ──> live
 - The SQL is exactly **one** statement, and that statement is a `SELECT`. A leading `WITH … SELECT` (CTE) is permitted; anything else — DML, DDL, `SET`, or a second statement after a `;` — is rejected.
 - Every `{{param}}` resolves to a declared parameter, and every declared parameter is referenced.
 - `describe_as` (§4.3) resolves the output schema, which is frozen into the snapshot.
-- If `cache.scope` is `shared`, the target connection must not be delegated (§6.3).
+- If `cache.scope` is `shared`, the target connection must not run queries **as the caller** — i.e. neither `delegated` nor `options.impersonate` (§6.3).
 
-**The one snapshot-external input P4 must re-check: `delegated`.** `EndpointSnapshot.delegated` records whether the connection delegated per-user credentials at the moment the version was published. `query.databases.delegated` is a **mutable** column: flipping it to `true` after a `cache.scope = shared` version was published turns a legitimately-published snapshot into exactly the cross-principal leak the check above exists to refuse, and nothing re-validates when it moves. **P4 must therefore compare the frozen `delegated` against the live column before serving from a shared cache, and refuse when they disagree.** Every other field in the snapshot is self-contained; this one is a witness, and a witness nobody questions is decoration.
+**The snapshot-external input P4 must re-check is a PAIR: `delegated` AND `options.impersonate`.** `EndpointSnapshot.delegated` and `EndpointSnapshot.impersonate` record, at the moment the version was published, the two mutable things on `query.databases` that decide whether the engine runs a query **as the caller**. Flipping either on after a `cache.scope = shared` version was published turns a legitimately-published snapshot into exactly the cross-principal leak the check above exists to refuse, and nothing re-validates when either moves. **P4 must therefore compare both frozen halves against the live row before serving from a shared cache, and refuse when either disagrees.** Every other field in the snapshot is self-contained; these two are a witness, and a witness nobody questions is decoration.
+
+**It was `delegated` alone, and that was a live leak rather than an omission.** `delegation_for`'s non-delegated arm still passes the caller as the session user (`egret-query/src/execution/mod.rs:86`), and each connector acts on `options.impersonate` on its own — Trino sends `X-Trino-User: <caller>` (`connector/trino.rs:43`), StarRocks issues `EXECUTE AS <caller> WITH NO REVERT` (`connector/starrocks.rs:129`). The two database fields are independent and unvalidated, so `{"delegated": false, "options": {"impersonate": true}}` — which `create`/`update` accept — is a fully per-principal connection that reads as shared-safe to anything consulting `delegated`. A `shared` endpoint on one cached principal A's Ranger-filtered rows under a principal-less key and served them to principal B with a 200 and `meta.cached: true`, with the witness silent because live `delegated` still equalled frozen `delegated`. `runs_per_principal(delegated, impersonate)` is now the single expression of the condition and both the publish check and the serving check route through it.
+
+**Why an operator reaches for `impersonate` at all — measured 2026-08-15, and not what it looks like.** The obvious hypothesis is that JWT delegation is unavailable to service accounts, since `delegation_for` maps `NoRefreshToken` to 403 and a `client_credentials` token has no refresh token. **That hypothesis is wrong.** The machine-IdP mints engine JWTs for `client_credentials` principals normally — that is what a machine IdP is for. The gate is **transport, not identity**: `connect` refuses to put a per-user engine JWT on a connection with no TLS or pinned certificate (`EGRET_ENGINE_TLS_INSECURE=1` overrides it, insecurely). So on a **plaintext** engine connection, `delegated: true` fails with a 500 whose cause appears only in the server log, and the natural retreat is `impersonate: true` — the configuration that carried the leak above. Deployments with TLS'd engines are not pushed down that path.
+
+*Instrument:* observed on the live dev stack — the mint **succeeded** and the TLS guard fired (a `NoRefreshToken` would have been a 403, and we got a 500 carrying the TLS message; you cannot refuse to send a token you failed to mint). *Not demonstrated:* a JWT-delegated query completing over TLS, because the dev stack has no CA-signed engine certificate. Note the trap for anyone re-checking this: the only 403 in the matrix is Trino's own, returned in the `impersonate` configuration — reading status codes alone inverts the conclusion.
 
 **`output`, `limits` and `rate_limit` are frozen, but they are not validated.** The list above is the whole of validation, and it covers `sql`, `params` and `cache` only — there is no rule for those three fields anywhere: not before the publish lock, not in the re-validation after it, and not at serve time. What they gain from the lock is **consistency**, not validation: they are frozen from the same read that was validated rather than from a row nobody looked at. A nonsensical `max_rows` or an unknown `output.shape` is frozen into the snapshot exactly as written, so **P4 must treat all three as untrusted author input** and bound them itself.
 
@@ -340,6 +346,22 @@ POST   /api/ws/{workspace}/data-api/service-accounts/{id}/clients   -> the secre
 DELETE /api/ws/{workspace}/data-api/clients/{id}
 ```
 
+**Granting a service account access to an endpoint** (P4, same surface, same session + CSRF group):
+
+```text
+GET    /api/ws/{workspace}/data-api/endpoints/{id}/grants
+POST   /api/ws/{workspace}/data-api/endpoints/{id}/grants   { "service_account_id": … }
+DELETE /api/ws/{workspace}/data-api/endpoints/{id}/grants/{service_account_id}
+```
+
+All three gate on `data_api_endpoint:manage`, **including the list**: writing a grant mutates the authorization graph and is strictly more powerful than reading an endpoint, and listing the grantees enumerates every consumer of it. Both ids are scoped to the caller's workspace — the endpoint through `EndpointStore` (whose statements carry the predicate themselves), the service account through `scoped_account` — and either mismatch is a 404. Without both, a `:manage` holder in one workspace could grant one workspace's account on another's endpoint with a call that looks entirely ordinary.
+
+A grant is one row: `access_grants (principal_type='user', principal_id=<service account>, scope_type='object', object_type='data_api_endpoint', scope_id=<endpoint id>, role_id=<data_api_invoker>, effect='allow')`. `data_api_invoker` is a workspace-scoped built-in role (migration 0124) carrying **exactly one** permission, `data_api_endpoint:invoke`. It has to be its own role and it has to stay single-permission: an object-scoped grant links its role's whole effective action set onto the object, so reusing `ws_viewer` (as `egret-bi`'s share API does) would hand a service account every viewer action on the endpoint it was merely meant to call, and adding a second permission to `data_api_invoker` would widen every already-written grant on every endpoint at once. It is workspace-scoped rather than platform-scoped because only a workspace role's Cedar template uses the cascading `resource in ?resource` form that matches an Object resource; a platform-scoped role there would link a policy that never fires and the grant would be silently inert.
+
+**A grant revocation takes effect on the next request; a token revocation does not.** The grant is read per request, so `DELETE …/grants/{service_account_id}` stops the very next call. Revoking the CLIENT cannot do that — the serving path verifies a stateless JWT (§6.2 step 1), so an already-issued token stays valid until `exp` and the 600s TTL of §6.1 is the irreducible bound. That asymmetry is the operational answer to *"cut this consumer off right now"*: revoke the grant, not the client. Revoking the client is the right move for a leaked *credential*, and it stops the next token being minted; it does not stop the token already in flight.
+
+A grant is on the ENDPOINT, not on a version, so it survives a re-publish. Keying it to the version would be superficially attractive ("the consumer agreed to this contract") and would silently break every consumer the moment an author published a fix.
+
 Two permissions, both `Scope::Workspace` and both seeded on `ws_admin` only (migration 0120): `service_account:read` to view accounts and clients, `service_account:manage` to create, delete and **issue**. Issuing gates on `:manage` and never on `:read` — a client is a bearer credential for that account's data access, so handing one out is strictly more powerful than reading the list. Every handler resolves the account (or client) against the workspace from the `WsContext` extractor, never from a second read of the path segment, and returns **404 rather than 403** on a mismatch — the same rule as §6.2 step 3.
 
 ### 6.2 Per-request chain
@@ -350,7 +372,8 @@ GET /data-api/v1/{ws}/{path}
  1. verify JWT via JWKS → principal + workspace from claims      ✗→ 401
  2. (ws, method, path) → endpoint → live_version_id → snapshot   ✗→ 404
  3. service account's workspace == {ws} in path                  ✗→ 404
- 4. Cedar: dataapi:invoke on Object data_api_endpoint:{id}       ✗→ 403
+ 4. Cedar: data_api_endpoint:invoke on Object                     ✗→ 403
+    data_api_endpoint:{id}
  5. rate limit (per endpoint and per client)                     ✗→ 429 + Retry-After
  6. cache lookup                                                 hit → return
  7. render params → dialect-safe SQL                             ✗→ 400
@@ -364,6 +387,14 @@ GET /data-api/v1/{ws}/{path}
 
 Step 3 returns **404, not 403**, on purpose: a token belonging to another workspace must not be able to distinguish "no such endpoint" from "exists, but you may not call it". The management API applies the same rule to service accounts and clients (§6.1).
 
+**Step 4 returns 403, and that reversal is deliberate.** By the time it runs, the caller has proved it holds a valid, unexpired credential for *this* workspace — so the existence of an endpoint in it is not a secret the answer could keep, and a 404 would buy no confidentiality while costing an operator a real diagnosis ("the endpoint is gone" instead of "the grant is missing"). The rule is: 404 while the caller has proved nothing, 403 once it has.
+
+**Step 4 is `data_api_endpoint:invoke`, not `dataapi:invoke`.** Earlier drafts of this document wrote the shorter name; the permission catalog (`egret-core/src/rbac.rs`) keys it `data_api_endpoint:invoke`, matching its `:read` and `:manage` siblings, and that is the string the serving path checks. The permission is `Scope::Workspace` like the other two, but unlike them it is **meant to be held object-scoped by a service account** rather than workspace-wide by a human: one `access_grants` row per (service account, endpoint). Migration 0124 seeds it on `ws_admin` for catalog consistency, where it is inert — the serving surface only accepts a `data-api` audience token minted for a service account, so a human session cannot use it.
+
+**Denial is `403 not_granted`, a different code from `403 data_access_denied`**, because they are two different systems' problems: `not_granted` means egret refused the CALL and the fix is a grant on the endpoint; `data_access_denied` means the engine refused the DATA and the fix is a Ranger grant. Sharing one code would send the operator to the wrong system, and would make "403s on this endpoint" an unactionable line in `access_log.error_code`.
+
+**Without step 4 a token was a workspace-wide read capability.** Recorded because the gap shipped through five tasks before it was closed: any valid, unexpired token for workspace W reached every live endpoint in W, so a service account created for one consumer could invoke every other consumer's endpoint and receive its full result set. The engine's own row filtering was the only thing behind it — absent where Ranger is not enforcing, and resource-only on StarRocks.
+
 ### 6.3 Cache must be principal-scoped
 
 Step 9 filters data **per principal**, so two service accounts calling the same endpoint with the same parameters can legitimately receive different rows. A cache key that omits the principal leaks data straight through Ranger.
@@ -371,9 +402,20 @@ Step 9 filters data **per principal**, so two service accounts calling the same 
 The cache config therefore carries a `scope`:
 
 - `per_principal` (default) — the cache key includes `service_account_id`.
-- `shared` — permitted **only when the connection is not delegated**. Checked at validate time, so a misconfiguration cannot be published in the first place.
+- `shared` — permitted **only when the connection does not run queries as the caller**: neither `delegated` nor `options.impersonate`. Checked at validate time, so a misconfiguration cannot be published in the first place. Both fields matter and either alone is disqualifying — see §5.3.
 
-Placing this check at validate time rather than at runtime means the unsafe **shape** can never enter `endpoint_versions`. That is precisely what publish-time validation guarantees, and it is not the whole problem: `query.databases.delegated` is mutable, so a connection can be flipped to delegated *after* a `shared` version was published, and no re-validation runs when it is. The residual is closed on the serving side, by the frozen witness §5.3 describes — **P4 compares `EndpointSnapshot.delegated` against the live column before serving from a shared cache and refuses when they disagree.**
+The key itself is `endpoint_id ‖ version ‖ declared params ‖ principal`, hashed with **every field length-prefixed** and the principal LAST. Two rules that step 7 must not undo when it replaces the parameter map with the rendered one:
+
+- **Only DECLARED parameters are keyed.** An undeclared parameter cannot affect the response, so it must not affect the entry either — hashing the whole query string lets one authenticated client mint unbounded entries in a cache shared by every workspace in the process.
+- **Length-prefixed, never delimited.** A delimiter is only safe while values cannot contain it, which today is true because `http::Uri` refuses control bytes in a raw query string — a property held by a crate the cache never mentions, and one that disappears the moment parameters are DECODED. With a `0x00` delimiter, `?a=1%00b%002` hashes identically to `?a=1&b=2`. Same principal, so never a cross-identity leak, but once parameters reach the SQL it is one filter's rows served for another's.
+
+Cross-identity collision is closed by the LAYOUT rather than by the delimiting: equal byte streams are equal in length and the principal is the last 16 bytes, so `params_a ‖ A == params_b ‖ B` forces `A == B` whatever the parameters contain.
+
+Placing this check at validate time rather than at runtime means the unsafe **shape** can never enter `endpoint_versions`. That is precisely what publish-time validation guarantees, and it is not the whole problem: **both** `query.databases.delegated` and `query.databases.options.impersonate` are mutable, so a connection can be switched to per-principal *after* a `shared` version was published, and no re-validation runs when it is. The residual is closed on the serving side, by the frozen witness PAIR §5.3 describes — **P4 compares both `EndpointSnapshot.delegated` and `EndpointSnapshot.impersonate` against the live row before serving from a shared cache and refuses when either disagrees.**
+
+The serving-side comparison is **not gated on `cache.enabled`**, matching the publish-time check, which also refuses a `shared` scope whether or not the cache is currently on: the safe-looking configuration is one draft edit from the unsafe one. The cost of that choice, stated rather than left to be discovered — an endpoint with `enabled: false` and a leftover `scope: shared` **hard-503s on a delegation flip even though it caches nothing and provably cannot leak**. That is a false positive. It is accepted because the operator's fix is the same either way (re-publish, or put the connection back) and because a refusal they can act on beats a latent misconfiguration that surfaces the day someone turns the cache on.
+
+The comparison is a metastore read on every call to a `shared` endpoint, **including calls that would have been cache hits** — checking after the hit would mean serving the stale entry and asking afterwards, which is the leak. `per_principal` endpoints return before the read. If that cost ever matters, memoise `(database_id → (delegated, impersonate))` with a short TTL rather than moving the check: a memo's staleness window is bounded and stated, a re-ordered check's is not.
 
 ### 6.4 Rate limiting
 
@@ -383,27 +425,52 @@ Write a `TokenBucket` in `egret-dataapi`, but **keep that module's `check_at(key
 
 Put it behind a `RateLimitStore` trait. v1 is in-memory per process; when the serving surface splits into a multi-replica binary, a shared-store implementation replaces it without touching call sites.
 
+**`RateLimitSpec.burst` sizes the per-CLIENT bucket only.** There is one `burst` field and it is written next to `per_key_qps`; reusing it for the endpoint-wide bucket sizes a limit every client shares with a number the author picked for one of them — a `{per_key_qps: 1, burst: 1, per_endpoint_qps: 1000}` endpoint would then admit one request per second in total, and a second client would be refused by a limit set to 1000. The endpoint-wide bucket takes one second of its own rate as its burst. Both keys are the `endpoint_id` (plus the client id for the per-client one) and never the request path: axum percent-decodes the wildcard capture, so a path-keyed bucket is two buckets a caller can alternate between.
+
 ## 7. Error handling
 
 One stable, machine-readable envelope:
 
 ```json
-{ "error": { "code": "param_invalid", "message": "...", "request_id": "01J..." } }
+{ "error": { "code": "row_limit_exceeded", "message": "...", "request_id": "01J..." } }
 ```
+
+**Two answers are deliberately outside this envelope**, and they are the only two: a method outside `GET`/`POST`, which axum answers `405` with an empty body, and a URI that does not match `/{ws}/{*path}` at all, which axum answers `404` with an empty body. Both are decided by the router before any of our code runs, so there is nothing to wrap; both are the same answer for every path under the surface, existing or not, so neither leaks. Changing that means a router fallback, not a handler. Pinned by `axum_answers_before_the_handler_and_those_two_answers_carry_no_envelope`.
 
 **Never return a raw engine error to an external caller.** Trino/StarRocks errors carry table names, column names and sometimes host information — on a key-authenticated public endpoint that is a metadata leak. Map to fixed codes and log the full detail internally against `request_id` so support can correlate.
 
+**Every code below is reachable, and every reachable code is below.** The table is reconciled against `ServingError`'s variants, which `serving/error.rs::to_wire` matches exhaustively — adding a variant is a compile error there rather than a silent 500 carrying an engine message.
+
 | HTTP | code | When |
 |---|---|---|
-| 400 | `param_invalid` / `param_missing` | wrong type, absent, or outside the allow-list |
-| 400 | `row_limit_exceeded` | result exceeded the configured row cap |
-| 401 | `key_invalid` | key unknown, expired, or revoked |
-| 403 | `forbidden` | Cedar denied `dataapi:invoke` |
-| 403 | `data_access_denied` | Ranger denied — message states the service account lacks a data grant (§5.3) |
-| 404 | `not_found` | absent, disabled, or wrong workspace |
-| 429 | `rate_limited` | with `Retry-After` |
-| 502 | `engine_unavailable` | engine unreachable |
-| 504 | `timeout` | exceeded the snapshot's timeout |
+| 400 | `row_limit_exceeded` | result exceeded the configured row cap; the message states the cap |
+| 401 | `key_invalid` | token missing, malformed, expired, wrong audience, or unverifiable — one answer for all of them (§6.2) |
+| 403 | `data_access_denied` | Ranger denied — the service account lacks a data grant (§5.3) |
+| 403 | `not_granted` | egret denied — the service account holds no `data_api_endpoint:invoke` grant on this endpoint (§6.2 step 4). A different code from the row above on purpose: the fix is a grant on the endpoint, not a Ranger grant |
+| 404 | `not_found` | absent, disabled, wrong workspace, archived workspace, or an unparseable path — one answer for all of them |
+| 429 | `rate_limited` | with `Retry-After`, computed from the bucket's refill |
+| 500 | `internal` | an egret-side fault, and any engine failure P4 cannot classify further (see below) |
+| 503 | `schema_drift` | the engine's columns no longer match the ones the version froze; refused rather than reshaped (§5.1.2) |
+| 503 | `output_naming_collision` | `output.naming` maps two frozen columns onto one key, so a column advertised in `meta.columns` would vanish from every row |
+| 503 | `cache_scope_stale` | a `shared` version's frozen `(delegated, options.impersonate)` pair no longer matches the live `query.databases` row (§6.3) |
+
+**The three 503s are 503 and not 500** for one reason: nothing on egret's side failed. The endpoint's published configuration has stopped describing its data, and the fix belongs to an author or operator — re-publish, change `naming`, or put the connection back. `cache_scope_stale` in particular is deliberately NOT a silent downgrade to a per-principal key: serving the endpoint a different way would keep it working while hiding the drift from the only person who can correct it.
+
+**All three carry `Retry-After: 300`, and that number is a floor rather than a forecast.** None of them self-heals — only a human clears them — so the instinct is to send no header at all. That instinct is wrong about what a bare 503 does: it does not stop retries, it leaves the interval to the client's default, which for mainstream retry libraries is an exponential backoff starting around a second. A fleet of callers would therefore hammer hardest in exactly the state a human has to notice. RFC 9110 §10.2.3 defines `Retry-After` on a 503 as *the minimum time the user agent is asked to wait*, explicitly not a promise the condition has cleared, so stating five minutes is both true and strictly quieter. Note that the 429's `Retry-After` is a different thing wearing the same name: it is computed from the bucket and IS a prediction of when the refusal lifts.
+
+### Codes this table used to promise, and why P4 does not emit them
+
+Each is a decision, not an omission. A code in a published table that nothing can produce is worse than an absent one — it reads as a contract clients can branch on.
+
+| HTTP | code | Why it is not live |
+|---|---|---|
+| 400 | `param_invalid` / `param_missing` | §6.2 step 7 (rendering declared `params` into the SQL) is not implemented, so no caller input is validated anywhere yet. They arrive with step 7 — and when they do, neither may name the parameter: the name is the author's, and naming it turns the error surface into a directory of which parameters an endpoint declares. |
+| 502 | `engine_unavailable` | **not decidable at this seam.** `QueryExecPort` returns `egret_core::Error`, and `port_impl` folds the engine's `Connect`/`Storage`/`Db` failures AND egret's own faults — resolving the principal's email, opening the database secret — into the same `Error::Internal`. Answering 502 would page an operator about Trino when the metastore is what failed. |
+| 504 | `timeout` | same seam. `engine_error` maps `EngineError::Timeout` to `Error::InvalidInput("query timed out")`, deliberately, because for `describe_as` a timeout means the query is too expensive to plan. Recognising it in the serving path would mean matching another crate's message string — a check that keeps compiling and silently stops working the day someone rewords it. |
+
+Making 502 and 504 real means widening `QueryExecPort`'s error type, which is a cross-crate contract change. Until then those failures are `500 internal` with the detail in the log — safe, because nothing from the engine reaches the body, and honest, which a guessed 502 would not be.
+
+**When that widening happens it must bring three things, not one.** (a) `execute_as` needs its own timeout error rather than sharing `describe_as`'s table: the shared arm maps `EngineError::Timeout` to `InvalidInput("query timed out")` for a reason true only of `describe_as`, so widening without splitting it leaves 504 undecidable forever. (b) A distinct **author-fault** code, because `EngineError::BadRequest`/`Engine`/`Limit` all become `Error::InvalidInput` and land on `500 internal` too — so a published endpoint whose SQL stopped parsing is today indistinguishable in `access_log.error_code` from an egret fault, and an operator scanning for "which endpoints are broken" cannot separate two different people's problems. (c) That code must not be a 400: the caller did nothing wrong, the endpoint did.
 
 **The serving path applies its own timeout** rather than relying on JobManager. `describe()` (`connector/mod.rs:81`) already carries the identical note — it wraps its own timeout because it is called directly with no outer JobManager. The serving path is likewise direct, so it carries the same obligation.
 
@@ -413,9 +480,14 @@ One stable, machine-readable envelope:
 
 ## 8. Observability
 
-- `dataapi.access_log` records every call. It is the fastest-growing table in the system: partition monthly plus a retention job, reusing the existing gc-worker pattern from catalog CE6 rather than writing a new one.
+- `dataapi.access_log` records every call that got far enough to name a workspace. It is the fastest-growing table in the system, and it carries **no foreign key on `endpoint_id` or `service_account_id`** — deliberately the opposite of `0121`'s `RESTRICT` on `endpoints.database_id`, and for the opposite reason: an access log is a record of what already happened, so a `CASCADE` would erase exactly the history an incident needs and a `RESTRICT` would make an endpoint undeletable because it had once been called. `workspace_id` is the exception and does cascade, because it is the tenancy boundary rather than a label.
+- **Retention is a prune job; there is no partitioning.** `AccessLogStore::prune(retention_days)` is the same `DELETE … WHERE ts < now() - make_interval(days => $1)` shape as `AuditStore::prune`, and it is **scheduled beside it** on the same hourly tick in `egret-bin`, so an operator who knows one retention knob does not have to learn a second. The key is `data_api.access_log_retention_days` (`EGRET_DATA_API__ACCESS_LOG_RETENTION_DAYS`), default 90. Monthly partitioning was specified and is **not** implemented: there is no partitioned table anywhere in the repo to model it on and no measurement saying one table will not do, and the first partitioning scheme in the system is not something to introduce on a guess.
+- **`access_log_retention_days = 0` means NEVER PRUNE, which is deliberately not what `prune(0)` means.** The store reads 0 as "keep nothing", because `ts < now() - 0 days` really is every row already written — the correct meaning for a primitive, and `AuditStore::prune`'s. A config key is not a primitive: `0` is what an operator writes when they mean "off", and what a blank env var or a half-written TOML produces by accident, so on the fastest-growing table in the system the two readings differ by the whole log deleted an hour after boot. The scheduler therefore declines to schedule a non-positive retention **and logs a warning saying the table will grow unbounded**. `audit.retention_days` still carries the trap unguarded; that is a separate subsystem's behaviour and was not changed here.
+- **Every call gets a row, including the 429 and the 404 — accepted, not overlooked.** A refused request costs one synchronous INSERT, on the path whose job is to say "stop". Three reasons it stands: (a) the rate limiter never shed database load and structurally cannot, because it is keyed on `endpoint_id` and therefore runs *after* `get_by_slug` and `live_snapshot` — a refused request has already paid an RSA verification and two SELECTs before the bucket answers; the limiter sheds ENGINE load, which is the expensive thing it exists for; (b) a client hammering an exhausted bucket and someone walking a workspace's URL space are the two things most worth seeing in this table, and dropping them to save a write would make abuse invisible exactly where it is visible; (c) sampling is the wrong bound, because the statistics below are counts and a sampled table answers them wrongly and silently. If it is ever *measured* to matter, the in-tree precedent is `egret-audit`'s `AuditSink` + `AuditWriter` — a bounded channel and a batch writer, trading durability at shutdown for amortised writes.
+- **A call refused before its token verifies is not in the table, and filling it in would be worse than the gap.** `workspace_id` is `NOT NULL`, and the only workspace identifier a 401 has is the slug in the URL — which is caller-supplied and unverified. Writing it would let an *unauthenticated* caller create rows attributed to any workspace whose slug they can guess, inflating that tenant's error rate in the statistics computed from this table. A nullable `workspace_id` does not help either: it stores nothing and still cannot restore a per-workspace count. The only real fixes are a separate table for pre-authentication refusals, or an explicitly-named `claimed_slug` column that no aggregate ever joins on. Until then a 401 is a `tracing` event carrying the same `request_id`, so it is correlatable but not countable.
+- **Related blind spot, and it is bigger:** the rate limiter runs *after* token verification, so an unauthenticated flood is bounded by nothing in this crate and appears in no table at all. That belongs to the authentication surface and to whatever fronts it, not to the access log — but it is the same hole seen from the other side.
 - Management UI statistics (call count, error rate, p50/p95, cache hit rate per endpoint) are computed from `access_log` — the equivalent of sqlrest's `HourCount` / `DateCount` / `NameCount`.
-- `request_id` is propagated to the engine and stored alongside `engine_query_id`, so a slow API call traces back to the exact query on Trino/StarRocks.
+- `request_id` is minted once per call, before anything can fail, and is the same id in the response body, in every `tracing` line for the call, and in `access_log.request_id` — which is what makes "quote your request_id" actionable. `engine_query_id` is specified and the column exists, but P4 always writes NULL: `QueryExecPort` returns no engine query id, so propagating `request_id` down to the engine and reading one back is still outstanding.
 - Publish, rollback, disable, enable, endpoint deletion, client issue and client revocation ARE `egret-audit` events as of P3 — see §5.3 for the exact `action`/`resource_type`/`detail` of each, for why no `client_secret` is ever in a detail, for why the endpoint delete is the one event that must carry columns, and for the four mutating routes that are still not audited.
 
 ## 9. Testing
@@ -436,7 +508,21 @@ CI runs in full locally before merge, including `cargo fmt`. Never run two works
 Deferred deliberately, each recorded so it is a decision rather than an omission:
 
 - **Writes (INSERT/UPDATE/DELETE)** and multi-statement transactions — needs transaction boundaries, rollback, write audit, and a policy for who may publish a write endpoint.
-- **Bound parameters at the connector layer** — see §3.
+- **Bound parameters at the connector layer.** This is the largest deferral in the document and the one most likely to be misread, so the reasoning is here rather than only in §3.
+
+  sqlrest — the implementation this design is modelled on — does **not** interpolate. Its MyBatis `#{param}` becomes a real `ParameterMapping`, i.e. a driver bind. We interpolate an escaped literal instead. On the parameter axis the reference implementation is therefore *structurally safer* than what we built.
+
+  Every escaping defect this feature has had exists because of that one choice: the backslash-blind quoting on StarRocks (P1), the `{{param}}` publishable inside a string literal, the scanner that read `#` as a comment while StarRocks read it as whitespace, and the `;` that escaped `describe`'s wrapper (all P3). A bound parameter cannot break out of its own position, so none of that class is reachable.
+
+  **It was deferred for cost, not because interpolation was judged adequate.** `Connector::execute` takes `sql: &str` with no parameter channel; StarRocks could bind natively through `mysql_async`, but Trino needs `X-Trino-Prepared-Statement` plus `EXECUTE … USING`, which is a `Connector` trait change and a second protocol path. Doing it would *delete* the dialect escaper, the raw-byte statement check, and the placeholder-position check — the fix is subtractive, which is the strongest argument for it.
+
+- **Dynamic SQL** — conditional predicates that appear only when a parameter was supplied. sqlrest has this through MyBatis `<if>`, `<where>`, `<set>`, `<choose>`/`<when>`, `<foreach>`; we have none. `{{param}}` substitutes unconditionally, so an optional filter must be written `WHERE (region = {{r}} OR {{r}} IS NULL)`, which is awkward and usually defeats the index the predicate existed for.
+
+  **`rbatis` does not solve this**, and the reason is worth recording so it is not re-proposed. Its dynamic SQL is compile-time: `rb_html(args: TokenStream, func: TokenStream) -> TokenStream` is a proc macro over a `syn::ItemFn`, so the template must be a literal in Rust source at build time. A Data API endpoint is a row in `dataapi.endpoint_versions.snapshot`, authored by a user and published while the system is running — no macro can run over it. It is also inseparable from its own `rbdc` driver layer, which has no Trino driver and would mean rebuilding per-user delegation, engine JWTs and Ranger.
+
+  If it is ever built it must be a **runtime** renderer, and the shape matters more than the feature: a general template engine (Jinja-family) evaluates a user-authored template on a public endpoint, which is a known risk area for Superset and would be a new attack surface here. Build the smallest thing that answers "was this parameter supplied" — no expression language, no function calls, no attribute access.
+
+  **Order matters if both are done: bound parameters first.** Adding conditional rendering on top of string interpolation compounds two risks; adding it on top of binding compounds none.
 - **Groovy/script execution engine** (sqlrest's `ExecuteEngineEnum::SCRIPT`) — a large sandboxing problem for marginal benefit over SQL.
 - **MCP tool export** (sqlrest's `McpToolEntity`) — natural v2 follow-on once endpoints are stable.
 - **IP allow/deny lists** (sqlrest's `FirewallRulesEntity`) — better solved at ingress than in application code.

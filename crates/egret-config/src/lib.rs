@@ -128,6 +128,19 @@ pub struct AuditConfig {
     /// When false, the PDP is not wrapped and no events are emitted.
     pub enabled: bool,
     /// Rows older than this are pruned. Default 90.
+    ///
+    /// **`0` means "do not prune", not "keep nothing".** `AuditStore::prune(0)`
+    /// really would delete every row — `ts < now() - 0 days` is everything
+    /// already written — and that is the correct primitive, but a config key is
+    /// not a primitive: `0` is what an operator writes when they mean "off", and
+    /// what `EGRET_AUDIT__RETENTION_DAYS=` deserialises to when it is blank. On
+    /// the authorization-decision record, passed through on an hourly tick
+    /// inside a default-on `enabled`, that spelling emptied the table an hour
+    /// after boot. `egret-bin` routes this through
+    /// `egret_dataapi::serving::scheduled_retention` — the same guard
+    /// [`DataApiConfig::access_log_retention_days`] uses, deliberately the same
+    /// function and not a second spelling of the same comparison — and logs when
+    /// it declines to schedule.
     pub retention_days: i64,
     /// Bounded channel capacity; on overflow events are dropped (best-effort).
     pub channel_capacity: usize,
@@ -135,6 +148,40 @@ pub struct AuditConfig {
     pub batch_size: usize,
     /// Flush the batch at least this often.
     pub flush_interval_ms: u64,
+}
+
+/// The Data API's serving surface (P4).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataApiConfig {
+    /// Rows in `dataapi.access_log` older than this are pruned hourly, beside
+    /// the audit prune. Default 90, matching [`AuditConfig::retention_days`].
+    ///
+    /// # `0` means NEVER PRUNE here, and that is deliberately NOT
+    /// [`AuditConfig::retention_days`]'s reading
+    ///
+    /// `AccessLogStore::prune(0)` — like `AuditStore::prune(0)` — deletes
+    /// everything, because `ts < now() - 0 days` is every row already written.
+    /// That is the right semantics for the STORE, which is a primitive an
+    /// operator calls with an interval they chose.
+    ///
+    /// It is the wrong semantics for a CONFIG KEY, where `0` is what an operator
+    /// writes when they mean "off" and what a half-written TOML or a
+    /// `EGRET_DATA_API__ACCESS_LOG_RETENTION_DAYS=` env var can produce by
+    /// accident. On the fastest-growing table in the system, that spelling would
+    /// silently discard the whole log an hour later. So the scheduler treats `0`
+    /// (and any negative) as "do not schedule the prune at all" and logs that it
+    /// did — the store's meaning is untouched, and the trap is closed at the one
+    /// place a human types a number.
+    ///
+    /// `AuditConfig::retention_days` carries the identical trap and is guarded
+    /// the identical way — `egret-bin` routes it through the same
+    /// `scheduled_retention` rather than a second spelling of the same
+    /// comparison. This comment used to say the audit knob was "still unguarded"
+    /// and that fixing it was out of scope; that stopped being true and the
+    /// sentence stayed, which is the kind of note that tells the next reader not
+    /// to look. **If you add a third retention knob, route it through the same
+    /// function** — the danger is not this field, it is the shape.
+    pub access_log_retention_days: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,6 +202,21 @@ pub struct Config {
     pub audit: AuditConfig,
     pub kernel: KernelConfig,
     pub automation: AutomationConfig,
+    #[serde(default = "default_data_api")]
+    pub data_api: DataApiConfig,
+}
+
+/// Serde's fallback for a `[data_api]` section a deployment's TOML predates.
+///
+/// `Config::figment()` layers `Serialized::defaults(Config::default())` under
+/// the file, so a missing section is already covered — but only for callers
+/// that go through `figment()`. Anything deserialising a `Config` directly
+/// (a test, a future admin endpoint) would otherwise fail on a field that has
+/// only ever had one sensible value.
+fn default_data_api() -> DataApiConfig {
+    DataApiConfig {
+        access_log_retention_days: 90,
+    }
 }
 
 /// Alerts & Reports (P2). The scheduler is on by default: a schedule the user
@@ -305,6 +367,7 @@ impl Default for Config {
                 preview_rows: 100,
                 results_prefix: "query-results".into(),
             },
+            data_api: default_data_api(),
             audit: AuditConfig {
                 enabled: true,
                 retention_days: 90,
@@ -413,6 +476,44 @@ mod tests {
             assert_eq!(cfg.server.port, 8080);
             assert_eq!(cfg.server.host, "0.0.0.0");
             assert_eq!(cfg.database.max_connections, 10);
+            Ok(())
+        });
+    }
+
+    /// A fresh deployment must prune `dataapi.access_log`, and must not prune it
+    /// to nothing.
+    ///
+    /// The two halves are separate assertions on purpose. A default of 0 would
+    /// deserialise fine, read as "off" through `scheduled_retention`, and leave
+    /// the fastest-growing table in the system unbounded on every deployment
+    /// that never set the key — which is every deployment today, since the
+    /// `[data_api]` section is new.
+    #[test]
+    fn the_access_log_retention_default_is_positive() {
+        figment::Jail::expect_with(|_jail| {
+            let cfg: Config = Config::figment().extract()?;
+            assert!(
+                cfg.data_api.access_log_retention_days > 0,
+                "a fresh deployment must prune the access log, got {}",
+                cfg.data_api.access_log_retention_days
+            );
+            assert_eq!(
+                cfg.data_api.access_log_retention_days, cfg.audit.retention_days,
+                "the two retention knobs should not disagree by accident"
+            );
+            Ok(())
+        });
+    }
+
+    /// The key is reachable from the environment under the name the operator
+    /// docs will name. A section whose env path is wrong is a knob that silently
+    /// cannot be turned.
+    #[test]
+    fn the_access_log_retention_is_settable_from_the_environment() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("EGRET_DATA_API__ACCESS_LOG_RETENTION_DAYS", "7");
+            let cfg: Config = Config::figment().extract()?;
+            assert_eq!(cfg.data_api.access_log_retention_days, 7);
             Ok(())
         });
     }

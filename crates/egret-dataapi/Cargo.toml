@@ -48,9 +48,18 @@ argon2.workspace = true
 rand.workspace = true
 base64.workspace = true
 utoipa.workspace = true
+# The serving response cache's key (`serving/cache.rs`). A hash rather than a
+# concatenation so the key is fixed-length however many parameters an endpoint
+# declares, and so no separator question arises from a value containing one.
+sha2.workspace = true
 
 [dev-dependencies]
 tower.workspace = true
+# `serving_auth.rs` asserts that every rejection arm LOGS its reason. The doc on
+# `verify_serving_token` promises an operator can tell a stale token from a
+# replayed catalog one; without a subscriber to capture the events, that promise
+# was prose and stayed false through a whole review.
+tracing-subscriber.workspace = true
 # `CedarPdp::build` needs an `EventBus` — the route tests run against the REAL
 # PDP, not a mocked decision, so a mis-scoped permission cannot pass.
 egret-events.workspace = true

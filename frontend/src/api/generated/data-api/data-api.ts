@@ -30,12 +30,14 @@ import type {
   CreateServiceAccountInput,
   DataApiClientDto,
   DataApiEndpointDto,
+  DataApiEndpointGrantDto,
   DataApiEndpointVersionDto,
   DataApiNewClientDto,
   DataApiPublishedDto,
   DataApiServiceAccountDto,
   DataApiValidationDto,
   ErrorBody,
+  GrantInvokeInput,
   IssueClientInput,
   PublishEndpointInput,
   RollbackEndpointInput,
@@ -961,6 +963,345 @@ export const useDataApiEnableEndpoint = <TError = ErrorBody,
         TContext
       > => {
       return useMutation(getDataApiEnableEndpointMutationOptions(options), queryClient);
+    }
+    export type dataApiListEndpointGrantsResponse200 = {
+  data: DataApiEndpointGrantDto[]
+  status: 200
+}
+
+export type dataApiListEndpointGrantsResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type dataApiListEndpointGrantsResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type dataApiListEndpointGrantsResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type dataApiListEndpointGrantsResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type dataApiListEndpointGrantsResponseSuccess = (dataApiListEndpointGrantsResponse200) & {
+  headers: Headers;
+};
+export type dataApiListEndpointGrantsResponseError = (dataApiListEndpointGrantsResponse401 | dataApiListEndpointGrantsResponse403 | dataApiListEndpointGrantsResponse404 | dataApiListEndpointGrantsResponse500) & {
+  headers: Headers;
+};
+
+export type dataApiListEndpointGrantsResponse = (dataApiListEndpointGrantsResponseSuccess | dataApiListEndpointGrantsResponseError)
+
+export const getDataApiListEndpointGrantsUrl = (workspace: string,
+    id: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/data-api/endpoints/${encodeURIComponent(id)}/grants`
+}
+
+export const dataApiListEndpointGrants = async (workspace: string,
+    id: string, options?: Parameters<typeof customInstance>[1]): Promise<dataApiListEndpointGrantsResponse> => {
+
+  return customInstance<dataApiListEndpointGrantsResponse>(getDataApiListEndpointGrantsUrl(workspace,id),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getDataApiListEndpointGrantsQueryKey = (workspace: string,
+    id: string,) => {
+    return [
+    `/api/ws/${encodeURIComponent(workspace)}/data-api/endpoints/${encodeURIComponent(id)}/grants`
+    ] as const;
+    }
+
+
+export const getDataApiListEndpointGrantsQueryOptions = <TData = Awaited<ReturnType<typeof dataApiListEndpointGrants>>, TError = ErrorBody>(workspace: string,
+    id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof dataApiListEndpointGrants>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getDataApiListEndpointGrantsQueryKey(workspace,id);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof dataApiListEndpointGrants>>> = ({ signal }) => dataApiListEndpointGrants(workspace,id, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: workspace !== null && workspace !== undefined && id !== null && id !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof dataApiListEndpointGrants>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type DataApiListEndpointGrantsQueryResult = NonNullable<Awaited<ReturnType<typeof dataApiListEndpointGrants>>>
+export type DataApiListEndpointGrantsQueryError = ErrorBody
+
+
+export function useDataApiListEndpointGrants<TData = Awaited<ReturnType<typeof dataApiListEndpointGrants>>, TError = ErrorBody>(
+ workspace: string,
+    id: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof dataApiListEndpointGrants>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof dataApiListEndpointGrants>>,
+          TError,
+          Awaited<ReturnType<typeof dataApiListEndpointGrants>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useDataApiListEndpointGrants<TData = Awaited<ReturnType<typeof dataApiListEndpointGrants>>, TError = ErrorBody>(
+ workspace: string,
+    id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof dataApiListEndpointGrants>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof dataApiListEndpointGrants>>,
+          TError,
+          Awaited<ReturnType<typeof dataApiListEndpointGrants>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useDataApiListEndpointGrants<TData = Awaited<ReturnType<typeof dataApiListEndpointGrants>>, TError = ErrorBody>(
+ workspace: string,
+    id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof dataApiListEndpointGrants>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useDataApiListEndpointGrants<TData = Awaited<ReturnType<typeof dataApiListEndpointGrants>>, TError = ErrorBody>(
+ workspace: string,
+    id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof dataApiListEndpointGrants>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getDataApiListEndpointGrantsQueryOptions(workspace,id,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type dataApiGrantEndpointInvokeResponse200 = {
+  data: DataApiEndpointGrantDto
+  status: 200
+}
+
+export type dataApiGrantEndpointInvokeResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type dataApiGrantEndpointInvokeResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type dataApiGrantEndpointInvokeResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type dataApiGrantEndpointInvokeResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type dataApiGrantEndpointInvokeResponseSuccess = (dataApiGrantEndpointInvokeResponse200) & {
+  headers: Headers;
+};
+export type dataApiGrantEndpointInvokeResponseError = (dataApiGrantEndpointInvokeResponse401 | dataApiGrantEndpointInvokeResponse403 | dataApiGrantEndpointInvokeResponse404 | dataApiGrantEndpointInvokeResponse500) & {
+  headers: Headers;
+};
+
+export type dataApiGrantEndpointInvokeResponse = (dataApiGrantEndpointInvokeResponseSuccess | dataApiGrantEndpointInvokeResponseError)
+
+export const getDataApiGrantEndpointInvokeUrl = (workspace: string,
+    id: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/data-api/endpoints/${encodeURIComponent(id)}/grants`
+}
+
+export const dataApiGrantEndpointInvoke = async (workspace: string,
+    id: string,
+    grantInvokeInput: GrantInvokeInput, options?: Parameters<typeof customInstance>[1]): Promise<dataApiGrantEndpointInvokeResponse> => {
+
+  return customInstance<dataApiGrantEndpointInvokeResponse>(getDataApiGrantEndpointInvokeUrl(workspace,id),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(grantInvokeInput)
+  }
+);}
+
+
+
+
+
+export const getDataApiGrantEndpointInvokeMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof dataApiGrantEndpointInvoke>>, TError,{workspace: string;id: string;data: GrantInvokeInput}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof dataApiGrantEndpointInvoke>>, TError,{workspace: string;id: string;data: GrantInvokeInput}, TContext> => {
+
+const mutationKey = ['dataApiGrantEndpointInvoke'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof dataApiGrantEndpointInvoke>>, {workspace: string;id: string;data: GrantInvokeInput}> = (props) => {
+          const {workspace,id,data} = props ?? {};
+
+          return  dataApiGrantEndpointInvoke(workspace,id,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type DataApiGrantEndpointInvokeMutationResult = NonNullable<Awaited<ReturnType<typeof dataApiGrantEndpointInvoke>>>
+    export type DataApiGrantEndpointInvokeMutationBody = GrantInvokeInput
+    export type DataApiGrantEndpointInvokeMutationError = ErrorBody
+
+    export const useDataApiGrantEndpointInvoke = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof dataApiGrantEndpointInvoke>>, TError,{workspace: string;id: string;data: GrantInvokeInput}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof dataApiGrantEndpointInvoke>>,
+        TError,
+        {workspace: string;id: string;data: GrantInvokeInput},
+        TContext
+      > => {
+      return useMutation(getDataApiGrantEndpointInvokeMutationOptions(options), queryClient);
+    }
+    export type dataApiRevokeEndpointInvokeResponse200 = {
+  data: Ack
+  status: 200
+}
+
+export type dataApiRevokeEndpointInvokeResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type dataApiRevokeEndpointInvokeResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type dataApiRevokeEndpointInvokeResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type dataApiRevokeEndpointInvokeResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type dataApiRevokeEndpointInvokeResponseSuccess = (dataApiRevokeEndpointInvokeResponse200) & {
+  headers: Headers;
+};
+export type dataApiRevokeEndpointInvokeResponseError = (dataApiRevokeEndpointInvokeResponse401 | dataApiRevokeEndpointInvokeResponse403 | dataApiRevokeEndpointInvokeResponse404 | dataApiRevokeEndpointInvokeResponse500) & {
+  headers: Headers;
+};
+
+export type dataApiRevokeEndpointInvokeResponse = (dataApiRevokeEndpointInvokeResponseSuccess | dataApiRevokeEndpointInvokeResponseError)
+
+export const getDataApiRevokeEndpointInvokeUrl = (workspace: string,
+    id: string,
+    serviceAccountId: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/data-api/endpoints/${encodeURIComponent(id)}/grants/${encodeURIComponent(serviceAccountId)}`
+}
+
+export const dataApiRevokeEndpointInvoke = async (workspace: string,
+    id: string,
+    serviceAccountId: string, options?: Parameters<typeof customInstance>[1]): Promise<dataApiRevokeEndpointInvokeResponse> => {
+
+  return customInstance<dataApiRevokeEndpointInvokeResponse>(getDataApiRevokeEndpointInvokeUrl(workspace,id,serviceAccountId),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+);}
+
+
+
+
+
+export const getDataApiRevokeEndpointInvokeMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof dataApiRevokeEndpointInvoke>>, TError,{workspace: string;id: string;serviceAccountId: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof dataApiRevokeEndpointInvoke>>, TError,{workspace: string;id: string;serviceAccountId: string}, TContext> => {
+
+const mutationKey = ['dataApiRevokeEndpointInvoke'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof dataApiRevokeEndpointInvoke>>, {workspace: string;id: string;serviceAccountId: string}> = (props) => {
+          const {workspace,id,serviceAccountId} = props ?? {};
+
+          return  dataApiRevokeEndpointInvoke(workspace,id,serviceAccountId,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type DataApiRevokeEndpointInvokeMutationResult = NonNullable<Awaited<ReturnType<typeof dataApiRevokeEndpointInvoke>>>
+
+    export type DataApiRevokeEndpointInvokeMutationError = ErrorBody
+
+    export const useDataApiRevokeEndpointInvoke = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof dataApiRevokeEndpointInvoke>>, TError,{workspace: string;id: string;serviceAccountId: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof dataApiRevokeEndpointInvoke>>,
+        TError,
+        {workspace: string;id: string;serviceAccountId: string},
+        TContext
+      > => {
+      return useMutation(getDataApiRevokeEndpointInvokeMutationOptions(options), queryClient);
     }
     export type dataApiPublishEndpointResponse200 = {
   data: DataApiPublishedDto

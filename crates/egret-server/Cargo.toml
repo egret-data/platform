@@ -38,3 +38,7 @@ http-body-util = "0.1"
 egret-audit.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
+# `dataapi_serving_mount.rs` builds a `DataApiState` by hand to compose the real
+# router: `QueryExecPort` for the fake engine, `uuid` for the token claims.
+egret-query-api.workspace = true
+uuid.workspace = true

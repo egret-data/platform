@@ -48,6 +48,17 @@ impl egret_query_api::QueryExecPort for UnreachablePort {
     ) -> Result<Vec<egret_core::ColumnMeta>, egret_core::Error> {
         unreachable!("no route in this test should reach the query engine")
     }
+
+    async fn execute_as(
+        &self,
+        _ws: Uuid,
+        _database_id: Uuid,
+        _principal: egret_core::UserId,
+        _sql: &str,
+        _limits: egret_query_api::Limits,
+    ) -> Result<egret_core::TabularResult, egret_core::Error> {
+        unreachable!("no route in this test should reach the query engine")
+    }
 }
 
 fn build_state(db: Db, pdp: Arc<dyn egret_core::authz::Pdp>) -> DataApiState {
@@ -63,14 +74,19 @@ fn build_state(db: Db, pdp: Arc<dyn egret_core::authz::Pdp>) -> DataApiState {
             chrono::Duration::minutes(60),
         ),
         workspaces: egret_workspace::workspaces::WorkspaceRepo::new(db.clone()),
-        authz: egret_workspace::rbac::Authorizer::new(db),
+        authz: egret_workspace::rbac::Authorizer::new(db.clone()),
         pdp,
+        // The real Postgres key store. Nothing in this file authenticates a
+        // machine token, so `active()` is never called and no key is generated.
+        keys: Arc::new(egret_machine_idp::PgSigningKeyStore::new(db.clone())),
         issuer: "https://egret.test".into(),
         // A sink whose receiver is dropped immediately: `emit` is best-effort
         // and logs rather than failing when the channel is closed, so nothing in
         // this file depends on it. What the audited routes emit is asserted in
         // `audit.rs`, which keeps the receiver.
         audit: egret_audit::AuditSink::new(1).0,
+        cache: egret_dataapi::serving::ResponseCache::new(),
+        rate_limits: std::sync::Arc::new(egret_dataapi::serving::TokenBucket::new()),
     }
 }
 

@@ -1073,17 +1073,101 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             config.audit.batch_size,
             std::time::Duration::from_millis(config.audit.flush_interval_ms),
         ));
-        let prune_store = audit_store.clone();
-        let retention = config.audit.retention_days;
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
-            loop {
-                tick.tick().await;
-                if let Err(e) = prune_store.prune(retention).await {
-                    tracing::warn!(error=%e, "audit prune failed");
+        // The SAME `prune(0)` trap the Data API access log closes below, on the
+        // table that matters most: `audit.audit_log` is the authorization-decision
+        // record. `AuditStore::prune(0)` deletes everything — `ts < now() - 0
+        // days` is every row already written, and that is the correct primitive —
+        // but a CONFIG key is not a primitive. `0` is what an operator writes
+        // when they mean "off", and what `EGRET_AUDIT__RETENTION_DAYS=`
+        // deserialises to when it is blank or half-written. Passed straight
+        // through, on an hourly tick inside the default-on `audit.enabled`, that
+        // empties the audit trail one hour after boot, silently, with nothing
+        // having gone wrong and no operator action that looks like a mistake.
+        //
+        // `egret_dataapi::serving::scheduled_retention` is reused rather than
+        // re-implemented here: it is the same decision, and two spellings of it
+        // are how one of them ends up wrong. (The dependency direction is
+        // acceptable — this binary already composes every seam — but if
+        // `egret-audit` ever grows its own scheduler, the guard should move
+        // there and both call sites should use that one.)
+        //
+        // The store keeps its meaning; only the SCHEDULER refuses to call it with
+        // a number that would wipe. An operator who genuinely wants an empty
+        // table still has `prune(0)`.
+        let configured_audit_retention = config.audit.retention_days;
+        if let Some(retention) =
+            egret_dataapi::serving::scheduled_retention(configured_audit_retention)
+        {
+            let prune_store = audit_store.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
+                loop {
+                    tick.tick().await;
+                    if let Err(e) = prune_store.prune(retention).await {
+                        tracing::warn!(error=%e, "audit prune failed");
+                    }
                 }
-            }
-        });
+            });
+        } else {
+            tracing::warn!(
+                retention_days = configured_audit_retention,
+                "audit retention is not positive; prune NOT scheduled. \
+                 audit.audit_log will grow without bound — set \
+                 audit.retention_days to a positive number of days. \
+                 (This is deliberately not a wipe: a retention of 0 reads as \
+                 'off', never as 'keep nothing'.)"
+            );
+        }
+    }
+
+    // The Data API's access log has its own retention, on the same hourly tick
+    // and in the same shape — spec §8. It is spawned HERE, beside the audit
+    // prune, rather than near the `DataApiState` construction 700 lines below,
+    // because the two are one operational concern: an operator asking "what
+    // prunes, and how often" should find both answers in one place.
+    //
+    // It is NOT gated on `config.audit.enabled`. That flag means "do not record
+    // authorization decisions"; the access log is a different table with a
+    // different purpose, and reading one switch as governing both would leave
+    // the fastest-growing table in the system unpruned for a reason nobody
+    // wrote down.
+    //
+    // A retention of 0 or less means DO NOT PRUNE, and is logged when it is
+    // taken. `AccessLogStore::prune(0)` deletes everything — `ts < now() - 0
+    // days` is every row already written — so treating a config `0` as "off"
+    // (which is what an operator writing `0` means, and what a blank env var
+    // deserialises to) is the difference between a knob that is off and a knob
+    // that empties the table an hour after boot. The store keeps its meaning;
+    // only the scheduler refuses to call it with a number that would wipe.
+    {
+        let configured = config.data_api.access_log_retention_days;
+        if let Some(retention) = egret_dataapi::serving::scheduled_retention(configured) {
+            let prune_store = egret_dataapi::serving::AccessLogStore::new(db.clone());
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
+                loop {
+                    tick.tick().await;
+                    match prune_store.prune(retention).await {
+                        Ok(n) if n > 0 => {
+                            tracing::info!(
+                                deleted = n,
+                                retention_days = retention,
+                                "data-api access log pruned"
+                            )
+                        }
+                        Ok(_) => {}
+                        Err(e) => tracing::warn!(error=%e, "data-api access log prune failed"),
+                    }
+                }
+            });
+        } else {
+            tracing::warn!(
+                retention_days = configured,
+                "data-api access log retention is not positive; prune NOT scheduled. \
+                 dataapi.access_log will grow without bound — set \
+                 data_api.access_log_retention_days to a positive number of days."
+            );
+        }
     }
 
     let users = UserRepo::new(db.clone());
@@ -1780,8 +1864,15 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // EB-3: the real ClientVerifier is the Catalog Client registry (CatalogStore).
     // `issuer` is egret's public root URL (the JWT `iss` + OIDC issuer lakekeeper
     // will trust in EB-3's Authorizer integration).
+    // One key store, shared: the IdP signs with it and the Data API serving path
+    // (P4) verifies against it, so there is a single source of truth for what
+    // egret's signing key currently is. This is NOT a rotation fix — both sides
+    // read `active()` and would follow a rotation forward together either way;
+    // see `DataApiState::keys` for what closing that would actually take.
+    let signing_keys: std::sync::Arc<dyn egret_machine_idp::SigningKeyStore> =
+        std::sync::Arc::new(egret_machine_idp::PgSigningKeyStore::new(db.clone()));
     let idp = Some(egret_machine_idp::IdpState {
-        keys: std::sync::Arc::new(egret_machine_idp::PgSigningKeyStore::new(db.clone())),
+        keys: signing_keys.clone(),
         issuer: egret_public_url.clone(),
         verifiers: vec![
             std::sync::Arc::new(egret_catalog_engine::CatalogStore::new(db.clone())),
@@ -1809,11 +1900,19 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         workspaces: WorkspaceRepo::new(db.clone()),
         authz: Authorizer::new(db.clone()),
         pdp: pdp.clone(),
+        // The SAME store the machine-IdP above signs with (P4 Task 2), so the
+        // serving path verifies a token against the key that actually signed it.
+        keys: signing_keys.clone(),
         issuer: egret_public_url.clone(),
         // The SAME sink `CpState` and every other seam receives (P3 Task 5), so
         // publishing an endpoint or minting a client lands in the one `audit_log`
         // an operator already queries, not in a Data-API-local trail.
         audit: audit_sink.clone(),
+        // The serving surface's per-process cache and rate-limit buckets (P4
+        // Task 4). Constructed ONCE, here: built per request they would be a
+        // cache that never hits and a limit nobody reaches.
+        cache: egret_dataapi::serving::ResponseCache::new(),
+        rate_limits: std::sync::Arc::new(egret_dataapi::serving::TokenBucket::new()),
     });
 
     let app = build_router(AppState {

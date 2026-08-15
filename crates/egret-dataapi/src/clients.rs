@@ -178,7 +178,11 @@ impl egret_machine_idp::ClientVerifier for ClientStore {
             .unwrap_or_default();
         Ok(Some(egret_machine_idp::VerifiedClient {
             client_id: client_id.to_string(),
-            audience: "data-api".into(),
+            // The const, not the literal: this is the MINT side and
+            // `serving::verify_serving_token` is the VERIFY side, and a token
+            // whose audience the verifier does not recognise is refused with no
+            // hint as to why. One definition means the two cannot drift apart.
+            audience: crate::serving::DATA_API_AUDIENCE.into(),
             extra_claims: extra,
             ttl_secs: DATA_API_TTL_SECS,
         }))

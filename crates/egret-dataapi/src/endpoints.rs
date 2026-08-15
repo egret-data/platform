@@ -291,6 +291,17 @@ pub const ALLOWED_METHODS: [&str; 2] = ["GET", "POST"];
 /// but a field that lands before its guard is a hole.
 pub const FOLDER_ENTITY_TYPE: &str = "data_api_endpoint";
 
+/// The Cedar object KIND an endpoint appears as in an authorization decision,
+/// and the `access_grants.object_type` of an invoke grant (spec §5, §6.2 step 4).
+///
+/// It happens to spell the same string as [`FOLDER_ENTITY_TYPE`] and is a
+/// separate constant on purpose: one names a row in `analytics.folders`, the
+/// other namespaces `Egret::Object::"<kind>:<uuid>"` in the PDP and is written
+/// into `access_grants`. Aliasing them would make a rename of either silently
+/// re-point every invoke grant at a kind nothing checks — grants that keep
+/// matching the schema and stop matching the decision.
+pub const OBJECT_KIND: &str = "data_api_endpoint";
+
 /// The longest a stored endpoint path may be, in bytes.
 ///
 /// Not a product limit — a limit that already exists further down, made visible.
@@ -700,20 +711,52 @@ impl EndpointStore {
     /// nothing: an auditor could see that *something* was deleted and never
     /// which URL stopped being served. `RETURNING` also costs no second query
     /// and cannot race, since it reads the row the DELETE itself removed.
+    /// **The invoke grants go with it, and that needs a statement of its own.**
+    /// `access_grants.scope_id` is POLYMORPHIC with no FK to anything (migration
+    /// 0068) and no cleanup trigger, so nothing at the database level removes an
+    /// endpoint's grants when the endpoint is destroyed. This is the same shape
+    /// `UserRepo::hard_delete` already handles from the PRINCIPAL side — it
+    /// sweeps `access_grants` by `principal_id`, which is what keeps deleting a
+    /// service account from leaving grants behind. This is the OBJECT side of the
+    /// same gap, and without it a deleted endpoint leaves rows that the grants
+    /// list would render with a null name, that accumulate without bound, and
+    /// that would silently come back to life if `gen_random_uuid()` ever
+    /// reissued the id (it will not — but a grant surviving its object is not a
+    /// thing to reason about probabilistically).
+    ///
+    /// Both statements run in ONE transaction. Split, a failure between them
+    /// leaves exactly the orphan this is here to prevent, and the endpoint would
+    /// already be gone so nothing could retry the sweep.
     pub async fn delete(&self, workspace: Uuid, id: Uuid) -> Result<DeletedEndpoint> {
+        let mut tx = self.db.pool.begin().await.map_err(db_err)?;
         let row: Option<(String, String, String, Uuid)> = sqlx::query_as(
             "DELETE FROM dataapi.endpoints WHERE id = $1 AND workspace_id = $2 \
              RETURNING name, path, method, database_id",
         )
         .bind(id)
         .bind(workspace)
-        .fetch_optional(&self.db.pool)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(db_err)?;
         // Reported rather than swallowed: a DELETE that matched nothing is the
         // same event as a GET that found nothing, and must answer the same way.
+        // Checked BEFORE the sweep, so a 404 cannot delete another workspace's
+        // grants on an id it was never allowed to name.
         let (name, path, method, database_id) =
             row.ok_or_else(|| Error::NotFound("endpoint".into()))?;
+        // Scoped by `object_type` as well as `scope_id`: a uuid is not unique
+        // across kinds by construction, and this must not reach a dashboard
+        // share that happens to carry the same scope id.
+        sqlx::query(
+            "DELETE FROM access_grants \
+             WHERE scope_type = 'object' AND object_type = $1 AND scope_id = $2",
+        )
+        .bind(OBJECT_KIND)
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        tx.commit().await.map_err(db_err)?;
         Ok(DeletedEndpoint {
             name,
             path,

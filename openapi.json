@@ -14964,6 +14964,294 @@
         }
       }
     },
+    "/api/ws/{workspace}/data-api/endpoints/{id}/grants": {
+      "get": {
+        "tags": [
+          "data-api"
+        ],
+        "operationId": "list_endpoint_grants",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Endpoint id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Service accounts granted invoke on this endpoint",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DataApiEndpointGrantDto"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing data_api_endpoint:manage — listing the grantees is a manage operation, not a read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such endpoint in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "data-api"
+        ],
+        "operationId": "grant_endpoint_invoke",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Endpoint id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GrantInvokeInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Granted (idempotent)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataApiEndpointGrantDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing data_api_endpoint:manage — granting invoke rights mutates the authorization graph, so :read does not reach it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such endpoint, or no such service account, in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/data-api/endpoints/{id}/grants/{service_account_id}": {
+      "delete": {
+        "tags": [
+          "data-api"
+        ],
+        "operationId": "revoke_endpoint_invoke",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Endpoint id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "service_account_id",
+            "in": "path",
+            "description": "Service account to revoke",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Revoked (idempotent). Takes effect on the caller's NEXT request — unlike revoking a client, which cannot recall an already-issued token before its 600s TTL expires",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ack"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing data_api_endpoint:manage",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such endpoint, or no such service account, in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/data-api/endpoints/{id}/publish": {
       "post": {
         "tags": [
@@ -24300,6 +24588,234 @@
         }
       }
     },
+    "/data-api/v1/{ws}/{path}": {
+      "get": {
+        "tags": [
+          "data-api-serving"
+        ],
+        "operationId": "serve_get",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace slug; must match the token's `ws` claim",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "path",
+            "description": "The endpoint's published path, e.g. `reports/daily`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Rows from the published snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServingResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`row_limit_exceeded` — the result exceeded the endpoint's row cap",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServingErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "`key_invalid` — bearer token missing, expired, or not for this audience",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServingErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`data_access_denied` — the engine denied the data to this service account",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServingErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`not_found` — no such live endpoint in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServingErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`rate_limited` — a published rate limit was exceeded; `Retry-After` states when the bucket refills",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServingErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "`internal` — an egret-side fault; quote `request_id` to support",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServingErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`schema_drift` / `output_naming_collision` / `cache_scope_stale` — the published configuration no longer describes the data. `Retry-After` is a floor, not a forecast: only a re-publish clears these",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServingErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "data_api_bearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "data-api-serving"
+        ],
+        "operationId": "serve_post",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace slug; must match the token's `ws` claim",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "path",
+            "description": "The endpoint's published path, e.g. `reports/daily`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Rows from the published snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServingResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`row_limit_exceeded` — the result exceeded the endpoint's row cap",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServingErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "`key_invalid` — bearer token missing, expired, or not for this audience",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServingErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`data_access_denied` — the engine denied the data to this service account",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServingErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`not_found` — no such live endpoint in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServingErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`rate_limited` — a published rate limit was exceeded; `Retry-After` states when the bucket refills",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServingErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "`internal` — an egret-side fault; quote `request_id` to support",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServingErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`schema_drift` / `output_naming_collision` / `cache_scope_stale` — the published configuration no longer describes the data. `Retry-After` is a floor, not a forecast: only a re-publish clears these",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServingErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "data_api_bearer": []
+          }
+        ]
+      }
+    },
     "/oauth/token": {
       "post": {
         "tags": [
@@ -27022,6 +27538,38 @@
           }
         }
       },
+      "DataApiEndpointGrantDto": {
+        "type": "object",
+        "description": "One service account's invoke grant on an endpoint.",
+        "required": [
+          "id",
+          "service_account_id",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The `access_grants` row id."
+          },
+          "service_account_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The granted service account (its `users.id`)."
+          },
+          "service_account_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The account's display name, so the list is readable without a second\ncall. `None` if the account row has since been deleted."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
       "DataApiEndpointVersionDto": {
         "type": "object",
         "description": "A published version, as the API reports it.",
@@ -27851,7 +28399,11 @@
           },
           "delegated": {
             "type": "boolean",
-            "description": "Whether `database_id` delegated per-user credentials to the engine at the\nmoment this version was published.\n\n**The one input to the frozen contract that lives outside the snapshot.**\n`query.databases.delegated` is a mutable column: `cache.scope = shared` is\nrefused at publish time on a delegated connection (Ranger filters rows per\nprincipal, so a shared cache serves one caller's rows to another), but a\nnon-delegated connection can be flipped to delegated afterwards, and no\nre-validation runs anywhere when it is. Freezing the value publish\nvalidated against is what lets the serving path notice.\n\n**P4 must compare this against the live `delegated` before serving from a\nshared cache, and refuse when they disagree.** Every other field here is\nself-contained; this one is a witness, and it is only useful if it is\nchecked."
+            "description": "Whether `database_id` delegated per-user credentials to the engine at the\nmoment this version was published.\n\n**Half of a witness PAIR — see [`Self::impersonate`], and do not read\nthis field alone.** Together they are the two mutable columns that decide\nwhether the engine runs a query as the CALLER, which is the only thing\nthat makes a shared cache unsafe. An earlier version of this comment, and\nof both checks that read it, treated `delegated` as the whole condition;\nit is not, and the gap was a live cross-principal leak."
+          },
+          "impersonate": {
+            "type": "boolean",
+            "description": "Whether `query.databases.options.impersonate` was set at the moment this\nversion was published. The other half of the witness pair.\n\n**`delegated` alone does not decide whether the engine runs per\nprincipal, and believing it did was a real leak.** `delegation_for`'s\nNON-delegated arm still returns `Some(principal_email)` as the session\nuser (`egret-query/src/execution/mod.rs:86`), and both connectors act on\n`options.impersonate` independently of `delegated`:\n\n* `connector/trino.rs:43` — `bearer_token.is_some() || options.impersonate\n  == Some(true)` sends `X-Trino-User: <caller>`;\n* `connector/starrocks.rs:129` — `bearer_token.is_none() &&\n  options.impersonate == Some(true)` issues\n  `EXECUTE AS <caller> WITH NO REVERT`.\n\nSo `{delegated: false, options: {impersonate: true}}` — which\n`DatabaseInput` accepts, the two fields being independent and unvalidated\n— runs every query under the caller's own Ranger policy while looking\nnon-delegated to anything that reads `delegated`.\n\n**Both halves must be compared against the live row before serving from a\nshared cache.** Freezing only `delegated` let a `shared` endpoint on such\na connection cache principal A's filtered rows under a principal-less key\nand serve them to principal B: a 200, `meta.cached: true`, nothing in\n`access_log` to distinguish it, and the witness silent because live\n`delegated` still equalled frozen `delegated`.\n\n`#[serde(default)]` so a snapshot written before this field existed\ndeserialises as `false`. That is the fail-closed direction: such a\nsnapshot can only have been published against a connection this check now\nrefuses, so comparing `false` against a live `true` yields\n`cache_scope_stale` and a re-publish, which is the correct outcome."
           },
           "columns": {
             "type": "array",
@@ -28339,6 +28891,19 @@
           },
           "privilege": {
             "type": "string"
+          }
+        }
+      },
+      "GrantInvokeInput": {
+        "type": "object",
+        "required": [
+          "service_account_id"
+        ],
+        "properties": {
+          "service_account_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The service account to grant. Must live in this workspace."
           }
         }
       },
@@ -31255,6 +31820,95 @@
           }
         }
       },
+      "ServingErrorBody": {
+        "type": "object",
+        "description": "The serving surface's error envelope (spec §7).\n\nNamed `ServingErrorBody` and not `ErrorBody` on purpose. `egret_core::http`\nalready exports an `ErrorBody`, it is a DIFFERENT shape (`{\"error\":\n\"<string>\"}`), and `egret_server::openapi_doc` merges this crate's serving\ndocument with the rest of the API into one OpenAPI document — where two\nschemas sharing a name silently overwrite each other. A generated client\nwould then be typed against whichever won.",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ServingErrorDetail"
+          }
+        }
+      },
+      "ServingErrorDetail": {
+        "type": "object",
+        "required": [
+          "code",
+          "message",
+          "request_id"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "The stable, machine-readable code from spec §7. Clients branch on this;\n`message` is for humans and may be reworded.",
+            "example": "row_limit_exceeded"
+          },
+          "message": {
+            "type": "string",
+            "description": "A fixed string per code. Never rendered from an internal error — see the\nmodule comment."
+          },
+          "request_id": {
+            "type": "string",
+            "description": "The correlation id, also written to `dataapi.access_log.request_id` and\nto every `tracing` line for this call. Quoting it is how a caller gets\nsupport to the detail they were deliberately not given."
+          }
+        }
+      },
+      "ServingMeta": {
+        "type": "object",
+        "required": [
+          "columns",
+          "row_count",
+          "version",
+          "cached",
+          "request_id"
+        ],
+        "properties": {
+          "columns": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ColumnSpec"
+            },
+            "description": "The FROZEN columns from the snapshot, not the ones this execution\nhappened to return. The published contract is what a client codes\nagainst; if the underlying table has drifted, the difference is a defect\nto surface, not something to paper over by reporting today's shape."
+          },
+          "row_count": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "cached": {
+            "type": "boolean"
+          },
+          "request_id": {
+            "type": "string"
+          }
+        }
+      },
+      "ServingResponse": {
+        "type": "object",
+        "description": "The success body (spec §5.1.2).\n\n`meta.version` is the published version that served the call, so a\nclient-side bug is reproducible against the exact snapshot that produced it.\n`meta.cached` is likewise not cosmetic: without it a stale-looking result is\nindistinguishable from a fresh one while debugging. It is a real value — Task\n4 landed the cache and [`run`] sets it `true` on a hit — and this comment\nsaid \"hard-`false` until Task 4 lands\" for three tasks after Task 4 landed.",
+        "required": [
+          "data",
+          "meta"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            },
+            "description": "Rows, shaped by the snapshot's `output.shape`: an array of objects\n(default) or an array of arrays."
+          },
+          "meta": {
+            "$ref": "#/components/schemas/ServingMeta"
+          }
+        }
+      },
       "SetAccessPolicy": {
         "type": "object",
         "properties": {
@@ -33276,6 +33930,14 @@
           }
         }
       }
+    },
+    "securitySchemes": {
+      "data_api_bearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "A `data-api` audience JWT from `POST /oauth/token` (OAuth2 client_credentials). TTL 600s."
+      }
     }
   },
   "tags": [
@@ -33394,6 +34056,10 @@
     {
       "name": "data-api",
       "description": "Data API service accounts and OAuth2 clients"
+    },
+    {
+      "name": "data-api-serving",
+      "description": "Published Data API endpoints, called by service accounts with a bearer token"
     }
   ]
 }

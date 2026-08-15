@@ -1,4 +1,5 @@
-//! `describe_as` must resolve a real column schema through the port, not a stub.
+//! `describe_as` must resolve a real column schema through the port, not a stub,
+//! and `execute_as` must return real rows through it under the same scoping rule.
 //!
 //! Engine + DB gated. Required:
 //!   * `DATABASE_URL`          — the metastore the registry/user repos read.
@@ -373,4 +374,229 @@ async fn describe_as_refuses_a_database_from_another_workspace() {
         .await
         .expect("the workspace's own database still describes");
     assert_eq!(cols.len(), 2);
+}
+
+/// A bounded serving limit: the Data API's per-endpoint cap, not the job runner's.
+fn small_limits() -> Limits {
+    Limits {
+        max_rows: 100,
+        timeout: std::time::Duration::from_secs(30),
+    }
+}
+
+/// `execute_as` is the serving half of the port: real rows off a live
+/// coordinator, under the caller's identity, and carrying the SAME scoping
+/// guarantee as `describe_as` — a `database_id` outside `ws` is `NotFound`
+/// before the principal is resolved and before any network call.
+#[tokio::test]
+async fn execute_as_returns_rows_and_scopes_to_the_workspace() {
+    let Some(f) = trino_engine_state().await else {
+        eprintln!("skip");
+        return;
+    };
+    let port: &dyn QueryExecPort = &f.st;
+
+    let out = port
+        .execute_as(f.ws, f.database_id, f.user, "SELECT 1 AS n", small_limits())
+        .await
+        .expect("execute must succeed");
+    assert_eq!(out.rows.len(), 1, "one row from a one-row SELECT");
+    assert_eq!(
+        out.columns[0].name, "n",
+        "column names come from the SELECT"
+    );
+    assert_eq!(
+        out.rows[0][0],
+        serde_json::json!(1),
+        "the actual cell value"
+    );
+    assert!(
+        !out.truncated,
+        "one row under a cap of 100 is not truncated"
+    );
+
+    // Same scoping guarantee describe_as carries: a database from another
+    // workspace is NotFound, checked before any network call. The SQL is valid
+    // and the connection is live, so the ONLY reason to fail is the scope.
+    let err = port
+        .execute_as(
+            f.ws,
+            f.foreign_database_id,
+            f.user,
+            "SELECT 1",
+            small_limits(),
+        )
+        .await
+        .expect_err("a foreign database must not execute");
+    assert!(
+        matches!(err, egret_core::Error::NotFound(_)),
+        "a foreign database must be NotFound (not Forbidden, which would confirm it exists), got {err:?}"
+    );
+}
+
+/// The cap must be visible to the caller. A silent truncation would let a Data
+/// API response look like the complete answer when it is a prefix of one.
+#[tokio::test]
+async fn execute_as_reports_truncation_rather_than_silently_capping() {
+    let Some(f) = trino_engine_state().await else {
+        eprintln!("skip");
+        return;
+    };
+    let port: &dyn QueryExecPort = &f.st;
+    let limits = Limits {
+        max_rows: 2,
+        timeout: std::time::Duration::from_secs(30),
+    };
+
+    let out = port
+        .execute_as(
+            f.ws,
+            f.database_id,
+            f.user,
+            "SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3",
+            limits,
+        )
+        .await
+        .expect("execute must succeed");
+    assert!(
+        out.truncated,
+        "the caller must be able to tell it did not get everything"
+    );
+    assert_eq!(out.rows.len(), 2, "capped at max_rows");
+}
+
+/// The error variants must not be flattened on the serving path either: bad SQL
+/// stays a 400 the endpoint author can act on, and must come from the engine's
+/// parser rather than a refused connection.
+#[tokio::test]
+async fn execute_as_rejects_invalid_sql_as_invalid_input() {
+    let Some(f) = trino_engine_state().await else {
+        eprintln!("skip");
+        return;
+    };
+    let port: &dyn QueryExecPort = &f.st;
+
+    let err = port
+        .execute_as(
+            f.ws,
+            f.database_id,
+            f.user,
+            "SELECT FROM WHERE",
+            small_limits(),
+        )
+        .await
+        .expect_err("a syntax error must surface as an error, not an empty result");
+    assert!(
+        matches!(err, egret_core::Error::InvalidInput(_)),
+        "bad SQL must map to InvalidInput, got {err:?}"
+    );
+    let msg = err.to_string();
+    assert!(
+        !msg.contains("forbidden") && !msg.contains("connect"),
+        "the engine must have parsed the SQL, not refused the connection: {msg}"
+    );
+}
+
+/// `limits.timeout` is a real budget, not decoration.
+///
+/// The serving path has no JobManager, so `execute_as` must impose the bound
+/// `run_query` imposes for the async path. `Connector::execute` does NOT do it:
+/// StarRocks never reads `limits.timeout` and sets no mysql_async read/wait
+/// timeout, so an unwrapped serving request hangs until the connection dies;
+/// Trino turns it into a PER-REQUEST reqwest timeout whose clock restarts on
+/// every `nextUri` poll, so total wall-clock is unbounded. This test runs on
+/// Trino and pins the wrap that fixes both.
+///
+/// Why the assertions are what they are:
+///
+/// * The budget is **sub-second on purpose**. The Trino connector also sets
+///   `query_max_run_time = limits.timeout.as_secs().max(1)`, i.e. the engine's
+///   own kill switch is `floor(budget)` seconds — for any budget >= 1s that
+///   fires *before* the wrap and the test would pass without it. Under 1s the
+///   session property clamps to 1s and the wrap is strictly first.
+/// * The exact message is asserted, not just the variant. `"query timed out"`
+///   is reachable only through `EngineError::Timeout`, and `TrinoConnector`
+///   never returns that variant — so this string is the wrap's fingerprint.
+///   Trino's own `EXCEEDED_TIME_LIMIT` arrives as `Engine(..)` and a reqwest
+///   per-request timeout as `Connect(..)`; both are excluded by it.
+/// * The elapsed bound is the "rather than hanging" half — the property that
+///   actually fails open on StarRocks.
+#[tokio::test]
+async fn execute_as_enforces_the_timeout_budget_rather_than_hanging() {
+    let Some(f) = trino_engine_state().await else {
+        eprintln!("skip");
+        return;
+    };
+    let port: &dyn QueryExecPort = &f.st;
+    let budget = std::time::Duration::from_millis(750);
+    let limits = Limits {
+        max_rows: 10,
+        timeout: budget,
+    };
+
+    // Six billion rows through the tpch generator: it cannot finish inside the
+    // budget, and every individual `nextUri` poll returns promptly — which is
+    // exactly the shape the per-request timeout fails to bound.
+    let started = std::time::Instant::now();
+    let err = port
+        .execute_as(
+            f.ws,
+            f.database_id,
+            f.user,
+            "SELECT count(*) FROM tpch.sf1000.lineitem",
+            limits,
+        )
+        .await
+        .expect_err("a query past its budget must return, not run to completion");
+    let elapsed = started.elapsed();
+
+    assert!(
+        matches!(err, egret_core::Error::InvalidInput(_)),
+        "an over-budget query is the author's problem (400), got {err:?}"
+    );
+    assert!(
+        err.to_string().contains("query timed out"),
+        "the budget must be enforced by execute_as's own wrap, not by the \
+         engine's session limit or a per-request socket timeout: {err}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "execute_as must return near its budget, not hang: took {elapsed:?}"
+    );
+}
+
+/// The scope check must run **first**, not merely run.
+///
+/// `execute_as_returns_rows_and_scopes_to_the_workspace` proves the check
+/// happens; it cannot prove the ordering, because a foreign id yields `NotFound`
+/// under either order. This does: with a principal that does not exist, the
+/// scope-check-first ordering still reports `NotFound`, whereas resolving the
+/// principal first would report `Internal("principal not found")` and thereby
+/// tell the caller the database itself was acceptable — an oracle, and a lookup
+/// spent on an id that should have been refused for free.
+#[tokio::test]
+async fn execute_as_scopes_the_database_before_resolving_the_principal() {
+    let Some(f) = trino_engine_state().await else {
+        eprintln!("skip");
+        return;
+    };
+    let port: &dyn QueryExecPort = &f.st;
+    let ghost = egret_core::UserId(Uuid::new_v4());
+
+    let err = port
+        .execute_as(
+            f.ws,
+            f.foreign_database_id,
+            ghost,
+            "SELECT 1",
+            small_limits(),
+        )
+        .await
+        .expect_err("a foreign database must not execute");
+    assert!(
+        matches!(err, egret_core::Error::NotFound(_)),
+        "the workspace scope check must run before the principal lookup, or an \
+         unknown principal turns the refusal into Internal and leaks that the \
+         database itself was acceptable: got {err:?}"
+    );
 }
