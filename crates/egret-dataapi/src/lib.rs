@@ -57,7 +57,7 @@ pub use lifecycle::{
     check_cache_scope, check_enum_params, check_params, check_single_select, validate,
     DataApiEndpointVersionDto, DataApiPublishedDto, ValidationError, VersionRef,
 };
-pub use render::{check_publish, check_static, render, ParamValues, RenderError};
+pub use render::{check_dynamic, check_publish, check_static, render, ParamValues, RenderError};
 pub use routes::{
     management_router, openapi, CreateServiceAccountInput, DataApiAdminApi, DataApiClientDto,
     DataApiEndpointGrantDto, DataApiError, DataApiNewClientDto, DataApiServiceAccountDto,

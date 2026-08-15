@@ -953,12 +953,175 @@ fn the_recursive_rule_does_not_need_whitespace() {
     );
 }
 
-/// The bind budget is charged before the value is cloned, so the cap does not
-/// itself double the allocation it exists to prevent.
+/// A single value larger than the whole bind budget is refused.
+///
+/// The budget is charged from the value's size BEFORE `to_param` clones it, so
+/// the cap does not itself double the allocation it exists to prevent — but this
+/// assertion cannot see that ordering, only the refusal. The ordering is a
+/// code-level property with no observable difference, and no mutation is claimed
+/// for it.
 #[test]
-fn the_bind_budget_is_charged_before_the_clone() {
+fn a_value_larger_than_the_bind_cap_is_refused() {
     match render("SELECT {{ 'a' * 99000000 }}", &ParamValues::new()) {
         Err(e) => assert_eq!(e, RenderError::BindsTooLarge),
         Ok((sql, binds)) => panic!("no refusal: {} value(s), sql {sql:?}", binds.len()),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Round 3: names, shapes and budgets
+// ---------------------------------------------------------------------------
+
+/// **A parameter's NAME must never switch the rule off.** The filters that mark
+/// a value as already-plain are honoured only in filter position, after a `|`.
+/// Matched anywhere in the operand, an author who names a parameter `format` —
+/// or `count`, `value`, `length`, `sum`, `title`, `string`, `int`, `float`,
+/// `bool`, `join`, `trim`, `round`, `replace` — turns the lint off by writing
+/// the plainest comparison there is. No evasion, no unusual spelling.
+#[test]
+fn a_parameter_named_like_a_filter_is_still_a_parameter() {
+    for name in [
+        "format", "count", "value", "length", "sum", "title", "string", "int", "float", "bool",
+        "join", "trim", "round", "replace",
+    ] {
+        let mut ctx = ParamValues::new();
+        ctx.insert(name, Param::Str("csv".into()));
+        let tpl = format!("{{% if {name} == 'csv' %}}A{{% endif %}}");
+        let err = render(&tpl, &ctx).expect_err(&tpl);
+        assert_eq!(
+            err,
+            RenderError::BareParameterComparison(name.into()),
+            "template: {tpl}"
+        );
+
+        // …and the same name aliased through a `set` is still a parameter.
+        let tpl = format!("{{% set m = {name} %}}{{% if m == 'csv' %}}A{{% endif %}}");
+        let err = render(&tpl, &ctx).expect_err(&tpl);
+        assert_eq!(
+            err,
+            RenderError::BareParameterComparison("m".into()),
+            "template: {tpl}"
+        );
+    }
+
+    // The escape hatch still works, because `value` is in FILTER position there.
+    let mut ctx = ParamValues::new();
+    ctx.insert("format", Param::Str("csv".into()));
+    assert_eq!(
+        render("{% if format | value == 'csv' %}A{% endif %}", &ctx)
+            .unwrap()
+            .0,
+        "A"
+    );
+}
+
+/// A branch only the plain values take, containing something that cannot render,
+/// is a DIVERGENCE — the opaque render succeeded and the plain one did not.
+/// Treating it as inconclusive threw away a positive.
+#[test]
+fn the_gate_treats_a_failed_plain_render_as_a_divergence() {
+    let mut ctx = ParamValues::new();
+    ctx.insert("mode", Param::Str("slow".into()));
+    ctx.insert_list("regions", vec![Param::Str("EU".into())]);
+
+    // `{{ regions }}` emits a whole list, which no engine can bind — so the
+    // branch renders only when the comparison is true, i.e. only in the plain
+    // render.
+    let tpl = "{% if (mode) == 'fast' %}{{ regions }}{% endif %}SELECT 1";
+    assert_eq!(
+        egret_dataapi::render::check_dynamic(tpl, &ctx),
+        Err(RenderError::ParameterInspected)
+    );
+}
+
+/// `{% with a = 1, b = mode %}` is several assignments, not a tuple. Taking the
+/// first `=` aliased `a` and stopped, reopening the rename bypass.
+#[test]
+fn every_assignment_in_a_with_block_is_aliased() {
+    let mut ctx = ParamValues::new();
+    ctx.insert("mode", Param::Str("fast".into()));
+
+    assert_eq!(
+        render(
+            "{% with a = 1, b = mode %}{% if b == 'fast' %}A{% endif %}{% endwith %}",
+            &ctx
+        )
+        .unwrap_err(),
+        RenderError::BareParameterComparison("b".into())
+    );
+    // The tuple form — one `=`, commas on both sides — still binds both names.
+    assert_eq!(
+        render(
+            "{% set m, n = mode, mode %}{% if n == 'fast' %}A{% endif %}",
+            &ctx
+        )
+        .unwrap_err(),
+        RenderError::BareParameterComparison("n".into())
+    );
+    // One segment unwrapping with `| value` must not silence the others.
+    assert_eq!(
+        render(
+            "{% with a = mode | value, b = mode %}{% if b == 'fast' %}A{% endif %}{% endwith %}",
+            &ctx
+        )
+        .unwrap_err(),
+        RenderError::BareParameterComparison("b".into())
+    );
+}
+
+/// The probe budget must degrade evenly. Parameter-major spending exhausts it on
+/// whichever parameter sorts first — `names()` is alphabetical — and every later
+/// parameter is then never probed at all.
+#[test]
+fn the_probe_budget_reaches_the_alphabetically_last_parameter() {
+    let mut ctx = ParamValues::new();
+    // `zzz` sorts last, and the definition carries far more literals than the
+    // per-parameter budget would allow before reaching it.
+    for name in ["aaa", "bbb", "ccc", "ddd"] {
+        ctx.insert(name, Param::Str("x".into()));
+    }
+    ctx.insert("zzz", Param::Str("slow".into()));
+    let noise: String = (0..20).map(|i| format!("-- 'lit{i}'\n")).collect();
+    let tpl = format!(
+        "{noise}{{% if aaa %}}{{{{ aaa }}}}{{% endif %}}{{% if bbb %}}{{{{ bbb }}}}{{% endif %}}\
+         {{% if ccc %}}{{{{ ccc }}}}{{% endif %}}{{% if ddd %}}{{{{ ddd }}}}{{% endif %}}\
+         {{% if (zzz) == 'fast' %}}FAST{{% endif %}}"
+    );
+    assert_eq!(
+        egret_dataapi::render::check_dynamic(&tpl, &ctx),
+        Err(RenderError::ParameterInspected)
+    );
+}
+
+/// `| ident` needs ONE enum opaque. Keeping every enum opaque blinds the gate to
+/// all the others — and spec §4.3's canonical endpoint is exactly that shape.
+#[test]
+fn an_ident_parameter_does_not_blind_the_gate_to_other_enums() {
+    let mut ctx = ParamValues::new();
+    ctx.insert_enum("sort", "total", vec!["day".into(), "total".into()]);
+    ctx.insert_enum("mode", "slow", vec!["slow".into(), "fast".into()]);
+
+    let tpl = "SELECT {% if (mode) == 'fast' %}1{% else %}2{% endif %} ORDER BY {{ sort | ident }}";
+    assert_eq!(
+        egret_dataapi::render::check_dynamic(tpl, &ctx),
+        Err(RenderError::ParameterInspected)
+    );
+}
+
+/// The `is` branch reads the whole subject region too.
+#[test]
+fn a_test_applied_after_a_filter_is_still_an_inspection() {
+    let mut ctx = ParamValues::new();
+    ctx.insert_list("regions", vec![Param::Str("EU".into())]);
+    assert_eq!(
+        render("{% if regions | first is string %}A{% endif %}", &ctx).unwrap_err(),
+        RenderError::BareParameterComparison("regions".into())
+    );
+    // …and a plainising filter in FILTER position still permits the test.
+    assert_eq!(
+        render("{% if regions | length is number %}A{% endif %}", &ctx)
+            .unwrap()
+            .0,
+        "A"
+    );
 }

@@ -76,7 +76,7 @@
 //! the `value` filter is the supported spelling: `{% if mode | value == 'fast' %}`.
 //!
 //! **The rule is enforced twice, and only one of the two is a scanner.** At
-//! publish, [`check_publish`] measures it from BEHAVIOUR — it renders the
+//! publish, [`check_dynamic`] measures it from BEHAVIOUR — it renders the
 //! definition with the opaque values and again with plain ones, and an
 //! inspection takes a different branch whatever its spelling. Read that
 //! function's comment for why: five separate reviews found five bypasses of the
@@ -303,14 +303,30 @@ impl ParamValues {
     /// The same values as plain scalars — what the behavioural gate in
     /// [`check_publish`] renders against. Private: the serving path must never
     /// render this way, because a `Date` bound from a plain value binds as text.
-    fn plainified(&self, keep_enums_opaque: bool) -> ParamValues {
+    fn plainified(&self, keep_opaque: &[String]) -> ParamValues {
         ParamValues {
             entries: self
                 .entries
                 .iter()
-                .map(|(k, v)| (k.clone(), plainify(v, keep_enums_opaque)))
+                .map(|(k, v)| {
+                    let v = if keep_opaque.iter().any(|n| n == k) {
+                        v.clone()
+                    } else {
+                        plainify(v)
+                    };
+                    (k.clone(), v)
+                })
                 .collect(),
         }
+    }
+
+    /// The names of the enum parameters, in order.
+    fn enum_names(&self) -> impl Iterator<Item = String> + '_ {
+        self.entries.iter().filter_map(|(k, v)| {
+            v.downcast_object_ref::<Cell>()
+                .and_then(|c| c.allowed.as_ref())
+                .map(|_| k.clone())
+        })
     }
 
     /// Candidate values for probing `name`: an enum parameter's own `allowed`
@@ -322,7 +338,13 @@ impl ParamValues {
             .and_then(|v| v.downcast_object_ref::<Cell>())
             .and_then(|c| c.allowed.clone());
         match allowed {
-            Some(list) => list.into_iter().map(Param::Str).collect(),
+            // Capped: `allowed` has no length limit anywhere in the model, and
+            // one 64-value enum would otherwise consume the entire probe budget.
+            Some(list) => list
+                .into_iter()
+                .take(MAX_ENUM_CANDIDATES)
+                .map(Param::Str)
+                .collect(),
             None => literals.to_vec(),
         }
     }
@@ -438,19 +460,12 @@ impl Object for Cell {
 }
 
 /// One parameter value as a plain scalar, for [`check_publish`]'s second render.
-fn plainify(value: &Value, keep_enums_opaque: bool) -> Value {
+fn plainify(value: &Value) -> Value {
     if let Some(cell) = value.downcast_object_ref::<Cell>() {
-        if keep_enums_opaque && cell.allowed.is_some() {
-            return value.clone();
-        }
         return cell.plain();
     }
     match value.try_iter() {
-        Ok(items) => Value::from(
-            items
-                .map(|v| plainify(&v, keep_enums_opaque))
-                .collect::<Vec<_>>(),
-        ),
+        Ok(items) => Value::from(items.map(|v| plainify(&v)).collect::<Vec<_>>()),
         Err(_) => value.clone(),
     }
 }
@@ -688,7 +703,18 @@ fn environment(binds: Arc<Mutex<Binds>>) -> Environment<'static> {
 ///    caught here rather than by review.
 pub fn render(sql: &str, ctx: &ParamValues) -> Result<(String, Vec<Param>), RenderError> {
     check_static(sql, ctx)?;
+    render_inner(sql, ctx)
+}
 
+/// The render itself: the hardened environment, the capped sink and the
+/// invariant, with none of [`check_static`]'s source rules.
+///
+/// Separate so [`check_dynamic`] can probe with it. Re-running the scanner inside
+/// every probe render would make the gate short-circuit on the scanner's own
+/// verdict — which is the coupling the gate exists to remove — and the rules it
+/// skips are ones [`check_publish`] has already applied once, backstopped in here
+/// by the placeholder==bind invariant.
+fn render_inner(sql: &str, ctx: &ParamValues) -> Result<(String, Vec<Param>), RenderError> {
     let binds = Arc::new(Mutex::new(Binds::default()));
     let mut env = environment(binds.clone());
     env.add_template_owned("endpoint", sql.to_owned())
@@ -834,33 +860,39 @@ fn collect_aliases(body: &str, ctx: &ParamValues, aliases: &mut Vec<String>) {
     };
     match keyword.text {
         "set" | "with" => {
-            // Every target, not just the last: `{% set m, n = mode, other %}`
-            // binds two names and the second one was the only one recorded.
-            let Some(at) = toks
-                .iter()
-                .position(|t| t.kind == Tok::Other && t.text == "=")
-            else {
-                return;
-            };
-            let rhs = &toks[at + 1..];
-            // `{% set m = mode | value %}` is the author doing exactly what the
-            // error message tells them to; aliasing `m` there refuses the
-            // comparison that follows, which is a false positive.
-            if rhs
-                .iter()
-                .any(|t| t.kind == Tok::Word && PLAINISING_FILTERS.contains(&t.text))
-            {
-                return;
-            }
-            if !rhs
-                .iter()
-                .any(|t| t.kind == Tok::Word && is_param(t.text, ctx, aliases))
-            {
-                return;
-            }
-            for t in &toks[1..at] {
-                if t.kind == Tok::Word {
-                    aliases.push(t.text.to_string());
+            // Segment on top-level commas FIRST. `{% with a = 1, b = mode %}` is
+            // several assignments — `parse_with_block` accepts a comma-separated
+            // list — and taking the first `=` aliased `a` and stopped, which
+            // reopened the rename bypass this function exists to close. But
+            // `{% set m, n = mode, other %}` is ONE assignment to a tuple, with
+            // commas on both sides. A segment with no `=` of its own is what
+            // tells them apart.
+            let segments = split_top_level(&toks);
+            let multi = segments.len() > 1
+                && segments
+                    .iter()
+                    .all(|seg| seg.iter().any(|t| t.kind == Tok::Other && t.text == "="));
+            let assignments: Vec<&[Token<'_>]> = if multi { segments } else { vec![&toks[..]] };
+            for seg in assignments {
+                let Some(at) = seg
+                    .iter()
+                    .position(|t| t.kind == Tok::Other && t.text == "=")
+                else {
+                    continue;
+                };
+                let (targets, rhs) = (&seg[..at], &seg[at + 1..]);
+                // `{% set m = mode | value %}` is the author doing exactly what
+                // the error message asks; aliasing `m` there refuses the
+                // comparison that follows. Filter position only, and only for
+                // this segment — an early return used to discard every other
+                // target in the tag.
+                if param_in_region(rhs, ctx, aliases).is_none() {
+                    continue;
+                }
+                for t in targets {
+                    if t.kind == Tok::Word && t.text != "set" && t.text != "with" {
+                        aliases.push(t.text.to_string());
+                    }
                 }
             }
         }
@@ -930,6 +962,14 @@ fn collect_aliases(body: &str, ctx: &ParamValues, aliases: &mut Vec<String>) {
 /// does not happen to trigger; a missed spelling in the scanner was a rule that
 /// did not run at all. The failure modes are not the same shape.
 ///
+/// # It has no production caller yet
+///
+/// Task 7 wires this into publish. Until it does, **this gate delivers nothing
+/// at runtime** — the serving path runs [`check_static`] and the invariant, and
+/// nothing else. When it is wired, the published snapshot should record that it
+/// passed, so a version frozen before the gate existed can be refused at serve
+/// time rather than relying on an operator remembering to re-publish it.
+///
 /// # Deliberately not called by [`render`]
 ///
 /// It renders the definition many times. That is right at publish, where it
@@ -937,15 +977,32 @@ fn collect_aliases(body: &str, ctx: &ParamValues, aliases: &mut Vec<String>) {
 /// [`check_static`] and the invariant.
 pub fn check_publish(sql: &str, ctx: &ParamValues) -> Result<(), RenderError> {
     check_static(sql, ctx)?;
+    check_dynamic(sql, ctx)
+}
+
+/// The behavioural half of [`check_publish`], on its own.
+///
+/// Public so it can be exercised — and mutated — without [`check_static`]
+/// answering first. A gate whose tests can only reach it through the scanner is
+/// a gate nobody has actually measured.
+pub fn check_dynamic(sql: &str, ctx: &ParamValues) -> Result<(), RenderError> {
     for probe in probe_assignments(sql, ctx) {
-        let Ok((opaque_sql, opaque_binds)) = render(sql, &probe) else {
+        let Ok((opaque_sql, opaque_binds)) = render_inner(sql, &probe) else {
             // This assignment does not render; publish will refuse it through
             // its own render of the representative values, with the real error.
             continue;
         };
-        let Some((plain_sql, plain_binds)) = plain_render(sql, &probe) else {
-            continue;
+        let plain = match plain_render(sql, &probe) {
+            PlainRender::Rendered(sql, binds) => (sql, binds),
+            // The opaque render SUCCEEDED and the plain one did not: the two
+            // have diverged, which is the finding, not an inconclusive probe.
+            // `{% if <spelling> %}{{ regions }}{% endif %}` is the shape — a
+            // branch only the plain values take, containing something that
+            // cannot render. Discarding it threw away a positive.
+            PlainRender::Failed => return Err(RenderError::ParameterInspected),
+            PlainRender::Inconclusive => continue,
         };
+        let (plain_sql, plain_binds) = plain;
         // Bind TEXT, not the bind list itself. The two renders legitimately
         // disagree about a value's TYPE — that is the entire reason parameters
         // are opaque, so `Date("2020-02-29")` opposite `Str("2020-02-29")` is the
@@ -963,6 +1020,8 @@ pub fn check_publish(sql: &str, ctx: &ParamValues) -> Result<(), RenderError> {
 const MAX_PROBES: usize = 64;
 /// How many of a definition's own literals are used as candidate values.
 const MAX_PROBE_LITERALS: usize = 16;
+/// How many of an enum parameter's allowed values are probed.
+const MAX_ENUM_CANDIDATES: usize = 8;
 
 /// The value assignments the gate renders: the endpoint's own representative
 /// values, then each parameter set to each literal the definition mentions (or,
@@ -971,14 +1030,30 @@ const MAX_PROBE_LITERALS: usize = 16;
 fn probe_assignments(sql: &str, ctx: &ParamValues) -> Vec<ParamValues> {
     let mut out = vec![ctx.clone()];
     let literals = literals(sql);
-    let names: Vec<String> = ctx.names().map(str::to_owned).collect();
-    for name in names {
-        for candidate in ctx.candidates(&name, &literals) {
+    let per_name: Vec<(String, Vec<Param>)> = ctx
+        .names()
+        .map(str::to_owned)
+        .map(|n| {
+            let candidates = ctx.candidates(&n, &literals);
+            (n, candidates)
+        })
+        .collect();
+    // ROUND-ROBIN, one candidate per parameter per pass. Parameter-major
+    // exhausts the budget on whichever parameter sorts first — `ctx.names()` is
+    // alphabetical — and every later parameter is then never probed at all,
+    // silently. A cap that quietly stops testing is the failure shape this gate
+    // exists to remove, so it must at least degrade evenly.
+    let deepest = per_name.iter().map(|(_, c)| c.len()).max().unwrap_or(0);
+    for round in 0..deepest {
+        for (name, candidates) in &per_name {
+            let Some(candidate) = candidates.get(round) else {
+                continue;
+            };
             if out.len() >= MAX_PROBES {
                 return out;
             }
             let mut probe = ctx.clone();
-            probe.probe_replace(&name, candidate);
+            probe.probe_replace(name, candidate.clone());
             out.push(probe);
         }
     }
@@ -1001,37 +1076,49 @@ fn literals(sql: &str) -> Vec<Param> {
     let bodies: Vec<&str> = blocks(sql)
         .map(|bs| bs.iter().map(|b| b.body()).collect())
         .unwrap_or_default();
-    for body in bodies.into_iter().chain(std::iter::once(sql)) {
-        let b = body.as_bytes();
-        let mut i = 0;
-        while i < b.len() {
-            let c = b[i];
-            if c == b'\'' || c == b'"' {
-                let start = i + 1;
-                i += 1;
-                while i < b.len() && b[i] != c {
-                    i += if b[i] == b'\\' { 2 } else { 1 };
-                }
-                let text = body[start..i.min(body.len())].to_string();
-                push_unique(&mut out, Param::Str(text));
-                i += 1;
-            } else if c.is_ascii_digit() {
-                let start = i;
-                while i < b.len() && b[i].is_ascii_digit() {
-                    i += 1;
-                }
-                if let Ok(n) = body[start..i].parse::<i64>() {
-                    push_unique(&mut out, Param::I64(n));
-                }
-            } else {
+    // Block bodies first, and only they contribute numbers. The SQL around them
+    // is full of digits that are not comparison operands — `WHERE 1=1`,
+    // `LIMIT 100`, `col2` — and a 16-entry budget spent on those is a budget not
+    // spent on the literal a comparison actually names.
+    for body in &bodies {
+        harvest(body, true, &mut out);
+    }
+    harvest(sql, false, &mut out);
+    out
+}
+
+/// Every string literal in `text`, and its integers too when `numbers` is set.
+fn harvest(text: &str, numbers: bool, out: &mut Vec<Param>) {
+    let b = text.as_bytes();
+    let mut i = 0;
+    while i < b.len() && out.len() < MAX_PROBE_LITERALS {
+        let c = b[i];
+        if c == b'\'' || c == b'"' {
+            let start = i + 1;
+            i += 1;
+            while i < b.len() && b[i] != c {
+                i += if b[i] == b'\\' { 2 } else { 1 };
+            }
+            push_unique(out, Param::Str(text[start..i.min(text.len())].to_string()));
+            i += 1;
+        } else if c.is_ascii_digit() {
+            let start = i;
+            while i < b.len() && b[i].is_ascii_digit() {
                 i += 1;
             }
-            if out.len() >= MAX_PROBE_LITERALS {
-                return out;
+            // Not a number if it is part of an identifier (`col2`, `x1`), and
+            // not one at all outside a block body.
+            let inside_word =
+                start > 0 && (b[start - 1].is_ascii_alphanumeric() || b[start - 1] == b'_');
+            if numbers && !inside_word {
+                if let Ok(n) = text[start..i].parse::<i64>() {
+                    push_unique(out, Param::I64(n));
+                }
             }
+        } else {
+            i += 1;
         }
     }
-    out
 }
 
 fn push_unique(out: &mut Vec<Param>, param: Param) {
@@ -1047,15 +1134,63 @@ fn push_unique(out: &mut Vec<Param>, param: Param) {
 /// the point of it — so a definition that uses it cannot have its enum
 /// parameters plainified. That case is retried with them left opaque, and if it
 /// still cannot render, this assignment is inconclusive rather than a finding.
-fn plain_render(sql: &str, ctx: &ParamValues) -> Option<(String, Vec<String>)> {
-    for keep_enums_opaque in [false, true] {
-        match render(sql, &ctx.plainified(keep_enums_opaque)) {
-            Ok((sql, binds)) => return Some((sql, bind_text(&binds))),
+fn plain_render(sql: &str, ctx: &ParamValues) -> PlainRender {
+    // Everything plain, then one enum at a time kept opaque, then all of them.
+    //
+    // Per-parameter, because `| ident` needs ONE enum to stay opaque and keeping
+    // every enum opaque blinds the gate to all the others — and spec §4.3's
+    // canonical endpoint is exactly that shape: an `ident` sort column beside
+    // ordinary parameters. `enums` is capped so a definition with many of them
+    // cannot turn one probe into an unbounded number of renders.
+    let mut attempts: Vec<Vec<String>> = vec![Vec::new()];
+    let enums: Vec<String> = ctx.enum_names().take(MAX_ENUM_RETRIES).collect();
+    attempts.extend(enums.iter().map(|e| vec![e.clone()]));
+    if enums.len() > 1 {
+        attempts.push(enums.clone());
+    }
+    for keep_opaque in attempts {
+        match render_inner(sql, &ctx.plainified(&keep_opaque)) {
+            Ok((sql, binds)) => return PlainRender::Rendered(sql, bind_text(&binds)),
+            // `| ident` refuses anything but an enum parameter, by construction:
+            // this attempt plainified the one it is applied to.
             Err(RenderError::Ident) => continue,
-            Err(_) => return None,
+            Err(_) => return PlainRender::Failed,
         }
     }
-    None
+    PlainRender::Inconclusive
+}
+
+/// How many enum parameters one probe will retry individually.
+const MAX_ENUM_RETRIES: usize = 8;
+
+enum PlainRender {
+    Rendered(String, Vec<String>),
+    /// Rendered opaque, refused plain — a divergence.
+    Failed,
+    /// `| ident` could not be satisfied by any attempt; nothing is learned.
+    Inconclusive,
+}
+
+/// The token list split on commas at bracket depth zero.
+fn split_top_level<'t, 'a>(toks: &'t [Token<'a>]) -> Vec<&'t [Token<'a>]> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0;
+    for (i, t) in toks.iter().enumerate() {
+        if t.kind == Tok::Other {
+            match t.text {
+                "(" | "[" | "{" => depth += 1,
+                ")" | "]" | "}" => depth -= 1,
+                "," if depth == 0 => {
+                    out.push(&toks[start..i]);
+                    start = i + 1;
+                }
+                _ => {}
+            }
+        }
+    }
+    out.push(&toks[start..]);
+    out
 }
 
 /// Each bound value as text, so two renders can be compared without their types.
@@ -1255,7 +1390,6 @@ fn bare_comparison(
             // parameter for the same reason. Only `defined`/`undefined` mean on a
             // parameter what an author expects, so they are the allowlist.
             Tok::Word if tok.text == "is" => {
-                let subject = toks[..i].iter().rev().find(|t| t.kind == Tok::Word);
                 let test = toks[i + 1..]
                     .iter()
                     .find(|t| t.kind == Tok::Word && t.text != "not");
@@ -1263,11 +1397,10 @@ fn bare_comparison(
                 if benign {
                     continue;
                 }
-                let subject = subject
-                    .map(|t| t.text)
-                    .filter(|n| is_param(n, ctx, aliases));
-                if let Some(name) = subject {
-                    return Some(name.to_string());
+                // The whole subject region, not the nearest word: `regions |
+                // first is string` is the same silence as `regions is string`.
+                if let Some(name) = param_in_region(region_before(&toks, i), ctx, aliases) {
+                    return Some(name);
                 }
                 // `'fast' is eq(mode)` — the parameter is the ARGUMENT.
                 for t in &toks[i + 1..] {
@@ -1301,22 +1434,39 @@ fn operand_param(
     ctx: &ParamValues,
     aliases: &[String],
 ) -> Option<String> {
-    let mut found = None;
-    for region in [region_before(toks, i), region_after(toks, i)] {
-        let words: Vec<&str> = region
-            .iter()
-            .filter(|t| t.kind == Tok::Word)
-            .map(|t| t.text)
-            .collect();
-        if words.iter().any(|w| PLAINISING_FILTERS.contains(w)) {
-            continue;
-        }
-        if let Some(name) = words.iter().find(|w| is_param(w, ctx, aliases)) {
-            found = Some(name.to_string());
-            break;
-        }
+    [region_before(toks, i), region_after(toks, i)]
+        .into_iter()
+        .find_map(|region| param_in_region(region, ctx, aliases))
+}
+
+/// The parameter an operand region resolves to, unless a filter has already
+/// turned it into a plain value.
+///
+/// # The position check is the whole point
+///
+/// A [`PLAINISING_FILTERS`] word counts **only in filter position** — directly
+/// after a `|`. Matching the list against every word in the region regardless of
+/// position was a hole with no evasion in it at all: a parameter *named*
+/// `format`, `count`, `value`, `length`, `sum`, `title`, `string`, `int`,
+/// `float`, `bool`, `join`, `trim`, `round` or `replace` matched its own name,
+/// and `{% if format == 'csv' %}` — the plainest spelling there is — passed. Any
+/// author could pick that name; nothing anywhere validates parameter names
+/// against this list, and nothing should have to.
+fn param_in_region(region: &[Token<'_>], ctx: &ParamValues, aliases: &[String]) -> Option<String> {
+    let plainised = region.iter().enumerate().any(|(i, t)| {
+        t.kind == Tok::Word
+            && PLAINISING_FILTERS.contains(&t.text)
+            && i > 0
+            && region[i - 1].kind == Tok::Other
+            && region[i - 1].text == "|"
+    });
+    if plainised {
+        return None;
     }
-    found
+    region
+        .iter()
+        .find(|t| t.kind == Tok::Word && is_param(t.text, ctx, aliases))
+        .map(|t| t.text.to_string())
 }
 
 /// Filters whose result is a plain minijinja value, so a comparison after one is
