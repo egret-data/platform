@@ -218,7 +218,7 @@ impl Connector for StarRocksConnector {
             .await
             .map_err(|e| EngineError::Engine(e.to_string()))?;
 
-        let drained = drain_rows(&mut result, limits.max_rows, &cancel).await;
+        let drained = drain_rows(&mut result, limits.max_rows, &cancel, false).await;
         drop(result);
         let _ = conn.disconnect().await;
         let (columns, rows, truncated) = drained?;
@@ -244,6 +244,13 @@ impl Connector for StarRocksConnector {
     /// count from `params`. A StarRocks `StmtParamsMismatch` kills the whole
     /// connection (a later `SELECT 1` on it fails with "Connection to the
     /// server is closed"), so those two counts must never be able to disagree.
+    ///
+    /// **Not yet timeout-bound.** Like `execute`, this relies entirely on an
+    /// outer caller (the JobManager) to enforce `limits.timeout` by dropping
+    /// the future — `limits.timeout` itself is unread here. There is no
+    /// production caller of this method yet; whoever wires the Data API's
+    /// serving path to it MUST supply that outer timeout wrapper, or a slow
+    /// StarRocks query hangs the request indefinitely.
     async fn execute_with_params(
         &self,
         sql: &str,
@@ -277,7 +284,7 @@ impl Connector for StarRocksConnector {
             .await
             .map_err(|e| EngineError::Engine(e.to_string()))?;
 
-        let drained = drain_rows(&mut result, limits.max_rows, &cancel).await;
+        let drained = drain_rows(&mut result, limits.max_rows, &cancel, true).await;
         drop(result);
         let _ = conn.disconnect().await;
         let (columns, rows, truncated) = drained?;
@@ -337,10 +344,14 @@ impl Connector for StarRocksConnector {
 /// impls over the same `QueryResult` API) into columns + JSON rows, applying
 /// the row cap and cooperative cancellation. Shared by `execute` and
 /// `execute_with_params`, which differ only in how the result was produced.
+///
+/// `refuse_time` is set only by `execute_with_params` (the binary/`exec_iter`
+/// path) — see the `MYSQL_TYPE_TIME`/`MYSQL_TYPE_TIME2` check below for why.
 async fn drain_rows<P: mysql_async::prelude::Protocol>(
     result: &mut mysql_async::QueryResult<'_, 'static, P>,
     cap: usize,
     cancel: &CancellationToken,
+    refuse_time: bool,
 ) -> Result<(Vec<ColumnMeta>, Vec<Vec<serde_json::Value>>, bool), EngineError> {
     // Read columns BEFORE consuming any rows — columns_ref() accesses the pending result set.
     let columns: Vec<ColumnMeta> = result
@@ -358,6 +369,33 @@ async fn drain_rows<P: mysql_async::prelude::Protocol>(
         .iter()
         .map(|c| c.column_type())
         .collect();
+
+    // Measured live: on the binary protocol, StarRocks' TIME payload does not
+    // decode as a standard MySQL TIME value — `CAST('10:20:30' AS TIME)` came
+    // back with day/hour fields so large that `mysql_common`'s own `Debug`
+    // impl for `Value::Time` (which multiplies `days * 24`) panics with
+    // "attempt to multiply with overflow". A stock MySQL client reads the same
+    // payload as `days=86186786, 21:08:12` — not merely imprecise, wrong. The
+    // text protocol (`execute`, no bound params) is unaffected: it returns
+    // TIME as `Value::Bytes`, decoded correctly by `bytes_to_json`. Refusing
+    // here — before a single row is fetched — is the "clear error" outcome:
+    // there is no faithful decode to fall back to, so a plausible-looking
+    // wrong string would be strictly worse than refusing.
+    if refuse_time {
+        use mysql_async::consts::ColumnType::{MYSQL_TYPE_TIME, MYSQL_TYPE_TIME2};
+        if let Some(bad) = col_types
+            .iter()
+            .position(|t| matches!(t, MYSQL_TYPE_TIME | MYSQL_TYPE_TIME2))
+        {
+            let name = columns.get(bad).map(|c| c.name.as_str()).unwrap_or("?");
+            return Err(EngineError::Engine(format!(
+                "bound-parameter query returns a TIME column (`{name}`), which StarRocks' \
+                 binary protocol does not encode as a decodable MySQL TIME value (measured \
+                 — the payload does not survive round-tripping through the standard \
+                 driver). Cast it to text in the SQL instead, e.g. `CAST(<col> AS VARCHAR)`."
+            )));
+        }
+    }
 
     let mut rows: Vec<Vec<serde_json::Value>> = Vec::new();
 
@@ -388,18 +426,34 @@ async fn drain_rows<P: mysql_async::prelude::Protocol>(
 }
 
 /// Map a bound [`Param`] to the `mysql_async::Value` sent over the binary
-/// protocol. `Decimal`/`Str`/`Date`/`Timestamp` all go over as `Bytes` of
-/// their text form: StarRocks reports every bound parameter as
+/// protocol. `F64`/`Decimal`/`Str`/`Date`/`Timestamp` all go over as `Bytes`
+/// of their text form: StarRocks reports every bound parameter as
 /// `MYSQL_TYPE_VAR_STRING` regardless of the value's Rust variant, so there is
 /// no native wire type to prefer for a date or a decimal, and text is what
-/// preserves exact precision (no float rounding on a `Decimal`).
+/// preserves exact precision.
+///
+/// `F64` in particular goes over as text rather than `Value::Double` (an
+/// 8-byte binary float) on a reviewer-reported precision loss (binding
+/// `1234567.891` as `Value::Double` allegedly returns `1234567.875`, and
+/// `? = 1234567.891` evaluates false even under `CAST(? AS DOUBLE)`). Three
+/// direct measurements against a live StarRocks 4.1.3 through this exact
+/// `exec_iter` path — see
+/// `bound_f64_round_trips_exactly_through_a_backend_table_filter` in
+/// `tests/connector_starrocks_params.rs`, including a genuine backend
+/// table-scan `WHERE v = ?` filter — did NOT reproduce the loss; `Value::Double`
+/// round-tripped exactly every time. `1234567.875` is precisely the `f32`
+/// rounding of `1234567.891`, which points at the reviewer's measurement tool
+/// rather than this driver. Routing through text anyway because it is
+/// zero-cost and consistent with `Decimal`: JSON cannot express NaN/Infinity,
+/// so `Param::F64` can never carry a value `{f}` (shortest round-trip
+/// `Display`) fails to round-trip.
 fn param_to_value(p: &Param) -> mysql_async::Value {
     use mysql_async::Value as V;
     match p {
         Param::Null => V::NULL,
         Param::Bool(b) => V::Int(i64::from(*b)),
         Param::I64(n) => V::Int(*n),
-        Param::F64(f) => V::Double(*f),
+        Param::F64(f) => V::Bytes(format!("{f}").into_bytes()),
         Param::Decimal(s) | Param::Str(s) | Param::Date(s) | Param::Timestamp(s) => {
             V::Bytes(s.as_bytes().to_vec())
         }
