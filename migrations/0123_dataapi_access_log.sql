@@ -61,10 +61,30 @@ CREATE TABLE dataapi.access_log (
   request_id         text NOT NULL
 );
 
--- Every read of this table is "this workspace, recent first" — the statistics
--- panels, the support lookup, and the retention prune's own scan all narrow the
--- same way.
+-- The workspace-scoped reads: the statistics panels and any "what did this
+-- workspace do recently" lookup. Leading on `workspace_id` because those queries
+-- all name one.
 CREATE INDEX access_log_ws_ts_idx ON dataapi.access_log (workspace_id, ts DESC);
+
+-- The retention prune, which is the one read that does NOT narrow by workspace.
+--
+-- An earlier version of the comment above claimed the prune "narrows the same
+-- way" and gave it no index of its own. **It does not narrow the same way and it
+-- never could**: `AccessLogStore::prune` is deliberately global — retention is a
+-- system-wide policy, not a per-workspace one, exactly as `AuditStore::prune`
+-- is — so its `WHERE ts < now() - $1` cannot use an index that leads on
+-- `workspace_id`. Left as it was, the hourly job sequentially scanned the
+-- fastest-growing table in the schema, forever, and got slower every hour by
+-- construction.
+--
+-- The sibling this table was modelled on has exactly this index
+-- (`0076_audit_log.sql:19`, `audit_log_ts_idx`); it was the one line of the
+-- pattern that did not get copied.
+--
+-- `ts` ascending rather than `DESC`: the prune scans the OLD end. Postgres can
+-- read either direction, so this is about which end the planner starts from, and
+-- a btree on `ts` also serves the `ts DESC` reads.
+CREATE INDEX access_log_ts_idx ON dataapi.access_log (ts);
 
 -- Support's entry point is a `request_id` a caller quotes out of an error body,
 -- and they do not know which workspace it belonged to. Without this the lookup

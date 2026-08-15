@@ -14,8 +14,9 @@ import type { ServingResponseDataItem } from './servingResponseDataItem';
  * `meta.version` is the published version that served the call, so a
  * client-side bug is reproducible against the exact snapshot that produced it.
  * `meta.cached` is likewise not cosmetic: without it a stale-looking result is
- * indistinguishable from a fresh one while debugging. It is hard-`false` until
- * Task 4 lands the cache — a field that lies would be worse than no field.
+ * indistinguishable from a fresh one while debugging. It is a real value — Task
+ * 4 landed the cache and [`run`] sets it `true` on a hit — and this comment
+ * said "hard-`false` until Task 4 lands" for three tasks after Task 4 landed.
  */
 export interface ServingResponse {
   /**

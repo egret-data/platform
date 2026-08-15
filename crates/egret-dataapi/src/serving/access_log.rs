@@ -258,6 +258,16 @@ impl AccessLogStore {
     /// It IS a trap — a config default of 0 reading as "off" would silently
     /// discard the log — and it belongs to whoever wires this to a config key,
     /// which P4 does not.
+    /// # It is global, so it needs an index leading on `ts`
+    ///
+    /// There is no `workspace_id` predicate here and there should not be —
+    /// retention is a system-wide policy. That means this statement CANNOT use
+    /// `access_log_ws_ts_idx`, which leads on `workspace_id`, and for a while it
+    /// had nothing else: an hourly sequential scan of the fastest-growing table
+    /// in the schema, getting slower every hour by construction.
+    /// `access_log_ts_idx` (migration 0123) exists for this one query. If a
+    /// workspace-scoped retention is ever wanted, it is a second statement with
+    /// its own predicate, not a `WHERE` bolted onto this one.
     pub async fn prune(&self, retention_days: i64) -> Result<u64, sqlx::Error> {
         let res = sqlx::query(
             "DELETE FROM dataapi.access_log WHERE ts < now() - make_interval(days => $1)",

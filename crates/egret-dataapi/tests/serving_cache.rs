@@ -205,6 +205,107 @@ async fn a_shared_cache_is_refused_when_delegated_flipped_after_publish() {
     assert_eq!(f.call_as(f.principal_a, "x").await.status, StatusCode::OK);
 }
 
+/// **The leak this pair of checks exists for, and the one `delegated` alone
+/// missed.**
+///
+/// `options.impersonate` makes the engine run every query as the CALLER
+/// independently of `delegated` — `delegation_for`'s non-delegated arm still
+/// passes the caller as the session user, Trino sends `X-Trino-User: <caller>`
+/// and StarRocks issues `EXECUTE AS <caller> WITH NO REVERT`. So
+/// `{delegated: false, impersonate: true}` is a fully per-principal connection
+/// that reads as shared-safe to anything consulting `delegated`.
+///
+/// The serving-side witness is reached by flipping the flag AFTER publish, which
+/// is now the ONLY way to get there — publish itself refuses the combination
+/// (see the test below). That is the same no-re-validation window the
+/// `delegated` flip opens, and the reason the witness is a PAIR.
+///
+/// **Assert on the ROWS, not only the status.** A 503 that still handed B a body
+/// would satisfy a status-only assertion, and "B received A's rows" is the
+/// actual claim.
+#[tokio::test]
+async fn b_is_not_served_as_rows_when_impersonate_is_switched_on_after_publish() {
+    let f = skip_without_db!();
+    f.publish("/imp", f.database_id, shared_cache(), no_limits())
+        .await;
+
+    // Anti-triviality: on a genuinely shared-safe connection this IS a shared
+    // entry, so the refusal below is caused by the flip and not by the endpoint
+    // being broken all along.
+    let warm = f.call_as(f.principal_a, "imp").await;
+    assert_eq!(warm.status, StatusCode::OK, "{}", warm.body);
+    let a_rows = warm.ns();
+    assert_eq!(
+        a_rows,
+        vec![marker(f.principal_a)],
+        "the fake engine must be filtering per principal, or this test cannot \
+         tell one identity's rows from another's"
+    );
+
+    // The flip. `delegated` is untouched and still false — which is exactly why
+    // reading it alone could never notice.
+    f.set_database_impersonate(f.database_id, true).await;
+
+    let b = f.call_as(f.principal_b, "imp").await;
+    assert_ne!(
+        b.status,
+        StatusCode::OK,
+        "B was served from a principal-less cache entry on a connection that \
+         runs queries as the caller: {}",
+        b.body
+    );
+    assert_eq!(
+        b.status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "503 cache_scope_stale — the published configuration has drifted and a \
+         re-publish (or putting the connection back) clears it: {}",
+        b.body
+    );
+    assert!(
+        !b.body.to_string().contains(&a_rows[0].to_string()),
+        "the refusal still carried A's rows in its body: {}",
+        b.body
+    );
+
+    // And it tracks the live value rather than latching once.
+    f.set_database_impersonate(f.database_id, false).await;
+    assert_eq!(f.call_as(f.principal_b, "imp").await.status, StatusCode::OK);
+}
+
+/// The publish-time half. Kept separate from the serving-time test above
+/// deliberately: with only one of them, reverting either check alone would leave
+/// the other test green and the leak would look closed when half of it was.
+#[tokio::test]
+async fn a_shared_cache_cannot_be_published_against_an_impersonating_connection() {
+    let f = skip_without_db!();
+    let (status, body) = f
+        .try_publish("/imp-pub", f.impersonating_database_id, shared_cache())
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "`delegated: false, impersonate: true` runs every query as the caller; \
+         a shared cache on it serves one caller's rows to another: {body}"
+    );
+    // The message must name the field an author can actually check. Told only
+    // "delegated", they would look at a column that genuinely reads false.
+    assert!(
+        body.to_string().contains("impersonate"),
+        "the refusal must name options.impersonate, not just `delegated`: {body}"
+    );
+
+    // The same connection with a per-principal scope publishes fine — so the
+    // refusal is about the SCOPE, not about the connection being unusable.
+    let (status, body) = f
+        .try_publish(
+            "/imp-ok",
+            f.impersonating_database_id,
+            per_principal_cache(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
 #[tokio::test]
 async fn a_per_principal_endpoint_is_unaffected_by_the_delegated_column() {
     // The re-check is scoped to `shared`. A `per_principal` endpoint on a

@@ -1020,14 +1020,14 @@ async fn validated_draft(
     id: Uuid,
 ) -> Result<(DataApiEndpointDto, Vec<egret_dataapi_api::ColumnSpec>), DataApiError> {
     let draft = st.endpoints.get(ws, id).await?;
-    let delegated = st
+    let (delegated, impersonate) = st
         .endpoints
-        .connection_is_delegated(ws, draft.database_id)
+        .connection_per_principal_pair(ws, draft.database_id)
         .await?;
     // `ctx.principal`, not the service account: `describe_as` resolves under the
     // caller's own identity so a delegated connection applies THEIR policy, and
     // an author cannot publish a contract over a table they cannot themselves see.
-    let columns = validate(&*st.query, ws, principal, &draft, delegated).await?;
+    let columns = validate(&*st.query, ws, principal, &draft, delegated, impersonate).await?;
     Ok((draft, columns))
 }
 

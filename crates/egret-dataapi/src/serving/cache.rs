@@ -13,22 +13,55 @@
 //! So [`cache_key`] takes the principal, and the ONLY way it is absent is
 //! [`shared_cache_allowed`] returning `true`.
 //!
+//! # `delegated` is not the switch — there are TWO, and this got it wrong
+//!
+//! Read this before touching either check. The condition that makes a shared
+//! cache unsafe is "**the engine runs the query as the caller**", and TWO
+//! independent, unvalidated columns on `query.databases` each cause it:
+//!
+//! * `delegated`, and
+//! * `options.impersonate` — `delegation_for`'s non-delegated arm still passes
+//!   the caller as the session user (`egret-query/src/execution/mod.rs:86`), and
+//!   both connectors act on the flag on their own:
+//!   `connector/trino.rs:43` sends `X-Trino-User: <caller>`, and
+//!   `connector/starrocks.rs:129` issues `EXECUTE AS <caller> WITH NO REVERT`.
+//!
+//! `DatabaseInput` accepts `{"delegated": false, "options": {"impersonate":
+//! true}}`, so a connection can be fully per-principal at the engine while
+//! reading as non-delegated to anything that consults `delegated` alone.
+//!
+//! **Both checks used to consult `delegated` alone, and that was a live
+//! cross-identity leak**, not a theoretical one: such a connection plus
+//! `cache.scope: shared` passed publish-time validation, principal A's
+//! Ranger-filtered rows were stored under a principal-LESS key, and principal B
+//! — different policy, perfectly legitimate `:invoke` grant — was served A's
+//! rows with a 200 and `meta.cached: true`. Nothing in `access_log`
+//! distinguished it, and the frozen witness stayed silent because live
+//! `delegated` still equalled frozen `delegated`.
+//!
+//! [`crate::lifecycle::runs_per_principal`] is now the single expression of the
+//! condition, and both ends route through it.
+//!
 //! # Why `shared` is re-checked at serve time
 //!
 //! [`crate::lifecycle::check_cache_scope`] refuses `scope = shared` on a
-//! delegated connection at publish time, so the unsafe SHAPE never enters
-//! `endpoint_versions`. That is not the whole problem: `query.databases.delegated`
-//! is a mutable column, and flipping it to `true` after a `shared` version was
-//! published turns that already-frozen version into a cross-principal leak, with
-//! no re-validation running anywhere. Validate-time checking cannot close it,
-//! which is why [`egret_dataapi_api::EndpointSnapshot::delegated`] freezes what
-//! the connection was — a witness, and a witness nobody questions is decoration.
+//! per-principal connection at publish time, so the unsafe SHAPE never enters
+//! `endpoint_versions`. That is not the whole problem: BOTH columns are mutable,
+//! and switching either on after a `shared` version was published turns that
+//! already-frozen version into a cross-principal leak, with no re-validation
+//! running anywhere. Validate-time checking cannot close it, which is why
+//! [`egret_dataapi_api::EndpointSnapshot::delegated`] and
+//! [`egret_dataapi_api::EndpointSnapshot::impersonate`] freeze what the
+//! connection was — a witness PAIR, and a witness nobody questions is
+//! decoration. Half a witness is worse: it reads as though the question were
+//! being asked.
 //!
-//! On disagreement this **refuses** ([`ServingError::CacheScopeStale`], 503)
-//! rather than quietly falling back to a per-principal key. A silent downgrade
-//! would keep serving a configuration the operator no longer has, and hide the
-//! drift from the only person who can fix it (re-publish, or flip the column
-//! back). The failure is loud on purpose.
+//! On disagreement in EITHER half this **refuses**
+//! ([`ServingError::CacheScopeStale`], 503) rather than quietly falling back to
+//! a per-principal key. A silent downgrade would keep serving a configuration
+//! the operator no longer has, and hide the drift from the only person who can
+//! fix it (re-publish, or put the connection back). The failure is loud on
+//! purpose.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
@@ -178,35 +211,59 @@ pub async fn shared_cache_allowed(db: &Db, snap: &EndpointSnapshot) -> Result<bo
     // panic-shaped error, and it is certainly not a reason to serve a shared
     // entry. It is the same refusal — the configuration the version was
     // published against no longer exists.
-    let live: Option<bool> =
-        sqlx::query_scalar("SELECT delegated FROM query.databases WHERE id = $1")
+    //
+    // BOTH columns, in ONE statement. Two reads would let the pair come from two
+    // different moments, and reading only `delegated` — which is what this did —
+    // was the leak: `options.impersonate` makes the engine run as the caller
+    // independently of `delegated`, so a connection could be per-principal at
+    // the engine and look shared-safe here forever.
+    let live: Option<(bool, serde_json::Value)> =
+        sqlx::query_as("SELECT delegated, options FROM query.databases WHERE id = $1")
             .bind(snap.database_id)
             .fetch_optional(&db.pool)
             .await
             .map_err(ServingError::internal)?;
 
-    let Some(live) = live else {
+    let Some((live_delegated, live_options)) = live else {
         tracing::warn!(
             database_id = %snap.database_id,
             "a shared-cache endpoint's database row is gone; refusing rather than serving it"
         );
         return Err(ServingError::CacheScopeStale);
     };
+    let live_impersonate = crate::lifecycle::impersonate_flag(&live_options);
 
-    // Disagreement is a refusal, not a downgrade to per-principal: the operator
-    // published a configuration that is no longer safe, and silently serving it
-    // a different way hides that from them.
-    if live != snap.delegated {
+    // Disagreement in EITHER half is a refusal, not a downgrade to
+    // per-principal: the operator published a configuration that is no longer
+    // safe, and silently serving it a different way hides that from them.
+    //
+    // The comparison is on the pair rather than on `runs_per_principal`'s
+    // derived boolean, so the log names the field that actually moved. For a
+    // `shared` endpoint the derived value would do — publish refuses `shared`
+    // unless both halves are false, so any drift to true is caught either way —
+    // but "delegated changed" and "impersonate was switched on" send an operator
+    // to two different settings, and this is the one line they will read.
+    if live_delegated != snap.delegated || live_impersonate != snap.impersonate {
         tracing::warn!(
             database_id = %snap.database_id,
-            frozen = snap.delegated,
-            live,
-            "cache.scope = shared was published against a different `delegated` \
-             than the connection now has; refusing"
+            frozen_delegated = snap.delegated,
+            live_delegated,
+            frozen_impersonate = snap.impersonate,
+            live_impersonate,
+            "cache.scope = shared was published against a different \
+             (delegated, options.impersonate) pair than the connection now has; refusing"
         );
         return Err(ServingError::CacheScopeStale);
     }
-    Ok(!live)
+    // Belt and braces: the pair agreeing means the connection is what publish
+    // validated, and publish refuses `shared` on a per-principal connection — so
+    // this can only be false via a snapshot that predates the check. Returning
+    // `!runs_per_principal` rather than a bare `true` means the safety property
+    // is re-derived here instead of being inferred from "nothing changed".
+    Ok(!crate::lifecycle::runs_per_principal(
+        live_delegated,
+        live_impersonate,
+    ))
 }
 
 /// How long this snapshot's responses may be cached, or `None` for "do not
@@ -713,6 +770,7 @@ mod tests {
             limits: serde_json::from_value(serde_json::json!({})).unwrap(),
             rate_limit: serde_json::from_value(serde_json::json!({})).unwrap(),
             delegated: false,
+            impersonate: false,
             columns: vec![],
         }
     }

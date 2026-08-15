@@ -138,19 +138,47 @@ pub struct EndpointSnapshot {
     /// Whether `database_id` delegated per-user credentials to the engine at the
     /// moment this version was published.
     ///
-    /// **The one input to the frozen contract that lives outside the snapshot.**
-    /// `query.databases.delegated` is a mutable column: `cache.scope = shared` is
-    /// refused at publish time on a delegated connection (Ranger filters rows per
-    /// principal, so a shared cache serves one caller's rows to another), but a
-    /// non-delegated connection can be flipped to delegated afterwards, and no
-    /// re-validation runs anywhere when it is. Freezing the value publish
-    /// validated against is what lets the serving path notice.
-    ///
-    /// **P4 must compare this against the live `delegated` before serving from a
-    /// shared cache, and refuse when they disagree.** Every other field here is
-    /// self-contained; this one is a witness, and it is only useful if it is
-    /// checked.
+    /// **Half of a witness PAIR — see [`Self::impersonate`], and do not read
+    /// this field alone.** Together they are the two mutable columns that decide
+    /// whether the engine runs a query as the CALLER, which is the only thing
+    /// that makes a shared cache unsafe. An earlier version of this comment, and
+    /// of both checks that read it, treated `delegated` as the whole condition;
+    /// it is not, and the gap was a live cross-principal leak.
     pub delegated: bool,
+    /// Whether `query.databases.options.impersonate` was set at the moment this
+    /// version was published. The other half of the witness pair.
+    ///
+    /// **`delegated` alone does not decide whether the engine runs per
+    /// principal, and believing it did was a real leak.** `delegation_for`'s
+    /// NON-delegated arm still returns `Some(principal_email)` as the session
+    /// user (`egret-query/src/execution/mod.rs:86`), and both connectors act on
+    /// `options.impersonate` independently of `delegated`:
+    ///
+    /// * `connector/trino.rs:43` — `bearer_token.is_some() || options.impersonate
+    ///   == Some(true)` sends `X-Trino-User: <caller>`;
+    /// * `connector/starrocks.rs:129` — `bearer_token.is_none() &&
+    ///   options.impersonate == Some(true)` issues
+    ///   `EXECUTE AS <caller> WITH NO REVERT`.
+    ///
+    /// So `{delegated: false, options: {impersonate: true}}` — which
+    /// `DatabaseInput` accepts, the two fields being independent and unvalidated
+    /// — runs every query under the caller's own Ranger policy while looking
+    /// non-delegated to anything that reads `delegated`.
+    ///
+    /// **Both halves must be compared against the live row before serving from a
+    /// shared cache.** Freezing only `delegated` let a `shared` endpoint on such
+    /// a connection cache principal A's filtered rows under a principal-less key
+    /// and serve them to principal B: a 200, `meta.cached: true`, nothing in
+    /// `access_log` to distinguish it, and the witness silent because live
+    /// `delegated` still equalled frozen `delegated`.
+    ///
+    /// `#[serde(default)]` so a snapshot written before this field existed
+    /// deserialises as `false`. That is the fail-closed direction: such a
+    /// snapshot can only have been published against a connection this check now
+    /// refuses, so comparing `false` against a live `true` yields
+    /// `cache_scope_stale` and a re-publish, which is the correct outcome.
+    #[serde(default)]
+    pub impersonate: bool,
     /// Resolved by `describe_as` at publish time and frozen here, so the
     /// published contract does not drift when the underlying table changes.
     pub columns: Vec<ColumnSpec>,

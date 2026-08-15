@@ -48,10 +48,17 @@ use std::sync::{Arc, OnceLock};
 use tower::ServiceExt;
 use uuid::Uuid;
 
-/// Nothing on the serving path consults the PDP yet (spec §6.2 step 4, the Cedar
-/// `dataapi:invoke` check, is not implemented), so a stub is honest here — it is
-/// never called. It is deliberately DENY, so that if a future task adds the check
-/// this fixture cannot silently become an allow-all.
+/// A DENY-everything PDP.
+///
+/// The serving path DOES consult the PDP now — spec §6.2 step 4 checks
+/// `data_api_endpoint:invoke` on the endpoint object (this comment used to say
+/// the check "is not implemented", and used the short `dataapi:invoke` spelling
+/// the spec has since reconciled to the catalog key). Deny is still the right
+/// stub, and now for a stronger reason than "it is never called": every test in
+/// this file is about MOUNTING — the route exists, the CSRF layer is or is not
+/// there, the security scheme resolves — and none of them needs a call to
+/// succeed. An allow-all stub would let a mount test start depending on the
+/// authorization outcome without anyone noticing.
 struct DenyPdp;
 
 #[async_trait::async_trait]

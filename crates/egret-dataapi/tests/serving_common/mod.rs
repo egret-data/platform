@@ -215,6 +215,12 @@ pub struct Fixture {
     pub database_id: Uuid,
     /// `delegated = true` — where a `shared` cache is refused at publish time.
     pub delegated_database_id: Uuid,
+    /// **`delegated = false`, `options.impersonate = true`.** The configuration
+    /// that reads as shared-safe to anything consulting `delegated` alone, while
+    /// the connector still runs every query as the caller
+    /// (`connector/trino.rs:43`, `connector/starrocks.rs:129`). This is the
+    /// connection the cross-principal leak lived on.
+    pub impersonating_database_id: Uuid,
     pub port: Arc<FakePort>,
     /// The rate limiter's clock. Frozen unless a test advances it.
     pub clock: Arc<TestClock>,
@@ -232,13 +238,32 @@ async fn insert_user(db: &Db, tag: &str) -> Uuid {
 }
 
 async fn insert_database(db: &Db, ws: Uuid, owner: Uuid, delegated: bool) -> Uuid {
+    insert_database_full(db, ws, owner, delegated, false).await
+}
+
+/// Both halves of the pair that decides whether the engine runs per principal.
+///
+/// `options` is written as raw JSON with the key spelled exactly as
+/// `egret_query_api::DbOptions::impersonate` serialises it — the same string the
+/// production code reads through `lifecycle::impersonate_flag`. Written here
+/// rather than through the databases route so a test can construct the
+/// combination the route accepts but nothing validates.
+async fn insert_database_full(
+    db: &Db,
+    ws: Uuid,
+    owner: Uuid,
+    delegated: bool,
+    impersonate: bool,
+) -> Uuid {
     sqlx::query_scalar(
-        "INSERT INTO query.databases (workspace_id, name, engine, host, port, delegated, created_by) \
-         VALUES ($1, $2, 'trino', 'localhost', 8080, $3, $4) RETURNING id",
+        "INSERT INTO query.databases \
+           (workspace_id, name, engine, host, port, delegated, options, created_by) \
+         VALUES ($1, $2, 'trino', 'localhost', 8080, $3, $4, $5) RETURNING id",
     )
     .bind(ws)
     .bind(format!("db-{}", Uuid::new_v4().simple()))
     .bind(delegated)
+    .bind(serde_json::json!({ "impersonate": impersonate }))
     .bind(owner)
     .fetch_one(&db.pool)
     .await
@@ -319,6 +344,7 @@ pub async fn fixture() -> Option<Fixture> {
     let principal_b = UserId(insert_user(&db, "t4_sa_b").await);
     let database_id = insert_database(&db, ws_id, admin, false).await;
     let delegated_database_id = insert_database(&db, ws_id, admin, true).await;
+    let impersonating_database_id = insert_database_full(&db, ws_id, admin, false, true).await;
 
     let author = insert_user(&db, "t4_author").await;
     grant(
@@ -385,6 +411,7 @@ pub async fn fixture() -> Option<Fixture> {
         admin,
         database_id,
         delegated_database_id,
+        impersonating_database_id,
         port,
         clock,
     })
@@ -564,6 +591,51 @@ impl Fixture {
         grant_invoke(&self.db, self.principal_a, ep).await;
         grant_invoke(&self.db, self.principal_b, ep).await;
         ep
+    }
+
+    /// Publish without asserting success, so a test can assert the REFUSAL.
+    pub async fn try_publish(
+        &self,
+        path: &str,
+        database_id: Uuid,
+        cache: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let ep: Uuid = sqlx::query_scalar(
+            "INSERT INTO dataapi.endpoints \
+               (workspace_id, name, path, method, database_id, sql, cache, created_by) \
+             VALUES ($1, $2, $3, 'GET', $4, 'SELECT 1 AS n', $5, $6) RETURNING id",
+        )
+        .bind(self.ws_id)
+        .bind(format!("ep-{}", Uuid::new_v4().simple()))
+        .bind(path)
+        .bind(database_id)
+        .bind(&cache)
+        .bind(self.admin)
+        .fetch_one(&self.db.pool)
+        .await
+        .expect("insert endpoint draft");
+        self.mgmt_send(
+            "POST",
+            &format!("/api/ws/{}/data-api/endpoints/{ep}/publish", self.ws_slug),
+            Some(serde_json::json!({})),
+        )
+        .await
+    }
+
+    /// Switch `options.impersonate` on a live connection AFTER a version was
+    /// published against it — the other half of the pair, and the same
+    /// no-re-validation window `set_database_delegated` opens.
+    ///
+    /// Writes the whole `options` object, as the databases route does, rather
+    /// than patching a key: a test that only ever saw a jsonb_set path could
+    /// pass against a production writer that replaces the object.
+    pub async fn set_database_impersonate(&self, database_id: Uuid, impersonate: bool) {
+        sqlx::query("UPDATE query.databases SET options = $1 WHERE id = $2")
+            .bind(serde_json::json!({ "impersonate": impersonate }))
+            .bind(database_id)
+            .execute(&self.db.pool)
+            .await
+            .expect("flip impersonate");
     }
 
     /// Flip the live `delegated` column AFTER a version was published against

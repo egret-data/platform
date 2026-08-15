@@ -267,11 +267,15 @@ pub enum ValidationError {
          instead, e.g. `LIKE concat('%', {{{{{0}}}}}, '%')`"
     )]
     PlaceholderInsideQuotedText(String),
+    // Names BOTH fields, because an author told only "delegated" on a connection
+    // whose `delegated` is false has been told something they can verify is
+    // untrue, and will go looking for a different problem.
     #[error(
-        "cache.scope = shared is not allowed on a delegated connection: the engine filters rows \
-         per principal, so a shared cache would serve one caller's rows to another"
+        "cache.scope = shared is not allowed on a connection that runs queries as the caller \
+         (delegated, or options.impersonate): the engine filters rows per principal, so a \
+         shared cache would serve one caller's rows to another"
     )]
-    SharedCacheOnDelegatedConnection,
+    SharedCacheOnPerPrincipalConnection,
     #[error("enum parameter `{0}` must declare a non-empty `allowed` list")]
     EnumWithoutAllowed(String),
 }
@@ -660,22 +664,94 @@ fn first_count_mismatch(referenced: &[String], survived: &[String]) -> Option<St
         .cloned()
 }
 
-/// `Shared` cache is refused on a delegated connection: Ranger filters per
-/// principal, so one principal's rows would be served to another. Refusing at
-/// VALIDATE time means the unsafe configuration can never be published, rather
-/// than being caught (or not) at serve time.
+/// Does this connection make the engine run a query as the CALLER?
+///
+/// **The one predicate the shared-cache rules are actually about**, and the
+/// reason it is a named function rather than an inline `&&` at two call sites:
+/// those two sites disagreeing is precisely the defect this replaces. Both
+/// [`check_cache_scope`] (publish time) and
+/// [`crate::serving::shared_cache_allowed`] (serve time) route through it, so
+/// "safe to share a cache entry" cannot mean two different things at the two
+/// ends of a published endpoint's life.
+///
+/// **`delegated` alone is NOT this predicate**, which is what the earlier
+/// version got wrong. `delegation_for`'s non-delegated arm still returns
+/// `Some(principal_email)` as the session user
+/// (`egret-query/src/execution/mod.rs:86`), and each connector then decides for
+/// itself on `options.impersonate`:
+///
+/// * Trino (`connector/trino.rs:43`) sends `X-Trino-User: <caller>` when
+///   `bearer_token.is_some() || options.impersonate == Some(true)`;
+/// * StarRocks (`connector/starrocks.rs:129`) issues
+///   `EXECUTE AS <caller> WITH NO REVERT` when
+///   `bearer_token.is_none() && options.impersonate == Some(true)`.
+///
+/// The two database fields are independent and unvalidated — `create`/`update`
+/// accept `{"delegated": false, "options": {"impersonate": true}}` — so a
+/// connection can be per-principal at the engine while reading as non-delegated
+/// to anything that consults `delegated`. That connection plus
+/// `cache.scope: shared` was a cross-identity leak that both checks waved
+/// through.
+///
+/// OR, not AND: either field on its own is sufficient to make the engine filter
+/// per principal, and this must stay the conservative direction.
+///
+/// # The fix NOT taken, and why it is worth someone's time later
+///
+/// The obvious upstream fix is to stop the combination existing: have the
+/// databases route reject `{"delegated": false, "options": {"impersonate":
+/// true}}` at registration, since a connection that impersonates without being
+/// marked delegated is arguably always a misconfiguration. That is defensible
+/// and it is deliberately not done here — it changes an existing public API's
+/// accepted inputs, which is outside P4's scope and would break any deployment
+/// already carrying that shape, silently, at the next `update`.
+///
+/// Recorded rather than dropped: if someone does take it, this predicate stays
+/// regardless. A registration-time check constrains rows written AFTER it, and
+/// this one is the thing that keeps already-stored rows and hand-edited ones
+/// from leaking. Defence at the decision point, not only at the door.
+pub fn runs_per_principal(delegated: bool, impersonate: bool) -> bool {
+    delegated || impersonate
+}
+
+/// Read `options.impersonate` out of a `query.databases.options` JSONB value.
+///
+/// This crate depends on no other feature seam (see the module comment), so
+/// `DbOptions` is not in scope and the column is read as raw JSON. The key is
+/// spelled exactly as `egret_query_api::DbOptions::impersonate` serialises it —
+/// that field carries no `#[serde(rename)]`, so the wire name is the Rust name.
+/// **That is a coupling by string**, which is why it lives in one function with
+/// a test rather than being inlined at each of the three call sites.
+///
+/// Anything that is not literally JSON `true` reads as `false`: absent, `null`,
+/// the string `"true"`, a number. That is the fail-SAFE direction for the
+/// PUBLISH check and the fail-OPEN direction for nothing — the serving-side
+/// comparison uses the same function on both the frozen and the live value, so a
+/// value this cannot parse is simply "not impersonating" at both ends and the
+/// pair still agrees. If `DbOptions` ever starts accepting a looser spelling,
+/// this function is the one place that has to learn it.
+pub fn impersonate_flag(options: &serde_json::Value) -> bool {
+    options.get("impersonate") == Some(&serde_json::Value::Bool(true))
+}
+
+/// `Shared` cache is refused on any connection that runs queries per principal —
+/// see [`runs_per_principal`] for why that is two fields and not one. The engine
+/// filters rows for the caller, so one principal's rows would be served to
+/// another. Refusing at VALIDATE time means the unsafe configuration can never
+/// be published, rather than being caught (or not) at serve time.
 ///
 /// Refused whether or not the cache is currently `enabled`. The pair is frozen
 /// into the snapshot together, and a `scope = shared, enabled = false` version
 /// is one flag away from leaking with no re-validation in between — while an
-/// author who wants a shared cache on a delegated connection has no correct way
-/// to get one, so there is nothing legitimate being blocked.
+/// author who wants a shared cache on such a connection has no correct way to
+/// get one, so there is nothing legitimate being blocked.
 pub fn check_cache_scope(
     cache: &CacheSpec,
     delegated: bool,
+    impersonate: bool,
 ) -> std::result::Result<(), ValidationError> {
-    if delegated && cache.scope == CacheScope::Shared {
-        return Err(ValidationError::SharedCacheOnDelegatedConnection);
+    if runs_per_principal(delegated, impersonate) && cache.scope == CacheScope::Shared {
+        return Err(ValidationError::SharedCacheOnPerPrincipalConnection);
     }
     Ok(())
 }
@@ -699,11 +775,12 @@ pub fn validate_definition(
     params: &[ParamSpec],
     cache: &CacheSpec,
     delegated: bool,
+    impersonate: bool,
 ) -> std::result::Result<(), ValidationError> {
     check_single_select(sql)?;
     check_enum_params(params)?;
     check_params(sql, params)?;
-    check_cache_scope(cache, delegated)?;
+    check_cache_scope(cache, delegated, impersonate)?;
     Ok(())
 }
 
@@ -772,8 +849,15 @@ pub async fn validate(
     principal: UserId,
     draft: &DataApiEndpointDto,
     delegated: bool,
+    impersonate: bool,
 ) -> Result<Vec<ColumnSpec>> {
-    validate_definition(&draft.sql, &draft.params, &draft.cache, delegated)?;
+    validate_definition(
+        &draft.sql,
+        &draft.params,
+        &draft.cache,
+        delegated,
+        impersonate,
+    )?;
     let probe = probe_sql(&draft.sql, &draft.params)?;
     let columns = port
         .describe_as(workspace, draft.database_id, principal, &probe)
@@ -825,23 +909,34 @@ fn db_err(e: sqlx::Error) -> Error {
 }
 
 impl EndpointStore {
-    /// Whether `database` (which must belong to `workspace`) delegates per-user
-    /// credentials to the engine.
+    /// The `(delegated, options.impersonate)` pair for `database` (which must
+    /// belong to `workspace`) — the two columns that decide whether the engine
+    /// runs a query as the CALLER. See [`runs_per_principal`].
     ///
     /// Read here rather than passed in: it is the input to
     /// [`check_cache_scope`], and a caller who supplied it would be supplying the
     /// answer to the safety question. `NotFound` for a database outside the
     /// workspace, matching every other cross-workspace answer in this crate.
-    pub async fn connection_is_delegated(&self, workspace: Uuid, database: Uuid) -> Result<bool> {
-        sqlx::query_scalar(
-            "SELECT delegated FROM query.databases WHERE id = $1 AND workspace_id = $2",
+    ///
+    /// **Returns the PAIR, and used to return `delegated` alone.** The old
+    /// signature could not express the unsafe configuration at all, so every
+    /// caller of it was structurally incapable of noticing
+    /// `{delegated: false, impersonate: true}`.
+    pub async fn connection_per_principal_pair(
+        &self,
+        workspace: Uuid,
+        database: Uuid,
+    ) -> Result<(bool, bool)> {
+        let row: Option<(bool, serde_json::Value)> = sqlx::query_as(
+            "SELECT delegated, options FROM query.databases WHERE id = $1 AND workspace_id = $2",
         )
         .bind(database)
         .bind(workspace)
         .fetch_optional(&self.db.pool)
         .await
-        .map_err(db_err)?
-        .ok_or_else(|| Error::NotFound("database".into()))
+        .map_err(db_err)?;
+        let (delegated, options) = row.ok_or_else(|| Error::NotFound("database".into()))?;
+        Ok((delegated, impersonate_flag(&options)))
     }
 
     /// Freeze `draft` into a new immutable version and make it the live one.
@@ -937,8 +1032,13 @@ impl EndpointStore {
         // `delegated` witness exists for — P4 compares it against the live column
         // and refuses a shared cache when they disagree — and it is not something
         // publish can close on its own.
-        let delegated: bool = sqlx::query_scalar(
-            "SELECT delegated FROM query.databases WHERE id = $1 AND workspace_id = $2",
+        // The witness PAIR, read in one statement so the two halves cannot come
+        // from two different moments. `options` is JSONB and the key is spelled
+        // exactly as `egret_query_api::DbOptions::impersonate` serialises it —
+        // this crate deliberately depends on no other feature seam, so the
+        // coupling is by name and is asserted in `impersonate_flag`.
+        let (delegated, options): (bool, serde_json::Value) = sqlx::query_as(
+            "SELECT delegated, options FROM query.databases WHERE id = $1 AND workspace_id = $2",
         )
         .bind(current.database_id)
         .bind(workspace)
@@ -946,10 +1046,17 @@ impl EndpointStore {
         .await
         .map_err(db_err)?
         .ok_or_else(|| Error::NotFound("database".into()))?;
+        let impersonate = impersonate_flag(&options);
 
         // The whole pure validator, against the row actually being frozen. See the
         // doc comment: this is what closes the window, not the identity check above.
-        validate_definition(&current.sql, &current.params, &current.cache, delegated)?;
+        validate_definition(
+            &current.sql,
+            &current.params,
+            &current.cache,
+            delegated,
+            impersonate,
+        )?;
 
         let snapshot = EndpointSnapshot {
             // The stored path, which `normalize_path` already canonicalised. The
@@ -963,7 +1070,12 @@ impl EndpointStore {
             cache: current.cache.clone(),
             limits: current.limits.clone(),
             rate_limit: current.rate_limit.clone(),
+            // The witness PAIR, both halves from the one SELECT above. Freezing
+            // only `delegated` — which is what this did — left
+            // `{delegated: false, impersonate: true}` indistinguishable from a
+            // genuinely shared-safe connection forever after.
             delegated,
+            impersonate,
             columns,
         };
         let payload = serde_json::to_value(&snapshot)
@@ -1604,26 +1716,83 @@ mod tests {
         ));
     }
 
+    /// All four corners of the pair, not just the `delegated` axis.
+    ///
+    /// The `(false, true)` case is the one that mattered: a connection with
+    /// `delegated: false` and `options.impersonate: true` runs every query as the
+    /// caller, and the earlier one-field check published it as shared-safe.
     #[test]
-    fn shared_cache_is_refused_only_on_a_delegated_connection() {
-        assert_eq!(
-            check_cache_scope(&cache(CacheScope::Shared), true),
-            Err(ValidationError::SharedCacheOnDelegatedConnection)
+    fn shared_cache_is_refused_on_either_half_of_the_pair() {
+        for (delegated, impersonate) in [(true, false), (false, true), (true, true)] {
+            assert_eq!(
+                check_cache_scope(&cache(CacheScope::Shared), delegated, impersonate),
+                Err(ValidationError::SharedCacheOnPerPrincipalConnection),
+                "shared must be refused for (delegated={delegated}, impersonate={impersonate})"
+            );
+        }
+        // The one safe corner.
+        assert!(check_cache_scope(&cache(CacheScope::Shared), false, false).is_ok());
+        // …and `per_principal` is fine everywhere, which is what makes the
+        // refusals above about the SCOPE rather than about the connection.
+        for (delegated, impersonate) in [(true, false), (false, true), (true, true), (false, false)]
+        {
+            assert!(
+                check_cache_scope(&cache(CacheScope::PerPrincipal), delegated, impersonate).is_ok()
+            );
+        }
+    }
+
+    /// The predicate is OR, and it is asserted directly so the corner above
+    /// cannot be "fixed" by weakening it to AND somewhere else.
+    #[test]
+    fn a_connection_runs_per_principal_if_either_field_says_so() {
+        assert!(!runs_per_principal(false, false));
+        assert!(runs_per_principal(true, false));
+        assert!(
+            runs_per_principal(false, true),
+            "impersonate alone is enough"
         );
-        assert!(check_cache_scope(&cache(CacheScope::Shared), false).is_ok());
-        assert!(check_cache_scope(&cache(CacheScope::PerPrincipal), true).is_ok());
+        assert!(runs_per_principal(true, true));
+    }
+
+    /// The JSONB key is a string coupling to `egret_query_api::DbOptions`, so it
+    /// is pinned in one place rather than trusted at three call sites.
+    #[test]
+    fn the_impersonate_flag_reads_only_a_real_json_true() {
+        assert!(impersonate_flag(&serde_json::json!({"impersonate": true})));
+        assert!(!impersonate_flag(
+            &serde_json::json!({"impersonate": false})
+        ));
+        assert!(!impersonate_flag(&serde_json::json!({})));
+        assert!(!impersonate_flag(&serde_json::json!({"impersonate": null})));
+        // A non-bool must not read as true. It also must not read as true at the
+        // OTHER end — the frozen and the live value go through this same
+        // function, so an unparseable value is "not impersonating" on both sides
+        // and the pair still agrees rather than 503ing forever.
+        assert!(!impersonate_flag(
+            &serde_json::json!({"impersonate": "true"})
+        ));
+        assert!(!impersonate_flag(&serde_json::json!({"impersonate": 1})));
+        // Neighbouring keys must not be mistaken for it.
+        assert!(!impersonate_flag(
+            &serde_json::json!({"impersonated": true})
+        ));
     }
 
     /// A disabled shared cache is still refused — the flag is one edit away from
     /// enabled, and that edit does not re-run validation.
     #[test]
-    fn a_disabled_shared_cache_is_still_refused_when_delegated() {
+    fn a_disabled_shared_cache_is_still_refused_when_per_principal() {
         let c = CacheSpec {
             enabled: false,
             ttl_seconds: 60,
             scope: CacheScope::Shared,
         };
-        assert!(check_cache_scope(&c, true).is_err());
+        assert!(check_cache_scope(&c, true, false).is_err());
+        assert!(
+            check_cache_scope(&c, false, true).is_err(),
+            "the impersonate half must carry the disabled-cache rule too"
+        );
     }
 
     #[test]
@@ -1676,6 +1845,7 @@ mod tests {
             &[param("unused", ParamType::String)],
             &cache(CacheScope::PerPrincipal),
             false,
+            false,
         )
         .unwrap_err();
         assert_eq!(err, ValidationError::MultipleStatements);
@@ -1693,7 +1863,7 @@ mod tests {
             ValidationError::UndeclaredPlaceholder("r".into()),
             ValidationError::UnreferencedParameter("r".into()),
             ValidationError::DuplicateParameter("r".into()),
-            ValidationError::SharedCacheOnDelegatedConnection,
+            ValidationError::SharedCacheOnPerPrincipalConnection,
             ValidationError::EnumWithoutAllowed("s".into()),
         ] {
             let msg = e.to_string();

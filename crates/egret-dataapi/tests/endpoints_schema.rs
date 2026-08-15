@@ -138,6 +138,12 @@ fn fixture_snapshot(database_id: Uuid) -> EndpointSnapshot {
         // validated against. `true` here rather than the `false` default, so a
         // field that failed to round-trip could not pass by accident.
         delegated: true,
+        // The other half of the witness pair. Deliberately DIFFERENT from
+        // `delegated` here, per this fixture's own rule of using distinguishable
+        // values: a round trip that set both to `true` could not catch the two
+        // being swapped, and swapping them is exactly the mistake that turns a
+        // safety check into a coin flip.
+        impersonate: false,
         columns: vec![
             ColumnSpec {
                 name: "id".to_string(),

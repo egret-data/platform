@@ -164,8 +164,9 @@ const TIMEOUT_CEILING_SECS: u64 = 300;
 /// `meta.version` is the published version that served the call, so a
 /// client-side bug is reproducible against the exact snapshot that produced it.
 /// `meta.cached` is likewise not cosmetic: without it a stale-looking result is
-/// indistinguishable from a fresh one while debugging. It is hard-`false` until
-/// Task 4 lands the cache — a field that lies would be worse than no field.
+/// indistinguishable from a fresh one while debugging. It is a real value — Task
+/// 4 landed the cache and [`run`] sets it `true` on a hit — and this comment
+/// said "hard-`false` until Task 4 lands" for three tasks after Task 4 landed.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ServingResponse {
     /// Rows, shaped by the snapshot's `output.shape`: an array of objects
@@ -671,9 +672,24 @@ async fn run(
 /// # Still not decoded, and still not validated
 ///
 /// Step 7 owns both, and until it lands no caller input reaches the engine at
-/// all. Leaving values raw errs toward a MISS: two encodings of one value are
-/// two entries, which costs an execution and never serves the wrong rows. When
-/// step 7 lands, the RENDERED parameters (defaults applied, body parameters
+/// all. Leaving VALUES raw errs toward a MISS: two encodings of one value are
+/// two entries, which costs an execution and never serves the wrong rows.
+///
+/// **That safety argument covers values and NOT names, and the difference is a
+/// landmine for step 7.** The match below is `p.name == k` against the raw,
+/// undecoded key, so `?d%61y=2026-01-01` does not match a declared `day`: it is
+/// dropped, and the request shares a cache entry with one that carries no `day`
+/// at all. Today that is inert — nothing renders parameters, so both requests
+/// genuinely produce the same rows. **The moment step 7 renders them it is a
+/// wrong-rows bug**, because the two requests would then produce different rows
+/// under one key.
+///
+/// So step 7 must percent-decode the key BEFORE matching it against
+/// `p.name`, not only decode the value. Decoding values alone would close the
+/// visible half and leave this one, which is the half that has no symptom until
+/// it has the worst one.
+///
+/// When step 7 lands, the RENDERED parameters (defaults applied, body parameters
 /// included) replace this — a default-valued parameter absent from the URL is
 /// still part of what produced the rows.
 ///
@@ -1165,6 +1181,7 @@ mod tests {
             },
             rate_limit: serde_json::from_value(serde_json::json!({})).unwrap(),
             delegated: false,
+            impersonate: false,
             columns: vec![],
         }
     }

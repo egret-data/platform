@@ -79,6 +79,30 @@ fn refuse(reason: &'static str) -> ServingError {
 /// an operator staring at a wall of 401s can tell "their clock is wrong" from
 /// "someone is replaying a catalog token" without the prober learning the same
 /// thing. Task 5's access log records the CODE; this is where the reason lives.
+///
+/// # It verifies against the ACTIVE key only, so a rotation invalidates every
+/// live token
+///
+/// Stated here, beside the three checks this function does make, rather than
+/// only in a ledger somewhere: `keys.active()` below is the single JWK this
+/// verifies against, and both minting and verification follow `active()`
+/// forward together. So the instant the signing key rotates, **every
+/// already-issued `data-api` token stops verifying** and its holder gets 401s
+/// until it re-exchanges — up to the full 600s TTL of blanket failure across
+/// every client at once, indistinguishable from a bad credential and looking to
+/// the operator like a mass outage.
+///
+/// Not fireable today: no rotation tooling exists in-tree, so `active()` never
+/// changes in a running deployment. The fix when it does is to verify against
+/// every JWK from `all_public_jwks()` — which the [`SigningKeyStore`] trait
+/// already exposes, and which is exactly why it exposes it — accepting any that
+/// validates. **Whoever adds rotation must do that first**, in the same change
+/// and not after; a rotation shipped ahead of it is a scheduled outage.
+///
+/// This note lives in the doc rather than only in a design ledger deliberately.
+/// The reason `verify_with_jwk` checks neither `aud` nor `exp` — the thing this
+/// function exists to compensate for — survived three phases as a ledger entry
+/// nobody opened while reading this code.
 pub async fn verify_serving_token(
     keys: &dyn SigningKeyStore,
     bearer: &str,
