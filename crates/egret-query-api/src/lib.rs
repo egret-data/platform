@@ -48,10 +48,30 @@ pub use port::QueryExecPort;
 /// fetches `max_rows + 1` and, if the extra row appears, sets
 /// [`TabularResult::truncated`] and drops it — so a caller can always tell a
 /// complete answer from a prefix of one.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Limits {
     pub max_rows: usize,
     pub timeout: std::time::Duration,
+}
+
+/// A caller-supplied value bound into a query. Never rendered into SQL text by
+/// the caller of a connector — the connector decides how its engine carries it.
+///
+/// Lives here, beside [`Limits`], because `egret-dataapi` must be able to
+/// construct one without depending on `egret-query`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Param {
+    Null,
+    Bool(bool),
+    I64(i64),
+    F64(f64),
+    /// Exact decimal, kept as text so no float rounding is introduced.
+    Decimal(String),
+    Str(String),
+    /// `YYYY-MM-DD`
+    Date(String),
+    /// `YYYY-MM-DD HH:MM:SS[.fff]`
+    Timestamp(String),
 }
 
 /// Supported query engines.

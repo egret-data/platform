@@ -10,6 +10,7 @@ use egret_core::{ColumnMeta, TabularResult};
 
 use crate::execution::error::EngineError;
 use crate::execution::model::Limits;
+use egret_query_api::Param;
 
 mod starrocks;
 mod trino;
@@ -88,6 +89,49 @@ pub trait Connector: Send + Sync {
             .execute(&wrapped, &limits, CancellationToken::new())
             .await?;
         Ok(r.columns)
+    }
+
+    /// Run `sql` with `params` bound by the engine's own parameter mechanism.
+    ///
+    /// The default REFUSES rather than interpolating. That asymmetry is the point:
+    /// a defaulted `params` argument on `execute` would force every implementor —
+    /// including test fakes and any future connector — to make a decision, and the
+    /// cheapest wrong decision is to ignore the argument and build a string. This
+    /// codebase already lost a SEV-0 to a defaulted inherited behaviour in `describe`.
+    async fn execute_with_params(
+        &self,
+        sql: &str,
+        params: &[Param],
+        limits: &Limits,
+        cancel: CancellationToken,
+    ) -> Result<TabularResult, EngineError> {
+        if params.is_empty() {
+            self.execute(sql, limits, cancel).await
+        } else {
+            Err(EngineError::Engine(
+                "this connector does not support bound parameters".into(),
+            ))
+        }
+    }
+
+    /// Typed columns of a parameterised `SELECT`, without supplying values.
+    ///
+    /// Not symmetry: on StarRocks the text path given SQL containing `?` returns
+    /// ZERO COLUMNS AND NO ERROR (measured), so publish would freeze an empty
+    /// schema instead of failing.
+    async fn describe_with_params(
+        &self,
+        sql: &str,
+        param_count: usize,
+        timeout: Duration,
+    ) -> Result<Vec<ColumnMeta>, EngineError> {
+        if param_count == 0 {
+            self.describe(sql, timeout).await
+        } else {
+            Err(EngineError::Engine(
+                "this connector does not support describing a parameterised query".into(),
+            ))
+        }
     }
 }
 
