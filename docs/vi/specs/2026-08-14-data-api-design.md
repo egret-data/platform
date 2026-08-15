@@ -428,7 +428,21 @@ CI chạy đầy đủ ở local trước khi merge, gồm cả `cargo fmt`. Kh�
 Cố ý hoãn, mỗi mục đều được ghi lại để nó là một quyết định chứ không phải một thiếu sót:
 
 - **Ghi (INSERT/UPDATE/DELETE)** và transaction nhiều statement — cần transaction boundary, rollback, audit ghi, và chính sách về việc ai được publish endpoint ghi.
-- **Bound parameter ở tầng connector** — xem §3.
+- **Bound parameter ở tầng connector.** Đây là mục hoãn lớn nhất trong tài liệu này và là mục dễ bị đọc sai nhất, nên lập luận đặt ở đây chứ không chỉ ở §3.
+
+  sqlrest — bản triển khai mà thiết kế này lấy làm mẫu — **không** nội suy. `#{param}` của MyBatis trở thành một `ParameterMapping` thật, tức là driver bind. Chúng ta thì ghép một literal đã escape. Vậy trên trục tham số, bản tham chiếu *an toàn hơn về mặt cấu trúc* so với thứ chúng ta đã dựng.
+
+  Mọi lỗi escaping mà tính năng này từng gặp đều bắt nguồn từ đúng lựa chọn đó: quoting mù backslash trên StarRocks (P1), `{{param}}` publish được bên trong một string literal, scanner đọc `#` là comment trong khi StarRocks đọc nó là whitespace, và dấu `;` thoát khỏi wrapper của `describe` (đều ở P3). Một bound parameter không thể thoát khỏi vị trí của chính nó, nên cả lớp lỗi đó không với tới được.
+
+  **Nó bị hoãn vì chi phí, không phải vì nội suy được đánh giá là đủ tốt.** `Connector::execute` nhận `sql: &str` và không có kênh tham số; StarRocks bind được trực tiếp qua `mysql_async`, nhưng Trino cần `X-Trino-Prepared-Statement` cộng `EXECUTE … USING`, tức là đổi trait `Connector` và thêm một đường giao thức thứ hai. Làm nó sẽ **xoá bỏ** escaper theo dialect, phép kiểm statement trên byte thô, và phép kiểm vị trí placeholder — bản vá mang tính trừ đi, và đó là lập luận mạnh nhất ủng hộ nó.
+
+- **Dynamic SQL** — mệnh đề điều kiện chỉ xuất hiện khi tham số được truyền. sqlrest có nhờ MyBatis `<if>`, `<where>`, `<set>`, `<choose>`/`<when>`, `<foreach>`; chúng ta không có gì. `{{param}}` thay thế vô điều kiện, nên một filter tuỳ chọn phải viết thành `WHERE (region = {{r}} OR {{r}} IS NULL)` — vừa gượng vừa thường làm hỏng chính index mà mệnh đề đó sinh ra để dùng.
+
+  **`rbatis` không giải quyết được việc này**, và lý do đáng ghi lại để không ai đề xuất lại. Dynamic SQL của nó là compile-time: `rb_html(args: TokenStream, func: TokenStream) -> TokenStream` là một proc macro trên `syn::ItemFn`, nên template phải là literal trong source Rust lúc build. Còn một endpoint của Data API là một hàng trong `dataapi.endpoint_versions.snapshot`, do người dùng viết và publish khi hệ thống đang chạy — không macro nào chạy trên nó được. Nó cũng không tách rời khỏi tầng driver `rbdc` của chính nó, mà `rbdc` không có driver Trino và dùng nó nghĩa là dựng lại delegation per-user, engine JWT và Ranger.
+
+  Nếu có ngày làm, nó phải là bộ render **runtime**, và hình dạng quan trọng hơn bản thân tính năng: một template engine tổng quát (họ Jinja) sẽ đánh giá template do người dùng viết trên một endpoint công khai — đó là vùng rủi ro đã biết của Superset và sẽ là một bề mặt tấn công mới ở đây. Hãy làm thứ nhỏ nhất trả lời được câu "tham số này có được truyền không": không ngôn ngữ biểu thức, không gọi hàm, không truy cập thuộc tính.
+
+  **Nếu làm cả hai thì thứ tự quan trọng: bound parameter trước.** Thêm render có điều kiện lên trên nội suy chuỗi là cộng dồn hai rủi ro; thêm nó lên trên binding thì không cộng dồn gì cả.
 - **Engine thực thi Groovy/script** (`ExecuteEngineEnum::SCRIPT` của sqlrest) — bài toán sandbox lớn đổi lấy lợi ích không đáng kể so với SQL.
 - **Xuất MCP tool** (`McpToolEntity` của sqlrest) — việc tiếp nối tự nhiên ở v2 khi endpoint đã ổn định.
 - **Danh sách IP allow/deny** (`FirewallRulesEntity` của sqlrest) — giải ở tầng ingress tốt hơn trong application code.

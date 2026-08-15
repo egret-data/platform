@@ -436,7 +436,21 @@ CI runs in full locally before merge, including `cargo fmt`. Never run two works
 Deferred deliberately, each recorded so it is a decision rather than an omission:
 
 - **Writes (INSERT/UPDATE/DELETE)** and multi-statement transactions — needs transaction boundaries, rollback, write audit, and a policy for who may publish a write endpoint.
-- **Bound parameters at the connector layer** — see §3.
+- **Bound parameters at the connector layer.** This is the largest deferral in the document and the one most likely to be misread, so the reasoning is here rather than only in §3.
+
+  sqlrest — the implementation this design is modelled on — does **not** interpolate. Its MyBatis `#{param}` becomes a real `ParameterMapping`, i.e. a driver bind. We interpolate an escaped literal instead. On the parameter axis the reference implementation is therefore *structurally safer* than what we built.
+
+  Every escaping defect this feature has had exists because of that one choice: the backslash-blind quoting on StarRocks (P1), the `{{param}}` publishable inside a string literal, the scanner that read `#` as a comment while StarRocks read it as whitespace, and the `;` that escaped `describe`'s wrapper (all P3). A bound parameter cannot break out of its own position, so none of that class is reachable.
+
+  **It was deferred for cost, not because interpolation was judged adequate.** `Connector::execute` takes `sql: &str` with no parameter channel; StarRocks could bind natively through `mysql_async`, but Trino needs `X-Trino-Prepared-Statement` plus `EXECUTE … USING`, which is a `Connector` trait change and a second protocol path. Doing it would *delete* the dialect escaper, the raw-byte statement check, and the placeholder-position check — the fix is subtractive, which is the strongest argument for it.
+
+- **Dynamic SQL** — conditional predicates that appear only when a parameter was supplied. sqlrest has this through MyBatis `<if>`, `<where>`, `<set>`, `<choose>`/`<when>`, `<foreach>`; we have none. `{{param}}` substitutes unconditionally, so an optional filter must be written `WHERE (region = {{r}} OR {{r}} IS NULL)`, which is awkward and usually defeats the index the predicate existed for.
+
+  **`rbatis` does not solve this**, and the reason is worth recording so it is not re-proposed. Its dynamic SQL is compile-time: `rb_html(args: TokenStream, func: TokenStream) -> TokenStream` is a proc macro over a `syn::ItemFn`, so the template must be a literal in Rust source at build time. A Data API endpoint is a row in `dataapi.endpoint_versions.snapshot`, authored by a user and published while the system is running — no macro can run over it. It is also inseparable from its own `rbdc` driver layer, which has no Trino driver and would mean rebuilding per-user delegation, engine JWTs and Ranger.
+
+  If it is ever built it must be a **runtime** renderer, and the shape matters more than the feature: a general template engine (Jinja-family) evaluates a user-authored template on a public endpoint, which is a known risk area for Superset and would be a new attack surface here. Build the smallest thing that answers "was this parameter supplied" — no expression language, no function calls, no attribute access.
+
+  **Order matters if both are done: bound parameters first.** Adding conditional rendering on top of string interpolation compounds two risks; adding it on top of binding compounds none.
 - **Groovy/script execution engine** (sqlrest's `ExecuteEngineEnum::SCRIPT`) — a large sandboxing problem for marginal benefit over SQL.
 - **MCP tool export** (sqlrest's `McpToolEntity`) — natural v2 follow-on once endpoints are stable.
 - **IP allow/deny lists** (sqlrest's `FirewallRulesEntity`) — better solved at ingress than in application code.
