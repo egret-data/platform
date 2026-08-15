@@ -27,7 +27,17 @@ async-trait.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 openidconnect.workspace = true
-jsonwebtoken.workspace = true
+# `aws_lc_rs` named explicitly, for the same reason as `egret-machine-idp`:
+# jsonwebtoken 10 selects its crypto backend from features and installs a
+# provider whose every sign/verify is a `panic!` when neither `rust_crypto` nor
+# `aws_lc_rs` is on. This crate verifies OIDC id-tokens and back-channel logout
+# tokens (`oidc.rs`), so that panic is on a live auth path — it did not fire only
+# because a sibling crate unified the feature in. Note `from_crate_features`
+# gates on `all(feature = "X", not(feature = "Y"))` in BOTH directions, so
+# enabling `rust_crypto` anywhere in the tree would turn both on, match neither
+# arm, and install the panicking provider in the full binary. One backend, named
+# by every crate that needs one.
+jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }
 reqwest.workspace = true
 time = "0.3"
 # OpenAPI emit (E0·P4b-1): `#[utoipa::path]` on the auth + oidc routers'
