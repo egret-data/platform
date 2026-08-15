@@ -308,17 +308,144 @@ async fn a_token_for_another_workspace_is_404() {
 }
 ```
 
-- [ ] **Step 2: Run, implement, run**
+- [ ] **Step 2: Implement the lookup**
 
-Route on `dataapi.endpoints (method, path)` restricted to `state = 'live'` and the token's workspace, join to `endpoint_versions` through `live_version_id`, and take **everything that decides the response** from the snapshot.
+The one query. Everything that decides the response comes from `v.snapshot`; `e` is joined only to route and to scope.
+
+```rust
+/// Resolve an inbound request to a live snapshot.
+///
+/// Routing comes from `dataapi.endpoints (method, path)` — the pair carrying
+/// `UNIQUE (workspace_id, method, path)` — restricted to `state = 'live'` and
+/// the token's workspace. CONTENT comes only from `v.snapshot`. See
+/// `egret_dataapi::lifecycle`'s module comment for why the split is that way
+/// round: a draft edit can move a live endpoint's URL, so routing must follow
+/// the endpoint row, while what it returns must not.
+async fn live_snapshot(
+    db: &Db,
+    ws: Uuid,
+    method: &str,
+    path: &str,
+) -> Result<Option<(Uuid, i32, EndpointSnapshot)>, ServingError> {
+    let row: Option<(Uuid, i32, serde_json::Value)> = sqlx::query_as(
+        "SELECT e.id, v.version, v.snapshot \
+         FROM dataapi.endpoints e \
+         JOIN dataapi.endpoint_versions v ON v.id = e.live_version_id \
+         WHERE e.workspace_id = $1 AND e.method = $2 AND e.path = $3 \
+           AND e.state = 'live'",
+    )
+    .bind(ws)
+    .bind(method)
+    .bind(path)
+    .fetch_optional(&db.pool)
+    .await
+    .map_err(ServingError::internal)?;
+
+    let Some((id, version, raw)) = row else { return Ok(None) };
+    let snapshot: EndpointSnapshot =
+        serde_json::from_value(raw).map_err(ServingError::internal)?;
+    Ok(Some((id, version, snapshot)))
+}
+```
+
+And the handler's opening, where the inbound path is normalised **before** the lookup:
+
+```rust
+async fn serve(
+    State(st): State<DataApiState>,
+    Path((ws_slug, raw_path)): Path<(String, String)>,
+    method: axum::http::Method,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<ServingResponse>, ServingError> {
+    let principal = verify_serving_token(&*st.keys, bearer(&headers)?).await?;
+
+    // axum percent-decodes a `{*path}` capture; stored paths were never encoded,
+    // and P3 stores them canonical. A path that fails the rule cannot match any
+    // stored row, so it is a 404 — not a 400: a caller must not be able to tell
+    // "malformed" from "absent" here.
+    let path = egret_dataapi::endpoints::normalize_path(&raw_path)
+        .map_err(|_| ServingError::NotFound)?;
+
+    // The workspace comes from the TOKEN, and the slug in the path must agree.
+    // Disagreement is 404, never 403 — see the module comment.
+    let ws = st
+        .workspaces
+        .get_by_slug(&ws_slug)
+        .await
+        .map_err(ServingError::internal)?
+        .filter(|w| w.id == principal.workspace_id)
+        .ok_or(ServingError::NotFound)?;
+
+    let (endpoint_id, version, snap) =
+        live_snapshot(&st.db, ws.id, method.as_str(), &path)
+            .await?
+            .ok_or(ServingError::NotFound)?;
+    // …steps 4-10 continue in Tasks 4 and 5.
+}
+```
 
 - [ ] **Step 3: Mount it**
 
-In `crates/egret-server/src/lib.rs`, nest under `/data-api/v1` as its own group — **not** inside the `/api` group, and with no cookie or CSRF layer. Add one `doc.merge(...)` line, keeping the list explicit.
+In `crates/egret-server/src/lib.rs`, beside the existing `dataapi` block at line 326. The management router keeps its CSRF layer; the serving router is a **separate group with none**, mounted at the root rather than under `/api`:
 
-- [ ] **Step 4: Prove the middleware is not inherited**
+```rust
+    if let Some(dataapi) = state.dataapi.clone() {
+        let group = Router::new()
+            .nest("/api", egret_dataapi::management_router())
+            .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))
+            .with_state(dataapi.clone());
+        router = router.merge(group);
 
-Add a test asserting a `POST` to a live endpoint succeeds **without** a CSRF header. If it fails with a CSRF error, the router picked up the control plane's layer. That is the failure this repo has already shipped once, and no router-level test caught it then.
+        // The serving surface, WITHOUT the CSRF layer and outside `/api` —
+        // the same reasoning `render_router` carries (`egret-automation/src/
+        // routes.rs:115-126`). Double-submit CSRF defends requests a browser
+        // authenticates AMBIENTLY; nothing is ambient here, because the caller
+        // sets an `Authorization` header itself. Requiring a CSRF cookie an
+        // external client can never have would simply make every POST endpoint
+        // impossible — which is exactly what shipping the renderer inside the
+        // layered group did, and no router-level test saw it.
+        let serving = Router::new()
+            .nest("/data-api/v1", egret_dataapi::serving_router())
+            .with_state(dataapi);
+        router = router.merge(serving);
+    }
+```
+
+Add one `doc.merge(...)` line for the serving OpenAPI, keeping the list explicit.
+
+- [ ] **Step 4: Prove the middleware is not inherited — through the COMPOSED router**
+
+This step has a trap that this repo has already fallen into. `render_router`'s own comment records it (`crates/egret-automation/src/routes.rs:123-126`): *"the integration tests call this router directly, so the layer they never mount rejected every POST in production."*
+
+**A test that calls `serving_router()` directly cannot see a CSRF failure**, because it never mounts the layer. It would pass whether or not the group is layered, which makes it worthless for exactly this property.
+
+The test must go through the composed application router. `AppState::for_tests` currently sets `dataapi: None` (`crates/egret-server/src/lib.rs:80`), so no test has ever built the composed router with this group merged at all — that gap is why this is the first chance to catch it.
+
+```rust
+#[tokio::test]
+async fn a_post_to_a_live_endpoint_needs_no_csrf_cookie() {
+    // Built through egret_server::router(), NOT serving_router() — a direct
+    // call never mounts the CSRF layer and so cannot fail this.
+    let app = composed_app_with_dataapi().await;
+    let token = mint_data_api_token().await;
+
+    let res = app
+        .oneshot(
+            Request::post("/data-api/v1/default/reports/daily")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(r#"{"params":{}}"#.into())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_ne!(res.status(), 403, "the serving group must not carry the CSRF layer");
+    assert_ne!(body_text(res).await, "csrf check failed");
+}
+```
+
+You will need to extend `AppState::for_tests` (or add a sibling) so `dataapi` can be populated. Do that rather than skipping the test — it is the only mechanism that can catch this class.
 
 - [ ] **Step 5: Verify by mutation**
 
@@ -367,15 +494,127 @@ async fn a_shared_cache_is_refused_when_delegated_flipped_after_publish() {
 }
 ```
 
-- [ ] **Step 2: The rate limiter**
+- [ ] **Step 2: Implement the cache key and the delegated re-check**
 
-`TokenBucket` with `check_at(key, now)` — the clock is injected, so no test sleeps. Behind a `RateLimitStore` trait; in-memory per process for v1, with a note that a multi-replica deployment needs a shared implementation. Model the shape on `crates/egret-auth/src/ratelimit.rs` but **not** its semantics: that one is login-style lockout, and an API needs 429 + `Retry-After`, retryable as soon as the bucket refills.
+```rust
+/// What a cached response is keyed by.
+///
+/// `principal` is present unless the snapshot says `shared` AND the delegated
+/// re-check passed. Ranger filters per principal, so two identities can
+/// legitimately get different rows from the same endpoint and the same params;
+/// a key without the principal serves one identity's rows to another.
+fn cache_key(
+    endpoint_id: Uuid,
+    version: i32,
+    params: &BTreeMap<String, String>,
+    principal: Option<UserId>,
+) -> String {
+    let mut h = Sha256::new();
+    h.update(endpoint_id.as_bytes());
+    h.update(version.to_le_bytes());
+    // BTreeMap so the iteration order is the key's, not the request's.
+    for (k, v) in params {
+        h.update(k.as_bytes());
+        h.update([0u8]);
+        h.update(v.as_bytes());
+        h.update([0u8]);
+    }
+    match principal {
+        Some(p) => h.update(p.0.as_bytes()),
+        // A literal marker rather than nothing: without it a shared entry and a
+        // per-principal entry for the nil UUID would collide.
+        None => h.update(b"shared"),
+    }
+    format!("{:x}", h.finalize())
+}
 
-Two time points in any assertion must be genuinely separated — never able to coincide.
+/// Decide whether this request may use a shared cache entry.
+///
+/// `snapshot.delegated` froze what the connection was at publish time.
+/// `query.databases.delegated` is mutable, so a version published as `shared`
+/// against a non-delegated connection becomes a cross-principal leak the moment
+/// someone flips that database. Validate-time checking cannot close this; the
+/// frozen value is a witness, and a witness nobody questions is decoration.
+async fn shared_cache_allowed(
+    db: &Db,
+    snap: &EndpointSnapshot,
+) -> Result<bool, ServingError> {
+    if snap.cache.scope != CacheScope::Shared {
+        return Ok(false);
+    }
+    let live: bool = sqlx::query_scalar(
+        "SELECT delegated FROM query.databases WHERE id = $1",
+    )
+    .bind(snap.database_id)
+    .fetch_one(&db.pool)
+    .await
+    .map_err(ServingError::internal)?;
 
-- [ ] **Step 3: Run, implement, run, mutate**
+    // Disagreement is a refusal, not a downgrade to per-principal: the operator
+    // published a configuration that is no longer safe, and silently serving it
+    // a different way hides that from them.
+    if live != snap.delegated {
+        return Err(ServingError::CacheScopeStale);
+    }
+    Ok(!live)
+}
+```
 
-Remove the principal from the cache key. Expected: `two_principals_do_not_share_a_cached_response` FAILS. Remove the delegated re-check. Expected: the second test FAILS. Revert each.
+`CacheScopeStale` maps to `503` with code `cache_scope_stale` — the endpoint is not permanently broken, its configuration has drifted, and the operator's fix is to re-publish. Add it to spec §7's table in both languages.
+
+- [ ] **Step 3: Implement the rate limiter**
+
+Model the shape on `crates/egret-auth/src/ratelimit.rs` — same injected-clock signature — but **not** its semantics. That one is login-style lockout (exceed the threshold and you are locked out for a fixed period); an API needs a bucket that refills, 429 + `Retry-After`, retryable immediately once it does.
+
+```rust
+/// Token bucket with an injected clock. Behind `RateLimitStore` so a
+/// multi-replica deployment can swap a shared implementation in without
+/// touching a call site; in-memory per process is correct while the serving
+/// surface is in-process.
+#[derive(Clone)]
+pub struct TokenBucket {
+    inner: Arc<Mutex<HashMap<String, Bucket>>>,
+    qps: f64,
+    burst: f64,
+}
+
+struct Bucket {
+    tokens: f64,
+    last: Instant,
+}
+
+impl TokenBucket {
+    /// Returns `Ok(())` or the `Duration` a caller should wait — which becomes
+    /// `Retry-After`. Takes `now` so tests never sleep.
+    pub fn check_at(&self, key: &str, now: Instant) -> Result<(), Duration> {
+        let mut map = self.inner.lock().unwrap();
+        let b = map.entry(key.to_string()).or_insert(Bucket { tokens: self.burst, last: now });
+        let elapsed = now.saturating_duration_since(b.last).as_secs_f64();
+        b.tokens = (b.tokens + elapsed * self.qps).min(self.burst);
+        b.last = now;
+        if b.tokens >= 1.0 {
+            b.tokens -= 1.0;
+            Ok(())
+        } else {
+            // Time until one whole token exists.
+            Err(Duration::from_secs_f64((1.0 - b.tokens) / self.qps))
+        }
+    }
+}
+```
+
+The tests must use two genuinely separated `Instant`s. Two readings that can coincide make a passing test that proves nothing — construct `now` and `now + Duration::from_secs(n)` explicitly rather than calling `Instant::now()` twice.
+
+Rate-limit on both keys the snapshot configures: `per_key_qps` keyed by the client, `per_endpoint_qps` keyed by the endpoint. A single combined key would let one client's burst exhaust another's allowance.
+
+- [ ] **Step 4: Run, implement, run, mutate**
+
+Three mutations, run separately:
+1. Drop `principal` from `cache_key`. Expected: `two_principals_do_not_share_a_cached_response` FAILS.
+2. Make `shared_cache_allowed` return `Ok(true)` without reading the live column. Expected: `a_shared_cache_is_refused_when_delegated_flipped_after_publish` FAILS.
+3. Make `check_at` always return `Ok(())`. Expected: the rate-limit test FAILS.
+
+Revert each. A gate whose removal leaves the suite green is not a gate.
 
 - [ ] **Step 4: Commit**
 
@@ -450,11 +689,70 @@ CREATE INDEX access_log_ws_ts_idx ON dataapi.access_log (workspace_id, ts DESC);
 
 Note the deliberate absence of FKs on `endpoint_id` / `service_account_id`: an access log must survive the deletion of what it describes. That is the opposite of the choice `0121` made for `endpoints.database_id`, and for the opposite reason — say so in the migration comment.
 
-Retention follows `AuditStore::prune(retention_days)` (`crates/egret-audit/src/lib.rs:209`), which is the established pattern here. There is no partitioning precedent in this repo; do not introduce one without a measured reason.
+Retention follows `AuditStore::prune(retention_days)` (`crates/egret-audit/src/lib.rs:209`), which is the established pattern here — a plain `DELETE … WHERE ts < now() - make_interval(days => $1)` returning the count. There is no partitioning precedent in this repo; do not introduce one without a measured reason.
 
-- [ ] **Step 3: Verify by mutation**
+```rust
+/// Delete rows older than `retention_days`; returns the deleted count.
+/// Mirrors `AuditStore::prune`, deliberately — an operator who knows one
+/// retention knob should not have to learn a second shape for this one.
+pub async fn prune(&self, retention_days: i64) -> Result<u64, sqlx::Error> {
+    let res = sqlx::query(
+        "DELETE FROM dataapi.access_log WHERE ts < now() - make_interval(days => $1)",
+    )
+    .bind(retention_days.max(0) as i32)
+    .execute(&self.db.pool)
+    .await?;
+    Ok(res.rows_affected())
+}
+```
 
-Make the error mapper pass the engine's message through. Expected: `an_engine_error_never_reaches_the_caller_verbatim` FAILS naming the leaked table. Revert.
+- [ ] **Step 3: The error mapper**
+
+One function, exhaustive over `egret_core::Error`, so a new variant is a compile error rather than a silent 500 with an engine message in it.
+
+```rust
+/// Map an internal error to the wire. The caller sees a fixed code and a fixed
+/// message; the detail goes to the log against `request_id`.
+///
+/// Engine errors carry table names, column names and sometimes hosts. On a
+/// key-authenticated public surface that is a metadata leak, so nothing from
+/// the engine reaches the body — including via `Display`.
+fn to_wire(e: &ServingError, request_id: &str) -> (StatusCode, Json<ErrorBody>) {
+    let (status, code, message) = match e {
+        ServingError::Unauthorized => (401, "key_invalid", "authentication failed"),
+        ServingError::NotFound => (404, "not_found", "no such endpoint"),
+        ServingError::ParamInvalid(_) => (400, "param_invalid", "a parameter is invalid"),
+        ServingError::ParamMissing(_) => (400, "param_missing", "a required parameter is missing"),
+        ServingError::RowLimitExceeded { cap } =>
+            (400, "row_limit_exceeded", &format!("result exceeded the {cap}-row cap")),
+        ServingError::RateLimited { .. } => (429, "rate_limited", "too many requests"),
+        // The author's SQL is fine and their policy denies the table. Saying
+        // "invalid input" sends them to debug the wrong thing.
+        ServingError::DataAccessDenied =>
+            (403, "data_access_denied",
+             "the service account is not granted access to this data"),
+        ServingError::CacheScopeStale =>
+            (503, "cache_scope_stale",
+             "this endpoint's cache configuration is no longer valid; re-publish it"),
+        ServingError::EngineUnavailable => (502, "engine_unavailable", "the query engine is unreachable"),
+        ServingError::Timeout => (504, "timeout", "the query exceeded its time limit"),
+        ServingError::Internal(_) => (500, "internal", "internal error"),
+    };
+    // The ONLY place the internal detail is allowed to appear.
+    tracing::warn!(%request_id, error = ?e, code, "data-api request failed");
+    (status, Json(ErrorBody { error: ErrorDetail { code, message, request_id } }))
+}
+```
+
+`ParamInvalid(_)` and `ParamMissing(_)` deliberately do not interpolate their payload: the parameter *name* is the author's, not the caller's, and naming it tells a prober which parameters exist. If that turns out to hurt usability more than it helps, change it as a decision with a note — not by accident.
+
+- [ ] **Step 4: Verify by mutation**
+
+Two mutations, run separately:
+1. Make the mapper pass the engine's message through (`e.to_string()` as `message`). Expected: `an_engine_error_never_reaches_the_caller_verbatim` FAILS naming the leaked table.
+2. Map `DataAccessDenied` to `param_invalid`. Expected: `a_ranger_denial_is_not_reported_as_bad_sql` FAILS.
+
+Revert each.
 
 - [ ] **Step 4: Full scoped check and commit**
 
