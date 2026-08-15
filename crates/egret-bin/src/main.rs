@@ -1824,6 +1824,11 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         // publishing an endpoint or minting a client lands in the one `audit_log`
         // an operator already queries, not in a Data-API-local trail.
         audit: audit_sink.clone(),
+        // The serving surface's per-process cache and rate-limit buckets (P4
+        // Task 4). Constructed ONCE, here: built per request they would be a
+        // cache that never hits and a limit nobody reaches.
+        cache: egret_dataapi::serving::ResponseCache::new(),
+        rate_limits: std::sync::Arc::new(egret_dataapi::serving::TokenBucket::new()),
     });
 
     let app = build_router(AppState {

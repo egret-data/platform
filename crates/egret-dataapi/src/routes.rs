@@ -144,6 +144,19 @@ pub struct DataApiState {
     /// also the honest bound on what these events promise: an audit record is
     /// best-effort evidence, never a precondition of the mutation.
     pub audit: egret_audit::AuditSink,
+    /// The serving surface's response cache (spec §6.2 step 6).
+    ///
+    /// Held in the state rather than built per request for the obvious reason —
+    /// a cache constructed per call is not one — and cloned cheaply (an `Arc`
+    /// inside), so every route built from this state shares the one map.
+    pub cache: crate::serving::ResponseCache,
+    /// The serving surface's rate-limit buckets (spec §6.2 step 5).
+    ///
+    /// Behind a trait so a multi-replica deployment can swap a shared store in
+    /// without a call site changing; in-process buckets are correct only while
+    /// the serving surface is in-process, and splitting the binary would
+    /// otherwise multiply every published limit by the replica count in silence.
+    pub rate_limits: std::sync::Arc<dyn crate::serving::RateLimitStore>,
 }
 
 impl FromRef<DataApiState> for SessionService {

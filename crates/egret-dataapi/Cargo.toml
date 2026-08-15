@@ -48,6 +48,10 @@ argon2.workspace = true
 rand.workspace = true
 base64.workspace = true
 utoipa.workspace = true
+# The serving response cache's key (`serving/cache.rs`). A hash rather than a
+# concatenation so the key is fixed-length however many parameters an endpoint
+# declares, and so no separator question arises from a value containing one.
+sha2.workspace = true
 
 [dev-dependencies]
 tower.workspace = true

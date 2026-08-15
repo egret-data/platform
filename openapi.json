@@ -24349,11 +24349,14 @@
           "404": {
             "description": "No such live endpoint in this workspace"
           },
+          "429": {
+            "description": "A published rate limit was exceeded; `Retry-After` states the wait"
+          },
           "500": {
             "description": "Internal error"
           },
           "503": {
-            "description": "The published output contract no longer matches the data"
+            "description": "The published output contract, or a shared cache's connection setting, no longer matches"
           }
         },
         "security": [
@@ -24410,11 +24413,14 @@
           "404": {
             "description": "No such live endpoint in this workspace"
           },
+          "429": {
+            "description": "A published rate limit was exceeded; `Retry-After` states the wait"
+          },
           "500": {
             "description": "Internal error"
           },
           "503": {
-            "description": "The published output contract no longer matches the data"
+            "description": "The published output contract, or a shared cache's connection setting, no longer matches"
           }
         },
         "security": [

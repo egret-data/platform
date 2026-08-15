@@ -139,6 +139,8 @@ fn composed_app_with_dataapi() -> axum::Router {
         keys: Arc::new(FakeKeys),
         issuer: "https://egret.test".into(),
         audit: egret_audit::AuditSink::new(1).0,
+        cache: egret_dataapi::serving::ResponseCache::new(),
+        rate_limits: std::sync::Arc::new(egret_dataapi::serving::TokenBucket::new()),
     };
     build_router(AppState::without_db().with_dataapi(state))
 }

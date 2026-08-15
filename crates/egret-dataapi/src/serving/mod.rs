@@ -4,13 +4,18 @@
 //! is authenticated by a bearer token alone.
 //!
 //! Task 2 lands [`auth`]: bearer token → [`ServingPrincipal`]. Task 3 lands
-//! [`router`]: URL → published snapshot → rows. The response cache, the rate
-//! limiter, the full error envelope and the access log arrive in Tasks 4-5.
+//! [`router`]: URL → published snapshot → rows. Task 4 lands [`cache`] and
+//! [`ratelimit`] — steps 6 and 5 of spec §6.2. The full error envelope and the
+//! access log arrive in Task 5.
 
 pub mod auth;
+pub mod cache;
+pub mod ratelimit;
 pub mod router;
 
 pub use auth::{verify_serving_token, ServingPrincipal, DATA_API_AUDIENCE};
+pub use cache::{cache_key, shared_cache_allowed, CachedResponse, ResponseCache};
+pub use ratelimit::{Rate, RateLimitStore, TokenBucket};
 pub use router::{serving_openapi, serving_router, ServingMeta, ServingResponse};
 
 /// A serving-path failure.
@@ -29,9 +34,10 @@ pub use router::{serving_openapi, serving_router, ServingMeta, ServingResponse};
 ///
 /// **Task 5 owns the wire mapping** (`serving/error.rs`): the fixed code table
 /// from spec §7, the `{ "error": { code, message, request_id } }` envelope and
-/// the remaining variants (`ParamInvalid`, `ParamMissing`, `RateLimited`,
-/// `CacheScopeStale`, `EngineUnavailable`, `Timeout`). What is here is the
-/// minimum Task 3's handler needs to answer at all — deliberately a plain
+/// the remaining variants (`ParamInvalid`, `ParamMissing`, `EngineUnavailable`,
+/// `Timeout`). [`Self::RateLimited`] and [`Self::CacheScopeStale`] arrived with
+/// Task 4 because its two mechanisms cannot answer without them. What is here
+/// is the minimum the handler needs to answer at all — deliberately a plain
 /// status + fixed string, so that nothing about it reads as a finished envelope.
 #[derive(Debug, thiserror::Error)]
 pub enum ServingError {
@@ -85,6 +91,25 @@ pub enum ServingError {
     /// territory rather than fixed here.
     #[error("output naming maps two columns onto one key")]
     OutputNamingCollision,
+    /// The caller exhausted a published rate limit (spec §6.2 step 5).
+    ///
+    /// Carries the wait rather than a bare status, because that is the whole
+    /// difference between this and the login-style lockout in
+    /// `egret-auth`: a client refused here is retryable as soon as its bucket
+    /// refills, and `Retry-After` is how it learns when.
+    #[error("rate limited")]
+    RateLimited { retry_after: std::time::Duration },
+    /// A `cache.scope = shared` version whose frozen `delegated` no longer
+    /// matches the live `query.databases.delegated`.
+    ///
+    /// Refused rather than downgraded to a per-principal key: the operator
+    /// published a configuration that is no longer safe, and serving it a
+    /// different way hides that from the person whose job it is to fix it (spec
+    /// §6.3). 503 with code `cache_scope_stale` — the endpoint is not
+    /// permanently broken, its configuration has drifted, and a re-publish
+    /// clears it.
+    #[error("cache scope is stale")]
+    CacheScopeStale,
     /// Something on egret's side failed — the IdP key store was unreachable, say.
     /// Deliberately NOT folded into [`Self::Unauthorized`]: a 401 tells an
     /// operator their credential is bad and sends them to rotate it, while the

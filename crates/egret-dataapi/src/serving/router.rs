@@ -1,6 +1,6 @@
 //! URL → published snapshot → rows. The serving surface's request chain
-//! (spec §6.2 steps 1-3 and 8-10; steps 4-7 are noted below and belong to later
-//! tasks).
+//! (spec §6.2 steps 1-3, 5-6 and 8-10; steps 4 and 7 are noted below and belong
+//! to later tasks).
 //!
 //! # The one invariant this module exists to hold
 //!
@@ -86,17 +86,6 @@
 //!   and an endpoint stops being an access-control boundary at all. The only
 //!   thing standing behind it is the engine's own row filtering, and on
 //!   StarRocks that enforcement is resource-only. Being tracked as its own task.
-//! * step 5 — rate limiting (Task 4).
-//! * step 6 — the cache, and with it the `delegated` re-check against the live
-//!   `query.databases` column (Task 4).
-//!
-//!   **Both of those keys must be built from the NORMALISED path**, the `path`
-//!   binding below and not the raw capture. `reports%2Fdaily` and
-//!   `reports/daily` reach the same endpoint (that is what `normalize_path`
-//!   before the lookup guarantees), so keying off the raw form gives one
-//!   endpoint two cache entries and two rate-limit buckets — a cache that
-//!   under-hits and a limit a caller can double by alternating spellings.
-//!   Keying off `endpoint_id` sidesteps it entirely and is the better answer.
 //! * step 7 — rendering declared `params` into the SQL. Until it lands, a
 //!   snapshot containing `{{placeholder}}` is sent to the engine verbatim and
 //!   fails there as a syntax error. That is a broken endpoint, not an injection:
@@ -106,8 +95,24 @@
 //! * the error envelope and the access log (Task 5). [`ServingError`]'s
 //!   `IntoResponse` below is a placeholder with a fixed body and no
 //!   `request_id`; `serving/error.rs` replaces it.
+//!
+//! # What Task 4 added, and what it keyed on
+//!
+//! Steps 5 and 6 are here now. **Both key on `endpoint_id`, never on the request
+//! path** — axum percent-decodes the wildcard capture, so `reports%2Fdaily` and
+//! `reports/daily` reach the same endpoint and a path-keyed bucket would be two
+//! buckets a caller can alternate between, and a cache that never hits itself.
+//! `endpoint_id` is already resolved by the time either is needed.
+//!
+//! The rate limit is applied BEFORE the cache lookup, per spec §6.2's order: a
+//! published limit is the endpoint's admission control, and a client that
+//! exhausts it should not be able to keep pulling cached rows out of it.
 
-use axum::extract::{Path, State};
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::time::Instant;
+
+use axum::extract::{Path, RawQuery, State};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -117,6 +122,8 @@ use egret_metastore::Db;
 use serde::Serialize;
 use uuid::Uuid;
 
+use super::cache::{cache_key, cache_ttl, shared_cache_allowed};
+use super::ratelimit::{check_request, retry_after_secs};
 use super::{verify_serving_token, ServingError};
 use crate::routes::DataApiState;
 
@@ -247,18 +254,20 @@ impl utoipa::Modify for BearerAddon {
         (status = 401, description = "Bearer token missing, expired, or not for this audience"),
         (status = 403, description = "The engine denied the data to this service account"),
         (status = 404, description = "No such live endpoint in this workspace"),
+        (status = 429, description = "A published rate limit was exceeded; `Retry-After` states the wait"),
         (status = 500, description = "Internal error"),
-        (status = 503, description = "The published output contract no longer matches the data"),
+        (status = 503, description = "The published output contract, or a shared cache's connection setting, no longer matches"),
     ),
     security(("data_api_bearer" = [])),
 )]
 async fn serve_get(
     state: State<DataApiState>,
     path: Path<(String, String)>,
+    query: RawQuery,
     method: Method,
     headers: HeaderMap,
 ) -> Result<Json<ServingResponse>, ServingError> {
-    serve(state, path, method, headers).await
+    serve(state, path, query, method, headers).await
 }
 
 #[utoipa::path(
@@ -275,23 +284,26 @@ async fn serve_get(
         (status = 401, description = "Bearer token missing, expired, or not for this audience"),
         (status = 403, description = "The engine denied the data to this service account"),
         (status = 404, description = "No such live endpoint in this workspace"),
+        (status = 429, description = "A published rate limit was exceeded; `Retry-After` states the wait"),
         (status = 500, description = "Internal error"),
-        (status = 503, description = "The published output contract no longer matches the data"),
+        (status = 503, description = "The published output contract, or a shared cache's connection setting, no longer matches"),
     ),
     security(("data_api_bearer" = [])),
 )]
 async fn serve_post(
     state: State<DataApiState>,
     path: Path<(String, String)>,
+    query: RawQuery,
     method: Method,
     headers: HeaderMap,
 ) -> Result<Json<ServingResponse>, ServingError> {
-    serve(state, path, method, headers).await
+    serve(state, path, query, method, headers).await
 }
 
 async fn serve(
     State(st): State<DataApiState>,
     Path((ws_slug, raw_path)): Path<(String, String)>,
+    RawQuery(raw_query): RawQuery,
     method: Method,
     headers: HeaderMap,
 ) -> Result<Json<ServingResponse>, ServingError> {
@@ -330,8 +342,78 @@ async fn serve(
         .await?
         .ok_or(ServingError::NotFound)?;
 
-    // …spec §6.2 steps 4-7 (Cedar, rate limit, cache, param rendering) land in
-    // Tasks 4 and 5; see the module comment.
+    // …spec §6.2 step 4 (the Cedar `dataapi:invoke` check) is its own task; see
+    // the module comment for why its absence is a hole and not merely an
+    // unfinished step. Step 7 (param rendering) likewise.
+
+    // One clock reading for the whole request, so the rate limit and the cache
+    // agree about when "now" was. Monotonic, so an NTP step cannot make an entry
+    // immortal or refill every bucket at once.
+    let now = Instant::now();
+
+    // Step 5 — rate limit. BOTH published keys: the client's own allowance and
+    // the endpoint-wide one. Keyed on `endpoint_id`, never on the path.
+    check_request(
+        &*st.rate_limits,
+        endpoint_id,
+        &principal.client_id,
+        &snap.rate_limit,
+        now,
+    )
+    .map_err(|retry_after| {
+        tracing::debug!(
+            endpoint_id = %endpoint_id,
+            client_id = %principal.client_id,
+            retry_after_secs = retry_after_secs(retry_after),
+            "data-api request rate limited"
+        );
+        ServingError::RateLimited { retry_after }
+    })?;
+
+    // Step 6 — the cache.
+    //
+    // The `shared` re-check runs BEFORE the `enabled` test and regardless of it:
+    // `check_cache_scope` refuses a shared scope at publish time whether or not
+    // the cache is currently on, and a serving path that only noticed the drift
+    // while caching would report it the moment someone flipped `enabled` rather
+    // than the moment the configuration became unsafe.
+    let shared = shared_cache_allowed(&st.db, &snap).await?;
+    let params = query_params(raw_query.as_deref());
+    // The principal is in the key unless a re-checked `shared` says otherwise —
+    // Ranger filters per principal, so this is the difference between a cache
+    // and a cross-identity leak.
+    let key = cache_key(
+        endpoint_id,
+        version,
+        &params,
+        (!shared).then_some(principal.user_id),
+    );
+
+    if snap.cache.enabled {
+        if let Some(hit) = st.cache.get_at(&key, now) {
+            let request_id = Uuid::new_v4().to_string();
+            tracing::debug!(
+                %request_id,
+                endpoint_id = %endpoint_id,
+                version,
+                client_id = %principal.client_id,
+                "data-api request served from cache"
+            );
+            return Ok(Json(ServingResponse {
+                // One clone per hit. The alternative is `Arc` in the response
+                // type, which needs serde's `rc` feature and leaks a caching
+                // detail into the public wire type.
+                data: (*hit.data).clone(),
+                meta: ServingMeta {
+                    columns: snap.columns.clone(),
+                    row_count: hit.row_count,
+                    version,
+                    cached: true,
+                    request_id,
+                },
+            }));
+        }
+    }
 
     let limits = execution_limits(&snap);
     let cap = limits.max_rows as u32;
@@ -365,17 +447,59 @@ async fn serve(
         "data-api request served"
     );
 
+    // Shaped BEFORE it is cached, and the shaped form is what is stored: shaping
+    // is where `output.shape`/`naming` and the drift refusal apply, so caching
+    // the raw result would let a hit and a miss disagree about whether the
+    // endpoint had drifted.
+    let data = shape_rows(&out, &snap)?;
+    if snap.cache.enabled {
+        st.cache.put_at(
+            key,
+            Arc::new(data.clone()),
+            out.row_count,
+            cache_ttl(&snap),
+            now,
+        );
+    }
+
     Ok(Json(ServingResponse {
-        data: shape_rows(&out, &snap)?,
+        data,
         meta: ServingMeta {
             columns: snap.columns.clone(),
             row_count: out.row_count,
             version,
-            // Task 4 owns the cache; until it exists this is honestly false.
             cached: false,
             request_id,
         },
     }))
+}
+
+/// The request's query string, as the cache key's parameter map.
+///
+/// **Not decoded, and not validated.** Step 7 (rendering declared `params` into
+/// the SQL) is a later task and owns both; until it lands no caller input
+/// reaches the engine at all, so this map's only job is to keep two calls that
+/// differ in their query string out of each other's cache entry. Leaving it
+/// undecoded errs toward a MISS: two encodings of the same value are two
+/// entries, which costs an execution and never serves the wrong rows. When step
+/// 7 lands, the rendered parameters (defaults applied, body parameters
+/// included) replace this — a default-valued parameter is part of what produced
+/// the rows and must be part of the key.
+///
+/// A repeated key keeps every occurrence rather than the last, so `?a=1&a=2`
+/// and `?a=2` cannot share an entry.
+fn query_params(raw: Option<&str>) -> BTreeMap<String, String> {
+    let mut out: BTreeMap<String, String> = BTreeMap::new();
+    for pair in raw.unwrap_or("").split('&').filter(|s| !s.is_empty()) {
+        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+        out.entry(k.to_string())
+            .and_modify(|held| {
+                held.push('\u{1}');
+                held.push_str(v);
+            })
+            .or_insert_with(|| v.to_string());
+    }
+    out
 }
 
 /// Resolve an inbound request to a live snapshot.
@@ -658,6 +782,18 @@ fn apply_naming(name: &str, naming: &str) -> String {
 // ---------------------------------------------------------------------------
 impl IntoResponse for ServingError {
     fn into_response(self) -> Response {
+        // Handled ahead of the table because it is the one answer carrying a
+        // HEADER. A 429 without `Retry-After` tells a client it was refused and
+        // not when to come back, which every retry loop resolves by guessing —
+        // usually immediately, and usually again.
+        if let ServingError::RateLimited { retry_after } = &self {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                [("Retry-After", retry_after_secs(*retry_after).to_string())],
+                "rate limit exceeded",
+            )
+                .into_response();
+        }
         let (status, message) = match &self {
             ServingError::Unauthorized => (StatusCode::UNAUTHORIZED, "authentication failed"),
             ServingError::NotFound => (StatusCode::NOT_FOUND, "no such endpoint"),
@@ -688,6 +824,18 @@ impl IntoResponse for ServingError {
                 StatusCode::SERVICE_UNAVAILABLE,
                 "this endpoint's output naming maps two columns onto one key; change it and re-publish",
             ),
+            // Deliberately NOT a downgrade to a per-principal answer: the
+            // published configuration is no longer safe and the operator has to
+            // see that. Same 503 shape as the two above, and the same reason —
+            // an author or operator acts, nothing on egret's side is broken.
+            ServingError::CacheScopeStale => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "this endpoint's shared cache was published against a different connection setting; re-publish it",
+            ),
+            // Answered above, with its header.
+            ServingError::RateLimited { .. } => {
+                (StatusCode::TOO_MANY_REQUESTS, "rate limit exceeded")
+            }
             ServingError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
         };
         // The only place the internal detail appears.

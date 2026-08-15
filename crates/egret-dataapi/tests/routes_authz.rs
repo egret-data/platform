@@ -85,6 +85,8 @@ fn build_state(db: Db, pdp: Arc<dyn egret_core::authz::Pdp>) -> DataApiState {
         // this file depends on it. What the audited routes emit is asserted in
         // `audit.rs`, which keeps the receiver.
         audit: egret_audit::AuditSink::new(1).0,
+        cache: egret_dataapi::serving::ResponseCache::new(),
+        rate_limits: std::sync::Arc::new(egret_dataapi::serving::TokenBucket::new()),
     }
 }
 

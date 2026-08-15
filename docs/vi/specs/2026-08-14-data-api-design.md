@@ -375,6 +375,8 @@ Viết `TokenBucket` trong `egret-dataapi`, nhưng **giữ nguyên hình dạng 
 
 Đặt sau một trait `RateLimitStore`. v1 in-memory theo process; khi serving surface tách thành binary nhiều replica, một implementation dùng store chung sẽ thay vào mà không đụng call site.
 
+**`RateLimitSpec.burst` chỉ định cỡ bucket theo CLIENT.** Chỉ có một trường `burst` và nó được viết cạnh `per_key_qps`; dùng lại nó cho bucket toàn endpoint là định cỡ một giới hạn dùng chung bằng con số tác giả chọn cho một client — endpoint `{per_key_qps: 1, burst: 1, per_endpoint_qps: 1000}` khi đó chỉ nhận một request mỗi giây trên tổng thể, và client thứ hai bị từ chối bởi một giới hạn đặt là 1000. Bucket toàn endpoint lấy một giây theo chính rate của nó làm burst. Cả hai key đều là `endpoint_id` (cộng client id với bucket theo client), không bao giờ là path: axum giải mã percent cho wildcard capture, nên key theo path là hai bucket mà caller có thể luân phiên.
+
 ## 7. Xử lý lỗi
 
 Một envelope ổn định, máy đọc được:
@@ -395,7 +397,10 @@ Một envelope ổn định, máy đọc được:
 | 404 | `not_found` | không tồn tại, đã disable, hoặc sai workspace |
 | 429 | `rate_limited` | kèm `Retry-After` |
 | 502 | `engine_unavailable` | không kết nối được engine |
+| 503 | `cache_scope_stale` | bản `shared` có `delegated` đã đóng băng không còn khớp cột `query.databases` hiện tại (§6.3) |
 | 504 | `timeout` | vượt timeout trong snapshot |
+
+`cache_scope_stale` là 503 chứ không phải 500: phía egret không hỏng gì cả, chỉ là cấu hình đã publish của endpoint bị lệch, và cách sửa của người vận hành là publish lại (hoặc đưa connection về như cũ). Cố ý KHÔNG âm thầm hạ xuống khóa theo principal — phục vụ endpoint theo kiểu khác sẽ giữ cho nó chạy được nhưng che mất chỗ lệch khỏi đúng người có thể sửa.
 
 **Serving path tự áp timeout của mình** thay vì dựa vào JobManager. `describe()` (`connector/mod.rs:81`) đã mang ghi chú y hệt — nó tự bọc timeout vì được gọi trực tiếp, không có JobManager bọc ngoài. Serving path cũng đi thẳng, nên gánh cùng nghĩa vụ.
 

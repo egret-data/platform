@@ -383,6 +383,8 @@ Write a `TokenBucket` in `egret-dataapi`, but **keep that module's `check_at(key
 
 Put it behind a `RateLimitStore` trait. v1 is in-memory per process; when the serving surface splits into a multi-replica binary, a shared-store implementation replaces it without touching call sites.
 
+**`RateLimitSpec.burst` sizes the per-CLIENT bucket only.** There is one `burst` field and it is written next to `per_key_qps`; reusing it for the endpoint-wide bucket sizes a limit every client shares with a number the author picked for one of them — a `{per_key_qps: 1, burst: 1, per_endpoint_qps: 1000}` endpoint would then admit one request per second in total, and a second client would be refused by a limit set to 1000. The endpoint-wide bucket takes one second of its own rate as its burst. Both keys are the `endpoint_id` (plus the client id for the per-client one) and never the request path: axum percent-decodes the wildcard capture, so a path-keyed bucket is two buckets a caller can alternate between.
+
 ## 7. Error handling
 
 One stable, machine-readable envelope:
@@ -403,7 +405,10 @@ One stable, machine-readable envelope:
 | 404 | `not_found` | absent, disabled, or wrong workspace |
 | 429 | `rate_limited` | with `Retry-After` |
 | 502 | `engine_unavailable` | engine unreachable |
+| 503 | `cache_scope_stale` | a `shared` version's frozen `delegated` no longer matches the live `query.databases` column (§6.3) |
 | 504 | `timeout` | exceeded the snapshot's timeout |
+
+`cache_scope_stale` is a 503 and not a 500: nothing on egret's side failed, the endpoint's published configuration has drifted, and the operator's fix is to re-publish it (or to put the connection back). It is deliberately NOT a silent downgrade to a per-principal key — serving the endpoint a different way would keep it working while hiding the drift from the only person who can correct it.
 
 **The serving path applies its own timeout** rather than relying on JobManager. `describe()` (`connector/mod.rs:81`) already carries the identical note — it wraps its own timeout because it is called directly with no outer JobManager. The serving path is likewise direct, so it carries the same obligation.
 
