@@ -398,20 +398,36 @@ Một envelope ổn định, máy đọc được:
 
 **Không bao giờ trả raw engine error cho caller bên ngoài.** Lỗi Trino/StarRocks mang theo tên bảng, tên cột và đôi khi cả thông tin host — trên một endpoint công khai sau một credential cho máy thì đó là rò rỉ metadata. Map sang code cố định và ghi chi tiết đầy đủ vào log nội bộ kèm `request_id` để support tra được.
 
+**Mọi code dưới đây đều có thể xảy ra, và mọi code có thể xảy ra đều nằm dưới đây.** Bảng này đã được đối chiếu lại với các variant của `ServingError`, mà `serving/error.rs::to_wire` match EXHAUSTIVE — thêm một variant sẽ là lỗi biên dịch ở đó, thay vì âm thầm thành 500 mang theo message của engine.
+
 | HTTP | code | Khi nào |
 |---|---|---|
-| 400 | `param_invalid` / `param_missing` | sai kiểu, thiếu, hoặc ngoài allow-list |
-| 400 | `row_limit_exceeded` | kết quả vượt row cap đã cấu hình |
-| 401 | `key_invalid` | key không tồn tại, hết hạn, hoặc đã thu hồi |
-| 403 | `forbidden` | Cedar từ chối `dataapi:invoke` |
-| 403 | `data_access_denied` | Ranger từ chối — message nói rõ service account chưa được cấp quyền dữ liệu (§5.3) |
-| 404 | `not_found` | không tồn tại, đã disable, hoặc sai workspace |
-| 429 | `rate_limited` | kèm `Retry-After` |
-| 502 | `engine_unavailable` | không kết nối được engine |
+| 400 | `row_limit_exceeded` | kết quả vượt row cap đã cấu hình; message nói rõ cap là bao nhiêu |
+| 401 | `key_invalid` | token thiếu, sai định dạng, hết hạn, sai audience, hoặc không verify được — MỘT câu trả lời cho tất cả (§6.2) |
+| 403 | `data_access_denied` | Ranger từ chối — service account chưa được cấp quyền dữ liệu (§5.3) |
+| 404 | `not_found` | không tồn tại, đã disable, sai workspace, workspace đã archive, hoặc path không chuẩn hoá được — MỘT câu trả lời cho tất cả |
+| 429 | `rate_limited` | kèm `Retry-After`, tính từ thời điểm bucket đầy lại |
+| 500 | `internal` | lỗi phía egret, và mọi lỗi engine mà P4 chưa phân loại được sâu hơn (xem dưới) |
+| 503 | `schema_drift` | cột engine trả về không còn khớp cột đã đóng băng trong version; từ chối chứ không định hình lại (§5.1.2) |
+| 503 | `output_naming_collision` | `output.naming` ánh xạ hai cột đã đóng băng vào cùng một key, khiến một cột được quảng cáo trong `meta.columns` biến mất khỏi mọi dòng |
 | 503 | `cache_scope_stale` | bản `shared` có `delegated` đã đóng băng không còn khớp cột `query.databases` hiện tại (§6.3) |
-| 504 | `timeout` | vượt timeout trong snapshot |
 
-`cache_scope_stale` là 503 chứ không phải 500: phía egret không hỏng gì cả, chỉ là cấu hình đã publish của endpoint bị lệch, và cách sửa của người vận hành là publish lại (hoặc đưa connection về như cũ). Cố ý KHÔNG âm thầm hạ xuống khóa theo principal — phục vụ endpoint theo kiểu khác sẽ giữ cho nó chạy được nhưng che mất chỗ lệch khỏi đúng người có thể sửa.
+**Cả ba cái 503 là 503 chứ không phải 500** vì một lý do: phía egret không hỏng gì cả. Cấu hình đã publish của endpoint thôi không còn mô tả đúng dữ liệu của nó, và việc sửa thuộc về tác giả hoặc người vận hành — publish lại, đổi `naming`, hoặc đưa connection về như cũ. Riêng `cache_scope_stale` cố ý KHÔNG âm thầm hạ xuống khóa theo principal: phục vụ endpoint theo kiểu khác sẽ giữ cho nó chạy được nhưng che mất chỗ lệch khỏi đúng người có thể sửa.
+
+**Cả ba đều mang `Retry-After: 300`, và con số đó là một CẬN DƯỚI chứ không phải một dự báo.** Không cái nào tự lành — chỉ con người mới xoá được — nên bản năng là không gửi header nào cả. Bản năng đó hiểu sai một 503 trống làm gì: nó không dừng retry, nó để khoảng cách retry cho mặc định của client, mà với các thư viện retry phổ biến là exponential backoff bắt đầu từ khoảng một giây. Cả một đội client vì thế sẽ dập mạnh nhất đúng vào lúc con người cần nhận ra vấn đề. RFC 9110 §10.2.3 định nghĩa `Retry-After` trên 503 là *khoảng thời gian TỐI THIỂU user agent được yêu cầu chờ*, rõ ràng không phải lời hứa rằng tình trạng đã hết — nên nói năm phút vừa đúng vừa yên tĩnh hơn hẳn. Lưu ý `Retry-After` của 429 là một thứ khác mang cùng cái tên: nó tính từ bucket và LÀ một dự báo về lúc lệnh từ chối được gỡ.
+
+### Những code bảng này từng hứa, và vì sao P4 không phát ra chúng
+
+Mỗi cái là một quyết định, không phải một thiếu sót. Một code nằm trong bảng đã publish mà không gì tạo ra được thì tệ hơn là không có: client sẽ đọc nó như một hợp đồng để rẽ nhánh.
+
+| HTTP | code | Vì sao chưa sống |
+|---|---|---|
+| 400 | `param_invalid` / `param_missing` | §6.2 bước 7 (render `params` đã khai báo vào SQL) chưa làm, nên chưa có input nào của caller được validate ở đâu cả. Chúng đến cùng bước 7 — và khi đó, cả hai đều không được nêu TÊN tham số: tên là của tác giả, nêu ra tức là biến bề mặt lỗi thành danh mục các tham số mà endpoint khai báo. |
+| 403 | `forbidden` | bước kiểm tra Cedar `data_api_endpoint:invoke` là task riêng. Chừng nào chưa có, mọi token hợp lệ của một workspace đều với tới MỌI endpoint live trong workspace đó — đó là một lỗ hổng, không chỉ là một bước chưa xong. |
+| 502 | `engine_unavailable` | **không quyết định được ở seam này.** `QueryExecPort` trả `egret_core::Error`, và `port_impl` gộp CẢ lỗi hạ tầng của engine (`Connect`/`Storage`/`Db`) LẪN lỗi của chính egret — resolve email của principal, mở secret của database — vào cùng một `Error::Internal`. Trả 502 sẽ gọi người vận hành dậy vì Trino trong khi thứ hỏng là metastore. |
+| 504 | `timeout` | cùng seam đó. `engine_error` map `EngineError::Timeout` thành `Error::InvalidInput("query timed out")`, một cách cố ý, vì với `describe_as` thì timeout nghĩa là query quá đắt để lập kế hoạch. Nhận ra nó ở serving path sẽ phải so khớp chuỗi message của một crate khác — một phép kiểm tra vẫn biên dịch được và âm thầm hết tác dụng đúng ngày ai đó sửa lại câu chữ. |
+
+Muốn 502 và 504 thành thật thì phải mở rộng kiểu lỗi của `QueryExecPort`, tức là đổi hợp đồng xuyên crate. Chừng đó chưa xảy ra, các lỗi ấy là `500 internal` với chi tiết nằm trong log — an toàn, vì không gì từ engine lọt vào body, và trung thực, điều mà một cái 502 đoán mò thì không.
 
 **Serving path tự áp timeout của mình** thay vì dựa vào JobManager. `describe()` (`connector/mod.rs:81`) đã mang ghi chú y hệt — nó tự bọc timeout vì được gọi trực tiếp, không có JobManager bọc ngoài. Serving path cũng đi thẳng, nên gánh cùng nghĩa vụ.
 
@@ -421,9 +437,11 @@ Một envelope ổn định, máy đọc được:
 
 ## 8. Observability
 
-- `dataapi.access_log` ghi lại mọi lời gọi. Đây là bảng tăng nhanh nhất hệ thống: partition theo tháng cộng một job dọn theo retention, tái dùng gc-worker pattern có sẵn từ catalog CE6 thay vì viết mới.
+- `dataapi.access_log` ghi lại mọi lời gọi đi đủ xa để biết được workspace. Đây là bảng tăng nhanh nhất hệ thống, và nó **không có foreign key trên `endpoint_id` hay `service_account_id`** — cố ý ngược lại với `RESTRICT` mà `0121` đặt cho `endpoints.database_id`, và vì lý do ngược lại: access log là bản ghi về việc ĐÃ xảy ra, nên `CASCADE` sẽ xoá đúng phần lịch sử mà một sự cố cần, còn `RESTRICT` sẽ khiến một endpoint không xoá được chỉ vì nó từng được gọi. `workspace_id` là ngoại lệ và CÓ cascade, vì nó là ranh giới tenancy chứ không phải một nhãn.
+- **Retention là một job dọn; không có partition.** `AccessLogStore::prune(retention_days)` cùng hình dạng `DELETE … WHERE ts < now() - make_interval(days => $1)` với `AuditStore::prune`, chạy trên cùng nhịp mỗi giờ, để người vận hành đã biết một núm retention thì không phải học núm thứ hai. Partition theo tháng đã được đặc tả và **không** được làm: trong repo không có bảng partition nào để mô phỏng theo, cũng không có phép đo nào nói một bảng đơn là không đủ — và scheme partition đầu tiên của hệ thống không phải thứ nên dựng lên từ phỏng đoán. Lưu ý `retention_days = 0` KHÔNG GIỮ GÌ CẢ — nó không có nghĩa "vô hạn" — và đó cũng là hành vi của `AuditStore::prune`.
+- **Lời gọi bị từ chối trước khi token verify thì không nằm trong bảng.** `workspace_id` là `NOT NULL` còn slug trên URL là do caller cung cấp và chưa được xác thực, nên một 401 chỉ là sự kiện `tracing`. Đó là một khoảng trống thật với ai muốn đếm số lần dò credential theo workspace, và nó là hệ quả của schema chứ không phải một sơ suất.
 - Thống kê trên management UI (số lần gọi, tỉ lệ lỗi, p50/p95, cache hit rate theo endpoint) tính từ `access_log` — tương đương `HourCount` / `DateCount` / `NameCount` của sqlrest.
-- `request_id` được truyền xuống engine và lưu cạnh `engine_query_id`, để một lời gọi API chậm truy ngược về đúng query trên Trino/StarRocks.
+- `request_id` được sinh MỘT lần cho mỗi lời gọi, trước khi bất cứ thứ gì có thể hỏng, và là cùng một id trong response body, trong mọi dòng `tracing` của lời gọi đó, và trong `access_log.request_id` — đó là thứ khiến câu "đọc request_id của bạn cho chúng tôi" thực sự dùng được. `engine_query_id` đã được đặc tả và cột đã có, nhưng P4 luôn ghi NULL: `QueryExecPort` không trả về query id của engine, nên việc truyền `request_id` xuống engine và đọc ngược một id về vẫn còn nợ.
 - Publish, rollback, disable, enable, xoá endpoint, cấp client và thu hồi client ĐÃ là sự kiện `egret-audit` kể từ P3 — xem §5.3 để biết `action`/`resource_type`/`detail` chính xác của từng cái, vì sao không bao giờ có `client_secret` trong `detail`, vì sao sự kiện xoá endpoint là cái duy nhất buộc phải mang theo các cột, và bốn route mutating vẫn chưa được audit.
 
 ## 9. Kiểm thử

@@ -647,6 +647,25 @@ Revert each. A gate whose removal leaves the suite green is not a gate.
 
 ### Task 5: Errors, access log, retention
 
+> **SHIPPED — and the sketch below is superseded on three points.** Read spec §7
+> and `serving/error.rs` for what was actually built, not this. The differences,
+> each a decision recorded there:
+>
+> 1. **`ParamInvalid`, `ParamMissing`, `EngineUnavailable` and `Timeout` were not
+>    added.** None is constructible on today's serving path, and a dead variant
+>    makes a published code table look finished while nothing can produce the
+>    code. Spec §7 now lists them separately, with the reason each is unreachable
+>    — for 502/504 it is that `QueryExecPort` flattens both the engine's
+>    infrastructure failures and egret's own into one `Error::Internal`.
+> 2. **`SchemaDrift` and `OutputNamingCollision` had to be added to the table**
+>    (Tasks 3 and 4 landed them after this plan was written), and all three 503s
+>    carry `Retry-After: 300` as a floor rather than a forecast.
+> 3. **Mutation 1 as written below does not fail.** `e.to_string()` on
+>    `ServingError::Internal` is already the literal `"internal error"` —
+>    thiserror redacts at the `Display` level — so the mutation that proves the
+>    test is load-bearing is rendering the SOURCE, not the error. See the task
+>    report.
+
 **Files:**
 - Create: `crates/egret-dataapi/src/serving/error.rs`, `.../access_log.rs`, `migrations/0123_dataapi_access_log.sql`
 - Test: `crates/egret-dataapi/tests/serving_errors.rs`

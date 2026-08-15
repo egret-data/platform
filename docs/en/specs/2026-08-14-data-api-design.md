@@ -406,20 +406,36 @@ One stable, machine-readable envelope:
 
 **Never return a raw engine error to an external caller.** Trino/StarRocks errors carry table names, column names and sometimes host information — on a key-authenticated public endpoint that is a metadata leak. Map to fixed codes and log the full detail internally against `request_id` so support can correlate.
 
+**Every code below is reachable, and every reachable code is below.** The table is reconciled against `ServingError`'s variants, which `serving/error.rs::to_wire` matches exhaustively — adding a variant is a compile error there rather than a silent 500 carrying an engine message.
+
 | HTTP | code | When |
 |---|---|---|
-| 400 | `param_invalid` / `param_missing` | wrong type, absent, or outside the allow-list |
-| 400 | `row_limit_exceeded` | result exceeded the configured row cap |
-| 401 | `key_invalid` | key unknown, expired, or revoked |
-| 403 | `forbidden` | Cedar denied `dataapi:invoke` |
-| 403 | `data_access_denied` | Ranger denied — message states the service account lacks a data grant (§5.3) |
-| 404 | `not_found` | absent, disabled, or wrong workspace |
-| 429 | `rate_limited` | with `Retry-After` |
-| 502 | `engine_unavailable` | engine unreachable |
+| 400 | `row_limit_exceeded` | result exceeded the configured row cap; the message states the cap |
+| 401 | `key_invalid` | token missing, malformed, expired, wrong audience, or unverifiable — one answer for all of them (§6.2) |
+| 403 | `data_access_denied` | Ranger denied — the service account lacks a data grant (§5.3) |
+| 404 | `not_found` | absent, disabled, wrong workspace, archived workspace, or an unparseable path — one answer for all of them |
+| 429 | `rate_limited` | with `Retry-After`, computed from the bucket's refill |
+| 500 | `internal` | an egret-side fault, and any engine failure P4 cannot classify further (see below) |
+| 503 | `schema_drift` | the engine's columns no longer match the ones the version froze; refused rather than reshaped (§5.1.2) |
+| 503 | `output_naming_collision` | `output.naming` maps two frozen columns onto one key, so a column advertised in `meta.columns` would vanish from every row |
 | 503 | `cache_scope_stale` | a `shared` version's frozen `delegated` no longer matches the live `query.databases` column (§6.3) |
-| 504 | `timeout` | exceeded the snapshot's timeout |
 
-`cache_scope_stale` is a 503 and not a 500: nothing on egret's side failed, the endpoint's published configuration has drifted, and the operator's fix is to re-publish it (or to put the connection back). It is deliberately NOT a silent downgrade to a per-principal key — serving the endpoint a different way would keep it working while hiding the drift from the only person who can correct it.
+**The three 503s are 503 and not 500** for one reason: nothing on egret's side failed. The endpoint's published configuration has stopped describing its data, and the fix belongs to an author or operator — re-publish, change `naming`, or put the connection back. `cache_scope_stale` in particular is deliberately NOT a silent downgrade to a per-principal key: serving the endpoint a different way would keep it working while hiding the drift from the only person who can correct it.
+
+**All three carry `Retry-After: 300`, and that number is a floor rather than a forecast.** None of them self-heals — only a human clears them — so the instinct is to send no header at all. That instinct is wrong about what a bare 503 does: it does not stop retries, it leaves the interval to the client's default, which for mainstream retry libraries is an exponential backoff starting around a second. A fleet of callers would therefore hammer hardest in exactly the state a human has to notice. RFC 9110 §10.2.3 defines `Retry-After` on a 503 as *the minimum time the user agent is asked to wait*, explicitly not a promise the condition has cleared, so stating five minutes is both true and strictly quieter. Note that the 429's `Retry-After` is a different thing wearing the same name: it is computed from the bucket and IS a prediction of when the refusal lifts.
+
+### Codes this table used to promise, and why P4 does not emit them
+
+Each is a decision, not an omission. A code in a published table that nothing can produce is worse than an absent one — it reads as a contract clients can branch on.
+
+| HTTP | code | Why it is not live |
+|---|---|---|
+| 400 | `param_invalid` / `param_missing` | §6.2 step 7 (rendering declared `params` into the SQL) is not implemented, so no caller input is validated anywhere yet. They arrive with step 7 — and when they do, neither may name the parameter: the name is the author's, and naming it turns the error surface into a directory of which parameters an endpoint declares. |
+| 403 | `forbidden` | the Cedar `data_api_endpoint:invoke` check is its own task. Until it lands, any valid token for a workspace reaches every live endpoint in it — a hole, not merely an unfinished step. |
+| 502 | `engine_unavailable` | **not decidable at this seam.** `QueryExecPort` returns `egret_core::Error`, and `port_impl` folds the engine's `Connect`/`Storage`/`Db` failures AND egret's own faults — resolving the principal's email, opening the database secret — into the same `Error::Internal`. Answering 502 would page an operator about Trino when the metastore is what failed. |
+| 504 | `timeout` | same seam. `engine_error` maps `EngineError::Timeout` to `Error::InvalidInput("query timed out")`, deliberately, because for `describe_as` a timeout means the query is too expensive to plan. Recognising it in the serving path would mean matching another crate's message string — a check that keeps compiling and silently stops working the day someone rewords it. |
+
+Making 502 and 504 real means widening `QueryExecPort`'s error type, which is a cross-crate contract change. Until then those failures are `500 internal` with the detail in the log — safe, because nothing from the engine reaches the body, and honest, which a guessed 502 would not be.
 
 **The serving path applies its own timeout** rather than relying on JobManager. `describe()` (`connector/mod.rs:81`) already carries the identical note — it wraps its own timeout because it is called directly with no outer JobManager. The serving path is likewise direct, so it carries the same obligation.
 
@@ -429,9 +445,11 @@ One stable, machine-readable envelope:
 
 ## 8. Observability
 
-- `dataapi.access_log` records every call. It is the fastest-growing table in the system: partition monthly plus a retention job, reusing the existing gc-worker pattern from catalog CE6 rather than writing a new one.
+- `dataapi.access_log` records every call that got far enough to name a workspace. It is the fastest-growing table in the system, and it carries **no foreign key on `endpoint_id` or `service_account_id`** — deliberately the opposite of `0121`'s `RESTRICT` on `endpoints.database_id`, and for the opposite reason: an access log is a record of what already happened, so a `CASCADE` would erase exactly the history an incident needs and a `RESTRICT` would make an endpoint undeletable because it had once been called. `workspace_id` is the exception and does cascade, because it is the tenancy boundary rather than a label.
+- **Retention is a prune job; there is no partitioning.** `AccessLogStore::prune(retention_days)` is the same `DELETE … WHERE ts < now() - make_interval(days => $1)` shape as `AuditStore::prune`, driven by the same hourly tick, so an operator who knows one retention knob does not have to learn a second. Monthly partitioning was specified and is **not** implemented: there is no partitioned table anywhere in the repo to model it on and no measurement saying one table will not do, and the first partitioning scheme in the system is not something to introduce on a guess. Note that `retention_days = 0` KEEPS NOTHING — it is not "unlimited" — which is `AuditStore::prune`'s behaviour too.
+- **A call refused before its token verifies is not in the table.** `workspace_id` is `NOT NULL` and the slug in the URL is caller-supplied and unverified, so a 401 is a `tracing` event only. That is a real gap for counting credential-stuffing per workspace, and it follows from the schema rather than from an oversight.
 - Management UI statistics (call count, error rate, p50/p95, cache hit rate per endpoint) are computed from `access_log` — the equivalent of sqlrest's `HourCount` / `DateCount` / `NameCount`.
-- `request_id` is propagated to the engine and stored alongside `engine_query_id`, so a slow API call traces back to the exact query on Trino/StarRocks.
+- `request_id` is minted once per call, before anything can fail, and is the same id in the response body, in every `tracing` line for the call, and in `access_log.request_id` — which is what makes "quote your request_id" actionable. `engine_query_id` is specified and the column exists, but P4 always writes NULL: `QueryExecPort` returns no engine query id, so propagating `request_id` down to the engine and reading one back is still outstanding.
 - Publish, rollback, disable, enable, endpoint deletion, client issue and client revocation ARE `egret-audit` events as of P3 — see §5.3 for the exact `action`/`resource_type`/`detail` of each, for why no `client_secret` is ever in a detail, for why the endpoint delete is the one event that must carry columns, and for the four mutating routes that are still not audited.
 
 ## 9. Testing
