@@ -60,6 +60,46 @@ fn render_literal(p: &Param) -> String {
     }
 }
 
+/// Normalize a Trino type name read from `DESCRIBE OUTPUT`'s `"Type"` result
+/// column so it matches the spelling `execute`/`describe` report for the
+/// *same* type.
+///
+/// Measured live (Trino 481), same SQL, same logical column: the ordinary
+/// `/v1/statement` execute response spells a decimal column's type
+/// `"decimal(10, 2)"` (a space after the comma — matches
+/// `render_literal`'s own test fixture `"decimal(9, 4)"` and is Trino's
+/// `Type.getDisplayName()` convention), while `DESCRIBE OUTPUT`'s `"Type"`
+/// result column spells the identical type `"decimal(10,2)"` — no space.
+/// `varchar(20)` was measured identical both ways (a single-argument type
+/// has no comma to diverge on), so this is specifically a multi-argument
+/// type-signature-vs-display-name difference between the two Trino server
+/// code paths `describe` and `describe_with_params` go through, not a
+/// difference in the underlying type. Left unfixed, a parameterised
+/// endpoint's `decimal` column would carry a different `type` string than
+/// an otherwise-identical non-parameterised one, and Task 7's CAST-typing
+/// rule would inherit that inconsistency silently.
+///
+/// The fix normalizes at the boundary rather than trying to special-case
+/// `decimal`: insert a single space after every comma that isn't already
+/// followed by whitespace. This is a plain byte scan, not a type-grammar
+/// parser — safe here because Trino type-signature strings never quote or
+/// escape a comma (no string literal can appear inside one), so every `,`
+/// byte is a genuine argument separator. Idempotent on already-correctly-
+/// spaced input (the execute-response spelling passes through unchanged),
+/// so applying it unconditionally to `describe_with_params`'s output never
+/// second-guesses a type that was already right.
+fn normalize_trino_type_spacing(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 4);
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        out.push(c);
+        if c == ',' && chars.peek().is_some_and(|next| !next.is_whitespace()) {
+            out.push(' ');
+        }
+    }
+    out
+}
+
 /// Percent-encode `s` for use as (part of) an HTTP header value, per RFC 3986
 /// — every byte except the unreserved set (`A-Z a-z 0-9 - _ . ~`) becomes
 /// `%XX`. Operates on bytes, not `char`s, so multi-byte UTF-8 encodes
@@ -441,6 +481,13 @@ impl Connector for TrinoConnector {
     /// example above (`v`) — neither engine infers a parameter's type from
     /// context, which is the constraint `describe_with_params_types_a_bare_placeholder_as_unknown_but_a_cast_fixes_it`
     /// pins for Task 7's `CAST` rule.
+    ///
+    /// Every type string is passed through [`normalize_trino_type_spacing`]
+    /// before being returned — see its doc comment for the measured
+    /// `decimal(10,2)` vs `decimal(10, 2)` divergence between this path and
+    /// `describe`'s, which `describe_and_describe_with_params_type_the_same_columns_identically_on_trino`
+    /// in the test file pins as the two paths' outputs matching exactly for
+    /// shared columns.
     async fn describe_with_params(
         &self,
         sql: &str,
@@ -496,7 +543,7 @@ impl Connector for TrinoConnector {
             .into_iter()
             .map(|row| ColumnMeta {
                 name: row[name_idx].as_str().unwrap_or_default().to_string(),
-                ty: row[type_idx].as_str().unwrap_or_default().to_string(),
+                ty: normalize_trino_type_spacing(row[type_idx].as_str().unwrap_or_default()),
             })
             .collect())
     }
@@ -607,6 +654,46 @@ mod tests {
             render_literal(&Param::Timestamp("2020-02-29 13:14:15.123".into())),
             "TIMESTAMP '2020-02-29 13:14:15.123'"
         );
+    }
+
+    // --- normalize_trino_type_spacing (fix round 1: DESCRIBE OUTPUT vs execute) ---
+
+    #[test]
+    fn normalize_inserts_a_space_after_an_unspaced_comma() {
+        // The exact measured divergence: DESCRIBE OUTPUT spells this
+        // "decimal(10,2)"; execute spells it "decimal(10, 2)".
+        assert_eq!(
+            normalize_trino_type_spacing("decimal(10,2)"),
+            "decimal(10, 2)"
+        );
+    }
+
+    #[test]
+    fn normalize_is_a_no_op_on_already_spaced_input() {
+        // Idempotent: running it on execute's own spelling must not double
+        // the space or otherwise change it.
+        assert_eq!(
+            normalize_trino_type_spacing("decimal(10, 2)"),
+            "decimal(10, 2)"
+        );
+    }
+
+    #[test]
+    fn normalize_leaves_a_comma_free_type_unchanged() {
+        assert_eq!(normalize_trino_type_spacing("varchar(20)"), "varchar(20)");
+        assert_eq!(normalize_trino_type_spacing("unknown"), "unknown");
+        assert_eq!(normalize_trino_type_spacing("integer"), "integer");
+    }
+
+    #[test]
+    fn normalize_handles_multiple_and_trailing_commas() {
+        assert_eq!(
+            normalize_trino_type_spacing("row(a integer,b varchar)"),
+            "row(a integer, b varchar)"
+        );
+        // A trailing comma (degenerate, but must not panic/index-out-of-bounds
+        // on `chars.peek()` returning `None`).
+        assert_eq!(normalize_trino_type_spacing("a,"), "a,");
     }
 
     #[test]

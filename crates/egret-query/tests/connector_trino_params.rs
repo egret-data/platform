@@ -35,6 +35,22 @@
 //!     `execute_with_params` renders or transmits the prepared statement
 //!     itself, so it does not weaken anything this file is testing.
 //!
+//! **CI hazard, recorded not fixed**: `EGRET_ENGINE_TLS_INSECURE=1` must be
+//! scoped to ONLY this file's (and `connector_starrocks_params.rs`'s) `cargo
+//! test` invocation — e.g. `EGRET_ENGINE_TLS_INSECURE=1 cargo test -p
+//! egret-query --test connector_trino_params`. Setting it globally across a
+//! whole `cargo test -p egret-query` run also flips it on for the crate's
+//! `--lib` unit tests, where it silently breaks two of them that assert the
+//! *default* refuse-without-TLS behavior:
+//! `execution::connector::starrocks::tests::bearer_requires_tls` and
+//! `execution::connector::trino::tests::bearer_requires_tls`. Those aren't
+//! flaky or broken — they're correctly proving the opt-out is off by
+//! default — but a CI job that exports this var once for "the whole test
+//! step" gets two failures that look unrelated to whatever changed. Run the
+//! live integration binaries (this file, `connector_starrocks_params.rs`)
+//! and `--lib` as separate invocations, or set the var only on the specific
+//! `cargo test --test` command line, never on the job's environment.
+//!
 //! A self-skipped run proves nothing.
 
 use egret_query::execution::connector::{build_connector, ConnSpec, Connector};
@@ -460,5 +476,73 @@ async fn describe_with_params_types_a_bare_placeholder_as_unknown_but_a_cast_fix
     assert_eq!(
         cast[0].ty, "date",
         "an explicit CAST must fix the type — this is what Task 7's publish-time rule relies on"
+    );
+}
+
+/// Fix round 1: `describe` and `describe_with_params` are two DIFFERENT
+/// Trino server code paths — `describe` reads `columns[].type` off the
+/// `/v1/statement` execute response, `describe_with_params` reads the
+/// `"Type"` result column of `DESCRIBE OUTPUT`'s own query — that merely
+/// happen to stringify most types the same way. Nothing before this test
+/// compared them for the SAME column, and they do NOT always agree: measured
+/// live, a `decimal(10,2)` column comes back `"decimal(10, 2)"` from
+/// `describe` and `"decimal(10,2)"` (no space) from raw `DESCRIBE OUTPUT` —
+/// `normalize_trino_type_spacing` in `trino.rs` is what reconciles that.
+/// `varchar(20)` was measured identical either way (no comma to diverge on),
+/// included here anyway as the other multi-argument-typed-name case the
+/// brief named.
+///
+/// This test types the SAME logical `m`/`s` columns two ways — once via the
+/// ordinary non-parameterised `describe` (no `?` in the SQL, since `describe`
+/// cannot handle one at all — see `plain_describe_on_parameterised_sql_errors_instead_of_describing`
+/// above) and once via `describe_with_params` on an otherwise-identical query
+/// that ALSO has a bound placeholder column — and asserts the shared
+/// columns' `ColumnMeta` are byte-identical. A future change to either path
+/// (or a Trino upgrade that changes one server code path's stringification
+/// but not the other's) that reintroduces a spelling divergence fails here,
+/// rather than only being noticed once Task 7 freezes two different type
+/// strings for what a user sees as "the same column type."
+#[tokio::test]
+async fn describe_and_describe_with_params_type_the_same_columns_identically_on_trino() {
+    let Some(c) = trino_or_skip() else {
+        eprintln!("skip");
+        return;
+    };
+
+    let via_plain = c
+        .describe(
+            "SELECT CAST(1.5 AS DECIMAL(10,2)) AS m, CAST('x' AS VARCHAR(20)) AS s",
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("plain describe on SQL with no placeholder must succeed");
+
+    let via_params = c
+        .describe_with_params(
+            "SELECT ? AS v, CAST(1.5 AS DECIMAL(10,2)) AS m, CAST('x' AS VARCHAR(20)) AS s",
+            1,
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("describe_with_params on the otherwise-identical parameterised SQL");
+
+    let find = |cols: &[egret_core::ColumnMeta], name: &str| {
+        cols.iter()
+            .find(|c| c.name == name)
+            .unwrap_or_else(|| panic!("no column named {name} in {cols:?}"))
+            .clone()
+    };
+
+    assert_eq!(
+        find(&via_plain, "m"),
+        find(&via_params, "m"),
+        "the decimal column must type IDENTICALLY through both describe paths — this is the \
+         exact spelling divergence (\"decimal(10, 2)\" vs \"decimal(10,2)\") that motivated \
+         normalize_trino_type_spacing"
+    );
+    assert_eq!(
+        find(&via_plain, "s"),
+        find(&via_params, "s"),
+        "the varchar(n) column must also type identically through both paths"
     );
 }

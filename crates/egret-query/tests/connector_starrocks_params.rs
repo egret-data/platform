@@ -387,3 +387,25 @@ async fn describe_with_params_types_a_bare_placeholder_as_varchar_but_a_cast_fix
         "an explicit CAST must fix the type — this is what Task 7's publish-time rule relies on"
     );
 }
+
+// Deliberately NOT mirrored here: Trino's test file has
+// `describe_and_describe_with_params_type_the_same_columns_identically_on_trino`,
+// comparing the SAME column's type string across `describe` and
+// `describe_with_params`. StarRocks does not need that test, and adding one
+// "for symmetry" would be redundant, not merely unnecessary:
+//
+// `StarRocksConnector::describe` and `StarRocksConnector::describe_with_params`
+// both build their `ColumnMeta`s by calling the SAME `coltype_name(ColumnType)`
+// function on a `mysql_async::consts::ColumnType` read off the wire — one via
+// `result.columns_ref()` (text protocol), the other via `stmt.columns()`
+// (binary protocol). `coltype_name` is a pure `match` over the enum with no
+// branch that reads which protocol produced the value, so for any given
+// `ColumnType` the two paths are byte-for-byte the same function call — they
+// cannot spell a type differently by construction. That is unlike Trino,
+// where `describe` and `describe_with_params` are two independent Trino
+// SERVER code paths (`/v1/statement`'s `columns[].type` vs `DESCRIBE
+// OUTPUT`'s own `"Type"` result column) that merely happened to agree until
+// `decimal(p,s)` proved they don't always — see `normalize_trino_type_spacing`
+// in `trino.rs`. A StarRocks equivalent test would only ever be exercising
+// Rust's own referential transparency, not a real engine boundary, so it was
+// left out on purpose rather than by oversight.
