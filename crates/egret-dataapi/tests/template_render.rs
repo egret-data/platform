@@ -739,3 +739,226 @@ fn nothing_in_the_workspace_registers_a_template_loader() {
          does not remove these functions; only this check does."
     );
 }
+
+// ---------------------------------------------------------------------------
+// The behavioural gate
+// ---------------------------------------------------------------------------
+
+/// **The rule that no source scan has held.** Five reviews found five bypasses
+/// of the comparison lint, every one of them this module's scanner disagreeing
+/// with minijinja's lexer. `check_publish` does not read the source for this: it
+/// renders the definition with the opaque values serving uses and again with the
+/// same values as plain scalars, and a construct that INSPECTS a parameter takes
+/// a different branch. There is no spelling to evade.
+///
+/// Every template below is written so the byte scanner cannot see it — through a
+/// parenthesis, a subscript, a filter, a test, a raw block, an alias.
+#[test]
+fn the_behavioural_gate_catches_inspection_whatever_its_spelling() {
+    let mut ctx = ParamValues::new();
+    ctx.insert("mode", Param::Str("slow".into()));
+    ctx.insert_list("regions", vec![Param::Str("US".into())]);
+
+    for tpl in [
+        "{% if (mode) == 'fast' %}FAST{% endif %}",
+        "{% if ((mode)) == 'fast' %}FAST{% endif %}",
+        "{% if regions[0] == 'EU' %}X{% endif %}",
+        "{% if regions | first == 'EU' %}X{% endif %}",
+        "{% if mode is eq('fast') %}FAST{% endif %}",
+        "{% if mode is string %}FAST{% endif %}",
+        "{{ 'FAST' if (mode) == 'fast' else 'SLOW' }}",
+        "{% for r in regions if (r) == 'EU' %}{{ r }}{% endfor %}",
+        // The scanner's own blind spot from the last round, kept here because
+        // the gate does not care how it was hidden.
+        "{% raw %}{#{% endraw %}{% if mode == 'fast' %}FAST{% endif %}",
+    ] {
+        let err = egret_dataapi::render::check_publish(tpl, &ctx).expect_err(tpl);
+        assert!(
+            matches!(
+                err,
+                RenderError::ParameterInspected | RenderError::BareParameterComparison(_)
+            ),
+            "template {tpl} gave {err:?}"
+        );
+    }
+}
+
+/// The gate must be quiet on definitions that only BIND their parameters —
+/// including the spec's own canonical endpoint, which uses every construct the
+/// design offers.
+#[test]
+fn the_behavioural_gate_is_quiet_on_definitions_that_only_bind() {
+    let mut ctx = ParamValues::new();
+    ctx.insert("region", Param::Str("EU".into()));
+    ctx.insert("from", Param::Date("2020-02-29".into()));
+    ctx.insert_absent("to");
+    ctx.insert_list(
+        "regions",
+        vec![Param::Str("EU".into()), Param::Str("US".into())],
+    );
+    ctx.insert_enum("sort", "total", vec!["day".into(), "total".into()]);
+
+    let canonical = "\
+SELECT region, SUM(amount) AS total
+FROM sales
+WHERE 1=1
+  {% if region %} AND region = {{ region }} {% endif %}
+  {% if from %}   AND day >= {{ from }}     {% endif %}
+  {% if to %}     AND day <= {{ to }}       {% endif %}
+  {% if regions %} AND region IN (
+      {% for r in regions %}{{ r }}{% if not loop.last %},{% endif %}{% endfor %}
+  ) {% endif %}
+GROUP BY region
+ORDER BY {{ sort | ident }}";
+    assert_eq!(
+        egret_dataapi::render::check_publish(canonical, &ctx),
+        Ok(())
+    );
+
+    for tpl in [
+        "SELECT {{ region }}",
+        "SELECT {% raw %}{{ literal }}{% endraw %} , {{ region }}",
+        "{% if regions | length > 0 %}SELECT {{ region }}{% endif %}",
+        "{% if region | value == 'EU' %}SELECT 1{% endif %}",
+        "{% set label = 'x' %}{% if label == 'x' %}SELECT 1{% endif %}",
+    ] {
+        assert_eq!(
+            egret_dataapi::render::check_publish(tpl, &ctx),
+            Ok(()),
+            "template: {tpl}"
+        );
+    }
+}
+
+/// `{% raw %}` makes the lexer emit everything up to `{% endraw %}` as data. A
+/// scanner that does not know that reads `{% raw %}{#{% endraw %}` as an
+/// unterminated comment, gives up, and every rule below is off for the rest of
+/// the definition.
+#[test]
+fn a_raw_block_does_not_switch_the_rules_off() {
+    let mut ctx = ParamValues::new();
+    ctx.insert("mode", Param::Str("fast".into()));
+    ctx.insert("a", Param::Str(EVIL.into()));
+
+    assert_eq!(
+        render(
+            "{% raw %}{#{% endraw %}{% if mode == 'fast' %}FAST{% endif %}",
+            &ctx
+        )
+        .unwrap_err(),
+        RenderError::BareParameterComparison("mode".into())
+    );
+    assert_eq!(
+        render(
+            "{% raw %}{#{%- endraw +%}{% filter upper %}{{ a }}{% endfilter %}",
+            &ctx
+        )
+        .unwrap_err(),
+        RenderError::CaptureConstruct("filter")
+    );
+    // The raw block's own contents stay literal, and are not rules.
+    let (sql, binds) = render("{% raw %}{% filter x %}{{ a }}{% endraw %}", &ctx).unwrap();
+    assert_eq!(sql, "{% filter x %}{{ a }}");
+    assert!(binds.is_empty());
+    // An unterminated raw is refused rather than scanned on a guess.
+    assert_eq!(
+        render("{% raw %}{% if mode == 'fast' %}", &ctx).unwrap_err(),
+        RenderError::UnterminatedRaw
+    );
+}
+
+/// The three spellings that walked past an adjacency check.
+#[test]
+fn the_lint_reads_the_whole_operand_not_the_token_beside_the_operator() {
+    let mut ctx = ParamValues::new();
+    ctx.insert("mode", Param::Str("fast".into()));
+    ctx.insert_list("regions", vec![Param::Str("EU".into())]);
+
+    for (tpl, want) in [
+        ("{% if (mode) == 'fast' %}A{% endif %}", "mode"),
+        ("{% if regions[0] == 'EU' %}A{% endif %}", "regions"),
+        ("{% if regions | first == 'EU' %}A{% endif %}", "regions"),
+        ("{% if 'EU' == regions[0] %}A{% endif %}", "regions"),
+    ] {
+        let err = render(tpl, &ctx).expect_err(tpl);
+        assert_eq!(
+            err,
+            RenderError::BareParameterComparison(want.into()),
+            "template: {tpl}"
+        );
+    }
+
+    // …and the correct forms still render.
+    for tpl in [
+        "{% if regions | length > 0 %}A{% endif %}",
+        "{% if mode | value == 'fast' %}A{% endif %}",
+    ] {
+        assert_eq!(render(tpl, &ctx).unwrap().0, "A", "template: {tpl}");
+    }
+}
+
+/// A loop variable compared in the very tag that binds it: the aliases have to
+/// be collected before that tag's own condition is read.
+#[test]
+fn a_loop_variable_is_a_parameter_inside_its_own_header() {
+    let mut ctx = ParamValues::new();
+    ctx.insert_list("regions", vec![Param::Str("EU".into())]);
+    assert_eq!(
+        render(
+            "{% for r in regions if r == 'EU' %}{{ r }}{% endfor %}",
+            &ctx
+        )
+        .unwrap_err(),
+        RenderError::BareParameterComparison("r".into())
+    );
+}
+
+/// Two alias defects: a tuple target aliased only its last name, and unwrapping
+/// with `| value` — the documented right thing to do — still produced an alias
+/// and refused the comparison that followed.
+#[test]
+fn aliases_cover_every_target_and_stop_at_an_unwrap() {
+    let mut ctx = ParamValues::new();
+    ctx.insert("mode", Param::Str("fast".into()));
+    ctx.insert("other", Param::Str("x".into()));
+
+    assert_eq!(
+        render(
+            "{% set m, n = mode, other %}{% if m == 'fast' %}A{% endif %}",
+            &ctx
+        )
+        .unwrap_err(),
+        RenderError::BareParameterComparison("m".into())
+    );
+    assert_eq!(
+        render(
+            "{% set m = mode | value %}{% if m == 'fast' %}A{% endif %}",
+            &ctx
+        )
+        .unwrap()
+        .0,
+        "A",
+        "unwrapping with `| value` must not leave an alias behind"
+    );
+}
+
+/// `split_whitespace` never saw this one; the modifier needs no space.
+#[test]
+fn the_recursive_rule_does_not_need_whitespace() {
+    let mut ctx = ParamValues::new();
+    ctx.insert_list("regions", vec![Param::Str("EU".into())]);
+    assert_eq!(
+        render("{% for x in (regions)recursive %}{{ x }}{% endfor %}", &ctx).unwrap_err(),
+        RenderError::RecursiveLoop
+    );
+}
+
+/// The bind budget is charged before the value is cloned, so the cap does not
+/// itself double the allocation it exists to prevent.
+#[test]
+fn the_bind_budget_is_charged_before_the_clone() {
+    match render("SELECT {{ 'a' * 99000000 }}", &ParamValues::new()) {
+        Err(e) => assert_eq!(e, RenderError::BindsTooLarge),
+        Ok((sql, binds)) => panic!("no refusal: {} value(s), sql {sql:?}", binds.len()),
+    }
+}

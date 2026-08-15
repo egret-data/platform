@@ -75,6 +75,16 @@
 //! forever. [`check_static`] rejects every comparison-shaped form it can see and
 //! the `value` filter is the supported spelling: `{% if mode | value == 'fast' %}`.
 //!
+//! **The rule is enforced twice, and only one of the two is a scanner.** At
+//! publish, [`check_publish`] measures it from BEHAVIOUR — it renders the
+//! definition with the opaque values and again with plain ones, and an
+//! inspection takes a different branch whatever its spelling. Read that
+//! function's comment for why: five separate reviews found five bypasses of the
+//! byte scanner, every one of them this module disagreeing with minijinja's
+//! lexer about the same bytes, and the sixth spelling exists but is not written
+//! down yet. The scanner below is the fast first line and is precise where it
+//! fires; the gate is what the rule actually rests on.
+//!
 //! "Comparison-shaped" is wider than the operators. `eq`/`equalto`/`ne`/`lt`/
 //! `le`/`gt`/`ge`/`in`/`sameas` are registered as **tests** routing to the same
 //! `ops::coerce`, so `mode is eq('fast')` is `==` under another spelling; the
@@ -82,8 +92,10 @@
 //! same reason; and a comparison is just as silent inside `{% set %}`, inside a
 //! for-loop's filter condition and inside a bare `{{ … }}` as inside `{% if %}`.
 //! So the lint reads every tag and every expression, `is <test>` is refused
-//! unless the test is `defined`/`undefined`, and the only `in` that survives is
-//! the one in a `{% for %}` header.
+//! unless the test is `defined`/`undefined`, the only `in` that survives is the
+//! one in a `{% for %}` header, and the operand it reads is the whole region
+//! around the operator — `(mode)`, `regions[0]` and `regions | first` are the
+//! same silence as a bare `mode`.
 //!
 //! A rename does not defeat it: `{% with m = mode %}`, `{% set m = mode %}` and
 //! a `{% for r in regions %}` loop variable all bind a parameter's value to a new
@@ -153,6 +165,24 @@ pub enum RenderError {
     BareParameterComparison(String),
     #[error("the definition is not a valid template: {0}")]
     Template(String),
+    #[error(
+        "a `{{% raw %}}` block is never closed. minijinja refuses it as a syntax error, and the \
+         scanner that enforces every rule above cannot tell live template text from raw text \
+         past that point — so it is refused here rather than scanned on a guess"
+    )]
+    UnterminatedRaw,
+    /// The behavioural gate. Deliberately does not name a construct: it is
+    /// detected by rendering the same definition twice and watching the SQL
+    /// change, so there is no token to point at.
+    #[error(
+        "this definition INSPECTS a parameter rather than using it as a value — a comparison, a \
+         test, a subscript or an index whose result changes depending on how the value is \
+         represented. A parameter carries its SQL type as an opaque value, so `p == 'x'` and \
+         everything shaped like it is silently FALSE. Write `p | value` to compare. Detected by \
+         rendering with and without the wrapper and watching the SQL diverge, so the spelling is \
+         not what triggers it"
+    )]
+    ParameterInspected,
     #[error("the rendered SQL exceeds the {MAX_SQL_BYTES} byte cap")]
     TooLarge,
     #[error("the values bound by this definition exceed the {MAX_BIND_BYTES} byte cap")]
@@ -270,6 +300,58 @@ impl ParamValues {
         self.entries.is_empty()
     }
 
+    /// The same values as plain scalars — what the behavioural gate in
+    /// [`check_publish`] renders against. Private: the serving path must never
+    /// render this way, because a `Date` bound from a plain value binds as text.
+    fn plainified(&self, keep_enums_opaque: bool) -> ParamValues {
+        ParamValues {
+            entries: self
+                .entries
+                .iter()
+                .map(|(k, v)| (k.clone(), plainify(v, keep_enums_opaque)))
+                .collect(),
+        }
+    }
+
+    /// Candidate values for probing `name`: an enum parameter's own `allowed`
+    /// entries, or the definition's literals for anything else.
+    fn candidates(&self, name: &str, literals: &[Param]) -> Vec<Param> {
+        let allowed = self
+            .entries
+            .get(name)
+            .and_then(|v| v.downcast_object_ref::<Cell>())
+            .and_then(|c| c.allowed.clone());
+        match allowed {
+            Some(list) => list.into_iter().map(Param::Str).collect(),
+            None => literals.to_vec(),
+        }
+    }
+
+    /// Replaces one value, keeping its SHAPE — enum-ness, and list-ness.
+    ///
+    /// Shape matters more than it looks: substituting a scalar for a list
+    /// parameter makes `regions[0]` and `regions | first` fail to render, and a
+    /// probe that fails to render is inconclusive rather than a finding — so the
+    /// gate silently stopped covering exactly the two spellings it was built
+    /// for. Measured, with the byte lint disabled: `{% if regions[0] == 'EU' %}`
+    /// came back clean. Probe-only.
+    fn probe_replace(&mut self, name: &str, value: Param) {
+        let Some(existing) = self.entries.get(name) else {
+            return;
+        };
+        if existing.downcast_object_ref::<Cell>().is_none() && existing.try_iter().is_ok() {
+            self.insert_list(name.to_string(), vec![value]);
+            return;
+        }
+        let allowed = existing
+            .downcast_object_ref::<Cell>()
+            .and_then(|c| c.allowed.clone());
+        self.entries.insert(
+            name.to_string(),
+            Value::from_object(Cell::new(value, allowed)),
+        );
+    }
+
     fn context(&self) -> Value {
         Value::from_iter(self.entries.iter().map(|(k, v)| (k.clone(), v.clone())))
     }
@@ -352,6 +434,24 @@ impl Object for Cell {
 
     fn render(self: &Arc<Self>, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.text())
+    }
+}
+
+/// One parameter value as a plain scalar, for [`check_publish`]'s second render.
+fn plainify(value: &Value, keep_enums_opaque: bool) -> Value {
+    if let Some(cell) = value.downcast_object_ref::<Cell>() {
+        if keep_enums_opaque && cell.allowed.is_some() {
+            return value.clone();
+        }
+        return cell.plain();
+    }
+    match value.try_iter() {
+        Ok(items) => Value::from(
+            items
+                .map(|v| plainify(&v, keep_enums_opaque))
+                .collect::<Vec<_>>(),
+        ),
+        Err(_) => value.clone(),
     }
 }
 
@@ -446,16 +546,31 @@ struct Binds {
 const MAX_BIND_BYTES: usize = 1 << 20;
 
 impl Binds {
-    fn push(&mut self, param: Param) -> Result<(), MjError> {
-        self.bytes += match &param {
-            Param::Decimal(s) | Param::Str(s) | Param::Date(s) | Param::Timestamp(s) => s.len(),
-            _ => std::mem::size_of::<Param>(),
-        };
+    /// Charges `bytes` against the budget before the value is materialised.
+    fn reserve(&mut self, bytes: usize) -> Result<(), MjError> {
+        self.bytes = self.bytes.saturating_add(bytes);
         if self.bytes > MAX_BIND_BYTES {
             return Err(MjError::new(MjErrorKind::InvalidOperation, BINDS_TOO_LARGE));
         }
-        self.list.push(param);
         Ok(())
+    }
+
+    fn push(&mut self, param: Param) {
+        self.list.push(param);
+    }
+}
+
+/// What binding `value` will cost, read without cloning it.
+fn prospective_bytes(value: &Value) -> usize {
+    if let Some(cell) = value.downcast_object_ref::<Cell>() {
+        return match &cell.param {
+            Param::Decimal(s) | Param::Str(s) | Param::Date(s) | Param::Timestamp(s) => s.len(),
+            _ => std::mem::size_of::<Param>(),
+        };
+    }
+    match value.as_str() {
+        Some(s) => s.len(),
+        None => std::mem::size_of::<Param>(),
     }
 }
 
@@ -474,11 +589,18 @@ fn bind_formatter(
         if let Some(ident) = value.downcast_object_ref::<Ident>() {
             return out.write_str(&ident.text).map_err(MjError::from);
         }
-        let param = to_param(value)?;
-        binds
+        let mut held = binds
             .lock()
-            .expect("bind list mutex poisoned by a panic inside the renderer")
-            .push(param)?;
+            .expect("bind list mutex poisoned by a panic inside the renderer");
+        // Measured BEFORE `to_param`, which clones. `{{ 'a' * 99_999_999 }}` is
+        // already 99 MB inside minijinja by the time we see it; cloning it first
+        // and checking afterwards doubles exactly the allocation the cap exists
+        // to prevent. What minijinja itself allocated is bounded by its own
+        // 100 MB repeated-string cap and is not ours to refuse.
+        held.reserve(prospective_bytes(value))?;
+        let param = to_param(value)?;
+        held.push(param);
+        drop(held);
         out.write_str(PLACEHOLDER).map_err(MjError::from)
     }
 }
@@ -631,7 +753,7 @@ pub fn check_static(sql: &str, ctx: &ParamValues) -> Result<(), RenderError> {
     // exactly the same way. Accumulated in source order, which is the order a
     // template can use them in.
     let mut aliases: Vec<String> = Vec::new();
-    for block in blocks(sql) {
+    for block in blocks(sql)? {
         let body = block.body();
         if let Block::Tag(_) = block {
             let keyword = body
@@ -670,7 +792,13 @@ pub fn check_static(sql: &str, ctx: &ParamValues) -> Result<(), RenderError> {
             // as a value (not as the whole emit) captures the loop body and re-emits
             // it, desyncing exactly as `{% filter %}` does. Not named in the spec;
             // found by reading the VM.
-            if keyword == "for" && body.split_whitespace().any(|w| w == "recursive") {
+            // Tokens, not `split_whitespace`: `{% for x in (regions)recursive %}`
+            // needs no space before the modifier.
+            if keyword == "for"
+                && tokens(body)
+                    .iter()
+                    .any(|t| t.kind == Tok::Word && t.text == "recursive")
+            {
                 return Err(RenderError::RecursiveLoop);
             }
         }
@@ -678,11 +806,15 @@ pub fn check_static(sql: &str, ctx: &ParamValues) -> Result<(), RenderError> {
         // is meaningless wherever it is written, and it was silently taking the
         // wrong branch from `{% set f = mode == 'fast' %}`, from a for-loop's
         // filter condition, and from a bare `{{ 'FAST' if mode == 'fast' else … }}`.
-        if let Some(name) = bare_comparison(body, ctx, &aliases, matches!(block, Block::Tag(_))) {
-            return Err(RenderError::BareParameterComparison(name));
-        }
+        // BEFORE the lint, not after: `{% for r in regions if r == 'EU' %}`
+        // compares the loop variable in the very tag that binds it, and a
+        // collect-afterwards pass has no name for `r` yet when it reads that
+        // condition.
         if let Block::Tag(_) = block {
             collect_aliases(body, ctx, &mut aliases);
+        }
+        if let Some(name) = bare_comparison(body, ctx, &aliases, matches!(block, Block::Tag(_))) {
+            return Err(RenderError::BareParameterComparison(name));
         }
     }
     Ok(())
@@ -702,20 +834,33 @@ fn collect_aliases(body: &str, ctx: &ParamValues, aliases: &mut Vec<String>) {
     };
     match keyword.text {
         "set" | "with" => {
-            // `<name> = <expr>`: alias `<name>` when `<expr>` mentions a
-            // parameter or an alias.
-            for (i, tok) in toks.iter().enumerate() {
-                if tok.kind != Tok::Other || tok.text != "=" {
-                    continue;
-                }
-                let Some(lhs) = toks[..i].iter().rev().find(|t| t.kind == Tok::Word) else {
-                    continue;
-                };
-                if toks[i + 1..]
-                    .iter()
-                    .any(|t| t.kind == Tok::Word && is_param(t.text, ctx, aliases))
-                {
-                    aliases.push(lhs.text.to_string());
+            // Every target, not just the last: `{% set m, n = mode, other %}`
+            // binds two names and the second one was the only one recorded.
+            let Some(at) = toks
+                .iter()
+                .position(|t| t.kind == Tok::Other && t.text == "=")
+            else {
+                return;
+            };
+            let rhs = &toks[at + 1..];
+            // `{% set m = mode | value %}` is the author doing exactly what the
+            // error message tells them to; aliasing `m` there refuses the
+            // comparison that follows, which is a false positive.
+            if rhs
+                .iter()
+                .any(|t| t.kind == Tok::Word && PLAINISING_FILTERS.contains(&t.text))
+            {
+                return;
+            }
+            if !rhs
+                .iter()
+                .any(|t| t.kind == Tok::Word && is_param(t.text, ctx, aliases))
+            {
+                return;
+            }
+            for t in &toks[1..at] {
+                if t.kind == Tok::Word {
+                    aliases.push(t.text.to_string());
                 }
             }
         }
@@ -726,7 +871,13 @@ fn collect_aliases(body: &str, ctx: &ParamValues, aliases: &mut Vec<String>) {
             else {
                 return;
             };
-            if toks[at + 1..]
+            // The header ends at the loop's own `if` filter, so a condition
+            // mentioning a parameter does not make the iterable look like one.
+            let end = toks[at + 1..]
+                .iter()
+                .position(|t| t.kind == Tok::Word && t.text == "if")
+                .map_or(toks.len(), |p| at + 1 + p);
+            if toks[at + 1..end]
                 .iter()
                 .any(|t| t.kind == Tok::Word && is_param(t.text, ctx, aliases))
             {
@@ -739,6 +890,186 @@ fn collect_aliases(body: &str, ctx: &ParamValues, aliases: &mut Vec<String>) {
         }
         _ => {}
     }
+}
+
+/// **The publish-time gate: everything [`check_static`] refuses, plus a
+/// BEHAVIOURAL test for the rule no source scan has been able to hold.**
+///
+/// # Why this exists rather than a sixth round of spellings
+///
+/// Five separate reviews found five bypasses of the comparison rule — `{%+`,
+/// `{# {% #}`, `{% raw %}`, `(mode)`, `regions[0] / | first` — and every one was
+/// the same defect: **this module's scanner disagreeing with minijinja's lexer
+/// about the same bytes.** A sixth spelling exists; nobody has written it down
+/// yet. The scanner is fixed for the five, and it is still a scanner.
+///
+/// So the real gate is measured from behaviour instead. A parameter reaches the
+/// template as an opaque [`Cell`] (so its SQL type survives), and minijinja
+/// compares an object against a string as NOT EQUAL — that is the whole defect.
+/// Render the same definition twice, once with the opaque values serving will
+/// use and once with the same values as plain scalars: a construct that merely
+/// BINDS a parameter renders identically both ways, and a construct that
+/// INSPECTS one — `==`, `is eq`, `in`, a subscript, whatever its spelling —
+/// takes a different branch and the SQL diverges. There is no token to evade.
+///
+/// It is the same instrument choice that makes the placeholder==bind invariant
+/// work, and for the same reason: it reads the rendered output rather than the
+/// source. That invariant is the one gate nothing has bypassed.
+///
+/// # What it costs, and the one thing it needs to be sensitive
+///
+/// A comparison only diverges when the plain render takes the OTHER branch,
+/// which needs a value the comparison is true for. Representative values alone
+/// would therefore miss `{% if mode == 'fast' %}` whenever the representative
+/// value is not `fast` — i.e. nearly always. So the candidate values are taken
+/// from the definition's own literals: `'fast'` is right there in the template
+/// that compares against it.
+///
+/// **The property that makes this worth building**: harvesting a literal wrongly
+/// costs SENSITIVITY, never soundness. A missed literal is a comparison this pass
+/// does not happen to trigger; a missed spelling in the scanner was a rule that
+/// did not run at all. The failure modes are not the same shape.
+///
+/// # Deliberately not called by [`render`]
+///
+/// It renders the definition many times. That is right at publish, where it
+/// happens once per version, and wrong per request. The serving path keeps
+/// [`check_static`] and the invariant.
+pub fn check_publish(sql: &str, ctx: &ParamValues) -> Result<(), RenderError> {
+    check_static(sql, ctx)?;
+    for probe in probe_assignments(sql, ctx) {
+        let Ok((opaque_sql, opaque_binds)) = render(sql, &probe) else {
+            // This assignment does not render; publish will refuse it through
+            // its own render of the representative values, with the real error.
+            continue;
+        };
+        let Some((plain_sql, plain_binds)) = plain_render(sql, &probe) else {
+            continue;
+        };
+        // Bind TEXT, not the bind list itself. The two renders legitimately
+        // disagree about a value's TYPE — that is the entire reason parameters
+        // are opaque, so `Date("2020-02-29")` opposite `Str("2020-02-29")` is the
+        // gate working, not a finding. What must not differ is the text, and it
+        // is the half that carries `{{ 'FAST' if (mode) == 'fast' else 'SLOW' }}`
+        // — an inspection whose SQL shape and placeholder count never move.
+        if opaque_sql != plain_sql || bind_text(&opaque_binds) != plain_binds {
+            return Err(RenderError::ParameterInspected);
+        }
+    }
+    Ok(())
+}
+
+/// How many probe renders one definition may cost.
+const MAX_PROBES: usize = 64;
+/// How many of a definition's own literals are used as candidate values.
+const MAX_PROBE_LITERALS: usize = 16;
+
+/// The value assignments the gate renders: the endpoint's own representative
+/// values, then each parameter set to each literal the definition mentions (or,
+/// for an enum parameter, to each of its allowed values — an enum cannot hold
+/// anything else, and substituting something else would only break `| ident`).
+fn probe_assignments(sql: &str, ctx: &ParamValues) -> Vec<ParamValues> {
+    let mut out = vec![ctx.clone()];
+    let literals = literals(sql);
+    let names: Vec<String> = ctx.names().map(str::to_owned).collect();
+    for name in names {
+        for candidate in ctx.candidates(&name, &literals) {
+            if out.len() >= MAX_PROBES {
+                return out;
+            }
+            let mut probe = ctx.clone();
+            probe.probe_replace(&name, candidate);
+            out.push(probe);
+        }
+    }
+    out
+}
+
+/// Every string and integer literal in the definition — those inside a tag or an
+/// expression first, because those are the ones a template compares against,
+/// then the rest of the text until the cap.
+///
+/// **Harvesting from the whole source, not only from blocks, is deliberate.**
+/// Measured: with raw-awareness removed from [`blocks`], the gate ALSO stopped
+/// catching `{% raw %}{#{% endraw %}{% if mode == 'fast' %}` — not because the
+/// gate is syntactic, but because its candidate values were coming through the
+/// same scanner, so a desync starved it of the literal `'fast'`. The gate's
+/// soundness never depended on the scanner; its SENSITIVITY did, and this is what
+/// cuts that last thread.
+fn literals(sql: &str) -> Vec<Param> {
+    let mut out: Vec<Param> = Vec::new();
+    let bodies: Vec<&str> = blocks(sql)
+        .map(|bs| bs.iter().map(|b| b.body()).collect())
+        .unwrap_or_default();
+    for body in bodies.into_iter().chain(std::iter::once(sql)) {
+        let b = body.as_bytes();
+        let mut i = 0;
+        while i < b.len() {
+            let c = b[i];
+            if c == b'\'' || c == b'"' {
+                let start = i + 1;
+                i += 1;
+                while i < b.len() && b[i] != c {
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+                let text = body[start..i.min(body.len())].to_string();
+                push_unique(&mut out, Param::Str(text));
+                i += 1;
+            } else if c.is_ascii_digit() {
+                let start = i;
+                while i < b.len() && b[i].is_ascii_digit() {
+                    i += 1;
+                }
+                if let Ok(n) = body[start..i].parse::<i64>() {
+                    push_unique(&mut out, Param::I64(n));
+                }
+            } else {
+                i += 1;
+            }
+            if out.len() >= MAX_PROBE_LITERALS {
+                return out;
+            }
+        }
+    }
+    out
+}
+
+fn push_unique(out: &mut Vec<Param>, param: Param) {
+    if !out.contains(&param) {
+        out.push(param);
+    }
+}
+
+/// Renders `sql` with every parameter as a plain scalar rather than an opaque
+/// value, returning the SQL and the number of values bound.
+///
+/// `| ident` refuses anything but an enum parameter — by construction, which is
+/// the point of it — so a definition that uses it cannot have its enum
+/// parameters plainified. That case is retried with them left opaque, and if it
+/// still cannot render, this assignment is inconclusive rather than a finding.
+fn plain_render(sql: &str, ctx: &ParamValues) -> Option<(String, Vec<String>)> {
+    for keep_enums_opaque in [false, true] {
+        match render(sql, &ctx.plainified(keep_enums_opaque)) {
+            Ok((sql, binds)) => return Some((sql, bind_text(&binds))),
+            Err(RenderError::Ident) => continue,
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
+/// Each bound value as text, so two renders can be compared without their types.
+fn bind_text(binds: &[Param]) -> Vec<String> {
+    binds
+        .iter()
+        .map(|p| match p {
+            Param::Null => String::new(),
+            Param::Bool(b) => b.to_string(),
+            Param::I64(i) => i.to_string(),
+            Param::F64(f) => f.to_string(),
+            Param::Decimal(s) | Param::Str(s) | Param::Date(s) | Param::Timestamp(s) => s.clone(),
+        })
+        .collect()
 }
 
 /// A `{% … %}` tag or a `{{ … }}` expression, body only.
@@ -775,7 +1106,7 @@ impl<'a> Block<'a> {
 /// It still over-approximates — a `{% filter %}` written inside `{% raw %}` is
 /// inert but rejected anyway — and over-approximating is the safe direction for a
 /// rejection rule.
-fn blocks(sql: &str) -> Vec<Block<'_>> {
+fn blocks(sql: &str) -> Result<Vec<Block<'_>>, RenderError> {
     let b = sql.as_bytes();
     let mut out = Vec::new();
     let mut i = 0;
@@ -801,22 +1132,50 @@ fn blocks(sql: &str) -> Vec<Block<'_>> {
             }
         };
         let body_start = i + 2;
-        match find_block_end(sql, body_start, close) {
-            Some(at) => {
-                let body = trim_markers(&sql[body_start..at]);
-                out.push(if is_tag {
-                    Block::Tag(body)
-                } else {
-                    Block::Expr(body)
-                });
-                i = at + 2;
-            }
+        let Some(at) = find_block_end(sql, body_start, close) else {
             // Unterminated: minijinja refuses it as a syntax error, and there is
             // nothing further to scan.
-            None => break,
+            break;
+        };
+        let body = trim_markers(&sql[body_start..at]);
+        if is_tag && body.split_whitespace().next() == Some("raw") {
+            // `{% raw %}` makes the lexer emit everything up to `{% endraw %}` as
+            // template DATA — no tag, no comment, no expression inside it exists.
+            // A scanner that does not know this reads `{% raw %}{#{% endraw %}` as
+            // an unterminated comment, gives up, and every rule below is silently
+            // off for the rest of the definition.
+            i = find_endraw(sql, at + 2).ok_or(RenderError::UnterminatedRaw)?;
+            continue;
         }
+        out.push(if is_tag {
+            Block::Tag(body)
+        } else {
+            Block::Expr(body)
+        });
+        i = at + 2;
     }
-    out
+    Ok(out)
+}
+
+/// The offset just past the `{% endraw %}` that closes a raw block, by the
+/// lexer's own rule: scan forward for `{%`, and accept it only if what follows is
+/// optional whitespace-control, optional whitespace, `endraw`, optional
+/// whitespace-control and `%}` (`skip_basic_tag(.., "endraw", .., true)`).
+fn find_endraw(sql: &str, from: usize) -> Option<usize> {
+    let b = sql.as_bytes();
+    let mut i = from;
+    while let Some(at) = b[i..].windows(2).position(|w| w == b"{%") {
+        let after = i + at + 2;
+        let rest = sql[after..].trim_start_matches(['-', '+']).trim_start();
+        if let Some(tail) = rest.strip_prefix("endraw") {
+            let tail = tail.trim_start().trim_start_matches(['-', '+']);
+            if let Some(end) = tail.strip_prefix("%}") {
+                return Some(sql.len() - end.len());
+            }
+        }
+        i = after;
+    }
+    None
 }
 
 /// The offset of `close`, skipping over string literals the way the lexer does.
@@ -923,26 +1282,99 @@ fn bare_comparison(
     None
 }
 
-/// The parameter standing on either side of the operator at `i`, skipping a
-/// `not` (`mode not in xs`).
+/// The parameter an operand of the operator at `i` resolves to, if any.
+///
+/// Reads the whole operand REGION rather than the one token beside the operator,
+/// because `(mode)`, `regions[0]` and `regions | first` are the same silence as a
+/// bare `mode` and all three escape an adjacency check. The region ends at the
+/// nearest thing that cannot be part of one operand: `,`, `and`, `or`, `if`,
+/// `else`, or another operator.
+///
+/// [`PLAINISING_FILTERS`] is the one relaxation, and it is a usability list, not
+/// a security boundary — `{{ regions | length > 0 }}` compares two integers and
+/// is perfectly correct, so refusing it would be a false positive. A wrong entry
+/// there costs a false positive or a miss that [`check_publish`] catches; it
+/// cannot let caller text into SQL.
 fn operand_param(
     toks: &[Token<'_>],
     i: usize,
     ctx: &ParamValues,
     aliases: &[String],
 ) -> Option<String> {
-    let mut before = i;
-    while before > 0 && toks[before - 1].text == "not" {
-        before -= 1;
-    }
-    for side in [before.checked_sub(1), Some(i + 1)].into_iter().flatten() {
-        if let Some(t) = toks.get(side) {
-            if t.kind == Tok::Word && is_param(t.text, ctx, aliases) {
-                return Some(t.text.to_string());
-            }
+    let mut found = None;
+    for region in [region_before(toks, i), region_after(toks, i)] {
+        let words: Vec<&str> = region
+            .iter()
+            .filter(|t| t.kind == Tok::Word)
+            .map(|t| t.text)
+            .collect();
+        if words.iter().any(|w| PLAINISING_FILTERS.contains(w)) {
+            continue;
+        }
+        if let Some(name) = words.iter().find(|w| is_param(w, ctx, aliases)) {
+            found = Some(name.to_string());
+            break;
         }
     }
-    None
+    found
+}
+
+/// Filters whose result is a plain minijinja value, so a comparison after one is
+/// meaningful. `value` is the documented escape hatch; the rest are here so
+/// ordinary template arithmetic is not refused. Note what is NOT here: `first`,
+/// `last`, `min`, `max`, `default` and `sort` all hand back an ELEMENT, which is
+/// still a parameter value.
+const PLAINISING_FILTERS: &[&str] = &[
+    "value",
+    "length",
+    "count",
+    "sum",
+    "int",
+    "float",
+    "string",
+    "join",
+    "lower",
+    "upper",
+    "trim",
+    "abs",
+    "round",
+    "capitalize",
+    "title",
+    "replace",
+    "format",
+    "bool",
+    "indent",
+];
+
+/// Tokens making up the operand to the left of `i`.
+fn region_before<'t, 'a>(toks: &'t [Token<'a>], i: usize) -> &'t [Token<'a>] {
+    let mut start = i;
+    while start > 0 && !ends_operand(&toks[start - 1]) {
+        start -= 1;
+    }
+    &toks[start..i]
+}
+
+/// Tokens making up the operand to the right of `i`.
+fn region_after<'t, 'a>(toks: &'t [Token<'a>], i: usize) -> &'t [Token<'a>] {
+    let mut end = i + 1;
+    while end < toks.len() && !ends_operand(&toks[end]) {
+        end += 1;
+    }
+    &toks[i + 1..end]
+}
+
+fn ends_operand(tok: &Token<'_>) -> bool {
+    match tok.kind {
+        Tok::Op => true,
+        // `=` is an assignment or a kwarg separator, never part of the operand
+        // beside it (`==` lexes as one `Op`, so this cannot be a comparison).
+        Tok::Other => tok.text == "," || tok.text == "=",
+        Tok::Word => matches!(
+            tok.text,
+            "and" | "or" | "if" | "else" | "elif" | "in" | "is"
+        ),
+    }
 }
 
 fn is_param(name: &str, ctx: &ParamValues, aliases: &[String]) -> bool {
