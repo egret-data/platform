@@ -417,6 +417,89 @@ impl Connector for TrinoConnector {
 
         self.run_statement(&client, req, limits, cancel).await
     }
+
+    /// Typed columns of a parameterised `SELECT`, without supplying values.
+    ///
+    /// Trino has no equivalent of a raw `DESCRIBE`-without-executing — the
+    /// only way to learn a query's output schema without running it is
+    /// `DESCRIBE OUTPUT <name>` against a *prepared* statement. So this
+    /// registers the wrapped query as a header-scoped prepared statement
+    /// (same `X-Trino-Prepared-Statement: <name>=<percent-encoded sql>`
+    /// mechanism `execute_with_params` uses — one request, no persisted
+    /// session) and sends `DESCRIBE OUTPUT <name>` as the body. Measured
+    /// live: this returns the full output schema and no data rows from the
+    /// underlying query — e.g. for `SELECT ? AS v, k, d FROM …`, the
+    /// response rows are `["v","","","","unknown",1,false]`,
+    /// `["k","","","","integer",4,false]`, `["d","","","","date",4,false]`
+    /// — column 0 is the output column's name, column 4 is its Trino type
+    /// name. Neither is positionally assumed here: both are located by
+    /// `DESCRIBE OUTPUT`'s own response column names (`"Column Name"`,
+    /// `"Type"`), which is what the response's `columns` metadata actually
+    /// declares, rather than trusting today's column order to hold forever.
+    ///
+    /// A bare `?` in the projection types as `"unknown"`, confirmed by the
+    /// example above (`v`) — neither engine infers a parameter's type from
+    /// context, which is the constraint `describe_with_params_types_a_bare_placeholder_as_unknown_but_a_cast_fixes_it`
+    /// pins for Task 7's `CAST` rule.
+    async fn describe_with_params(
+        &self,
+        sql: &str,
+        param_count: usize,
+        timeout: std::time::Duration,
+    ) -> Result<Vec<ColumnMeta>, EngineError> {
+        if param_count == 0 {
+            return self.describe(sql, timeout).await;
+        }
+        if let Some(reason) = &self.insecure_bearer {
+            return Err(EngineError::Connect(reason.clone()));
+        }
+        let client = self.build_client(timeout)?;
+        let wrapped = format!("SELECT * FROM (\n{sql}\n) AS _egret_ds LIMIT 0");
+        let name = "p1";
+        let prepared_header = format!("{name}={}", percent_encode(&wrapped));
+        let session = format!("query_max_run_time={}s", timeout.as_secs().max(1));
+        let req = self.auth(
+            client
+                .post(format!("{}/v1/statement", self.base_url))
+                .header("X-Trino-Session", session)
+                .header("X-Trino-Prepared-Statement", prepared_header)
+                .body(format!("DESCRIBE OUTPUT {name}")),
+        );
+        // DESCRIBE OUTPUT's own result has one row per output column of the
+        // wrapped query, never per-row query data — a generous cap costs
+        // nothing here (unlike `execute`, where it bounds real result size).
+        let limits = Limits {
+            max_rows: 100_000,
+            timeout,
+        };
+        let result = self
+            .run_statement(&client, req, &limits, CancellationToken::new())
+            .await?;
+
+        let name_idx = result
+            .columns
+            .iter()
+            .position(|c| c.name == "Column Name")
+            .ok_or_else(|| {
+                EngineError::Engine("DESCRIBE OUTPUT response has no \"Column Name\" column".into())
+            })?;
+        let type_idx = result
+            .columns
+            .iter()
+            .position(|c| c.name == "Type")
+            .ok_or_else(|| {
+                EngineError::Engine("DESCRIBE OUTPUT response has no \"Type\" column".into())
+            })?;
+
+        Ok(result
+            .rows
+            .into_iter()
+            .map(|row| ColumnMeta {
+                name: row[name_idx].as_str().unwrap_or_default().to_string(),
+                ty: row[type_idx].as_str().unwrap_or_default().to_string(),
+            })
+            .collect())
+    }
 }
 
 impl TrinoConnector {

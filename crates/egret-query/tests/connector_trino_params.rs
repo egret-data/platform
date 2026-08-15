@@ -358,3 +358,107 @@ async fn hostile_timestamp_content_is_contained_not_evaluated() {
     )
     .await;
 }
+
+// --- describe_with_params (Task 4) ---
+
+/// The plain `describe` path pin, Trino side: this is what would happen if
+/// `describe_with_params` merely delegated to `Connector::describe` (the
+/// default `LIMIT 0`-wrapped `execute`) instead of using `DESCRIBE OUTPUT`.
+/// Trino's failure mode here is LOUD, not silent — a `?` reaching the
+/// `/v1/statement` endpoint outside a prepared-statement context is a
+/// semantic error ("Incorrect number of parameters: expected 1 but found
+/// 0"), never a wrong-but-successful zero-column result. That is a
+/// *different* defect shape from StarRocks' silent success (see the
+/// StarRocks test file), but it is exactly as disqualifying: an author
+/// publishing a parameterised query through the plain path gets an opaque
+/// engine error instead of a usable schema, which is why `describe_with_params`
+/// exists as its own code path on this engine too, not just on StarRocks.
+#[tokio::test]
+async fn plain_describe_on_parameterised_sql_errors_instead_of_describing() {
+    let Some(c) = trino_or_skip() else {
+        eprintln!("skip");
+        return;
+    };
+    let err = c
+        .describe("SELECT ? AS v", Duration::from_secs(30))
+        .await
+        .expect_err("the plain LIMIT-0-wrapped path cannot describe a `?`-bearing query on Trino");
+    assert!(
+        err.to_string().contains("Incorrect number of parameters"),
+        "got: {err}"
+    );
+}
+
+/// The Task 4 headline: `describe_with_params` on Trino goes through
+/// `DESCRIBE OUTPUT`, not the plain path pinned above, and returns a
+/// non-empty, correctly-named, correctly-typed schema for a query mixing a
+/// bound placeholder with ordinary columns. Pins the EXACT measured live
+/// response (`v`/`k`/`d` → `unknown`/`integer`/`date`) so a future change to
+/// row indexing, column-name lookup, or the wrapper shape is caught here
+/// rather than only in Task 7's consumer.
+#[tokio::test]
+async fn describe_with_params_returns_the_full_output_schema_on_trino() {
+    let Some(c) = trino_or_skip() else {
+        eprintln!("skip");
+        return;
+    };
+    let cols = c
+        .describe_with_params(
+            "SELECT ? AS v, k, d FROM (SELECT 1 AS k, DATE '2020-01-01' AS d) t",
+            1,
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("describe_with_params must type a parameterised query without values");
+
+    assert_eq!(
+        cols,
+        vec![
+            egret_core::ColumnMeta {
+                name: "v".into(),
+                ty: "unknown".into()
+            },
+            egret_core::ColumnMeta {
+                name: "k".into(),
+                ty: "integer".into()
+            },
+            egret_core::ColumnMeta {
+                name: "d".into(),
+                ty: "date".into()
+            },
+        ],
+        "must be non-empty and match DESCRIBE OUTPUT's measured live response exactly"
+    );
+}
+
+/// Task 4 Step 3 / Task 7's dependency: neither engine infers a bound
+/// placeholder's type. A bare `?` in the projection types as Trino's literal
+/// `"unknown"`; wrapping it in `CAST(? AS date)` fixes the type to `"date"`.
+/// This is the exact constraint Task 7's publish-time rule (require a CAST
+/// on any parameter appearing in the projection) depends on — pinned here as
+/// a live measurement rather than left as a comment that could go stale.
+#[tokio::test]
+async fn describe_with_params_types_a_bare_placeholder_as_unknown_but_a_cast_fixes_it() {
+    let Some(c) = trino_or_skip() else {
+        eprintln!("skip");
+        return;
+    };
+    let bare = c
+        .describe_with_params("SELECT ? AS v", 1, Duration::from_secs(30))
+        .await
+        .expect("describe a bare placeholder");
+    assert_eq!(
+        bare[0].ty, "unknown",
+        "an uncast placeholder must type as Trino's literal \"unknown\", proving Trino \
+         infers nothing from context"
+    );
+
+    let cast = c
+        .describe_with_params("SELECT CAST(? AS date) AS v", 1, Duration::from_secs(30))
+        .await
+        .expect("describe a cast placeholder");
+    assert_eq!(
+        cast[0].ty, "date",
+        "an explicit CAST must fix the type — this is what Task 7's publish-time rule relies on"
+    );
+}

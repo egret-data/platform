@@ -285,3 +285,105 @@ async fn bound_f64_round_trips_exactly_through_a_backend_table_filter() {
     );
     assert_eq!(out.rows[0][0], serde_json::json!(1234567.891));
 }
+
+// --- describe_with_params (Task 4) ---
+
+/// The measured defect this whole task exists to prevent, pinned as a live
+/// test rather than left as a comment: StarRocks' TEXT protocol — exactly
+/// what `Connector::describe`'s default `LIMIT 0` wrapper drives — given a
+/// query containing `?` returns a normal, SUCCESSFUL, **zero-column**
+/// result. No error at all. If `describe_with_params` ever regressed to
+/// delegating to this path for `param_count > 0`, publish would freeze an
+/// empty schema into the snapshot instead of failing loudly.
+#[tokio::test]
+async fn plain_describe_on_parameterised_sql_silently_returns_zero_columns() {
+    let Some((h, p)) = parse() else {
+        eprintln!("skip: no EGRET_TEST_STARROCKS_URL");
+        return;
+    };
+    let c = build_connector(&spec(&h, p));
+    let cols = c
+        .describe(
+            "SELECT ? AS v, c_int FROM (SELECT CAST(1 AS INT) AS c_int) t",
+            Duration::from_secs(30),
+        )
+        .await
+        .expect(
+            "the plain text-protocol path does NOT error on a `?` — that is exactly the \
+             silent-success defect this test pins",
+        );
+    assert!(
+        cols.is_empty(),
+        "measured live behavior: the text protocol returns zero columns, not an error, for a \
+         query containing `?` — got {cols:?}. If this ever stops being empty, the defect this \
+         task exists to prevent may no longer be real, and describe_with_params's separate \
+         `conn.prep()` path should be re-justified against fresh measurements."
+    );
+}
+
+/// The Task 4 headline, StarRocks side: `describe_with_params` uses
+/// `conn.prep()` (the binary/prepared-statement protocol) instead of the
+/// silently-empty text path pinned above, and returns the query's real
+/// output schema — non-empty, correctly named — for the exact SQL shape
+/// that silently failed above.
+#[tokio::test]
+async fn describe_with_params_returns_non_empty_columns_on_starrocks() {
+    let Some((h, p)) = parse() else {
+        eprintln!("skip: no EGRET_TEST_STARROCKS_URL");
+        return;
+    };
+    let c = build_connector(&spec(&h, p));
+    let cols = c
+        .describe_with_params(
+            "SELECT ? AS v, c_int FROM (SELECT CAST(1 AS INT) AS c_int) t",
+            1,
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("describe_with_params must type a parameterised query without values");
+
+    assert_eq!(
+        cols.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+        vec!["v", "c_int"],
+        "must be non-empty and name both output columns, unlike the silently-empty plain path"
+    );
+    assert_eq!(
+        cols[1].ty, "int",
+        "the ordinary, unbound column's type must still come through correctly"
+    );
+}
+
+/// Task 4 Step 3 / Task 7's dependency, StarRocks side: neither engine
+/// infers a bound placeholder's type. A bare `?` in the projection reports
+/// as StarRocks' `MYSQL_TYPE_VAR_STRING` (`coltype_name` → `"varchar"`);
+/// wrapping it in `CAST(? AS DATE)` fixes the type to `"date"`. Pinned live
+/// so Task 7's CAST-in-projection rule rests on a measurement, not folklore
+/// — and so the constraint is checked identically on both engines, since
+/// nothing about `describe_with_params`'s contract says it should differ.
+#[tokio::test]
+async fn describe_with_params_types_a_bare_placeholder_as_varchar_but_a_cast_fixes_it() {
+    let Some((h, p)) = parse() else {
+        eprintln!("skip: no EGRET_TEST_STARROCKS_URL");
+        return;
+    };
+    let c = build_connector(&spec(&h, p));
+
+    let bare = c
+        .describe_with_params("SELECT ? AS v", 1, Duration::from_secs(30))
+        .await
+        .expect("describe a bare placeholder");
+    assert_eq!(
+        bare[0].ty, "varchar",
+        "an uncast placeholder must report StarRocks' MYSQL_TYPE_VAR_STRING (mapped to \
+         \"varchar\" by coltype_name), proving StarRocks infers nothing from context"
+    );
+
+    let cast = c
+        .describe_with_params("SELECT CAST(? AS DATE) AS v", 1, Duration::from_secs(30))
+        .await
+        .expect("describe a cast placeholder");
+    assert_eq!(
+        cast[0].ty, "date",
+        "an explicit CAST must fix the type — this is what Task 7's publish-time rule relies on"
+    );
+}

@@ -338,6 +338,68 @@ impl Connector for StarRocksConnector {
             .await
             .map_err(|_| EngineError::Timeout)?
     }
+
+    /// Typed columns of a parameterised `SELECT`, without supplying values.
+    ///
+    /// Not a fallback to [`Connector::describe`]'s text-protocol path — that
+    /// is the exact defect this method exists to prevent. Measured live: the
+    /// text protocol given a wrapped query containing `?` returns a normal,
+    /// *successful* result with **zero columns** (see
+    /// `plain_describe_on_parameterised_sql_silently_returns_zero_columns`
+    /// in the test file), because StarRocks' `COM_QUERY` path treats `?` as
+    /// meaningless syntax it happens not to reject rather than a parameter
+    /// marker. Publish-time typing calling that path would freeze an empty
+    /// schema into the snapshot with no error to notice.
+    ///
+    /// Instead this uses `conn.prep()` (the binary/prepared-statement
+    /// protocol, `COM_STMT_PREPARE`) on the wrapped query and reads
+    /// `Statement::columns()` — measured to return the full, correct output
+    /// schema for a query containing `?`. `execute_with_params` already
+    /// drives this same protocol for execution; this is its describe-only
+    /// counterpart, never executing the statement.
+    async fn describe_with_params(
+        &self,
+        sql: &str,
+        param_count: usize,
+        timeout: Duration,
+    ) -> Result<Vec<ColumnMeta>, EngineError> {
+        if param_count == 0 {
+            return self.describe(sql, timeout).await;
+        }
+        self.guard()?;
+        // Same reasoning as `describe`: check before wrapping, not after —
+        // the wrapper is exactly what the SEV-0 payload closes early.
+        reject_statement_separator(sql)?;
+        let wrapped = format!("SELECT * FROM (\n{sql}\n) AS _egret_ds LIMIT 0");
+        let opts = self.opts.clone();
+        let execute_as = self.execute_as.clone();
+        let fut = async move {
+            let mut conn = mysql_async::Conn::new(opts)
+                .await
+                .map_err(|e| EngineError::Connect(e.to_string()))?;
+            if let Some(u) = &execute_as {
+                StarRocksConnector::switch_identity(&mut conn, u).await?;
+            }
+            let stmt = conn
+                .prep(wrapped)
+                .await
+                .map_err(|e| EngineError::Engine(e.to_string()))?;
+            let columns: Vec<ColumnMeta> = stmt
+                .columns()
+                .iter()
+                .map(|c| ColumnMeta {
+                    name: c.name_str().to_string(),
+                    ty: coltype_name(c.column_type()).to_string(),
+                })
+                .collect();
+            let _ = conn.close(stmt).await;
+            let _ = conn.disconnect().await;
+            Ok::<Vec<ColumnMeta>, EngineError>(columns)
+        };
+        tokio::time::timeout(timeout, fut)
+            .await
+            .map_err(|_| EngineError::Timeout)?
+    }
 }
 
 /// Drain a pending result set (text or binary protocol — both are `Protocol`
