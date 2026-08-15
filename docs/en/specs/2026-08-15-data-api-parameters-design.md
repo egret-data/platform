@@ -385,13 +385,24 @@ the new rules live, so an old snapshot would otherwise bypass all of them.
 - **Writes.** Unchanged from §10.
 - **A MyBatis-shaped tag set.** `{% if %}`/`{% for %}` cover it; `<set>` is for writes,
   `<bind>` is evaluation, and `<where>`/`<trim>` are ergonomics over `WHERE 1=1`.
-- **Migrating `egret-bi` to bound parameters.** `chartquery.rs::sql_literal` still
-  interpolates via `quote_string`, and chart and dashboard filter values flow through it —
-  the surface where the P1 backslash vector was actually reachable with `chart:read`. It is
-  the larger prize and it touches 19 charts and a large test surface; mixing it in here would
-  force one review to hold injection analysis and BI regression analysis at once. **Until it
-  lands, egret has two safety models side by side — Data API safe by construction, BI safe by
-  escaper — and that must be stated where a reader of either would see it.**
+- **Migrating the other two interpolating surfaces.** There are **three** SQL-building
+  surfaces after this phase, not two. `egret-bi/src/chartquery.rs::sql_literal` interpolates
+  chart and dashboard filter values — the surface where the P1 backslash vector was actually
+  reachable with `chart:read`. `egret-query/src/execution/template.rs` interpolates SQL Lab
+  parameters; its own doc says it is "deliberately NOT a general template engine". Both are
+  `quote_string` call sites and both were call sites of the P1 bug. Migrating them is the
+  larger prize; BI alone touches 19 charts and a large test surface, and mixing it in here
+  would force one review to hold injection analysis and BI regression analysis at once.
+  **Until they land, egret carries two safety models side by side — Data API safe by
+  construction, the other two safe by escaper — and that must be stated at the top of each
+  interpolating module, not only here: a reader of `chartquery.rs` has no reason to open this
+  document.**
+
+  Note also a live documentation trap: `egret-dataapi/src/lifecycle.rs` says at `:551`,
+  `:592` and `:629` that P3's validation matches "what `template::render` will do at serve
+  time". **Nothing on the Data API serving path ever called it** — that renderer is SQL Lab's.
+  P3's rules are correct and `PlaceholderInsideQuotedText` is what makes binding possible at
+  all; only the comments' account of live behaviour is wrong. This phase fixes them.
 
 ## 9. Acceptance
 

@@ -376,13 +376,23 @@ snapshot cũ sẽ đi vòng qua tất cả chúng.
 - **Ghi dữ liệu.** Không đổi so với §10.
 - **Bộ thẻ kiểu MyBatis.** `{% if %}`/`{% for %}` đã phủ; `<set>` là để ghi, `<bind>` là đánh
   giá biểu thức, còn `<where>`/`<trim>` chỉ là tiện nghi so với `WHERE 1=1`.
-- **Chuyển `egret-bi` sang bound parameters.** `chartquery.rs::sql_literal` vẫn nội suy qua
-  `quote_string`, và giá trị filter của chart lẫn dashboard đi qua đó — đúng bề mặt mà vector
-  backslash của P1 thực sự với tới được chỉ với quyền `chart:read`. Đó là phần thưởng lớn hơn
-  và nó động vào 19 chart cùng khối lượng test lớn; trộn vào đây sẽ buộc một lượt review phải
-  giữ trong đầu cùng lúc cả phân tích injection lẫn phân tích hồi quy BI. **Cho tới khi việc đó
-  xong, egret có hai mô hình an toàn song song — Data API an toàn theo cấu trúc, BI an toàn nhờ
-  escaper — và điều đó phải được nói ở chỗ người đọc bên nào cũng thấy.**
+- **Chuyển hai bề mặt nội suy còn lại.** Sau phase này egret có **ba** bề mặt dựng SQL, không
+  phải hai. `egret-bi/src/chartquery.rs::sql_literal` nội suy giá trị filter của chart và
+  dashboard — đúng bề mặt mà vector backslash của P1 thực sự với tới được chỉ với quyền
+  `chart:read`. `egret-query/src/execution/template.rs` nội suy tham số của SQL Lab; chính doc
+  của nó ghi "deliberately NOT a general template engine". Cả hai đều là call site của
+  `quote_string` và cả hai đều từng là call site của lỗi P1. Chuyển chúng là phần thưởng lớn
+  hơn; riêng BI đã động vào 19 chart và khối lượng test lớn, và trộn vào đây sẽ buộc một lượt
+  review phải giữ trong đầu cùng lúc cả phân tích injection lẫn phân tích hồi quy BI. **Cho tới
+  khi xong, egret mang hai mô hình an toàn song song — Data API an toàn theo cấu trúc, hai cái
+  kia an toàn nhờ escaper — và điều đó phải được ghi ở đầu MỖI module nội suy, không chỉ ở đây:
+  người đọc `chartquery.rs` không có lý do gì để mở tài liệu này.**
+
+  Còn một cái bẫy tài liệu đang sống: `egret-dataapi/src/lifecycle.rs` ghi ở `:551`, `:592` và
+  `:629` rằng kiểm tra của P3 khớp với "what `template::render` will do at serve time".
+  **Đường phục vụ của Data API chưa bao giờ gọi nó** — bộ render đó là của SQL Lab. Các luật
+  của P3 vẫn đúng và `PlaceholderInsideQuotedText` chính là thứ khiến bind khả thi; chỉ có
+  phần mô tả hành vi lúc chạy trong comment là sai. Phase này sửa chúng.
 
 ## 9. Nghiệm thu
 
