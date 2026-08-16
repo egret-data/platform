@@ -1125,3 +1125,96 @@ fn a_test_applied_after_a_filter_is_still_an_inspection() {
         "A"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The rendered statement is scanned like the definition was
+// ---------------------------------------------------------------------------
+
+/// **`| ident` writes AUTHOR text into the statement, and nothing scanned it.**
+///
+/// The caller-provenance property held all along — the emitted string is always
+/// an entry from the author's `allowed` list. The premise nobody had tested is
+/// the other one: that the author's own string is safe *because* it is the
+/// author's. It is not. The definition-side `;` test reads the RAW definition,
+/// which contains no `;`; the entry does. It binds zero values, so the
+/// placeholder==bind invariant is satisfied, and with no parameters the serving
+/// path reaches StarRocks through `execute` — COM_QUERY, every statement in one
+/// submission.
+#[test]
+fn author_text_reaching_the_statement_gets_the_definitions_own_byte_tests() {
+    let mut ctx = ParamValues::new();
+    ctx.insert_enum(
+        "sort",
+        "id; DROP TABLE t",
+        vec!["id".into(), "id; DROP TABLE t".into()],
+    );
+    assert_eq!(
+        render("SELECT id FROM t ORDER BY {{ sort | ident }}", &ctx).unwrap_err(),
+        RenderError::RenderedSeparator
+    );
+
+    let mut hash = ParamValues::new();
+    hash.insert_enum("sort", "id #x", vec!["id #x".into()]);
+    assert_eq!(
+        render("SELECT id FROM t ORDER BY {{ sort | ident }}", &hash).unwrap_err(),
+        RenderError::RenderedHash
+    );
+
+    // A trailing separator is not a separator, and an ordinary identifier still
+    // renders.
+    let mut ok = ParamValues::new();
+    ok.insert_enum("sort", "total", vec!["total".into()]);
+    assert_eq!(
+        render("SELECT id FROM t ORDER BY {{ sort | ident }};", &ok)
+            .unwrap()
+            .0,
+        "SELECT id FROM t ORDER BY total;"
+    );
+    // …and a `;` inside a string literal in the author's own SQL is text.
+    assert_eq!(
+        render("SELECT 'a;b' AS x, {{ sort | ident }}", &ok)
+            .unwrap()
+            .0,
+        "SELECT 'a;b' AS x, total"
+    );
+}
+
+/// The invariant must hold under BOTH escaping readings, not the larger of the
+/// two. It exists for StarRocks arity and StarRocks is the backslash-escaping
+/// reading, so taking the max let the reading that matters disagree as long as
+/// the other one agreed.
+#[test]
+fn the_invariant_holds_under_both_escaping_readings() {
+    let mut ctx = ParamValues::new();
+    ctx.insert("a", Param::Str("x".into()));
+    // Both readings terminate every literal here, so neither is `Unscannable` —
+    // they simply disagree about where the marker stands. Under
+    // `backslash_escapes = true` (StarRocks) both `\'` are escapes, one literal
+    // spans the marker and the structural count is **0**; under `false` (Trino)
+    // the literals close early and the count is **1**. Binds is 1 either way.
+    // Taking the max accepts this; requiring both refuses it, and the reading
+    // that would have been ignored is StarRocks', where the arity mismatch kills
+    // the connection.
+    assert_eq!(
+        render(r"SELECT 'a\'{{ a }}\'b'", &ctx).unwrap_err(),
+        RenderError::PlaceholderBindMismatch {
+            placeholders: 0,
+            binds: 1
+        }
+    );
+}
+
+/// The one caller-triggered render failure has its own variant, so the serving
+/// path can tell it from every author-fault one without matching on a message.
+#[test]
+fn binding_a_sequence_as_one_value_is_its_own_variant() {
+    let mut ctx = ParamValues::new();
+    ctx.insert_list(
+        "regions",
+        vec![Param::Str("EU".into()), Param::Str("US".into())],
+    );
+    assert_eq!(
+        render("SELECT {{ regions }}", &ctx).unwrap_err(),
+        RenderError::SequenceBind
+    );
+}

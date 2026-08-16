@@ -301,13 +301,13 @@ impl utoipa::Modify for BearerAddon {
     ),
     responses(
         (status = 200, description = "Rows from the published snapshot", body = ServingResponse),
-        (status = 400, description = "`row_limit_exceeded` — the result exceeded the endpoint's row cap", body = ServingErrorBody),
+        (status = 400, description = "`row_limit_exceeded` — the result exceeded the endpoint's row cap; `param_missing` — a required parameter was not supplied; `param_invalid` — a supplied parameter failed its declared type, its `allowed` list, or was repeated where one value is required. Neither parameter error names the parameter: the name is the author's, and naming it turns the error surface into a directory of what an endpoint declares", body = ServingErrorBody),
         (status = 401, description = "`key_invalid` — bearer token missing, expired, or not for this audience", body = ServingErrorBody),
         (status = 403, description = "`data_access_denied` — the engine denied the data to this service account", body = ServingErrorBody),
         (status = 404, description = "`not_found` — no such live endpoint in this workspace", body = ServingErrorBody),
         (status = 429, description = "`rate_limited` — a published rate limit was exceeded; `Retry-After` states when the bucket refills", body = ServingErrorBody),
         (status = 500, description = "`internal` — an egret-side fault; quote `request_id` to support", body = ServingErrorBody),
-        (status = 503, description = "`schema_drift` / `output_naming_collision` / `cache_scope_stale` — the published configuration no longer describes the data. `Retry-After` is a floor, not a forecast: only a re-publish clears these", body = ServingErrorBody),
+        (status = 503, description = "`schema_drift` / `output_naming_collision` / `cache_scope_stale` / `param_gate_stale` — the published configuration no longer describes the data, or was frozen before the current parameter-safety rules existed. `Retry-After` is a floor, not a forecast: only a re-publish clears these", body = ServingErrorBody),
     ),
     security(("data_api_bearer" = [])),
 )]
@@ -331,13 +331,13 @@ async fn serve_get(
     ),
     responses(
         (status = 200, description = "Rows from the published snapshot", body = ServingResponse),
-        (status = 400, description = "`row_limit_exceeded` — the result exceeded the endpoint's row cap", body = ServingErrorBody),
+        (status = 400, description = "`row_limit_exceeded` — the result exceeded the endpoint's row cap; `param_missing` — a required parameter was not supplied; `param_invalid` — a supplied parameter failed its declared type, its `allowed` list, or was repeated where one value is required. Neither parameter error names the parameter: the name is the author's, and naming it turns the error surface into a directory of what an endpoint declares", body = ServingErrorBody),
         (status = 401, description = "`key_invalid` — bearer token missing, expired, or not for this audience", body = ServingErrorBody),
         (status = 403, description = "`data_access_denied` — the engine denied the data to this service account", body = ServingErrorBody),
         (status = 404, description = "`not_found` — no such live endpoint in this workspace", body = ServingErrorBody),
         (status = 429, description = "`rate_limited` — a published rate limit was exceeded; `Retry-After` states when the bucket refills", body = ServingErrorBody),
         (status = 500, description = "`internal` — an egret-side fault; quote `request_id` to support", body = ServingErrorBody),
-        (status = 503, description = "`schema_drift` / `output_naming_collision` / `cache_scope_stale` — the published configuration no longer describes the data. `Retry-After` is a floor, not a forecast: only a re-publish clears these", body = ServingErrorBody),
+        (status = 503, description = "`schema_drift` / `output_naming_collision` / `cache_scope_stale` / `param_gate_stale` — the published configuration no longer describes the data, or was frozen before the current parameter-safety rules existed. `Retry-After` is a floor, not a forecast: only a re-publish clears these", body = ServingErrorBody),
     ),
     security(("data_api_bearer" = [])),
 )]
@@ -655,6 +655,19 @@ async fn run(
     //
     // Rendering happens after the cache lookup because a hit needs no statement,
     // and it is the only work on this path that a hit gets to skip.
+    //
+    // **EVERY snapshot goes through minijinja now, including one with no
+    // parameters at all.** A P4 endpoint whose SQL happens to contain `{%` or
+    // `{#` — a JSON path, a literal brace in a string — parsed as nothing before
+    // this phase and is a template today, so it can now fail to render and
+    // answer 500 where it used to answer 200. The `param_gate` stamp does NOT
+    // cover this case: it is only consulted when the snapshot declares
+    // parameters, and this one declares none. Rendering unconditionally is still
+    // the right call — a `params.is_empty()` shortcut would mean the statement a
+    // request executes depends on a field that is not the statement, which is
+    // the shape of every bug this phase fixed — but the exposure is real, it is
+    // a re-publish away from being visible, and it belongs in the release note
+    // rather than in a comment nobody reads after the incident.
     let (sql, binds) = crate::render::render(&snap.sql, &resolved.values)
         .map_err(|e| render_error(e, resolved.has_repeats))?;
 
@@ -734,13 +747,18 @@ async fn run(
 /// would send an operator to debug a definition that is correct, while the
 /// caller's fix is to stop sending the duplicate.
 ///
-/// `has_repeats` is therefore consulted, and only in the direction that is safe
-/// to be wrong in: it can turn a 500 into a 400 **only** for a request that
-/// actually repeated a declared parameter. It never turns a caller error into a
-/// 500, and it never widens what the body says. The alternative — matching on
-/// the text of minijinja's message — is the check that keeps compiling and
-/// silently stops working the day someone rewords it, which `port_impl`'s
-/// `engine_error` already carries a comment about.
+/// `has_repeats` is therefore consulted — but it is NOT sufficient on its own,
+/// and treating it as sufficient was a real defect: it let any caller downgrade
+/// every render failure to a 400 at `debug!` by appending one duplicate
+/// parameter. `PlaceholderBindMismatch`, `RenderedSeparator`, `CaptureConstruct`
+/// and `ParameterInspected` are statements about the DEFINITION; a caller must
+/// not be able to decide how loudly they are reported.
+///
+/// So the 400 needs both halves: a repeat, and the one variant a repeat can
+/// cause. That variant is [`crate::render::RenderError::SequenceBind`] — its own
+/// variant precisely so this match is not on the text of a message, which is the
+/// check that keeps compiling and silently stops working the day someone rewords
+/// it (`port_impl`'s `engine_error` carries the same comment).
 ///
 /// [`RenderError::Ident`] is the one variant safe to surface as-is, and it is
 /// still mapped rather than echoed: [`super::params::resolve`] already checked
@@ -748,13 +766,29 @@ async fn run(
 /// cannot reach it. Reaching it means `| ident` was applied to something that is
 /// not an enum parameter — an author fault, which publish (Task 7) refuses.
 fn render_error(e: crate::render::RenderError, has_repeats: bool) -> ServingError {
-    if has_repeats {
+    use crate::render::RenderError as R;
+    // The 400 is for the ONE caller-triggered failure, and it is now identified
+    // by its variant. Consulting `has_repeats` alone let any caller downgrade
+    // EVERY render failure to a client error by appending one duplicate
+    // parameter: `&region=x&region=x` turned a `PlaceholderBindMismatch` — the
+    // backstop nothing has ever bypassed — into a `param_invalid` logged at
+    // `debug!`, so the operator saw a client mistake and no warning at all.
+    if matches!(e, R::SequenceBind) && has_repeats {
         tracing::debug!(
             error = %e,
             "data-api render failed on a request that repeated a declared parameter"
         );
         return ServingError::ParamInvalid;
     }
+    // Everything else is the endpoint's fault or an attack on it, and both are
+    // things an operator must see. `warn!` unconditionally — a caller cannot
+    // choose the level, and these are exactly the events that must not be
+    // silenced by one repeated query parameter.
+    tracing::warn!(
+        error = %e,
+        has_repeats,
+        "data-api render failed: the published definition is unsafe to serve"
+    );
     ServingError::internal(format!("render endpoint definition: {e}"))
 }
 
@@ -1159,6 +1193,47 @@ fn apply_naming(name: &str, naming: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A caller must not be able to choose how loudly a fault is reported.**
+    ///
+    /// `has_repeats` is caller-controlled — append `&region=x` twice — and on its
+    /// own it turned EVERY render failure into a client-side 400 logged at
+    /// `debug!`. A `PlaceholderBindMismatch`, the backstop nothing has ever
+    /// bypassed, reached the operator as `param_invalid` with no warning line.
+    #[test]
+    fn only_the_caller_triggered_render_failure_becomes_a_400() {
+        use crate::render::RenderError as R;
+
+        // The one variant a repeat can actually cause, and only with a repeat.
+        assert!(matches!(
+            render_error(R::SequenceBind, true),
+            ServingError::ParamInvalid
+        ));
+        assert!(matches!(
+            render_error(R::SequenceBind, false),
+            ServingError::Internal { .. }
+        ));
+
+        // Everything else is a statement about the DEFINITION, repeat or not.
+        for e in [
+            R::PlaceholderBindMismatch {
+                placeholders: 1,
+                binds: 2,
+            },
+            R::RenderedSeparator,
+            R::RenderedHash,
+            R::CaptureConstruct("filter"),
+            R::ParameterInspected,
+            R::Ident,
+            R::Unscannable("x".into()),
+            R::BindsTooLarge,
+        ] {
+            assert!(
+                matches!(render_error(e, true), ServingError::Internal { .. }),
+                "a repeated parameter must not downgrade this"
+            );
+        }
+    }
 
     /// The naming transforms are pure and cheap to pin here; the routing
     /// properties they sit next to need a database and live in

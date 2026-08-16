@@ -185,6 +185,34 @@ pub enum RenderError {
     ParameterInspected,
     #[error("the rendered SQL exceeds the {MAX_SQL_BYTES} byte cap")]
     TooLarge,
+    /// The one thing `| ident` can put into a statement that a caller cannot:
+    /// AUTHOR text, unscanned. See [`check_rendered_statement`].
+    #[error(
+        "the rendered statement carries a statement separator `;` outside a trailing position. \
+         The definition itself cannot contain one — publish refuses it by the same byte test — \
+         so it arrived through `| ident`, which writes an `allowed` entry into the SQL as text. \
+         On StarRocks the serving path sends this over COM_QUERY, which executes every statement \
+         in one submission, so a second statement here is arbitrary DDL"
+    )]
+    RenderedSeparator,
+    #[error(
+        "the rendered statement carries `#`, which StarRocks ACCEPTS AND IGNORES as a comment \
+         while Trino has no such token. The definition cannot contain one, so it arrived through \
+         `| ident` — the same path, the same refusal"
+    )]
+    RenderedHash,
+    /// A sequence or map reached the formatter as one value.
+    ///
+    /// Its own variant rather than a [`RenderError::Template`] carrying a
+    /// message, because the serving path has to tell this ONE caller-triggered
+    /// render failure from every author-fault one — a repeated query parameter
+    /// resolves to a list — and matching on the text of a message is the check
+    /// that keeps compiling after someone rewords it.
+    #[error(
+        "this value cannot be bound as a single parameter; emit a sequence one element at a time \
+         inside a `{{% for %}}` loop"
+    )]
+    SequenceBind,
     #[error("the values bound by this definition exceed the {MAX_BIND_BYTES} byte cap")]
     BindsTooLarge,
     /// The invariant that survives a regression in [`check_static`]'s rules.
@@ -605,6 +633,9 @@ fn prospective_bytes(value: &Value) -> usize {
 
 const BINDS_TOO_LARGE: &str = "the values bound by this definition exceed the size cap";
 
+const SEQUENCE_BIND_MSG: &str = "this value cannot be bound as a single parameter; emit a \
+                                 sequence one element at a time inside a `{% for %}` loop";
+
 /// Writes `?` and binds. The only thing a `{{ … }}` can do.
 ///
 /// The bind list is captured by the closure rather than carried in the template
@@ -662,8 +693,7 @@ fn to_param(value: &Value) -> Result<Param, MjError> {
         _ => {
             return Err(MjError::new(
                 MjErrorKind::InvalidOperation,
-                "this value cannot be bound as a single parameter; emit a sequence one element \
-                 at a time inside a `{% for %}` loop",
+                SEQUENCE_BIND_MSG,
             ))
         }
     })
@@ -752,13 +782,23 @@ fn render_inner(sql: &str, ctx: &ParamValues) -> Result<(String, Vec<Param>), Re
             .list,
     );
 
-    let placeholders = structural_placeholders(&rendered)?;
-    if placeholders != binds.len() {
-        return Err(RenderError::PlaceholderBindMismatch {
-            placeholders,
-            binds: binds.len(),
-        });
+    let readings = scannable_readings(&rendered)?;
+    // BOTH readings, not the larger of the two. The invariant exists for
+    // StarRocks arity, and StarRocks is the backslash-escaping reading — taking
+    // the max let the reading that matters disagree as long as the other one
+    // agreed. Requiring both is strictly stronger and rejects nothing
+    // legitimate, since a definition whose two readings disagree about where a
+    // literal ends is refused at publish anyway.
+    for stripped in &readings {
+        let placeholders = stripped.matches(PLACEHOLDER).count();
+        if placeholders != binds.len() {
+            return Err(RenderError::PlaceholderBindMismatch {
+                placeholders,
+                binds: binds.len(),
+            });
+        }
     }
+    check_rendered_statement(&rendered, &readings)?;
     Ok((rendered, binds))
 }
 
@@ -770,17 +810,54 @@ fn render_inner(sql: &str, ctx: &ParamValues) -> Result<(String, Vec<Param>), Re
 /// markers never reach the output while its values do reach the bind list.
 /// Counting what the formatter wrote would make the invariant trivially true and
 /// blind to exactly the case it exists for.
-fn structural_placeholders(rendered: &str) -> Result<usize, RenderError> {
-    // Both escaping readings, as everywhere else in this crate: which regions
-    // count as quoted is the one thing Trino and StarRocks disagree about, and
-    // the larger count is the safe one to compare against.
-    let mut max = 0;
-    for backslash_escapes in [true, false] {
-        let stripped = crate::lifecycle::strip_comments_and_strings(rendered, backslash_escapes)
-            .map_err(|e| RenderError::Unscannable(e.to_string()))?;
-        max = max.max(stripped.matches(PLACEHOLDER).count());
+fn scannable_readings(rendered: &str) -> Result<Vec<String>, RenderError> {
+    [true, false]
+        .into_iter()
+        .map(|backslash_escapes| {
+            crate::lifecycle::strip_comments_and_strings(rendered, backslash_escapes)
+                .map_err(|e| RenderError::Unscannable(e.to_string()))
+        })
+        .collect()
+}
+
+/// **The rendered statement gets the same byte tests the definition got.**
+///
+/// # Why the definition's scan is not enough
+///
+/// `check_single_select` refuses a non-trailing `;` and `reject_unscannable_bytes`
+/// refuses `#`, both on the RAW definition — and until this phase that was the
+/// whole story, because the statement sent to an engine WAS the definition. It is
+/// not any more. `| ident` writes an entry from the author's `allowed` list into
+/// the statement as text, and nothing scanned that entry:
+/// `allowed = ["id", "id; DROP TABLE t"]` published green, rendered
+/// `SELECT id FROM t ORDER BY id; DROP TABLE t` and bound **zero** values — so
+/// the placeholder==bind invariant was satisfied, and with no parameters the
+/// serving path calls `execute`, which on StarRocks is COM_QUERY and runs every
+/// statement in one submission. Author-to-arbitrary-DDL, past every rule.
+///
+/// On Trino the same payload is a query failure rather than an escalation: its
+/// REST client submits one statement per request and the trailing text is a
+/// parse error. The refusal is unconditional anyway — which engine is behind an
+/// endpoint is not something this module knows, and "safe on the engine we
+/// happen to have" is how the first version of this reasoning went wrong.
+///
+/// # Where it runs
+///
+/// Inside [`render`], so publish (through `check_rendered`) and every request
+/// get the same test. The readings are the ones the invariant already computed.
+fn check_rendered_statement(rendered: &str, readings: &[String]) -> Result<(), RenderError> {
+    // `#` on the raw text and `;` on the stripped text, mirroring exactly what
+    // the definition-side rules do — `reject_unscannable_bytes` is a raw scan and
+    // `check_single_select` strips first.
+    if rendered.contains('#') {
+        return Err(RenderError::RenderedHash);
     }
-    Ok(max)
+    for stripped in readings {
+        if stripped.trim_end().trim_end_matches(';').contains(';') {
+            return Err(RenderError::RenderedSeparator);
+        }
+    }
+    Ok(())
 }
 
 /// The rules that must hold before a template is allowed to render at all.
@@ -1742,6 +1819,9 @@ fn mj_err(e: MjError) -> RenderError {
     }
     if chain_contains(&e, BINDS_TOO_LARGE) {
         return RenderError::BindsTooLarge;
+    }
+    if chain_contains(&e, SEQUENCE_BIND_MSG) {
+        return RenderError::SequenceBind;
     }
     let mut msg = e.to_string();
     let mut source = std::error::Error::source(&e);

@@ -79,4 +79,27 @@ export interface EndpointSnapshot {
      * published contract does not drift when the underlying table changes.
      */
   columns: ColumnSpec[];
+  /**
+     * Which revision of the publish-time parameter gate this version passed.
+     *
+     * **A stamp, not a note.** P4.5's §7 said "every endpoint with parameters
+     * must be re-published after P4.5" — an instruction to an operator, which
+     * is not an enforcement. A version frozen before the gate existed carries
+     * `0` here (`#[serde(default)]`), so the serving path can REFUSE it rather
+     * than render a definition no rule ever looked at. That turns the migration
+     * from something someone has to remember into something the server checks.
+     *
+     * An integer rather than a bool, because the situation it exists for is
+     * exactly the one that recurs: when a future revision of the gate closes a
+     * rule the current one misses, bumping [`PARAM_GATE`] makes every snapshot
+     * stamped with the older gate refuse to serve until it is re-published and
+     * re-checked. A bool could only ever say "some gate ran", which is the claim
+     * that was not good enough this time either.
+     *
+     * Only consulted when the snapshot declares parameters: a version with no
+     * `params` renders nothing, so there is nothing for the gate to have missed
+     * and nothing to force a re-publish of.
+     * @minimum 0
+     */
+  param_gate?: number;
 }

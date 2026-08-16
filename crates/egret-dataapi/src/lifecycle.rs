@@ -290,6 +290,14 @@ pub enum ValidationError {
     SharedCacheOnPerPrincipalConnection,
     #[error("enum parameter `{0}` must declare a non-empty `allowed` list")]
     EnumWithoutAllowed(String),
+    #[error(
+        "enum parameter `{param}` reaches the statement as TEXT — it is used in an identifier \
+         position through `| ident` — so every one of its `allowed` values must be an identifier: \
+         letters, digits and `_`, not starting with a digit, optionally one dot. `{value}` is not. \
+         An `allowed` entry is written into the statement verbatim and is the one thing a \
+         definition can carry that no other rule scanned"
+    )]
+    EnumValueNotIdentifier { param: String, value: String },
     /// Everything the renderer refuses, at publish time: a definition that does
     /// not parse under the hardened environment, a capture construct, `| ident`
     /// on anything that is not an enum parameter with an `allowed` list, a
@@ -1077,6 +1085,7 @@ fn representative(sql: &str, params: &[ParamSpec], absent: &[&str]) -> ParamValu
 /// all of them absent: those two extremes are what a caller can actually reach
 /// with no query string at all.
 fn check_render_rules(sql: &str, params: &[ParamSpec]) -> std::result::Result<(), ValidationError> {
+    check_ident_values(sql, params)?;
     let full = representative(sql, params, &[]);
     crate::render::check_publish(sql, &full)?;
     check_rendered(sql, &full)?;
@@ -1104,6 +1113,105 @@ fn check_render_rules(sql: &str, params: &[ParamSpec]) -> std::result::Result<()
         check_rendered(sql, &none)?;
     }
     Ok(())
+}
+
+/// Every `allowed` value of an enum that reaches the statement as TEXT must be
+/// identifier-shaped.
+///
+/// # The hole this closes, and why the rendered-statement scan is not enough
+///
+/// `| ident` writes an `allowed` entry into the statement verbatim — that is what
+/// it is for, since `ORDER BY ?` is a syntax error on both engines — and the
+/// entry is the author's own string, which is the whole provenance argument. What
+/// nobody had checked is the OTHER premise: that the author's string is safe
+/// *because* it is the author's. It was not. `allowed = ["id", "id; DROP TABLE t"]`
+/// published green: the definition-side `;` test reads the RAW definition, which
+/// has no `;` in it, and publish renders only the FIRST entry, so the second
+/// reached no scan and no `describe`.
+///
+/// [`crate::render::render`] now scans the rendered statement, which stops the
+/// separator at serve time and at publish for whichever entries publish happens
+/// to render — but "happens to render" is a bounded set and `allowed` is not.
+/// This rule is the unbounded half: EVERY entry, checked by shape.
+///
+/// # Why it is scoped rather than applied to every enum
+///
+/// The brief said to require the shape of all `allowed` values everywhere.
+/// Measured against the model, that refuses a legitimate and ordinary endpoint:
+/// an enum is also how an author constrains a bound VALUE (`WHERE status =
+/// {{ status }}` with `allowed = ["Pending Review"]`), and a value never reaches
+/// the statement text at all. So the shape is required exactly of the enums whose
+/// value DOES reach it, and reaching is decided by rendering rather than by
+/// scanning for `| ident`:
+///
+/// * render with the first allowed entry and with the second; if the statements
+///   differ, the value reached the text — nothing else can move it, because a
+///   comparison against a parameter is refused;
+/// * with one entry, or if the entry appears verbatim in the rendered statement,
+///   assume it reached (over-strict, and safe in that direction);
+/// * if a render fails at all, assume it reached — fail closed.
+fn check_ident_values(sql: &str, params: &[ParamSpec]) -> std::result::Result<(), ValidationError> {
+    for p in params.iter().filter(|p| p.ty == ParamType::Enum) {
+        let Some(allowed) = p.allowed.as_ref().filter(|a| !a.is_empty()) else {
+            continue;
+        };
+        if !enum_reaches_statement_text(sql, params, p, allowed) {
+            continue;
+        }
+        for value in allowed {
+            if !is_identifier_shaped(value) {
+                return Err(ValidationError::EnumValueNotIdentifier {
+                    param: p.name.clone(),
+                    value: value.clone(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Does this enum's value reach the rendered statement as text? See
+/// [`check_ident_values`]. Fails closed.
+fn enum_reaches_statement_text(
+    sql: &str,
+    params: &[ParamSpec],
+    p: &ParamSpec,
+    allowed: &[String],
+) -> bool {
+    let render_with = |value: &str| {
+        let mut ctx = representative(sql, params, &[]);
+        ctx.insert_enum(p.name.clone(), value.to_string(), allowed.to_vec());
+        crate::render::render(sql, &ctx).map(|(sql, _)| sql)
+    };
+    let Ok(first) = render_with(&allowed[0]) else {
+        return true;
+    };
+    if let Some(second) = allowed.get(1) {
+        match render_with(second) {
+            Ok(other) if other != first => return true,
+            Err(_) => return true,
+            _ => {}
+        }
+    }
+    first.contains(allowed[0].as_str())
+}
+
+/// `[A-Za-z_][A-Za-z0-9_]*`, optionally one dot between two such parts.
+///
+/// A qualified name (`t.col`) is the most an identifier position needs; a
+/// quoted identifier is not accepted, because accepting one would mean deciding
+/// which dialect's quoting rules apply — the agreement this crate refuses to
+/// assume everywhere else.
+fn is_identifier_shaped(value: &str) -> bool {
+    let mut parts = value.split('.');
+    let ok = |part: &str| {
+        let mut chars = part.chars();
+        chars
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    };
+    parts.next().is_some_and(ok) && parts.clone().count() <= 1 && parts.all(ok)
 }
 
 /// Render once and apply the two rules that read the rendered statement.
@@ -1755,6 +1863,91 @@ mod tests {
             enabled: true,
             ttl_seconds: 60,
             scope,
+        }
+    }
+
+    fn enum_param(name: &str, allowed: &[&str]) -> ParamSpec {
+        ParamSpec {
+            allowed: Some(allowed.iter().map(|s| (*s).to_string()).collect()),
+            required: true,
+            ..param(name, ParamType::Enum)
+        }
+    }
+
+    /// **The `allowed` list was the one author-supplied string no rule scanned.**
+    ///
+    /// `| ident` writes it into the statement verbatim; the definition-side `;`
+    /// test reads the RAW definition, which has no `;` in it; and publish renders
+    /// only the FIRST entry, so a hostile second entry reached no scan and no
+    /// `describe`. It bound zero values, so the placeholder==bind invariant was
+    /// satisfied — and a parameterless statement reaches StarRocks through
+    /// `execute`, which is COM_QUERY.
+    #[test]
+    fn an_allowed_value_in_an_identifier_position_must_be_an_identifier() {
+        let sql = "SELECT id FROM t ORDER BY {{ sort | ident }}";
+        let hostile = enum_param("sort", &["id", "id; DROP TABLE t"]);
+        assert_eq!(
+            validate_definition(
+                sql,
+                &[hostile],
+                &cache(CacheScope::PerPrincipal),
+                false,
+                false
+            ),
+            Err(ValidationError::EnumValueNotIdentifier {
+                param: "sort".into(),
+                value: "id; DROP TABLE t".into()
+            })
+        );
+
+        // A qualified name is the most an identifier position needs.
+        let ok = enum_param("sort", &["id", "t.total"]);
+        assert_eq!(
+            validate_definition(sql, &[ok], &cache(CacheScope::PerPrincipal), false, false),
+            Ok(())
+        );
+
+        // Payloads that carry no separator at all are refused by SHAPE — the
+        // rendered-statement scan alone would not see this one.
+        let union = enum_param("sort", &["id", "id UNION SELECT secret FROM vault"]);
+        assert!(matches!(
+            validate_definition(
+                sql,
+                &[union],
+                &cache(CacheScope::PerPrincipal),
+                false,
+                false
+            ),
+            Err(ValidationError::EnumValueNotIdentifier { .. })
+        ));
+    }
+
+    /// …and the shape is required only of the enums that reach the statement as
+    /// TEXT. An enum is also how an author constrains a bound VALUE, and a bound
+    /// value never reaches the statement at all — refusing `Pending Review`
+    /// there would make `ParamType::Enum` unusable for its other purpose.
+    #[test]
+    fn an_allowed_value_that_is_only_bound_may_be_any_string() {
+        let sql = "SELECT id FROM t WHERE status = {{ status }}";
+        let spec = enum_param("status", &["Pending Review", "done; not really"]);
+        assert_eq!(
+            validate_definition(sql, &[spec], &cache(CacheScope::PerPrincipal), false, false),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn identifier_shape_is_letters_digits_underscore_and_at_most_one_dot() {
+        for ok in ["id", "_id", "a1", "t.col", "_a._b"] {
+            assert!(is_identifier_shaped(ok), "{ok} should be an identifier");
+        }
+        for bad in [
+            "", "1a", "a b", "a;b", "a.b.c", "a-b", "\"a\"", "a(", "id DESC",
+        ] {
+            assert!(
+                !is_identifier_shaped(bad),
+                "{bad} should NOT be an identifier"
+            );
         }
     }
 

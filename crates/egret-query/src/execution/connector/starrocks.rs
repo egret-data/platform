@@ -66,11 +66,27 @@ use egret_query_api::Param;
 /// arbitrary-SQL channel — `execution::job::apply_sql_limit` explicitly carries a
 /// multi-statement branch — and a caller holding `query:run` on the connection
 /// can already send `DROP TABLE` as statement one, so batching is not an
-/// escalation there. **The consequence P4 must not inherit:** a serving path that
-/// hands snapshot SQL to `execute` gets no protection from this function. What
-/// keeps that safe is that `egret-dataapi`'s validator now refuses a `;` in the
-/// RAW definition by the same byte test, so no `;` can reach a published
-/// snapshot in the first place.
+/// escalation there. **The consequence the Data API must not inherit:** a serving
+/// path that hands snapshot SQL to `execute` gets no protection from this
+/// function.
+///
+/// # The premise that used to be written here, and how it was falsified
+///
+/// This comment used to say the Data API was safe because "egret-dataapi's
+/// validator refuses a `;` in the RAW definition, so no `;` can reach a published
+/// snapshot in the first place". That was true of the definition and stopped
+/// being true of the STATEMENT the moment P4.5 started rendering: `| ident`
+/// writes an entry from the author's `allowed` list into the statement as text,
+/// and `allowed = ["id", "id; DROP TABLE t"]` published green and rendered
+/// `SELECT id FROM t ORDER BY id; DROP TABLE t` with zero bound values — which,
+/// having no parameters, arrives here through `execute`.
+///
+/// What keeps it safe NOW is two rules in `egret-dataapi`, neither of them the
+/// raw-definition scan: `render::check_rendered_statement` applies this same byte
+/// test to the RENDERED statement on every publish and every request, and
+/// `lifecycle::check_ident_values` requires every `allowed` entry that can reach
+/// an identifier position to be identifier-shaped. If either is ever relaxed,
+/// this function's absence from `execute` becomes an escalation again.
 fn reject_statement_separator(sql: &str) -> Result<(), EngineError> {
     if sql.trim_end().trim_end_matches(';').contains(';') {
         return Err(EngineError::Engine(
