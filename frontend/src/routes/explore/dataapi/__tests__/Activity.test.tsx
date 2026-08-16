@@ -239,6 +239,37 @@ describe("Activity — range presets bounded by retention", () => {
     expect(screen.getByRole("button", { name: "1h" })).not.toBeDisabled();
   });
 
+  // Final-review finding (#8): `retention_days: 0` — retention off, or simply
+  // not configured — made EVERY preset fail `RANGE_DAYS[r] > retentionDays`,
+  // including the one currently selected. The screen then reads as a broken
+  // control (nothing is clickable, not even what is showing) instead of as a
+  // bound, and the selected range cannot be re-pressed. A range that IS
+  // selected is by definition reachable.
+  it("never disables the SELECTED preset, even at retention_days: 0", async () => {
+    mockSummary({ data: { status: 200, data: { ...DEFAULT_SUMMARY, retention_days: 0 } } });
+    renderActivity();
+    await screen.findByTestId("tile-calls");
+    // 24h is the default selection.
+    expect(screen.getByRole("button", { name: "24h" })).not.toBeDisabled();
+    // The bound still applies to everything else.
+    expect(screen.getByRole("button", { name: "30d" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "1h" })).toBeDisabled();
+  });
+
+  it("exempts whichever preset is selected, not a hardcoded one", async () => {
+    mockSummary({ data: { status: 200, data: { ...DEFAULT_SUMMARY, retention_days: 7 } } });
+    const user = userEvent.setup();
+    renderActivity();
+    await screen.findByTestId("tile-calls");
+
+    // 30d is out of range and disabled…
+    expect(screen.getByRole("button", { name: "30d" })).toBeDisabled();
+    // …while 1h, which is in range, is selectable and then exempt itself.
+    await user.click(screen.getByRole("button", { name: "1h" }));
+    expect(screen.getByRole("button", { name: "1h" })).not.toBeDisabled();
+    expect(screen.getByRole("button", { name: "24h" })).not.toBeDisabled();
+  });
+
   it("clicking a range preset re-queries the summary with that range", async () => {
     const user = userEvent.setup();
     renderActivity();
@@ -450,10 +481,23 @@ describe("Activity — call list", () => {
 });
 
 describe("Activity — page shell", () => {
-  it("uses the Explore idiom: h1, no subtitle paragraph", async () => {
+  // `DataApiLayout` renders the page's one `h1` ("Data API", text-2xl). A
+  // section nested in its Outlet takes `h2`, exactly like every page nested
+  // under `WorkspaceSettings` — two `h1`s on one page is a heading-outline
+  // defect a screen reader hears, and the subtitle stays the shell's.
+  it("uses the nested-section idiom: h2, no second h1, no subtitle paragraph", async () => {
     renderActivity();
-    const h1 = await screen.findByRole("heading", { level: 1, name: "Activity" });
-    expect(h1.className).toContain("text-lg");
-    expect(h1.className).toContain("font-semibold");
+    const h2 = await screen.findByRole("heading", { level: 2, name: "Activity" });
+    expect(h2.className).toContain("text-lg");
+    expect(h2.className).toContain("font-semibold");
+    expect(screen.queryByRole("heading", { level: 1 })).not.toBeInTheDocument();
+  });
+
+  // The shell already wraps the Outlet in `p-6`; a `p-4` here stacked to 40px
+  // where the endpoint detail route carries 24.
+  it("adds no padding of its own on top of the shell's", async () => {
+    const { container } = renderActivity();
+    await screen.findByRole("heading", { level: 2, name: "Activity" });
+    expect(container.firstElementChild?.className ?? "").not.toMatch(/\bp-4\b/);
   });
 });

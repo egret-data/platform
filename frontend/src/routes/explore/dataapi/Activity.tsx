@@ -56,9 +56,12 @@ export default function Activity() {
     "Could not load activity statistics.";
 
   return (
-    <div className="p-4">
+    // No `p-4`: `DataApiLayout` already wraps the Outlet in `p-6`. `h2`, not
+    // `h1` — the shell owns the page's single `h1`, same as every page nested
+    // under `WorkspaceSettings`.
+    <div>
       <div className="mb-4">
-        <h1 className="text-lg font-semibold">Activity</h1>
+        <h2 className="text-lg font-semibold">Activity</h2>
       </div>
 
       <div className="mb-4">
@@ -100,7 +103,13 @@ function RangePicker({
     <div className="space-y-1">
       <div className="flex items-center gap-2">
         {RANGES.map((r) => {
-          const disabled = retentionDays != null && RANGE_DAYS[r] > retentionDays;
+          // The SELECTED preset is never disabled, even when it exceeds
+          // retention. `retention_days: 0` (retention off / not configured)
+          // otherwise disables every button including the one currently in
+          // effect, which reads as a broken control rather than as a bound —
+          // and leaves the user unable to re-press the range they are looking
+          // at. A range that IS selected is by definition reachable.
+          const disabled = range !== r && retentionDays != null && RANGE_DAYS[r] > retentionDays;
           return (
             <Button
               key={r}

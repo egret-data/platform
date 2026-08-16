@@ -64,7 +64,11 @@ function NavItem({ item }: { item: Section }) {
  * horizontally scrollable tab strip instead.
  */
 export default function DataApiLayout() {
-  const { ws: slug } = useParams();
+  // `workspace`, not `ws` — the route is `/explore/:workspace/*` (App.tsx), the
+  // same param name every other file in this feature reads. Under `:ws` this
+  // was always `undefined`, the lookup never matched, and the "…for {name}"
+  // branch below was dead in production.
+  const { workspace: slug } = useParams();
   const { data: workspaces } = useMyWorkspaces(true);
   const ws = workspaces?.find((w) => w.slug === slug);
 
