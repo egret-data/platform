@@ -47,6 +47,7 @@ import Definition from "@/routes/explore/dataapi/detail/Definition";
 import ResponseSection from "@/routes/explore/dataapi/detail/ResponseSection";
 import AccessSection from "@/routes/explore/dataapi/detail/AccessSection";
 import VersionsSection from "@/routes/explore/dataapi/detail/Versions";
+import TryIt from "@/routes/explore/dataapi/detail/TryIt";
 import { Placeholder } from "@/routes/Placeholder";
 import Workspaces from "@/routes/control-plane/Workspaces";
 import WorkspaceDetail from "@/routes/control-plane/WorkspaceDetail";
@@ -126,17 +127,16 @@ function ExploreRoutes() {
                 that can be opened cold. */}
             <Route path="endpoints/:id" element={<EndpointDetail />}>
               <Route index element={<Definition />} />
-              {/* Try it still renders `Placeholder` — Task 7 swaps it in for
-                  its real section. Each section is its own child route (not
-                  a query param) so the open section is in the URL and survives a
-                  refresh. `Access` links into `try` with `?service_account=`;
-                  Task 7 (Try it) reads that key to preselect the account a row
-                  is about. Nothing fails if it doesn't — the link still
+              {/* Each section is its own child route (not a query param) so
+                  the open section is in the URL and survives a refresh.
+                  `Access` links into `try` with `?service_account=`; `TryIt`
+                  reads that exact key to preselect the account a row is
+                  about. Nothing fails if it doesn't — the link still
                   navigates, just without the preselection — which is why the
                   contract is written down here and in the plan ledger. */}
               <Route path="response" element={<ResponseSection />} />
               <Route path="access" element={<AccessSection />} />
-              <Route path="try" element={<Placeholder title="Try it" />} />
+              <Route path="try" element={<TryIt />} />
               <Route path="versions" element={<VersionsSection />} />
             </Route>
             <Route path="clients" element={<Placeholder title="Clients" />} />
