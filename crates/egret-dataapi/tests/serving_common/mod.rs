@@ -79,9 +79,9 @@ pub fn bind_signature(params: &[Param]) -> i64 {
 pub struct FakePort {
     pub executions: AtomicUsize,
     pub last: Mutex<Option<(String, Vec<Param>)>>,
-    /// Set by [`FakePort::fail_next_with`]; consumed by the next
-    /// `execute_as`/`execute_as_with_params` call.
-    next_error: Mutex<Option<String>>,
+    /// Set by [`FakePort::fail_next_with`] / [`FakePort::fail_next_internal`];
+    /// consumed by the next `execute_as`/`execute_as_with_params` call.
+    next_error: Mutex<Option<Error>>,
 }
 
 impl FakePort {
@@ -99,12 +99,19 @@ impl FakePort {
     }
 
     /// Make the NEXT `execute_as`/`execute_as_with_params` call fail, carrying
-    /// `msg` on `egret_core::Error::Internal` — the shape `port_impl` hands an
-    /// engine's own unstructured failure text to the serving path once it has
-    /// folded the connector's error into one variant (see
-    /// `serving::router::engine_error`'s doc). Lets a test hand the classifier
-    /// under `serving::error::is_permission_denied` an arbitrary message
-    /// without teaching this fake a second SQL-substring dialect.
+    /// `msg` on `egret_core::Error::InvalidInput`.
+    ///
+    /// **`InvalidInput`, not `Internal`, and the variant is the whole point.**
+    /// `port_impl::engine_error` folds every QUERY-level engine failure —
+    /// `EngineError::Engine`, which is what a Trino denial inside a 200
+    /// (`connector/trino.rs:334`) and every StarRocks failure arrive as, plus
+    /// `BadRequest` and `Limit` — into `Error::InvalidInput` carrying the
+    /// engine's own words. `Internal` is what it produces for INFRASTRUCTURE
+    /// and, crucially, for egret's own faults in `connect_as`. A fake that hands
+    /// the serving path `Internal` here is modelling the wrong half of that
+    /// table, and it is why `serving::router::engine_error` used to
+    /// message-match egret's own failures. See [`FakePort::fail_next_internal`]
+    /// for the other half, which now has its own test.
     ///
     /// One-shot and consumed BEFORE `executions`/`last` are touched: a failed
     /// call never rendered a statement worth recording, and leaving the flag
@@ -116,15 +123,21 @@ impl FakePort {
     /// engine sends — this fake returns whatever string it is given. See
     /// `is_permission_denied`'s own doc for what verifying THAT would take.
     pub fn fail_next_with(&self, msg: impl Into<String>) {
-        *self.next_error.lock().unwrap() = Some(msg.into());
+        *self.next_error.lock().unwrap() = Some(Error::InvalidInput(msg.into()));
+    }
+
+    /// Make the NEXT execution fail with `egret_core::Error::Internal` — the
+    /// shape `port_impl::connect_as` produces for EGRET's own faults (resolving
+    /// the principal's email, opening the database secret) as well as for an
+    /// unreachable coordinator. Same one-shot semantics as
+    /// [`FakePort::fail_next_with`].
+    pub fn fail_next_internal(&self, msg: impl Into<String>) {
+        let msg = msg.into();
+        *self.next_error.lock().unwrap() = Some(Error::Internal(anyhow::anyhow!(msg)));
     }
 
     fn take_next_error(&self) -> Option<Error> {
-        self.next_error
-            .lock()
-            .unwrap()
-            .take()
-            .map(|msg| Error::Internal(anyhow::anyhow!(msg)))
+        self.next_error.lock().unwrap().take()
     }
 }
 
@@ -660,19 +673,36 @@ impl Fixture {
     /// built from: the cache keys on the principal, the rate limiter on the
     /// client.
     pub async fn call_as_client(&self, principal: UserId, client_id: &str, path: &str) -> Res {
+        self.call_as_client_with_headers(principal, client_id, path, &[])
+            .await
+    }
+
+    /// The same consumer call, plus arbitrary request headers.
+    ///
+    /// Exists for the headers a caller could INVENT: `actor_user_id` is a fact
+    /// only because a `TrialActor` extension cannot be set from outside the
+    /// process, and the way that stops being true is somebody reading the actor
+    /// from a header. A test that can send one is the only thing that notices.
+    pub async fn call_as_client_with_headers(
+        &self,
+        principal: UserId,
+        client_id: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+    ) -> Res {
         let token = mint(self.ws_id, principal, client_id);
         let uri = format!("/data-api/v1/{}/{path}", self.ws_slug);
+        let mut builder = Request::builder()
+            .method("GET")
+            .uri(&uri)
+            .header("authorization", format!("Bearer {token}"));
+        for (k, v) in headers {
+            builder = builder.header(*k, *v);
+        }
         let res = self
             .serving
             .clone()
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri(&uri)
-                    .header("authorization", format!("Bearer {token}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(builder.body(Body::empty()).unwrap())
             .await
             .unwrap();
         let status = res.status();

@@ -969,10 +969,19 @@ fn execution_limits(snap: &EndpointSnapshot) -> egret_query_api::Limits {
 /// (`connector/trino.rs`'s `send()`), which conflates a Ranger/file-ACL deny
 /// with a bad or expired engine token and cannot tell the two apart. Every
 /// OTHER shape — StarRocks entirely, and a Trino denial that instead surfaces
-/// as a query-level failure inside a 200 — arrives untyped, and
-/// [`is_permission_denied`] recognises THOSE by message into
-/// [`ServingError::RangerDenied`] (see that variant's doc for why the two
-/// exist side by side rather than one replacing the other).
+/// as a query-level failure inside a 200 — arrives untyped **as
+/// `Error::InvalidInput`**, and [`is_permission_denied`] recognises THOSE by
+/// message into [`ServingError::RangerDenied`] (see that variant's doc for why
+/// the two exist side by side rather than one replacing the other).
+///
+/// # The heuristic sees ONE variant, not everything that is not `Forbidden`
+///
+/// `Error::InvalidInput` is the only variant `port_impl::engine_error` produces
+/// from the engine's own message text (`EngineError::Engine`/`BadRequest`/
+/// `Limit`). Matching more broadly — every non-`Forbidden` shape, as this
+/// function once did — hands the substring test egret's OWN faults too, and
+/// `"permission denied"` is a common OS/Kubernetes/vault string. See the match
+/// arm below for what that cost.
 ///
 /// # Everything else is `Internal`, and that is now a decision rather than a gap
 ///
@@ -1021,22 +1030,39 @@ fn execution_limits(snap: &EndpointSnapshot) -> egret_query_api::Limits {
 fn engine_error(e: egret_core::Error) -> ServingError {
     match e {
         egret_core::Error::Forbidden => ServingError::DataAccessDenied,
-        other => {
-            // Computed before `other` is (possibly) moved into `internal`
-            // below — `Display`, not a consuming conversion.
-            let msg = other.to_string();
-            if is_permission_denied(&msg) {
-                // `raw` never reaches the wire — `to_wire` ignores it, same as
-                // `Internal`'s source — but it does reach `serve`'s `error =
-                // ?e` log line, so a false-positive classification still
-                // leaves the engine's actual words in the server log. See
-                // `ServingError::RangerDenied`'s doc for why that matters.
-                return ServingError::RangerDenied {
-                    raw: anyhow::anyhow!("{msg}"),
-                };
+        // **Only `InvalidInput` is message-matched, and the narrowing is the
+        // point.** `port_impl::engine_error` folds every query-level engine
+        // failure — `EngineError::Engine`, which is what a Trino denial inside a
+        // 200 (`connector/trino.rs:334`) and every StarRocks failure arrive as,
+        // plus `BadRequest` and `Limit` — into `Error::InvalidInput` carrying the
+        // engine's own words. That is the ONLY variant whose message came from
+        // the engine.
+        //
+        // `Internal` is deliberately excluded. It is produced for EGRET's own
+        // faults as well as the engine's: resolving the principal's email,
+        // opening the database secret, resolving delegation
+        // (`port_impl.rs`'s `connect_as`). `"permission denied"` is one of the
+        // most common OS, Kubernetes and vault error strings, so a secret this
+        // process could not open used to be reported as `403 ranger_denied` —
+        // sending an operator to audit Ranger grants that were fine while the
+        // actual fault was ours. A false negative here costs a generic 500 with
+        // the detail in the log; a false positive costs an operator's afternoon
+        // and points them away from the failure.
+        //
+        // `NotFound` is excluded for the same reason: `connect_as` reports a
+        // database outside the workspace as `NotFound` before it reaches an
+        // engine at all.
+        egret_core::Error::InvalidInput(msg) if is_permission_denied(&msg) => {
+            // `raw` never reaches the wire — `to_wire` ignores it, same as
+            // `Internal`'s source — but it does reach `serve`'s `error = ?e`
+            // log line, so a misclassification still leaves the engine's actual
+            // words in the server log. See `ServingError::RangerDenied`'s doc
+            // for why that matters.
+            ServingError::RangerDenied {
+                raw: anyhow::anyhow!("{msg}"),
             }
-            ServingError::internal(other)
         }
+        other => ServingError::internal(other),
     }
 }
 

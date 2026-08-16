@@ -13,11 +13,18 @@ async fn a_call_that_matches_no_endpoint_still_records_its_url() {
 
     // A path no endpoint claims: this 404s inside routing, so the row carries
     // no endpoint_id and the two new columns are the only thing identifying it.
-    let res = f.call_as_client(f.principal_a, "client-a", "no/such/endpoint").await;
+    let res = f
+        .call_as_client(f.principal_a, "client-a", "no/such/endpoint")
+        .await;
     assert_eq!(res.status, 404);
 
-    let row: (Option<uuid::Uuid>, Option<String>, Option<String>) = sqlx::query_as(
-        "SELECT endpoint_id, request_method, request_path \
+    let row: (
+        Option<uuid::Uuid>,
+        Option<String>,
+        Option<String>,
+        Option<uuid::Uuid>,
+    ) = sqlx::query_as(
+        "SELECT endpoint_id, request_method, request_path, actor_user_id \
          FROM dataapi.access_log WHERE workspace_id = $1 ORDER BY ts DESC LIMIT 1",
     )
     .bind(f.ws_id)
@@ -31,6 +38,82 @@ async fn a_call_that_matches_no_endpoint_still_records_its_url() {
         row.2.as_deref(),
         Some("no/such/endpoint"),
         "without this the row is an uncountable 404 with nothing to act on"
+    );
+    assert_eq!(
+        row.3, None,
+        "a REAL consumer call must never carry an actor: every statistic, the \
+         trial exclusion and the trial-vs-consumer distinction rest on this"
+    );
+}
+
+/// **`actor_user_id` is a fact, not a claim — the negative half.**
+///
+/// Only an in-process handler can insert a `TrialActor` extension
+/// (`try_it::TrialActor`), which is what makes "this row was a trial" something
+/// the caller cannot assert about their own call. Every existing test proves the
+/// POSITIVE half: a real trial gets an actor. Nothing proved the negative, and a
+/// refactor that read the actor from a request header would keep all forty test
+/// binaries green while inverting the property the code comments call the point
+/// of the design.
+///
+/// So this drives a REAL consumer call carrying headers a caller could invent —
+/// including the exact `x-egret-trial-actor` shape such a refactor would reach
+/// for — and asserts the column is still NULL. It would go red the moment the
+/// extension became a header.
+#[tokio::test]
+async fn a_consumer_cannot_forge_an_actor_with_a_header() {
+    let Some(f) = fixture().await else { return };
+
+    let forged = f.admin.to_string();
+    let res = f
+        .call_as_client_with_headers(
+            f.principal_a,
+            "client-a",
+            "probe",
+            &[
+                ("x-egret-trial-actor", forged.as_str()),
+                ("x-trial-actor", forged.as_str()),
+                ("trial-actor", forged.as_str()),
+                ("x-egret-actor-user-id", forged.as_str()),
+            ],
+        )
+        .await;
+    // Whatever the endpoint answered — the row is written either way, and it is
+    // the row this test is about.
+    assert!(
+        res.status.as_u16() < 500,
+        "the call must have been served, not crashed: {} {}",
+        res.status,
+        res.body
+    );
+
+    let actor: Option<uuid::Uuid> = sqlx::query_scalar(
+        "SELECT actor_user_id FROM dataapi.access_log \
+         WHERE workspace_id = $1 ORDER BY ts DESC LIMIT 1",
+    )
+    .bind(f.ws_id)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("access_log row");
+
+    assert_eq!(
+        actor, None,
+        "a header a consumer can send must never become actor_user_id — that is \
+         the whole reason TrialActor is an extension and not a header"
+    );
+
+    // And the forgery is invisible to the statistics: the call counts as
+    // consumer traffic, which it is.
+    let (status, body) = f
+        .mgmt_get(&format!(
+            "/api/ws/{}/data-api/activity/summary?range=24h",
+            f.ws_slug
+        ))
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        body["total"]["calls"], 1,
+        "a call that claimed to be a trial must still be counted: {body}"
     );
 }
 
@@ -62,7 +145,10 @@ async fn ws_admin_can_invoke_without_any_object_grant() {
     .await
     .expect("pdp answered");
 
-    assert!(allowed, "ws_admin reaches invoke through the workspace cascade");
+    assert!(
+        allowed,
+        "ws_admin reaches invoke through the workspace cascade"
+    );
 }
 
 #[tokio::test]
@@ -125,7 +211,8 @@ async fn the_unmatched_bucket_is_not_conflated_with_the_grand_total() {
     // the grand total carry a NULL endpoint_id; only `grouping()` tells them
     // apart — see `ActivityStore::summary`'s doc comment.
     for _ in 0..3 {
-        f.log_row_for(None, None, 404, 5, false, Some("not_found")).await;
+        f.log_row_for(None, None, 404, 5, false, Some("not_found"))
+            .await;
     }
 
     let (status, body) = f
@@ -194,7 +281,10 @@ async fn trial_runs_appear_only_when_asked_for() {
     f.log_row_as_trial(200, 10, f.admin).await;
 
     let (_, without) = f
-        .mgmt_get(&format!("/api/ws/{}/data-api/activity/calls?range=24h", f.ws_slug))
+        .mgmt_get(&format!(
+            "/api/ws/{}/data-api/activity/calls?range=24h",
+            f.ws_slug
+        ))
         .await;
     assert_eq!(without.as_array().unwrap().len(), 1);
 
