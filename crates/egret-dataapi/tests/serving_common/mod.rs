@@ -680,6 +680,18 @@ impl Fixture {
         self.mgmt_send("GET", path, None).await
     }
 
+    /// A POST through the management router, with the session cookie
+    /// [`Fixture::mgmt_send`] already attaches. Needed to republish an
+    /// EXISTING endpoint id a second time (producing version 2) rather than
+    /// creating a fresh one, which [`Fixture::publish`] always does.
+    pub async fn mgmt_post(
+        &self,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) -> (StatusCode, serde_json::Value) {
+        self.mgmt_send("POST", path, body).await
+    }
+
     /// Insert a row directly into `dataapi.access_log`, bypassing the real
     /// serving path, so a test can shape a population — three successes and
     /// seven failures, say — without driving ten real requests through it.
@@ -689,8 +701,43 @@ impl Fixture {
     /// `cacheable_calls` JOIN reads `dataapi.endpoint_versions` through.
     /// `actor_user_id` is left NULL: this is a real call, not a trial — see
     /// [`Fixture::log_row_as_trial`] for that.
+    ///
+    /// A thin specialisation of [`Fixture::log_row_for`], fixed to the
+    /// fixture's own endpoint at its only version — see that function for a
+    /// row against an EXPLICIT endpoint/version, which this can't produce.
     pub async fn log_row(
         &self,
+        status_code: i32,
+        duration_ms: i32,
+        cache_hit: bool,
+        error_code: Option<&str>,
+    ) {
+        self.log_row_for(
+            Some(self.endpoint_id),
+            Some(1),
+            status_code,
+            duration_ms,
+            cache_hit,
+            error_code,
+        )
+        .await
+    }
+
+    /// The general form: an explicit `endpoint_id`/`version` rather than
+    /// always the fixture's own `/probe` at its only version.
+    ///
+    /// Exists for two shapes [`Fixture::log_row`] cannot produce: a row that
+    /// never resolved ANY endpoint (`endpoint_id: None` — the unmatched-404
+    /// shape `access_log.rs` describes, which carries a NULL `endpoint_id`
+    /// exactly like the grand total does — see `ActivityStore::summary`'s
+    /// `grouping()` doc comment for why telling the two apart is the point of
+    /// that query), and a row against one of SEVERAL versions of one endpoint
+    /// (needed to prove `cacheable_calls` joins the version the row recorded
+    /// rather than the endpoint's current config).
+    pub async fn log_row_for(
+        &self,
+        endpoint_id: Option<Uuid>,
+        version: Option<i32>,
         status_code: i32,
         duration_ms: i32,
         cache_hit: bool,
@@ -700,10 +747,11 @@ impl Fixture {
             "INSERT INTO dataapi.access_log \
                (workspace_id, endpoint_id, version, status_code, duration_ms, \
                 cache_hit, error_code, request_id) \
-             VALUES ($1, $2, 1, $3, $4, $5, $6, $7)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         )
         .bind(self.ws_id)
-        .bind(self.endpoint_id)
+        .bind(endpoint_id)
+        .bind(version)
         .bind(status_code)
         .bind(duration_ms)
         .bind(cache_hit)

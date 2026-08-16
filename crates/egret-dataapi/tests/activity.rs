@@ -111,3 +111,112 @@ async fn trial_runs_are_excluded_from_statistics() {
 
     assert_eq!(body["total"]["calls"], 1, "the trial must not be counted");
 }
+
+#[tokio::test]
+async fn the_unmatched_bucket_is_not_conflated_with_the_grand_total() {
+    let Some(f) = fixture().await else { return };
+
+    // Two calls that matched the fixture's real endpoint...
+    f.log_row(200, 10, false, None).await;
+    f.log_row(200, 10, false, None).await;
+    // ...and three calls that never resolved ANY endpoint — endpoint_id NULL,
+    // exactly the shape `a_call_that_matches_no_endpoint_still_records_its_url`
+    // proves the serving path writes for a genuine 404. Both this bucket and
+    // the grand total carry a NULL endpoint_id; only `grouping()` tells them
+    // apart — see `ActivityStore::summary`'s doc comment.
+    for _ in 0..3 {
+        f.log_row_for(None, None, 404, 5, false, Some("not_found")).await;
+    }
+
+    let (status, body) = f
+        .mgmt_get(&format!(
+            "/api/ws/{}/data-api/activity/summary?range=24h",
+            f.ws_slug
+        ))
+        .await;
+    assert_eq!(status, 200);
+
+    // The grand total must count every row, unmatched included — reading NULL
+    // as "this is the total" would instead make the total EQUAL the unmatched
+    // bucket, or drop one of the two NULL-endpoint_id rows outright.
+    assert_eq!(body["total"]["calls"], 5);
+    assert_eq!(body["total"]["errors"], 3);
+
+    let endpoints = body["endpoints"].as_array().expect("endpoints array");
+    let matched = endpoints
+        .iter()
+        .find(|r| r["endpoint_id"] == serde_json::json!(f.endpoint_id))
+        .expect("the matched endpoint's own row is present");
+    assert_eq!(
+        matched["calls"], 2,
+        "the unmatched rows must not be absorbed into the matched endpoint's row"
+    );
+
+    let unmatched = endpoints
+        .iter()
+        .find(|r| r["endpoint_id"].is_null())
+        .expect(
+            "the unmatched bucket must appear as its OWN entry in `endpoints`, \
+             distinct from `total`",
+        );
+    assert_eq!(unmatched["calls"], 3);
+    assert_eq!(unmatched["errors"], 3);
+}
+
+#[tokio::test]
+async fn cacheable_calls_reads_the_versions_own_snapshot_not_the_live_config() {
+    let Some(f) = fixture().await else { return };
+
+    // Publish once with caching OFF — this becomes version 1.
+    let ep = f
+        .publish(
+            "/versioned",
+            f.database_id,
+            serde_json::json!({ "enabled": false }),
+            serde_json::json!({}),
+        )
+        .await;
+
+    // Flip the DRAFT's cache on and republish the SAME endpoint id. Publish
+    // freezes whatever `dataapi.endpoints.cache` holds at that moment into the
+    // NEW version's snapshot (lifecycle.rs), so this produces version 2 with
+    // caching ON while version 1's frozen snapshot still says OFF.
+    sqlx::query("UPDATE dataapi.endpoints SET cache = $1 WHERE id = $2")
+        .bind(serde_json::json!({ "enabled": true, "ttl_seconds": 60, "scope": "per_principal" }))
+        .bind(ep)
+        .execute(&f.db.pool)
+        .await
+        .expect("flip cache on");
+    let (status, body) = f
+        .mgmt_post(
+            &format!("/api/ws/{}/data-api/endpoints/{ep}/publish", f.ws_slug),
+            Some(serde_json::json!({})),
+        )
+        .await;
+    assert_eq!(status, 200, "republish failed: {body}");
+
+    // One successful call against EACH version. Same endpoint, same status,
+    // same duration — the only thing that differs is which version's snapshot
+    // the row is attributed to.
+    f.log_row_for(Some(ep), Some(1), 200, 10, false, None).await;
+    f.log_row_for(Some(ep), Some(2), 200, 10, false, None).await;
+
+    let (status, body) = f
+        .mgmt_get(&format!(
+            "/api/ws/{}/data-api/activity/summary?range=24h",
+            f.ws_slug
+        ))
+        .await;
+    assert_eq!(status, 200);
+
+    assert_eq!(
+        body["total"]["calls"], 2,
+        "a join fanning out across an endpoint's several versions would \
+         double-count this row and everything else in the total"
+    );
+    assert_eq!(
+        body["total"]["cacheable_calls"], 1,
+        "only the version-2 call ran on a cache-enabled snapshot — the version-1 \
+         call must NOT count just because the endpoint is cache-on NOW"
+    );
+}
