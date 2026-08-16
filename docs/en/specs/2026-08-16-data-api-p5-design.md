@@ -415,6 +415,12 @@ enforcement, so an admin must also grant that service account in Ranger.
 2. **The `Access` section** — the *current* status, per §6.2.
 3. **Engine permission errors are mapped** to a message naming the missing step, instead of
    leaking the raw engine error. Spec §5.3 already requires this and it does not exist yet.
+   The wire code is the base spec §7's **`data_access_denied`** — one code, not a
+   Ranger-specific one, because the typed recognition (Trino's coordinator answering HTTP
+   401/403) cannot tell a policy deny from a bad or expired engine credential, so a code named
+   for Ranger would state the wrong cause in half the cases it fires. The message therefore
+   names both causes and the remedy for each, and the UI must not promise the reader that
+   Ranger is the problem.
 
 ### 6.4 Feature-flag warning goes at the toggle
 

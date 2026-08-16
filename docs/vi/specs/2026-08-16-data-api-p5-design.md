@@ -409,7 +409,12 @@ thực thi, nên admin còn phải cấp quyền cho service account đó trong 
 1. **Dialog publish** — nói điều đó *trước* khi endpoint lên live.
 2. **Mục `Access`** — trạng thái *hiện tại*, theo §6.2.
 3. **Lỗi permission từ engine được map** thành thông điệp nêu đúng bước còn thiếu, thay vì rò
-   lỗi engine thô. Spec §5.3 đã yêu cầu điều này và nó vẫn chưa tồn tại.
+   lỗi engine thô. Spec §5.3 đã yêu cầu điều này và nó vẫn chưa tồn tại. Code trên wire là
+   **`data_access_denied`** của §7 spec nền — MỘT code, không phải một code riêng cho Ranger,
+   vì cách nhận diện có kiểu (coordinator Trino trả HTTP 401/403) không tách được "policy từ
+   chối" với "credential engine sai/hết hạn", nên một code đặt tên theo Ranger sẽ nói sai
+   nguyên nhân trong một nửa số lần nó bắn. Vì vậy message nêu cả hai nguyên nhân kèm cách sửa
+   cho từng cái, và UI không được hứa với người đọc rằng Ranger là vấn đề.
 
 ### 6.4 Cảnh báo feature-flag đặt ngay tại toggle
 

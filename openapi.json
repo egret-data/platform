@@ -25086,7 +25086,7 @@
             }
           },
           "403": {
-            "description": "`ranger_denied` — the engine denied the data to this service account, recognised from its own failure message (the code a live Trino/StarRocks denial actually produces); `data_access_denied` — the same, from a connector that types the failure instead, which neither shipped one does today",
+            "description": "`data_access_denied` — the engine refused this service account the underlying data, either because it lacks a data permission (a Ranger grant, say) or because its engine credential is bad or expired; one code, because the two recognitions available (Trino's typed 401/403 from the coordinator, and every other engine failure matched on its own message) cannot tell those causes apart. `not_granted` — egret refused the call because the service account holds no invoke grant on this endpoint",
             "content": {
               "application/json": {
                 "schema": {
@@ -25199,7 +25199,7 @@
             }
           },
           "403": {
-            "description": "`ranger_denied` — the engine denied the data to this service account, recognised from its own failure message (the code a live Trino/StarRocks denial actually produces); `data_access_denied` — the same, from a connector that types the failure instead, which neither shipped one does today",
+            "description": "`data_access_denied` — the engine refused this service account the underlying data, either because it lacks a data permission (a Ranger grant, say) or because its engine credential is bad or expired; one code, because the two recognitions available (Trino's typed 401/403 from the coordinator, and every other engine failure matched on its own message) cannot tell those causes apart. `not_granted` — egret refused the call because the service account holds no invoke grant on this endpoint",
             "content": {
               "application/json": {
                 "schema": {

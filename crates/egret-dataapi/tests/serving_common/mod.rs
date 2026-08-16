@@ -119,7 +119,7 @@ impl FakePort {
     /// trip one.
     ///
     /// This only proves the MAPPING (a message containing e.g. `"Access
-    /// Denied"` becomes `ranger_denied`), not that the message is one a real
+    /// Denied"` becomes `data_access_denied`), not that the message is one a real
     /// engine sends — this fake returns whatever string it is given. See
     /// `is_permission_denied`'s own doc for what verifying THAT would take.
     pub fn fail_next_with(&self, msg: impl Into<String>) {

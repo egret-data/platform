@@ -1077,32 +1077,43 @@ async fn an_engine_permission_error_names_the_missing_step() {
     let res = f.call_as_client(f.principal_a, "client-a", "probe").await;
 
     assert_eq!(res.status, StatusCode::FORBIDDEN, "{}", res.body);
-    assert_eq!(res.body["error"]["code"], "ranger_denied");
-    // The message must point at the grant, not at the SQL. An author reading a
-    // raw engine error debugs their query — which is correct, but not here:
-    // the query was fine, and the missing piece is a Ranger grant.
+    // The SAME code the typed `Error::Forbidden` path produces
+    // (`a_second_principal_is_refused_the_same_way` above). The two
+    // recognitions were once two wire codes; one of them was named for Ranger
+    // and would have stated the wrong cause whenever the real fault was a bad
+    // engine credential, which the typed path cannot distinguish. This
+    // assertion is what proves the heuristic still maps at all.
+    assert_eq!(res.body["error"]["code"], "data_access_denied");
+    // The message must point at the permission, not at the SQL. An author
+    // reading a raw engine error debugs their query — which is correct, but not
+    // here: the query was fine, and the missing piece is a data permission or a
+    // working engine credential.
     let msg = res.body["error"]["message"].as_str().unwrap();
     assert!(msg.contains("service account"), "{msg}");
     assert!(
         !msg.contains("Cannot select from table"),
         "the raw engine error must not be echoed: {msg}"
     );
+    assert!(
+        !msg.contains("sales"),
+        "a table name drawn from the engine's message must not reach the wire: {msg}"
+    );
 }
 
-/// **Egret's OWN fault must never be reported as a Ranger denial**, however its
-/// message reads.
+/// **Egret's OWN fault must never be reported as a data-access denial**,
+/// however its message reads.
 ///
 /// `port_impl::connect_as` produces `Error::Internal` for failures that are
 /// entirely ours — resolving the principal's email, opening the database secret —
 /// and `"permission denied"` is one of the most common OS, Kubernetes and vault
 /// error strings there is. While `engine_error` message-matched everything that
 /// was not `Error::Forbidden`, a secret this process could not open answered
-/// `403 ranger_denied` and sent an operator to audit grants that were fine.
+/// `403 data_access_denied` and sent an operator to audit grants that were fine.
 ///
 /// The mutation that fails this test: widen `engine_error`'s guarded arm back to
 /// `other => { if is_permission_denied(&other.to_string()) { … } }`.
 #[tokio::test]
-async fn an_internal_fault_is_never_classified_as_a_ranger_denial() {
+async fn an_internal_fault_is_never_classified_as_a_data_access_denial() {
     let Some(f) = serving_common::fixture().await else {
         eprintln!("DATABASE_URL unset — skipping");
         return;
@@ -1117,7 +1128,7 @@ async fn an_internal_fault_is_never_classified_as_a_ranger_denial() {
     assert_eq!(
         res.status,
         StatusCode::INTERNAL_SERVER_ERROR,
-        "our fault is a 500, not a 403 pointing at Ranger: {}",
+        "our fault is a 500, not a 403 pointing at the engine's permissions: {}",
         res.body
     );
     assert_eq!(res.body["error"]["code"], "internal");

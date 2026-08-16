@@ -304,7 +304,7 @@ impl utoipa::Modify for BearerAddon {
         (status = 200, description = "Rows from the published snapshot", body = ServingResponse),
         (status = 400, description = "`row_limit_exceeded` — the result exceeded the endpoint's row cap; `param_missing` — a required parameter was not supplied; `param_invalid` — a supplied parameter failed its declared type, its `allowed` list, or was repeated where one value is required. Neither parameter error names the parameter: the name is the author's, and naming it turns the error surface into a directory of what an endpoint declares", body = ServingErrorBody),
         (status = 401, description = "`key_invalid` — bearer token missing, expired, or not for this audience", body = ServingErrorBody),
-        (status = 403, description = "`ranger_denied` — the engine denied the data to this service account, recognised from its own failure message (the code a live Trino/StarRocks denial actually produces); `data_access_denied` — the same, from a connector that types the failure instead, which neither shipped one does today", body = ServingErrorBody),
+        (status = 403, description = "`data_access_denied` — the engine refused this service account the underlying data, either because it lacks a data permission (a Ranger grant, say) or because its engine credential is bad or expired; one code, because the two recognitions available (Trino's typed 401/403 from the coordinator, and every other engine failure matched on its own message) cannot tell those causes apart. `not_granted` — egret refused the call because the service account holds no invoke grant on this endpoint", body = ServingErrorBody),
         (status = 404, description = "`not_found` — no such live endpoint in this workspace", body = ServingErrorBody),
         (status = 429, description = "`rate_limited` — a published rate limit was exceeded; `Retry-After` states when the bucket refills", body = ServingErrorBody),
         (status = 500, description = "`internal` — an egret-side fault; quote `request_id` to support", body = ServingErrorBody),
@@ -335,7 +335,7 @@ async fn serve_get(
         (status = 200, description = "Rows from the published snapshot", body = ServingResponse),
         (status = 400, description = "`row_limit_exceeded` — the result exceeded the endpoint's row cap; `param_missing` — a required parameter was not supplied; `param_invalid` — a supplied parameter failed its declared type, its `allowed` list, or was repeated where one value is required. Neither parameter error names the parameter: the name is the author's, and naming it turns the error surface into a directory of what an endpoint declares", body = ServingErrorBody),
         (status = 401, description = "`key_invalid` — bearer token missing, expired, or not for this audience", body = ServingErrorBody),
-        (status = 403, description = "`ranger_denied` — the engine denied the data to this service account, recognised from its own failure message (the code a live Trino/StarRocks denial actually produces); `data_access_denied` — the same, from a connector that types the failure instead, which neither shipped one does today", body = ServingErrorBody),
+        (status = 403, description = "`data_access_denied` — the engine refused this service account the underlying data, either because it lacks a data permission (a Ranger grant, say) or because its engine credential is bad or expired; one code, because the two recognitions available (Trino's typed 401/403 from the coordinator, and every other engine failure matched on its own message) cannot tell those causes apart. `not_granted` — egret refused the call because the service account holds no invoke grant on this endpoint", body = ServingErrorBody),
         (status = 404, description = "`not_found` — no such live endpoint in this workspace", body = ServingErrorBody),
         (status = 429, description = "`rate_limited` — a published rate limit was exceeded; `Retry-After` states when the bucket refills", body = ServingErrorBody),
         (status = 500, description = "`internal` — an egret-side fault; quote `request_id` to support", body = ServingErrorBody),
@@ -961,18 +961,19 @@ fn execution_limits(snap: &EndpointSnapshot) -> egret_query_api::Limits {
 
 /// Map an engine failure onto the serving vocabulary.
 ///
-/// The Ranger denial is the one given its own answer, because it is the one
-/// the operator can act on and the one that must never be reported as bad
-/// input — recognised two ways. `egret_core::Error::Forbidden` is typed and
-/// becomes [`ServingError::DataAccessDenied`]; Trino's connector produces it
+/// The data denial is the one given its own answer, because it is the one the
+/// operator can act on and the one that must never be reported as bad input —
+/// recognised two ways, into ONE [`ServingError::DataAccessDenied`].
+/// `egret_core::Error::Forbidden` is typed; Trino's connector produces it
 /// whenever the COORDINATOR's own HTTP response is 401/403
 /// (`connector/trino.rs`'s `send()`), which conflates a Ranger/file-ACL deny
-/// with a bad or expired engine token and cannot tell the two apart. Every
+/// with a bad or expired engine credential and cannot tell the two apart. Every
 /// OTHER shape — StarRocks entirely, and a Trino denial that instead surfaces
 /// as a query-level failure inside a 200 — arrives untyped **as
 /// `Error::InvalidInput`**, and [`is_permission_denied`] recognises THOSE by
-/// message into [`ServingError::RangerDenied`] (see that variant's doc for why
-/// the two exist side by side rather than one replacing the other).
+/// message. Both land on the same variant and the same wire code: see that
+/// variant's doc for why the surviving code is the neutral `data_access_denied`
+/// and not one named for Ranger.
 ///
 /// # The heuristic sees ONE variant, not everything that is not `Forbidden`
 ///
@@ -1029,7 +1030,10 @@ fn execution_limits(snap: &EndpointSnapshot) -> egret_query_api::Limits {
 /// would not be. See `ServingError`'s comment.
 fn engine_error(e: egret_core::Error) -> ServingError {
     match e {
-        egret_core::Error::Forbidden => ServingError::DataAccessDenied,
+        // `raw: None` is a statement, not an omission: `Error::Forbidden` is a
+        // unit variant, so there is no engine text to keep. Naming the field
+        // here forces any future edit to decide rather than default.
+        egret_core::Error::Forbidden => ServingError::DataAccessDenied { raw: None },
         // **Only `InvalidInput` is message-matched, and the narrowing is the
         // point.** `port_impl::engine_error` folds every query-level engine
         // failure — `EngineError::Engine`, which is what a Trino denial inside a
@@ -1043,8 +1047,8 @@ fn engine_error(e: egret_core::Error) -> ServingError {
         // opening the database secret, resolving delegation
         // (`port_impl.rs`'s `connect_as`). `"permission denied"` is one of the
         // most common OS, Kubernetes and vault error strings, so a secret this
-        // process could not open used to be reported as `403 ranger_denied` —
-        // sending an operator to audit Ranger grants that were fine while the
+        // process could not open used to be reported as `403 data_access_denied`
+        // — sending an operator to audit engine grants that were fine while the
         // actual fault was ours. A false negative here costs a generic 500 with
         // the detail in the log; a false positive costs an operator's afternoon
         // and points them away from the failure.
@@ -1056,10 +1060,10 @@ fn engine_error(e: egret_core::Error) -> ServingError {
             // `raw` never reaches the wire — `to_wire` ignores it, same as
             // `Internal`'s source — but it does reach `serve`'s `error = ?e`
             // log line, so a misclassification still leaves the engine's actual
-            // words in the server log. See `ServingError::RangerDenied`'s doc
-            // for why that matters.
-            ServingError::RangerDenied {
-                raw: anyhow::anyhow!("{msg}"),
+            // words in the server log. See `ServingError::DataAccessDenied`'s
+            // doc for why that matters.
+            ServingError::DataAccessDenied {
+                raw: Some(anyhow::anyhow!("{msg}")),
             }
         }
         other => ServingError::internal(other),
