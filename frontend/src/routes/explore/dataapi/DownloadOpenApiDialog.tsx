@@ -32,7 +32,12 @@ export function DownloadOpenApiDialog({ ws, open, onOpenChange, endpointId }: {
    *  the list page, which asks for the aggregate document. */
   endpointId?: string;
 }) {
-  const { data: envelope, isLoading: accountsLoading } = useDataApiListServiceAccounts(ws);
+  const {
+    data: envelope,
+    isLoading: accountsLoading,
+    isError: accountsError,
+    error: accountsQueryError,
+  } = useDataApiListServiceAccounts(ws);
   const accounts = envelope?.status === 200 ? envelope.data : [];
   const [accountId, setAccountId] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -94,8 +99,20 @@ export function DownloadOpenApiDialog({ ws, open, onOpenChange, endpointId }: {
               ))}
             </SelectContent>
           </Select>
-          {!accountsLoading && accounts.length === 0 && (
-            <p className="text-xs text-muted-foreground">No service accounts yet — create one under Clients.</p>
+          {/* Same rule as `TryIt.tsx`'s picker: a failed fetch must not be
+              reported as an empty workspace. Both surfaces read the same query,
+              so they fail together — and would both have told the user to
+              create something that already exists. */}
+          {accountsError ? (
+            <p className="text-xs text-destructive">
+              Could not load service accounts.{" "}
+              {(accountsQueryError as unknown as Error)?.message ?? "Try again in a moment."}
+            </p>
+          ) : (
+            !accountsLoading &&
+            accounts.length === 0 && (
+              <p className="text-xs text-muted-foreground">No service accounts yet — create one under Clients.</p>
+            )
           )}
         </div>
         {error && (

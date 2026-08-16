@@ -1,16 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, NavLink, Outlet, useOutletContext, useParams } from "react-router-dom";
-import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
-import {
-  getDataApiGetEndpointQueryKey,
-  getDataApiListEndpointsQueryKey,
-  useDataApiGetEndpoint,
-  useDataApiUpdateEndpoint,
-} from "@/api/generated/data-api/data-api";
+import { useDataApiGetEndpoint } from "@/api/generated/data-api/data-api";
+// Save's invalidation (this record + the list its Name column feeds) lives in
+// the wrapper, next to every other Data API mutation — see `src/api/dataApi.ts`.
+import { useUpdateEndpoint } from "@/api/dataApi";
 import type { DataApiEndpointDto, UpdateEndpointInput } from "@/api/generated/model";
 import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
 
@@ -157,15 +154,7 @@ function EndpointDetailInner({ ws, id }: { ws: string; id: string }) {
   });
   const endpoint = envelope?.status === 200 ? envelope.data : undefined;
 
-  const qc = useQueryClient();
-  const updateMutation = useDataApiUpdateEndpoint({
-    mutation: {
-      onSuccess: () => {
-        qc.invalidateQueries({ queryKey: getDataApiGetEndpointQueryKey(ws, id) });
-        qc.invalidateQueries({ queryKey: getDataApiListEndpointsQueryKey(ws) });
-      },
-    },
-  });
+  const updateMutation = useUpdateEndpoint();
 
   const [form, setFormState] = useState<EndpointFormState | null>(null);
   const [baselineForm, setBaselineForm] = useState<EndpointFormState | null>(null);

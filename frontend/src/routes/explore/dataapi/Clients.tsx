@@ -16,13 +16,20 @@ import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { RelativeTime } from "@/components/explore/RelativeTime";
 import {
   getDataApiListClientsQueryKey,
-  useDataApiCreateServiceAccount,
-  useDataApiDeleteServiceAccount,
   useDataApiIssueClient,
   useDataApiListClients,
   useDataApiListServiceAccounts,
   useDataApiRevokeClient,
 } from "@/api/generated/data-api/data-api";
+// The service-account mutations come from the hand-written wrapper, which owns
+// their invalidation (`src/api/dataApi.ts`). That key is shared by five
+// surfaces — this table, Try-it's picker, the Access checklist, the OpenAPI
+// download dialog and the Response preview — so a create wired straight to the
+// generated hook left a new account missing from all five for 30 seconds.
+// Issue/revoke CLIENT stay generated + invalidated locally below: their key is
+// per service account and `revoke`'s variables carry the client id, not the
+// owning account's, so it cannot be derived the way the wrapper derives its.
+import { useCreateServiceAccount, useDeleteServiceAccount } from "@/api/dataApi";
 import type { DataApiClientDto, DataApiNewClientDto, DataApiServiceAccountDto } from "@/api/generated/model";
 
 /**
@@ -47,8 +54,8 @@ export default function Clients() {
   const { data: envelope, isLoading, isError, error } = useDataApiListServiceAccounts(ws);
   const accounts = useMemo(() => (envelope?.status === 200 ? envelope.data : []), [envelope]);
 
-  const createMutation = useDataApiCreateServiceAccount();
-  const deleteMutation = useDataApiDeleteServiceAccount();
+  const createMutation = useCreateServiceAccount();
+  const deleteMutation = useDeleteServiceAccount();
 
   const [createOpen, setCreateOpen] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<DataApiServiceAccountDto | null>(null);
@@ -99,9 +106,12 @@ export default function Clients() {
   ];
 
   return (
-    <div className="p-4">
+    // The shell (`DataApiLayout`) owns the page's `p-6` and its single `h1`;
+    // this section adds neither, same as every page nested under
+    // `WorkspaceSettings`.
+    <div>
       <div className="mb-4 flex items-center justify-between">
-        <h1 className="text-lg font-semibold">Clients</h1>
+        <h2 className="text-lg font-semibold">Clients</h2>
         <Button onClick={() => setCreateOpen(true)}>+ Service account</Button>
       </div>
 
@@ -475,7 +485,7 @@ function CreateServiceAccountDialog({ ws, open, onOpenChange, create }: {
   ws: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  create: ReturnType<typeof useDataApiCreateServiceAccount>;
+  create: ReturnType<typeof useCreateServiceAccount>;
 }) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");

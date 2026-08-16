@@ -21,13 +21,17 @@ import { FolderHeaderRow } from "@/components/explore/FolderHeaderRow";
 import { groupByFolder, useCollapsed } from "@/components/explore/folders";
 import { useFoldersFoldersList } from "@/api/generated/folders/folders";
 import { useDatabases, type DatabaseConn } from "@/api/databases";
+import { useDataApiListEndpoints } from "@/api/generated/data-api/data-api";
+// Mutations come from the hand-written wrapper, never from the generated hooks:
+// the wrapper is what owns the cache invalidation (see `src/api/dataApi.ts`).
+// Wired to the generated hook directly, "Endpoint disabled" toasts over a row
+// whose badge still reads Live for the next 30 seconds.
 import {
-  useDataApiCreateEndpoint,
-  useDataApiDeleteEndpoint,
-  useDataApiDisableEndpoint,
-  useDataApiEnableEndpoint,
-  useDataApiListEndpoints,
-} from "@/api/generated/data-api/data-api";
+  useCreateEndpoint,
+  useDeleteEndpoint,
+  useDisableEndpoint,
+  useEnableEndpoint,
+} from "@/api/dataApi";
 import type { DataApiEndpointDto } from "@/api/generated/model";
 import { DownloadOpenApiDialog } from "./DownloadOpenApiDialog";
 
@@ -88,10 +92,10 @@ export default function Endpoints() {
 
   const { data: databases } = useDatabases(ws);
 
-  const createMutation = useDataApiCreateEndpoint();
-  const deleteMutation = useDataApiDeleteEndpoint();
-  const disableMutation = useDataApiDisableEndpoint();
-  const enableMutation = useDataApiEnableEndpoint();
+  const createMutation = useCreateEndpoint();
+  const deleteMutation = useDeleteEndpoint();
+  const disableMutation = useDisableEndpoint();
+  const enableMutation = useEnableEndpoint();
 
   const collapse = useCollapsed(`folders:${ws}:${FOLDER_KIND}`);
 
@@ -163,7 +167,12 @@ export default function Endpoints() {
         <RowActionsMenu>
           <DropdownMenuItem onClick={() => nav(`/explore/${ws}/data-api/endpoints/${e.id}`)}>Open</DropdownMenuItem>
           {e.state === "live" && (
+            // `disabled` while in flight, like every other mutation trigger in
+            // this feature: the menu closes on click but the row's menu can be
+            // reopened before the request settles, and a second Disable on an
+            // already-disabled endpoint is a 409 the author never asked for.
             <DropdownMenuItem
+              disabled={disableMutation.isPending}
               onClick={() =>
                 disableMutation.mutateAsync({ workspace: ws, id: e.id })
                   .then(() => toast.success("Endpoint disabled"))
@@ -183,10 +192,10 @@ export default function Endpoints() {
             // honour it, but nothing stops a click from reaching `onClick`
             // in an environment that doesn't apply CSS at all (jsdom).
             <DropdownMenuItem
-              disabled={e.live_version_id == null}
+              disabled={e.live_version_id == null || enableMutation.isPending}
               title={e.live_version_id == null ? "This endpoint has never been published; publish it instead." : undefined}
               onClick={() => {
-                if (e.live_version_id == null) return;
+                if (e.live_version_id == null || enableMutation.isPending) return;
                 enableMutation.mutateAsync({ workspace: ws, id: e.id })
                   .then(() => toast.success("Endpoint enabled"))
                   .catch((err) => toast.error(String(err)));
@@ -204,10 +213,15 @@ export default function Endpoints() {
     </tr>
   );
 
+  // No padding of its own: `DataApiLayout` already wraps the Outlet in `p-6`,
+  // and a nested `p-4` here made this page carry 40px where the endpoint
+  // detail route carries 24. `h2`, not `h1`, for the same reason every page
+  // nested under `WorkspaceSettings` uses one — the shell owns the page's
+  // single `h1`.
   return (
-    <div className="p-4">
+    <div>
       <div className="mb-4 flex items-center justify-between">
-        <h1 className="text-lg font-semibold">Endpoints</h1>
+        <h2 className="text-lg font-semibold">Endpoints</h2>
         <div className="flex items-center gap-2">
           <Button variant="outline" onClick={() => setDownloadOpen(true)}>Download OpenAPI</Button>
           <Button onClick={() => setCreateOpen(true)}>+ Endpoint</Button>
@@ -335,7 +349,7 @@ function CreateEndpointDialog({ ws, open, onOpenChange, databases, create, onCre
   open: boolean;
   onOpenChange: (open: boolean) => void;
   databases: DatabaseConn[];
-  create: ReturnType<typeof useDataApiCreateEndpoint>;
+  create: ReturnType<typeof useCreateEndpoint>;
   onCreated: (id: string) => void;
 }) {
   const [name, setName] = useState("");

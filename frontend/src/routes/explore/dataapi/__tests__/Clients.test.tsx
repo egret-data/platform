@@ -64,7 +64,7 @@ const revokeMutateAsync = vi.fn();
 
 function renderClients() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(
+  const utils = render(
     <QueryClientProvider client={qc}>
       <MemoryRouter initialEntries={["/explore/eng/data-api/clients"]}>
         <Routes>
@@ -73,6 +73,7 @@ function renderClients() {
       </MemoryRouter>
     </QueryClientProvider>,
   );
+  return { ...utils, qc };
 }
 
 beforeEach(() => {
@@ -105,6 +106,14 @@ beforeEach(() => {
   vi.mocked(api.useDataApiRevokeClient).mockReturnValue(
     { mutateAsync: revokeMutateAsync, isPending: false } as unknown as
       ReturnType<typeof api.useDataApiRevokeClient>,
+  );
+
+  // Automocking turns the query-key builder into a `vi.fn()` returning
+  // `undefined`; an argument-sensitive fake is what lets a test tell "the
+  // service-account list was invalidated" from "something was".
+  vi.mocked(api.getDataApiListServiceAccountsQueryKey).mockImplementation(
+    (ws) => ["dataApiListServiceAccounts", ws] as unknown as
+      ReturnType<typeof api.getDataApiListServiceAccountsQueryKey>,
   );
 
   createAccountMutateAsync.mockResolvedValue({
@@ -275,5 +284,82 @@ describe("Clients", () => {
         data: { name: "new-bot", description: undefined },
       });
     });
+  });
+});
+
+/**
+ * Cache invalidation (final-review finding, Important #1).
+ *
+ * The service-account list key is shared by FIVE surfaces — this table,
+ * Try-it's "Run as" picker, the Access checklist, the OpenAPI download dialog
+ * and the Response preview. With `staleTime: 30000` and no `onSuccess` on the
+ * generated hooks, a newly created account was missing from all five for
+ * thirty seconds, and a deleted one stayed in all five.
+ *
+ * These drive the `onSuccess` the page's mutations were constructed with —
+ * the one `src/api/dataApi.ts` attaches — the same way `EndpointDetail.test.tsx`
+ * pins Save's.
+ */
+describe("Clients — cache invalidation", () => {
+  const RESULT = { status: 200, data: {}, headers: new Headers() } as never;
+
+  async function fireSuccess(
+    hook: { mock: { calls: unknown[][] } },
+    variables: Record<string, unknown>,
+  ) {
+    const opts = hook.mock.calls.at(-1)?.[0] as
+      | { mutation?: { onSuccess?: (...a: never[]) => unknown } }
+      | undefined;
+    await opts?.mutation?.onSuccess?.(
+      RESULT,
+      variables as never,
+      undefined as never,
+      undefined as never,
+    );
+  }
+
+  it("creating a service account invalidates the list every picker on this feature reads", async () => {
+    const { qc } = renderClients();
+    const spy = vi.spyOn(qc, "invalidateQueries");
+    await fireSuccess(vi.mocked(api.useDataApiCreateServiceAccount), { workspace: "eng", data: {} });
+    expect(spy).toHaveBeenCalledWith(
+      expect.objectContaining({ queryKey: ["dataApiListServiceAccounts", "eng"] }),
+    );
+  });
+
+  it("deleting a service account invalidates that same list, so the row leaves the table", async () => {
+    const { qc } = renderClients();
+    const spy = vi.spyOn(qc, "invalidateQueries");
+    await fireSuccess(vi.mocked(api.useDataApiDeleteServiceAccount), { workspace: "eng", id: "sa-1" });
+    expect(spy).toHaveBeenCalledWith(
+      expect.objectContaining({ queryKey: ["dataApiListServiceAccounts", "eng"] }),
+    );
+  });
+
+  // The workspace is read from the mutation VARIABLES, never from a separate
+  // hook argument that could drift from where the write went.
+  it("invalidates the list of the workspace the write actually went to", async () => {
+    const { qc } = renderClients();
+    const spy = vi.spyOn(qc, "invalidateQueries");
+    await fireSuccess(vi.mocked(api.useDataApiCreateServiceAccount), { workspace: "other-ws", data: {} });
+    expect(spy).toHaveBeenCalledWith(
+      expect.objectContaining({ queryKey: ["dataApiListServiceAccounts", "other-ws"] }),
+    );
+  });
+});
+
+/** The shell owns the page's single `h1` and its `p-6`; this section takes `h2`. */
+describe("Clients — page shell", () => {
+  it("renders its title as an h2, not a second h1", async () => {
+    renderClients();
+    const h2 = await screen.findByRole("heading", { level: 2, name: "Clients" });
+    expect(h2.className).toContain("text-lg");
+    expect(screen.queryByRole("heading", { level: 1 })).not.toBeInTheDocument();
+  });
+
+  it("adds no padding of its own on top of the shell's", async () => {
+    const { container } = renderClients();
+    await screen.findByRole("heading", { level: 2, name: "Clients" });
+    expect(container.firstElementChild?.className ?? "").not.toMatch(/\bp-4\b/);
   });
 });

@@ -78,7 +78,7 @@ const enableMutateAsync = vi.fn();
 
 function renderEndpoints() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(
+  const utils = render(
     <QueryClientProvider client={qc}>
       <MemoryRouter initialEntries={["/explore/eng/data-api/endpoints"]}>
         <Routes>
@@ -88,6 +88,7 @@ function renderEndpoints() {
       </MemoryRouter>
     </QueryClientProvider>,
   );
+  return { ...utils, qc };
 }
 
 beforeEach(() => {
@@ -119,6 +120,17 @@ beforeEach(() => {
   vi.mocked(api.dataApiGetOpenapi).mockResolvedValue(
     { status: 200, data: { openapi: "3.0.3" }, headers: new Headers() } as unknown as
       Awaited<ReturnType<typeof api.dataApiGetOpenapi>>,
+  );
+
+  // Automocking the generated module turns the query-key builders into
+  // `vi.fn()`s returning `undefined` — give them argument-sensitive fakes so
+  // "the right list was invalidated" is distinguishable from
+  // "invalidateQueries was called with nothing".
+  vi.mocked(api.getDataApiListEndpointsQueryKey).mockImplementation(
+    (ws) => ["dataApiListEndpoints", ws] as unknown as ReturnType<typeof api.getDataApiListEndpointsQueryKey>,
+  );
+  vi.mocked(api.getDataApiGetEndpointQueryKey).mockImplementation(
+    (ws, id) => ["dataApiGetEndpoint", ws, id] as unknown as ReturnType<typeof api.getDataApiGetEndpointQueryKey>,
   );
 
   createMutateAsync.mockResolvedValue({ status: 201, data: { id: "ep-new" }, headers: new Headers() });
@@ -356,5 +368,199 @@ describe("Endpoints", () => {
     await user.click(screen.getByRole("button", { name: /^download$/i }));
 
     expect(await screen.findByText(/\?endpoint_id=/)).toBeInTheDocument();
+  });
+});
+
+/**
+ * Cache invalidation (final-review finding, Important #1).
+ *
+ * `queryClient.ts` sets `staleTime: 30000` and the orval-generated mutation
+ * hooks carry no `onSuccess` — there is not one `invalidate` in the generated
+ * file. So a mutation wired straight to a generated hook toasts success over a
+ * list that goes on showing the OLD state for the next 30 seconds: Disable
+ * leaves the badge reading Live, Delete leaves the row in place, Create
+ * navigates away and Back shows a list without the new endpoint.
+ *
+ * These tests drive the `onSuccess` this page's mutations were constructed
+ * with — the one `src/api/dataApi.ts` attaches — exactly the way
+ * `EndpointDetail.test.tsx` pins Save's. Asserting on the KEY, not merely on
+ * "invalidateQueries ran", is what makes them fail for a wrapper that
+ * invalidates the wrong workspace or the wrong query.
+ */
+describe("Endpoints — cache invalidation", () => {
+  const RESULT = { status: 200, data: {}, headers: new Headers() } as never;
+
+  /** Fire the `onSuccess` the page's mutation was built with, if it has one. */
+  async function fireSuccess(
+    hook: { mock: { calls: unknown[][] } },
+    variables: Record<string, unknown>,
+  ) {
+    const opts = hook.mock.calls.at(-1)?.[0] as
+      | { mutation?: { onSuccess?: (...a: never[]) => unknown } }
+      | undefined;
+    await opts?.mutation?.onSuccess?.(
+      RESULT,
+      variables as never,
+      undefined as never,
+      undefined as never,
+    );
+  }
+
+  it("Disable invalidates the endpoint list, so the badge cannot keep reading Live", async () => {
+    mockList({ data: { status: 200, data: [FOLDERED_ROW] } });
+    const { qc } = renderEndpoints();
+    const spy = vi.spyOn(qc, "invalidateQueries");
+    await fireSuccess(vi.mocked(api.useDataApiDisableEndpoint), { workspace: "eng", id: "ep-1" });
+    expect(spy).toHaveBeenCalledWith(
+      expect.objectContaining({ queryKey: ["dataApiListEndpoints", "eng"] }),
+    );
+  });
+
+  it("Enable invalidates the endpoint list, so the badge cannot keep reading Disabled", async () => {
+    mockList({ data: { status: 200, data: [FOLDERED_ROW] } });
+    const { qc } = renderEndpoints();
+    const spy = vi.spyOn(qc, "invalidateQueries");
+    await fireSuccess(vi.mocked(api.useDataApiEnableEndpoint), { workspace: "eng", id: "ep-1" });
+    expect(spy).toHaveBeenCalledWith(
+      expect.objectContaining({ queryKey: ["dataApiListEndpoints", "eng"] }),
+    );
+  });
+
+  it("Delete invalidates the endpoint list, so the deleted row leaves the table", async () => {
+    mockList({ data: { status: 200, data: [LOOSE_ROW] } });
+    const { qc } = renderEndpoints();
+    const spy = vi.spyOn(qc, "invalidateQueries");
+    await fireSuccess(vi.mocked(api.useDataApiDeleteEndpoint), { workspace: "eng", id: "ep-2" });
+    expect(spy).toHaveBeenCalledWith(
+      expect.objectContaining({ queryKey: ["dataApiListEndpoints", "eng"] }),
+    );
+  });
+
+  it("Create invalidates the endpoint list, so navigating Back shows the new endpoint", async () => {
+    const { qc } = renderEndpoints();
+    const spy = vi.spyOn(qc, "invalidateQueries");
+    await fireSuccess(vi.mocked(api.useDataApiCreateEndpoint), { workspace: "eng", data: {} });
+    expect(spy).toHaveBeenCalledWith(
+      expect.objectContaining({ queryKey: ["dataApiListEndpoints", "eng"] }),
+    );
+  });
+
+  // The workspace comes from the mutation VARIABLES, not from a hook argument,
+  // so there is no second source of truth that can drift from the write.
+  it("invalidates the list of the workspace the write actually went to", async () => {
+    const { qc } = renderEndpoints();
+    const spy = vi.spyOn(qc, "invalidateQueries");
+    await fireSuccess(vi.mocked(api.useDataApiDeleteEndpoint), { workspace: "other-ws", id: "ep-2" });
+    expect(spy).toHaveBeenCalledWith(
+      expect.objectContaining({ queryKey: ["dataApiListEndpoints", "other-ws"] }),
+    );
+  });
+});
+
+/**
+ * The shell (`DataApiLayout`) renders the page's single `h1` ("Data API",
+ * text-2xl) and wraps the Outlet in `p-6`. A section nested in that Outlet
+ * takes `h2` and adds no padding, like every page nested under
+ * `WorkspaceSettings`.
+ */
+describe("Endpoints — page shell", () => {
+  it("renders its title as an h2, not a second h1", async () => {
+    mockList({ data: { status: 200, data: [FOLDERED_ROW] } });
+    mockFolders([{ id: "f-1", name: "Reporting" }]);
+    renderEndpoints();
+    const h2 = await screen.findByRole("heading", { level: 2, name: "Endpoints" });
+    expect(h2.className).toContain("text-lg");
+    expect(screen.queryByRole("heading", { level: 1 })).not.toBeInTheDocument();
+  });
+
+  it("adds no padding of its own on top of the shell's", async () => {
+    mockList({ data: { status: 200, data: [FOLDERED_ROW] } });
+    mockFolders([{ id: "f-1", name: "Reporting" }]);
+    const { container } = renderEndpoints();
+    await screen.findByRole("heading", { level: 2, name: "Endpoints" });
+    expect(container.firstElementChild?.className ?? "").not.toMatch(/\bp-4\b/);
+  });
+});
+
+/**
+ * Disable/Enable fire from a `DropdownMenuItem`, which closes on click but can
+ * be reopened before the request settles. Every other mutation trigger in this
+ * feature guards on `isPending`; these two did not.
+ */
+describe("Endpoints — in-flight guards", () => {
+  it("disables the Disable item while a disable is in flight", async () => {
+    vi.mocked(api.useDataApiDisableEndpoint).mockReturnValue(
+      { mutateAsync: disableMutateAsync, isPending: true } as unknown as
+        ReturnType<typeof api.useDataApiDisableEndpoint>,
+    );
+    mockList({ data: { status: 200, data: [FOLDERED_ROW] } });
+    mockFolders([{ id: "f-1", name: "Reporting" }]);
+    const user = userEvent.setup();
+    renderEndpoints();
+    await screen.findByText("Daily report");
+
+    await user.click(screen.getByRole("button", { name: "Actions" }));
+    const item = (await screen.findByText("Disable")).closest('[role="menuitem"]')!;
+    expect(item).toHaveAttribute("data-disabled");
+  });
+
+  it("disables the Enable item while an enable is in flight, and a click cannot re-fire it", async () => {
+    vi.mocked(api.useDataApiEnableEndpoint).mockReturnValue(
+      { mutateAsync: enableMutateAsync, isPending: true } as unknown as
+        ReturnType<typeof api.useDataApiEnableEndpoint>,
+    );
+    const resumable = makeEndpoint({ id: "ep-8", name: "Paused feed", state: "disabled", live_version_id: "v-9" });
+    mockList({ data: { status: 200, data: [resumable] } });
+    const user = userEvent.setup();
+    renderEndpoints();
+    await screen.findByText("Paused feed");
+
+    await user.click(screen.getByRole("button", { name: "Actions" }));
+    const label = await screen.findByText("Enable");
+    expect(label.closest('[role="menuitem"]')).toHaveAttribute("data-disabled");
+    // `data-[disabled]:pointer-events-none` is CSS, which jsdom does not apply
+    // — the handler has to refuse on its own, same as the never-published case.
+    await user.click(label);
+    expect(enableMutateAsync).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Final-review finding (Important #4), second surface: the download dialog's
+ * account picker read the SAME query as Try-it's and collapsed `isError` into
+ * the same empty case — telling the user to "create one under Clients" when
+ * the request had failed, next to a Download button that could never succeed.
+ */
+describe("DownloadOpenApiDialog — a failed account fetch is not an empty workspace", () => {
+  function mockAccounts(over: Record<string, unknown>) {
+    vi.mocked(api.useDataApiListServiceAccounts).mockReturnValue(
+      { data: undefined, isLoading: false, isError: false, error: null, ...over } as unknown as
+        ReturnType<typeof api.useDataApiListServiceAccounts>,
+    );
+  }
+
+  it("reports a failed fetch as a failure, never as 'no service accounts yet'", async () => {
+    mockAccounts({ isError: true, error: new Error("workspace not found") });
+    const user = userEvent.setup();
+    renderEndpoints();
+
+    await user.click(screen.getByRole("button", { name: /download openapi/i }));
+    await screen.findByRole("heading", { name: "Download OpenAPI" });
+
+    expect(screen.getByText(/could not load service accounts/i)).toBeInTheDocument();
+    expect(screen.getByText(/workspace not found/)).toBeInTheDocument();
+    expect(screen.queryByText(/no service accounts yet/i)).not.toBeInTheDocument();
+  });
+
+  it("still shows the create-one prompt when the workspace is genuinely empty", async () => {
+    mockAccounts({ data: { status: 200, data: [] } });
+    const user = userEvent.setup();
+    renderEndpoints();
+
+    await user.click(screen.getByRole("button", { name: /download openapi/i }));
+    await screen.findByRole("heading", { name: "Download OpenAPI" });
+
+    expect(screen.getByText(/no service accounts yet/i)).toBeInTheDocument();
+    expect(screen.queryByText(/could not load service accounts/i)).not.toBeInTheDocument();
   });
 });
