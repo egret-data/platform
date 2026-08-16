@@ -394,7 +394,7 @@ describe("ResponseSection", () => {
     expect(screen.getByText(/daily/)).toBeInTheDocument();
   });
 
-  it("shows the frozen columns of the live version, not the draft", async () => {
+  it("picks the is_live version's columns, not a superseded one's", async () => {
     vi.mocked(api.useDataApiListEndpointVersions).mockReturnValue(
       {
         data: {
@@ -425,6 +425,44 @@ describe("ResponseSection", () => {
     );
     renderResponse(makeEndpoint({ live_version_id: null, state: "draft" }));
     expect(await screen.findByText(/no live version/i)).toBeInTheDocument();
+  });
+
+  // Reviewer finding (Important #1): `columnsLoading` alone was provable only
+  // by reading the code. A published endpoint whose versions fetch hasn't
+  // landed yet must show a loading state, not "no live version yet" — the
+  // exact conflation this test and the next one pin apart.
+  it("shows a loading state, not the publish prompt, while a live endpoint's versions are still in flight", async () => {
+    vi.mocked(api.useDataApiListEndpointVersions).mockReturnValue(
+      { data: undefined, isLoading: true, isError: false } as unknown as
+        ReturnType<typeof api.useDataApiListEndpointVersions>,
+    );
+    vi.mocked(api.useDataApiGetOpenapi).mockReturnValue(
+      { data: undefined, isError: false } as unknown as ReturnType<typeof api.useDataApiGetOpenapi>,
+    );
+    renderResponse(makeEndpoint({ live_version_id: "v-1" }));
+    expect(await screen.findByText("Loading…")).toBeInTheDocument();
+    expect(screen.queryByText(/no live version/i)).not.toBeInTheDocument();
+  });
+
+  // Reviewer finding (Important #1): react-query clears `isLoading` on ANY
+  // settle, error included, so a versions-fetch failure for a LIVE endpoint
+  // would otherwise fall into the same branch as "never published" — telling
+  // an author who has already published to do the one thing they've done.
+  it("reports the versions fetch failing as an error, not as never having been published", async () => {
+    vi.mocked(api.useDataApiListEndpointVersions).mockReturnValue(
+      {
+        data: undefined,
+        isLoading: false,
+        isError: true,
+        error: new Error("network error"),
+      } as unknown as ReturnType<typeof api.useDataApiListEndpointVersions>,
+    );
+    vi.mocked(api.useDataApiGetOpenapi).mockReturnValue(
+      { data: undefined, isError: false } as unknown as ReturnType<typeof api.useDataApiGetOpenapi>,
+    );
+    renderResponse(makeEndpoint({ live_version_id: "v-1" }));
+    expect(await screen.findByText(/could not load the published contract/i)).toBeInTheDocument();
+    expect(screen.queryByText(/no live version/i)).not.toBeInTheDocument();
   });
 
   it("changes only the touched output field when the shape is switched, via a partial PATCH", async () => {

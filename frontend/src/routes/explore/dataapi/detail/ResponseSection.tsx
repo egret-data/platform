@@ -45,6 +45,14 @@ export default function ResponseSection() {
   // `!endpoint.live_version_id` below. Conflating the two would flash "no
   // live version" on every load of a perfectly-live endpoint.
   const columnsLoading = !!endpoint.live_version_id && versionsQuery.isLoading;
+  // react-query clears `isLoading` on ANY settle, error included — so a fetch
+  // failure for a live endpoint falls straight into the `!liveVersion`
+  // branch below unless checked first, and reads as "never published" to an
+  // author who has already published. Same class of bug this codebase fixed
+  // once across four list pages (`Endpoints.tsx`'s own `isError` branch is
+  // the pattern this mirrors) — the one section whose whole purpose is
+  // representing server state accurately cannot re-introduce it.
+  const columnsErrored = !!endpoint.live_version_id && versionsQuery.isError;
 
   const { data: accountsEnvelope } = useDataApiListServiceAccounts(ws);
   const accounts = accountsEnvelope?.status === 200 ? accountsEnvelope.data : [];
@@ -86,6 +94,13 @@ export default function ResponseSection() {
         <CardContent>
           {columnsLoading ? (
             <p className="text-sm text-muted-foreground">Loading…</p>
+          ) : columnsErrored ? (
+            <Alert variant="destructive">
+              <AlertDescription>
+                Could not load the published contract.{" "}
+                {(versionsQuery.error as unknown as Error)?.message ?? "Try again in a moment."}
+              </AlertDescription>
+            </Alert>
           ) : !endpoint.live_version_id || !liveVersion ? (
             <p className="text-sm text-muted-foreground">
               This endpoint has no live version yet. Publish it to see the columns a consumer will receive
