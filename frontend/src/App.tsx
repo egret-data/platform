@@ -42,6 +42,7 @@ import AccessRequests from "@/routes/explore/settings/AccessRequests";
 import WorkspaceGeneral from "@/routes/explore/settings/WorkspaceGeneral";
 import DataApiLayout from "@/routes/explore/dataapi/DataApiLayout";
 import Endpoints from "@/routes/explore/dataapi/Endpoints";
+import Clients from "@/routes/explore/dataapi/Clients";
 import EndpointDetail from "@/routes/explore/dataapi/EndpointDetail";
 import Definition from "@/routes/explore/dataapi/detail/Definition";
 import ResponseSection from "@/routes/explore/dataapi/detail/ResponseSection";
@@ -116,9 +117,9 @@ function ExploreRoutes() {
           {/* Engine connections now live under Workspace settings; keep the old
               path working by redirecting into that tab. */}
           <Route path="engines" element={<Navigate to="../settings/engines" replace />} />
-          {/* Clients/Activity still render `Placeholder` — Tasks 8/9 of the P5b
-              frontend plan swap each in for its real page. Endpoints (Task 2) and
-              the endpoint detail route (Task 3) are real. */}
+          {/* Activity still renders `Placeholder` — Task 9 of the P5b frontend
+              plan swaps it in. Endpoints (Task 2), the endpoint detail route
+              (Task 3) and Clients (Task 8) are real. */}
           <Route path="data-api" element={<RequireFeature feature="data_api"><DataApiLayout /></RequireFeature>}>
             <Route index element={<Navigate to="endpoints" replace />} />
             <Route path="endpoints" element={<Endpoints />} />
@@ -139,7 +140,7 @@ function ExploreRoutes() {
               <Route path="try" element={<TryIt />} />
               <Route path="versions" element={<VersionsSection />} />
             </Route>
-            <Route path="clients" element={<Placeholder title="Clients" />} />
+            <Route path="clients" element={<Clients />} />
             <Route path="activity" element={<Placeholder title="Activity" />} />
           </Route>
           <Route path="pipelines" element={<Placeholder title="Pipelines" />} />
