@@ -62,7 +62,7 @@
 //! entirely from the snapshot. See `lifecycle.rs`' module comment for the full
 //! contract.
 
-use axum::extract::{FromRef, Path, State};
+use axum::extract::{FromRef, Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
@@ -80,6 +80,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::activity::{ActivityRange, ActivityRow, ActivityStore, ActivitySummaryDto};
 use crate::clients::ClientStore;
 use crate::endpoints::{
     normalize_path, CreateEndpointInput, DataApiEndpointDto, EndpointStore, UpdateEndpointInput,
@@ -183,6 +184,8 @@ pub struct DataApiState {
     /// the serving surface is in-process, and splitting the binary would
     /// otherwise multiply every published limit by the replica count in silence.
     pub rate_limits: std::sync::Arc<dyn crate::serving::RateLimitStore>,
+    /// The Activity tab's store (P5 §4) — call statistics from `dataapi.access_log`.
+    pub activity: ActivityStore,
 }
 
 impl FromRef<DataApiState> for SessionService {
@@ -1613,6 +1616,41 @@ async fn revoke_endpoint_invoke(
     Ok(Json(Ack::ok()))
 }
 
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct ActivityQuery {
+    pub range: ActivityRange,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/data-api/activity/summary",
+    tag = "data-api",
+    params(WorkspacePath, ActivityQuery),
+    responses(
+        (status = 200, description = "Call statistics for the range", body = ActivitySummaryDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing data_api_endpoint:read permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn activity_summary(
+    State(st): State<DataApiState>,
+    WsContext(ctx): WsContext,
+    Query(q): Query<ActivityQuery>,
+) -> Result<Json<ActivitySummaryDto>, DataApiError> {
+    // Workspace-scoped `:read` for the whole tab. Activity is deliberately a
+    // workspace-level view and is NOT sliced per endpoint: a per-row filter
+    // would make the totals disagree with their own rows, which is the one thing
+    // §4.2 spends a GROUPING SETS query to prevent.
+    egret_core::authz::require(&*st.pdp, &ctx, EP_READ).await?;
+    Ok(Json(
+        st.activity
+            .summary(ctx.workspace_id.0, q.range.since(Utc::now()))
+            .await
+            .map_err(db_err)?,
+    ))
+}
+
 /// The Data API management router. Mount under `/api` so the live paths are
 /// `/api/ws/{workspace}/data-api/…` — `WsContext`'s feature gate only recognises
 /// a path beginning `/api/ws/` or `/ws/`, and `egret-server`'s
@@ -1677,6 +1715,10 @@ pub fn management_router() -> Router<DataApiState> {
             "/ws/{workspace}/data-api/endpoints/{id}/grants/{service_account_id}",
             delete(revoke_endpoint_invoke),
         )
+        .route(
+            "/ws/{workspace}/data-api/activity/summary",
+            get(activity_summary),
+        )
 }
 
 #[derive(utoipa::OpenApi)]
@@ -1702,6 +1744,7 @@ pub fn management_router() -> Router<DataApiState> {
         list_endpoint_grants,
         grant_endpoint_invoke,
         revoke_endpoint_invoke,
+        activity_summary,
     ),
     components(schemas(
         DataApiServiceAccountDto,
@@ -1726,6 +1769,9 @@ pub fn management_router() -> Router<DataApiState> {
         GrantInvokeInput,
         egret_dataapi_api::EndpointSnapshot,
         egret_dataapi_api::ColumnSpec,
+        ActivitySummaryDto,
+        ActivityRow,
+        ActivityRange,
     )),
     tags((name = "data-api", description = "Data API service accounts and OAuth2 clients")),
 )]

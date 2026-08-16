@@ -14230,6 +14230,75 @@
         }
       }
     },
+    "/api/ws/{workspace}/data-api/activity/summary": {
+      "get": {
+        "tags": [
+          "data-api"
+        ],
+        "operationId": "activity_summary",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "range",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ActivityRange"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Call statistics for the range",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActivitySummaryDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing data_api_endpoint:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/data-api/clients/{id}": {
       "delete": {
         "tags": [
@@ -25414,6 +25483,99 @@
         "properties": {
           "ok": {
             "type": "boolean"
+          }
+        }
+      },
+      "ActivityRange": {
+        "type": "string",
+        "description": "The four ranges the UI offers, and the only ones it may ask for.\n\nA fixed set rather than a date picker: every query here narrows on\n`access_log_ws_ts_idx (workspace_id, ts DESC)`, and the presets are what keep\nit inside that index's reach. An input that accepts \"one year\" on the\nfastest-growing table in the schema has nothing stopping the person who types\nit.",
+        "enum": [
+          "1h",
+          "24h",
+          "7d",
+          "30d"
+        ]
+      },
+      "ActivityRow": {
+        "type": "object",
+        "description": "One line of the statistics table, or — with `endpoint_id: None` — either the\ngrand total or the unmatched-request bucket, depending on which grouping set\nproduced it.",
+        "required": [
+          "calls",
+          "errors",
+          "cache_hits",
+          "cacheable_calls"
+        ],
+        "properties": {
+          "endpoint_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "endpoint_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "calls": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "errors": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "p50_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "`None` when the population is empty — no successful call in range. Zero\nwould be a measurement; this is the absence of one."
+          },
+          "p95_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "cache_hits": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "cacheable_calls": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The DENOMINATOR for cache-hit rate: successful calls on a version whose\nsnapshot had caching enabled. Sent raw so the caller can render `—`\nrather than `0%` when it is zero — zero of zero is not zero."
+          }
+        }
+      },
+      "ActivitySummaryDto": {
+        "type": "object",
+        "required": [
+          "total",
+          "endpoints"
+        ],
+        "properties": {
+          "total": {
+            "$ref": "#/components/schemas/ActivityRow"
+          },
+          "endpoints": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ActivityRow"
+            }
+          },
+          "retention_days": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "`DataApiConfig::access_log_retention_days`, passed through so the UI can\ndisable ranges that reach past it (spec §4.7).\n\n**The UI cannot compute this and must not assume 30 days exist.**\nRetention may be shorter, and `0` means keep nothing — the same reading\n`AuditConfig::retention_days` has. Without this field someone selects\n`30d`, watches the data thin out at the old end, and concludes traffic\nfell; the screen would be actively supporting a wrong conclusion.\n\n`None` ⇒ no prune is scheduled (`scheduled_retention` returned `None`),\nso nothing is being deleted and every range is honest."
           }
         }
       },

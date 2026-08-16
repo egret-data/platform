@@ -41,6 +41,7 @@
 //! egret that is safe by construction rather than by escaper; its module comment
 //! carries the mechanism and the rules that keep it that way.
 
+pub mod activity;
 pub mod clients;
 pub mod endpoints;
 mod invoke;
@@ -49,6 +50,7 @@ pub mod render;
 pub mod routes;
 pub mod serving;
 
+pub use activity::{ActivityRange, ActivityRow, ActivityStore, ActivitySummaryDto};
 pub use clients::{ClientStore, NewClient, DATA_API_TTL_SECS};
 pub use endpoints::{
     CreateEndpointInput, DataApiEndpointDto, DeletedEndpoint, EndpointStore, UpdateEndpointInput,

@@ -64,3 +64,50 @@ async fn ws_admin_can_invoke_without_any_object_grant() {
 
     assert!(allowed, "ws_admin reaches invoke through the workspace cascade");
 }
+
+#[tokio::test]
+async fn latency_percentiles_ignore_error_responses() {
+    let Some(f) = fixture().await else { return };
+
+    // Three successes at 100ms and seven failures at 1ms. Including the failures
+    // drags p50 to 1ms and makes latency look BETTER the more the system fails.
+    for _ in 0..3 {
+        f.log_row(200, 100, false, None).await;
+    }
+    for _ in 0..7 {
+        f.log_row(401, 1, false, Some("unauthorized")).await;
+    }
+
+    let (status, body) = f
+        .mgmt_get(&format!(
+            "/api/ws/{}/data-api/activity/summary?range=24h",
+            f.ws_slug
+        ))
+        .await;
+    assert_eq!(status, 200);
+
+    assert_eq!(body["total"]["calls"], 10);
+    assert_eq!(body["total"]["errors"], 7);
+    assert_eq!(
+        body["total"]["p50_ms"].as_f64().unwrap().round(),
+        100.0,
+        "p50 must come from the 2xx population only"
+    );
+}
+
+#[tokio::test]
+async fn trial_runs_are_excluded_from_statistics() {
+    let Some(f) = fixture().await else { return };
+
+    f.log_row(200, 10, false, None).await;
+    f.log_row_as_trial(200, 10, f.admin).await;
+
+    let (_, body) = f
+        .mgmt_get(&format!(
+            "/api/ws/{}/data-api/activity/summary?range=24h",
+            f.ws_slug
+        ))
+        .await;
+
+    assert_eq!(body["total"]["calls"], 1, "the trial must not be counted");
+}

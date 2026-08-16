@@ -20,7 +20,9 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use egret_core::{ColumnMeta, Error, TabularResult, UserId};
-use egret_dataapi::{management_router, serving_router, ClientStore, DataApiState, EndpointStore};
+use egret_dataapi::{
+    management_router, serving_router, ActivityStore, ClientStore, DataApiState, EndpointStore,
+};
 use egret_machine_idp::{generate_rsa_key, sign_claims, IdpError, KeyMaterial, SigningKeyStore};
 use egret_metastore::Db;
 use egret_query_api::Param;
@@ -516,6 +518,9 @@ pub async fn fixture() -> Option<Fixture> {
         // reaches, and every test here would pass vacuously.
         cache: egret_dataapi::serving::ResponseCache::new(),
         rate_limits: clock.clone(),
+        // A fixed, sensible retention rather than a config read — nothing in
+        // this fixture boots `egret-config`.
+        activity: ActivityStore::new(db.clone(), Some(90)),
     };
 
     let session = st
@@ -667,6 +672,67 @@ impl Fixture {
             status,
             serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
         )
+    }
+
+    /// A GET through the management router, with the session cookie
+    /// [`Fixture::mgmt_send`] already attaches.
+    pub async fn mgmt_get(&self, path: &str) -> (StatusCode, serde_json::Value) {
+        self.mgmt_send("GET", path, None).await
+    }
+
+    /// Insert a row directly into `dataapi.access_log`, bypassing the real
+    /// serving path, so a test can shape a population — three successes and
+    /// seven failures, say — without driving ten real requests through it.
+    ///
+    /// Attributed to `f.endpoint_id` (the `/probe` endpoint `fixture()`
+    /// publishes) at version 1 — the version `ActivityStore::summary`'s
+    /// `cacheable_calls` JOIN reads `dataapi.endpoint_versions` through.
+    /// `actor_user_id` is left NULL: this is a real call, not a trial — see
+    /// [`Fixture::log_row_as_trial`] for that.
+    pub async fn log_row(
+        &self,
+        status_code: i32,
+        duration_ms: i32,
+        cache_hit: bool,
+        error_code: Option<&str>,
+    ) {
+        sqlx::query(
+            "INSERT INTO dataapi.access_log \
+               (workspace_id, endpoint_id, version, status_code, duration_ms, \
+                cache_hit, error_code, request_id) \
+             VALUES ($1, $2, 1, $3, $4, $5, $6, $7)",
+        )
+        .bind(self.ws_id)
+        .bind(self.endpoint_id)
+        .bind(status_code)
+        .bind(duration_ms)
+        .bind(cache_hit)
+        .bind(error_code)
+        .bind(Uuid::new_v4().to_string())
+        .execute(&self.db.pool)
+        .await
+        .expect("insert access_log row");
+    }
+
+    /// The same, but as a Try-it trial run by `actor` — excluded from every
+    /// statistic `ActivityStore::summary` computes (spec §4.2), and shown only
+    /// in the call list.
+    pub async fn log_row_as_trial(&self, status_code: i32, duration_ms: i32, actor: Uuid) {
+        sqlx::query(
+            "INSERT INTO dataapi.access_log \
+               (workspace_id, endpoint_id, version, status_code, duration_ms, \
+                actor_user_id, request_id) \
+             VALUES ($1, $2, 1, $3, $4, $5, $6)",
+        )
+        .bind(self.ws_id)
+        .bind(self.endpoint_id)
+        .bind(status_code)
+        .bind(duration_ms)
+        .bind(actor)
+        .bind(Uuid::new_v4().to_string())
+        .execute(&self.db.pool)
+        .await
+        .expect("insert access_log row");
     }
 
     /// Insert a draft carrying `cache`/`rate_limit` and publish it through the
