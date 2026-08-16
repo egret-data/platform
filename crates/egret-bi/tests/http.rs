@@ -234,6 +234,68 @@ async fn member_session(
         .token
 }
 
+/// `data_api_endpoints` is a valid `{kind}` on the generic folder router
+/// (`kind_perms`), the same way `notebooks` and `alerts` share it despite
+/// living in other crates. Without the arm, `kind_perms` returns `None` and the
+/// route 404s — which would mean Data API endpoints can never appear in the
+/// Access Control console's folder tree alongside dashboards and datasets. A
+/// workspace member holding `data_api_endpoint:read`, resolved by a real
+/// `CedarPdp`, must be able to list its (empty) folders.
+#[tokio::test]
+async fn data_api_endpoint_folders_are_a_known_kind() {
+    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let db = Db::connect(&url, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+
+    let owner: Uuid =
+        sqlx::query_scalar("INSERT INTO users (provider, email) VALUES ('local', $1) RETURNING id")
+            .bind(format!("owner_{}@egret.local", Uuid::new_v4().simple()))
+            .fetch_one(&db.pool)
+            .await
+            .expect("insert owner");
+    let slug = format!("bi-dataapi-folders-{}", Uuid::new_v4().simple());
+    let ws: Uuid = sqlx::query_scalar(
+        "INSERT INTO workspaces (slug, name, created_by, status) \
+         VALUES ($1, 'DataAPI Folders Test', $2, 'active') RETURNING id",
+    )
+    .bind(&slug)
+    .bind(owner)
+    .fetch_one(&db.pool)
+    .await
+    .expect("insert workspace");
+
+    let (_role, role_name) = seed_workspace_role(&db, "data_api_endpoint:read").await;
+
+    let pdp: Arc<dyn egret_core::authz::Pdp> = Arc::new(
+        egret_auth::pdp::CedarPdp::build(db.clone(), &egret_events::EventBus::new())
+            .await
+            .expect("build CedarPdp"),
+    );
+    let st = build_state(db.clone(), pdp);
+    let sessions = st.sessions.clone();
+    let reader = member_session(&db, &sessions, ws, &role_name).await;
+
+    let app = egret_bi::folder_router().with_state(st);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/ws/{slug}/folders/data_api_endpoints"))
+                .header("Cookie", format!("egret_session={reader}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "endpoints must appear in the Access Control console like dashboards and datasets"
+    );
+}
+
 /// PDP-backed workspace authz (this seam migrated onto
 /// `egret_core::authz::require`): a workspace member whose workspace role grants
 /// `dashboard:read` — resolved by a real `CedarPdp`, not the allow-all stub —

@@ -80,11 +80,24 @@ impl AccessViewsRepo {
     pub async fn list_workspace_roles_with_perms(&self) -> Result<Vec<WsRole>> {
         // One flat scan: every workspace role, LEFT-joined to its permissions so
         // roles with no permissions still appear. Folded into `WsRole`s below.
+        //
+        // `data_api_invoker` is excluded HERE, in the query, rather than by the
+        // route handler that currently is this method's only caller. This is the
+        // workspace-scope role catalog a member picker offers, and
+        // `data_api_invoker` (seeded by migration 0124, egret-dataapi — literal
+        // string here to avoid a cross-crate dependency, same convention as
+        // `egret-bi`'s `kind_perms`) exists to be granted OBJECT-scoped to one
+        // service account for one endpoint. Offered as a workspace MEMBERSHIP
+        // role it would mean "invoke every endpoint in this workspace" through
+        // Cedar's workspace→object cascade — the same over-grant a `ws_admin`
+        // membership now carries. Filtering in the query means a future SECOND
+        // consumer of this method inherits the exclusion automatically, instead
+        // of needing to remember to filter it out itself.
         let rows = sqlx::query_as::<_, RolePermRow>(
             "SELECT r.id, r.name, r.description, r.parent_role_id, rp.permission \
              FROM roles r \
              LEFT JOIN role_permissions rp ON rp.role_id = r.id \
-             WHERE r.scope = 'workspace' \
+             WHERE r.scope = 'workspace' AND r.name <> 'data_api_invoker' \
              ORDER BY r.name, rp.permission",
         )
         .fetch_all(&self.db.pool)

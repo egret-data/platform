@@ -3386,6 +3386,14 @@ fn kind_perms(kind: &str) -> Option<(&'static str, &'static str, &'static str)> 
         // notebooks do; `alert:read` was added by migration 0113 precisely so
         // this pair exists. Literal strings, again to avoid a cross-crate dep.
         "alerts" => Some(("alert", "alert:read", "alert:manage")),
+        // Data API endpoints live in egret-dataapi and share this router the way
+        // notebooks and alerts do; both permissions exist from migration 0122.
+        // Literal strings, again to avoid a cross-crate dependency.
+        "data_api_endpoints" => Some((
+            "data_api_endpoint",
+            "data_api_endpoint:read",
+            "data_api_endpoint:manage",
+        )),
         _ => None,
     }
 }
