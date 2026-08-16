@@ -25,6 +25,7 @@ import { ParamLocation, ParamType, type DataApiEndpointDto, type DataApiEndpoint
 import EndpointDetail from "@/routes/explore/dataapi/EndpointDetail";
 import Definition from "@/routes/explore/dataapi/detail/Definition";
 import ResponseSection from "@/routes/explore/dataapi/detail/ResponseSection";
+import VersionsSection from "@/routes/explore/dataapi/detail/Versions";
 
 function makeEndpoint(overrides: Partial<DataApiEndpointDto> = {}): DataApiEndpointDto {
   return {
@@ -484,5 +485,182 @@ describe("ResponseSection", () => {
     // Task 3's review flagged: it would silently drop or reorder fields no
     // control on this page even touched.
     expect(call.data).toEqual({ output: { shape: "arrays", naming: "snake" } });
+  });
+});
+
+function renderVersions(
+  endpoint: DataApiEndpointDto = makeEndpoint({ live_version_id: "v-2", state: "live" }),
+  refetch: () => void = vi.fn(),
+) {
+  vi.mocked(api.useDataApiGetEndpoint).mockReturnValue(
+    { data: { status: 200, data: endpoint }, isLoading: false, isError: false, error: null, refetch } as unknown as
+      ReturnType<typeof api.useDataApiGetEndpoint>,
+  );
+
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(
+    <QueryClientProvider client={qc}>
+      <MemoryRouter initialEntries={[`/explore/eng/data-api/endpoints/${endpoint.id}/versions`]}>
+        <Routes>
+          <Route path="/explore/:workspace/data-api/endpoints/:id" element={<EndpointDetail />}>
+            <Route path="versions" element={<VersionsSection />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+}
+
+const publishMutateAsync = vi.fn();
+const rollbackMutateAsync = vi.fn();
+
+describe("VersionsSection", () => {
+  const versionsRefetchSpy = vi.fn();
+
+  beforeEach(() => {
+    versionsRefetchSpy.mockClear();
+    publishMutateAsync.mockReset();
+    rollbackMutateAsync.mockReset();
+
+    vi.mocked(api.useDataApiListEndpointVersions).mockReturnValue(
+      { data: { status: 200, data: [] }, isLoading: false, isError: false } as unknown as
+        ReturnType<typeof api.useDataApiListEndpointVersions>,
+    );
+    vi.mocked(api.useDataApiPublishEndpoint).mockReturnValue(
+      { mutateAsync: publishMutateAsync, isPending: false } as unknown as
+        ReturnType<typeof api.useDataApiPublishEndpoint>,
+    );
+    vi.mocked(api.useDataApiRollbackEndpoint).mockReturnValue(
+      { mutateAsync: rollbackMutateAsync, isPending: false } as unknown as
+        ReturnType<typeof api.useDataApiRollbackEndpoint>,
+    );
+    vi.mocked(api.getDataApiListEndpointVersionsQueryKey).mockImplementation(
+      (ws, id) => ["dataApiListEndpointVersions", ws, id] as unknown as
+        ReturnType<typeof api.getDataApiListEndpointVersionsQueryKey>,
+    );
+
+    publishMutateAsync.mockResolvedValue({
+      status: 200,
+      data: { version_id: "v-3", version: 3, state: "live" },
+      headers: new Headers(),
+    });
+    rollbackMutateAsync.mockResolvedValue({
+      status: 200,
+      data: { version_id: "v-1", version: 1, state: "live" },
+      headers: new Headers(),
+    });
+  });
+
+  // The one thing this section must not get wrong (spec §6.3, second of its
+  // three placements): this is the moment BEFORE the endpoint goes live, and
+  // the one place the warning reaches an author who never opens Access. It
+  // must not be a toast fired after the fact — Publish still has to be
+  // confirmed once the warning is showing.
+  it("warns that publishing does not grant data access before it publishes", async () => {
+    renderVersions();
+    await userEvent.click(await screen.findByRole("button", { name: /publish/i }));
+    expect(await screen.findByText(/does not grant data access/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /publish/i })).toBeInTheDocument();
+    expect(publishMutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("lists each version with its note and who, and puts the live badge on the one live_version_id points at", async () => {
+    vi.mocked(api.useDataApiListEndpointVersions).mockReturnValue(
+      {
+        data: {
+          status: 200,
+          data: [
+            makeVersion({ id: "v-1", version: 1, is_live: false, note: "initial", created_by: "user-1" }),
+            makeVersion({ id: "v-2", version: 2, is_live: true, note: "fixed a typo", created_by: "user-2" }),
+          ],
+        },
+        isLoading: false,
+        isError: false,
+      } as unknown as ReturnType<typeof api.useDataApiListEndpointVersions>,
+    );
+    renderVersions();
+
+    expect(await screen.findByText("fixed a typo")).toBeInTheDocument();
+    expect(screen.getByText("initial")).toBeInTheDocument();
+    expect(screen.getByText("user-2")).toBeInTheDocument();
+    // Exactly one Live badge — on v-2, not on both rows.
+    expect(screen.getAllByText("Live")).toHaveLength(1);
+  });
+
+  it("publishes with an optional note and refetches the endpoint afterward", async () => {
+    renderVersions(makeEndpoint({ live_version_id: "v-2", state: "live" }), versionsRefetchSpy);
+    await userEvent.click(await screen.findByRole("button", { name: /publish/i }));
+    await screen.findByText(/does not grant data access/i);
+
+    await userEvent.type(screen.getByLabelText(/note/i), "shipping v3");
+    await userEvent.click(screen.getByRole("button", { name: "Publish" }));
+
+    await waitFor(() =>
+      expect(publishMutateAsync).toHaveBeenCalledWith({
+        workspace: "eng",
+        id: "ep-1",
+        data: { note: "shipping v3" },
+      }),
+    );
+    // `refetch` exists for exactly this case — publish changes `state` and
+    // `live_version_id` server-side, and the header/other sections read
+    // those off `endpoint`, not off this section's own versions query.
+    await waitFor(() => expect(versionsRefetchSpy).toHaveBeenCalled());
+  });
+
+  it("rolls back only after typing the confirming word, naming the version by id, and refetches the endpoint afterward", async () => {
+    vi.mocked(api.useDataApiListEndpointVersions).mockReturnValue(
+      {
+        data: {
+          status: 200,
+          data: [
+            makeVersion({ id: "v-1", version: 1, is_live: false }),
+            makeVersion({ id: "v-2", version: 2, is_live: true }),
+          ],
+        },
+        isLoading: false,
+        isError: false,
+      } as unknown as ReturnType<typeof api.useDataApiListEndpointVersions>,
+    );
+    renderVersions(makeEndpoint({ live_version_id: "v-2", state: "live" }), versionsRefetchSpy);
+
+    await userEvent.click(await screen.findByRole("button", { name: /roll back/i }));
+    const confirmButton = screen.getByRole("button", { name: "Delete" });
+    expect(confirmButton).toBeDisabled();
+    expect(rollbackMutateAsync).not.toHaveBeenCalled();
+
+    await userEvent.type(screen.getByPlaceholderText("rollback"), "rollback");
+    await userEvent.click(confirmButton);
+
+    await waitFor(() =>
+      expect(rollbackMutateAsync).toHaveBeenCalledWith({
+        workspace: "eng",
+        id: "ep-1",
+        data: { version_id: "v-1" },
+      }),
+    );
+    await waitFor(() => expect(versionsRefetchSpy).toHaveBeenCalled());
+  });
+
+  // Same class of bug ResponseSection was fixed for: react-query clears
+  // `isLoading` on any settle, error included, so a fetch failure must not
+  // fall into the same branch as "nothing published yet".
+  it("reports a versions-fetch failure as an error, not as never having been published", async () => {
+    vi.mocked(api.useDataApiListEndpointVersions).mockReturnValue(
+      {
+        data: undefined,
+        isLoading: false,
+        isError: true,
+        error: new Error("network error"),
+      } as unknown as ReturnType<typeof api.useDataApiListEndpointVersions>,
+    );
+    renderVersions();
+    expect(await screen.findByText(/could not load/i)).toBeInTheDocument();
+    expect(screen.queryByText(/never been published/i)).not.toBeInTheDocument();
+  });
+
+  it("says the endpoint has never been published when the version list is genuinely empty", async () => {
+    renderVersions();
+    expect(await screen.findByText(/never been published/i)).toBeInTheDocument();
   });
 });

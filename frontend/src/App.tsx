@@ -46,6 +46,7 @@ import EndpointDetail from "@/routes/explore/dataapi/EndpointDetail";
 import Definition from "@/routes/explore/dataapi/detail/Definition";
 import ResponseSection from "@/routes/explore/dataapi/detail/ResponseSection";
 import AccessSection from "@/routes/explore/dataapi/detail/AccessSection";
+import VersionsSection from "@/routes/explore/dataapi/detail/Versions";
 import { Placeholder } from "@/routes/Placeholder";
 import Workspaces from "@/routes/control-plane/Workspaces";
 import WorkspaceDetail from "@/routes/control-plane/WorkspaceDetail";
@@ -125,8 +126,8 @@ function ExploreRoutes() {
                 that can be opened cold. */}
             <Route path="endpoints/:id" element={<EndpointDetail />}>
               <Route index element={<Definition />} />
-              {/* Try it/Versions still render `Placeholder` — later tasks swap
-                  each in for its real section. Each is its own child route (not
+              {/* Try it still renders `Placeholder` — Task 7 swaps it in for
+                  its real section. Each section is its own child route (not
                   a query param) so the open section is in the URL and survives a
                   refresh. `Access` links into `try` with `?service_account=`;
                   Task 7 (Try it) reads that key to preselect the account a row
@@ -136,7 +137,7 @@ function ExploreRoutes() {
               <Route path="response" element={<ResponseSection />} />
               <Route path="access" element={<AccessSection />} />
               <Route path="try" element={<Placeholder title="Try it" />} />
-              <Route path="versions" element={<Placeholder title="Versions" />} />
+              <Route path="versions" element={<VersionsSection />} />
             </Route>
             <Route path="clients" element={<Placeholder title="Clients" />} />
             <Route path="activity" element={<Placeholder title="Activity" />} />
