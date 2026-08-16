@@ -92,13 +92,36 @@ pub(crate) struct Resolved {
 /// `ParamLocation::Body` parameters are treated as not supplied. Nothing on this
 /// surface parses a request body today (`serve_post` takes no body extractor),
 /// so a `Body` parameter resolves through its `default`, or through `required`
-/// to a 400. That is a gap, not a decision that body parameters are unsupported;
-/// it is named here and in the task report rather than left to be discovered.
+/// to a 400. That is a gap, not a decision that body parameters are unsupported.
+///
+/// **Publish refuses `location: body` now** (`lifecycle::check_param_locations`),
+/// because the OPTIONAL case is silent rather than loud: the parameter resolves
+/// absent, its `{% if %}` block is omitted, and the endpoint serves unfiltered
+/// rows with a 200 forever. This arm remains only for a snapshot published
+/// before that rule — and such a snapshot is refused a layer up by the parameter
+/// gate stamp anyway.
 pub(crate) fn resolve(
     raw_query: Option<&str>,
     snap: &EndpointSnapshot,
 ) -> Result<Resolved, ServingError> {
     let supplied = decode(raw_query, snap)?;
+    // Which declared parameters this definition loops over. One scan of the
+    // template per request, and only when it declares parameters at all — the
+    // render that follows does strictly more work. It is the same function
+    // publish uses to build its representative values, deliberately: the shape a
+    // definition was validated against is the shape it is served.
+    let iterated: Vec<String> = if snap.params.is_empty() {
+        Vec::new()
+    } else {
+        crate::render::iterated_params(
+            &snap.sql,
+            &snap
+                .params
+                .iter()
+                .map(|p| p.name.clone())
+                .collect::<Vec<_>>(),
+        )
+    };
 
     let mut values = ParamValues::new();
     let mut key: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -109,13 +132,24 @@ pub(crate) fn resolve(
             ParamLocation::Query => supplied.get(&spec.name),
             ParamLocation::Body => None,
         };
+        // Whether the values below came from the CALLER or from the author's
+        // `default`, which is the difference between a 400 and a 500 when one of
+        // them fails to coerce. Publish refuses a `default` that does not satisfy
+        // its own `ty` (`ValidationError::DefaultNotValidForType`), so a failure
+        // on this branch is a broken snapshot, not a bad request — and answering
+        // `param_invalid` blamed the caller for the author's mistake while
+        // logging it under a code that points at nothing.
+        let mut from_default = false;
         let texts: Vec<&str> = match (from_request, &spec.default) {
             (Some(v), _) if !v.is_empty() => v.iter().map(String::as_str).collect(),
             // The author's own default. Keyed by its resolved value like any
             // other, so `?region=EU` and an absent `region` defaulting to `EU`
             // share an entry — they render the same statement and bind the same
             // values, which is precisely when sharing is correct.
-            (_, Some(d)) => vec![d.as_str()],
+            (_, Some(d)) => {
+                from_default = true;
+                vec![d.as_str()]
+            }
             (_, None) => {
                 if spec.required {
                     return Err(ServingError::ParamMissing);
@@ -144,7 +178,15 @@ pub(crate) fn resolve(
 
         let mut params = Vec::with_capacity(texts.len());
         for t in texts {
-            params.push(coerce(spec, t)?);
+            params.push(coerce(spec, t).map_err(|e| match (e, from_default) {
+                (CoerceError::Invalid, false) => ServingError::ParamInvalid,
+                (CoerceError::Invalid, true) => ServingError::internal(
+                    "a published `default` does not satisfy its own declared type",
+                ),
+                (CoerceError::Malformed, _) => {
+                    ServingError::internal("enum parameter published with no `allowed` list")
+                }
+            })?);
         }
 
         key.insert(
@@ -158,7 +200,17 @@ pub(crate) fn resolve(
             // `IN ({% for r in regions %}{{ r }}…{% endfor %})` render
             // `IN (?, ?, ?)` — the `IN (?)`-binds-one-value problem falls out of
             // the formatter and needs no construct of its own (spec §4.3).
-            1 => insert_one(&mut values, spec, params.pop().expect("len == 1")),
+            //
+            // **Unless the definition ITERATES it**, in which case one value is
+            // still a list of one. Arity is the caller's, and shape is the
+            // definition's: a `{% for r in regions %}` over a scalar is not a
+            // one-element loop, it is "plain is not iterable" — a 500 on the
+            // perfectly ordinary request `?regions=EU`. Publish infers the same
+            // set from the same function, so the shape a definition is validated
+            // against and the shape it is served cannot disagree.
+            1 if !iterated.iter().any(|n| n == &spec.name) => {
+                insert_one(&mut values, spec, params.pop().expect("len == 1"))
+            }
             _ => values.insert_list(spec.name.clone(), params),
         }
     }
@@ -222,7 +274,28 @@ fn decode(
 /// (Tasks 1-3). A `String`-typed parameter binds as text and is checked for
 /// nothing beyond the size caps — it does not need to be, because it can only
 /// ever become a bound value.
-fn coerce(spec: &ParamSpec, text: &str) -> Result<Param, ServingError> {
+/// Why [`coerce`] refused.
+///
+/// Two answers, because they are two different people's mistakes: `Invalid` is
+/// the caller's text, `Malformed` is the published definition. The caller-facing
+/// mapping is the caller's alone — see [`resolve`], which is also where the
+/// author's own `default` failing is turned into a 500 rather than a 400.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum CoerceError {
+    /// The text does not satisfy the declared `ty`.
+    Invalid,
+    /// The `ParamSpec` itself cannot be honoured — an `Enum` with no `allowed`.
+    Malformed,
+}
+
+/// **Shared with publish**, which is the entire point.
+///
+/// `lifecycle` validates an author's `default` by running it through this exact
+/// function (spec §5, T7-6). A second copy written for publish would be free to
+/// accept something the serving path rejects, and the failure mode of that
+/// disagreement is the one this check exists to remove: a definition that
+/// publishes green and then answers 400 on every call that omits the parameter.
+pub(crate) fn coerce(spec: &ParamSpec, text: &str) -> Result<Param, CoerceError> {
     match spec.ty {
         ParamType::String => Ok(Param::Str(text.to_string())),
         ParamType::Enum => {
@@ -230,11 +303,9 @@ fn coerce(spec: &ParamSpec, text: &str) -> Result<Param, ServingError> {
                 .allowed
                 .as_ref()
                 .filter(|a| !a.is_empty())
-                // An enum with no `allowed` is an author mistake publish should
-                // refuse (spec §5). Not the caller's fault, so not a 400.
-                .ok_or_else(|| {
-                    ServingError::internal("enum parameter published with no `allowed` list")
-                })?;
+                // An enum with no `allowed` is an author mistake publish
+                // refuses (spec §5). Not the caller's fault, so not a 400.
+                .ok_or(CoerceError::Malformed)?;
             // The AUTHOR's entry is what is kept, never the caller's bytes —
             // the same provenance rule `ident_filter` enforces. Two equal
             // strings, and the one that survives is always the author's.
@@ -242,12 +313,12 @@ fn coerce(spec: &ParamSpec, text: &str) -> Result<Param, ServingError> {
                 .iter()
                 .find(|a| a.as_str() == text)
                 .map(|a| Param::Str(a.clone()))
-                .ok_or(ServingError::ParamInvalid)
+                .ok_or(CoerceError::Invalid)
         }
         ParamType::Boolean => match text.to_ascii_lowercase().as_str() {
             "true" | "1" => Ok(Param::Bool(true)),
             "false" | "0" => Ok(Param::Bool(false)),
-            _ => Err(ServingError::ParamInvalid),
+            _ => Err(CoerceError::Invalid),
         },
         ParamType::Number => {
             if let Ok(i) = text.parse::<i64>() {
@@ -260,7 +331,7 @@ fn coerce(spec: &ParamSpec, text: &str) -> Result<Param, ServingError> {
             if is_plain_decimal(text) {
                 return Ok(Param::Decimal(text.to_string()));
             }
-            Err(ServingError::ParamInvalid)
+            Err(CoerceError::Invalid)
         }
         // Parsed and re-formatted rather than passed through, so ONE spelling
         // reaches the engine. chrono accepts an unpadded `2026-1-2`; it comes
@@ -271,7 +342,7 @@ fn coerce(spec: &ParamSpec, text: &str) -> Result<Param, ServingError> {
         // that engine's own parser happens to accept.
         ParamType::Date => chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d")
             .map(|d| Param::Date(d.format("%Y-%m-%d").to_string()))
-            .map_err(|_| ServingError::ParamInvalid),
+            .map_err(|_| CoerceError::Invalid),
         ParamType::Timestamp => ["%Y-%m-%d %H:%M:%S%.f", "%Y-%m-%dT%H:%M:%S%.f"]
             .iter()
             .find_map(|f| chrono::NaiveDateTime::parse_from_str(text, f).ok())
@@ -279,7 +350,7 @@ fn coerce(spec: &ParamSpec, text: &str) -> Result<Param, ServingError> {
             // prints nothing when the fraction is zero, so a plain second-
             // resolution timestamp stays plain.
             .map(|t| Param::Timestamp(t.format("%Y-%m-%d %H:%M:%S%.f").to_string()))
-            .ok_or(ServingError::ParamInvalid),
+            .ok_or(CoerceError::Invalid),
     }
 }
 
@@ -356,6 +427,7 @@ mod tests {
             delegated: false,
             impersonate: false,
             columns: vec![],
+            param_gate: egret_dataapi_api::PARAM_GATE,
         }
     }
 
@@ -526,7 +598,7 @@ mod tests {
             let s = spec("p", ty.clone(), false);
             match (coerce(&s, text), want) {
                 (Ok(got), Some(want)) => assert_eq!(got, want, "{ty:?} {text:?}"),
-                (Err(ServingError::ParamInvalid), None) => {}
+                (Err(CoerceError::Invalid), None) => {}
                 (got, want) => panic!("{ty:?} {text:?}: got {got:?}, wanted {want:?}"),
             }
         }
@@ -542,10 +614,7 @@ mod tests {
             coerce(&p, "day").expect("allowed"),
             Param::Str("day".into())
         );
-        assert!(matches!(
-            coerce(&p, "amount"),
-            Err(ServingError::ParamInvalid)
-        ));
+        assert!(matches!(coerce(&p, "amount"), Err(CoerceError::Invalid)));
     }
 
     /// Repeats become an `IN`-list; an enum repeat is refused because an enum is

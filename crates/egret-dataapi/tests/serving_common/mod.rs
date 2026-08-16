@@ -113,6 +113,22 @@ impl egret_query_api::QueryExecPort for FakePort {
         Ok(vec![col("n")])
     }
 
+    /// Publish describes the RENDERED statement, which carries `?` markers, so
+    /// it goes through this method rather than `describe_as`. Overridden rather
+    /// than inherited for the same reason as `execute_as_with_params` below: the
+    /// trait's default refuses a non-zero `param_count`, and every fixture in
+    /// this suite publishes parameterised endpoints.
+    async fn describe_as_with_params(
+        &self,
+        _ws: Uuid,
+        _database_id: Uuid,
+        _principal: UserId,
+        _sql: &str,
+        _param_count: usize,
+    ) -> Result<Vec<ColumnMeta>, Error> {
+        Ok(vec![col("n")])
+    }
+
     /// Deliberately NOT the method the serving path calls, and it returns rows
     /// that ignore the binds because it has none.
     ///

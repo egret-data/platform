@@ -114,6 +114,15 @@
 //!   parameter resolves through its `default`, or through `required` to a 400.
 //!   It is a gap rather than a decision that body parameters are unsupported.
 //!
+//!   **Publish now refuses `location: body` outright**
+//!   (`lifecycle::check_param_locations`), so no NEW version can reach this
+//!   code with one. The handling above stays because a snapshot published
+//!   before that rule can still be live — and the reason the rule exists is the
+//!   OPTIONAL case, which is silent: the parameter resolves to absent, its
+//!   `{% if %}` block is omitted, and the endpoint answers 200 with unfiltered
+//!   rows. Such a snapshot also fails the parameter-gate stamp below, so in
+//!   practice it is refused before it renders.
+//!
 //! # What Task 5 added: one id, and one place the request is described
 //!
 //! The `request_id` is minted ONCE, at the top of [`serve`], before anything can
@@ -587,6 +596,15 @@ async fn run(
     // the cache is currently on, and a serving path that only noticed the drift
     // while caching would report it the moment someone flipped `enabled` rather
     // than the moment the configuration became unsafe.
+    // Before anything is keyed, cached or rendered: a version that declares
+    // parameters and predates the publish-time gate is refused outright. Every
+    // rule spec §5 added lives at publish, so serving such a snapshot means
+    // rendering a definition no rule ever looked at — see
+    // [`ServingError::ParamGateStale`]. Placed above the cache lookup so a warm
+    // entry cannot answer for it either.
+    if !snap.params.is_empty() && snap.param_gate < egret_dataapi_api::PARAM_GATE {
+        return Err(ServingError::ParamGateStale);
+    }
     let shared = shared_cache_allowed(&st.db, &snap).await?;
     // Step 7's first half, and it runs BEFORE the cache lookup on purpose. The
     // key has to describe what this request will RENDER, not what it asked for
@@ -1207,6 +1225,7 @@ mod tests {
             delegated: false,
             impersonate: false,
             columns: vec![],
+            param_gate: egret_dataapi_api::PARAM_GATE,
         }
     }
 }

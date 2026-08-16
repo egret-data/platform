@@ -159,6 +159,24 @@ impl egret_query_api::QueryExecPort for EngineState {
             .map_err(engine_error)
     }
 
+    async fn describe_as_with_params(
+        &self,
+        ws: Uuid,
+        database_id: Uuid,
+        principal: UserId,
+        sql: &str,
+        param_count: usize,
+    ) -> Result<Vec<ColumnMeta>, Error> {
+        // Same prelude, same scoping guarantee, same error table as `describe_as`
+        // — only the connector call differs, and it differs because the text path
+        // given a `?` answers with zero columns and no error on StarRocks.
+        let spec = connect_as(self, ws, database_id, principal).await?;
+        build_connector(&spec)
+            .describe_with_params(sql, param_count, DESCRIBE_TIMEOUT)
+            .await
+            .map_err(engine_error)
+    }
+
     async fn execute_as(
         &self,
         ws: Uuid,

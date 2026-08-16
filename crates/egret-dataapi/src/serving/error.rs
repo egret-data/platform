@@ -63,9 +63,9 @@ use super::ServingError;
 ///
 /// # This is a floor, not a prediction
 ///
-/// The three 503s — [`ServingError::SchemaDrift`],
-/// [`ServingError::OutputNamingCollision`] and
-/// [`ServingError::CacheScopeStale`] — do not self-heal. Each is cleared by a
+/// The four 503s — [`ServingError::SchemaDrift`],
+/// [`ServingError::OutputNamingCollision`], [`ServingError::CacheScopeStale`]
+/// and [`ServingError::ParamGateStale`] — do not self-heal. Each is cleared by a
 /// human re-publishing the endpoint, and no duration egret can name is a
 /// forecast of when that happens. So the obvious reading is that they should
 /// carry no `Retry-After` at all.
@@ -260,6 +260,16 @@ pub(crate) fn to_wire(e: &ServingError) -> Wire {
              `delegated` and `options.impersonate` settings"
                 .into(),
         ),
+        // Names the fix and nothing else. The operator cannot act on WHICH rule
+        // the old snapshot never met — the rules are the author's, and the list
+        // changes — so the message states the one action that clears it.
+        ServingError::ParamGateStale => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "param_gate_stale",
+            "this endpoint's live version was published before its parameters were validated; \
+             re-publish it"
+                .into(),
+        ),
         // The source is NOT rendered. It is the only thing in this file that
         // could carry a table name or a host, and it goes to `tracing` instead.
         ServingError::Internal(_) => (
@@ -275,7 +285,8 @@ pub(crate) fn to_wire(e: &ServingError) -> Wire {
         // A floor, not a prediction.
         ServingError::SchemaDrift
         | ServingError::OutputNamingCollision
-        | ServingError::CacheScopeStale => Some(CONFIG_DRIFT_RETRY_AFTER_SECS),
+        | ServingError::CacheScopeStale
+        | ServingError::ParamGateStale => Some(CONFIG_DRIFT_RETRY_AFTER_SECS),
         ServingError::Unauthorized
         | ServingError::NotFound
         | ServingError::DataAccessDenied
@@ -445,6 +456,7 @@ mod tests {
             ServingError::SchemaDrift,
             ServingError::OutputNamingCollision,
             ServingError::CacheScopeStale,
+            ServingError::ParamGateStale,
         ] {
             assert_eq!(
                 to_wire(&e).retry_after,
@@ -472,8 +484,8 @@ mod tests {
     }
 
     /// Codes are the client's branching key, so two variants sharing one would
-    /// make them indistinguishable on the wire. The three 503s in particular
-    /// have three different fixes.
+    /// make them indistinguishable on the wire. The four 503s in particular
+    /// have four different fixes.
     #[test]
     fn no_two_variants_share_a_code() {
         let codes = [
@@ -497,6 +509,10 @@ mod tests {
             to_wire(&ServingError::SchemaDrift).code,
             to_wire(&ServingError::OutputNamingCollision).code,
             to_wire(&ServingError::CacheScopeStale).code,
+            // Four 503s now, and this is the one most easily confused with
+            // `cache_scope_stale`: both mean "this version predates something",
+            // and only one of them is cleared by restoring a connection setting.
+            to_wire(&ServingError::ParamGateStale).code,
             to_wire(&ServingError::Internal(anyhow::anyhow!("boom"))).code,
         ];
         let unique: std::collections::HashSet<_> = codes.iter().collect();

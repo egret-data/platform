@@ -344,6 +344,24 @@ placeholder, unreferenced parameter, `PlaceholderInsideQuotedText`):
 - A parameter in the projection is wrapped in a `CAST` (§3.4).
 - `describe` runs through the parameter-aware path and returns a non-empty column list;
   an empty list is a publish error, never a frozen empty schema (§3.4).
+- **`location: body` is refused.** Nothing on the serving surface parses a request body, so
+  a body parameter is never supplied. Required, that is a permanent 400 — loud. Optional, it
+  resolves as absent, its `{% if %}` block is omitted, and the endpoint answers **200 with
+  unfiltered rows, forever**, with nothing in the response to say a predicate went missing.
+- **`default` is coerced by the same function the serving path uses**, and must satisfy its
+  own `ty`. A `date` parameter defaulted to `"yesterday"` otherwise makes every call that
+  omits it a 400 `param_invalid` — blaming the caller for the author's mistake, and recording
+  it in `access_log` under a code that points at nothing.
+- **Every optional parameter with no `default` is rendered ABSENT, on its own.** Absence is
+  what most calls carry, and it is a second contract rather than a variation on the first: an
+  absent parameter is `none`, so `{{ sort | ident }}` outside an `{% if %}` renders fine with
+  a value and is a 500 without one. A definition that does not render with the parameter
+  missing does not publish.
+
+The rules that need a rendered statement are enforced by rendering it, not by scanning the
+template: `check_publish` (§4.2's behavioural gate) runs at publish and only at publish —
+it renders up to sixty-four times, which is right once per version and absurd per request.
+The serving path keeps the source rules and the placeholder==bind invariant.
 
 **At serve time**, before rendering:
 
@@ -356,6 +374,17 @@ placeholder, unreferenced parameter, `PlaceholderInsideQuotedText`):
 - Values are type-checked per `ParamSpec.ty`. `Date`/`Timestamp` parse to real temporal
   values and bind as typed parameters, not strings.
 - A missing required parameter is a 400; a value failing its type is a 400.
+- A **repeated** query parameter becomes a LIST, one bind per value — `ParamSpec` has no
+  multiplicity field, so multiplicity comes from the request. A repeated `Enum` is a 400: an
+  enum is a single choice and the only type that can reach an identifier position.
+- **Arity is the caller's; SHAPE is the definition's.** A parameter the definition iterates
+  (`{% for r in regions %}`) is a list even when one value is supplied, because a scalar
+  there is not a one-element loop — it is "plain is not iterable", a 500 on the ordinary
+  request `?regions=EU`. Publish infers the same set from the same function, so the shape a
+  definition is validated against is the shape it is served.
+- `+` decodes to a space in both names and values (the `application/x-www-form-urlencoded`
+  reading `axum` and mainstream clients produce), which silently changes a `String` value:
+  `?token=a+b` binds `"a b"`. A client sending base64 or a `C++`-shaped value must send `%2B`.
 
 **Errors never name the parameter.** The name is the endpoint author's, and naming it turns
 the error surface into a directory of which parameters an endpoint declares. This restates
@@ -376,9 +405,22 @@ without must not share an entry, because they now execute different SQL.
 ## 7. Compatibility
 
 An endpoint published before this phase that declares parameters starts rendering them.
-Nothing runs in production, so the migration is stated rather than automated: **every
-endpoint with parameters must be re-published after P4.5.** Publish-time validation is where
-the new rules live, so an old snapshot would otherwise bypass all of them.
+Publish-time validation is where every new rule lives, so an old snapshot bypasses all of
+them — a `location: body` parameter that silently drops a filter, a `default` that makes
+every defaulted call a 400, a `| ident` that is a 500 whenever the caller omits its value.
+
+This was originally written as an instruction — "every endpoint with parameters must be
+re-published after P4.5" — and an instruction is not an enforcement. **The snapshot records
+which revision of the gate it passed** (`EndpointSnapshot::param_gate`, stamped by publish
+and nothing else), and a version that declares parameters and carries less than the current
+`PARAM_GATE` is refused at serve time with a 503 `param_gate_stale` — before it is keyed,
+cached or rendered. A pre-P4.5 snapshot deserialises to `0` and so is refused; one re-publish
+clears it. A version with no parameters renders nothing and is unaffected.
+
+The same mechanism carries the *next* migration: when a future revision of the gate closes a
+rule this one misses, bumping `PARAM_GATE` refuses every snapshot the older gate blessed
+until it has been through the new one. That is the reason the field is an integer and not a
+boolean — "some gate ran" is precisely the claim that was not good enough this time.
 
 ## 8. What stays out of scope
 

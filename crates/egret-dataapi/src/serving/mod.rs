@@ -198,6 +198,30 @@ pub enum ServingError {
     /// the error is wrong.
     #[error("cache scope is stale")]
     CacheScopeStale,
+    /// A version that declares parameters but was frozen before the
+    /// publish-time parameter gate existed, or before its current revision —
+    /// `EndpointSnapshot::param_gate < PARAM_GATE`.
+    ///
+    /// **The alternative was an instruction.** Spec §7 said every endpoint with
+    /// parameters must be re-published after P4.5, because publish-time
+    /// validation is where the new rules live and an older snapshot bypasses all
+    /// of them: a `location: body` parameter that silently drops a filter, a
+    /// `default` that makes every defaulted call a 400, a `| ident` that is a
+    /// 500 whenever the caller omits its parameter. An instruction is not an
+    /// enforcement, and the endpoint that nobody remembers to re-publish is
+    /// exactly the one that carries the rule nobody checked.
+    ///
+    /// Refused rather than rendered-and-hoped, and refused rather than
+    /// re-validated on the fly: validating here would mean running a
+    /// sixty-four-render gate on a request path, and passing it would still
+    /// leave the snapshot's own frozen columns resolved by the pre-gate describe.
+    ///
+    /// 503 with `param_gate_stale`, alongside the other two config-drift 503s:
+    /// the endpoint is not broken, its published version predates a rule, and one
+    /// re-publish clears it. Not a 500 — nothing failed — and not a 404, which
+    /// would tell an operator to look for a deleted endpoint.
+    #[error("published before the parameter validation gate")]
+    ParamGateStale,
     /// Something on egret's side failed — the IdP key store was unreachable, say.
     /// Deliberately NOT folded into [`Self::Unauthorized`]: a 401 tells an
     /// operator their credential is bad and sends them to rotate it, while the

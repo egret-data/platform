@@ -156,27 +156,24 @@ async fn a_repeated_parameter_becomes_one_bind_marker_per_value() {
     // The `IN (?)`-binds-one-value problem, which falls out of the formatter and
     // needs no construct of its own (spec §4.3).
     //
-    // **The loop variable is named after the parameter on purpose, and it is a
-    // workaround for a known open item, not a style choice.** P3's
-    // `lifecycle::placeholders` treats the whole inside of `{{ }}` as a
-    // parameter NAME, so spec §4.3's own example — `{% for r in regions %}{{ r }}`
-    // — is refused at publish with "the query references `{{r}}` but no
-    // parameter named `r` is declared". That is ledger item T7-3, and Task 7
-    // owns reconciling the two scanners. Shadowing the parameter with the loop
-    // target is what publishes today; if T7-3 lands, this test should go back to
-    // the spec's spelling.
+    // **Spec §4.3's own spelling, restored.** This used to shadow the parameter
+    // with the loop variable (`{% for region in region %}`) because P3's
+    // scanner read the whole inside of a `{{ }}` as a parameter NAME, so `{{ r }}`
+    // was "no parameter named `r` is declared" and the spec's example could not
+    // be published at all. Task 7 reconciled the two scanners (T7-3); the
+    // workaround is gone and the loop variable is `r` again.
     let f = skip_without_db!();
     publish(
         &f,
         "/in",
         "SELECT 1 AS n WHERE region IN (\
-         {% for region in region %}{{ region }}{% if not loop.last %},{% endif %}{% endfor %})",
-        one_param("region", "string"),
+         {% for r in regions %}{{ r }}{% if not loop.last %},{% endif %}{% endfor %})",
+        one_param("regions", "string"),
     )
     .await;
 
     let res = f
-        .call_as(f.principal_a, "in?region=EU&region=US&region=APAC")
+        .call_as(f.principal_a, "in?regions=EU&regions=US&regions=APAC")
         .await;
     assert_eq!(res.status, StatusCode::OK, "{}", res.body);
     let (sql, binds) = f.port.last();
@@ -474,4 +471,104 @@ async fn a_default_shares_the_entry_with_the_value_spelled_out() {
 
     // And a DIFFERENT value is still its own entry.
     assert!(!f.call_as(f.principal_a, "def?region=US").await.cached());
+}
+
+// ---------------------------------------------------------------------------
+// Task 7 — the publish-time gate, from the serving side.
+// ---------------------------------------------------------------------------
+
+/// **T7-2.** A version frozen before the gate existed must be REFUSED, not
+/// served on the assumption that someone re-published it.
+///
+/// Spec §7 said "every endpoint with parameters must be re-published after
+/// P4.5", which is an instruction to a person. This is the enforcement: the
+/// snapshot records which gate it passed, and a `0` — the value every
+/// pre-P4.5-Task-7 snapshot deserialises to — is refused with `param_gate_stale`
+/// before the request is keyed, cached or rendered.
+///
+/// The snapshot is patched in place rather than constructed by hand so
+/// everything else about it is exactly what a real publish wrote: the only
+/// difference between the 200 above and the 503 below is the stamp.
+#[tokio::test]
+async fn a_version_published_before_the_gate_is_refused_until_it_is_republished() {
+    let f = skip_without_db!();
+    publish(&f, "/stale", OPTIONAL_REGION, one_param("region", "string")).await;
+    let ok = f.call_as(f.principal_a, "stale?region=EU").await;
+    assert_eq!(ok.status, StatusCode::OK, "{}", ok.body);
+
+    sqlx::query(
+        "UPDATE dataapi.endpoint_versions \
+         SET snapshot = snapshot - 'param_gate' \
+         WHERE snapshot->>'path' = '/stale'",
+    )
+    .execute(&f.db.pool)
+    .await
+    .expect("un-stamp the snapshot");
+
+    let res = f.call_as(f.principal_a, "stale?region=EU").await;
+    assert_eq!(
+        res.status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "an unstamped version must not serve: {}",
+        res.body
+    );
+    assert_eq!(
+        res.body["error"]["code"], "param_gate_stale",
+        "{}",
+        res.body
+    );
+    assert_eq!(
+        f.port.executions(),
+        1,
+        "and it must be refused before the engine is asked anything"
+    );
+}
+
+/// An endpoint that declares NO parameters is unaffected by the stamp: it
+/// renders nothing, so there is nothing the gate could have missed and nothing
+/// to force a re-publish of.
+///
+/// Without this the previous test passes just as well against a check that
+/// refuses every pre-gate snapshot, which would take out every P4 endpoint in
+/// service.
+#[tokio::test]
+async fn a_version_with_no_parameters_is_unaffected_by_the_stamp() {
+    let f = skip_without_db!();
+    publish(&f, "/nostamp", "SELECT 1 AS n", serde_json::json!([])).await;
+    sqlx::query(
+        "UPDATE dataapi.endpoint_versions \
+         SET snapshot = snapshot - 'param_gate' \
+         WHERE snapshot->>'path' = '/nostamp'",
+    )
+    .execute(&f.db.pool)
+    .await
+    .expect("un-stamp the snapshot");
+
+    let res = f.call_as(f.principal_a, "nostamp").await;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.body);
+}
+
+/// One value supplied to a parameter the definition LOOPS over is still a list.
+///
+/// `?regions=EU` is an ordinary request against spec §4.3's `IN`-list endpoint,
+/// and a scalar there is not a one-element loop — minijinja answers "plain is
+/// not iterable" and the call is a 500. Arity is the caller's; shape is the
+/// definition's.
+#[tokio::test]
+async fn a_single_value_for_an_iterated_parameter_is_still_a_list() {
+    let f = skip_without_db!();
+    publish(
+        &f,
+        "/one",
+        "SELECT 1 AS n WHERE region IN (\
+         {% for r in regions %}{{ r }}{% if not loop.last %},{% endif %}{% endfor %})",
+        one_param("regions", "string"),
+    )
+    .await;
+
+    let res = f.call_as(f.principal_a, "one?regions=EU").await;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.body);
+    let (sql, binds) = f.port.last();
+    assert_eq!(binds, vec![Param::Str("EU".into())]);
+    assert!(sql.contains("IN (?)"), "{sql}");
 }

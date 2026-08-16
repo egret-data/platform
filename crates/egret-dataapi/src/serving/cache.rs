@@ -791,6 +791,7 @@ mod tests {
             delegated: false,
             impersonate: false,
             columns: vec![],
+            param_gate: egret_dataapi_api::PARAM_GATE,
         }
     }
 }

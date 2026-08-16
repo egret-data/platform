@@ -335,6 +335,25 @@ khai báo không dùng, `PlaceholderInsideQuotedText`):
 - Tham số trong phần projection được bọc `CAST` (§3.4).
 - `describe` chạy qua đường có tham số và trả về danh sách cột **không rỗng**; danh sách rỗng
   là lỗi publish, không bao giờ là một schema rỗng bị đóng băng (§3.4).
+- **`location: body` bị từ chối.** Không có gì ở bề mặt phục vụ đọc request body, nên tham số
+  body không bao giờ được cấp. Nếu `required`, đó là 400 vĩnh viễn — ồn ào, thấy ngay. Nếu
+  tuỳ chọn thì tệ hơn: nó phân giải thành vắng mặt, khối `{% if %}` bị bỏ, và endpoint trả
+  **200 kèm dữ liệu KHÔNG lọc, mãi mãi**, không có gì trong response nói rằng một điều kiện đã
+  biến mất.
+- **`default` được ép kiểu bằng đúng hàm mà đường phục vụ dùng**, và phải thoả `ty` của chính
+  nó. Nếu không, một tham số `date` để mặc định `"yesterday"` khiến mọi lời gọi bỏ qua nó
+  thành 400 `param_invalid` — đổ lỗi cho **người gọi** vì lỗi của tác giả, và ghi vào
+  `access_log` dưới một mã không chỉ về đâu cả.
+- **Mỗi tham số tuỳ chọn không có `default` đều được render ở trạng thái VẮNG MẶT, riêng lẻ.**
+  Vắng mặt là trạng thái của phần lớn lời gọi, và nó là một hợp đồng thứ hai chứ không phải
+  biến thể của hợp đồng thứ nhất: tham số vắng mặt là `none`, nên `{{ sort | ident }}` nằm
+  ngoài `{% if %}` render tốt khi có giá trị và là 500 khi không. Định nghĩa không render được
+  khi thiếu tham số thì không publish được.
+
+Các luật cần tới câu lệnh đã render thì được thực thi bằng cách **render**, không phải bằng
+cách quét template: `check_publish` (cổng hành vi ở §4.2) chạy lúc publish và chỉ lúc publish
+— nó render tới sáu mươi tư lần, đúng cho mỗi lần publish một phiên bản và vô lý nếu mỗi
+request. Đường phục vụ giữ các luật nguồn và bất biến số placeholder == số bind.
 
 **Lúc phục vụ**, trước khi render:
 
@@ -347,6 +366,18 @@ khai báo không dùng, `PlaceholderInsideQuotedText`):
 - Giá trị được kiểm kiểu theo `ParamSpec.ty`. `Date`/`Timestamp` parse thành giá trị thời gian
   thật và bind theo đúng kiểu, không phải chuỗi.
 - Thiếu tham số bắt buộc là 400; sai kiểu là 400.
+- Tham số query **lặp lại** trở thành một LIST, mỗi giá trị một bind — `ParamSpec` không có
+  trường bội số, nên bội số đến từ request. `Enum` lặp lại là 400: enum là một lựa chọn đơn và
+  là kiểu duy nhất có thể chạm tới vị trí định danh.
+- **Số lượng là của người gọi; HÌNH DẠNG là của định nghĩa.** Tham số mà định nghĩa lặp qua
+  (`{% for r in regions %}`) vẫn là list ngay cả khi chỉ có một giá trị, vì một scalar ở đó
+  không phải vòng lặp một phần tử — nó là "plain is not iterable", tức 500 cho request hết sức
+  bình thường `?regions=EU`. Publish suy ra cùng tập đó bằng cùng một hàm, nên hình dạng mà
+  định nghĩa được kiểm và hình dạng nó được phục vụ không thể lệch nhau.
+- `+` giải mã thành dấu cách ở **cả** tên lẫn giá trị (cách đọc
+  `application/x-www-form-urlencoded` mà `axum` và các client phổ biến sinh ra), nên nó âm
+  thầm đổi một giá trị `String`: `?token=a+b` bind `"a b"`. Client gửi base64 hay giá trị dạng
+  `C++` phải gửi `%2B`.
 
 **Thông báo lỗi không bao giờ nêu tên tham số.** Tên là của tác giả endpoint, và nêu tên biến
 bề mặt lỗi thành danh mục các tham số mà endpoint khai báo. Đây là nhắc lại §7 của spec gốc,
@@ -366,10 +397,23 @@ dùng chung một entry, vì giờ chúng thực thi hai câu SQL khác nhau.
 
 ## 7. Tương thích
 
-Endpoint publish **trước** phase này mà có khai báo tham số sẽ bắt đầu render chúng. Chưa có gì
-chạy production, nên việc chuyển đổi được **nói ra** chứ không tự động hoá: **mọi endpoint có
-tham số phải publish lại sau P4.5.** Kiểm tra lúc publish là nơi các luật mới sống, nên một
-snapshot cũ sẽ đi vòng qua tất cả chúng.
+Endpoint publish **trước** phase này mà có khai báo tham số sẽ bắt đầu render chúng. Kiểm tra
+lúc publish là nơi mọi luật mới sống, nên một snapshot cũ đi vòng qua tất cả chúng — một tham
+số `location: body` âm thầm bỏ mất một bộ lọc, một `default` biến mọi lời gọi mặc định thành
+400, một `| ident` là 500 mỗi khi người gọi bỏ qua giá trị.
+
+Trước đây điều này được viết như một **chỉ dẫn** — "mọi endpoint có tham số phải publish lại
+sau P4.5" — và chỉ dẫn thì không phải sự thực thi. **Snapshot ghi lại nó đã qua bản nào của
+cổng kiểm** (`EndpointSnapshot::param_gate`, do publish đóng dấu và không nơi nào khác), và
+một phiên bản có khai báo tham số nhưng mang giá trị nhỏ hơn `PARAM_GATE` hiện tại sẽ bị từ
+chối lúc phục vụ bằng 503 `param_gate_stale` — trước khi nó được tính khoá cache, tra cache
+hay render. Snapshot trước P4.5 deserialize thành `0` nên bị từ chối; publish lại một lần là
+xong. Phiên bản không có tham số thì không render gì, nên không bị ảnh hưởng.
+
+Cùng cơ chế đó gánh luôn lần chuyển đổi **kế tiếp**: khi một bản cổng kiểm sau này bịt một
+luật mà bản này bỏ sót, việc tăng `PARAM_GATE` sẽ từ chối mọi snapshot mà cổng cũ đã duyệt,
+cho tới khi chúng đi qua cổng mới. Đó là lý do trường này là số nguyên chứ không phải boolean
+— "đã có một cổng nào đó chạy" chính là lời khẳng định lần này đã không đủ.
 
 ## 8. Ngoài phạm vi
 

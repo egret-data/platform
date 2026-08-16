@@ -50,6 +50,11 @@ enum Describe {
 struct FakePort {
     mode: Mutex<Describe>,
     seen: Mutex<Vec<(Uuid, Uuid, Uuid, String)>>,
+    /// The `param_count` of the last describe. Publish now describes the
+    /// RENDERED statement, so the markers and their count are the whole reason
+    /// `describe_as_with_params` exists — a fake that recorded only the SQL
+    /// could not tell the two paths apart.
+    last_params: Mutex<usize>,
     /// A statement to run DURING `describe_as` — that is, inside the exact
     /// window between publish's pre-lock read and its transaction. This is how
     /// the TOCTOU interleaving is produced deterministically, through the real
@@ -64,6 +69,7 @@ impl FakePort {
         Self {
             mode: Mutex::new(Describe::Columns(vec![("n", "integer")])),
             seen: Mutex::new(Vec::new()),
+            last_params: Mutex::new(0),
             mid_describe: Mutex::new(None),
         }
     }
@@ -90,6 +96,9 @@ impl FakePort {
     }
     fn call_count(&self) -> usize {
         self.seen.lock().unwrap().len()
+    }
+    fn last_param_count(&self) -> usize {
+        *self.last_params.lock().unwrap()
     }
 }
 
@@ -129,6 +138,22 @@ impl egret_query_api::QueryExecPort for FakePort {
             Describe::BadSql(m) => Err(Error::InvalidInput(m.into())),
             Describe::Missing(m) => Err(Error::NotFound(m.into())),
         }
+    }
+
+    /// The path publish actually takes. It does NOT fall through to the trait's
+    /// default: the default refuses a non-zero `param_count`, which is the right
+    /// answer for a fake that has not thought about parameters and the wrong one
+    /// for this suite, whose whole subject is parameterised publish.
+    async fn describe_as_with_params(
+        &self,
+        ws: Uuid,
+        database_id: Uuid,
+        principal: UserId,
+        sql: &str,
+        param_count: usize,
+    ) -> Result<Vec<ColumnMeta>, Error> {
+        *self.last_params.lock().unwrap() = param_count;
+        self.describe_as(ws, database_id, principal, sql).await
     }
 
     /// Lifecycle is the AUTHORING path (draft → validate → publish); it only
@@ -663,6 +688,30 @@ async fn a_failed_describe_leaves_no_half_published_endpoint() {
     assert_eq!(live, None);
 }
 
+/// **An empty column list is a publish error, never a frozen empty schema.**
+///
+/// This is not a hypothetical shape of failure: on StarRocks the TEXT describe
+/// path answers a statement containing a bind marker with zero columns and NO
+/// error (measured, spec §3.4) — which is why publish describes through
+/// `describe_as_with_params` at all. If that ever regressed, or if an engine
+/// simply had nothing to say about a statement, freezing the answer would give
+/// an endpoint that returns 200s carrying empty objects forever, with nothing in
+/// the response or the log to say what went wrong.
+#[tokio::test]
+async fn a_describe_that_resolves_no_columns_is_refused() {
+    let f = skip_without_db!();
+    let ep = f.create_endpoint("empty", "empty", "SELECT 1 AS n").await;
+    f.port.set(Describe::Columns(vec![]));
+
+    let (status, body) = f.publish_raw(ep).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body.to_string().contains("no output columns"),
+        "the reason must say what is empty: {body}"
+    );
+    assert!(f.versions(ep).await.is_empty(), "no version may exist");
+}
+
 /// A policy denial and a bad statement are different problems with different
 /// fixes. Flattening both into one status sends an author whose SQL is perfect
 /// to go and rewrite it.
@@ -986,13 +1035,177 @@ async fn a_parameterized_endpoint_is_described_through_a_rendered_probe() {
     f.publish(ep).await;
     assert_eq!(
         f.port.last_sql(),
-        "SELECT n FROM t WHERE r = '' AND n > 0",
-        "the engine must be handed renderable SQL, not a template"
+        "SELECT n FROM t WHERE r = ? AND n > ?",
+        "the engine must be handed the statement that will be SERVED — rendered, \
+         with bind markers — not a template and not a literal-substituted probe"
+    );
+    assert_eq!(
+        f.port.last_param_count(),
+        2,
+        "and the marker count beside it, or the engine cannot type the statement"
     );
     assert_eq!(
         f.live_snapshot(ep).await.sql,
         sql,
-        "the snapshot freezes the TEMPLATE — the probe is only for describe"
+        "the snapshot freezes the TEMPLATE — the render is only for describe"
+    );
+}
+
+/// The publish rules of spec §5, each reaching publish through the route and
+/// each refused with its own reason.
+///
+/// One case per rule, and the rule's own error text is asserted rather than just
+/// the 400: three of these are 400s for entirely different reasons, and a test
+/// that only counted statuses would pass with any one of the guards deleted.
+#[tokio::test]
+async fn publish_refuses_each_parameter_rule_with_its_own_reason() {
+    let f = skip_without_db!();
+    let before = f.port.call_count();
+    for (sql, params, needle, why) in [
+        (
+            "SELECT 1 AS n WHERE r = {{r}}",
+            serde_json::json!([{ "name": "r", "type": "string", "location": "body" }]),
+            "location: body",
+            "a body parameter is never supplied",
+        ),
+        (
+            "SELECT 1 AS n WHERE d = {{d}}",
+            serde_json::json!([
+                { "name": "d", "type": "date", "location": "query", "default": "yesterday" }
+            ]),
+            "is not a valid `date`",
+            "an author default that cannot coerce blames the caller forever",
+        ),
+        (
+            "SELECT 1 AS n ORDER BY {{ s | ident }}",
+            serde_json::json!([
+                { "name": "s", "type": "enum", "location": "query",
+                  "allowed": ["a", "b"] }
+            ]),
+            "optional with no `default`",
+            "an unguarded optional enum is a 500 on every call that omits it",
+        ),
+        (
+            "SELECT 1 AS n ORDER BY {{ s | ident }}",
+            serde_json::json!([
+                { "name": "s", "type": "string", "location": "query", "required": true }
+            ]),
+            "`ident` may only be applied to an enum parameter",
+            "`ident` on a non-enum parameter",
+        ),
+        (
+            "SELECT 1 AS n LIMIT {{n}}",
+            serde_json::json!([
+                { "name": "n", "type": "number", "location": "query", "required": true }
+            ]),
+            "`LIMIT`/`OFFSET`",
+            "no engine binds a limit",
+        ),
+        (
+            "SELECT {{v}} AS v FROM t",
+            serde_json::json!([
+                { "name": "v", "type": "string", "location": "query", "required": true }
+            ]),
+            "without a `CAST`",
+            "an uncast projection parameter freezes the wrong column type",
+        ),
+        (
+            "SELECT 1 AS n {% filter upper %}{{ r }}{% endfilter %}",
+            serde_json::json!([
+                { "name": "r", "type": "string", "location": "query", "required": true }
+            ]),
+            "may not appear in a published definition",
+            "a capture construct desyncs the bind list",
+        ),
+        (
+            "SELECT 1 AS n WHERE {% if r == 'EU' %}1=1{% endif %} AND x = {{r}}",
+            serde_json::json!([
+                { "name": "r", "type": "string", "location": "query", "required": true }
+            ]),
+            "compared directly against another value",
+            "a bare parameter comparison is silently false",
+        ),
+        (
+            "SELECT 1 AS n WHERE r = {{r",
+            serde_json::json!([
+                { "name": "r", "type": "string", "location": "query", "required": true }
+            ]),
+            "malformed parameter placeholder",
+            "an unterminated placeholder",
+        ),
+    ] {
+        let ep = f
+            .create_endpoint(why, &format!("p/{}", Uuid::new_v4().simple()), sql)
+            .await;
+        f.patch_endpoint(ep, serde_json::json!({ "params": params }))
+            .await;
+        let (status, body) = f.publish_raw(ep).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{why}: {body}");
+        assert!(
+            body.to_string().contains(needle),
+            "{why}: expected the reason to mention {needle:?}, got {body}"
+        );
+        assert!(f.versions(ep).await.is_empty(), "{why} must not publish");
+    }
+    assert_eq!(
+        f.port.call_count(),
+        before,
+        "every one of these is decidable without the engine, so none may reach it"
+    );
+}
+
+/// The rules must not have banned the shapes they exist to make safe — a test
+/// suite that only proves refusals passes just as well against a validator that
+/// refuses everything.
+///
+/// Spec §4.3's canonical endpoint is the headline: it could not be published at
+/// all before T7-3, because P3's scanner read `sort | ident` as a parameter NAME
+/// and a loop variable `r` as an undeclared parameter, and because the old probe
+/// handed `{% if %}` to the engine verbatim.
+#[tokio::test]
+async fn the_canonical_parameterized_endpoint_publishes() {
+    let f = skip_without_db!();
+    let sql = "SELECT region, SUM(amount) AS total \
+               FROM sales \
+               WHERE 1=1 \
+               {% if region %} AND region = {{ region }} {% endif %} \
+               {% if from %} AND day >= {{ from }} {% endif %} \
+               {% if regions %} AND region IN ( \
+               {% for r in regions %}{{ r }}{% if not loop.last %},{% endif %}{% endfor %} \
+               ) {% endif %} \
+               GROUP BY region \
+               ORDER BY {{ sort | ident }}";
+    let ep = f.create_endpoint("canon", "canon", sql).await;
+    f.patch_endpoint(
+        ep,
+        serde_json::json!({ "params": [
+            { "name": "region",  "type": "string", "location": "query" },
+            { "name": "from",    "type": "date",   "location": "query" },
+            { "name": "regions", "type": "string", "location": "query" },
+            // `sort` reaches an identifier position through `| ident`, which is
+            // only legal on an enum with an `allowed` list — and it is required,
+            // because `ORDER BY` has no `{% if %}` around it.
+            { "name": "sort", "type": "enum", "location": "query", "required": true,
+              "allowed": ["region", "total"] }
+        ]}),
+    )
+    .await;
+
+    f.publish(ep).await;
+    let described = f.port.last_sql();
+    assert!(
+        described.contains("ORDER BY region"),
+        "`| ident` emits the AUTHOR's allowed entry, raw: {described}"
+    );
+    assert!(
+        described.contains("region = ?") && described.contains("day >= ?"),
+        "every conditional branch a value reaches must be described: {described}"
+    );
+    assert_eq!(
+        f.live_snapshot(ep).await.param_gate,
+        egret_dataapi_api::PARAM_GATE,
+        "a version that passed the gate must say so, or serving cannot tell it \
+         from one published before the gate existed"
     );
 }
 

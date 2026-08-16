@@ -464,6 +464,20 @@ fn plainify(value: &Value) -> Value {
     if let Some(cell) = value.downcast_object_ref::<Cell>() {
         return cell.plain();
     }
+    // **`none` and `undefined` ITERATE AS EMPTY in minijinja**
+    // (`Value::try_iter`, `ValueRepr::None => ValueIterImpl::Empty`), so without
+    // this line the branch below turns a declared-but-absent parameter into an
+    // empty LIST. A list cannot be bound as one value, so the plain render fails
+    // where the opaque one succeeded, and [`check_dynamic`] reports
+    // [`RenderError::ParameterInspected`] against a definition that inspects
+    // nothing — a divergence manufactured entirely by this function.
+    //
+    // Unreachable until Task 7: nothing called [`check_publish`] with an absent
+    // parameter, and absence is the case an OPTIONAL parameter is in on most
+    // calls. Absent is already as plain as a value gets.
+    if value.is_none() || value.is_undefined() {
+        return value.clone();
+    }
     match value.try_iter() {
         Ok(items) => Value::from(items.map(|v| plainify(&v)).collect::<Vec<_>>()),
         Err(_) => value.clone(),
@@ -978,6 +992,98 @@ fn collect_aliases(body: &str, ctx: &ParamValues, aliases: &mut Vec<String>) {
 pub fn check_publish(sql: &str, ctx: &ParamValues) -> Result<(), RenderError> {
     check_static(sql, ctx)?;
     check_dynamic(sql, ctx)
+}
+
+/// Every name this template reads out of its context, as **minijinja's own
+/// parser** reports it.
+///
+/// # This is the reconciliation of the two scanners
+///
+/// P3's `lifecycle::placeholders` treats the whole inside of a `{{ … }}` as a
+/// parameter NAME. That was true of the renderer it was written against — one
+/// that only ever substituted `{{name}}` — and it stopped being true the moment
+/// P4.5 made the definition a real template. `{{ sort | ident }}` became an
+/// undeclared placeholder called `"sort | ident"`, a loop variable `{{ r }}`
+/// became an undeclared placeholder called `"r"`, and **spec §4.3's own
+/// canonical example could not be published**.
+///
+/// The fix is not a better scanner. `undeclared_variables` walks the AST
+/// minijinja itself compiled, so a loop target, a `{% set %}` target and a
+/// `{% with %}` binding are already excluded, filter arguments and `{% if %}`
+/// conditions are already included, and there is no spelling to keep in sync:
+/// this module's whole history is the byte scanner disagreeing with the lexer,
+/// and the answer that has held every time is to ask the lexer.
+///
+/// Not a replacement for `PlaceholderInsideQuotedText`, which is a different
+/// question — *where in the SQL* a reference stands, which minijinja has no
+/// opinion about — and stays a byte scan over both escaping readings.
+///
+/// The template is parsed under [`environment`], not a bare one, so the answer
+/// is the same parse the render will do. A definition that does not parse is
+/// reported as [`RenderError::Template`] rather than silently yielding an empty
+/// set, which is what `undeclared_variables` does with a parse error on its own.
+pub fn context_names(sql: &str) -> Result<Vec<String>, RenderError> {
+    let binds = Arc::new(Mutex::new(Binds::default()));
+    let mut env = environment(binds);
+    env.add_template_owned("endpoint", sql.to_owned())
+        .map_err(mj_err)?;
+    let template = env.get_template("endpoint").map_err(mj_err)?;
+    // `false`: a nested lookup is reported as its ROOT name, which is the only
+    // half a `ParamSpec` can ever declare.
+    let mut names: Vec<String> = template.undeclared_variables(false).into_iter().collect();
+    // `undeclared_variables` returns a `HashSet`; publish errors must not depend
+    // on hash order.
+    names.sort();
+    Ok(names)
+}
+
+/// The declared parameters this definition iterates over in a `{% for %}`
+/// header.
+///
+/// Publish-time only, and it exists because `ParamSpec` has no multiplicity
+/// field: whether a parameter arrives as one value or as a list is decided by
+/// the REQUEST (a repeated query parameter becomes a list — see
+/// `serving::params`), so representative values have to guess the shape the
+/// definition expects. A parameter named as a loop's iterable gets a
+/// one-element list; everything else gets a scalar.
+///
+/// A byte scan, with the same over-approximating habits as [`blocks`] — and the
+/// direction it fails in is the safe one: a misclassified parameter makes the
+/// representative render FAIL, which refuses the publish. It cannot make a
+/// definition publish that would not otherwise.
+pub fn iterated_params(sql: &str, declared: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let Ok(bs) = blocks(sql) else {
+        return out;
+    };
+    for block in bs {
+        let Block::Tag(body) = block else { continue };
+        let toks = tokens(body);
+        if toks.first().map(|t| t.text) != Some("for") {
+            continue;
+        }
+        let Some(at) = toks
+            .iter()
+            .position(|t| t.kind == Tok::Word && t.text == "in")
+        else {
+            continue;
+        };
+        // The header ends at the loop's own `if` filter — a condition naming a
+        // parameter does not make that parameter the iterable.
+        let end = toks[at + 1..]
+            .iter()
+            .position(|t| t.kind == Tok::Word && t.text == "if")
+            .map_or(toks.len(), |p| at + 1 + p);
+        for t in &toks[at + 1..end] {
+            if t.kind == Tok::Word
+                && declared.iter().any(|d| d == t.text)
+                && !out.iter().any(|o| o == t.text)
+            {
+                out.push(t.text.to_string());
+            }
+        }
+    }
+    out
 }
 
 /// The behavioural half of [`check_publish`], on its own.

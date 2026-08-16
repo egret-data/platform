@@ -68,6 +68,46 @@ pub trait QueryExecPort: Send + Sync {
         sql: &str,
     ) -> Result<Vec<ColumnMeta>, egret_core::Error>;
 
+    /// [`Self::describe_as`], for a statement that carries `param_count` bind
+    /// markers and no values.
+    ///
+    /// The Data API's publish path renders an endpoint's template before it
+    /// describes it, so the statement handed to the engine is the one that will
+    /// actually be served — `?` markers and all. That statement cannot go through
+    /// [`Self::describe_as`]: **on StarRocks the text path given SQL containing
+    /// `?` returns zero columns and NO error** (measured, P4.5 §3.4), so publish
+    /// would freeze an empty schema instead of failing. Both engines can type a
+    /// parameterised statement without values — Trino via `DESCRIBE OUTPUT`,
+    /// StarRocks via `prep()` — which is what this routes to.
+    ///
+    /// Every obligation on [`Self::describe_as`] holds unchanged: the workspace
+    /// scope check, running as `principal`, and the by-variant error mapping.
+    ///
+    /// # Why it is defaulted, and why the default REFUSES
+    ///
+    /// The same reasoning as [`Self::execute_as_with_params`], which see: the
+    /// trait has ten implementations, nine of them hand-written test fakes, and a
+    /// default that quietly ignored `param_count` would let every fake answer a
+    /// parameterised describe with its canned columns while nothing exercised the
+    /// parameter-aware path at all. So it delegates only where delegating is
+    /// exactly equivalent — `param_count == 0` — and otherwise refuses.
+    async fn describe_as_with_params(
+        &self,
+        ws: Uuid,
+        database_id: Uuid,
+        principal: egret_core::UserId,
+        sql: &str,
+        param_count: usize,
+    ) -> Result<Vec<ColumnMeta>, egret_core::Error> {
+        if param_count == 0 {
+            self.describe_as(ws, database_id, principal, sql).await
+        } else {
+            Err(egret_core::Error::Internal(anyhow::anyhow!(
+                "this QueryExecPort implementation cannot describe a parameterised statement"
+            )))
+        }
+    }
+
     /// Run `sql` as `principal` and return the rows, honouring `limits`.
     ///
     /// The serving half of the port: the Data API's request path calls this

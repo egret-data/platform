@@ -154,6 +154,10 @@ fn fixture_snapshot(database_id: Uuid) -> EndpointSnapshot {
                 ty: "varchar".to_string(),
             },
         ],
+        // Non-default on purpose, like every other field here: a round trip that
+        // dropped this would leave `0`, which is the value the serving path
+        // refuses.
+        param_gate: egret_dataapi_api::PARAM_GATE,
     }
 }
 
