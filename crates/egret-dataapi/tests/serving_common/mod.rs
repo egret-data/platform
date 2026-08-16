@@ -296,6 +296,11 @@ pub struct Fixture {
     pub db: Db,
     pub serving: axum::Router,
     pub mgmt: axum::Router,
+    /// The same state the two routers above were built from — cloned before
+    /// `.with_state` consumed it. Lets a test reach a `pub(crate)` expression
+    /// like [`egret_dataapi::can_invoke_for_test`] directly, without going
+    /// through HTTP for a question that isn't about routing.
+    pub state: DataApiState,
     pub session: String,
     pub ws_slug: String,
     pub ws_id: Uuid,
@@ -303,6 +308,10 @@ pub struct Fixture {
     pub principal_a: UserId,
     pub principal_b: UserId,
     pub admin: Uuid,
+    /// The endpoint the fixture publishes, at `/probe`. `f.admin` is a
+    /// `ws_admin` member of `ws_id` and holds no object-scoped grant naming
+    /// this endpoint — see `grant_ws_admin` below.
+    pub endpoint_id: Uuid,
     /// `delegated = false` — the connection a `shared` cache may be published
     /// against.
     pub database_id: Uuid,
@@ -416,6 +425,30 @@ pub async fn grant_invoke(db: &Db, user: UserId, endpoint: Uuid) {
     .expect("grant invoke");
 }
 
+/// Make `user` a `ws_admin` of `ws` — a WORKSPACE-scoped `access_grants` row on
+/// the real, migration-seeded role, written directly rather than through
+/// `workspace_members` for the same reason [`grant_invoke`] writes
+/// `access_grants` directly: `AccessGrantStore::grants_for` reads this table,
+/// not the legacy one the `sync_workspace_grant` trigger mirrors from.
+///
+/// This is what lets `f.admin` reach `data_api_endpoint:invoke` on every
+/// endpoint in `ws` through the Cedar workspace->object cascade (migration
+/// 0124) while owning zero `scope_type = 'object'` rows — the distinction
+/// `can_invoke`'s doc comment exists to explain.
+async fn grant_ws_admin(db: &Db, user: Uuid, ws: Uuid) {
+    sqlx::query(
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         SELECT 'user', $1, r.id, 'workspace', $2 FROM roles r \
+         WHERE r.scope = 'workspace' AND r.name = 'ws_admin' \
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(user)
+    .bind(ws)
+    .execute(&db.pool)
+    .await
+    .expect("grant ws_admin");
+}
+
 pub async fn fixture() -> Option<Fixture> {
     let url = std::env::var("DATABASE_URL").ok()?;
     let db = Db::connect(&url, 5).await.expect("connect");
@@ -447,6 +480,10 @@ pub async fn fixture() -> Option<Fixture> {
         &["data_api_endpoint:read", "data_api_endpoint:manage"],
     )
     .await;
+    // `admin` gets NO object-scoped grant on anything — it reaches invoke (once
+    // an endpoint is published below) purely through this workspace-scoped
+    // `ws_admin` membership and the Cedar cascade migration 0124 put on it.
+    grant_ws_admin(&db, admin, ws_id).await;
 
     // The REAL PDP, built after the grant (`CedarPdp` snapshots policies at
     // build time).
@@ -488,26 +525,43 @@ pub async fn fixture() -> Option<Fixture> {
         .expect("create session")
         .token;
 
-    Some(Fixture {
+    // Captured before `.with_state(st)` below consumes it.
+    let state = st.clone();
+
+    let mut f = Fixture {
         db,
         serving: axum::Router::new()
             .nest("/data-api/v1", serving_router())
-            .with_state(st.clone()),
+            .with_state(state.clone()),
         mgmt: axum::Router::new()
             .nest("/api", management_router())
             .with_state(st),
+        state,
         session,
         ws_slug: slug,
         ws_id,
         principal_a,
         principal_b,
         admin,
+        // Set for real just below, once the fixture can publish through its own
+        // `mgmt` router.
+        endpoint_id: Uuid::nil(),
         database_id,
         delegated_database_id,
         impersonating_database_id,
         port,
         clock,
-    })
+    };
+    f.endpoint_id = f
+        .publish(
+            "/probe",
+            database_id,
+            serde_json::json!({ "enabled": false }),
+            serde_json::json!({}),
+        )
+        .await;
+
+    Some(f)
 }
 
 pub struct Res {

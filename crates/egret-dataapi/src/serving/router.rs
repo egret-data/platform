@@ -849,27 +849,14 @@ async fn invoke_allowed(
     ws: egret_core::WorkspaceId,
     endpoint_id: Uuid,
 ) -> Result<(), ServingError> {
-    let allowed = st
-        .pdp
-        .authorize(
-            &egret_core::authz::Subject {
-                user_id: principal.user_id,
-                group_ids: Vec::new(),
-            },
-            crate::routes::EP_INVOKE,
-            &egret_core::authz::Resource::Object(egret_core::authz::ObjectRef {
-                kind: crate::endpoints::OBJECT_KIND.to_string(),
-                id: endpoint_id,
-                folder_id: None,
-                workspace_id: ws,
-            }),
-        )
+    // The expression itself now lives in `crate::invoke` — the serving path is
+    // one of three callers that must agree, see that module's comment.
+    let allowed = crate::invoke::can_invoke(st, principal.user_id, ws, endpoint_id)
         .await
         // A PDP that could not answer is OUR fault, and it must not read as a
         // refusal: `Internal` (500) sends an operator to egret, `NotGranted`
         // (403) would send them to write a grant that already exists.
-        .map_err(ServingError::internal)?
-        .allow;
+        .map_err(ServingError::internal)?;
     if allowed {
         Ok(())
     } else {

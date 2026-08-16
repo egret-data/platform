@@ -43,6 +43,7 @@
 
 pub mod clients;
 pub mod endpoints;
+mod invoke;
 pub mod lifecycle;
 pub mod render;
 pub mod routes;
@@ -67,3 +68,17 @@ pub use serving::{
     serving_openapi, serving_router, verify_serving_token, ServingError, ServingMeta,
     ServingPrincipal, ServingResponse, DATA_API_AUDIENCE,
 };
+
+/// Test-only access to the shared invoke expression (P5 §5.2). Integration
+/// tests live outside the crate and cannot see `pub(crate)`; exposing it through
+/// a named shim keeps the real function crate-private, so no production caller
+/// can drift onto a second copy of this decision.
+#[doc(hidden)]
+pub async fn can_invoke_for_test(
+    st: &crate::routes::DataApiState,
+    user_id: egret_core::ids::UserId,
+    ws: egret_core::WorkspaceId,
+    endpoint_id: uuid::Uuid,
+) -> Result<bool, egret_core::Error> {
+    crate::invoke::can_invoke(st, user_id, ws, endpoint_id).await
+}
