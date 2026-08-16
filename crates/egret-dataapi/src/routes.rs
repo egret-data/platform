@@ -80,7 +80,9 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::activity::{ActivityRange, ActivityRow, ActivityStore, ActivitySummaryDto};
+use crate::activity::{
+    ActivityCallDto, ActivityRange, ActivityRow, ActivityStore, ActivitySummaryDto,
+};
 use crate::clients::ClientStore;
 use crate::endpoints::{
     normalize_path, CreateEndpointInput, DataApiEndpointDto, EndpointStore, UpdateEndpointInput,
@@ -1651,6 +1653,72 @@ async fn activity_summary(
     ))
 }
 
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+#[serde(deny_unknown_fields)]
+pub struct ActivityCallsQuery {
+    pub range: ActivityRange,
+    #[serde(default)]
+    pub endpoint_id: Option<Uuid>,
+    #[serde(default)]
+    pub status_code: Option<i32>,
+    #[serde(default)]
+    pub error_code: Option<String>,
+    #[serde(default)]
+    pub request_id: Option<String>,
+    /// Off by default. A trial is not consumer traffic, so it must be asked for.
+    #[serde(default)]
+    pub include_trials: bool,
+    /// Keyset cursor: return rows strictly older than this.
+    #[serde(default)]
+    pub before: Option<DateTime<Utc>>,
+    #[serde(default = "default_call_limit")]
+    pub limit: i64,
+}
+
+fn default_call_limit() -> i64 {
+    50
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/data-api/activity/calls",
+    tag = "data-api",
+    params(WorkspacePath, ActivityCallsQuery),
+    responses(
+        (status = 200, description = "Individual calls in the range, most recent first", body = Vec<ActivityCallDto>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing data_api_endpoint:read permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn activity_calls(
+    State(st): State<DataApiState>,
+    WsContext(ctx): WsContext,
+    Query(q): Query<ActivityCallsQuery>,
+) -> Result<Json<Vec<ActivityCallDto>>, DataApiError> {
+    // Same gate as `activity_summary`: workspace-scoped `:read`. The
+    // `request_id` filter does NOT relax this — see `ActivityStore::calls`'s
+    // doc comment for why the workspace predicate must stay in the statement
+    // even though `access_log_request_id_idx` is global.
+    egret_core::authz::require(&*st.pdp, &ctx, EP_READ).await?;
+    Ok(Json(
+        st.activity
+            .calls(
+                ctx.workspace_id.0,
+                q.range.since(Utc::now()),
+                q.endpoint_id,
+                q.status_code,
+                q.error_code.as_deref(),
+                q.request_id.as_deref(),
+                q.include_trials,
+                q.before,
+                q.limit,
+            )
+            .await
+            .map_err(db_err)?,
+    ))
+}
+
 /// The Data API management router. Mount under `/api` so the live paths are
 /// `/api/ws/{workspace}/data-api/…` — `WsContext`'s feature gate only recognises
 /// a path beginning `/api/ws/` or `/ws/`, and `egret-server`'s
@@ -1719,6 +1787,10 @@ pub fn management_router() -> Router<DataApiState> {
             "/ws/{workspace}/data-api/activity/summary",
             get(activity_summary),
         )
+        .route(
+            "/ws/{workspace}/data-api/activity/calls",
+            get(activity_calls),
+        )
 }
 
 #[derive(utoipa::OpenApi)]
@@ -1745,6 +1817,7 @@ pub fn management_router() -> Router<DataApiState> {
         grant_endpoint_invoke,
         revoke_endpoint_invoke,
         activity_summary,
+        activity_calls,
     ),
     components(schemas(
         DataApiServiceAccountDto,
@@ -1772,6 +1845,7 @@ pub fn management_router() -> Router<DataApiState> {
         ActivitySummaryDto,
         ActivityRow,
         ActivityRange,
+        ActivityCallDto,
     )),
     tags((name = "data-api", description = "Data API service accounts and OAuth2 clients")),
 )]

@@ -164,6 +164,57 @@ async fn the_unmatched_bucket_is_not_conflated_with_the_grand_total() {
 }
 
 #[tokio::test]
+async fn a_request_id_lookup_cannot_read_another_workspace() {
+    let Some(f) = fixture().await else { return };
+
+    // A row in ANOTHER workspace, with a request_id the caller knows.
+    let other_ws = f.make_workspace("other").await;
+    let rid = "01JOTHERWORKSPACEREQUESTID";
+    f.log_row_in(other_ws, 500, 5, Some(rid)).await;
+
+    let (status, body) = f
+        .mgmt_get(&format!(
+            "/api/ws/{}/data-api/activity/calls?range=24h&request_id={rid}",
+            f.ws_slug
+        ))
+        .await;
+
+    assert_eq!(status, 200);
+    assert_eq!(
+        body.as_array().map(|a| a.len()),
+        Some(0),
+        "access_log_request_id_idx is global on purpose; the QUERY is what scopes it"
+    );
+}
+
+#[tokio::test]
+async fn trial_runs_appear_only_when_asked_for() {
+    let Some(f) = fixture().await else { return };
+    f.log_row(200, 10, false, None).await;
+    f.log_row_as_trial(200, 10, f.admin).await;
+
+    let (_, without) = f
+        .mgmt_get(&format!("/api/ws/{}/data-api/activity/calls?range=24h", f.ws_slug))
+        .await;
+    assert_eq!(without.as_array().unwrap().len(), 1);
+
+    let (_, with) = f
+        .mgmt_get(&format!(
+            "/api/ws/{}/data-api/activity/calls?range=24h&include_trials=true",
+            f.ws_slug
+        ))
+        .await;
+    assert_eq!(with.as_array().unwrap().len(), 2);
+    let trial = with
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| !r["actor_user_id"].is_null())
+        .expect("the trial row is present and identifies its actor");
+    assert_eq!(trial["actor_user_id"], f.admin.to_string());
+}
+
+#[tokio::test]
 async fn cacheable_calls_reads_the_versions_own_snapshot_not_the_live_config() {
     let Some(f) = fixture().await else { return };
 

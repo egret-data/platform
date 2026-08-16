@@ -78,6 +78,26 @@ pub struct ActivitySummaryDto {
     pub retention_days: Option<i64>,
 }
 
+#[derive(Debug, Serialize, sqlx::FromRow, utoipa::ToSchema)]
+pub struct ActivityCallDto {
+    pub id: Uuid,
+    pub ts: DateTime<Utc>,
+    pub endpoint_id: Option<Uuid>,
+    pub endpoint_name: Option<String>,
+    /// What the caller asked for. The ONLY identification a row carries when
+    /// `endpoint_id` is null — see migration 0125.
+    pub request_method: Option<String>,
+    pub request_path: Option<String>,
+    pub status_code: i32,
+    pub error_code: Option<String>,
+    pub duration_ms: i32,
+    pub cache_hit: bool,
+    pub client_id: Option<String>,
+    pub request_id: String,
+    /// Non-null ⇒ a Try-it run by this person, not consumer traffic.
+    pub actor_user_id: Option<Uuid>,
+}
+
 #[derive(Clone)]
 pub struct ActivityStore {
     db: Db,
@@ -190,5 +210,61 @@ impl ActivityStore {
             endpoints,
             retention_days: self.retention_days,
         })
+    }
+
+    /// The call list. One fixed statement; every filter is an optional
+    /// predicate, because sqlx 0.9's `query_as` takes a `&'static str` and a
+    /// built statement is what P1 spent its whole scope removing.
+    ///
+    /// **`workspace_id = $1` is not negotiable, including on the `request_id`
+    /// lookup.** `access_log_request_id_idx` is deliberately global so support
+    /// can find a row without knowing the workspace; a handler that leans on the
+    /// index and drops the predicate lets a guessable id read across a tenancy
+    /// boundary. The index's shape is not the query's authorization.
+    ///
+    /// Keyset pagination on `ts` — `OFFSET` on the fastest-growing table in the
+    /// schema gets slower every page and can skip rows written mid-scroll.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn calls(
+        &self,
+        ws: Uuid,
+        since: DateTime<Utc>,
+        endpoint_id: Option<Uuid>,
+        status_code: Option<i32>,
+        error_code: Option<&str>,
+        request_id: Option<&str>,
+        include_trials: bool,
+        before: Option<DateTime<Utc>>,
+        limit: i64,
+    ) -> Result<Vec<ActivityCallDto>, sqlx::Error> {
+        sqlx::query_as(
+            "SELECT al.id, al.ts, al.endpoint_id, e.name AS endpoint_name, \
+                    al.request_method, al.request_path, al.status_code, al.error_code, \
+                    al.duration_ms, al.cache_hit, al.client_id, al.request_id, \
+                    al.actor_user_id \
+             FROM dataapi.access_log al \
+             LEFT JOIN dataapi.endpoints e ON e.id = al.endpoint_id \
+             WHERE al.workspace_id = $1 \
+               AND al.ts >= $2 \
+               AND ($3::uuid IS NULL OR al.endpoint_id = $3) \
+               AND ($4::int IS NULL OR al.status_code = $4) \
+               AND ($5::text IS NULL OR al.error_code = $5) \
+               AND ($6::text IS NULL OR al.request_id = $6) \
+               AND ($7::boolean OR al.actor_user_id IS NULL) \
+               AND ($8::timestamptz IS NULL OR al.ts < $8) \
+             ORDER BY al.ts DESC \
+             LIMIT $9",
+        )
+        .bind(ws)
+        .bind(since)
+        .bind(endpoint_id)
+        .bind(status_code)
+        .bind(error_code)
+        .bind(request_id)
+        .bind(include_trials)
+        .bind(before)
+        .bind(limit.clamp(1, 200))
+        .fetch_all(&self.db.pool)
+        .await
     }
 }

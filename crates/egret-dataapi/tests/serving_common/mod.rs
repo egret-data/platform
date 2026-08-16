@@ -783,6 +783,55 @@ impl Fixture {
         .expect("insert access_log row");
     }
 
+    /// A second workspace the fixture's session user holds NO membership in —
+    /// deliberately, so a row planted in it is a row the caller cannot see
+    /// through any grant. That is what makes
+    /// `a_request_id_lookup_cannot_read_another_workspace` a test of the
+    /// `workspace_id = $1` predicate rather than of a grant that happens to be
+    /// missing.
+    pub async fn make_workspace(&self, slug: &str) -> Uuid {
+        let owner = insert_user(&self.db, "t5_other_owner").await;
+        sqlx::query_scalar(
+            "INSERT INTO workspaces (slug, name, created_by, status) \
+             VALUES ($1, 'Data API Task 5 Other', $2, 'active') RETURNING id",
+        )
+        .bind(format!("{slug}-{}", Uuid::new_v4().simple()))
+        .bind(owner)
+        .fetch_one(&self.db.pool)
+        .await
+        .expect("insert workspace")
+    }
+
+    /// [`Fixture::log_row_for`], but for an EXPLICIT workspace rather than the
+    /// fixture's own `ws_id`. Needed only to plant a row in the workspace
+    /// [`Fixture::make_workspace`] returns — every other test in this crate
+    /// wants a row in the fixture's own workspace and uses `log_row`/
+    /// `log_row_for` instead.
+    pub async fn log_row_in(
+        &self,
+        ws: Uuid,
+        status_code: i32,
+        duration_ms: i32,
+        request_id: Option<&str>,
+    ) {
+        sqlx::query(
+            "INSERT INTO dataapi.access_log \
+               (workspace_id, status_code, duration_ms, request_id) \
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(ws)
+        .bind(status_code)
+        .bind(duration_ms)
+        .bind(
+            request_id
+                .map(str::to_string)
+                .unwrap_or_else(|| Uuid::new_v4().to_string()),
+        )
+        .execute(&self.db.pool)
+        .await
+        .expect("insert access_log row");
+    }
+
     /// Insert a draft carrying `cache`/`rate_limit` and publish it through the
     /// REAL publish route, so the frozen snapshot is the one publish produces —
     /// including its `(delegated, impersonate)` witness pair, which is what the

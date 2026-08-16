@@ -50,7 +50,7 @@ pub mod render;
 pub mod routes;
 pub mod serving;
 
-pub use activity::{ActivityRange, ActivityRow, ActivityStore, ActivitySummaryDto};
+pub use activity::{ActivityCallDto, ActivityRange, ActivityRow, ActivityStore, ActivitySummaryDto};
 pub use clients::{ClientStore, NewClient, DATA_API_TTL_SECS};
 pub use endpoints::{
     CreateEndpointInput, DataApiEndpointDto, DeletedEndpoint, EndpointStore, UpdateEndpointInput,
