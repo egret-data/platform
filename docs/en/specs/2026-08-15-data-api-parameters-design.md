@@ -552,9 +552,45 @@ rendered `IN (?, ?)` and a single `?regions=EU` rendered `IN (?)` rather than 50
 `describe_as_with_params` returned five typed columns from the publish call site on a
 template full of `{% if %}` tags; and a snapshot with `param_gate` stripped was refused
 **503 `param_gate_stale`**. Hostile values (`EU' OR '1'='1`, a trailing `\`) came back as
-**data** — zero rows, HTTP 200 — never as an error and never as extra rows. **Trino was NOT
-live-checked over HTTP** and remains proven only by its Rust integration tests; see the
-report for why.
+**data** — zero rows, HTTP 200 — never as an error and never as extra rows.
+
+**ALSO PERFORMED 2026-08-16 against Trino** (Trino 481, a coordinator built to the shape egret
+itself provisions — see below). The same sequence, same results: `?region=EU` → ids `{1,2}` and
+`?region=US` → ids `{3,4}`; `region` absent → all five rows; `?d=2020-02-29` → the two leap-day
+rows; the `IN`-list at 2, 1 and 3 values with §4.3's canonical example published verbatim; and
+`describe_as_with_params` returning five typed columns from the publish call site through
+Trino's `DESCRIBE OUTPUT`.
+
+Two things this run added that the StarRocks one could not:
+
+1. **The rendered `EXECUTE … USING` text was read back off the coordinator**
+   (`system.runtime.queries`), so §3.1's claim is observed rather than inferred. Trino received
+   `EXECUTE p1 USING 'EU', DATE '2020-02-29'` — a *typed* date literal — and, for the payload
+   `a' || 'b`, `EXECUTE p1 USING 'a'' || ''b', 'a'' || ''b'`. **The quote is doubled.** Broken
+   escaping renders `'a' || 'b'`, which Trino evaluates to `"ab"` with a 200 and no error; the
+   value came back as the literal 8-byte string instead. `x' || current_user || 'y` likewise
+   round-tripped as 24 bytes rather than leaking the engine principal, and a trailing backslash
+   survived as one byte — Trino does not treat it as an escape, so it must *not* be doubled
+   here, the opposite of the StarRocks rule.
+2. **Task 4's spelling divergence was re-measured and normalization shown to be load-bearing at
+   publish.** On this coordinator raw `DESCRIBE OUTPUT` returns `decimal(10,2)` while the
+   execute response returns `decimal(10, 2)`. Two endpoints over the identical projection — one
+   with a parameter, one without, i.e. the two different describe paths — both froze
+   `decimal(10, 2)` into the snapshot. `varchar(20)` was identical either way.
+
+**Environment note, because it is a live trap and not a code defect.** The dev docker
+coordinator (`deploy/trino/etc/config.properties`) trusts *Keycloak's* JWKS with
+`required-audience=trino`. egret's only engine-token issuer is `MachineIdpEngineMinter`, which
+signs `aud: "engine"` with egret's own key; no `ConnOptions` field carries a static bearer, and
+the non-delegated and impersonate arms of `delegation_for` send no bearer at all. **Nothing
+egret can mint is acceptable to that coordinator**, so it can never serve a Data API request.
+That file is stale relative to what egret itself provisions — the `demo-trino-coordinator`
+ConfigMap in the kind cluster reads `key-file=<egret>/.well-known/jwks.json` with
+`required-audience=engine`, which is the configuration this check used. Relatedly,
+`POST /databases/{id}/test` builds its connection with `bearer_token: None`
+(`registry/tester.rs`), so it reports `{"ok":false,"detail":"forbidden"}` against *any* JWT-only
+Trino even when the published endpoint serves correctly — do not read that as a broken
+connection.
 
 ## 10. Residual risk, stated rather than implied
 

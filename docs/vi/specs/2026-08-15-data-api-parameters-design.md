@@ -544,9 +544,44 @@ render `IN (?, ?)` còn `?regions=EU` một giá trị render `IN (?)` chứ kh�
 `describe_as_with_params` trả về năm cột có kiểu từ chính call site publish, trên một template
 đầy tag `{% if %}`; và một snapshot bị xoá `param_gate` bị từ chối **503 `param_gate_stale`**.
 Các giá trị thù địch (`EU' OR '1'='1`, một `\` ở cuối) quay về dưới dạng **dữ liệu** — không
-dòng nào, HTTP 200 — không bao giờ là lỗi và không bao giờ là dòng thừa. **Trino CHƯA được
-kiểm sống qua HTTP** và hiện chỉ được chứng minh bởi các integration test Rust của nó; xem
-report để biết lý do.
+dòng nào, HTTP 200 — không bao giờ là lỗi và không bao giờ là dòng thừa.
+
+**CŨNG ĐÃ THỰC HIỆN 2026-08-16 trên Trino** (Trino 481, một coordinator dựng đúng theo cấu hình
+mà chính egret provision — xem bên dưới). Cùng một chuỗi, cùng kết quả: `?region=EU` → id
+`{1,2}` và `?region=US` → id `{3,4}`; thiếu `region` → đủ năm dòng; `?d=2020-02-29` → hai dòng
+ngày nhuận; `IN`-list ở 2, 1 và 3 giá trị với ví dụ chuẩn ở §4.3 publish **nguyên văn**; và
+`describe_as_with_params` trả về năm cột có kiểu từ chính call site publish qua `DESCRIBE OUTPUT`
+của Trino.
+
+Hai điều lần chạy này thêm được mà lần StarRocks không thể:
+
+1. **Văn bản `EXECUTE … USING` đã render được đọc ngược lại từ coordinator**
+   (`system.runtime.queries`), nên khẳng định ở §3.1 là **quan sát được** chứ không phải suy
+   luận. Trino nhận `EXECUTE p1 USING 'EU', DATE '2020-02-29'` — một literal date **có kiểu** —
+   và với payload `a' || 'b` thì nhận `EXECUTE p1 USING 'a'' || ''b', 'a'' || ''b'`. **Dấu nháy
+   đã được nhân đôi.** Escape hỏng sẽ render `'a' || 'b'`, Trino tính ra `"ab"` với HTTP 200 và
+   không lỗi; thực tế giá trị quay về đúng chuỗi 8 byte. Tương tự
+   `x' || current_user || 'y` quay về 24 byte thay vì rò rỉ principal của engine, và một `\` ở
+   cuối sống sót nguyên một byte — Trino không coi đó là ký tự escape nên **không được** nhân
+   đôi ở đây, ngược hẳn với quy tắc của StarRocks.
+2. **Sai lệch cách viết kiểu ở Task 4 đã được đo lại và chứng minh việc chuẩn hoá là có tác
+   dụng thật tại publish.** Trên coordinator này, `DESCRIBE OUTPUT` thô trả về `decimal(10,2)`
+   còn response của execute trả về `decimal(10, 2)`. Hai endpoint trên cùng một projection —
+   một có tham số, một không, tức hai đường describe khác nhau — đều đóng băng
+   `decimal(10, 2)` vào snapshot. `varchar(20)` giống nhau ở cả hai đường.
+
+**Ghi chú môi trường, vì đây là một cái bẫy sống chứ không phải lỗi code.** Coordinator Trino
+trong docker dev (`deploy/trino/etc/config.properties`) tin JWKS của *Keycloak* với
+`required-audience=trino`. Nguồn phát engine-token duy nhất của egret là
+`MachineIdpEngineMinter`, ký `aud: "engine"` bằng khoá của chính egret; không trường
+`ConnOptions` nào mang bearer tĩnh, và nhánh non-delegated lẫn nhánh impersonate của
+`delegation_for` đều không gửi bearer. **Không có thứ gì egret mint được mà coordinator đó chấp
+nhận**, nên nó không bao giờ phục vụ được một request Data API. File đó đã cũ so với chính cấu
+hình egret provision — ConfigMap `demo-trino-coordinator` trong cụm kind ghi
+`key-file=<egret>/.well-known/jwks.json` với `required-audience=engine`, và đó là cấu hình lần
+kiểm này dùng. Liên quan: `POST /databases/{id}/test` dựng kết nối với `bearer_token: None`
+(`registry/tester.rs`), nên nó báo `{"ok":false,"detail":"forbidden"}` với **bất kỳ** Trino
+chỉ-JWT nào kể cả khi endpoint đã publish vẫn chạy đúng — đừng đọc đó là kết nối hỏng.
 
 ## 10. Rủi ro còn lại, nói thẳng thay vì để ngầm
 
