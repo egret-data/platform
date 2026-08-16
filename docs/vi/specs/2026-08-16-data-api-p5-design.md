@@ -268,19 +268,31 @@ membership `ws_admin` mang `data_api_endpoint:invoke`, và cascade workspace→o
 tới được qua đường cascade và sinh ra một tài liệu thiếu path — không lỗi, và người đọc không
 có cách nào biết. Hãy hỏi authorizer đúng câu hỏi mà serving hỏi.
 
-### 5.3 `servers[0].url` suy ra từ request
+### 5.3 `servers[0].url` và `tokenUrl` cùng lấy từ một nguồn: `issuer`
 
-egret không có setting "base URL công khai của API". `catalog.public_url` là `Option` mặc định
-`http://localhost:8080` và về ngữ nghĩa thuộc về catalog; `automation.browser_url` thuộc về
-link trong thông báo. Mượn cái nào cũng là mượn nhầm knob, và cả hai đều có thể chưa set — cho
-ra một file trỏ localhost trông hoàn toàn hợp lệ.
+```text
+servers[0].url  = {DataApiState.issuer}/data-api/v1
+tokenUrl        = {DataApiState.issuer}/…            (token endpoint của machine-IdP)
+```
 
-**Suy ra từ chính request tải file**: scheme + `X-Forwarded-Host` / `Host`, ghép với mount
-serving `/data-api/v1` (`crates/egret-server/src/lib.rs:369`). Người đang tải file đang ngồi
-trên đúng origin mà consumer sẽ dùng.
+**Chúng bắt buộc dùng chung một nguồn, nếu không file có thể tự mâu thuẫn.** `tokenUrl` không
+có lựa chọn nào khác — nó là endpoint của chính machine-IdP, suy ra từ `issuer`, và là đúng URL
+đã được trao cho consumer khi client của họ được issue. Nếu `servers[0].url` lấy từ chỗ khác,
+một tài liệu duy nhất có thể đẩy consumer tới một origin để lấy token và một origin khác để gọi.
 
-**Và hiển thị URL đó cạnh nút tải.** Một giá trị suy ra cần một chỗ để bị nhìn thấy là sai;
-mắt người trên màn hình mới là phép kiểm tra, không phải một knob cấu hình không ai xem lại.
+`DataApiState.issuer` chính là `catalog.public_url`, đã trim, mặc định `http://localhost:8080`
+(`crates/egret-bin/src/main.rs:1356`). Cái tên gây hiểu nhầm — dù nằm dưới `catalog`, giá trị
+đó **chính là** URL gốc công khai của egret: nó là `iss` của JWT machine-IdP, là `token_endpoint`
+trả về khi issue client, là `required_issuer` của StarRocks, và là `engine_oidc_issuer`. Một
+deployment mà nó sai là một deployment mà `client_credentials` đã hỏng sẵn, nên "nó có thể chưa
+set" không phải là một chế độ hỏng mà riêng tài liệu này gánh.
+
+Mount serving là `/data-api/v1` (`crates/egret-server/src/lib.rs:369`).
+
+**UI hiện URL đó cạnh nút tải, và cảnh báo khi host của chính request lệch với `issuer`.** Đó là
+chỗ mắt người nhìn tới, và một chỗ lệch ở đó đáng nêu vì lý do lớn hơn OpenAPI: nó nghĩa là
+`catalog.public_url` đang sai, thứ làm hỏng việc mint token và engine JWT auth từ lâu trước khi
+làm hỏng một file tải về.
 
 ### 5.4 Nội dung
 

@@ -270,19 +270,33 @@ exactly the endpoints reachable through that cascade and emits a document with p
 — with no error, and no way for the reader to tell. Ask the authorizer the same question
 serving asks.
 
-### 5.3 `servers[0].url` is derived from the request
+### 5.3 `servers[0].url` and `tokenUrl` come from the same source: `issuer`
 
-egret has no "public API base URL" setting. `catalog.public_url` is an `Option` defaulting to
-`http://localhost:8080` and semantically belongs to the catalog; `automation.browser_url`
-belongs to notification links. Borrowing either is borrowing the wrong knob, and both can be
-unset — producing a file pointing at localhost that looks perfectly valid.
+```text
+servers[0].url  = {DataApiState.issuer}/data-api/v1
+tokenUrl        = {DataApiState.issuer}/…            (the machine-IdP token endpoint)
+```
 
-**Derive it from the request that downloads the file**: scheme + `X-Forwarded-Host` / `Host`,
-joined with the serving mount `/data-api/v1` (`crates/egret-server/src/lib.rs:369`). The
-person downloading is sitting on the origin the consumer will use.
+**They must share one source, or the file can contradict itself.** `tokenUrl` has no choice —
+it is the machine-IdP's own endpoint, derived from `issuer`, and it is the same URL already
+handed to the consumer when their client was issued. If `servers[0].url` came from anywhere
+else, a single document could send a consumer to one origin for a token and another for the
+call.
 
-**And display that URL next to the download button.** A derived value needs a place to be
-seen wrong; a human eye on the screen is the check, not a config knob nobody revisits.
+`DataApiState.issuer` is `catalog.public_url`, trimmed, defaulting to `http://localhost:8080`
+(`crates/egret-bin/src/main.rs:1356`). The name is misleading — despite living under
+`catalog`, that value **is** egret's public root URL: it is the machine-IdP JWT `iss`, the
+`token_endpoint` returned when a client is issued, StarRocks' `required_issuer`, and
+`engine_oidc_issuer`. A deployment where it is wrong is a deployment where
+`client_credentials` already fails, so "it might be unset" is not a failure mode this document
+can have on its own.
+
+The serving mount is `/data-api/v1` (`crates/egret-server/src/lib.rs:369`).
+
+**The UI shows that URL next to the download button, and warns when the request's own host
+disagrees with `issuer`.** That is where the human eye goes, and a mismatch there is worth
+surfacing for a reason larger than OpenAPI: it means `catalog.public_url` is wrong, which
+breaks token minting and engine JWT auth well before it breaks a downloaded file.
 
 ### 5.4 Contents
 
