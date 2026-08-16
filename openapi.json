@@ -16069,7 +16069,7 @@
             }
           },
           "403": {
-            "description": "Missing data_api_endpoint:read permission",
+            "description": "Missing data_api_endpoint:manage permission. The gate matches `/grants` LIST, not the other read routes: this document is the grant roster, resolved per service account",
             "content": {
               "application/json": {
                 "schema": {

@@ -38,7 +38,9 @@
 //!    the three `/grants` routes — including the LIST — on
 //!    `data_api_endpoint:manage`: an invoke grant is what makes an endpoint
 //!    callable at all, so writing one mutates the authorization graph and
-//!    reading them enumerates every consumer of the endpoint.
+//!    reading them enumerates every consumer of the endpoint. `GET
+//!    …/data-api/openapi` is on `:manage` for the same reason and is the
+//!    stronger case — it answers that question per account and iterable.
 //! 2. **The workspace comes from [`WsContext`], never from the `{workspace}`
 //!    path segment read a second time.** Gating on one and querying with the
 //!    other is exactly how a cross-workspace hole opens. A service account or
@@ -1789,7 +1791,7 @@ fn openapi_gen_err(e: crate::openapi_gen::OpenApiGenError) -> DataApiError {
         (status = 200, description = "OpenAPI 3.0.3 document describing what service_account_id may invoke. `servers[0].url` already carries the workspace slug, so joining it with a `paths` key gives the URL a consumer calls", body = serde_json::Value),
         (status = 400, description = "The workspace has more live endpoints than one document may describe; request them one at a time with endpoint_id", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing data_api_endpoint:read permission", body = ErrorBody),
+        (status = 403, description = "Missing data_api_endpoint:manage permission. The gate matches `/grants` LIST, not the other read routes: this document is the grant roster, resolved per service account", body = ErrorBody),
         (status = 404, description = "No such service account in this workspace", body = ErrorBody),
         (status = 409, description = "A described endpoint's output naming collides; re-publish it", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
@@ -1800,16 +1802,26 @@ async fn get_openapi(
     WsContext(ctx): WsContext,
     Query(q): Query<OpenApiQuery>,
 ) -> Result<Json<serde_json::Value>, DataApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, EP_READ).await?;
+    // **`:manage`, not `:read`, and matching `/grants` LIST on purpose.** This
+    // route takes a `service_account_id` and answers with exactly the set of
+    // endpoints that account may invoke — the grant roster, read from the other
+    // end and iterable over the workspace's accounts. The module comment's first
+    // invariant puts `/grants` LIST on `:manage` because "reading them enumerates
+    // every consumer of the endpoint"; this route answers a strictly MORE
+    // powerful question than that one — full path, parameter and schema detail
+    // for every endpoint a principal may invoke, not just a roster of ids — so
+    // gating it lower let `:read` enumerate what `:manage` was there to protect.
+    // Do not "fix" this back to `EP_READ` to match the other GETs in this
+    // module: the other GETs describe endpoints, this one describes who can call
+    // them.
+    egret_core::authz::require(&*st.pdp, &ctx, EP_MANAGE).await?;
     // `ctx.workspace_id`, resolved through `scoped_account` before anything
     // else, exactly like every other handler in this module that takes an id
-    // from the caller (see the module comment's containment invariant). This
-    // document answers a MORE powerful question than `/grants` LIST does — full
-    // path, parameter and schema detail for every endpoint a principal may
-    // invoke, not just a roster of ids — so it cannot be looser about whose
-    // `service_account_id` it accepts. Without this, any uuid (another
-    // workspace's principal, a random value, a non-service-account user)
-    // supplied here would answer 200 with a DIFFERENT set of paths depending on
+    // from the caller (see the module comment's containment invariant). The
+    // permission gate above is not a substitute: it says the caller may ask the
+    // question, not whose account it may ask it about. Without this, any uuid
+    // (another workspace's principal, a random value, a non-service-account
+    // user) supplied here would answer 200 with a DIFFERENT set of paths depending on
     // what it can invoke — precisely the content oracle `scoped_account`'s
     // uniform 404 exists to deny. The mismatch answers 404, never 403, so a
     // caller cannot distinguish "no such account" from "not yours".

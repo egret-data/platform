@@ -345,6 +345,44 @@ pub fn mint(ws: Uuid, user: UserId, client_id: &str) -> String {
 // Fixture
 // ---------------------------------------------------------------------------
 
+/// A management caller holding a specific permission set — see
+/// [`Fixture::caller_with`]. Carries its OWN router because it carries its own
+/// PDP: `CedarPdp::build` snapshots policies, so a principal granted after the
+/// fixture was built is invisible to the fixture's own PDP.
+pub struct Caller {
+    /// The `users.id` the session resolves to.
+    pub user: Uuid,
+    app: axum::Router,
+    session: String,
+}
+
+impl Caller {
+    /// A GET through this caller's own router, carrying its session cookie.
+    pub async fn get(&self, path: &str) -> (StatusCode, serde_json::Value) {
+        let res = self
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(path)
+                    .header("Cookie", format!("egret_session={}", self.session))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = res.status();
+        let bytes = axum::body::to_bytes(res.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+}
+
 pub struct Fixture {
     pub db: Db,
     pub serving: axum::Router,
@@ -1062,6 +1100,40 @@ impl Fixture {
     /// path without duplicating the `access_grants` insert.
     pub async fn grant_ws_admin(&self, user: Uuid) {
         grant_ws_admin(&self.db, user, self.ws_id).await
+    }
+
+    /// A management router + session for a BRAND-NEW human holding exactly
+    /// `perms` in the fixture's workspace — the only way to measure a gate,
+    /// since [`Fixture::mgmt_get`]'s own session belongs to `author`, who holds
+    /// `data_api_endpoint:read` AND `:manage` and would therefore pass every
+    /// gate this module has.
+    ///
+    /// **A FRESH `CedarPdp` is built after the role rows exist**, because
+    /// `CedarPdp::build` snapshots policies. Reusing `self.state`'s PDP — built
+    /// in `fixture()` — would answer from a snapshot taken before this role and
+    /// silently deny everything, which reads exactly like a gate that works.
+    /// Everything else is cloned from the fixture's state so the routes under
+    /// test are the ones every other test in the suite drives.
+    pub async fn caller_with(&self, perms: &[&str]) -> Caller {
+        let user = insert_user(&self.db, "t4_gated").await;
+        grant(&self.db, user, self.ws_id, perms).await;
+        let pdp: Arc<dyn egret_core::authz::Pdp> = Arc::new(
+            egret_auth::pdp::CedarPdp::build(self.db.clone(), &egret_events::EventBus::new())
+                .await
+                .expect("build CedarPdp"),
+        );
+        let mut st = self.state.clone();
+        st.pdp = pdp;
+        let session = st
+            .sessions
+            .create(egret_core::ids::UserId(user), "test", "127.0.0.1")
+            .await
+            .expect("create session")
+            .token;
+        let app = axum::Router::new()
+            .nest("/api", management_router())
+            .with_state(st);
+        Caller { user, app, session }
     }
 
     /// Switch `options.impersonate` on a live connection AFTER a version was

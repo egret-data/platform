@@ -271,3 +271,46 @@ async fn an_unknown_service_account_id_is_not_found() {
         .await;
     assert_eq!(status, 404);
 }
+
+/// **The document is gated on `data_api_endpoint:manage`, not `:read`.**
+///
+/// It takes a `service_account_id` and answers with exactly the endpoints that
+/// account may invoke — the grant roster, per account and iterable over the
+/// workspace's service accounts. `/grants` LIST is on `:manage` for precisely
+/// that reason (see `routes.rs`'s first module invariant), and this route
+/// answers a strictly more powerful version of the same question, so a `:read`
+/// holder must not reach it.
+///
+/// The rest of this file's calls go through `f.mgmt_get`, whose session belongs
+/// to a principal holding BOTH `:read` and `:manage` — which is why they keep
+/// passing and why none of them could have noticed the gate. This one needs its
+/// own principal.
+///
+/// The mutation that fails this test: put `EP_READ` back on `get_openapi`.
+#[tokio::test]
+async fn a_read_only_principal_cannot_read_the_generated_document() {
+    let Some(f) = fixture().await else { return };
+    let sa = f.create_service_account("gate-check-sa").await;
+
+    let reader = f.caller_with(&["data_api_endpoint:read"]).await;
+    let path = format!(
+        "/api/ws/{}/data-api/openapi?service_account_id={sa}",
+        f.ws_slug
+    );
+    let (status, body) = reader.get(&path).await;
+    assert_eq!(
+        status, 403,
+        "`:read` must not enumerate what a service account may invoke: {body}"
+    );
+
+    // And the SAME request succeeds for a principal that holds `:manage`, so
+    // the 403 above is the gate and not a broken route, a bad session, or a
+    // service account this fixture never really created. Without this half, a
+    // handler that answered 403 unconditionally would pass.
+    let manager = f
+        .caller_with(&["data_api_endpoint:read", "data_api_endpoint:manage"])
+        .await;
+    let (status, body) = manager.get(&path).await;
+    assert_eq!(status, 200, "`:manage` must still be served: {body}");
+    assert!(body["paths"].is_object(), "{body}");
+}

@@ -251,8 +251,20 @@ pulling echarts into a page that otherwise needs no charting stack.
 GET /api/ws/{ws}/data-api/openapi?service_account_id=<uuid>[&endpoint_id=<uuid>]
 ```
 
-Gate `data_api_endpoint:read`. Per-endpoint is the same route with `endpoint_id` — one
-builder, not two mechanisms that can drift.
+Gate **`data_api_endpoint:manage`**, matching `/grants` LIST rather than the other read
+routes. The route takes a `service_account_id` and answers with exactly the endpoints that
+account may invoke: it is the grant roster, read from the other end, per account and iterable
+over the workspace's service accounts. Base spec §6.2 and `routes.rs`'s first module invariant
+put the `/grants` routes — including the LIST — on `:manage` because "reading them enumerates
+every consumer of the endpoint", and this route answers a strictly more powerful version of
+that question (full path, parameter and schema detail, not just a roster of ids). Gating it on
+`:read` would let a reader enumerate what `:manage` exists to protect. **Do not "fix" this back
+to `:read` for consistency with the other GETs** — the other GETs describe endpoints; this one
+describes who can call them. Pinned by
+`tests/openapi_gen.rs::a_read_only_principal_cannot_read_the_generated_document`.
+
+Per-endpoint is the same route with `endpoint_id` — one builder, not two mechanisms that can
+drift.
 
 Output is **OpenAPI 3.0.3**, not 3.1: Postman and `openapi-generator` support 3.0 far more
 widely, and this artifact's whole purpose is being consumed by someone else's tooling.

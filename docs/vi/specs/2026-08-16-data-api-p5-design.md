@@ -250,8 +250,19 @@ cái giá kéo echarts vào một trang vốn không cần stack biểu đồ n�
 GET /api/ws/{ws}/data-api/openapi?service_account_id=<uuid>[&endpoint_id=<uuid>]
 ```
 
-Gate `data_api_endpoint:read`. Per-endpoint là cùng route thêm `endpoint_id` — một builder,
-không phải hai cơ chế có thể lệch nhau.
+Gate **`data_api_endpoint:manage`**, khớp với `/grants` LIST chứ không khớp các route read
+khác. Route này nhận một `service_account_id` và trả về đúng tập endpoint mà account đó gọi
+được: nó chính là danh sách grant, đọc từ đầu bên kia, theo từng account và duyệt được hết các
+service account của workspace. §6.2 spec nền và invariant module đầu tiên trong `routes.rs` đặt
+các route `/grants` — kể cả LIST — lên `:manage` vì "đọc chúng là liệt kê mọi consumer của
+endpoint", và route này trả lời một phiên bản mạnh hơn hẳn của cùng câu hỏi đó (đầy đủ path,
+tham số và schema, không chỉ danh sách id). Gate nó ở `:read` sẽ cho một người chỉ có quyền đọc
+liệt kê đúng thứ mà `:manage` sinh ra để bảo vệ. **Đừng "sửa" nó về `:read` cho đồng bộ với các
+GET khác** — các GET khác mô tả endpoint; route này mô tả AI gọi được chúng. Được ghim bởi
+`tests/openapi_gen.rs::a_read_only_principal_cannot_read_the_generated_document`.
+
+Per-endpoint là cùng route thêm `endpoint_id` — một builder, không phải hai cơ chế có thể lệch
+nhau.
 
 Đầu ra là **OpenAPI 3.0.3**, không phải 3.1: Postman và `openapi-generator` hỗ trợ 3.0 rộng
 hơn nhiều, và mục đích duy nhất của artifact này là được tooling của người khác tiêu thụ.
