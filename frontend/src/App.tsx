@@ -44,6 +44,7 @@ import DataApiLayout from "@/routes/explore/dataapi/DataApiLayout";
 import Endpoints from "@/routes/explore/dataapi/Endpoints";
 import EndpointDetail from "@/routes/explore/dataapi/EndpointDetail";
 import Definition from "@/routes/explore/dataapi/detail/Definition";
+import ResponseSection from "@/routes/explore/dataapi/detail/ResponseSection";
 import { Placeholder } from "@/routes/Placeholder";
 import Workspaces from "@/routes/control-plane/Workspaces";
 import WorkspaceDetail from "@/routes/control-plane/WorkspaceDetail";
@@ -123,11 +124,11 @@ function ExploreRoutes() {
                 that can be opened cold. */}
             <Route path="endpoints/:id" element={<EndpointDetail />}>
               <Route index element={<Definition />} />
-              {/* Response/Access/Try it/Versions still render `Placeholder` — Tasks
-                  4-7 swap each in for its real section. Each is its own child
+              {/* Access/Try it/Versions still render `Placeholder` — Tasks 5-7
+                  swap each in for its real section. Each is its own child
                   route (not a query param) so the open section is in the URL and
                   survives a refresh. */}
-              <Route path="response" element={<Placeholder title="Response" />} />
+              <Route path="response" element={<ResponseSection />} />
               <Route path="access" element={<Placeholder title="Access" />} />
               <Route path="try" element={<Placeholder title="Try it" />} />
               <Route path="versions" element={<Placeholder title="Versions" />} />

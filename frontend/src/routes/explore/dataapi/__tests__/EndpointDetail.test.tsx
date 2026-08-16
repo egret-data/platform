@@ -21,9 +21,10 @@ vi.mock("@/lib/useUnsavedChangesWarning", () => ({
 
 import * as api from "@/api/generated/data-api/data-api";
 import * as databasesApi from "@/api/databases";
-import { ParamLocation, ParamType, type DataApiEndpointDto } from "@/api/generated/model";
+import { ParamLocation, ParamType, type DataApiEndpointDto, type DataApiEndpointVersionDto } from "@/api/generated/model";
 import EndpointDetail from "@/routes/explore/dataapi/EndpointDetail";
 import Definition from "@/routes/explore/dataapi/detail/Definition";
+import ResponseSection from "@/routes/explore/dataapi/detail/ResponseSection";
 
 function makeEndpoint(overrides: Partial<DataApiEndpointDto> = {}): DataApiEndpointDto {
   return {
@@ -291,5 +292,159 @@ describe("EndpointDetail dirtiness", () => {
     expect(invalidateSpy).toHaveBeenCalledWith(
       expect.objectContaining({ queryKey: ["dataApiListEndpoints", "eng"] }),
     );
+  });
+});
+
+function renderResponse(endpoint: DataApiEndpointDto = makeEndpoint()) {
+  vi.mocked(api.useDataApiGetEndpoint).mockReturnValue(
+    { data: { status: 200, data: endpoint }, isLoading: false, isError: false, error: null, refetch: vi.fn() } as unknown as
+      ReturnType<typeof api.useDataApiGetEndpoint>,
+  );
+
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(
+    <QueryClientProvider client={qc}>
+      <MemoryRouter initialEntries={[`/explore/eng/data-api/endpoints/${endpoint.id}/response`]}>
+        <Routes>
+          <Route path="/explore/:workspace/data-api/endpoints/:id" element={<EndpointDetail />}>
+            <Route path="response" element={<ResponseSection />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+}
+
+// `servers[0].url` already carries the workspace slug (P5a fixed the backend
+// for exactly this — see `openapi_gen.rs`) — the fixture pins that shape so a
+// regression that drops the slug or reconstructs the URL from parts shows up
+// here rather than only in a live check.
+const OPENAPI_FIXTURE = {
+  openapi: "3.0.3",
+  info: { title: "Data API", version: "1.0.0" },
+  servers: [{ url: "https://egret.test/data-api/v1/analytics" }],
+  paths: {},
+};
+
+function makeVersion(overrides: Partial<DataApiEndpointVersionDto> = {}): DataApiEndpointVersionDto {
+  return {
+    id: "v-1",
+    version: 1,
+    note: "",
+    is_live: true,
+    created_by: "user-1",
+    created_at: "2026-08-01T00:00:00Z",
+    snapshot: {
+      sql: "SELECT 1",
+      method: "GET",
+      path: "reports/daily",
+      database_id: "db-1",
+      params: [],
+      output: {},
+      cache: {},
+      limits: {},
+      rate_limit: {},
+      delegated: false,
+      columns: [{ name: "total_revenue", ty: "bigint" }],
+    },
+    ...overrides,
+  } as unknown as DataApiEndpointVersionDto;
+}
+
+describe("ResponseSection", () => {
+  beforeEach(() => {
+    vi.mocked(api.useDataApiListEndpointVersions).mockReturnValue(
+      { data: { status: 200, data: [] }, isLoading: false, isError: false } as unknown as
+        ReturnType<typeof api.useDataApiListEndpointVersions>,
+    );
+    vi.mocked(api.useDataApiListServiceAccounts).mockReturnValue(
+      {
+        data: {
+          status: 200,
+          data: [{ id: "sa-1", name: "svc", description: "", email: "svc@x", created_at: "2026-01-01T00:00:00Z" }],
+        },
+        isLoading: false,
+        isError: false,
+      } as unknown as ReturnType<typeof api.useDataApiListServiceAccounts>,
+    );
+  });
+
+  it("shows the served base URL beside the download", async () => {
+    vi.mocked(api.useDataApiGetOpenapi).mockReturnValue(
+      { data: { status: 200, data: OPENAPI_FIXTURE }, isError: false } as unknown as
+        ReturnType<typeof api.useDataApiGetOpenapi>,
+    );
+    renderResponse();
+    // OPENAPI_FIXTURE.servers[0].url — the slug is part of it; see the backend note above.
+    expect(await screen.findByText("https://egret.test/data-api/v1/analytics")).toBeInTheDocument();
+  });
+
+  it("names the endpoint and says re-publish when the document is refused", async () => {
+    // apiFetch throws on non-2xx, so a 409 arrives as react-query's `error`,
+    // an ApiError carrying `.status` — not as `data`.
+    vi.mocked(api.useDataApiGetOpenapi).mockReturnValue(
+      {
+        data: undefined,
+        isError: true,
+        error: Object.assign(new Error("endpoint daily has an output naming collision; re-publish it"), { status: 409 }),
+      } as unknown as ReturnType<typeof api.useDataApiGetOpenapi>,
+    );
+    renderResponse();
+    expect(await screen.findByText(/re-publish/i)).toBeInTheDocument();
+    expect(screen.getByText(/daily/)).toBeInTheDocument();
+  });
+
+  it("shows the frozen columns of the live version, not the draft", async () => {
+    vi.mocked(api.useDataApiListEndpointVersions).mockReturnValue(
+      {
+        data: {
+          status: 200,
+          data: [
+            makeVersion({ id: "v-0", version: 1, is_live: false }),
+            makeVersion({ id: "v-1", version: 2, is_live: true }),
+          ],
+        },
+        isLoading: false,
+        isError: false,
+      } as unknown as ReturnType<typeof api.useDataApiListEndpointVersions>,
+    );
+    vi.mocked(api.useDataApiGetOpenapi).mockReturnValue(
+      { data: undefined, isError: false } as unknown as ReturnType<typeof api.useDataApiGetOpenapi>,
+    );
+    renderResponse(makeEndpoint({ live_version_id: "v-1" }));
+    expect(await screen.findByText("total_revenue")).toBeInTheDocument();
+    expect(screen.getByText("bigint")).toBeInTheDocument();
+  });
+
+  // A draft endpoint (never published) has no frozen columns yet — rendering
+  // an empty table here would misrepresent "nothing published" as "publishes
+  // zero columns", so this must be a distinct message, not an empty table.
+  it("says there is no live version rather than showing the draft's columns", async () => {
+    vi.mocked(api.useDataApiGetOpenapi).mockReturnValue(
+      { data: undefined, isError: false } as unknown as ReturnType<typeof api.useDataApiGetOpenapi>,
+    );
+    renderResponse(makeEndpoint({ live_version_id: null, state: "draft" }));
+    expect(await screen.findByText(/no live version/i)).toBeInTheDocument();
+  });
+
+  it("changes only the touched output field when the shape is switched, via a partial PATCH", async () => {
+    vi.mocked(api.useDataApiGetOpenapi).mockReturnValue(
+      { data: undefined, isError: false } as unknown as ReturnType<typeof api.useDataApiGetOpenapi>,
+    );
+    const endpoint = makeEndpoint({ output: { shape: "objects", naming: "snake" } });
+    const user = userEvent.setup();
+    renderResponse(endpoint);
+
+    await user.click(screen.getByRole("combobox", { name: "Shape" }));
+    await user.click(await screen.findByRole("option", { name: "Arrays" }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(updateMutateAsync).toHaveBeenCalled());
+    const call = updateMutateAsync.mock.calls[0][0];
+    // `naming` must survive untouched — rebuilding `output` from scratch
+    // (rather than spreading the existing object) is exactly the mistake
+    // Task 3's review flagged: it would silently drop or reorder fields no
+    // control on this page even touched.
+    expect(call.data).toEqual({ output: { shape: "arrays", naming: "snake" } });
   });
 });
