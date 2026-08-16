@@ -49,15 +49,36 @@ const STATE_TONE: Record<string, string> = {
 
 const ENGINE_LABEL: Record<string, string> = { trino: "Trino", starrocks: "StarRocks" };
 
-function stateLabel(state: string): string {
-  return state.length ? state.charAt(0).toUpperCase() + state.slice(1) : state;
+/**
+ * The list DTO has no version count — only `live_version_id`, a nullable id.
+ * Showing it as its own "Version" column was tried and dropped (see
+ * `docs/en/specs/2026-08-16-data-api-p5-design.md` §2.3): for `live` and
+ * `draft` the id fully tracks the state — a fresh draft is created with it
+ * null (migration 0121), and `EndpointStore::publish` (`lifecycle.rs`) is the
+ * only place that ever sets it, atomically with `state = 'live'` — so
+ * labelling those two states alone would only repeat the badge's own colour
+ * in words.
+ *
+ * `disabled` is the one state where the id carries real information:
+ * `EndpointStore::disable` (`lifecycle.rs`) has no state guard and never
+ * touches `live_version_id`, so a draft can be disabled directly — a
+ * `disabled` row can mean "was serving, paused" or "never served at all",
+ * and those need different next actions (Enable vs. Publish). Folding both
+ * into a bare "Disabled" badge would read as "currently serving" in the
+ * worse of the two cases.
+ */
+function stateBadgeLabel(e: DataApiEndpointDto): string {
+  if (e.state === "disabled") {
+    return e.live_version_id ? "Disabled · was live" : "Disabled · never published";
+  }
+  return e.state.length ? e.state.charAt(0).toUpperCase() + e.state.slice(1) : e.state;
 }
 
 export default function Endpoints() {
   const ws = useParams().workspace!;
   const nav = useNavigate();
 
-  const { data: envelope, isLoading, isError } = useDataApiListEndpoints(ws);
+  const { data: envelope, isLoading, isError, error } = useDataApiListEndpoints(ws);
   // useMemo (not a plain ternary) so a falsy envelope doesn't hand `rows`'
   // useMemo a fresh `[]` identity on every render.
   const endpoints = useMemo(() => (envelope?.status === 200 ? envelope.data : []), [envelope]);
@@ -133,14 +154,9 @@ export default function Endpoints() {
       </td>
       <td>
         <Badge className={STATE_TONE[e.state] ?? "bg-muted text-muted-foreground"}>
-          {stateLabel(e.state)}
+          {stateBadgeLabel(e)}
         </Badge>
       </td>
-      {/* The list DTO carries only `live_version_id` (a nullable id, not a
-          version count) — the numeric `version` on `DataApiEndpointVersionDto`
-          lives behind a per-endpoint versions fetch this page does not make.
-          "Published" is the honest signal available here without an N+1. */}
-      <td className="text-muted-foreground">{e.live_version_id ? "Published" : "—"}</td>
       <td className="text-muted-foreground">{engineLabel(e.database_id)}</td>
       <td className="text-muted-foreground"><RelativeTime iso={e.updated_at} className="block" /></td>
       <td>
@@ -158,12 +174,23 @@ export default function Endpoints() {
             </DropdownMenuItem>
           )}
           {e.state === "disabled" && (
+            // `useDataApiEnableEndpoint` 409s when `live_version_id` is null
+            // (EndpointStore::enable, lifecycle.rs) — there is nothing to
+            // re-enable. `disabled` + `title` communicate this up front rather
+            // than let the user discover it through a failed-mutation toast;
+            // the `live_version_id` check INSIDE the handler too, since
+            // `data-[disabled]:pointer-events-none` is CSS — real browsers
+            // honour it, but nothing stops a click from reaching `onClick`
+            // in an environment that doesn't apply CSS at all (jsdom).
             <DropdownMenuItem
-              onClick={() =>
+              disabled={e.live_version_id == null}
+              title={e.live_version_id == null ? "This endpoint has never been published; publish it instead." : undefined}
+              onClick={() => {
+                if (e.live_version_id == null) return;
                 enableMutation.mutateAsync({ workspace: ws, id: e.id })
                   .then(() => toast.success("Endpoint enabled"))
-                  .catch((err) => toast.error(String(err)))
-              }
+                  .catch((err) => toast.error(String(err)));
+              }}
             >
               Enable
             </DropdownMenuItem>
@@ -188,10 +215,16 @@ export default function Endpoints() {
       </div>
 
       {isLoading ? (
-        <ListSkeleton cols={6} />
+        <ListSkeleton cols={5} />
       ) : isError ? (
         <Alert variant="destructive">
-          <AlertDescription>Could not load endpoints. Try again in a moment.</AlertDescription>
+          {/* The generated hook types its error as `ErrorBody` (the response
+              SHAPE), but the mutator (`mutator.ts`) throws the real `ApiError`
+              it parsed that body into — same trick `Charts.tsx`/`Datasets.tsx`
+              use with their hand-written `ApiError`-typed hooks, just cast
+              through `unknown` first since `ErrorBody` and `Error` don't
+              structurally overlap. */}
+          <AlertDescription>{(error as unknown as Error)?.message ?? "Could not load endpoints. Try again in a moment."}</AlertDescription>
         </Alert>
       ) : hasData ? (
         <>
@@ -221,7 +254,6 @@ export default function Endpoints() {
                     <SortableHeader sortKey="name" label="Name" current={sort} onSort={onSort} />
                     <th className="px-2 font-medium">Method &amp; path</th>
                     <SortableHeader sortKey="state" label="State" current={sort} onSort={onSort} />
-                    <th className="px-2 font-medium">Version</th>
                     <th className="px-2 font-medium">Engine</th>
                     <SortableHeader sortKey="updated_at" label="Last edited" current={sort} onSort={onSort} />
                     <th className="w-8" />
@@ -235,7 +267,7 @@ export default function Endpoints() {
                       <FolderHeaderRow
                         name={group.folder?.name ?? "Uncategorized"}
                         count={group.rows.length}
-                        colSpan={7}
+                        colSpan={6}
                         collapsed={isCollapsed}
                         onToggle={() => collapse.toggle(key)}
                       />

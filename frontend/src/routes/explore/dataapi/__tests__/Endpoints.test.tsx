@@ -20,9 +20,9 @@ import { ApiError } from "@/api/client";
 import type { DataApiEndpointDto } from "@/api/generated/model";
 import Endpoints from "@/routes/explore/dataapi/Endpoints";
 
-function mockList(over: Partial<{ data: unknown; isError: boolean; isLoading: boolean }> = {}) {
+function mockList(over: Partial<{ data: unknown; isError: boolean; isLoading: boolean; error: unknown }> = {}) {
   vi.mocked(api.useDataApiListEndpoints).mockReturnValue(
-    { data: undefined, isLoading: false, isError: false, ...over } as unknown as
+    { data: undefined, isLoading: false, isError: false, error: null, ...over } as unknown as
       ReturnType<typeof api.useDataApiListEndpoints>,
   );
 }
@@ -162,7 +162,7 @@ describe("Endpoints", () => {
     expect(screen.getByTestId("list-skeleton")).toBeInTheDocument();
   });
 
-  it("renders name, method+path, state badge, version, engine and last-edited for a row", async () => {
+  it("renders name, method+path, state badge, engine and last-edited for a row", async () => {
     mockList({ data: { status: 200, data: [FOLDERED_ROW] } });
     mockFolders([{ id: "f-1", name: "Reporting" }]);
     renderEndpoints();
@@ -170,16 +170,30 @@ describe("Endpoints", () => {
     expect(screen.getByText("GET")).toBeInTheDocument();
     expect(screen.getByText("/reports/daily")).toBeInTheDocument();
     expect(screen.getByText("Live")).toBeInTheDocument();
-    expect(screen.getByText("Published")).toBeInTheDocument(); // has a live_version_id
     expect(screen.getByText("Trino")).toBeInTheDocument(); // resolved from database_id via useDatabases
+    // There is no separate Version column — see the mutation-checked test below
+    // for why that information lives in the State badge instead.
+    expect(screen.queryByText("Version")).not.toBeInTheDocument();
   });
 
-  it("shows a dash for the Version column when the endpoint has never been published", async () => {
-    mockList({ data: { status: 200, data: [LOOSE_ROW] } });
+  it("shows the real error message from the failed query, not just a generic string", async () => {
+    mockList({ isError: true, error: { message: "workspace not found" } });
     renderEndpoints();
-    await screen.findByText("Ad hoc query");
-    const row = screen.getByText("Ad hoc query").closest("tr")!;
-    expect(row.textContent).toContain("—");
+    expect(await screen.findByText("workspace not found")).toBeInTheDocument();
+  });
+
+  // Reviewer finding: `EndpointStore::disable` (lifecycle.rs) has no state
+  // guard and never touches `live_version_id`, so a draft can be disabled
+  // directly. A bare "Disabled" badge would read as "currently serving" for
+  // an endpoint that never served anything — this is the test that pins the
+  // fix and the one Step 7's mutation check below targets.
+  it("distinguishes a disabled-but-was-live endpoint from a disabled-and-never-published one", async () => {
+    const wasLive = makeEndpoint({ id: "ep-5", name: "Paused feed", state: "disabled", live_version_id: "v-2" });
+    const neverPublished = makeEndpoint({ id: "ep-6", name: "Stillborn draft", state: "disabled", live_version_id: null });
+    mockList({ data: { status: 200, data: [wasLive, neverPublished] } });
+    renderEndpoints();
+    expect(await screen.findByText("Disabled · was live")).toBeInTheDocument();
+    expect(screen.getByText("Disabled · never published")).toBeInTheDocument();
   });
 
   it("SummaryStrip 'live' chip filters the table to live rows only", async () => {
@@ -246,7 +260,7 @@ describe("Endpoints", () => {
     });
   });
 
-  it("row menu shows Enable, not Disable, for a disabled endpoint", async () => {
+  it("row menu shows Enable, not Disable, for a disabled endpoint, and it is clickable when there's a version to resume", async () => {
     const disabledRow = makeEndpoint({ id: "ep-3", name: "Paused feed", state: "disabled", live_version_id: "v-2" });
     mockList({ data: { status: 200, data: [disabledRow] } });
     const user = userEvent.setup();
@@ -254,8 +268,30 @@ describe("Endpoints", () => {
     await screen.findByText("Paused feed");
 
     await user.click(screen.getByRole("button", { name: "Actions" }));
-    expect(await screen.findByText("Enable")).toBeInTheDocument();
+    const enableItem = await screen.findByText("Enable");
+    expect(enableItem).toBeInTheDocument();
     expect(screen.queryByText("Disable")).not.toBeInTheDocument();
+    expect(enableItem.closest('[role="menuitem"]')).not.toHaveAttribute("data-disabled");
+  });
+
+  // `useDataApiEnableEndpoint` 409s (EndpointStore::enable, lifecycle.rs) when
+  // `live_version_id` is null — nothing to resume. The menu item must say so
+  // up front rather than let the user find out through a failed-mutation toast.
+  it("row menu disables Enable with an explanatory title for a never-published endpoint", async () => {
+    const neverPublished = makeEndpoint({ id: "ep-7", name: "Stillborn draft", state: "disabled", live_version_id: null });
+    mockList({ data: { status: 200, data: [neverPublished] } });
+    const user = userEvent.setup();
+    renderEndpoints();
+    await screen.findByText("Stillborn draft");
+
+    await user.click(screen.getByRole("button", { name: "Actions" }));
+    const enableItem = await screen.findByText("Enable");
+    const menuitem = enableItem.closest('[role="menuitem"]')!;
+    expect(menuitem).toHaveAttribute("data-disabled");
+    expect(menuitem).toHaveAttribute("title", expect.stringContaining("never been published"));
+
+    await user.click(enableItem);
+    expect(enableMutateAsync).not.toHaveBeenCalled();
   });
 
   it("row menu Delete opens ConfirmDeleteDialog and calls useDataApiDeleteEndpoint on confirm", async () => {

@@ -70,7 +70,19 @@ Theo scaffold trang danh sách Explore chuẩn: `p-4`, `h1 text-lg`, nút `"+ En
 hoá được nhóm theo folder — `SummaryStrip` đếm số kiêm luôn filter chip, và `RowActionsMenu`
 mỗi dòng.
 
-Cột: tên · method + path · trạng thái (draft/live/disabled) · version · engine · sửa lần cuối.
+Cột: tên · method + path · trạng thái (draft/live/disabled) · engine · sửa lần cuối.
+
+**Không có cột `version` riêng.** Một bản nháp trước của spec này từng liệt kê cột này, nhưng
+DTO của danh sách (`DataApiEndpointDto`) chỉ mang `live_version_id` — một id nullable, không
+phải số version trên `DataApiEndpointVersionDto`, thứ nằm sau một lượt gọi versions riêng cho
+từng endpoint mà trang này không có lý do gì để gọi cho mỗi dòng. Với `live`/`draft`, id đó dư
+thừa hoàn toàn so với badge trạng thái (một draft mới tạo có id null; `EndpointStore::publish`
+là nơi DUY NHẤT set nó, đồng thời với `state = 'live'`). Nơi duy nhất id đó mang thông tin thật
+là `disabled`: `EndpointStore::disable` không có guard theo trạng thái và không bao giờ đụng
+vào `live_version_id`, nên một draft có thể bị disable trực tiếp, và một badge "Disabled" trơn
+không thể phân biệt "từng phục vụ, đang tạm dừng" với "chưa từng phục vụ". Sự phân biệt đó
+thuộc về chính badge trạng thái — `Disabled · was live` so với `Disabled · never published` —
+chứ không phải một cột chỉ lặp lại màu của badge bằng lời yếu hơn.
 
 ### 2.4 Chi tiết endpoint
 

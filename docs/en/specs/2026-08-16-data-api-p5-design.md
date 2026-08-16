@@ -68,7 +68,19 @@ button, a hand-rolled `<table>` like Charts/Datasets — **not** `FilterableTabl
 cannot model folder grouping — `SummaryStrip` counts that double as filter chips, and
 `RowActionsMenu` per row.
 
-Columns: name · method + path · state (draft/live/disabled) · version · engine · last edited.
+Columns: name · method + path · state (draft/live/disabled) · engine · last edited.
+
+**No separate `version` column.** An earlier draft of this spec listed one, but the list DTO
+(`DataApiEndpointDto`) carries only `live_version_id` — a nullable id, not the version count on
+`DataApiEndpointVersionDto`, which lives behind a per-endpoint versions fetch this page has no
+license to make once per row. For `live`/`draft` that id is fully redundant with the state
+badge anyway (a fresh draft has it null; `EndpointStore::publish` is the only place that ever
+sets it, atomically with `state = 'live'`). The one place it carries real information is
+`disabled`: `EndpointStore::disable` has no state guard and never touches `live_version_id`, so
+a draft can be disabled directly, and a bare "Disabled" badge cannot tell "was serving, paused"
+from "never served at all." That distinction belongs in the state badge itself — `Disabled ·
+was live` vs. `Disabled · never published` — not in a column that would otherwise repeat the
+badge's own colour in weaker words.
 
 ### 2.4 Endpoint detail
 
