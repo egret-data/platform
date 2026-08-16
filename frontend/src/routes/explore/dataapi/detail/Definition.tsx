@@ -22,11 +22,12 @@ type Validation =
  * method + path, database, SQL, parameters, cache, limits and rate limit.
  * Everything the create dialog (`Endpoints.tsx`) doesn't ask for up front.
  *
- * One column at `max-w-3xl` — deliberately. A `grid` two-column layout pads
- * the short sections (Limits, Rate limit) to the height of the tall one
- * beside them (Parameters), and CSS `columns` fights the flex container this
- * page sits in and clips the form at the fold; both were tried on a
- * comparable editor and both were wrong.
+ * One column, deliberately — the shell (`EndpointDetail.tsx`) sets `max-w-3xl`
+ * around the `Outlet` so every section inherits it structurally. A `grid`
+ * two-column layout pads the short sections (Limits, Rate limit) to the
+ * height of the tall one beside them (Parameters), and CSS `columns` fights
+ * the flex container this page sits in and clips the form at the fold; both
+ * were tried on a comparable editor and both were wrong.
  */
 export default function Definition() {
   const { ws, id, form, setForm, dirty } = useEndpointDetail();
@@ -45,7 +46,7 @@ export default function Definition() {
   }
 
   return (
-    <div className="max-w-3xl space-y-6">
+    <div className="space-y-6">
       <div>
         <h2 className="text-lg font-semibold">Definition</h2>
         <p className="text-sm text-muted-foreground">

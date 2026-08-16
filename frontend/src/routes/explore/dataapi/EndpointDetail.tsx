@@ -1,10 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, NavLink, Outlet, useOutletContext, useParams } from "react-router-dom";
+import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
-import { useDataApiGetEndpoint, useDataApiUpdateEndpoint } from "@/api/generated/data-api/data-api";
+import {
+  getDataApiGetEndpointQueryKey,
+  getDataApiListEndpointsQueryKey,
+  useDataApiGetEndpoint,
+  useDataApiUpdateEndpoint,
+} from "@/api/generated/data-api/data-api";
 import type { DataApiEndpointDto, UpdateEndpointInput } from "@/api/generated/model";
 import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
 
@@ -50,20 +56,28 @@ function toForm(e: DataApiEndpointDto): EndpointFormState {
   };
 }
 
-function toUpdateInput(f: EndpointFormState): UpdateEndpointInput {
-  return {
-    name: f.name,
-    description: f.description,
-    method: f.method,
-    path: f.path,
-    database_id: f.database_id,
-    sql: f.sql,
-    params: f.params,
-    output: f.output,
-    cache: f.cache,
-    limits: f.limits,
-    rate_limit: f.rate_limit,
-  };
+/**
+ * A PATCH carrying only the fields that changed since `baseline` — never the
+ * whole form. `UpdateEndpointInput`'s own doc says an absent field means
+ * "leave it alone"; a whole-document PATCH built from a form hydrated once at
+ * mount silently reverts any change made elsewhere since — another tab, a
+ * colleague, a server-side normalization during a publish — the instant this
+ * page's Save is clicked, even though the author only touched one field.
+ */
+function diffToUpdateInput(baseline: EndpointFormState, form: EndpointFormState): UpdateEndpointInput {
+  const out: UpdateEndpointInput = {};
+  if (form.name !== baseline.name) out.name = form.name;
+  if (form.description !== baseline.description) out.description = form.description;
+  if (form.method !== baseline.method) out.method = form.method;
+  if (form.path !== baseline.path) out.path = form.path;
+  if (form.database_id !== baseline.database_id) out.database_id = form.database_id;
+  if (form.sql !== baseline.sql) out.sql = form.sql;
+  if (JSON.stringify(form.params) !== JSON.stringify(baseline.params)) out.params = form.params;
+  if (JSON.stringify(form.output) !== JSON.stringify(baseline.output)) out.output = form.output;
+  if (JSON.stringify(form.cache) !== JSON.stringify(baseline.cache)) out.cache = form.cache;
+  if (JSON.stringify(form.limits) !== JSON.stringify(baseline.limits)) out.limits = form.limits;
+  if (JSON.stringify(form.rate_limit) !== JSON.stringify(baseline.rate_limit)) out.rate_limit = form.rate_limit;
+  return out;
 }
 
 /** What every nested detail section (`detail/*.tsx`) reads via `useEndpointDetail()`. */
@@ -77,6 +91,10 @@ export interface EndpointDetailContext {
   dirty: boolean;
   saving: boolean;
   save: () => Promise<void>;
+  /** Re-fetch the endpoint record — for a section (Versions, Task 7) that just
+   *  changed `state`/`live_version_id` server-side (publish/rollback) and needs
+   *  the read-only half of this context to catch up. Does not touch `form`. */
+  refetch: () => void;
 }
 
 /** Nested sections read/write the shared form through this, not through `useOutletContext` directly. */
@@ -93,6 +111,29 @@ const SECTIONS: { to: string; label: string; end?: boolean }[] = [
 ];
 
 /**
+ * Thin wrapper: reads `:id` from the route and keys `EndpointDetailInner` by
+ * it.
+ *
+ * **This is the fix for a real defect, not a stylistic choice.** React Router
+ * reconciles the SAME component instance across `/endpoints/A` →
+ * `/endpoints/B` — only the `:id` param changes — so any state owned by a
+ * bare `EndpointDetail` (the draft form, the hydration guard) would survive
+ * that navigation unless something explicitly resets it. The `key={id}` here
+ * is that reset: React fully unmounts the old instance and mounts a brand new
+ * one whenever `id` changes, so `EndpointDetailInner`'s `useState`/`useRef`
+ * start fresh for every endpoint, with no imperative "clear the form" step
+ * anywhere for a stale record to leak through before it runs. This is React's
+ * own documented pattern for resetting state on a prop change (see
+ * "Resetting a form with a key" in the React docs), and it also means every
+ * nested section (the `Outlet`'s children) remounts fresh on a cross-endpoint
+ * navigation, rather than carrying its own local state across records either.
+ */
+export default function EndpointDetail() {
+  const { workspace: ws = "", id = "" } = useParams();
+  return <EndpointDetailInner key={id} ws={ws} id={id} />;
+}
+
+/**
  * The endpoint detail shell: a header (name + Save), a horizontal section nav,
  * and the active section in the Outlet. Owns the one piece of state every
  * section shares — the draft form and its dirtiness — so Save and the
@@ -102,25 +143,32 @@ const SECTIONS: { to: string; label: string; end?: boolean }[] = [
  * **Dirtiness is a comparison against the loaded value, never an `onChange`
  * flag.** An `onChange` boolean latches on Radix's hydration echo and raises a
  * phantom "Leave site?" on a page nobody edited — the defect Alerts #486 hit.
- * `baseline` is a serialized snapshot of the loaded (or just-saved) form;
- * `dirty` is `current !== baseline`, nothing else.
+ * `baselineForm` is a snapshot of the loaded (or just-saved) form; `dirty` is
+ * `current !== baseline` (compared as JSON), nothing else.
  *
- * Hydration is guarded to run once (`hydrated` ref): re-seeding the form on
- * every render that sees a `data` reference — including an unchanged refetch
- * handing back a new object identity — would clobber a mid-edit form. This
- * codebase has shipped that bug twice (ChartExplore, NotebookSettings).
+ * Hydration is guarded to run once (`hydrated` ref) — safe to write as a bare
+ * "ran once" flag here, unlike a component that lives across an id change,
+ * because `EndpointDetail` above remounts a fresh instance of this component
+ * per id (see its own doc comment).
  */
-export default function EndpointDetail() {
-  const { workspace: ws = "", id = "" } = useParams();
-  const { data: envelope, isLoading, isError, error } = useDataApiGetEndpoint(ws, id, {
+function EndpointDetailInner({ ws, id }: { ws: string; id: string }) {
+  const { data: envelope, isLoading, isError, error, refetch } = useDataApiGetEndpoint(ws, id, {
     query: { enabled: !!ws && !!id },
   });
   const endpoint = envelope?.status === 200 ? envelope.data : undefined;
 
-  const updateMutation = useDataApiUpdateEndpoint();
+  const qc = useQueryClient();
+  const updateMutation = useDataApiUpdateEndpoint({
+    mutation: {
+      onSuccess: () => {
+        qc.invalidateQueries({ queryKey: getDataApiGetEndpointQueryKey(ws, id) });
+        qc.invalidateQueries({ queryKey: getDataApiListEndpointsQueryKey(ws) });
+      },
+    },
+  });
 
   const [form, setFormState] = useState<EndpointFormState | null>(null);
-  const [baseline, setBaseline] = useState<string | null>(null);
+  const [baselineForm, setBaselineForm] = useState<EndpointFormState | null>(null);
   const hydrated = useRef(false);
 
   useEffect(() => {
@@ -128,7 +176,7 @@ export default function EndpointDetail() {
     hydrated.current = true;
     const seeded = toForm(endpoint);
     setFormState(seeded);
-    setBaseline(JSON.stringify(seeded));
+    setBaselineForm(seeded);
   }, [endpoint]);
 
   const setForm = useCallback(
@@ -143,14 +191,19 @@ export default function EndpointDetail() {
     [],
   );
 
-  const current = useMemo(() => (form ? JSON.stringify(form) : null), [form]);
-  const dirty = baseline !== null && current !== null && current !== baseline;
+  const currentJson = useMemo(() => (form ? JSON.stringify(form) : null), [form]);
+  const baselineJson = useMemo(() => (baselineForm ? JSON.stringify(baselineForm) : null), [baselineForm]);
+  const dirty = baselineJson !== null && currentJson !== null && currentJson !== baselineJson;
   useUnsavedChangesWarning(dirty);
 
   const save = useCallback(async () => {
-    if (!form) return;
+    if (!form || !baselineForm) return;
     try {
-      const res = await updateMutation.mutateAsync({ workspace: ws, id, data: toUpdateInput(form) });
+      const res = await updateMutation.mutateAsync({
+        workspace: ws,
+        id,
+        data: diffToUpdateInput(baselineForm, form),
+      });
       // The mutator throws on any non-2xx (see mutator.ts), so this branch is
       // the only one ever reached at runtime — same trick as `Endpoints.tsx`'s
       // create dialog, just narrowing TS's view of the response union.
@@ -164,12 +217,12 @@ export default function EndpointDetail() {
       // what a reload would show.
       const seeded = toForm(res.data);
       setFormState(seeded);
-      setBaseline(JSON.stringify(seeded));
+      setBaselineForm(seeded);
       toast.success("Saved");
     } catch (e) {
       toast.error(String(e));
     }
-  }, [form, updateMutation, ws, id]);
+  }, [form, baselineForm, updateMutation, ws, id]);
 
   if (isLoading) {
     return (
@@ -192,8 +245,9 @@ export default function EndpointDetail() {
       </div>
     );
   }
-  if (!form) {
-    // Endpoint has loaded but the hydration effect hasn't flushed yet — one render, at most.
+  if (!form || !baselineForm) {
+    // Either the hydration effect hasn't flushed yet, or `id` just changed
+    // and the new endpoint hasn't arrived — one render, at most, either way.
     return (
       <div className="p-4">
         <ListSkeleton cols={2} />
@@ -201,7 +255,19 @@ export default function EndpointDetail() {
     );
   }
 
-  const ctx: EndpointDetailContext = { ws, id, endpoint, form, setForm, dirty, saving: updateMutation.isPending, save };
+  const ctx: EndpointDetailContext = {
+    ws,
+    id,
+    endpoint,
+    form,
+    setForm,
+    dirty,
+    saving: updateMutation.isPending,
+    save,
+    refetch: () => {
+      void refetch();
+    },
+  };
 
   return (
     <div>
@@ -245,7 +311,15 @@ export default function EndpointDetail() {
         ))}
       </nav>
 
-      <Outlet context={ctx} />
+      {/* `max-w-3xl` lives here, not in each section — one structural width
+          rule every section inherits for free, rather than something Tasks
+          4-7 each have to remember to add to their own root element. `key={id}`
+          is redundant with `EndpointDetail`'s own remount-per-id above, kept
+          anyway as a second, independent guarantee that a section can never
+          carry its own local state across two different endpoints. */}
+      <div className="max-w-3xl">
+        <Outlet key={id} context={ctx} />
+      </div>
     </div>
   );
 }
