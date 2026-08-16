@@ -16,6 +16,12 @@ const FEATURES: FeatureDto[] = [
   { key: "charts", label: "Charts", description: "Chart building.", enabled: true },
   { key: "dashboards", label: "Dashboards", description: "Dashboards of charts.", enabled: false },
   { key: "notebooks", label: "Notebooks", description: "Python/SQL notebooks.", enabled: true },
+  {
+    key: "data_api",
+    label: "Data API",
+    description: "Publish saved queries as HTTP endpoints.",
+    enabled: true,
+  },
 ];
 
 function stubList(features: FeatureDto[] | undefined, isLoading = false) {
@@ -72,6 +78,7 @@ describe("WorkspaceFeaturesTab", () => {
             charts: true,
             dashboards: true,
             notebooks: false,
+            data_api: true,
           },
         },
       },
@@ -168,6 +175,16 @@ describe("WorkspaceFeaturesTab", () => {
     expect(
       screen.getByText(/hides it .* for everyone|blocks its API|everyone in this workspace/i),
     ).toBeInTheDocument();
+  });
+
+  test("warns that disabling Data API does not stop serving", () => {
+    render(<WorkspaceFeaturesTab workspaceId={WORKSPACE_ID} />);
+    // Rendered twice — narrow-screen and Details-column copies of the same
+    // help text — so assert at least one is present.
+    expect(screen.getAllByText(/live endpoints keep serving/i).length).toBeGreaterThan(0);
+    // It's specific to the Data API row, not sprayed onto every module.
+    const notebooksRow = screen.getByRole("switch", { name: "Notebooks" }).closest("tr");
+    expect(notebooksRow).not.toHaveTextContent(/live endpoints keep serving/i);
   });
 
   test("shows a loading state before the features have arrived", () => {
