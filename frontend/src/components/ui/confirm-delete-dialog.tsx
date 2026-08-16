@@ -12,12 +12,18 @@ interface ConfirmDeleteDialogProps {
   title: string;
   description: string;
   confirmText?: string; // text user must type, default "delete"
+  // The confirm button's own label — defaults to "Delete" so every existing
+  // call site (which reuses this component for genuine deletes) is
+  // unaffected. A call site whose action isn't a delete (revoke, rollback…)
+  // should pass its own verb here rather than let the button lie about what
+  // it does.
+  confirmLabel?: string;
   onConfirm: () => void;
   children?: React.ReactNode;
 }
 
 export const ConfirmDeleteDialog: React.FC<ConfirmDeleteDialogProps> = ({
-  open, onOpenChange, title, description, confirmText = 'delete', onConfirm, children,
+  open, onOpenChange, title, description, confirmText = 'delete', confirmLabel = 'Delete', onConfirm, children,
 }) => {
   const [inputValue, setInputValue] = useState('');
 
@@ -54,7 +60,7 @@ export const ConfirmDeleteDialog: React.FC<ConfirmDeleteDialogProps> = ({
             onClick={handleConfirm}
             disabled={inputValue.toLowerCase() !== confirmText.toLowerCase()}
           >
-            Delete
+            {confirmLabel}
           </Button>
         </AlertDialogFooter>
       </AlertDialogContent>

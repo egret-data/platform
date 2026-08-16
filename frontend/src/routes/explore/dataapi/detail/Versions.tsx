@@ -102,7 +102,12 @@ export default function VersionsSection() {
                     <td className="py-2 pr-2">
                       <span className="inline-flex items-center gap-1.5">
                         <span className="font-mono text-xs">v{v.version}</span>
-                        {v.is_live && <Badge variant="success">Live</Badge>}
+                        {/* Same token-based className `Endpoints.tsx` uses for the
+                            live state badge — `variant="success"` on `Badge`
+                            resolves to a hardcoded `bg-green-600`, not the OKLCH
+                            `--success` token, so it would be a different green
+                            from the one this row sits one click away from. */}
+                        {v.is_live && <Badge className="bg-success/15 text-success">Live</Badge>}
                       </span>
                     </td>
                     <td className="max-w-[16rem] truncate py-2 pr-2 text-muted-foreground">{v.note || "—"}</td>
@@ -154,6 +159,7 @@ export default function VersionsSection() {
         title={rollbackTarget ? `Roll back to v${rollbackTarget.version}?` : "Roll back?"}
         description="Every deployed client calling this endpoint's URL will immediately start receiving this version's frozen contract instead of the current live one. This does not delete anything — publish again to move forward once you're ready."
         confirmText="rollback"
+        confirmLabel="Roll back"
         onConfirm={async () => {
           if (!rollbackTarget) return;
           try {

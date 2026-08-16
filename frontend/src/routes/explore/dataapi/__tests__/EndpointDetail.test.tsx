@@ -608,6 +608,26 @@ describe("VersionsSection", () => {
     await waitFor(() => expect(versionsRefetchSpy).toHaveBeenCalled());
   });
 
+  // `PublishEndpointInput` documents `{}` as a valid publish body — an empty
+  // note must be OMITTED, not sent as `{ note: "" }`. Every other publish
+  // test types a note first, so a mutant that always attaches `note: ""`
+  // would survive them undetected.
+  it("publishes with no note as an empty body, not as an empty-string note", async () => {
+    renderVersions(makeEndpoint({ live_version_id: "v-2", state: "live" }), versionsRefetchSpy);
+    await userEvent.click(await screen.findByRole("button", { name: /publish/i }));
+    await screen.findByText(/does not grant data access/i);
+
+    await userEvent.click(screen.getByRole("button", { name: "Publish" }));
+
+    await waitFor(() =>
+      expect(publishMutateAsync).toHaveBeenCalledWith({
+        workspace: "eng",
+        id: "ep-1",
+        data: {},
+      }),
+    );
+  });
+
   it("rolls back only after typing the confirming word, naming the version by id, and refetches the endpoint afterward", async () => {
     vi.mocked(api.useDataApiListEndpointVersions).mockReturnValue(
       {
@@ -625,7 +645,11 @@ describe("VersionsSection", () => {
     renderVersions(makeEndpoint({ live_version_id: "v-2", state: "live" }), versionsRefetchSpy);
 
     await userEvent.click(await screen.findByRole("button", { name: /roll back/i }));
-    const confirmButton = screen.getByRole("button", { name: "Delete" });
+    // The shared dialog's confirm button must say what this action actually
+    // does — rollback is reversible (publish again), unlike the component's
+    // default "Delete" label, which every OTHER call site of
+    // `ConfirmDeleteDialog` genuinely wants.
+    const confirmButton = screen.getByRole("button", { name: "Roll back" });
     expect(confirmButton).toBeDisabled();
     expect(rollbackMutateAsync).not.toHaveBeenCalled();
 
