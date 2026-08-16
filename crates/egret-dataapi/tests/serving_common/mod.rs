@@ -479,7 +479,14 @@ pub async fn fixture() -> Option<Fixture> {
         &db,
         author,
         ws_id,
-        &["data_api_endpoint:read", "data_api_endpoint:manage"],
+        &[
+            "data_api_endpoint:read",
+            "data_api_endpoint:manage",
+            // Needed for `Fixture::create_service_account`, which goes through
+            // the REAL `POST …/service-accounts` route — gated on `:manage`,
+            // never `:read` (issuing/creating mutates the authorization graph).
+            "service_account:manage",
+        ],
     )
     .await;
     // `admin` gets NO object-scoped grant on anything — it reaches invoke (once
@@ -950,6 +957,36 @@ impl Fixture {
             .await;
         assert_eq!(status, StatusCode::CREATED, "create draft failed: {body}");
         body["id"].as_str().expect("id").parse().expect("uuid")
+    }
+
+    /// Create a real service account through the REAL `POST
+    /// …/service-accounts` route, never a direct insert — so its `users.id`
+    /// is exactly the kind of row `scoped_account` accepts, and a test that
+    /// hands this id back to a `:read`-gated route is exercising the same
+    /// containment check production traffic goes through. Returns the
+    /// account's id (a `users.id`).
+    pub async fn create_service_account(&self, name: &str) -> Uuid {
+        let (status, body) = self
+            .mgmt_post(
+                &format!("/api/ws/{}/data-api/service-accounts", self.ws_slug),
+                Some(serde_json::json!({ "name": name })),
+            )
+            .await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "create service account failed: {body}"
+        );
+        body["id"].as_str().expect("id").parse().expect("uuid")
+    }
+
+    /// Make `user` a `ws_admin` of the fixture's own workspace — a public
+    /// wrapper around the module-level `grant_ws_admin` used to seed `f.admin`,
+    /// so a test can put a SECOND principal (e.g. one
+    /// [`Fixture::create_service_account`] just minted) on the same cascade
+    /// path without duplicating the `access_grants` insert.
+    pub async fn grant_ws_admin(&self, user: Uuid) {
+        grant_ws_admin(&self.db, user, self.ws_id).await
     }
 
     /// Switch `options.impersonate` on a live connection AFTER a version was

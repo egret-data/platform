@@ -1763,6 +1763,7 @@ fn openapi_gen_err(e: crate::openapi_gen::OpenApiGenError) -> DataApiError {
         (status = 200, description = "OpenAPI 3.0.3 document describing what service_account_id may invoke", body = serde_json::Value),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing data_api_endpoint:read permission", body = ErrorBody),
+        (status = 404, description = "No such service account in this workspace", body = ErrorBody),
         (status = 409, description = "A described endpoint's output naming collides; re-publish it", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
@@ -1773,24 +1774,22 @@ async fn get_openapi(
     Query(q): Query<OpenApiQuery>,
 ) -> Result<Json<serde_json::Value>, DataApiError> {
     egret_core::authz::require(&*st.pdp, &ctx, EP_READ).await?;
-    // `service_account_id` is asked of Cedar via `can_invoke`, never resolved
-    // against `dataapi.service_accounts` first: `build` documents whatever a
-    // principal may invoke, and the whole point of this generator is that the
-    // answer can be "yes" for a principal — e.g. a `ws_admin` reaching invoke
-    // through the workspace->object cascade — that owns no row in that table at
-    // all. Gating this id on `scoped_account` first would silently narrow the
-    // document to literal service accounts and hide exactly the cascade case
-    // `can_invoke`'s module comment exists to describe. A `service_account_id`
-    // naming a real principal that simply cannot invoke anything here still
-    // answers 200 with an empty `paths` — not an error.
-    let doc = crate::openapi_gen::build(
-        &st,
-        ctx.workspace_id,
-        UserId(q.service_account_id),
-        q.endpoint_id,
-    )
-    .await
-    .map_err(openapi_gen_err)?;
+    // `ctx.workspace_id`, resolved through `scoped_account` before anything
+    // else, exactly like every other handler in this module that takes an id
+    // from the caller (see the module comment's containment invariant). This
+    // document answers a MORE powerful question than `/grants` LIST does — full
+    // path, parameter and schema detail for every endpoint a principal may
+    // invoke, not just a roster of ids — so it cannot be looser about whose
+    // `service_account_id` it accepts. Without this, any uuid (another
+    // workspace's principal, a random value, a non-service-account user)
+    // supplied here would answer 200 with a DIFFERENT set of paths depending on
+    // what it can invoke — precisely the content oracle `scoped_account`'s
+    // uniform 404 exists to deny. The mismatch answers 404, never 403, so a
+    // caller cannot distinguish "no such account" from "not yours".
+    let sa = scoped_account(&st, ctx.workspace_id.0, q.service_account_id).await?;
+    let doc = crate::openapi_gen::build(&st, ctx.workspace_id, UserId(sa), q.endpoint_id)
+        .await
+        .map_err(openapi_gen_err)?;
     Ok(Json(doc))
 }
 

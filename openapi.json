@@ -15958,6 +15958,16 @@
               }
             }
           },
+          "404": {
+            "description": "No such service account in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "409": {
             "description": "A described endpoint's output naming collides; re-publish it",
             "content": {
