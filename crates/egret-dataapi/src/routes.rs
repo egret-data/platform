@@ -24,6 +24,7 @@
 //! GET    /api/ws/{workspace}/data-api/endpoints/{id}/grants
 //! POST   /api/ws/{workspace}/data-api/endpoints/{id}/grants
 //! DELETE /api/ws/{workspace}/data-api/endpoints/{id}/grants/{service_account_id}
+//! POST   /api/ws/{workspace}/data-api/endpoints/{id}/try
 //!
 //! GET    /api/ws/{workspace}/data-api/openapi
 //! ```
@@ -102,7 +103,11 @@ const SA_MANAGE: &str = "service_account:manage";
 const EP_READ: &str = "data_api_endpoint:read";
 /// Author endpoints. Flat, like every permission here: it implies no `:read`,
 /// and `:read` implies none of it.
-const EP_MANAGE: &str = "data_api_endpoint:manage";
+///
+/// `pub(crate)` because [`crate::try_it`]'s handler gates on it too — running an
+/// endpoint as somebody else is an authoring act, not a reading one — and the
+/// three action strings stay one list rather than a literal per file.
+pub(crate) const EP_MANAGE: &str = "data_api_endpoint:manage";
 /// Call a published endpoint (spec §6.2 step 4).
 ///
 /// Never checked by a route in this module — it is the action the SERVING path
@@ -273,7 +278,11 @@ fn db_err(e: sqlx::Error) -> DataApiError {
 /// Resolve a service account and confirm it belongs to the workspace the caller
 /// was authorized against. Returns 404 — never 403 — on mismatch, so a caller in
 /// another workspace cannot distinguish "no such account" from "not yours".
-async fn scoped_account(st: &DataApiState, ws: Uuid, sa: Uuid) -> Result<Uuid, DataApiError> {
+pub(crate) async fn scoped_account(
+    st: &DataApiState,
+    ws: Uuid,
+    sa: Uuid,
+) -> Result<Uuid, DataApiError> {
     let found: Option<Uuid> = sqlx::query_scalar(
         "SELECT user_id FROM dataapi.service_accounts WHERE user_id = $1 AND workspace_id = $2",
     )
@@ -1857,6 +1866,13 @@ pub fn management_router() -> Router<DataApiState> {
             "/ws/{workspace}/data-api/endpoints/{id}/grants/{service_account_id}",
             delete(revoke_endpoint_invoke),
         )
+        // The handler lives in `try_it` rather than here: it is the one route in
+        // this module that builds and drives the SERVING router, and keeping it
+        // beside its own reasoning keeps that visible.
+        .route(
+            "/ws/{workspace}/data-api/endpoints/{id}/try",
+            post(crate::try_it::try_endpoint),
+        )
         .route(
             "/ws/{workspace}/data-api/activity/summary",
             get(activity_summary),
@@ -1891,6 +1907,7 @@ pub fn management_router() -> Router<DataApiState> {
         list_endpoint_grants,
         grant_endpoint_invoke,
         revoke_endpoint_invoke,
+        crate::try_it::try_endpoint,
         activity_summary,
         activity_calls,
         get_openapi,
@@ -1922,6 +1939,9 @@ pub fn management_router() -> Router<DataApiState> {
         ActivityRow,
         ActivityRange,
         ActivityCallDto,
+        crate::try_it::TryRequest,
+        crate::try_it::TryResponse,
+        crate::try_it::TryRequestEcho,
     )),
     tags((name = "data-api", description = "Data API service accounts and OAuth2 clients")),
 )]

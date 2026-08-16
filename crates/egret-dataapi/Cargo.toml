@@ -64,9 +64,14 @@ sha2.workspace = true
 # entry point for it, and because this must decode the way axum's own `Query`
 # extractor does: percent-decoding plus `+` as a space.
 url.workspace = true
+# `ServiceExt::oneshot` — the Try-it route (`try_it.rs`) calls the REAL serving
+# router in process through its tower `Service`, the same way the test suites
+# drive it. A production dependency rather than a dev one for exactly that
+# reason: the guarantee is that a trial traverses the shipped router, so the
+# call has to be in the shipped code.
+tower.workspace = true
 
 [dev-dependencies]
-tower.workspace = true
 # `serving_auth.rs` asserts that every rejection arm LOGS its reason. The doc on
 # `verify_serving_token` promises an operator can tell a stale token from a
 # replayed catalog one; without a subscriber to capture the events, that promise

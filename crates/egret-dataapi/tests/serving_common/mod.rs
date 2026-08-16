@@ -304,6 +304,12 @@ pub struct Fixture {
     /// through HTTP for a question that isn't about routing.
     pub state: DataApiState,
     pub session: String,
+    /// The `users.id` behind [`Fixture::session`] — the human every management
+    /// call in these suites is made AS. Exposed because a Try-it trial records
+    /// the person who ran it in `access_log.actor_user_id`, and asserting that
+    /// column needs the id the session resolves to rather than a second user
+    /// that merely also exists.
+    pub author: Uuid,
     pub ws_slug: String,
     pub ws_id: Uuid,
     /// Two service accounts, whose Ranger-equivalent grants differ.
@@ -550,6 +556,7 @@ pub async fn fixture() -> Option<Fixture> {
             .with_state(st),
         state,
         session,
+        author,
         ws_slug: slug,
         ws_id,
         principal_a,

@@ -153,7 +153,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use axum::extract::{Path, RawQuery, State};
+use axum::extract::{Extension, Path, RawQuery, State};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -170,6 +170,7 @@ use super::params;
 use super::ratelimit::{check_request, retry_after_secs};
 use super::{verify_serving_token, ServingError};
 use crate::routes::DataApiState;
+use crate::try_it::TrialActor;
 
 /// Upper bound applied to a snapshot's `limits.max_rows` before it is acted on.
 ///
@@ -317,8 +318,9 @@ async fn serve_get(
     query: RawQuery,
     method: Method,
     headers: HeaderMap,
+    trial: Option<Extension<TrialActor>>,
 ) -> Response {
-    serve(state, path, query, method, headers).await
+    serve(state, path, query, method, headers, trial).await
 }
 
 #[utoipa::path(
@@ -347,8 +349,9 @@ async fn serve_post(
     query: RawQuery,
     method: Method,
     headers: HeaderMap,
+    trial: Option<Extension<TrialActor>>,
 ) -> Response {
-    serve(state, path, query, method, headers).await
+    serve(state, path, query, method, headers, trial).await
 }
 
 /// The outer half of a served call: mint the correlation id, run the chain,
@@ -376,12 +379,23 @@ async fn serve_post(
 ///
 /// The insert happens AFTER `duration_ms` is computed, so the recorded duration
 /// is what the caller experienced and not what the bookkeeping cost.
+///
+/// # The one thing that is not read off the wire
+///
+/// `trial` is an EXTENSION, so it is present only when an in-process management
+/// handler ([`crate::try_it`]) built this request. A header could be sent by
+/// anyone, and this path would then be trusting a caller's word about whether
+/// their own call was a trial; nothing outside the process can insert an
+/// extension. `Option<Extension<_>>` rather than a raw `parts.extensions.get`
+/// so absence is a typed value rather than a lookup that reads the same whether
+/// the extension is missing or the type has drifted.
 async fn serve(
     State(st): State<DataApiState>,
     path: Path<(String, String)>,
     query: RawQuery,
     method: Method,
     headers: HeaderMap,
+    trial: Option<Extension<TrialActor>>,
 ) -> Response {
     // One clock reading for the whole request, so the rate limit, the cache and
     // the recorded duration all agree about when "now" was. Monotonic, so an NTP
@@ -397,6 +411,14 @@ async fn serve(
     // had to remember to do it.
     entry.request_method = Some(method.to_string());
     entry.request_path = Some(path.1.clone());
+
+    // Present only when an in-process management handler built this request; a
+    // real consumer cannot insert an extension, so this cannot be forged. Set
+    // BEFORE `run`, like the two fields above, so a trial refused at step 1 is
+    // still recorded as a trial rather than counted as consumer traffic.
+    if let Some(Extension(TrialActor(actor))) = trial {
+        entry.actor_user_id = Some(actor.0);
+    }
 
     let outcome = run(
         &st,

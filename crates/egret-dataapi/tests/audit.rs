@@ -840,6 +840,81 @@ async fn deleting_a_service_account_records_what_it_destroyed() {
     assert_eq!(left, 0);
 }
 
+/// A Try-it trial is an IMPERSONATION — the console runs a query as a service
+/// account — so it is audited like one (precedent: user impersonation, #332).
+///
+/// Two halves, and the second is the reason this test is in THIS file. The
+/// event must attribute the act to the human and name the account they borrowed;
+/// and it must carry no part of the token minted to make the call. A `data-api`
+/// JWT in an append-only table is the same class of mistake as a client secret
+/// there — `Fixture::drained` sweeps every event for issued secrets, and this
+/// adds the JWT shape, which no secret sweep would catch.
+///
+/// The trial itself is refused (`403 not_granted`, no invoke grant) and the
+/// event records that: what an auditor needs to know is that someone ran an
+/// endpoint as somebody else and what came back, not whether it succeeded.
+#[tokio::test]
+async fn a_trial_is_audited_as_an_impersonation_and_carries_no_token() {
+    let mut f = skip_without_db!();
+    let sa = f.service_account("trialled").await;
+    let ep = f.endpoint("trial-target", "/trial-target").await;
+    let eps = ep.to_string();
+    let url = f.endpoints_url();
+
+    let (status, body) = f
+        .send(
+            "POST",
+            &format!("{url}/{ep}/publish"),
+            Some(serde_json::json!({})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let _publish = f.one_event();
+
+    let (status, body) = f
+        .send(
+            "POST",
+            &format!("{url}/{ep}/try"),
+            Some(serde_json::json!({ "service_account_id": sa, "params": {} })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["status"], 403, "no invoke grant: {body}");
+
+    let ev = f.one_event();
+    assert_eq!(
+        ev.shape(),
+        (
+            Some(f.manager.user),
+            Some(f.ws_id),
+            "data_api_endpoint:try",
+            "data_api_endpoint",
+            Some(eps.as_str()),
+        ),
+        "the actor is the human who ran the trial, never the account it ran as",
+    );
+    assert_eq!(
+        ev.detail["service_account_id"].as_str(),
+        Some(sa.to_string().as_str()),
+        "whose access was borrowed is the whole question an auditor asks: {:?}",
+        ev.detail
+    );
+    assert_eq!(
+        ev.detail["status"],
+        serde_json::json!(403),
+        "and what the borrowed access got back: {:?}",
+        ev.detail
+    );
+    // A JWT is three base64url segments; every one this deployment signs starts
+    // `eyJ` (`{"` under base64). Checked over the WHOLE detail, so a token under
+    // any key trips it.
+    assert!(
+        !ev.detail.to_string().contains("eyJ"),
+        "a trial token reached the audit trail: {:?}",
+        ev.detail
+    );
+}
+
 /// **Anti-triviality for every assertion above.** Each of them reads a queue,
 /// and a queue that were somehow filled by something other than these handlers
 /// would still satisfy `one_event`. A REFUSED call must add nothing: an audit

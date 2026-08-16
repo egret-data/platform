@@ -15698,6 +15698,115 @@
         }
       }
     },
+    "/api/ws/{workspace}/data-api/endpoints/{id}/try": {
+      "post": {
+        "tags": [
+          "data-api"
+        ],
+        "operationId": "try_endpoint",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Endpoint id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The trial RAN. `status` and `body` are the serving path's own answer — a 403 or a 429 in there is a result, not a failure of this route",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TryResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing data_api_endpoint:manage — a trial runs a query as somebody else, so :read does not reach it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such endpoint, or no such service account, in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The endpoint's result is too large for a console trial",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/data-api/endpoints/{id}/validate": {
       "post": {
         "tags": [
@@ -33425,6 +33534,80 @@
         "properties": {
           "new_owner_id": {
             "type": "string"
+          }
+        }
+      },
+      "TryRequest": {
+        "type": "object",
+        "required": [
+          "service_account_id"
+        ],
+        "properties": {
+          "service_account_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "params": {
+            "type": "object",
+            "description": "Values exactly as they would arrive on the query string. A `Vec` per key\nbecause a repeated parameter is a LIST (P4.5), and a trial that could\nonly send one value could not exercise the case most likely to be wrong.",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "TryRequestEcho": {
+        "type": "object",
+        "required": [
+          "method",
+          "url",
+          "authorization",
+          "curl"
+        ],
+        "properties": {
+          "method": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "authorization": {
+            "type": "string",
+            "description": "Always the literal `Bearer ••••`. The token is never serialised."
+          },
+          "curl": {
+            "type": "string",
+            "description": "A copyable reproduction using a `$TOKEN` placeholder."
+          }
+        }
+      },
+      "TryResponse": {
+        "type": "object",
+        "required": [
+          "status",
+          "body",
+          "request"
+        ],
+        "properties": {
+          "status": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The status the SERVING path returned. The trial itself is a 200 whenever\nit ran — a 403 from the endpoint is a result, not a failure of the trial.",
+            "minimum": 0
+          },
+          "body": {
+            "type": "object",
+            "description": "The serving path's own body, verbatim: rows and `meta` on success, spec\n§7's `{code, message, request_id}` on a refusal. Verbatim because the\npoint of the feature is to show what the consumer gets, and a body this\nroute summarised would be a different answer than the real one."
+          },
+          "request": {
+            "$ref": "#/components/schemas/TryRequestEcho"
           }
         }
       },
