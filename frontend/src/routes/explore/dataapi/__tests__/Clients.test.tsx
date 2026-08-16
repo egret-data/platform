@@ -185,6 +185,26 @@ describe("Clients", () => {
     });
   });
 
+  it("shows the client-fetch error, not the empty state, when useDataApiListClients fails", async () => {
+    mockClients({ isError: true });
+    renderClients();
+    await screen.findByText("reporting-bot");
+    expect(await screen.findByText(/could not load clients/i)).toBeInTheDocument();
+    // The bug this guards: folding `isError` into `clients.length === 0`
+    // would print the empty-state copy for an account whose clients simply
+    // failed to load — the same isError-as-empty defect this codebase fixed
+    // once across four list pages.
+    expect(screen.queryByText(/no clients yet/i)).not.toBeInTheDocument();
+  });
+
+  it("shows a loading state for the client list while useDataApiListClients is in flight", async () => {
+    mockClients({ isLoading: true });
+    renderClients();
+    await screen.findByText("reporting-bot");
+    expect(screen.getByText(/loading/i)).toBeInTheDocument();
+    expect(screen.queryByText(/no clients yet/i)).not.toBeInTheDocument();
+  });
+
   it("shows expiry and last-used for a client that carries them", async () => {
     mockClients({
       data: {

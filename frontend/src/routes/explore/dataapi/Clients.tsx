@@ -135,6 +135,15 @@ export default function Clients() {
             // CTA offering "create your first" while data plainly exists would
             // be the same first-run/empty conflation the endpoints list fixed.
             emptyText="No service accounts match."
+            // Each row's `ClientsCell` fires its own `useDataApiListClients`
+            // on mount — one request per VISIBLE service account, uncapped
+            // without this. `FilterableTable` only mounts `pageRows` (the
+            // current page's slice, see FilterableTable.tsx's `pageRows`),
+            // not the full `shown` set, so paging here caps concurrent
+            // requests at `pageSize` regardless of how many accounts exist.
+            // 25 matches every other control-plane list page that sets this
+            // for the same reason (Workspaces.tsx, Warehouses.tsx, etc.).
+            pageSize={25}
           />
         </>
       ) : (
@@ -235,6 +244,12 @@ function ClientsCell({ ws, account }: { ws: string; account: DataApiServiceAccou
                     expires <RelativeTime iso={c.expires_at} />
                   </span>
                 )}
+                {/* Gated on `revoked`, not `revoked || expired`: expiry and
+                    revocation are different lifecycle events on the backend
+                    (`expires_at` vs `revoked_at`, independently settable), and
+                    an expired-but-not-yet-revoked client is still a real row
+                    an operator may want to revoke explicitly (e.g. to record
+                    why, or before its expiry is trusted). */}
                 {!revoked && (
                   <Button
                     variant="ghost"
@@ -385,6 +400,16 @@ function IssueClientDialog({ ws, account, open, onOpenChange, issue, onIssued }:
  * the secret; the client id is shown as plain text so `getByRole("button",
  * { name: /copy/i })` (and a reader scanning the dialog) finds one unambiguous
  * button, not two.
+ *
+ * Known cosmetic gap: `open` is driven by `client !== null`, and `Done`
+ * calls `onOpenChange(false)` which nulls `client` synchronously in the same
+ * tick — so Radix's close animation plays over an already-empty body rather
+ * than the last-shown content. No security implication (the secret is exactly
+ * as gone either way); not fixed here because the natural fix — caching the
+ * last-shown value in its own state and updating it inside a `useEffect` — is
+ * exactly the `react-hooks/set-state-in-effect` shape this file went out of
+ * its way to avoid elsewhere (see `IssueClientDialog`/`CreateServiceAccountDialog`'s
+ * `reset()` comments).
  */
 function NewClientSecretDialog({ client, onOpenChange }: {
   client: DataApiNewClientDto | null;
