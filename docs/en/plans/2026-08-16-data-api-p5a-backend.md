@@ -10,6 +10,8 @@
 
 Implements `docs/en/specs/2026-08-16-data-api-p5-design.md` §4, §5, §6.1, §7 — that is PRs 1 and 2 of the spec's §9 decomposition. Frontend (PRs 3–7) is a separate plan written after this merges.
 
+> **This plan is a historical record and two of its decisions were overturned during implementation. The specs are current; this file is not.** Anything below that names `ranger_denied` describes a wire code that no longer exists — engine-side denial is a single code, `data_access_denied`, because the same condition covers both a Ranger/ACL policy denial and a bad or expired engine credential, and a Ranger-named code would state the wrong cause in half the cases. And `GET …/data-api/openapi` is gated `data_api_endpoint:manage`, not `:read`: it returns the set of endpoints a named service account may invoke, which is the grant roster that `/grants` LIST is already `:manage` for. Task 6's §5.3 code sample also carried a wrong serving URL — see the `CORRECTED AFTER MERGE REVIEW` notes inline.
+
 ## Global Constraints
 
 - **sqlx 0.9: `sqlx::query()` takes `&'static str`.** Every statement in this plan is a fixed literal. Optional filters are expressed as `($n::type IS NULL OR col = $n)` predicates, never by string-building. Do not reach for `AssertSqlSafe`.
