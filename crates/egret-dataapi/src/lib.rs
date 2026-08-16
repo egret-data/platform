@@ -80,7 +80,9 @@ pub use serving::{
     serving_openapi, serving_router, verify_serving_token, ServingError, ServingMeta,
     ServingPrincipal, ServingResponse, DATA_API_AUDIENCE,
 };
-pub use try_it::{TrialActor, TryRequest, TryRequestEcho, TryResponse};
+pub use try_it::{
+    TrialActor, TrialResultTooLarge, TryItError, TryRequest, TryRequestEcho, TryResponse,
+};
 
 /// Test-only access to the shared invoke expression (P5 §5.2). Integration
 /// tests live outside the crate and cannot see `pub(crate)`; exposing it through

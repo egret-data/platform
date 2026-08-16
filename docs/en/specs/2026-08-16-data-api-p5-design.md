@@ -273,9 +273,13 @@ serving asks.
 ### 5.3 `servers[0].url` and `tokenUrl` come from the same source: `issuer`
 
 ```text
-servers[0].url  = {DataApiState.issuer}/data-api/v1
+servers[0].url  = {DataApiState.issuer}/data-api/v1/{workspace slug}
 tokenUrl        = {DataApiState.issuer}/…            (the machine-IdP token endpoint)
 ```
+
+**The workspace slug is part of `servers[0].url`, and leaving it out makes every
+documented operation return 404.** See the mount-versus-route note at the end of this
+section — this is the single detail in §5 that is invisible in review and fatal in use.
 
 **They must share one source, or the file can contradict itself.** `tokenUrl` has no choice —
 it is the machine-IdP's own endpoint, derived from `issuer`, and it is the same URL already
@@ -291,7 +295,27 @@ call.
 `client_credentials` already fails, so "it might be unset" is not a failure mode this document
 can have on its own.
 
-The serving mount is `/data-api/v1` (`crates/egret-server/src/lib.rs:369`).
+#### The MOUNT is `/data-api/v1`. The ROUTE is `/data-api/v1/{ws}/{*path}`. Do not confuse them.
+
+`egret-server` nests the serving router at `/data-api/v1`
+(`crates/egret-server/src/lib.rs:369`), and the router's own single route is
+`/{ws}/{*path}` (`serving::serving_router`, extracted as `Path<(String, String)>`). The
+mount is therefore only the first half of what a consumer calls; **the workspace slug is a
+path segment of the route, not a detail of the deployment.**
+
+That distinction is the whole of this subsection, because getting it wrong is silent:
+`servers[0].url` set to the mount alone joins with a `paths` key of `/reports/daily` to give
+`{issuer}/data-api/v1/reports/daily`, which binds `ws = "reports"`. The slug then fails to
+match the `ws` claim in the consumer's token and **every documented operation answers 404** —
+from a document that is otherwise perfectly well-formed and passes every schema check.
+
+So `servers[0].url` ends in the slug, resolved from the already-authorized
+`WorkspaceId` (`WorkspaceRepo::get_by_id(...).slug`) — the *same* resolution §3's Try-it
+proxy uses to build the URL it drives the real router with, not a second mechanism. The two
+must agree, and `tests/openapi_gen.rs`'s `the_documented_url_is_the_url_try_it_calls` composes
+`servers[0].url` with a `paths` key and pins the result to what Try-it echoes for the same
+endpoint. Asserting either half alone — as the first version of these tests did — passes
+whether or not the slug is there.
 
 **The UI shows that URL next to the download button, and warns when the request's own host
 disagrees with `issuer`.** That is where the human eye goes, and a mismatch there is worth

@@ -271,9 +271,13 @@ có cách nào biết. Hãy hỏi authorizer đúng câu hỏi mà serving hỏi
 ### 5.3 `servers[0].url` và `tokenUrl` cùng lấy từ một nguồn: `issuer`
 
 ```text
-servers[0].url  = {DataApiState.issuer}/data-api/v1
+servers[0].url  = {DataApiState.issuer}/data-api/v1/{slug workspace}
 tokenUrl        = {DataApiState.issuer}/…            (token endpoint của machine-IdP)
 ```
+
+**Slug workspace là một phần của `servers[0].url`; bỏ nó ra thì MỌI operation trong tài liệu
+trả về 404.** Xem ghi chú mount-so-với-route ở cuối mục này — đây là chi tiết duy nhất trong
+§5 mà review không nhìn thấy nhưng dùng thật thì chết ngay.
 
 **Chúng bắt buộc dùng chung một nguồn, nếu không file có thể tự mâu thuẫn.** `tokenUrl` không
 có lựa chọn nào khác — nó là endpoint của chính machine-IdP, suy ra từ `issuer`, và là đúng URL
@@ -287,7 +291,26 @@ trả về khi issue client, là `required_issuer` của StarRocks, và là `eng
 deployment mà nó sai là một deployment mà `client_credentials` đã hỏng sẵn, nên "nó có thể chưa
 set" không phải là một chế độ hỏng mà riêng tài liệu này gánh.
 
-Mount serving là `/data-api/v1` (`crates/egret-server/src/lib.rs:369`).
+#### MOUNT là `/data-api/v1`. ROUTE là `/data-api/v1/{ws}/{*path}`. Đừng nhầm hai thứ đó.
+
+`egret-server` nest router serving tại `/data-api/v1`
+(`crates/egret-server/src/lib.rs:369`), còn route duy nhất của chính router đó là
+`/{ws}/{*path}` (`serving::serving_router`, trích bằng `Path<(String, String)>`). Vậy mount
+mới chỉ là nửa đầu của thứ consumer gọi; **slug workspace là một path segment của route, không
+phải một chi tiết của deployment.**
+
+Phân biệt đó là toàn bộ nội dung mục con này, vì làm sai thì im lặng: `servers[0].url` đặt bằng
+mount trần, nối với key `paths` là `/reports/daily`, ra
+`{issuer}/data-api/v1/reports/daily`, tức là bind `ws = "reports"`. Slug đó không khớp claim
+`ws` trong token của consumer, và **mọi operation trong tài liệu trả về 404** — từ một tài liệu
+hoàn toàn đúng cú pháp và qua được mọi kiểm tra schema.
+
+Nên `servers[0].url` kết thúc bằng slug, lấy từ `WorkspaceId` đã được authorize sẵn
+(`WorkspaceRepo::get_by_id(...).slug`) — *đúng* cách mà proxy Try-it ở §3 dựng URL để chạy
+router thật, không phải một cơ chế thứ hai. Hai bên phải khớp nhau, và
+`tests/openapi_gen.rs`'s `the_documented_url_is_the_url_try_it_calls` ghép `servers[0].url` với
+một key `paths` rồi ghim kết quả vào đúng URL Try-it echo ra cho cùng endpoint. Assert riêng
+từng nửa — như bản test đầu tiên đã làm — thì pass dù có slug hay không.
 
 **UI hiện URL đó cạnh nút tải, và cảnh báo khi host của chính request lệch với `issuer`.** Đó là
 chỗ mắt người nhìn tới, và một chỗ lệch ở đó đáng nêu vì lý do lớn hơn OpenAPI: nó nghĩa là

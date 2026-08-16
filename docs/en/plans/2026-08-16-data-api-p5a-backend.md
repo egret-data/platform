@@ -1182,7 +1182,11 @@ async fn servers_and_token_url_share_one_origin() {
 
     // Fixture issuer is https://egret.test. Both halves must come from it, or a
     // consumer fetches a token from one origin and calls another.
-    assert_eq!(server, "https://egret.test/data-api/v1");
+    // CORRECTED AFTER MERGE REVIEW: the slug belongs here, and asserting the
+    // base ALONE is why its absence shipped. See
+    // `the_documented_url_is_the_url_try_it_calls`, which composes
+    // servers[0].url with a paths key and compares against try_it's echo.
+    assert_eq!(server, format!("https://egret.test/data-api/v1/{}", f.ws_slug));
     assert!(token_url.starts_with("https://egret.test/"));
 }
 
@@ -1463,7 +1467,15 @@ pub async fn build(
         // Both halves of the origin come from `issuer`. See spec §5.3: if these
         // could disagree, one file would send a consumer to fetch a token from
         // one host and call another.
-        "servers": [ { "url": format!("{base}/data-api/v1") } ],
+        // CORRECTED AFTER MERGE REVIEW — this line as planned was WRONG.
+        // The serving MOUNT is /data-api/v1; the serving ROUTE is
+        // /data-api/v1/{ws}/{*path}. Without the workspace slug here, a
+        // consumer joining servers[0].url to a paths key binds `ws` to the
+        // first path segment and EVERY documented operation answers 404.
+        // Shipped as: format!("{base}/data-api/v1/{slug}"), with `slug`
+        // resolved from the authorized WorkspaceId exactly as try_it does.
+        // See spec §5.3.
+        "servers": [ { "url": format!("{base}/data-api/v1/{slug}") } ],
         "security": [ { "egret_oauth2": [] } ],
         "components": {
             "securitySchemes": {

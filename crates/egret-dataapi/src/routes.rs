@@ -1682,6 +1682,17 @@ pub struct ActivityCallsQuery {
     /// Keyset cursor: return rows strictly older than this.
     #[serde(default)]
     pub before: Option<DateTime<Utc>>,
+    // A CLAMP, where an out-of-range `range` is a hard 400 — two different
+    // answers to "you asked for more than you may have", and the difference is
+    // deliberate. `range` names a WINDOW: honouring "one year" by quietly
+    // serving 30 days would report a number the caller reads as the year's, so
+    // it has to refuse. `limit` names a PAGE SIZE: the caller pages with
+    // `before` either way, and 200 rows in place of 1000 is not a wrong answer
+    // to any question, only a shorter page. What would be indefensible is a
+    // clamp nobody can see — hence the doc comment below, which utoipa renders
+    // as this parameter's description.
+    /// How many rows to return. Default 50, maximum 200; a larger value is
+    /// clamped to 200 rather than refused.
     #[serde(default = "default_call_limit")]
     pub limit: i64,
 }
@@ -1752,12 +1763,18 @@ pub struct OpenApiQuery {
 /// [`Error`] through, and `NamingCollision` becomes a 409 naming the endpoint
 /// and telling the author to re-publish — there is no document to serve for a
 /// version `serving` itself answers 503 for.
+///
+/// `TooManyEndpoints` becomes a 400 rather than a 409 or a 500: the caller has a
+/// remedy in their own hands (`?endpoint_id=`, which the message names), and a
+/// second unrelated meaning for 409 on this surface is the confusion this branch
+/// otherwise had to fix in `try_it`.
 fn openapi_gen_err(e: crate::openapi_gen::OpenApiGenError) -> DataApiError {
     use crate::openapi_gen::OpenApiGenError;
     match e {
         OpenApiGenError::NamingCollision { endpoint } => Error::Conflict(format!(
             "endpoint {endpoint} has an output naming collision; re-publish it"
         )),
+        e @ OpenApiGenError::TooManyEndpoints { .. } => Error::InvalidInput(e.to_string()),
         OpenApiGenError::Db(e) => db_err(e),
         OpenApiGenError::Core(e) => e,
     }
@@ -1769,7 +1786,8 @@ fn openapi_gen_err(e: crate::openapi_gen::OpenApiGenError) -> DataApiError {
     tag = "data-api",
     params(WorkspacePath, OpenApiQuery),
     responses(
-        (status = 200, description = "OpenAPI 3.0.3 document describing what service_account_id may invoke", body = serde_json::Value),
+        (status = 200, description = "OpenAPI 3.0.3 document describing what service_account_id may invoke. `servers[0].url` already carries the workspace slug, so joining it with a `paths` key gives the URL a consumer calls", body = serde_json::Value),
+        (status = 400, description = "The workspace has more live endpoints than one document may describe; request them one at a time with endpoint_id", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing data_api_endpoint:read permission", body = ErrorBody),
         (status = 404, description = "No such service account in this workspace", body = ErrorBody),

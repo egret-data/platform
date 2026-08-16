@@ -47,9 +47,10 @@
 
 use axum::body::Body;
 use axum::extract::{Path, State};
-use axum::http::Request;
+use axum::http::{Request, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::Json;
-use egret_core::http::ErrorBody;
+use egret_core::http::{ApiError, ErrorBody};
 use egret_core::{Error, WorkspacePath};
 use egret_workspace::context::WsContext;
 use serde::{Deserialize, Serialize};
@@ -58,6 +59,38 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 use crate::routes::{scoped_account, DataApiError, DataApiState, EP_MANAGE};
+
+/// The trial ran, and its response was larger than [`MAX_TRIAL_BODY`].
+///
+/// **A `413`, and it needs its own type to be one.** `egret_core::Error` — which
+/// `DataApiError` aliases — has no payload-too-large variant, so the nearest
+/// reachable status was `409 Conflict`. That is the wrong semantic (nothing
+/// conflicts; a response was too big) and, worse, it collided with this surface's
+/// OTHER 409, `openapi_gen`'s `NamingCollision` — leaving one status meaning two
+/// unrelated things on adjacent routes of the same feature.
+///
+/// Rendered through [`ErrorBody`], the same envelope
+/// `impl IntoResponse for egret_core::Error` produces, so the shape a client
+/// parses does not change with the status.
+#[derive(Debug)]
+pub struct TrialResultTooLarge(String);
+
+impl IntoResponse for TrialResultTooLarge {
+    fn into_response(self) -> Response {
+        (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(ErrorBody {
+                error: self.0,
+                code: None,
+            }),
+        )
+            .into_response()
+    }
+}
+
+/// [`try_endpoint`]'s error: the crate's canonical [`Error`] for everything it
+/// shares with its siblings, plus the one failure this route alone can have.
+pub type TryItError = ApiError<TrialResultTooLarge>;
 
 /// How long a minted trial token lives.
 ///
@@ -77,7 +110,8 @@ const TRIAL_CLIENT_PREFIX: &str = "trial:";
 /// A published `limits.max_rows` may be up to a million rows, and the console
 /// cannot display that however it is delivered. Over the cap the trial fails
 /// with a message naming the cap, rather than reading an arbitrary amount of
-/// memory into a management response.
+/// memory into a management response. See [`TrialResultTooLarge`] for the status
+/// that failure carries and why it is not a 409.
 const MAX_TRIAL_BODY: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -224,7 +258,7 @@ async fn mint_trial_token(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing data_api_endpoint:manage — a trial runs a query as somebody else, so :read does not reach it", body = ErrorBody),
         (status = 404, description = "No such endpoint, or no such service account, in this workspace", body = ErrorBody),
-        (status = 409, description = "The endpoint's result is too large for a console trial", body = ErrorBody),
+        (status = 413, description = "The trial RAN, but its result is larger than a console trial will read back; lower the endpoint's row limit or call it with a client", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -233,7 +267,7 @@ pub async fn try_endpoint(
     WsContext(ctx): WsContext,
     Path((_ws_ignored, id)): Path<(String, Uuid)>,
     Json(body): Json<TryRequest>,
-) -> Result<Json<TryResponse>, DataApiError> {
+) -> Result<Json<TryResponse>, TryItError> {
     // `:manage`, not `:read` — this runs a query as somebody else.
     egret_core::authz::require(&*st.pdp, &ctx, EP_MANAGE).await?;
     // 404s an endpoint outside this workspace before anything is minted.
@@ -337,11 +371,11 @@ pub async fn try_endpoint(
     let bytes = axum::body::to_bytes(res.into_body(), MAX_TRIAL_BODY)
         .await
         .map_err(|_| {
-            Error::Conflict(format!(
+            TryItError::Domain(TrialResultTooLarge(format!(
                 "the endpoint returned more than {} MiB; lower its row limit or call it \
                  with a client",
                 MAX_TRIAL_BODY / (1024 * 1024)
-            ))
+            )))
         })?;
     // `Null` rather than a failure: the serving surface answers JSON on every
     // path it owns, so an unparseable body is worth showing the author as-is

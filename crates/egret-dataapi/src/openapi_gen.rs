@@ -10,10 +10,32 @@
 
 use crate::routes::DataApiState;
 use egret_core::ids::UserId;
-use egret_core::WorkspaceId;
+use egret_core::{Error, WorkspaceId};
 use egret_dataapi_api::{EndpointSnapshot, ParamLocation, ParamType};
 use serde_json::{json, Map, Value};
 use uuid::Uuid;
+
+/// The most live endpoints one generated document may describe.
+///
+/// **A bound, not a page.** Building the document asks the PDP whether the
+/// service account may invoke each candidate ([`crate::invoke::can_invoke`]),
+/// and a `CedarPdp::authorize` over an `Object` costs two DB round-trips before
+/// it links templates and runs the authorizer (`egret-auth`'s
+/// `pdp/mod.rs` — `grants_for`, plus the `tag_assignments` scan). That loop is
+/// the cost of this route, and left unbounded a workspace can make one `:read`
+/// GET arbitrarily expensive.
+///
+/// The question cannot be batched without changing what it answers.
+/// `can_invoke` is the SAME expression the serving path evaluates before it runs
+/// anything, and its answer must stay identical here or the document describes a
+/// different access set than the one a consumer meets. So the count is capped
+/// rather than the check weakened.
+///
+/// Exceeding it is an ERROR, never a truncated document: a document silently
+/// missing paths is exactly the failure §5.2 spends a Cedar call to avoid, and a
+/// consumer cannot tell a short document from a complete one. The caller's way
+/// through is `?endpoint_id=`, which narrows the query to a single row.
+pub const MAX_DOCUMENTED_ENDPOINTS: usize = 200;
 
 #[derive(Debug, thiserror::Error)]
 pub enum OpenApiGenError {
@@ -23,6 +45,12 @@ pub enum OpenApiGenError {
     /// document quietly missing a column is worse than no document.
     #[error("endpoint {endpoint} has an output naming collision; re-publish it")]
     NamingCollision { endpoint: String },
+    /// More live endpoints than [`MAX_DOCUMENTED_ENDPOINTS`]. See that constant.
+    #[error(
+        "this workspace has more than {max} live endpoints, more than one generated document \
+         may describe; download them one at a time with ?endpoint_id="
+    )]
+    TooManyEndpoints { max: usize },
     #[error(transparent)]
     Db(#[from] sqlx::Error),
     #[error(transparent)]
@@ -146,7 +174,8 @@ fn error_responses() -> Value {
 ///
 /// `only` narrows to a single endpoint — the per-endpoint download is this same
 /// builder, not a second mechanism that could describe an endpoint differently
-/// from the aggregate.
+/// from the aggregate. It is also the way past
+/// [`MAX_DOCUMENTED_ENDPOINTS`], which bounds the aggregate form.
 pub async fn build(
     st: &DataApiState,
     ws: WorkspaceId,
@@ -156,20 +185,58 @@ pub async fn build(
     // `state = 'live'` AND a live version: a draft has no published contract,
     // and a disabled endpoint answers 404, so documenting either describes
     // something that does not happen.
+    //
+    // `LIMIT $3` fetches ONE more row than may be described, so an overflow is
+    // detected from the count rather than from a document that came back short.
+    // See [`MAX_DOCUMENTED_ENDPOINTS`].
     let rows: Vec<(Uuid, String, String, String, String, Value, i32)> = sqlx::query_as(
         "SELECT e.id, e.name, e.description, e.path, e.method, ev.snapshot, ev.version \
          FROM dataapi.endpoints e \
          JOIN dataapi.endpoint_versions ev ON ev.id = e.live_version_id \
          WHERE e.workspace_id = $1 AND e.state = 'live' \
            AND ($2::uuid IS NULL OR e.id = $2) \
-         ORDER BY e.path",
+         ORDER BY e.path \
+         LIMIT $3",
     )
     .bind(ws.0)
     .bind(only)
+    .bind(MAX_DOCUMENTED_ENDPOINTS as i64 + 1)
     .fetch_all(&st.db.pool)
     .await?;
 
+    if rows.len() > MAX_DOCUMENTED_ENDPOINTS {
+        // Logged as well as returned: the caller sees a 400 they can act on, and
+        // the operator — who is the one who can decide whether the bound is
+        // still the right number — sees which workspace hit it.
+        tracing::warn!(
+            workspace_id = %ws.0,
+            max = MAX_DOCUMENTED_ENDPOINTS,
+            "generated OpenAPI refused: more live endpoints than one document may describe"
+        );
+        return Err(OpenApiGenError::TooManyEndpoints {
+            max: MAX_DOCUMENTED_ENDPOINTS,
+        });
+    }
+
     let base = st.issuer.trim_end_matches('/');
+    // The workspace SLUG, resolved exactly as `try_it` resolves it
+    // (`try_it.rs`'s `try_endpoint`) — from `ws`, which the handler already
+    // authorized against, never from a second read of the `{workspace}` path
+    // segment.
+    //
+    // **Without it every documented operation 404s.** The serving ROUTE is
+    // `/data-api/v1/{ws}/{*path}` (`serving::serving_router`), not the mount
+    // alone: joining a slug-less `servers[0].url` to a `paths` key of `/reports/daily`
+    // yields `…/data-api/v1/reports/daily`, which binds `ws = "reports"`, fails
+    // to match the token's `ws` claim, and refuses the call. `tests/openapi_gen.rs`'s
+    // `the_documented_url_is_the_url_try_it_calls` composes the two halves and
+    // pins them to the URL `try_it` echoes for the same endpoint.
+    let slug = st
+        .workspaces
+        .get_by_id(ws)
+        .await?
+        .ok_or_else(|| Error::NotFound("workspace".into()))?
+        .slug;
     let mut paths = Map::new();
 
     for (id, name, description, path, method, snapshot, version) in rows {
@@ -245,7 +312,10 @@ pub async fn build(
         // Both halves of the origin come from `issuer`. See spec §5.3: if these
         // could disagree, one file would send a consumer to fetch a token from
         // one host and call another.
-        "servers": [ { "url": format!("{base}/data-api/v1") } ],
+        //
+        // The WORKSPACE SLUG is part of the base URL because it is part of the
+        // serving route, not of the mount — see the `slug` binding above.
+        "servers": [ { "url": format!("{base}/data-api/v1/{slug}") } ],
         "security": [ { "egret_oauth2": [] } ],
         "components": {
             "securitySchemes": {

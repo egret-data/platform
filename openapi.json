@@ -14325,6 +14325,7 @@
           {
             "name": "limit",
             "in": "query",
+            "description": "How many rows to return. Default 50, maximum 200; a larger value is\nclamped to 200 rather than refused.",
             "required": false,
             "schema": {
               "type": "integer",
@@ -15784,8 +15785,8 @@
               }
             }
           },
-          "409": {
-            "description": "The endpoint's result is too large for a console trial",
+          "413": {
+            "description": "The trial RAN, but its result is larger than a console trial will read back; lower the endpoint's row limit or call it with a client",
             "content": {
               "application/json": {
                 "schema": {
@@ -16040,10 +16041,20 @@
         ],
         "responses": {
           "200": {
-            "description": "OpenAPI 3.0.3 document describing what service_account_id may invoke",
+            "description": "OpenAPI 3.0.3 document describing what service_account_id may invoke. `servers[0].url` already carries the workspace slug, so joining it with a `paths` key gives the URL a consumer calls",
             "content": {
               "application/json": {
                 "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "The workspace has more live endpoints than one document may describe; request them one at a time with endpoint_id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
               }
             }
           },

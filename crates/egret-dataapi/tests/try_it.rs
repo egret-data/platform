@@ -284,8 +284,10 @@ async fn a_trial_too_large_to_read_is_still_audited() {
         .unwrap();
     assert_eq!(
         res.status(),
-        StatusCode::CONFLICT,
-        "the trial must fail on the cap — otherwise this test proves nothing"
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "the trial must fail on the cap — otherwise this test proves nothing. \
+         413, not 409: nothing conflicts, and 409 on this surface already means \
+         `openapi_gen`'s naming collision"
     );
 
     // `emit` is a synchronous `try_send`, so the event is already queued.
