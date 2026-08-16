@@ -125,11 +125,14 @@ function ExploreRoutes() {
                 that can be opened cold. */}
             <Route path="endpoints/:id" element={<EndpointDetail />}>
               <Route index element={<Definition />} />
-              {/* Try it/Versions still render `Placeholder` — Tasks 6-7 swap
+              {/* Try it/Versions still render `Placeholder` — later tasks swap
                   each in for its real section. Each is its own child route (not
                   a query param) so the open section is in the URL and survives a
                   refresh. `Access` links into `try` with `?service_account=`;
-                  Task 6 reads it to preselect the account a row is about. */}
+                  Task 7 (Try it) reads that key to preselect the account a row
+                  is about. Nothing fails if it doesn't — the link still
+                  navigates, just without the preselection — which is why the
+                  contract is written down here and in the plan ledger. */}
               <Route path="response" element={<ResponseSection />} />
               <Route path="access" element={<AccessSection />} />
               <Route path="try" element={<Placeholder title="Try it" />} />

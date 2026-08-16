@@ -29,6 +29,25 @@ interface OpenApiInvokeProbe {
   paths?: Record<string, unknown>;
 }
 
+/** Why the effective-invoke question has no answer yet. */
+type UncheckedReason = "not-live" | "loading" | "error";
+
+/**
+ * The backend's answer to "may this account invoke this endpoint?", or the
+ * reason there isn't one.
+ *
+ * A three-valued type rather than a `boolean`, because the absence of an answer
+ * is a state the UI has to render, not a `false` to fall back to. Reviewer
+ * finding (Important #1) was exactly this collapse in the other direction: the
+ * `granted` arm used to hard-code `alsoInherited: false` on all three unchecked
+ * paths, so a granted row whose probe 500ed rendered the negative claim BY
+ * OMISSION — no caveat, live Revoke button — and an admin clicking Revoke on an
+ * account that also holds `ws_admin` would delete the grant and change nothing.
+ * `can_invoke` propagates PDP errors as errors by design (`invoke.rs`), so that
+ * is a real path, not a hypothetical one.
+ */
+type InheritedCheck = { known: true; inherited: boolean } | { known: false; reason: UncheckedReason };
+
 /**
  * Condition 1 for one service account, with the two states that must never
  * collapse into a single ✓.
@@ -38,13 +57,18 @@ interface OpenApiInvokeProbe {
  * (today: a workspace membership whose role carries `data_api_endpoint:invoke`,
  * applied to every object in the workspace by the Cedar cascade) — there is no
  * object-scoped row, so revoking here would delete nothing and change nothing.
+ *
+ * `granted` carries the WHOLE [`InheritedCheck`], not a boolean: being granted
+ * here says nothing about whether the account also reaches invoke another way,
+ * and that second question can be unanswered on a granted row just as easily as
+ * on an ungranted one.
  */
 type InvokeStatus =
-  | { kind: "granted"; alsoInherited: boolean }
+  | { kind: "granted"; also: InheritedCheck }
   | { kind: "inherited" }
   | { kind: "none" }
   /** The effective-invoke question was not answered. NEVER rendered as "no". */
-  | { kind: "unchecked"; reason: "not-live" | "loading" | "error" };
+  | { kind: "unchecked"; reason: UncheckedReason };
 
 /**
  * `Access` — one row per service account, two conditions each (spec §6.2).
@@ -95,6 +119,12 @@ export default function AccessSection() {
   // "not granted" for a principal that will invoke it happily the moment it is
   // published — a wrong answer dressed as a checked one.
   const isLive = endpoint.state === "live" && !!endpoint.live_version_id;
+  // `state` is one of draft/live/disabled (migration 0121's CHECK), and the two
+  // non-live values got here by opposite routes: a draft has never been
+  // published, a disabled endpoint WAS published and then switched off. Telling
+  // the second one "publish it" is false, so the sentence branches even though
+  // the access claim above it does not.
+  const wasDisabled = endpoint.state === "disabled";
 
   const accountsQuery = useDataApiListServiceAccounts(ws);
   const accountsEnvelope = accountsQuery.data;
@@ -188,9 +218,9 @@ export default function AccessSection() {
         <CardContent className="space-y-3">
           {!isLive && (
             <p className="text-sm text-muted-foreground">
-              This endpoint is not live, so nothing is being served yet and egret cannot check
-              workspace-inherited invoke rights against it. Grants recorded here are real and take effect
-              when it is published.
+              {wasDisabled
+                ? "This endpoint is disabled, so it is serving nothing and egret cannot check workspace-inherited invoke rights against it. Grants recorded here are real and apply again when it is re-enabled."
+                : "This endpoint is not live, so nothing is being served yet and egret cannot check workspace-inherited invoke rights against it. Grants recorded here are real and take effect when it is published."}
             </p>
           )}
 
@@ -299,26 +329,29 @@ function AccessRow({
   // for this account — the same expression the serving path evaluates.
   const effective = doc ? Object.keys(doc.paths ?? {}).length > 0 : undefined;
 
-  const status: InvokeStatus = !probeEnabled
-    ? grantedHere
-      ? { kind: "granted", alsoInherited: false }
-      : { kind: "unchecked", reason: "not-live" }
+  // Computed ONCE, ahead of `grantedHere`, and consumed by both arms below.
+  // The previous shape asked "granted?" first and re-derived the check inside
+  // each branch, which is what let three of those branches quietly answer
+  // `false` for a question nobody had asked the PDP (reviewer Important #1).
+  // With the check hoisted there is no branch left that can drop it.
+  const check: InheritedCheck = !probeEnabled
+    ? { known: false, reason: "not-live" }
     : probe.isError
-      ? grantedHere
-        ? { kind: "granted", alsoInherited: false }
-        : { kind: "unchecked", reason: "error" }
+      ? { known: false, reason: "error" }
       : effective === undefined
-        ? grantedHere
-          ? { kind: "granted", alsoInherited: false }
-          : { kind: "unchecked", reason: "loading" }
-        : grantedHere
-          ? { kind: "granted", alsoInherited: effective }
-          : effective
-            ? { kind: "inherited" }
-            : { kind: "none" };
+        ? { known: false, reason: "loading" }
+        : { known: true, inherited: effective };
+
+  const status: InvokeStatus = grantedHere
+    ? { kind: "granted", also: check }
+    : check.known
+      ? check.inherited
+        ? { kind: "inherited" }
+        : { kind: "none" }
+      : { kind: "unchecked", reason: check.reason };
 
   const membershipHref = `/explore/${ws}/settings/members`;
-  // Task 6 (`Try it`) reads `service_account` to preselect the account this row
+  // Task 7 (`Try it`) reads `service_account` to preselect the account this row
   // is about, so the author lands on the one question this row could not answer
   // with that account already chosen.
   const tryItHref = `/explore/${ws}/data-api/endpoints/${endpointId}/try?service_account=${encodeURIComponent(account.id)}`;
@@ -376,13 +409,31 @@ function AccessRow({
             {status.kind === "none" && <Badge variant="outline">Not granted</Badge>}
             {status.kind === "unchecked" && <Badge variant="outline">No grant on this endpoint</Badge>}
 
-            {status.kind === "granted" && status.alsoInherited && (
+            {status.kind === "granted" && status.also.known && status.also.inherited && (
               <span className="text-muted-foreground">
                 This account also reaches invoke through the workspace, so revoking here removes the
                 grant but not the access.{" "}
                 <Link className="underline" to={membershipHref}>
                   Workspace membership
                 </Link>
+              </span>
+            )}
+            {/* The caveat that used to be missing. A granted row whose check did
+                not land must not present Revoke as if it were known to be the
+                only thing holding the access up.
+
+                Skipped for an orphaned grant: there the probe was never going to
+                run (the principal is not a listed account, so the document route
+                404s for it by design), and "revoking may not remove access" would
+                imply a workspace membership for a principal this workspace does
+                not list. That row carries its own explanation instead. */}
+            {status.kind === "granted" && !status.also.known && !orphaned && (
+              <span className="text-muted-foreground">
+                {status.also.reason === "loading"
+                  ? "Checking workspace-inherited invoke…"
+                  : status.also.reason === "error"
+                    ? "egret could not check whether this account also reaches invoke through the workspace, so revoking here may not remove access."
+                    : "egret cannot check whether this account also reaches invoke through the workspace until this endpoint is live, so revoking here may not remove access once it is."}
               </span>
             )}
             {status.kind === "inherited" && (
@@ -396,7 +447,11 @@ function AccessRow({
             )}
             {status.kind === "unchecked" && status.reason === "not-live" && (
               <span className="text-muted-foreground">
-                Workspace-inherited invoke is unchecked until this endpoint is published.
+                {/* State-neutral on purpose: the row does not know whether the
+                    endpoint is a draft or a disabled one, and "until it is
+                    published" is false for the second. The section-level
+                    sentence above carries that distinction. */}
+                Workspace-inherited invoke is unchecked while this endpoint is not live.
               </span>
             )}
             {status.kind === "unchecked" && status.reason === "loading" && (

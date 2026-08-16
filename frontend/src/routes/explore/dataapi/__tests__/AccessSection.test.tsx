@@ -191,16 +191,23 @@ describe("AccessSection — condition 1, invoke", () => {
     });
     renderAccess();
 
-    expect(await screen.findByText("Granted on this endpoint")).toBeInTheDocument();
-    expect(screen.getByText("Inherited from the workspace")).toBeInTheDocument();
+    // Every assertion is scoped to its own row. A global `getByText` here would
+    // die on "found multiple elements" the moment the two states collapse —
+    // which reports a duplicate-badge problem rather than the state-collapse
+    // problem, and stops the run before the revoke/membership assertions that
+    // actually carry the requirement.
+    const granted = await screen.findByTestId(`access-row-${SA_GRANTED.id}`);
+    const inherited = screen.getByTestId(`access-row-${SA_INHERITED.id}`);
+
+    expect(within(granted).getByText("Granted on this endpoint")).toBeInTheDocument();
+    expect(within(inherited).getByText("Inherited from the workspace")).toBeInTheDocument();
+    expect(within(inherited).queryByText("Granted on this endpoint")).not.toBeInTheDocument();
 
     // The inherited row must NOT offer a revoke that would do nothing.
-    const inherited = screen.getByTestId(`access-row-${SA_INHERITED.id}`);
     expect(within(inherited).queryByRole("button", { name: /revoke/i })).not.toBeInTheDocument();
     expect(within(inherited).getByRole("link", { name: /membership/i })).toBeInTheDocument();
 
     // …and the granted row must, because there it changes something.
-    const granted = screen.getByTestId(`access-row-${SA_GRANTED.id}`);
     expect(within(granted).getByRole("button", { name: /revoke/i })).toBeInTheDocument();
   });
 
@@ -305,6 +312,51 @@ describe("AccessSection — condition 1, invoke", () => {
     expect(within(row).queryByText("Not granted")).not.toBeInTheDocument();
     expect(within(row).getByText(/could not check/i)).toBeInTheDocument();
   });
+
+  // Reviewer finding (Important #1). The unchecked state used to be discarded
+  // on the GRANTED arm — three branches hard-coded `alsoInherited: false` — so
+  // a granted row whose probe failed rendered the negative claim by OMISSION:
+  // no caveat, a live Revoke button, nothing said. `can_invoke` propagates PDP
+  // errors as errors by design (`invoke.rs`), so an account holding BOTH an
+  // object-scoped grant and `ws_admin` would show a clean "Granted on this
+  // endpoint", the admin would click Revoke, the grant would really be deleted,
+  // and the account would keep invoking through the cascade — the same "clicked
+  // revoke, nothing happened" surprise this section exists to prevent, reached
+  // through the error path instead of the inherited one.
+  it("warns that revoking may not remove access when a granted row's inherited check failed", async () => {
+    setup({ accounts: [SA_GRANTED], grants: [makeGrant(SA_GRANTED.id, SA_GRANTED.name)], openapiError: true });
+    renderAccess();
+
+    const row = await screen.findByTestId(`access-row-${SA_GRANTED.id}`);
+    expect(within(row).getByText("Granted on this endpoint")).toBeInTheDocument();
+    // The point of the assertion: the row must not present Revoke as if it were
+    // known to be the only thing holding the access up.
+    expect(within(row).getByText(/could not check.*also reaches invoke.*may not remove access/i)).toBeInTheDocument();
+    expect(within(row).getByRole("button", { name: /revoke/i })).toBeInTheDocument();
+  });
+
+  // Same discard, reached by the other unchecked path: granted on an endpoint
+  // that is not live, where the probe never runs at all.
+  it("warns that revoking may not remove access on a granted row of an endpoint that is not live", async () => {
+    setup({ accounts: [SA_GRANTED], grants: [makeGrant(SA_GRANTED.id, SA_GRANTED.name)] });
+    renderAccess(makeEndpoint({ state: "draft", live_version_id: null }));
+
+    const row = await screen.findByTestId(`access-row-${SA_GRANTED.id}`);
+    expect(within(row).getByText("Granted on this endpoint")).toBeInTheDocument();
+    expect(within(row).getByText(/cannot check.*also reaches invoke.*may not remove access/i)).toBeInTheDocument();
+  });
+
+  // A disabled endpoint WAS published and then switched off, so "take effect
+  // when it is published" states something false about it. No access claim
+  // changes — only the explanation.
+  it("does not tell a disabled endpoint to publish itself", async () => {
+    setup({ accounts: [SA_NONE], grants: [] });
+    renderAccess(makeEndpoint({ state: "disabled", live_version_id: "v-1" }));
+
+    expect(await screen.findByText(/this endpoint is disabled/i)).toBeInTheDocument();
+    expect(screen.getByText(/apply again when it is re-enabled/i)).toBeInTheDocument();
+    expect(screen.queryByText(/take effect when it is published/i)).not.toBeInTheDocument();
+  });
 });
 
 describe("AccessSection — condition 2, Ranger", () => {
@@ -333,16 +385,34 @@ describe("AccessSection — condition 2, Ranger", () => {
 
   // The one thing this section must never do: read the SQL and project Ranger
   // policy onto it. A half-right answer here is worse than none.
-  it("never presents a Ranger verdict", async () => {
+  //
+  // Asserting the ABSENCE of some invented verdict string would pass against an
+  // empty component and against any wording change — it is unfalsifiable. What
+  // is falsifiable: the Ranger line must be BYTE-IDENTICAL for two accounts
+  // whose invoke status is opposite. Any code that let this line vary with
+  // something egret knows — invoke status, the grant list, the SQL — breaks
+  // this equality, and nothing else about the section does.
+  it("says exactly the same thing about data access for accounts with opposite invoke status", async () => {
     setup({
-      accounts: [SA_GRANTED],
+      accounts: [SA_GRANTED, SA_NONE],
       grants: [makeGrant(SA_GRANTED.id, SA_GRANTED.name)],
       canInvoke: { [SA_GRANTED.id]: true },
     });
     renderAccess();
 
-    await screen.findByTestId(`access-row-${SA_GRANTED.id}`);
-    expect(screen.queryByText(/ranger: (allowed|denied|ok)/i)).not.toBeInTheDocument();
+    const grantedRow = await screen.findByTestId(`access-row-${SA_GRANTED.id}`);
+    const noneRow = screen.getByTestId(`access-row-${SA_NONE.id}`);
+
+    // Guard the premise: if both rows had the same invoke status the equality
+    // below would hold trivially.
+    expect(within(grantedRow).getByText("Granted on this endpoint")).toBeInTheDocument();
+    expect(within(noneRow).getByText("Not granted")).toBeInTheDocument();
+
+    const dataText = (row: HTMLElement) =>
+      within(row).getByText(/egret cannot check/i).parentElement?.textContent;
+
+    expect(dataText(grantedRow)).toBe(dataText(noneRow));
+    expect(dataText(grantedRow)).toMatch(/egret cannot check whether this account may read/i);
   });
 });
 
