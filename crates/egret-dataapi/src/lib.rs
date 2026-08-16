@@ -35,9 +35,16 @@
 //! `egret_machine_idp::verify_with_jwk` checks NEITHER and accepts a token
 //! carrying no `exp` at all — that module's comment carries the reasoning.
 
+//! P4.5 adds [`render`]: an endpoint's SQL and a caller's values become
+//! `(sql, Vec<Param>)` — a statement whose every `{{ … }}` has become a bind
+//! marker, and the values to bind to it. It is the only SQL-building surface in
+//! egret that is safe by construction rather than by escaper; its module comment
+//! carries the mechanism and the rules that keep it that way.
+
 pub mod clients;
 pub mod endpoints;
 pub mod lifecycle;
+pub mod render;
 pub mod routes;
 pub mod serving;
 
@@ -50,6 +57,7 @@ pub use lifecycle::{
     check_cache_scope, check_enum_params, check_params, check_single_select, validate,
     DataApiEndpointVersionDto, DataApiPublishedDto, ValidationError, VersionRef,
 };
+pub use render::{check_dynamic, check_publish, check_static, render, ParamValues, RenderError};
 pub use routes::{
     management_router, openapi, CreateServiceAccountInput, DataApiAdminApi, DataApiClientDto,
     DataApiEndpointGrantDto, DataApiError, DataApiNewClientDto, DataApiServiceAccountDto,

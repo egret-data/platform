@@ -24626,7 +24626,7 @@
             }
           },
           "400": {
-            "description": "`row_limit_exceeded` — the result exceeded the endpoint's row cap",
+            "description": "`row_limit_exceeded` — the result exceeded the endpoint's row cap; `param_missing` — a required parameter was not supplied; `param_invalid` — a supplied parameter failed its declared type, its `allowed` list, or was repeated where one value is required. Neither parameter error names the parameter: the name is the author's, and naming it turns the error surface into a directory of what an endpoint declares",
             "content": {
               "application/json": {
                 "schema": {
@@ -24686,7 +24686,7 @@
             }
           },
           "503": {
-            "description": "`schema_drift` / `output_naming_collision` / `cache_scope_stale` — the published configuration no longer describes the data. `Retry-After` is a floor, not a forecast: only a re-publish clears these",
+            "description": "`schema_drift` / `output_naming_collision` / `cache_scope_stale` / `param_gate_stale` — the published configuration no longer describes the data, or was frozen before the current parameter-safety rules existed. `Retry-After` is a floor, not a forecast: only a re-publish clears these",
             "content": {
               "application/json": {
                 "schema": {
@@ -24739,7 +24739,7 @@
             }
           },
           "400": {
-            "description": "`row_limit_exceeded` — the result exceeded the endpoint's row cap",
+            "description": "`row_limit_exceeded` — the result exceeded the endpoint's row cap; `param_missing` — a required parameter was not supplied; `param_invalid` — a supplied parameter failed its declared type, its `allowed` list, or was repeated where one value is required. Neither parameter error names the parameter: the name is the author's, and naming it turns the error surface into a directory of what an endpoint declares",
             "content": {
               "application/json": {
                 "schema": {
@@ -24799,7 +24799,7 @@
             }
           },
           "503": {
-            "description": "`schema_drift` / `output_naming_collision` / `cache_scope_stale` — the published configuration no longer describes the data. `Retry-After` is a floor, not a forecast: only a re-publish clears these",
+            "description": "`schema_drift` / `output_naming_collision` / `cache_scope_stale` / `param_gate_stale` — the published configuration no longer describes the data, or was frozen before the current parameter-safety rules existed. `Retry-After` is a floor, not a forecast: only a re-publish clears these",
             "content": {
               "application/json": {
                 "schema": {
@@ -28411,6 +28411,12 @@
               "$ref": "#/components/schemas/ColumnSpec"
             },
             "description": "Resolved by `describe_as` at publish time and frozen here, so the\npublished contract does not drift when the underlying table changes."
+          },
+          "param_gate": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Which revision of the publish-time parameter gate this version passed.\n\n**A stamp, not a note.** P4.5's §7 said \"every endpoint with parameters\nmust be re-published after P4.5\" — an instruction to an operator, which\nis not an enforcement. A version frozen before the gate existed carries\n`0` here (`#[serde(default)]`), so the serving path can REFUSE it rather\nthan render a definition no rule ever looked at. That turns the migration\nfrom something someone has to remember into something the server checks.\n\nAn integer rather than a bool, because the situation it exists for is\nexactly the one that recurs: when a future revision of the gate closes a\nrule the current one misses, bumping [`PARAM_GATE`] makes every snapshot\nstamped with the older gate refuse to serve until it is re-published and\nre-checked. A bool could only ever say \"some gate ran\", which is the claim\nthat was not good enough this time either.\n\nOnly consulted when the snapshot declares parameters: a version with no\n`params` renders nothing, so there is nothing for the gate to have missed\nand nothing to force a re-publish of.",
+            "minimum": 0
           }
         }
       },

@@ -19,7 +19,7 @@ pub struct ColumnMeta {
 /// `Serialize`/`Deserialize` are for the E4b contract crate + BI forwarding this
 /// result directly across the seam boundary; today the store persists `columns`
 /// and `rows` individually, so the whole-struct codecs are not yet exercised.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
 pub struct TabularResult {
     pub columns: Vec<ColumnMeta>,
     /// Row-major cell values; each inner vec is one row aligned to `columns`.

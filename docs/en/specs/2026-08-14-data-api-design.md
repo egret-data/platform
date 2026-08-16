@@ -212,6 +212,25 @@ The four jsonb config columns, and the shape frozen into `endpoint_versions.snap
 { "per_key_qps": 5, "burst": 10, "per_endpoint_qps": 50 }
 ```
 
+**How a caller supplies these at serve time** (P4.5; full rules in that spec's §5):
+
+- Query string only. `location: "body"` is **refused at publish** — nothing on the serving
+  surface parses a request body, so a body parameter is never supplied, and an *optional* one
+  would silently drop its `{% if %}` predicate and answer 200 with unfiltered rows forever.
+- A **repeated** query parameter is a LIST, one bind per value: `?regions=EU&regions=US` →
+  `IN (?, ?)`. A repeated `enum` is a 400. `ParamSpec` has no multiplicity field, so
+  multiplicity comes from the request — except that a parameter the template *iterates* is a
+  list even when one value is supplied, because a scalar there is not a one-element loop.
+- **`+` decodes to a SPACE, in both names and values** — the
+  `application/x-www-form-urlencoded` reading every mainstream HTTP client produces. So
+  `?token=a+b` binds `"a b"`, not `"a+b"`, and this **fails silently**: the call succeeds and
+  returns the rows for a value the caller did not type. Anything whose alphabet contains `+`
+  (standard base64, a `C++`-shaped literal, a signed number) must be sent as `%2B`. Measured
+  live 2026-08-16. Say this in the documentation you hand a client; nothing in the response
+  says it.
+- Undeclared parameters are ignored (so tracking parameters do not break a client), and only
+  DECLARED ones reach the cache key.
+
 **A misspelled key on the request body is a 400, not a silently dropped value.** The endpoint create (`POST`) and update (`PATCH`) bodies carry `#[serde(deny_unknown_fields)]`, and so do the nested config objects `params`, `output`, `cache`, `limits` and `rate_limit`. Both layers are needed: the attribute on the request body does not reach a nested struct, and nested is where the damage was — `{"rate_limit": {"per_client_qps": 5}}`, the spelling an earlier draft of this document specified, used to return 201 with `per_key_qps` defaulted to `0`. A rate limit the author believes they set and did not is worse than an error. Every field is either required or defaulted, so nothing legitimate is refused; the shapes above are the exact spellings.
 
 The two snapshot-internal types, `EndpointSnapshot` and its `columns`, deliberately do **not** carry the attribute: the server writes them for itself, so an author typo is impossible there. Note the cost this buys on the config types — they are also how the stored `jsonb` is read back, so adding a field in a later version and then rolling the binary back makes the older code refuse rows the newer one wrote, as a 500 on read rather than a silent misparse.
@@ -376,12 +395,25 @@ GET /data-api/v1/{ws}/{path}
     data_api_endpoint:{id}
  5. rate limit (per endpoint and per client)                     ✗→ 429 + Retry-After
  6. cache lookup                                                 hit → return
- 7. render params → dialect-safe SQL                             ✗→ 400
+ 7. render params → bound SQL (`?` + binds)                      ✗→ 400
  8. machine-idp mints an engine token for the SA
     → QueryExecPort::execute_as
  9. Ranger filters rows/columns at the engine, as the SA
 10. shape output → store in cache → access_log → return
 ```
+
+**Step 7 is implemented as of P4.5** (`2026-08-15-data-api-parameters-design.md`), and this
+document no longer describes it as absent. Values are **bound**, not interpolated: the
+template renders through a hardened `minijinja` environment whose formatter can only emit a
+bind marker, so every `{{ … }}` becomes a `?` and the value travels beside the statement —
+StarRocks binds at the wire, Trino carries the statement in `X-Trino-Prepared-Statement` and
+the values in `EXECUTE … USING`. It is split in two around step 6 for a reason: resolution
+(percent-decode, drop undeclared, apply defaults, type-check) runs **before** the cache
+lookup, because the key must describe what the request will render; rendering runs **after** a
+miss, because a hit needs no statement. `param_invalid` / `param_missing` are live 400s. A
+version published before the gate that validates parameterised templates existed is refused
+with **503 `param_gate_stale`** before it is keyed, cached or rendered — see §7 of the P4.5
+spec. Live-checked end to end against StarRocks on 2026-08-16.
 
 **Step 1 is stateless and costs no DB round-trip.** The bearer token is a JWT signed by egret's own machine-IdP, so the serving path verifies a signature against JWKS and reads `egret_user_id` and `ws` straight out of the claims — there is no credential lookup, and no Argon2, on the hot path. That is the whole reason §6.1 chose a token exchange over a per-request key. The price is the revocation window §6.1 bounds at 600s.
 
@@ -404,7 +436,7 @@ The cache config therefore carries a `scope`:
 - `per_principal` (default) — the cache key includes `service_account_id`.
 - `shared` — permitted **only when the connection does not run queries as the caller**: neither `delegated` nor `options.impersonate`. Checked at validate time, so a misconfiguration cannot be published in the first place. Both fields matter and either alone is disqualifying — see §5.3.
 
-The key itself is `endpoint_id ‖ version ‖ declared params ‖ principal`, hashed with **every field length-prefixed** and the principal LAST. Two rules that step 7 must not undo when it replaces the parameter map with the rendered one:
+The key itself is `endpoint_id ‖ version ‖ declared params ‖ principal`, hashed with **every field length-prefixed** and the principal LAST. Two rules step 7 had to preserve when it replaced the parameter map with the resolved one, and does (P4.5 derives the key from the resolved `Param`s, not from the request text, so key and render cannot disagree):
 
 - **Only DECLARED parameters are keyed.** An undeclared parameter cannot affect the response, so it must not affect the entry either — hashing the whole query string lets one authenticated client mint unbounded entries in a cache shared by every workspace in the process.
 - **Length-prefixed, never delimited.** A delimiter is only safe while values cannot contain it, which today is true because `http::Uri` refuses control bytes in a raw query string — a property held by a crate the cache never mentions, and one that disappears the moment parameters are DECODED. With a `0x00` delimiter, `?a=1%00b%002` hashes identically to `?a=1&b=2`. Same principal, so never a cross-identity leak, but once parameters reach the SQL it is one filter's rows served for another's.
@@ -453,10 +485,11 @@ One stable, machine-readable envelope:
 | 503 | `schema_drift` | the engine's columns no longer match the ones the version froze; refused rather than reshaped (§5.1.2) |
 | 503 | `output_naming_collision` | `output.naming` maps two frozen columns onto one key, so a column advertised in `meta.columns` would vanish from every row |
 | 503 | `cache_scope_stale` | a `shared` version's frozen `(delegated, options.impersonate)` pair no longer matches the live `query.databases` row (§6.3) |
+| 503 | `param_gate_stale` | the live version declares parameters but was frozen before the publish-time parameter gate reached its current revision, so no rule ever looked at its template; refused before keying, cache or render (P4.5 §7) |
 
-**The three 503s are 503 and not 500** for one reason: nothing on egret's side failed. The endpoint's published configuration has stopped describing its data, and the fix belongs to an author or operator — re-publish, change `naming`, or put the connection back. `cache_scope_stale` in particular is deliberately NOT a silent downgrade to a per-principal key: serving the endpoint a different way would keep it working while hiding the drift from the only person who can correct it.
+**The four 503s are 503 and not 500** for one reason: nothing on egret's side failed. The endpoint's published configuration has stopped describing its data, and the fix belongs to an author or operator — re-publish, change `naming`, or put the connection back. `cache_scope_stale` in particular is deliberately NOT a silent downgrade to a per-principal key: serving the endpoint a different way would keep it working while hiding the drift from the only person who can correct it.
 
-**All three carry `Retry-After: 300`, and that number is a floor rather than a forecast.** None of them self-heals — only a human clears them — so the instinct is to send no header at all. That instinct is wrong about what a bare 503 does: it does not stop retries, it leaves the interval to the client's default, which for mainstream retry libraries is an exponential backoff starting around a second. A fleet of callers would therefore hammer hardest in exactly the state a human has to notice. RFC 9110 §10.2.3 defines `Retry-After` on a 503 as *the minimum time the user agent is asked to wait*, explicitly not a promise the condition has cleared, so stating five minutes is both true and strictly quieter. Note that the 429's `Retry-After` is a different thing wearing the same name: it is computed from the bucket and IS a prediction of when the refusal lifts.
+**All four carry `Retry-After: 300`, and that number is a floor rather than a forecast.** None of them self-heals — only a human clears them — so the instinct is to send no header at all. That instinct is wrong about what a bare 503 does: it does not stop retries, it leaves the interval to the client's default, which for mainstream retry libraries is an exponential backoff starting around a second. A fleet of callers would therefore hammer hardest in exactly the state a human has to notice. RFC 9110 §10.2.3 defines `Retry-After` on a 503 as *the minimum time the user agent is asked to wait*, explicitly not a promise the condition has cleared, so stating five minutes is both true and strictly quieter. Note that the 429's `Retry-After` is a different thing wearing the same name: it is computed from the bucket and IS a prediction of when the refusal lifts.
 
 ### Codes this table used to promise, and why P4 does not emit them
 
@@ -464,7 +497,7 @@ Each is a decision, not an omission. A code in a published table that nothing ca
 
 | HTTP | code | Why it is not live |
 |---|---|---|
-| 400 | `param_invalid` / `param_missing` | §6.2 step 7 (rendering declared `params` into the SQL) is not implemented, so no caller input is validated anywhere yet. They arrive with step 7 — and when they do, neither may name the parameter: the name is the author's, and naming it turns the error surface into a directory of which parameters an endpoint declares. |
+| 400 | `param_invalid` / `param_missing` | **Live since P4.5**, which implemented §6.2 step 7. Neither names the parameter: the name is the author's, and naming it turns the error surface into a directory of which parameters an endpoint declares. |
 | 502 | `engine_unavailable` | **not decidable at this seam.** `QueryExecPort` returns `egret_core::Error`, and `port_impl` folds the engine's `Connect`/`Storage`/`Db` failures AND egret's own faults — resolving the principal's email, opening the database secret — into the same `Error::Internal`. Answering 502 would page an operator about Trino when the metastore is what failed. |
 | 504 | `timeout` | same seam. `engine_error` maps `EngineError::Timeout` to `Error::InvalidInput("query timed out")`, deliberately, because for `describe_as` a timeout means the query is too expensive to plan. Recognising it in the serving path would mean matching another crate's message string — a check that keeps compiling and silently stops working the day someone rewords it. |
 
@@ -508,7 +541,16 @@ CI runs in full locally before merge, including `cargo fmt`. Never run two works
 Deferred deliberately, each recorded so it is a decision rather than an omission:
 
 - **Writes (INSERT/UPDATE/DELETE)** and multi-statement transactions — needs transaction boundaries, rollback, write audit, and a policy for who may publish a write endpoint.
-- **Bound parameters at the connector layer.** This is the largest deferral in the document and the one most likely to be misread, so the reasoning is here rather than only in §3.
+- ~~**Bound parameters at the connector layer.**~~ **SUPERSEDED 2026-08-15 by
+  `2026-08-15-data-api-parameters-design.md` (P4.5) — bound parameters SHIPPED, live-checked
+  against StarRocks on 2026-08-16.** The
+  reasoning below stands as the record of why it was deferred, with three corrections measured
+  since: the fix is **not** subtractive (Trino has no wire-level parameter channel, so
+  `quote_string` survives on that path, and `egret-bi` still interpolates); StarRocks *does*
+  bind at the wire; and the cost was measured at roughly one extra round trip per query. Read
+  the P4.5 spec, not this bullet, for what is being implemented.
+
+  This was the largest deferral in the document and the one most likely to be misread, so the reasoning is here rather than only in §3.
 
   sqlrest — the implementation this design is modelled on — does **not** interpolate. Its MyBatis `#{param}` becomes a real `ParameterMapping`, i.e. a driver bind. We interpolate an escaped literal instead. On the parameter axis the reference implementation is therefore *structurally safer* than what we built.
 
@@ -516,7 +558,17 @@ Deferred deliberately, each recorded so it is a decision rather than an omission
 
   **It was deferred for cost, not because interpolation was judged adequate.** `Connector::execute` takes `sql: &str` with no parameter channel; StarRocks could bind natively through `mysql_async`, but Trino needs `X-Trino-Prepared-Statement` plus `EXECUTE … USING`, which is a `Connector` trait change and a second protocol path. Doing it would *delete* the dialect escaper, the raw-byte statement check, and the placeholder-position check — the fix is subtractive, which is the strongest argument for it.
 
-- **Dynamic SQL** — conditional predicates that appear only when a parameter was supplied. sqlrest has this through MyBatis `<if>`, `<where>`, `<set>`, `<choose>`/`<when>`, `<foreach>`; we have none. `{{param}}` substitutes unconditionally, so an optional filter must be written `WHERE (region = {{r}} OR {{r}} IS NULL)`, which is awkward and usually defeats the index the predicate existed for.
+- ~~**Dynamic SQL**~~ **SUPERSEDED 2026-08-15 by `2026-08-15-data-api-parameters-design.md`
+  (P4.5) — conditionals arrive with the renderer.** The rbatis analysis below is still correct
+  and was re-verified (`rbatis` is "Compile Time Async Dynamic SQL ORM"; `rbatis-codegen`
+  exposes only `TokenStream` producers). What changed: the answer is `minijinja` at runtime,
+  whose `set_formatter` makes binding the only thing a template can do — so the "build the
+  smallest thing" advice below is met without a bespoke construct, and the "bound parameters
+  first" ordering is satisfied inside one phase because the formatter **is** the binding. The
+  Superset comparison below is also corrected there: it is a *Python* Jinja2 risk that
+  minijinja's closed value model does not carry.
+
+  Conditional predicates that appear only when a parameter was supplied. sqlrest has this through MyBatis `<if>`, `<where>`, `<set>`, `<choose>`/`<when>`, `<foreach>`; we have none. `{{param}}` substitutes unconditionally, so an optional filter must be written `WHERE (region = {{r}} OR {{r}} IS NULL)`, which is awkward and usually defeats the index the predicate existed for.
 
   **`rbatis` does not solve this**, and the reason is worth recording so it is not re-proposed. Its dynamic SQL is compile-time: `rb_html(args: TokenStream, func: TokenStream) -> TokenStream` is a proc macro over a `syn::ItemFn`, so the template must be a literal in Rust source at build time. A Data API endpoint is a row in `dataapi.endpoint_versions.snapshot`, authored by a user and published while the system is running — no macro can run over it. It is also inseparable from its own `rbdc` driver layer, which has no Trino driver and would mean rebuilding per-user delegation, engine JWTs and Ranger.
 

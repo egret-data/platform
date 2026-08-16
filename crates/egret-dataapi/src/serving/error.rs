@@ -36,14 +36,17 @@
 //!
 //! # Why no parameter name appears in a 400
 //!
-//! Not applicable yet (`ParamInvalid`/`ParamMissing` do not exist until spec
-//! §6.2 step 7 lands) but recorded here because it is the first thing whoever
-//! adds them will reach for: the parameter *name* is the endpoint author's, not
-//! the caller's. Naming it in a 400 turns the error surface into a directory of
-//! which parameters an endpoint declares, which is the same class of oracle the
-//! single `Unauthorized` and the single `NotFound` exist to close. Whoever
-//! decides otherwise should do it as a decision with a note, not by
-//! interpolating out of habit.
+//! `ParamInvalid` and `ParamMissing` arrived with spec §6.2 step 7, and the rule
+//! written here before they existed is what they were built to: the parameter
+//! *name* is the endpoint author's, not the caller's. Naming it in a 400 turns
+//! the error surface into a directory of which parameters an endpoint declares,
+//! which is the same class of oracle the single `Unauthorized` and the single
+//! `NotFound` exist to close.
+//!
+//! It is enforced by the SHAPE of the two variants and not only by the strings
+//! below: both are unit variants carrying no parameter, so there is nothing here
+//! for a later edit to interpolate out of habit. Whoever decides otherwise has
+//! to widen the type first, which makes it a decision rather than a slip.
 
 use std::borrow::Cow;
 
@@ -60,9 +63,9 @@ use super::ServingError;
 ///
 /// # This is a floor, not a prediction
 ///
-/// The three 503s — [`ServingError::SchemaDrift`],
-/// [`ServingError::OutputNamingCollision`] and
-/// [`ServingError::CacheScopeStale`] — do not self-heal. Each is cleared by a
+/// The four 503s — [`ServingError::SchemaDrift`],
+/// [`ServingError::OutputNamingCollision`], [`ServingError::CacheScopeStale`]
+/// and [`ServingError::ParamGateStale`] — do not self-heal. Each is cleared by a
 /// human re-publishing the endpoint, and no duration egret can name is a
 /// forecast of when that happens. So the obvious reading is that they should
 /// carry no `Retry-After` at all.
@@ -185,6 +188,22 @@ pub(crate) fn to_wire(e: &ServingError) -> Wire {
              ask the endpoint's owner to grant it"
                 .into(),
         ),
+        // The two step-7 codes. NEITHER names the parameter, and neither
+        // variant carries one to name — see the module comment above and
+        // `ServingError::ParamMissing`'s own. The messages differ only in which
+        // fix they point at ("send it" vs "send something else"), which is the
+        // whole distinction a client can act on without being told the
+        // endpoint's parameter list.
+        ServingError::ParamMissing => (
+            StatusCode::BAD_REQUEST,
+            "param_missing",
+            "a required parameter is missing".into(),
+        ),
+        ServingError::ParamInvalid => (
+            StatusCode::BAD_REQUEST,
+            "param_invalid",
+            "a parameter value is not valid for this endpoint".into(),
+        ),
         // An error, never a truncated 200: a client that believes it has every
         // row produces wrong numbers with no signal.
         ServingError::RowLimitExceeded { cap } => (
@@ -241,6 +260,16 @@ pub(crate) fn to_wire(e: &ServingError) -> Wire {
              `delegated` and `options.impersonate` settings"
                 .into(),
         ),
+        // Names the fix and nothing else. The operator cannot act on WHICH rule
+        // the old snapshot never met — the rules are the author's, and the list
+        // changes — so the message states the one action that clears it.
+        ServingError::ParamGateStale => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "param_gate_stale",
+            "this endpoint's live version was published before its parameters were validated; \
+             re-publish it"
+                .into(),
+        ),
         // The source is NOT rendered. It is the only thing in this file that
         // could carry a table name or a host, and it goes to `tracing` instead.
         ServingError::Internal(_) => (
@@ -256,11 +285,14 @@ pub(crate) fn to_wire(e: &ServingError) -> Wire {
         // A floor, not a prediction.
         ServingError::SchemaDrift
         | ServingError::OutputNamingCollision
-        | ServingError::CacheScopeStale => Some(CONFIG_DRIFT_RETRY_AFTER_SECS),
+        | ServingError::CacheScopeStale
+        | ServingError::ParamGateStale => Some(CONFIG_DRIFT_RETRY_AFTER_SECS),
         ServingError::Unauthorized
         | ServingError::NotFound
         | ServingError::DataAccessDenied
         | ServingError::NotGranted
+        | ServingError::ParamMissing
+        | ServingError::ParamInvalid
         | ServingError::RowLimitExceeded { .. }
         | ServingError::Internal(_) => None,
     };
@@ -308,6 +340,8 @@ mod tests {
             (ServingError::NotFound, 404, "not_found"),
             (ServingError::DataAccessDenied, 403, "data_access_denied"),
             (ServingError::NotGranted, 403, "not_granted"),
+            (ServingError::ParamMissing, 400, "param_missing"),
+            (ServingError::ParamInvalid, 400, "param_invalid"),
             (
                 ServingError::RowLimitExceeded { cap: 100 },
                 400,
@@ -367,6 +401,34 @@ mod tests {
         );
     }
 
+    /// The rule the module comment states, asserted on the only two answers
+    /// that could break it. A parameter name is the author's, so neither body
+    /// may contain one — and since the variants carry nothing, the strongest
+    /// available assertion is that the messages are constants that mention no
+    /// specific parameter at all.
+    #[test]
+    fn a_parameter_error_names_no_parameter() {
+        assert_eq!(
+            to_wire(&ServingError::ParamMissing).message,
+            "a required parameter is missing"
+        );
+        assert_eq!(
+            to_wire(&ServingError::ParamInvalid).message,
+            "a parameter value is not valid for this endpoint"
+        );
+        // The names an endpoint in the suites actually declares. If either
+        // message ever started interpolating, this is what would appear.
+        for name in ["region", "day", "from", "sort"] {
+            for e in [ServingError::ParamMissing, ServingError::ParamInvalid] {
+                assert!(
+                    !to_wire(&e).message.contains(name),
+                    "a 400 named the parameter `{name}`, which turns the error \
+                     surface into a directory of what the endpoint declares"
+                );
+            }
+        }
+    }
+
     /// The cap is egret-published author config, not caller input, and spec §7
     /// asks for it explicitly. Pinned so a future "no interpolation anywhere"
     /// sweep has to argue with a test rather than delete it silently.
@@ -394,6 +456,7 @@ mod tests {
             ServingError::SchemaDrift,
             ServingError::OutputNamingCollision,
             ServingError::CacheScopeStale,
+            ServingError::ParamGateStale,
         ] {
             assert_eq!(
                 to_wire(&e).retry_after,
@@ -407,6 +470,8 @@ mod tests {
             ServingError::NotFound,
             ServingError::DataAccessDenied,
             ServingError::NotGranted,
+            ServingError::ParamMissing,
+            ServingError::ParamInvalid,
             ServingError::RowLimitExceeded { cap: 1 },
             ServingError::Internal(anyhow::anyhow!("boom")),
         ] {
@@ -419,8 +484,8 @@ mod tests {
     }
 
     /// Codes are the client's branching key, so two variants sharing one would
-    /// make them indistinguishable on the wire. The three 503s in particular
-    /// have three different fixes.
+    /// make them indistinguishable on the wire. The four 503s in particular
+    /// have four different fixes.
     #[test]
     fn no_two_variants_share_a_code() {
         let codes = [
@@ -431,6 +496,11 @@ mod tests {
             // STATUS must not share a code, or the wire cannot tell "ask egret
             // for a grant" from "ask Ranger for a grant".
             to_wire(&ServingError::NotGranted).code,
+            // Three 400s now. `param_missing` and `param_invalid` point at two
+            // different client-side fixes, and both are different from
+            // `row_limit_exceeded`, which is not the caller's fault at all.
+            to_wire(&ServingError::ParamMissing).code,
+            to_wire(&ServingError::ParamInvalid).code,
             to_wire(&ServingError::RowLimitExceeded { cap: 1 }).code,
             to_wire(&ServingError::RateLimited {
                 retry_after: Duration::from_secs(1),
@@ -439,6 +509,10 @@ mod tests {
             to_wire(&ServingError::SchemaDrift).code,
             to_wire(&ServingError::OutputNamingCollision).code,
             to_wire(&ServingError::CacheScopeStale).code,
+            // Four 503s now, and this is the one most easily confused with
+            // `cache_scope_stale`: both mean "this version predates something",
+            // and only one of them is cleared by restoring a connection setting.
+            to_wire(&ServingError::ParamGateStale).code,
             to_wire(&ServingError::Internal(anyhow::anyhow!("boom"))).code,
         ];
         let unique: std::collections::HashSet<_> = codes.iter().collect();

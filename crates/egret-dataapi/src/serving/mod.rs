@@ -7,11 +7,17 @@
 //! [`router`]: URL → published snapshot → rows. Task 4 lands [`cache`] and
 //! [`ratelimit`] — steps 6 and 5 of spec §6.2. Task 5 lands [`error`] (spec §7's
 //! envelope and its fixed code table) and [`access_log`] (spec §8).
+//!
+//! P4.5 lands [`params`] — step 7's first half, where a request and a snapshot's
+//! `ParamSpec`s become the values [`crate::render::render`] binds and the bytes
+//! the cache keys on. Read its module comment before touching either: the two
+//! projections come from one pass on purpose, and the reason is a wrong-rows bug.
 
 pub mod access_log;
 pub mod auth;
 pub mod cache;
 pub mod error;
+pub(crate) mod params;
 pub mod ratelimit;
 pub mod router;
 
@@ -49,9 +55,6 @@ pub use router::{serving_openapi, serving_router, ServingMeta, ServingResponse};
 /// None of them is constructible on today's serving path, and a dead variant
 /// would make the table look finished while nothing could ever produce the code:
 ///
-/// * `param_invalid` / `param_missing` — spec §6.2 step 7 (rendering declared
-///   `params` into the SQL) is not implemented, so no caller input is ever
-///   validated. They arrive with step 7.
 /// * `engine_unavailable` (502) and `timeout` (504) — **not decidable at this
 ///   seam.** `QueryExecPort` returns `egret_core::Error`, and `port_impl` folds
 ///   BOTH the engine's infrastructure failures (`Connect`/`Storage`/`Db`) AND
@@ -106,6 +109,28 @@ pub enum ServingError {
     /// instead send an operator hunting for a deleted endpoint.
     #[error("endpoint not granted to this service account")]
     NotGranted,
+    /// A `required` parameter the caller did not supply and the author gave no
+    /// `default` for (spec §5, serve-time rules).
+    ///
+    /// **Carries nothing, deliberately.** The parameter's name is the endpoint
+    /// author's, and putting it in a 400 turns the error surface into a
+    /// directory of which parameters an endpoint declares — the same free
+    /// oracle the single [`Self::Unauthorized`] and the single [`Self::NotFound`]
+    /// exist to close. A unit variant leaves nothing for a later edit to
+    /// interpolate out of habit; making it name a parameter would have to be a
+    /// deliberate change to this type.
+    #[error("a required parameter is missing")]
+    ParamMissing,
+    /// A supplied value that does not satisfy its `ParamSpec.ty` — a `Date` that
+    /// is not a date, a `Number` that is not one, an `Enum` value outside
+    /// `allowed`, a repeat of an `Enum`, or input past the size caps in
+    /// [`super::params`].
+    ///
+    /// Unit for the same reason as [`Self::ParamMissing`], and additionally
+    /// because echoing the VALUE back would reflect caller-controlled bytes into
+    /// a response body.
+    #[error("a parameter value is invalid")]
+    ParamInvalid,
     /// The result did not fit under the snapshot's `limits.max_rows`.
     ///
     /// An error rather than a truncated 200: a client that believes it has every
@@ -173,6 +198,30 @@ pub enum ServingError {
     /// the error is wrong.
     #[error("cache scope is stale")]
     CacheScopeStale,
+    /// A version that declares parameters but was frozen before the
+    /// publish-time parameter gate existed, or before its current revision —
+    /// `EndpointSnapshot::param_gate < PARAM_GATE`.
+    ///
+    /// **The alternative was an instruction.** Spec §7 said every endpoint with
+    /// parameters must be re-published after P4.5, because publish-time
+    /// validation is where the new rules live and an older snapshot bypasses all
+    /// of them: a `location: body` parameter that silently drops a filter, a
+    /// `default` that makes every defaulted call a 400, a `| ident` that is a
+    /// 500 whenever the caller omits its parameter. An instruction is not an
+    /// enforcement, and the endpoint that nobody remembers to re-publish is
+    /// exactly the one that carries the rule nobody checked.
+    ///
+    /// Refused rather than rendered-and-hoped, and refused rather than
+    /// re-validated on the fly: validating here would mean running a
+    /// sixty-four-render gate on a request path, and passing it would still
+    /// leave the snapshot's own frozen columns resolved by the pre-gate describe.
+    ///
+    /// 503 with `param_gate_stale`, alongside the other two config-drift 503s:
+    /// the endpoint is not broken, its published version predates a rule, and one
+    /// re-publish clears it. Not a 500 — nothing failed — and not a 404, which
+    /// would tell an operator to look for a deleted endpoint.
+    #[error("published before the parameter validation gate")]
+    ParamGateStale,
     /// Something on egret's side failed — the IdP key store was unreachable, say.
     /// Deliberately NOT folded into [`Self::Unauthorized`]: a 401 tells an
     /// operator their credential is bad and sends them to rotate it, while the

@@ -54,6 +54,26 @@ pub struct Limits {
     pub timeout: std::time::Duration,
 }
 
+/// A caller-supplied value bound into a query. Never rendered into SQL text by
+/// the caller of a connector — the connector decides how its engine carries it.
+///
+/// Lives here, beside [`Limits`], because `egret-dataapi` must be able to
+/// construct one without depending on `egret-query`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Param {
+    Null,
+    Bool(bool),
+    I64(i64),
+    F64(f64),
+    /// Exact decimal, kept as text so no float rounding is introduced.
+    Decimal(String),
+    Str(String),
+    /// `YYYY-MM-DD`
+    Date(String),
+    /// `YYYY-MM-DD HH:MM:SS[.fff]`
+    Timestamp(String),
+}
+
 /// Supported query engines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]

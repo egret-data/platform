@@ -23,6 +23,7 @@ use egret_core::{ColumnMeta, Error, TabularResult, UserId};
 use egret_dataapi::{management_router, serving_router, ClientStore, DataApiState, EndpointStore};
 use egret_machine_idp::{generate_rsa_key, sign_claims, IdpError, KeyMaterial, SigningKeyStore};
 use egret_metastore::Db;
+use egret_query_api::Param;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -43,16 +44,53 @@ pub fn marker(user: UserId) -> i64 {
     i64::from(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
 }
 
-/// Counts `execute_as` calls, so a test can tell a cache HIT from a
-/// re-execution that happened to return the same rows.
+/// A signature of the values a call bound, folded into the rows the fake
+/// returns.
+///
+/// This is what makes a parameter test non-vacuous. `marker(principal)` alone
+/// would come back identically whether the serving path passed `binds` through,
+/// passed an empty slice, or executed `snap.sql` unrendered — three very
+/// different behaviours, one indistinguishable body. Folding the binds in means
+/// the ROWS change when the bound values change, so an assertion that
+/// `?region=EU` and `?region=US` differ is an assertion about the serving path
+/// and not about a constant.
+///
+/// Zero for an empty list, on purpose: an endpoint with no parameters returns
+/// exactly `marker(principal)`, which is what every pre-P4.5 assertion in these
+/// suites was written against.
+pub fn bind_signature(params: &[Param]) -> i64 {
+    let mut h: i64 = 0;
+    for p in params {
+        for b in format!("{p:?}").into_bytes() {
+            h = h.wrapping_mul(31).wrapping_add(i64::from(b));
+        }
+        h = h.wrapping_mul(31).wrapping_add(1);
+    }
+    h
+}
+
+/// Counts executions, so a test can tell a cache HIT from a re-execution that
+/// happened to return the same rows — and records what the last one was ASKED to
+/// run, so a test can assert on the rendered statement rather than only on the
+/// rows it produced.
 #[derive(Default)]
 pub struct FakePort {
     pub executions: AtomicUsize,
+    pub last: Mutex<Option<(String, Vec<Param>)>>,
 }
 
 impl FakePort {
     pub fn executions(&self) -> usize {
         self.executions.load(Ordering::SeqCst)
+    }
+
+    /// The `(sql, params)` of the most recent execution.
+    pub fn last(&self) -> (String, Vec<Param>) {
+        self.last
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("no execution has reached the port")
     }
 }
 
@@ -75,18 +113,73 @@ impl egret_query_api::QueryExecPort for FakePort {
         Ok(vec![col("n")])
     }
 
+    /// Publish describes the RENDERED statement, which carries `?` markers, so
+    /// it goes through this method rather than `describe_as`. Overridden rather
+    /// than inherited for the same reason as `execute_as_with_params` below: the
+    /// trait's default refuses a non-zero `param_count`, and every fixture in
+    /// this suite publishes parameterised endpoints.
+    async fn describe_as_with_params(
+        &self,
+        _ws: Uuid,
+        _database_id: Uuid,
+        _principal: UserId,
+        _sql: &str,
+        _param_count: usize,
+    ) -> Result<Vec<ColumnMeta>, Error> {
+        Ok(vec![col("n")])
+    }
+
+    /// Deliberately NOT the method the serving path calls, and it returns rows
+    /// that ignore the binds because it has none.
+    ///
+    /// `serving/router.rs` calls `execute_as_with_params` for every request,
+    /// parameterised or not. If it ever went back to calling this one, a
+    /// parameterised endpoint's rows would lose their bind signature and every
+    /// assertion in `serving_params.rs` that two values differ would fail. That
+    /// is the point of keeping the two implementations distinguishable.
     async fn execute_as(
         &self,
         _ws: Uuid,
         _database_id: Uuid,
         principal: UserId,
-        _sql: &str,
+        sql: &str,
         _limits: egret_query_api::Limits,
     ) -> Result<TabularResult, Error> {
         self.executions.fetch_add(1, Ordering::SeqCst);
+        *self.last.lock().unwrap() = Some((sql.to_string(), Vec::new()));
         Ok(TabularResult {
             columns: vec![col("n")],
             rows: vec![vec![serde_json::json!(marker(principal))]],
+            row_count: 1,
+            bytes_scanned: None,
+            truncated: false,
+        })
+    }
+
+    /// Overridden rather than inherited, and that is a decision.
+    ///
+    /// `QueryExecPort::execute_as_with_params` is defaulted so the trait's nine
+    /// hand-written fakes keep compiling, and the default REFUSES a non-empty
+    /// `params` instead of quietly ignoring it — a fake that returns canned rows
+    /// while dropping the values on the floor would make every parameterised
+    /// assertion pass for no reason. So this fixture opts in explicitly, and
+    /// what it returns depends on the values it was given.
+    async fn execute_as_with_params(
+        &self,
+        _ws: Uuid,
+        _database_id: Uuid,
+        principal: UserId,
+        sql: &str,
+        params: &[Param],
+        _limits: egret_query_api::Limits,
+    ) -> Result<TabularResult, Error> {
+        self.executions.fetch_add(1, Ordering::SeqCst);
+        *self.last.lock().unwrap() = Some((sql.to_string(), params.to_vec()));
+        Ok(TabularResult {
+            columns: vec![col("n")],
+            rows: vec![vec![serde_json::json!(
+                marker(principal).wrapping_add(bind_signature(params))
+            )]],
             row_count: 1,
             bytes_scanned: None,
             truncated: false,

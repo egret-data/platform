@@ -6,6 +6,38 @@
 //! never inject SQL.
 //!
 //! Escaping rules live in [`egret_query_api::dialect`], not here.
+//!
+//! # Safety model: this module INTERPOLATES, and that is now the older of two
+//!
+//! egret has three SQL-building surfaces and they do not share a safety model.
+//!
+//! * **The Data API BINDS** (`egret-dataapi/src/render.rs`). Caller values never
+//!   enter the statement text at all: the renderer's formatter can only emit a
+//!   `?`, and the value travels beside the SQL as a driver bind (StarRocks) or
+//!   an `EXECUTE … USING` item (Trino). A value there cannot break out of its
+//!   own position because it was never in a position to break out of. Shipped
+//!   and live-checked in P4.5 — see
+//!   `docs/en/specs/2026-08-15-data-api-parameters-design.md`.
+//! * **This module interpolates**, escaping through
+//!   [`egret_query_api::quote_string`]. Correctness depends on that escaper
+//!   being right for the target dialect and on every value reaching it.
+//! * **`egret-bi/src/chartquery.rs::sql_literal` interpolates** the same way,
+//!   for chart and dashboard filter values.
+//!
+//! **This and `chartquery.rs` were both call sites of the P1 backslash bug**
+//! (`\` unescaped while `'` was doubled, so `\'` broke out of the literal on
+//! StarRocks; Trino unaffected). The escaper was fixed; the *model* was not, and
+//! a model that has already failed once is worth naming where a reader of it
+//! will see it.
+//!
+//! Note also that this renderer is **SQL Lab's and only SQL Lab's**. Nothing on
+//! the Data API serving path has ever called it — comments in
+//! `egret-dataapi/src/lifecycle.rs` used to say P3's validation matched "what
+//! `template::render` will do at serve time", which was never true and is now
+//! corrected there.
+//!
+//! Migrating both interpolating surfaces to binding is the larger remaining
+//! prize and was deliberately left out of P4.5 (spec §8).
 
 use super::model::QueryParam;
 use crate::registry::model::Engine;

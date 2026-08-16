@@ -1,4 +1,21 @@
 //! Trino connector — REST statement protocol with row-cap, timeout, cancellation.
+//!
+//! # Bound parameters are NOT wire-level binding (see spec §3.1)
+//!
+//! Trino's HTTP statement protocol has no parameter channel. A prepared
+//! statement's SQL text travels in the `X-Trino-Prepared-Statement` request
+//! header, and the values travel in the POST body as `EXECUTE <name> USING
+//! <literal>, <literal>, …` — **SQL text egret renders**, not bytes the wire
+//! protocol carries separately. The parser boundary at that endpoint is real
+//! and measured: a second statement (`'a'; DROP TABLE zz`) and a subquery
+//! (`'a' || (SELECT …)`) are both refused with a parse/analysis error. But a
+//! well-formed *scalar expression* is not — `'a' || 'b'` evaluates to `"ab"`,
+//! `current_user` evaluates to the caller, `upper('ab')` evaluates to `"AB"`.
+//! So a defect in [`render_literal`] is **arbitrary-scalar-expression
+//! injection**, not arbitrary SQL and not nothing. `quote_string` (shared
+//! with `egret-bi`'s interpolating surfaces) is what closes the quote/quote
+//! case; it does not need to double backslashes here because Trino does not
+//! treat `\` as a string escape character (unlike StarRocks/MySQL dialect).
 
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -9,6 +26,104 @@ use egret_core::{ColumnMeta, TabularResult};
 use super::{ConnSpec, Connector};
 use crate::execution::error::EngineError;
 use crate::execution::model::Limits;
+use egret_query_api::{quote_string, Engine, Param};
+
+/// Render a single [`Param`] as Trino SQL text suitable for one position in an
+/// `EXECUTE <name> USING <literal>, <literal>, …` list.
+///
+/// `Date`/`Timestamp`/`Decimal` are rendered as **typed literals**
+/// (`DATE '…'`, `TIMESTAMP '…'`, `DECIMAL '…'`) rather than bare quoted text,
+/// so the value keeps its declared type through Trino's own parser — a bare
+/// `'2020-02-29'` would arrive as `varchar`, not `date`. `F64` is rendered as
+/// a typed `DOUBLE '…'` literal for the same reason: an untyped literal like
+/// `1.5` is Trino's `DECIMAL(2,1)`, not `DOUBLE` (measured live against Trino
+/// 481) — `DOUBLE '…'` is unambiguous and Rust's `{f}` (shortest round-trip
+/// `Display`) is exact because a `Param::F64` can never carry NaN/Infinity
+/// (JSON, its only realistic origin, cannot express either).
+///
+/// Every `String`-shaped value (`Str`, and the text payload inside `Decimal`/
+/// `Date`/`Timestamp`) goes through [`quote_string`] — the single shared
+/// dialect-escaping primitive (see its own doc comment) — never hand-rolled
+/// quoting. That is the one property this function exists to guarantee: no
+/// other code path in this file is allowed to turn a caller value into SQL
+/// text.
+fn render_literal(p: &Param) -> String {
+    match p {
+        Param::Null => "NULL".to_string(),
+        Param::Bool(b) => if *b { "true" } else { "false" }.to_string(),
+        Param::I64(n) => n.to_string(),
+        Param::F64(f) => format!("DOUBLE {}", quote_string(Engine::Trino, &format!("{f}"))),
+        Param::Decimal(s) => format!("DECIMAL {}", quote_string(Engine::Trino, s)),
+        Param::Str(s) => quote_string(Engine::Trino, s),
+        Param::Date(s) => format!("DATE {}", quote_string(Engine::Trino, s)),
+        Param::Timestamp(s) => format!("TIMESTAMP {}", quote_string(Engine::Trino, s)),
+    }
+}
+
+/// Normalize a Trino type name read from `DESCRIBE OUTPUT`'s `"Type"` result
+/// column so it matches the spelling `execute`/`describe` report for the
+/// *same* type.
+///
+/// Measured live (Trino 481), same SQL, same logical column: the ordinary
+/// `/v1/statement` execute response spells a decimal column's type
+/// `"decimal(10, 2)"` (a space after the comma — matches
+/// `render_literal`'s own test fixture `"decimal(9, 4)"` and is Trino's
+/// `Type.getDisplayName()` convention), while `DESCRIBE OUTPUT`'s `"Type"`
+/// result column spells the identical type `"decimal(10,2)"` — no space.
+/// `varchar(20)` was measured identical both ways (a single-argument type
+/// has no comma to diverge on), so this is specifically a multi-argument
+/// type-signature-vs-display-name difference between the two Trino server
+/// code paths `describe` and `describe_with_params` go through, not a
+/// difference in the underlying type. Left unfixed, a parameterised
+/// endpoint's `decimal` column would carry a different `type` string than
+/// an otherwise-identical non-parameterised one, and Task 7's CAST-typing
+/// rule would inherit that inconsistency silently.
+///
+/// The fix normalizes at the boundary rather than trying to special-case
+/// `decimal`: insert a single space after every comma that isn't already
+/// followed by whitespace. This is a plain byte scan, not a type-grammar
+/// parser — safe here because Trino type-signature strings never quote or
+/// escape a comma (no string literal can appear inside one), so every `,`
+/// byte is a genuine argument separator. Idempotent on already-correctly-
+/// spaced input (the execute-response spelling passes through unchanged),
+/// so applying it unconditionally to `describe_with_params`'s output never
+/// second-guesses a type that was already right.
+fn normalize_trino_type_spacing(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 4);
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        out.push(c);
+        if c == ',' && chars.peek().is_some_and(|next| !next.is_whitespace()) {
+            out.push(' ');
+        }
+    }
+    out
+}
+
+/// Percent-encode `s` for use as (part of) an HTTP header value, per RFC 3986
+/// — every byte except the unreserved set (`A-Z a-z 0-9 - _ . ~`) becomes
+/// `%XX`. Operates on bytes, not `char`s, so multi-byte UTF-8 encodes
+/// correctly. Verified live against Trino 481: it decodes both this
+/// (percent) and form (`+`-for-space) encodings, so the stricter, unambiguous
+/// percent form is used here rather than relying on that leniency.
+///
+/// A hand-rolled encoder rather than a new dependency: `url` is already a
+/// workspace crate but only as a **dev**-dependency of `egret-query` (used to
+/// parse `EGRET_TEST_TRINO_URL` in tests), and its `form_urlencoded` encodes
+/// space as `+`, which is the leniency this function deliberately avoids
+/// relying on.
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
 
 pub struct TrinoConnector {
     base_url: String,
@@ -187,27 +302,27 @@ struct TrinoStats {
     processed_bytes: Option<u64>,
 }
 
-#[async_trait]
-impl Connector for TrinoConnector {
-    async fn execute(
+impl TrinoConnector {
+    /// Drive one Trino statement (already POSTed) through the `nextUri`
+    /// pagination loop to a `TabularResult`, honoring the row cap and
+    /// cooperative cancellation. Shared by `execute` and `execute_with_params`
+    /// — they differ only in how the initial POST is built (raw SQL body vs.
+    /// `EXECUTE … USING …` body + the prepared-statement header); once the
+    /// first response is in hand, the pagination/cap/cancel behavior is
+    /// identical, and it matters that it stays that way rather than the two
+    /// paths quietly diverging (e.g. one forgetting the row cap or the
+    /// mid-page DELETE-on-cancel).
+    ///
+    /// Measured (spec §3.1): the `X-Trino-Prepared-Statement` header is
+    /// required only on the initial POST — the `nextUri` GET loop below never
+    /// sends it, verified across a 200 000-row, 10-hop live fetch.
+    async fn run_statement(
         &self,
-        sql: &str,
+        client: &reqwest::Client,
+        req: reqwest::RequestBuilder,
         limits: &Limits,
         cancel: CancellationToken,
     ) -> Result<TabularResult, EngineError> {
-        if let Some(reason) = &self.insecure_bearer {
-            return Err(EngineError::Connect(reason.clone()));
-        }
-        let client = self.build_client(limits.timeout)?;
-
-        let session = format!("query_max_run_time={}s", limits.timeout.as_secs().max(1));
-        let req = self.auth(
-            client
-                .post(format!("{}/v1/statement", self.base_url))
-                .header("X-Trino-Session", session)
-                .body(sql.to_string()),
-        );
-
         let cap = limits.max_rows;
         let mut columns: Vec<ColumnMeta> = Vec::new();
         let mut rows: Vec<Vec<serde_json::Value>> = Vec::new();
@@ -283,6 +398,191 @@ impl Connector for TrinoConnector {
     }
 }
 
+#[async_trait]
+impl Connector for TrinoConnector {
+    async fn execute(
+        &self,
+        sql: &str,
+        limits: &Limits,
+        cancel: CancellationToken,
+    ) -> Result<TabularResult, EngineError> {
+        if let Some(reason) = &self.insecure_bearer {
+            return Err(EngineError::Connect(reason.clone()));
+        }
+        let client = self.build_client(limits.timeout)?;
+
+        let session = format!("query_max_run_time={}s", limits.timeout.as_secs().max(1));
+        let req = self.auth(
+            client
+                .post(format!("{}/v1/statement", self.base_url))
+                .header("X-Trino-Session", session)
+                .body(sql.to_string()),
+        );
+
+        self.run_statement(&client, req, limits, cancel).await
+    }
+
+    /// Execute `sql` as a Trino prepared statement, rendering `params` as the
+    /// `EXECUTE <name> USING <literal>, <literal>, …` list. See the module
+    /// doc comment: the `USING` list is SQL text this connector renders, not
+    /// a wire-level bind — [`render_literal`] and `quote_string` are the
+    /// entire injection boundary.
+    ///
+    /// `sql` travels in the `X-Trino-Prepared-Statement: <name>=<percent-
+    /// encoded sql>` header (required only on this POST, per
+    /// `run_statement`'s doc comment); a 120 024-byte statement measured 200
+    /// live, so header size is not a practical constraint.
+    ///
+    /// **Not yet timeout-bound beyond what `execute` already provides** —
+    /// same caveat as the StarRocks binding path (Task 2): `limits.timeout`
+    /// governs the `reqwest` client's per-request timeout exactly as it does
+    /// for `execute`, but there is no additional wrapper here. Whoever wires
+    /// the Data API's serving path to this method inherits the same
+    /// outer-timeout obligation already noted on `execute_as`.
+    async fn execute_with_params(
+        &self,
+        sql: &str,
+        params: &[Param],
+        limits: &Limits,
+        cancel: CancellationToken,
+    ) -> Result<TabularResult, EngineError> {
+        if params.is_empty() {
+            return self.execute(sql, limits, cancel).await;
+        }
+        if let Some(reason) = &self.insecure_bearer {
+            return Err(EngineError::Connect(reason.clone()));
+        }
+        let client = self.build_client(limits.timeout)?;
+        let req = self.prepared_request(&client, sql, params, limits);
+
+        self.run_statement(&client, req, limits, cancel).await
+    }
+
+    /// Typed columns of a parameterised `SELECT`, without supplying values.
+    ///
+    /// Trino has no equivalent of a raw `DESCRIBE`-without-executing — the
+    /// only way to learn a query's output schema without running it is
+    /// `DESCRIBE OUTPUT <name>` against a *prepared* statement. So this
+    /// registers the wrapped query as a header-scoped prepared statement
+    /// (same `X-Trino-Prepared-Statement: <name>=<percent-encoded sql>`
+    /// mechanism `execute_with_params` uses — one request, no persisted
+    /// session) and sends `DESCRIBE OUTPUT <name>` as the body. Measured
+    /// live: this returns the full output schema and no data rows from the
+    /// underlying query — e.g. for `SELECT ? AS v, k, d FROM …`, the
+    /// response rows are `["v","","","","unknown",1,false]`,
+    /// `["k","","","","integer",4,false]`, `["d","","","","date",4,false]`
+    /// — column 0 is the output column's name, column 4 is its Trino type
+    /// name. Neither is positionally assumed here: both are located by
+    /// `DESCRIBE OUTPUT`'s own response column names (`"Column Name"`,
+    /// `"Type"`), which is what the response's `columns` metadata actually
+    /// declares, rather than trusting today's column order to hold forever.
+    ///
+    /// A bare `?` in the projection types as `"unknown"`, confirmed by the
+    /// example above (`v`) — neither engine infers a parameter's type from
+    /// context, which is the constraint `describe_with_params_types_a_bare_placeholder_as_unknown_but_a_cast_fixes_it`
+    /// pins for Task 7's `CAST` rule.
+    ///
+    /// Every type string is passed through [`normalize_trino_type_spacing`]
+    /// before being returned — see its doc comment for the measured
+    /// `decimal(10,2)` vs `decimal(10, 2)` divergence between this path and
+    /// `describe`'s, which `describe_and_describe_with_params_type_the_same_columns_identically_on_trino`
+    /// in the test file pins as the two paths' outputs matching exactly for
+    /// shared columns.
+    async fn describe_with_params(
+        &self,
+        sql: &str,
+        param_count: usize,
+        timeout: std::time::Duration,
+    ) -> Result<Vec<ColumnMeta>, EngineError> {
+        if param_count == 0 {
+            return self.describe(sql, timeout).await;
+        }
+        if let Some(reason) = &self.insecure_bearer {
+            return Err(EngineError::Connect(reason.clone()));
+        }
+        let client = self.build_client(timeout)?;
+        let wrapped = format!("SELECT * FROM (\n{sql}\n) AS _egret_ds LIMIT 0");
+        let name = "p1";
+        let prepared_header = format!("{name}={}", percent_encode(&wrapped));
+        let session = format!("query_max_run_time={}s", timeout.as_secs().max(1));
+        let req = self.auth(
+            client
+                .post(format!("{}/v1/statement", self.base_url))
+                .header("X-Trino-Session", session)
+                .header("X-Trino-Prepared-Statement", prepared_header)
+                .body(format!("DESCRIBE OUTPUT {name}")),
+        );
+        // DESCRIBE OUTPUT's own result has one row per output column of the
+        // wrapped query, never per-row query data — a generous cap costs
+        // nothing here (unlike `execute`, where it bounds real result size).
+        let limits = Limits {
+            max_rows: 100_000,
+            timeout,
+        };
+        let result = self
+            .run_statement(&client, req, &limits, CancellationToken::new())
+            .await?;
+
+        let name_idx = result
+            .columns
+            .iter()
+            .position(|c| c.name == "Column Name")
+            .ok_or_else(|| {
+                EngineError::Engine("DESCRIBE OUTPUT response has no \"Column Name\" column".into())
+            })?;
+        let type_idx = result
+            .columns
+            .iter()
+            .position(|c| c.name == "Type")
+            .ok_or_else(|| {
+                EngineError::Engine("DESCRIBE OUTPUT response has no \"Type\" column".into())
+            })?;
+
+        Ok(result
+            .rows
+            .into_iter()
+            .map(|row| ColumnMeta {
+                name: row[name_idx].as_str().unwrap_or_default().to_string(),
+                ty: normalize_trino_type_spacing(row[type_idx].as_str().unwrap_or_default()),
+            })
+            .collect())
+    }
+}
+
+impl TrinoConnector {
+    /// Build the (unsent) POST request for a prepared-statement execution —
+    /// the `X-Trino-Prepared-Statement` header and the `EXECUTE p1 USING
+    /// <literal>, …` body. Split out of `execute_with_params` so its exact
+    /// shape can be pinned by an OFFLINE test: with `EGRET_TEST_TRINO_URL`
+    /// unset, `connector_trino_params.rs` self-skips entirely, so nothing in
+    /// CI would otherwise notice a wrong header name or a dropped
+    /// `percent_encode` call.
+    fn prepared_request(
+        &self,
+        client: &reqwest::Client,
+        sql: &str,
+        params: &[Param],
+        limits: &Limits,
+    ) -> reqwest::RequestBuilder {
+        let session = format!("query_max_run_time={}s", limits.timeout.as_secs().max(1));
+        let name = "p1";
+        let using = params
+            .iter()
+            .map(render_literal)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let body = format!("EXECUTE {name} USING {using}");
+        let prepared_header = format!("{name}={}", percent_encode(sql));
+        self.auth(
+            client
+                .post(format!("{}/v1/statement", self.base_url))
+                .header("X-Trino-Session", session)
+                .header("X-Trino-Prepared-Statement", prepared_header)
+                .body(body),
+        )
+    }
+}
+
 async fn send(req: reqwest::RequestBuilder) -> Result<TrinoResp, EngineError> {
     let resp = req
         .send()
@@ -308,6 +608,289 @@ async fn send(req: reqwest::RequestBuilder) -> Result<TrinoResp, EngineError> {
 mod tests {
     use super::*;
     use crate::registry::model::{ConnOptions, Engine};
+
+    // --- render_literal (Step 1: no engine needed) ---
+
+    #[test]
+    fn null_renders_bare_null() {
+        assert_eq!(render_literal(&Param::Null), "NULL");
+    }
+
+    #[test]
+    fn bool_renders_bare_lowercase() {
+        assert_eq!(render_literal(&Param::Bool(true)), "true");
+        assert_eq!(render_literal(&Param::Bool(false)), "false");
+    }
+
+    #[test]
+    fn i64_renders_bare_and_preserves_full_precision() {
+        // 2^53 + 1 — the classic float-precision boundary. A bare integer
+        // literal, never routed through a lossy f64 conversion.
+        assert_eq!(
+            render_literal(&Param::I64(9_007_199_254_740_993)),
+            "9007199254740993"
+        );
+        assert_eq!(render_literal(&Param::I64(-42)), "-42");
+    }
+
+    #[test]
+    fn f64_renders_as_typed_double_literal() {
+        // Bare `1.5` is Trino's DECIMAL(2,1), not DOUBLE (measured live) — the
+        // typed literal is what pins the value's type unambiguously.
+        assert_eq!(render_literal(&Param::F64(1.5)), "DOUBLE '1.5'");
+    }
+
+    #[test]
+    fn decimal_date_timestamp_render_as_typed_literals() {
+        assert_eq!(
+            render_literal(&Param::Decimal("123.456".into())),
+            "DECIMAL '123.456'"
+        );
+        assert_eq!(
+            render_literal(&Param::Date("2020-02-29".into())),
+            "DATE '2020-02-29'"
+        );
+        assert_eq!(
+            render_literal(&Param::Timestamp("2020-02-29 13:14:15.123".into())),
+            "TIMESTAMP '2020-02-29 13:14:15.123'"
+        );
+    }
+
+    // --- normalize_trino_type_spacing (fix round 1: DESCRIBE OUTPUT vs execute) ---
+
+    #[test]
+    fn normalize_inserts_a_space_after_an_unspaced_comma() {
+        // The exact measured divergence: DESCRIBE OUTPUT spells this
+        // "decimal(10,2)"; execute spells it "decimal(10, 2)".
+        assert_eq!(
+            normalize_trino_type_spacing("decimal(10,2)"),
+            "decimal(10, 2)"
+        );
+    }
+
+    #[test]
+    fn normalize_is_a_no_op_on_already_spaced_input() {
+        // Idempotent: running it on execute's own spelling must not double
+        // the space or otherwise change it.
+        assert_eq!(
+            normalize_trino_type_spacing("decimal(10, 2)"),
+            "decimal(10, 2)"
+        );
+    }
+
+    #[test]
+    fn normalize_leaves_a_comma_free_type_unchanged() {
+        assert_eq!(normalize_trino_type_spacing("varchar(20)"), "varchar(20)");
+        assert_eq!(normalize_trino_type_spacing("unknown"), "unknown");
+        assert_eq!(normalize_trino_type_spacing("integer"), "integer");
+    }
+
+    #[test]
+    fn normalize_handles_multiple_and_trailing_commas() {
+        assert_eq!(
+            normalize_trino_type_spacing("row(a integer,b varchar)"),
+            "row(a integer, b varchar)"
+        );
+        // A trailing comma (degenerate, but must not panic/index-out-of-bounds
+        // on `chars.peek()` returning `None`).
+        assert_eq!(normalize_trino_type_spacing("a,"), "a,");
+    }
+
+    #[test]
+    fn str_goes_through_quote_string() {
+        assert_eq!(render_literal(&Param::Str("hello".into())), "'hello'");
+        // "007" must stay a quoted string, not collapse to a bare 7 — this is
+        // exactly the string-coerced-to-number failure mode the round-trip
+        // test also guards, caught here at the render layer with no engine.
+        assert_eq!(render_literal(&Param::Str("007".into())), "'007'");
+    }
+
+    /// The property that matters most in this file: an embedded quote is
+    /// DOUBLED, never backslash-escaped, so the literal stays closed. This is
+    /// the exact behavior `quote_string(Engine::Trino, …)` provides, and
+    /// `render_literal` must not roll its own.
+    #[test]
+    fn embedded_quote_is_doubled_not_backslash_escaped() {
+        assert_eq!(render_literal(&Param::Str("O'Brien".into())), "'O''Brien'");
+        // The hostile canary this file's live test binds: a naive escaper
+        // that forgets doubling would let this break out of the literal.
+        assert_eq!(
+            render_literal(&Param::Str("'; DROP TABLE zz --".into())),
+            "'''; DROP TABLE zz --'"
+        );
+    }
+
+    /// Trino does not treat `\` as a string-literal escape character
+    /// (measured: `USING 'a\b'` is 4 chars, not 2) — so unlike StarRocks,
+    /// `render_literal` must NEVER double a backslash. Doubling here would
+    /// silently corrupt every Windows path or regex value passed as a filter.
+    #[test]
+    fn backslash_is_never_doubled() {
+        assert_eq!(
+            render_literal(&Param::Str(r"C:\Users\bob".into())),
+            r"'C:\Users\bob'"
+        );
+    }
+
+    // --- typed-variant hostile content (fix round 1, Important 2) ---
+    //
+    // `Decimal`/`Date`/`Timestamp` carry unvalidated caller text through
+    // `format!("<TYPE> {}", quote_string(...))`. Nothing upstream enforces
+    // that a `Date` actually looks like `YYYY-MM-DD` — so the property that
+    // matters is not "the content is well-formed" but "the content, however
+    // malformed, still goes through `quote_string` and stays inside ONE
+    // typed literal". These three pin the EXACT escaped output (not just
+    // "no panic"), so a future rewrite to `format!("DATE '{s}'")` — reasoning
+    // that a date can't contain a quote — fails here immediately, offline,
+    // rather than only being caught by the live containment tests in
+    // `connector_trino_params.rs`.
+
+    /// Reviewer-verified live (in the parenthesised form `"1) OR (1=1"`):
+    /// Trino rejects hostile `DECIMAL` content as `not a valid DECIMAL
+    /// literal`. That payload contains no `'`, so it happens to render
+    /// identically whether or not `quote_string` doubles quotes — it cannot
+    /// tell escaping-correct from escaping-broken apart. This variant adds
+    /// an embedded quote (mirroring the `Date`/`Timestamp` payloads below)
+    /// specifically so the mutation in `connector_trino_params.rs`'s live
+    /// twin of this test is meaningful: measured to fail differently
+    /// (`TYPE_MISMATCH: Logical expression term must evaluate to a
+    /// boolean`) once quote-doubling is removed.
+    #[test]
+    fn decimal_hostile_content_still_goes_through_quote_string() {
+        assert_eq!(
+            render_literal(&Param::Decimal("1' OR '1'='1".into())),
+            "DECIMAL '1'' OR ''1''=''1'"
+        );
+    }
+
+    #[test]
+    fn date_hostile_content_still_goes_through_quote_string() {
+        assert_eq!(
+            render_literal(&Param::Date("2020-01-01' OR '1'='1".into())),
+            "DATE '2020-01-01'' OR ''1''=''1'"
+        );
+    }
+
+    /// The exact shape of the attack the reviewer constructed: a naive
+    /// `format!("TIMESTAMP '{s}'")` would let this ONE param expand into
+    /// THREE `USING` items (a timestamp literal, a bare `current_user`
+    /// expression, and a second timestamp literal), evaluating
+    /// `current_user` and shifting every subsequent bind position. Routed
+    /// through `quote_string`, the embedded quotes are doubled and the whole
+    /// string stays inside a single `TIMESTAMP '…'` token.
+    #[test]
+    fn timestamp_hostile_content_still_goes_through_quote_string() {
+        assert_eq!(
+            render_literal(&Param::Timestamp(
+                "2020-01-01 00:00:00', current_user, TIMESTAMP '2020-01-01 00:00:00".into()
+            )),
+            "TIMESTAMP '2020-01-01 00:00:00'', current_user, TIMESTAMP ''2020-01-01 00:00:00'"
+        );
+    }
+
+    // --- percent_encode (Step 2 plumbing) ---
+
+    #[test]
+    fn percent_encode_leaves_unreserved_bytes_alone() {
+        assert_eq!(percent_encode("abcXYZ019-_.~"), "abcXYZ019-_.~");
+    }
+
+    #[test]
+    fn percent_encode_escapes_space_and_sql_punctuation() {
+        assert_eq!(percent_encode("SELECT ? AS s"), "SELECT%20%3F%20AS%20s");
+        // '%' itself must be escaped, or a literal `%` in SQL text (e.g. a
+        // LIKE pattern) would corrupt the encoding on decode.
+        assert_eq!(percent_encode("a%b"), "a%25b");
+    }
+
+    #[test]
+    fn percent_encode_is_byte_level_for_multibyte_utf8() {
+        // "日" is 3 UTF-8 bytes (E6 97 A5); each must become its own %XX, not
+        // one escape per `char`.
+        assert_eq!(percent_encode("日"), "%E6%97%A5");
+    }
+
+    /// The realistic shape of a Data API template: multi-line SQL with `=`
+    /// and `,` in it. `=` and `,` matter specifically — Trino's own header
+    /// value is `name=sql`, and a literal (unencoded) `=` or `,` reaching
+    /// that header would be ambiguous with the name/value separator or a
+    /// future multi-statement extension of it. CR/LF must never survive
+    /// either: a bare newline in a header value is a request-splitting
+    /// vector, and `reqwest::HeaderValue` refuses to construct one — so if
+    /// this encoder ever regressed to passing raw control bytes through,
+    /// `.build()` on the actual request would panic/error rather than
+    /// silently mis-behave, but this test catches it at the string level
+    /// first.
+    #[test]
+    fn percent_encode_handles_a_multiline_statement_with_cr_lf_and_punctuation() {
+        let sql = "SELECT ?\r\nFROM t\nWHERE x = ?,\ty";
+        let enc = percent_encode(sql);
+        assert_eq!(
+            enc,
+            "SELECT%20%3F%0D%0AFROM%20t%0AWHERE%20x%20%3D%20%3F%2C%09y"
+        );
+        assert!(
+            !enc.contains(['\r', '\n', '=', ',']),
+            "no raw control byte or header-structural character may survive: {enc:?}"
+        );
+    }
+
+    // --- offline request shape (fix round 1, Minor 2) ---
+    //
+    // With `EGRET_TEST_TRINO_URL` unset, every test in
+    // `connector_trino_params.rs` self-skips — so nothing in a normal CI run
+    // exercises `execute_with_params`'s actual header/body construction. This
+    // test needs no network call: `prepared_request(..).build()` materializes
+    // the `reqwest::Request` without sending it, the same pattern
+    // `bearer_path_sends_authorization_and_xtrino_user` already uses below.
+    #[test]
+    fn execute_with_params_emits_the_prepared_statement_header_and_execute_using_body() {
+        let c = TrinoConnector::new(&ConnSpec {
+            engine: Engine::Trino,
+            host: "h".into(),
+            port: 8080,
+            options: ConnOptions::default(),
+            secret: None,
+            session_user: Some("alice".into()),
+            bearer_token: None,
+        });
+        let client = reqwest::Client::new();
+        let limits = Limits {
+            max_rows: 100,
+            timeout: std::time::Duration::from_secs(30),
+        };
+        let req = c
+            .prepared_request(
+                &client,
+                "SELECT ? AS s, ? AS n",
+                &[Param::Str("hi".into()), Param::I64(42)],
+                &limits,
+            )
+            .build()
+            .unwrap();
+
+        assert_eq!(req.method(), reqwest::Method::POST);
+        assert_eq!(req.url().as_str(), "http://h:8080/v1/statement");
+
+        let h = req.headers();
+        assert_eq!(
+            h.get("X-Trino-Prepared-Statement").unwrap(),
+            "p1=SELECT%20%3F%20AS%20s%2C%20%3F%20AS%20n",
+            "the header name must be `p1`, matching the `EXECUTE p1 …` body below, \
+             and the SQL must be percent-encoded, not raw"
+        );
+
+        let body_bytes = req
+            .body()
+            .expect("execute_with_params always sets a body")
+            .as_bytes()
+            .expect("body was built from a String, so it's fully buffered");
+        assert_eq!(
+            std::str::from_utf8(body_bytes).unwrap(),
+            "EXECUTE p1 USING 'hi', 42",
+            "the USING list must be rendered literals, comma-joined, matching render_literal"
+        );
+    }
 
     #[test]
     fn xtrino_user_is_session_user_only_when_impersonating() {

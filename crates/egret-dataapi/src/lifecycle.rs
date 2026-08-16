@@ -227,11 +227,14 @@
 
 use egret_core::{Error, Result, UserId};
 use egret_dataapi_api::{
-    CacheScope, CacheSpec, ColumnSpec, EndpointSnapshot, ParamSpec, ParamType,
+    CacheScope, CacheSpec, ColumnSpec, EndpointSnapshot, ParamLocation, ParamSpec, ParamType,
+    PARAM_GATE,
 };
+use egret_query_api::Param;
 use uuid::Uuid;
 
 use crate::endpoints::{DataApiEndpointDto, EndpointStore};
+use crate::render::ParamValues;
 
 /// Everything `validate` can refuse, as a value rather than a string, so a caller
 /// can match on the reason and the tests can pin the specific rule that fired.
@@ -269,8 +272,10 @@ pub enum ValidationError {
     DuplicateParameter(String),
     #[error(
         "parameter `{{{{{0}}}}}` is referenced from inside a string literal, a quoted identifier \
-         or a comment. Its value is substituted there as an ALREADY-QUOTED literal, which closes \
-         the enclosing one and lets any caller inject SQL — write the placeholder as an operand \
+         or a comment. A placeholder there is not a value position: the renderer emits a bind \
+         marker the engine reads as text, so the value would be bound to a position that does \
+         not exist — and on a renderer that interpolates instead, the substituted literal closes \
+         the enclosing one and lets any caller inject SQL. Write the placeholder as an operand \
          instead, e.g. `LIKE concat('%', {{{{{0}}}}}, '%')`"
     )]
     PlaceholderInsideQuotedText(String),
@@ -285,6 +290,67 @@ pub enum ValidationError {
     SharedCacheOnPerPrincipalConnection,
     #[error("enum parameter `{0}` must declare a non-empty `allowed` list")]
     EnumWithoutAllowed(String),
+    #[error(
+        "enum parameter `{param}` reaches the statement as TEXT — it is used in an identifier \
+         position through `| ident` — so every one of its `allowed` values must be an identifier: \
+         letters, digits and `_`, not starting with a digit, optionally one dot. `{value}` is not. \
+         An `allowed` entry is written into the statement verbatim and is the one thing a \
+         definition can carry that no other rule scanned"
+    )]
+    EnumValueNotIdentifier { param: String, value: String },
+    /// Everything the renderer refuses, at publish time: a definition that does
+    /// not parse under the hardened environment, a capture construct, `| ident`
+    /// on anything that is not an enum parameter with an `allowed` list, a
+    /// comparison against a bare parameter, and the behavioural gate's
+    /// "this definition INSPECTS a parameter".
+    ///
+    /// Passed through with the renderer's own message. Those messages are
+    /// AUTHOR-facing by design — several of them quote the definition back —
+    /// which is exactly right here and is why the serving path maps the same
+    /// type to a generic failure instead.
+    #[error("{0}")]
+    Render(#[from] crate::render::RenderError),
+    #[error(
+        "parameter `{0}` is declared with `location: body`, which cannot be published. A REQUIRED \
+         body parameter is a permanent 400 — nothing on the serving surface reads a request body, \
+         so it is never supplied — and an OPTIONAL one is worse: it renders as absent, its \
+         `{{% if %}}` block is omitted, and the endpoint returns UNFILTERED rows with a 200 on \
+         every call. Declare it as `location: query`"
+    )]
+    BodyParameter(String),
+    #[error(
+        "parameter `{0}`'s `default` is not a valid `{1}`. The default is coerced by exactly the \
+         same rule as a caller's value, so an unparseable one makes every call that OMITS this \
+         parameter a 400 — blaming the caller for the definition, and logging it as `param_invalid` \
+         so nothing points back at the endpoint"
+    )]
+    DefaultNotValidForType(String, &'static str),
+    #[error(
+        "parameter `{0}` is optional with no `default`, and the definition does not render without \
+         it. An absent parameter is `none` in the template, so a construct that INSPECTS it — \
+         `{{{{ {0} | ident }}}}` is the usual one — fails on every call that omits it, as a 500. \
+         Guard it with `{{% if {0} %}}`, give it a `default`, or mark it `required`"
+    )]
+    OptionalParameterUnguarded(String),
+    #[error(
+        "a parameter appears in `LIMIT`/`OFFSET`. Neither engine accepts a bind marker there — \
+         StarRocks rejects `LIMIT ?` at prepare time — so the endpoint would fail on every call. \
+         Publish the limit as a constant, or apply it with `{{% if %}}`"
+    )]
+    ParameterInLimit,
+    #[error(
+        "a parameter appears in the select list without a `CAST`. Neither engine infers a bind \
+         marker's type in a projection — Trino types it as `unknown`, StarRocks as `VAR_STRING` — \
+         so the published column type would be frozen wrong. Write `CAST({{{{p}}}} AS <type>)`"
+    )]
+    UncastParameterInProjection,
+    #[error(
+        "the engine resolved no output columns for this definition. An endpoint with no columns \
+         has no contract, and freezing an empty schema would make every call return empty objects \
+         with a 200 — on StarRocks the text describe path answers exactly that, with no error, for \
+         a statement containing a bind marker"
+    )]
+    DescribeReturnedNoColumns,
 }
 
 impl From<ValidationError> for Error {
@@ -347,7 +413,10 @@ impl From<ValidationError> for Error {
 ///
 /// Nested block comments (which Postgres allows and Trino does not) end at the
 /// first `*/`; the leftovers can only cause a rejection, never an acceptance.
-fn strip_comments_and_strings(
+/// `pub(crate)` for `render::structural_placeholders`, which counts the bind
+/// markers standing in SQL structure in a RENDERED statement — the same question
+/// this answers for a placeholder in an unrendered one.
+pub(crate) fn strip_comments_and_strings(
     sql: &str,
     backslash_escapes: bool,
 ) -> std::result::Result<String, ValidationError> {
@@ -546,12 +615,38 @@ fn check_single_select_under(
 
 /// Every `{{ name }}` reference in `sql`, in order of appearance.
 ///
-/// Scans the RAW SQL, not the stripped form, because the renderer that will
-/// substitute these at serve time is itself a raw scan (`egret-query`'s
-/// `execution::template::render`). Matching its view is what keeps validation
-/// honest: a placeholder inside a string literal WILL be substituted there, so
-/// pretending it is inert here would declare a definition valid that behaves
-/// differently in production.
+/// Scans the RAW SQL, not the stripped form, because the renderer that
+/// substitutes these at serve time — [`crate::render::render`] — is a template
+/// engine that has no idea what SQL quoting is: it emits a bind marker wherever
+/// the placeholder stands, string literal or not. Matching that view is what
+/// keeps validation honest.
+///
+/// **The comment this replaces named `egret-query`'s
+/// `execution::template::render`.** That renderer is SQL Lab's, it interpolates
+/// through `quote_string`, and nothing on the Data API serving path has ever
+/// called it — the rule below was written against a renderer that was never
+/// wired in. The rule itself is right and P4.5 made it load-bearing: a
+/// placeholder that survives [`strip_comments_and_strings`] stands where a value
+/// stands, which is exactly where a bind marker may go.
+/// # It reports EXPRESSIONS, not names — the T7-3 reconciliation
+///
+/// This used to require the whole inside of a `{{ … }}` to be a bare
+/// identifier and to return it as a parameter name. That was correct against
+/// the renderer it was written for, which only ever substituted `{{name}}`, and
+/// P4.5 made it wrong: `{{ sort | ident }}` came back as an undeclared
+/// placeholder called `"sort | ident"` and a loop variable `{{ r }}` as one
+/// called `"r"`, so **spec §4.3's own canonical example could not be
+/// published** — and Task 6's suite had to shadow a parameter with its own loop
+/// variable to work around it.
+///
+/// So the two questions are now answered by the two instruments that can answer
+/// them. *Which names does this definition read?* is minijinja's, through
+/// [`crate::render::context_names`]. *Where in the SQL does a reference stand?*
+/// is this scan's, and it needs no opinion at all about what is inside the
+/// braces: an occurrence is an occurrence, and comparing occurrence counts
+/// before and after [`strip_comments_and_strings`] is what tells a value
+/// position from a quoted one. The expression text is carried only so the error
+/// can quote the reference back to the author.
 fn placeholders(sql: &str) -> std::result::Result<Vec<String>, ValidationError> {
     let mut found = Vec::new();
     let mut rest = sql;
@@ -561,13 +656,14 @@ fn placeholders(sql: &str) -> std::result::Result<Vec<String>, ValidationError> 
             .find("}}")
             .ok_or_else(|| ValidationError::MalformedPlaceholder("unterminated `{{`".into()))?;
         let raw = &after[..close];
-        let name = raw.trim();
-        if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-            return Err(ValidationError::MalformedPlaceholder(format!(
-                "{{{{{raw}}}}}"
-            )));
+        let expr = raw.trim();
+        // An empty `{{}}` is the one shape still refused here: minijinja does
+        // refuse it too, but this scan has to key each occurrence on something,
+        // and an empty key would make two of them indistinguishable.
+        if expr.is_empty() {
+            return Err(ValidationError::MalformedPlaceholder("{{}}".into()));
         }
-        found.push(name.to_string());
+        found.push(expr.to_string());
         rest = &after[close + 2..];
     }
     Ok(found)
@@ -589,9 +685,11 @@ fn placeholders(sql: &str) -> std::result::Result<Vec<String>, ValidationError> 
 /// correctness property, and its attacker is not the author: it is any holder of
 /// a Data API token, at serve time, long after this ran.
 ///
-/// `template::render` substitutes a placeholder with `quote_string(engine, v)` —
-/// an **already-quoted** literal. That is safe exactly where a literal is what
-/// the grammar expects. Inside an open literal it is the opposite:
+/// A placeholder is replaced by a bind marker, and — before P4.5, on the
+/// renderer these rules were written against — by `quote_string(engine, v)`, an
+/// **already-quoted** literal. Either is safe exactly where a literal is what the
+/// grammar expects, and neither is safe inside an open one. Take the
+/// interpolating reading first, because it is the one that shows the injection:
 ///
 /// ```sql
 /// SELECT * FROM t WHERE a = 'x{{p}}y'
@@ -626,19 +724,25 @@ pub fn check_params(sql: &str, params: &[ParamSpec]) -> std::result::Result<(), 
         }
         seen.push(&p.name);
     }
-    // The RAW scan, matching what `template::render` will do at serve time. A
-    // placeholder inside a literal IS substituted there, so it counts as
-    // referenced — pretending otherwise would report it as an unused parameter
-    // and send the author to delete the declaration rather than move the
-    // placeholder.
+    // The RAW scan, matching what `crate::render::render` does at serve time: a
+    // placeholder inside a literal still emits a bind marker there, so it counts
+    // as referenced — pretending otherwise would report it as an unused
+    // parameter and send the author to delete the declaration rather than move
+    // the placeholder.
     let referenced = placeholders(sql)?;
-    for name in &referenced {
+    // Which NAMES the definition reads is minijinja's answer, not this scan's —
+    // see [`placeholders`]' comment for why the two questions were split. It
+    // covers names in `{% if %}` conditions and filter arguments, which the old
+    // scan could not see at all, and it excludes loop targets and `{% set %}`
+    // bindings, which the old scan reported as undeclared parameters.
+    let read = crate::render::context_names(sql)?;
+    for name in &read {
         if !seen.contains(&name.as_str()) {
             return Err(ValidationError::UndeclaredPlaceholder(name.clone()));
         }
     }
     for p in params {
-        if !referenced.iter().any(|r| r == &p.name) {
+        if !read.iter().any(|r| r == &p.name) {
             return Err(ValidationError::UnreferencedParameter(p.name.clone()));
         }
     }
@@ -789,9 +893,77 @@ pub fn check_enum_params(params: &[ParamSpec]) -> std::result::Result<(), Valida
     Ok(())
 }
 
+/// `location: body` cannot be published (spec §5, T7-5).
+///
+/// Nothing on the serving surface reads a request body — `serve_post` takes no
+/// body extractor — so a body parameter is never supplied. What that means
+/// depends on `required`, and the harmless-looking half is the dangerous one:
+///
+/// * **required** — `ParamMissing`, a permanent 400 on every call. Loud, and
+///   disclosed.
+/// * **optional** — the parameter resolves to absent, so `{% if approved %}` is
+///   false, the block carrying the filter is OMITTED, and the endpoint answers
+///   **200 with unfiltered rows, forever**. Nothing in the response says a
+///   predicate went missing.
+///
+/// Refused rather than supported here because supporting it means parsing a
+/// request body on the serving path, which is a surface with its own content
+/// types, size limits and cache-key consequences — not something to add as a
+/// side effect of publish-time validation.
+pub fn check_param_locations(params: &[ParamSpec]) -> std::result::Result<(), ValidationError> {
+    for p in params {
+        if p.location == ParamLocation::Body {
+            return Err(ValidationError::BodyParameter(p.name.clone()));
+        }
+    }
+    Ok(())
+}
+
+/// An author's `default` must satisfy its own declared type (spec §5, T7-6).
+///
+/// Coerced through the **same function the serving path uses**, deliberately —
+/// see `serving::params::coerce`. A second implementation written for publish
+/// could accept something serving rejects, and the bug that costs is precisely
+/// the one this check removes: `default: "yesterday"` on a `Date` parameter
+/// publishes green, then every call that omits the parameter is a 400
+/// `param_invalid`. That answer blames the CALLER for the author's mistake, and
+/// `access_log` records it under a code that points at nothing.
+pub fn check_defaults(params: &[ParamSpec]) -> std::result::Result<(), ValidationError> {
+    for p in params {
+        let Some(default) = &p.default else { continue };
+        if crate::serving::params::coerce(p, default).is_err() {
+            return Err(ValidationError::DefaultNotValidForType(
+                p.name.clone(),
+                type_name(&p.ty),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn type_name(ty: &ParamType) -> &'static str {
+    match ty {
+        ParamType::String => "string",
+        ParamType::Number => "number",
+        ParamType::Boolean => "boolean",
+        ParamType::Date => "date",
+        ParamType::Timestamp => "timestamp",
+        ParamType::Enum => "enum value",
+    }
+}
+
 /// Run every shape check over a definition. The order is deliberate: the
 /// statement check first, so a multi-statement string is refused before anything
 /// downstream (including the engine) is asked to look at it.
+///
+/// **The publish-time gate runs here, which is what makes it real.** This
+/// function is the one both `POST …/validate` and [`EndpointStore::publish`] go
+/// through — publish re-runs it inside its own transaction against the row it is
+/// about to freeze — so "a definition that validates is exactly a definition
+/// that publishes" keeps holding, and neither entry point can acquire the rules
+/// without the other. Everything before [`check_render_rules`] is a scan;
+/// [`check_render_rules`] renders, which is why it is last and why nothing on
+/// the serving path calls it.
 pub fn validate_definition(
     sql: &str,
     params: &[ParamSpec],
@@ -801,58 +973,408 @@ pub fn validate_definition(
 ) -> std::result::Result<(), ValidationError> {
     check_single_select(sql)?;
     check_enum_params(params)?;
+    check_param_locations(params)?;
+    check_defaults(params)?;
     check_params(sql, params)?;
     check_cache_scope(cache, delegated, impersonate)?;
+    check_render_rules(sql, params)?;
     Ok(())
 }
 
-/// A type-correct constant to stand in for a parameter while the engine resolves
-/// the output schema.
+/// A type-correct stand-in value for one parameter, for the renders publish
+/// performs.
 ///
-/// No escaping is involved and none is needed: these are fixed constants chosen
-/// here, never caller data. They exist because `describe` is given SQL to plan,
-/// and `WHERE region = {{region}}` is not SQL — a template has to be rendered
-/// before an engine will parse it. The VALUES do not matter (describe plans, it
-/// does not execute); only the TYPES do, so that a comparison against a date or
-/// numeric column still type-checks.
-fn probe_literal(p: &ParamSpec) -> &'static str {
+/// No escaping is involved and none is needed — these never reach the SQL. The
+/// renderer turns every emitted value into a bind marker, so what a
+/// representative value decides is which BRANCHES a definition takes and what
+/// type each bound value carries, not what any statement says. Every one of them
+/// is deliberately TRUTHY, so `{% if region %}` takes its block: the point of the
+/// full-values render is to exercise the whole definition, and the absent case
+/// gets its own renders.
+fn representative_value(p: &ParamSpec) -> Param {
     match p.ty {
-        ParamType::Number => "0",
-        ParamType::Boolean => "true",
-        ParamType::Date => "DATE '1970-01-01'",
-        ParamType::Timestamp => "TIMESTAMP '1970-01-01 00:00:00'",
-        ParamType::String | ParamType::Enum => "''",
+        ParamType::Number => Param::I64(1),
+        ParamType::Boolean => Param::Bool(true),
+        ParamType::Date => Param::Date("1970-01-01".into()),
+        ParamType::Timestamp => Param::Timestamp("1970-01-01 00:00:00".into()),
+        ParamType::Enum => Param::Str(
+            p.allowed
+                .as_ref()
+                .and_then(|a| a.first().cloned())
+                // Unreachable after `check_enum_params`; a non-empty string
+                // keeps this truthy rather than silently changing the branch a
+                // probe takes.
+                .unwrap_or_else(|| "x".into()),
+        ),
+        ParamType::String => Param::Str("x".into()),
     }
 }
 
-/// Render `sql` with every declared parameter replaced by [`probe_literal`], so
-/// the engine has something it can plan.
+/// The context publish renders against: every declared parameter present with a
+/// representative value, except those named in `absent`.
 ///
-/// Only meaningful after [`check_params`] has passed, which is what guarantees
-/// every placeholder resolves; an unresolved one here would be a bug, so it is
-/// reported as one rather than silently left in the string.
-fn probe_sql(sql: &str, params: &[ParamSpec]) -> std::result::Result<String, ValidationError> {
-    if !sql.contains("{{") {
-        return Ok(sql.to_string());
+/// # Shape, not just value
+///
+/// A parameter named as a `{% for %}` iterable is inserted as a one-element
+/// LIST. `ParamSpec` has no multiplicity field — whether a parameter arrives as
+/// a scalar or a list is decided by the request (a repeated query parameter
+/// becomes a list) — so publish has to infer the shape the definition expects,
+/// and it infers it from the definition. A wrong guess makes the render FAIL,
+/// which refuses the publish; it cannot make a bad definition publish.
+///
+/// `absent` uses [`ParamValues::insert_absent`], not omission: under Strict
+/// undefined a name that is merely missing is an ERROR even when tested for
+/// truth, and "declared but not supplied" has to be `none` for `{% if %}` to be
+/// false. That is the same distinction the serving path makes, and it is what
+/// makes these renders representative of what will actually be served.
+fn representative(sql: &str, params: &[ParamSpec], absent: &[&str]) -> ParamValues {
+    let declared: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
+    let lists = crate::render::iterated_params(sql, &declared);
+    let mut ctx = ParamValues::new();
+    for p in params {
+        if absent.contains(&p.name.as_str()) {
+            ctx.insert_absent(p.name.clone());
+        } else if lists.iter().any(|l| l == &p.name) {
+            ctx.insert_list(p.name.clone(), vec![representative_value(p)]);
+        } else {
+            ctx.insert_for_spec(p, representative_value(p));
+        }
     }
-    let mut out = String::with_capacity(sql.len());
-    let mut rest = sql;
-    while let Some(open) = rest.find("{{") {
-        out.push_str(&rest[..open]);
-        let after = &rest[open + 2..];
-        let close = after
-            .find("}}")
-            .ok_or_else(|| ValidationError::MalformedPlaceholder("unterminated `{{`".into()))?;
-        let name = after[..close].trim();
-        let p = params
-            .iter()
-            .find(|p| p.name == name)
-            .ok_or_else(|| ValidationError::UndeclaredPlaceholder(name.to_string()))?;
-        out.push_str(probe_literal(p));
-        rest = &after[close + 2..];
+    ctx
+}
+
+/// The publish-time rules of spec §5 that need the definition RENDERED.
+///
+/// # This is where Task 5's gate acquires a caller
+///
+/// [`crate::render::check_publish`] — the behavioural gate that renders a
+/// definition with opaque values and again with plain ones and refuses any
+/// divergence — had no production caller at all until this function. Every
+/// safety property it establishes existed only in its own tests. It is called
+/// here and **only** here: it renders up to sixty-four times per invocation,
+/// which is right at publish (once per version) and would be absurd per request.
+/// The serving path keeps [`crate::render::check_static`] and the
+/// placeholder==bind invariant, which is what [`crate::render::render`] already
+/// runs.
+///
+/// # Which rule each render carries
+///
+/// * **The template parses under the hardened environment** — the first thing
+///   any render does, reported as [`crate::render::RenderError::Template`].
+/// * **No `{% filter %}`, no `{% set x %}…{% endset %}`** — `check_static`, as
+///   [`crate::render::RenderError::CaptureConstruct`].
+/// * **Placeholder count equals bind count** — the invariant inside every
+///   render, as [`crate::render::RenderError::PlaceholderBindMismatch`].
+/// * **`| ident` only on an `Enum` carrying `allowed`** — the filter itself
+///   refuses anything else, and the representative values are what put an
+///   `allowed` list in reach of it. A non-enum parameter is a `Cell` with no
+///   `allowed`; an absent one is `none`. Both are
+///   [`crate::render::RenderError::Ident`].
+/// * **No parameter in `LIMIT`/`OFFSET`**, and **a parameter in the projection
+///   is wrapped in a `CAST`** — scans of the RENDERED statement, where a
+///   parameter is a `?` standing in SQL structure rather than a `{{ … }}` that
+///   may or may not survive a branch.
+///
+/// # And the absent case, which is not a variation but a second contract
+///
+/// An optional parameter with no `default` is `none` at serve time on every call
+/// that omits it, which is most of them. `{{ sort | ident }}` outside an
+/// `{% if %}` renders fine with a value and is a 500 without one — an endpoint
+/// that publishes green and then fails every default call. So each optional
+/// parameter is rendered absent on its own, and the gate is run once more with
+/// all of them absent: those two extremes are what a caller can actually reach
+/// with no query string at all.
+fn check_render_rules(sql: &str, params: &[ParamSpec]) -> std::result::Result<(), ValidationError> {
+    check_ident_values(sql, params)?;
+    let full = representative(sql, params, &[]);
+    crate::render::check_publish(sql, &full)?;
+    check_rendered(sql, &full)?;
+
+    let optional: Vec<&str> = params
+        .iter()
+        .filter(|p| !p.required && p.default.is_none())
+        .map(|p| p.name.as_str())
+        .collect();
+    for name in &optional {
+        let ctx = representative(sql, params, &[name]);
+        // The render failing HERE and not above is exactly the T7-7 shape, and
+        // the parameter that was taken away is the one to name. The renderer's
+        // own error would say `ident` may only be applied to an enum parameter,
+        // which is true and points at the wrong fix.
+        if check_rendered(sql, &ctx).is_err() {
+            return Err(ValidationError::OptionalParameterUnguarded(
+                (*name).to_string(),
+            ));
+        }
     }
-    out.push_str(rest);
-    Ok(out)
+    if optional.len() > 1 {
+        let none = representative(sql, params, &optional);
+        crate::render::check_publish(sql, &none)?;
+        check_rendered(sql, &none)?;
+    }
+    Ok(())
+}
+
+/// Every `allowed` value of an enum that reaches the statement as TEXT must be
+/// identifier-shaped.
+///
+/// # The hole this closes, and why the rendered-statement scan is not enough
+///
+/// `| ident` writes an `allowed` entry into the statement verbatim — that is what
+/// it is for, since `ORDER BY ?` is a syntax error on both engines — and the
+/// entry is the author's own string, which is the whole provenance argument. What
+/// nobody had checked is the OTHER premise: that the author's string is safe
+/// *because* it is the author's. It was not. `allowed = ["id", "id; DROP TABLE t"]`
+/// published green: the definition-side `;` test reads the RAW definition, which
+/// has no `;` in it, and publish renders only the FIRST entry, so the second
+/// reached no scan and no `describe`.
+///
+/// [`crate::render::render`] now scans the rendered statement, which stops the
+/// separator at serve time and at publish for whichever entries publish happens
+/// to render — but "happens to render" is a bounded set and `allowed` is not.
+/// This rule is the unbounded half: EVERY entry, checked by shape.
+///
+/// # Why it is scoped rather than applied to every enum
+///
+/// The brief said to require the shape of all `allowed` values everywhere.
+/// Measured against the model, that refuses a legitimate and ordinary endpoint:
+/// an enum is also how an author constrains a bound VALUE (`WHERE status =
+/// {{ status }}` with `allowed = ["Pending Review"]`), and a value never reaches
+/// the statement text at all. So the shape is required exactly of the enums whose
+/// value DOES reach it, and reaching is decided by rendering rather than by
+/// scanning for `| ident`:
+///
+/// * render with the first allowed entry and with the second; if the statements
+///   differ, the value reached the text — nothing else can move it, because a
+///   comparison against a parameter is refused;
+/// * with one entry, or if the entry appears verbatim in the rendered statement,
+///   assume it reached (over-strict, and safe in that direction);
+/// * if a render fails at all, assume it reached — fail closed.
+fn check_ident_values(sql: &str, params: &[ParamSpec]) -> std::result::Result<(), ValidationError> {
+    for p in params.iter().filter(|p| p.ty == ParamType::Enum) {
+        let Some(allowed) = p.allowed.as_ref().filter(|a| !a.is_empty()) else {
+            continue;
+        };
+        if !enum_reaches_statement_text(sql, params, p, allowed) {
+            continue;
+        }
+        for value in allowed {
+            if !is_identifier_shaped(value) {
+                return Err(ValidationError::EnumValueNotIdentifier {
+                    param: p.name.clone(),
+                    value: value.clone(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Does this enum's value reach the rendered statement as text? See
+/// [`check_ident_values`]. Fails closed.
+fn enum_reaches_statement_text(
+    sql: &str,
+    params: &[ParamSpec],
+    p: &ParamSpec,
+    allowed: &[String],
+) -> bool {
+    let render_with = |value: &str| {
+        let mut ctx = representative(sql, params, &[]);
+        ctx.insert_enum(p.name.clone(), value.to_string(), allowed.to_vec());
+        crate::render::render(sql, &ctx).map(|(sql, _)| sql)
+    };
+    let Ok(first) = render_with(&allowed[0]) else {
+        return true;
+    };
+    if let Some(second) = allowed.get(1) {
+        match render_with(second) {
+            Ok(other) if other != first => return true,
+            Err(_) => return true,
+            _ => {}
+        }
+    }
+    first.contains(allowed[0].as_str())
+}
+
+/// `[A-Za-z_][A-Za-z0-9_]*`, optionally one dot between two such parts.
+///
+/// A qualified name (`t.col`) is the most an identifier position needs; a
+/// quoted identifier is not accepted, because accepting one would mean deciding
+/// which dialect's quoting rules apply — the agreement this crate refuses to
+/// assume everywhere else.
+fn is_identifier_shaped(value: &str) -> bool {
+    let mut parts = value.split('.');
+    let ok = |part: &str| {
+        let mut chars = part.chars();
+        chars
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    };
+    parts.next().is_some_and(ok) && parts.clone().count() <= 1 && parts.all(ok)
+}
+
+/// Render once and apply the two rules that read the rendered statement.
+fn check_rendered(sql: &str, ctx: &ParamValues) -> std::result::Result<(), ValidationError> {
+    let (rendered, _binds) = crate::render::render(sql, ctx)?;
+    check_no_parameter_in_limit(&rendered)?;
+    check_projection_parameters_are_cast(&rendered)?;
+    Ok(())
+}
+
+/// The rendered statement with comments and quoted regions elided, under both
+/// escaping readings — so a `?` inside a literal is text and not a bind marker,
+/// and neither dialect's reading of `\` is assumed.
+///
+/// Returns both readings because the two rules below must hold under each: a
+/// scan that picked one reading would be evadable by the other, which is the
+/// mistake this crate has already made once.
+fn scannable_readings(rendered: &str) -> Vec<String> {
+    ESCAPING_READINGS
+        .iter()
+        .filter_map(|e| strip_comments_and_strings(rendered, *e).ok())
+        .collect()
+}
+
+/// No parameter in `LIMIT`/`OFFSET` (spec §3.2, §5).
+///
+/// Neither engine will bind there — StarRocks refuses `LIMIT ?` at prepare time
+/// — so this is an endpoint that fails on every call, published green.
+///
+/// After the keyword, an operand made of digits and commas is fine (`LIMIT 10`,
+/// `LIMIT 10, 20`); a `?` in it is not; and the first word-shaped token ends the
+/// operand, so `LIMIT 10 OFFSET x` does not read `x` as part of `LIMIT`'s.
+fn check_no_parameter_in_limit(rendered: &str) -> std::result::Result<(), ValidationError> {
+    for text in scannable_readings(rendered) {
+        let b = text.as_bytes();
+        let lower = text.to_ascii_lowercase();
+        for keyword in ["limit", "offset"] {
+            let mut from = 0;
+            while let Some(at) = lower[from..].find(keyword) {
+                let start = from + at;
+                let end = start + keyword.len();
+                from = end;
+                let before_ok = start == 0 || !is_word_byte(b[start - 1]);
+                let after_ok = end >= b.len() || !is_word_byte(b[end]);
+                if !(before_ok && after_ok) {
+                    continue;
+                }
+                if operand_has_marker(&text[end..]) {
+                    return Err(ValidationError::ParameterInLimit);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn is_word_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// Does the operand immediately following a `LIMIT`/`OFFSET` keyword contain a
+/// bind marker? Digits, commas and whitespace continue the operand; anything
+/// else ends it.
+fn operand_has_marker(rest: &str) -> bool {
+    for c in rest.chars() {
+        match c {
+            '?' => return true,
+            c if c.is_ascii_whitespace() || c.is_ascii_digit() || c == ',' => continue,
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// A parameter in a select list must be wrapped in a `CAST` (spec §3.4, §5).
+///
+/// **Neither engine infers a bind marker's type in a projection**: Trino types a
+/// bare `?` as `unknown`, StarRocks as `VAR_STRING`. Publish freezes the
+/// describe-resolved columns into the snapshot, so an uncast parameter does not
+/// fail — it succeeds, with the wrong type frozen into the published contract
+/// forever. That is why it is a publish error rather than something left to the
+/// engine.
+///
+/// Every `SELECT` is scanned, not only the outermost, so a CTE's projection is
+/// covered too. The region ends at the first clause keyword at the same
+/// parenthesis depth, so a `?` in a `WHERE` is never mistaken for a projection.
+fn check_projection_parameters_are_cast(
+    rendered: &str,
+) -> std::result::Result<(), ValidationError> {
+    for text in scannable_readings(rendered) {
+        let lower = text.to_ascii_lowercase();
+        let b = lower.as_bytes();
+        let mut from = 0;
+        while let Some(at) = lower[from..].find("select") {
+            let start = from + at;
+            let end = start + "select".len();
+            from = end;
+            let before_ok = start == 0 || !is_word_byte(b[start - 1]);
+            let after_ok = end >= b.len() || !is_word_byte(b[end]);
+            if before_ok && after_ok && projection_has_uncast_marker(&lower[end..]) {
+                return Err(ValidationError::UncastParameterInProjection);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Clause keywords that end a select list at the depth the `SELECT` opened at.
+const CLAUSE_KEYWORDS: [&str; 9] = [
+    "from", "where", "group", "having", "order", "limit", "offset", "union", "into",
+];
+
+/// Walk one select list, tracking which enclosing parentheses were opened by a
+/// `CAST`/`TRY_CAST`. A `?` with no such parenthesis around it is the finding.
+///
+/// `rest` is already lowercased.
+fn projection_has_uncast_marker(rest: &str) -> bool {
+    // One entry per open parenthesis: was it opened by a cast?
+    let mut casts: Vec<bool> = Vec::new();
+    let b = rest.as_bytes();
+    let mut i = 0;
+    // The end of the last word token seen, so `(` can ask what preceded it.
+    let mut last_word: &str = "";
+    while i < b.len() {
+        let c = b[i];
+        if is_word_byte(c) {
+            let start = i;
+            while i < b.len() && is_word_byte(b[i]) {
+                i += 1;
+            }
+            let word = &rest[start..i];
+            // A clause keyword at the SELECT's own depth ends the projection.
+            if casts.is_empty() && CLAUSE_KEYWORDS.contains(&word) {
+                return false;
+            }
+            last_word = word;
+            continue;
+        }
+        match c {
+            b'(' => {
+                casts.push(matches!(last_word, "cast" | "try_cast"));
+                last_word = "";
+            }
+            b')' => {
+                if casts.pop().is_none() {
+                    // The select list ended with the enclosing expression, e.g.
+                    // a scalar subquery. Nothing further here is a projection.
+                    return false;
+                }
+                last_word = "";
+            }
+            b'?' => {
+                if !casts.iter().any(|c| *c) {
+                    return true;
+                }
+                last_word = "";
+            }
+            _ if c.is_ascii_whitespace() => {}
+            _ => last_word = "",
+        }
+        i += 1;
+    }
+    false
 }
 
 /// Validate a draft and resolve its output columns against the engine.
@@ -865,6 +1387,27 @@ fn probe_sql(sql: &str, params: &[ParamSpec]) -> std::result::Result<String, Val
 /// denial stays a 403 and a foreign `database_id` stays a 404, because telling an
 /// author "your SQL is invalid" when their SQL is fine and their grant is missing
 /// sends them to fix the wrong thing.
+///
+/// # The engine is shown the statement it will actually be sent
+///
+/// `WHERE region = {{region}}` is not SQL, so something has to be rendered before
+/// an engine will look at it. This used to substitute a typed literal for each
+/// `{{name}}` — which was adequate while the definition was a substitution list
+/// and stopped being adequate the moment it became a template: that substitution
+/// left every `{% if %}` and `{% for %}` tag standing in the string, so **no
+/// conditional endpoint could describe at all**, and spec §4.3's own example
+/// could not publish.
+///
+/// So publish renders the real thing, through the real renderer, with
+/// representative values — the same call the serving path makes — and describes
+/// the `?`-carrying statement that comes out. That statement cannot go through
+/// `describe_as`: on StarRocks the text path answers a statement containing `?`
+/// with **zero columns and no error**, which would freeze an empty schema. It
+/// goes through `describe_as_with_params`, which is what Task 4 built.
+///
+/// An empty column list is refused rather than frozen. An endpoint with no
+/// columns has no contract, and the failure it produces — 200s carrying empty
+/// objects — is the kind nobody reports as a bug.
 pub async fn validate(
     port: &dyn egret_query_api::QueryExecPort,
     workspace: Uuid,
@@ -880,10 +1423,24 @@ pub async fn validate(
         delegated,
         impersonate,
     )?;
-    let probe = probe_sql(&draft.sql, &draft.params)?;
+    // Infallible in practice — `check_render_rules` just rendered this same
+    // context — but reported rather than unwrapped, because "it cannot fail
+    // here" is a claim about another function.
+    let ctx = representative(&draft.sql, &draft.params, &[]);
+    let (rendered, binds) =
+        crate::render::render(&draft.sql, &ctx).map_err(ValidationError::Render)?;
     let columns = port
-        .describe_as(workspace, draft.database_id, principal, &probe)
+        .describe_as_with_params(
+            workspace,
+            draft.database_id,
+            principal,
+            &rendered,
+            binds.len(),
+        )
         .await?;
+    if columns.is_empty() {
+        return Err(ValidationError::DescribeReturnedNoColumns.into());
+    }
     Ok(columns.iter().map(ColumnSpec::from).collect())
 }
 
@@ -1102,6 +1659,13 @@ impl EndpointStore {
             delegated,
             impersonate,
             columns,
+            // The stamp, written here and nowhere else, because this is the one
+            // place `validate_definition` has just run against the row being
+            // frozen. §7 of the parameters spec said "every endpoint with
+            // parameters must be re-published after P4.5" — an instruction to
+            // whoever reads it. This is the enforcement: a version frozen before
+            // the gate existed carries `0`, and the serving path refuses it.
+            param_gate: PARAM_GATE,
         };
         let payload = serde_json::to_value(&snapshot)
             .map_err(|e| Error::Internal(anyhow::anyhow!("serialize snapshot: {e}")))?;
@@ -1299,6 +1863,91 @@ mod tests {
             enabled: true,
             ttl_seconds: 60,
             scope,
+        }
+    }
+
+    fn enum_param(name: &str, allowed: &[&str]) -> ParamSpec {
+        ParamSpec {
+            allowed: Some(allowed.iter().map(|s| (*s).to_string()).collect()),
+            required: true,
+            ..param(name, ParamType::Enum)
+        }
+    }
+
+    /// **The `allowed` list was the one author-supplied string no rule scanned.**
+    ///
+    /// `| ident` writes it into the statement verbatim; the definition-side `;`
+    /// test reads the RAW definition, which has no `;` in it; and publish renders
+    /// only the FIRST entry, so a hostile second entry reached no scan and no
+    /// `describe`. It bound zero values, so the placeholder==bind invariant was
+    /// satisfied — and a parameterless statement reaches StarRocks through
+    /// `execute`, which is COM_QUERY.
+    #[test]
+    fn an_allowed_value_in_an_identifier_position_must_be_an_identifier() {
+        let sql = "SELECT id FROM t ORDER BY {{ sort | ident }}";
+        let hostile = enum_param("sort", &["id", "id; DROP TABLE t"]);
+        assert_eq!(
+            validate_definition(
+                sql,
+                &[hostile],
+                &cache(CacheScope::PerPrincipal),
+                false,
+                false
+            ),
+            Err(ValidationError::EnumValueNotIdentifier {
+                param: "sort".into(),
+                value: "id; DROP TABLE t".into()
+            })
+        );
+
+        // A qualified name is the most an identifier position needs.
+        let ok = enum_param("sort", &["id", "t.total"]);
+        assert_eq!(
+            validate_definition(sql, &[ok], &cache(CacheScope::PerPrincipal), false, false),
+            Ok(())
+        );
+
+        // Payloads that carry no separator at all are refused by SHAPE — the
+        // rendered-statement scan alone would not see this one.
+        let union = enum_param("sort", &["id", "id UNION SELECT secret FROM vault"]);
+        assert!(matches!(
+            validate_definition(
+                sql,
+                &[union],
+                &cache(CacheScope::PerPrincipal),
+                false,
+                false
+            ),
+            Err(ValidationError::EnumValueNotIdentifier { .. })
+        ));
+    }
+
+    /// …and the shape is required only of the enums that reach the statement as
+    /// TEXT. An enum is also how an author constrains a bound VALUE, and a bound
+    /// value never reaches the statement at all — refusing `Pending Review`
+    /// there would make `ParamType::Enum` unusable for its other purpose.
+    #[test]
+    fn an_allowed_value_that_is_only_bound_may_be_any_string() {
+        let sql = "SELECT id FROM t WHERE status = {{ status }}";
+        let spec = enum_param("status", &["Pending Review", "done; not really"]);
+        assert_eq!(
+            validate_definition(sql, &[spec], &cache(CacheScope::PerPrincipal), false, false),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn identifier_shape_is_letters_digits_underscore_and_at_most_one_dot() {
+        for ok in ["id", "_id", "a1", "t.col", "_a._b"] {
+            assert!(is_identifier_shaped(ok), "{ok} should be an identifier");
+        }
+        for bad in [
+            "", "1a", "a b", "a;b", "a.b.c", "a-b", "\"a\"", "a(", "id DESC",
+        ] {
+            assert!(
+                !is_identifier_shaped(bad),
+                "{bad} should NOT be an identifier"
+            );
         }
     }
 
@@ -1729,16 +2378,76 @@ mod tests {
         );
     }
 
+    /// Two malformed shapes, refused by the two different instruments that can
+    /// see them — which is the T7-3 split in one test.
+    ///
+    /// `{{a b}}` is a template SYNTAX error and is now minijinja's to report:
+    /// this scan no longer requires the inside of a `{{ … }}` to be a bare
+    /// identifier, because requiring that is what made `{{ sort | ident }}` an
+    /// undeclared placeholder called `"sort | ident"`. `{{a` never reaches a
+    /// parser as a placeholder at all — an unterminated `{{` is template DATA to
+    /// minijinja, so the byte scan keeps that one.
     #[test]
     fn a_malformed_placeholder_is_rejected() {
-        assert!(matches!(
-            check_params("SELECT {{a b}}", &[]),
-            Err(ValidationError::MalformedPlaceholder(_))
-        ));
+        assert!(
+            matches!(
+                check_params("SELECT {{a b}}", &[]),
+                Err(ValidationError::Render(
+                    crate::render::RenderError::Template(_)
+                ))
+            ),
+            "a template syntax error is the parser's finding, not the scanner's"
+        );
         assert!(matches!(
             check_params("SELECT {{a", &[]),
             Err(ValidationError::MalformedPlaceholder(_))
         ));
+        assert!(matches!(
+            check_params("SELECT {{}}", &[]),
+            Err(ValidationError::MalformedPlaceholder(_))
+        ));
+    }
+
+    /// **T7-3, as a test.** Every one of these is refused by P3's scanner and
+    /// publishable under the reconciled one; the first is spec §4.3's own
+    /// canonical example, which could not be published at all.
+    #[test]
+    fn a_template_expression_is_no_longer_read_as_a_parameter_name() {
+        let sort = ParamSpec {
+            name: "sort".into(),
+            ty: ParamType::Enum,
+            location: ParamLocation::Query,
+            required: true,
+            default: None,
+            allowed: Some(vec!["region".into(), "total".into()]),
+            description: String::new(),
+        };
+        // `{{ sort | ident }}` — the whole inside used to become the NAME.
+        assert!(
+            check_params("SELECT 1 AS n ORDER BY {{ sort | ident }}", &[sort]).is_ok(),
+            "`sort | ident` was reported as an undeclared parameter of that name"
+        );
+        // A loop variable — `r` used to be reported as undeclared, and the
+        // iterable `regions` as unreferenced.
+        assert!(check_params(
+            "SELECT 1 AS n WHERE r IN ({% for r in regions %}{{ r }},{% endfor %}'')",
+            &[param("regions", ParamType::String)]
+        )
+        .is_ok());
+        // And the rules it must NOT have relaxed: a name nothing declares is
+        // still undeclared, now including one only a tag reads.
+        assert_eq!(
+            check_params("SELECT 1 AS n {% if nope %}{% endif %}", &[]),
+            Err(ValidationError::UndeclaredPlaceholder("nope".into())),
+            "a name read only by a tag was invisible to the old scan"
+        );
+        assert_eq!(
+            check_params("SELECT 1 AS n WHERE a = 'x{{ p | ident }}y'", &[param("p", ParamType::String)]),
+            Err(ValidationError::PlaceholderInsideQuotedText(
+                "p | ident".into()
+            )),
+            "the quoted-text rule keys on the OCCURRENCE, so it survives an expression it cannot parse"
+        );
     }
 
     /// All four corners of the pair, not just the `delegated` axis.
@@ -1839,26 +2548,36 @@ mod tests {
         assert!(check_enum_params(&[param("region", ParamType::String)]).is_ok());
     }
 
-    /// The probe is what lets a PARAMETERIZED endpoint be described at all: an
-    /// engine cannot plan `WHERE r = {{region}}`. The substituted values are
-    /// typed, so a comparison against a date or numeric column still type-checks.
+    /// The render is what lets a PARAMETERIZED endpoint be described at all: an
+    /// engine cannot plan `WHERE r = {{region}}`.
+    ///
+    /// This replaces the typed-literal probe it was written for. That probe
+    /// substituted only `{{ … }}` and left every `{% … %}` tag standing, so it
+    /// could not describe a conditional endpoint at all — it handed the engine a
+    /// string with `{% if r %}` in it. The renderer produces the statement that
+    /// will actually be served, `?` markers included, and the representative
+    /// values decide which branches it contains.
     #[test]
-    fn a_template_is_rendered_to_typed_probe_literals() {
+    fn a_template_is_rendered_to_the_statement_that_will_be_served() {
         let params = [
             param("r", ParamType::String),
             param("n", ParamType::Number),
             param("d", ParamType::Date),
         ];
+        let sql =
+            "SELECT * FROM t WHERE r = {{r}} {% if n %}AND n > {{ n }}{% endif %} AND d < {{d}}";
+        let (rendered, binds) =
+            crate::render::render(sql, &representative(sql, &params, &[])).unwrap();
         assert_eq!(
-            probe_sql(
-                "SELECT * FROM t WHERE r = {{r}} AND n > {{ n }} AND d < {{d}}",
-                &params
-            )
-            .unwrap(),
-            "SELECT * FROM t WHERE r = '' AND n > 0 AND d < DATE '1970-01-01'"
+            rendered, "SELECT * FROM t WHERE r = ? AND n > ? AND d < ?",
+            "every branch a representative value reaches must be in the described statement"
         );
-        // No placeholders is identity.
-        assert_eq!(probe_sql("SELECT 1", &[]).unwrap(), "SELECT 1");
+        assert_eq!(binds.len(), 3, "one bind per marker");
+        // No parameters is identity.
+        let (plain, none) =
+            crate::render::render("SELECT 1", &representative("SELECT 1", &[], &[])).unwrap();
+        assert_eq!(plain, "SELECT 1");
+        assert!(none.is_empty());
     }
 
     #[test]

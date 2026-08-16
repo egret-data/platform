@@ -182,7 +182,35 @@ pub struct EndpointSnapshot {
     /// Resolved by `describe_as` at publish time and frozen here, so the
     /// published contract does not drift when the underlying table changes.
     pub columns: Vec<ColumnSpec>,
+    /// Which revision of the publish-time parameter gate this version passed.
+    ///
+    /// **A stamp, not a note.** P4.5's §7 said "every endpoint with parameters
+    /// must be re-published after P4.5" — an instruction to an operator, which
+    /// is not an enforcement. A version frozen before the gate existed carries
+    /// `0` here (`#[serde(default)]`), so the serving path can REFUSE it rather
+    /// than render a definition no rule ever looked at. That turns the migration
+    /// from something someone has to remember into something the server checks.
+    ///
+    /// An integer rather than a bool, because the situation it exists for is
+    /// exactly the one that recurs: when a future revision of the gate closes a
+    /// rule the current one misses, bumping [`PARAM_GATE`] makes every snapshot
+    /// stamped with the older gate refuse to serve until it is re-published and
+    /// re-checked. A bool could only ever say "some gate ran", which is the claim
+    /// that was not good enough this time either.
+    ///
+    /// Only consulted when the snapshot declares parameters: a version with no
+    /// `params` renders nothing, so there is nothing for the gate to have missed
+    /// and nothing to force a re-publish of.
+    #[serde(default)]
+    pub param_gate: u32,
 }
+
+/// The current revision of the publish-time parameter gate — what
+/// [`EndpointSnapshot::param_gate`] is stamped with, and the minimum the serving
+/// path accepts on a snapshot that declares parameters.
+///
+/// `0` is reserved for "published before the gate existed" and is never written.
+pub const PARAM_GATE: u32 = 1;
 
 /// The frozen form of a `ColumnMeta`. Deliberately its own type rather than
 /// re-using `egret_core::ColumnMeta`: this one is persisted inside a published

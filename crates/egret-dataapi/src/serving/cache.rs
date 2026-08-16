@@ -126,11 +126,12 @@ const MAX_ENTRIES: usize = 4_096;
 ///
 /// The first version delimited with `0x00`, which was safe only because
 /// `http::Uri` refuses that byte in a raw query string — a property held by a
-/// crate this module never mentions, and one that evaporates the moment step 7
-/// hashes DECODED parameters. At that point `?a=1%00b%002` would hash
-/// byte-identically to `?a=1&b=2`. Same principal both times, so never a
-/// cross-identity leak, but once parameters reach the SQL that is one filter's
-/// rows served for another's — and a parameter is very often a tenant or a date.
+/// crate this module never mentions, and one that evaporated the moment step 7
+/// began hashing DECODED parameters — which it now does (P4.5). Under the old
+/// scheme `?a=1%00b%002` would hash byte-identically to `?a=1&b=2`. Same
+/// principal both times, so never a cross-identity leak, but once parameters
+/// reach the SQL that is one filter's rows served for another's — and a
+/// parameter is very often a tenant or a date.
 ///
 /// A `u64` length before every field removes the question rather than relying on
 /// an alphabet: no byte is special, so no value can be spelled to look like
@@ -594,8 +595,9 @@ mod tests {
         // The first version delimited with `0x00` and joined repeats with
         // `\u{1}`, which was safe only because `http::Uri` refuses those bytes in
         // a raw query string — a property held by a crate this module never
-        // mentions, and one that disappears the moment step 7 hashes DECODED
-        // values. These are the exact forgeries that would then have worked:
+        // mentions, and one that disappeared the moment step 7 began hashing
+        // DECODED values — which it now does (P4.5). These are the exact
+        // forgeries that would otherwise have worked:
         //
         //   ?a=1%00b%002  vs  ?a=1&b=2
         //   ?a=%011       vs  ?a=&a=1
@@ -791,6 +793,7 @@ mod tests {
             delegated: false,
             impersonate: false,
             columns: vec![],
+            param_gate: egret_dataapi_api::PARAM_GATE,
         }
     }
 }
