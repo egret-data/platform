@@ -43,6 +43,7 @@ import WorkspaceGeneral from "@/routes/explore/settings/WorkspaceGeneral";
 import DataApiLayout from "@/routes/explore/dataapi/DataApiLayout";
 import Endpoints from "@/routes/explore/dataapi/Endpoints";
 import Clients from "@/routes/explore/dataapi/Clients";
+import Activity from "@/routes/explore/dataapi/Activity";
 import EndpointDetail from "@/routes/explore/dataapi/EndpointDetail";
 import Definition from "@/routes/explore/dataapi/detail/Definition";
 import ResponseSection from "@/routes/explore/dataapi/detail/ResponseSection";
@@ -117,9 +118,6 @@ function ExploreRoutes() {
           {/* Engine connections now live under Workspace settings; keep the old
               path working by redirecting into that tab. */}
           <Route path="engines" element={<Navigate to="../settings/engines" replace />} />
-          {/* Activity still renders `Placeholder` — Task 9 of the P5b frontend
-              plan swaps it in. Endpoints (Task 2), the endpoint detail route
-              (Task 3) and Clients (Task 8) are real. */}
           <Route path="data-api" element={<RequireFeature feature="data_api"><DataApiLayout /></RequireFeature>}>
             <Route index element={<Navigate to="endpoints" replace />} />
             <Route path="endpoints" element={<Endpoints />} />
@@ -141,7 +139,7 @@ function ExploreRoutes() {
               <Route path="versions" element={<VersionsSection />} />
             </Route>
             <Route path="clients" element={<Clients />} />
-            <Route path="activity" element={<Placeholder title="Activity" />} />
+            <Route path="activity" element={<Activity />} />
           </Route>
           <Route path="pipelines" element={<Placeholder title="Pipelines" />} />
           <Route path="workflows" element={<Placeholder title="Workflows" />} />
