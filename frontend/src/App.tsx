@@ -40,6 +40,7 @@ import RolesPermissions from "@/routes/explore/settings/RolesPermissions";
 import SharedObjects from "@/routes/explore/settings/SharedObjects";
 import AccessRequests from "@/routes/explore/settings/AccessRequests";
 import WorkspaceGeneral from "@/routes/explore/settings/WorkspaceGeneral";
+import DataApiLayout from "@/routes/explore/dataapi/DataApiLayout";
 import { Placeholder } from "@/routes/Placeholder";
 import Workspaces from "@/routes/control-plane/Workspaces";
 import WorkspaceDetail from "@/routes/control-plane/WorkspaceDetail";
@@ -108,7 +109,20 @@ function ExploreRoutes() {
           {/* Engine connections now live under Workspace settings; keep the old
               path working by redirecting into that tab. */}
           <Route path="engines" element={<Navigate to="../settings/engines" replace />} />
-          <Route path="data-api" element={<Placeholder title="Data API" />} />
+          {/* The three sections (Endpoints/Clients/Activity) and the endpoint detail
+              route render `Placeholder` for now — Tasks 2/3/8/9 of the P5b frontend
+              plan swap each in for its real page. The shell itself, `RequireFeature`
+              gate, and full route tree are real as of this task. */}
+          <Route path="data-api" element={<RequireFeature feature="data_api"><DataApiLayout /></RequireFeature>}>
+            <Route index element={<Navigate to="endpoints" replace />} />
+            <Route path="endpoints" element={<Placeholder title="Endpoints" />} />
+            {/* `new` is not a route here: creating an endpoint asks for a name in a
+                dialog and then navigates to the created id, so there is no draft URL
+                that can be opened cold. */}
+            <Route path="endpoints/:id" element={<Placeholder title="Endpoint" />} />
+            <Route path="clients" element={<Placeholder title="Clients" />} />
+            <Route path="activity" element={<Placeholder title="Activity" />} />
+          </Route>
           <Route path="pipelines" element={<Placeholder title="Pipelines" />} />
           <Route path="workflows" element={<Placeholder title="Workflows" />} />
           <Route

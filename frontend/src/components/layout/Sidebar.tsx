@@ -38,7 +38,7 @@ const EXPLORE_GROUPS: NavGroup[] = [
   {
     heading: "Data Engineering",
     items: [
-      { label: "Data API", icon: Plug },
+      { label: "Data API", icon: Plug, to: "data-api", feature: "data_api" },
       { label: "Pipelines", icon: Waypoints },
     ],
   },
