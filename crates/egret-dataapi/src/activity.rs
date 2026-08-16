@@ -5,6 +5,11 @@ use egret_metastore::Db;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// The largest page [`ActivityStore::calls`] will return, and the value a larger
+/// `limit` is clamped to. Documented on `routes::ActivityCallsQuery::limit`, which
+/// is where a caller looks — a clamp nobody can see is the indefensible kind.
+pub const MAX_CALL_PAGE: i64 = 200;
+
 /// The four ranges the UI offers, and the only ones it may ask for.
 ///
 /// A fixed set rather than a date picker: every query here narrows on
@@ -78,6 +83,29 @@ pub struct ActivitySummaryDto {
     pub retention_days: Option<i64>,
 }
 
+/// One raw row of [`ActivityStore::summary`]'s GROUPING SETS query.
+///
+/// **Named fields, not a nine-element tuple.** Read positionally, `calls` and
+/// `errors` — same type, adjacent, and both plausible in either slot — swap
+/// silently under any reordering of the SELECT list, and every existing test
+/// still passes on a population where the two happen to be equal. `FromRow`
+/// binds by COLUMN NAME, so the aliases in the statement are what the fields
+/// track; that is why every column above is aliased even where Postgres would
+/// have named it anyway.
+#[derive(Debug, sqlx::FromRow)]
+struct SummaryRow {
+    endpoint_id: Option<Uuid>,
+    endpoint_name: Option<String>,
+    calls: i64,
+    errors: i64,
+    p50_ms: Option<f64>,
+    p95_ms: Option<f64>,
+    cache_hits: i64,
+    cacheable_calls: i64,
+    /// `grouping(al.endpoint_id)` — 1 for the grand total, 0 per endpoint.
+    is_total: i32,
+}
+
 #[derive(Debug, Serialize, sqlx::FromRow, utoipa::ToSchema)]
 pub struct ActivityCallDto {
     pub id: Uuid,
@@ -138,38 +166,66 @@ impl ActivityStore {
     ///
     /// Trials (`actor_user_id IS NOT NULL`) are excluded here and shown only in
     /// the call list.
+    ///
+    /// # `cache_enabled` is projected in a CTE, not read per access-log row
+    ///
+    /// `endpoint_versions.snapshot` holds the WHOLE frozen definition — SQL,
+    /// params, resolved columns — so it is TOASTed out of line for any endpoint
+    /// worth publishing. Written the obvious way, the
+    /// `(snapshot -> 'cache' ->> 'enabled')` extraction sits in the outer
+    /// aggregate over the join and is therefore evaluated once per joined
+    /// `access_log` row: on the `30d` preset, one detoast per call in the window,
+    /// on the fastest-growing table in the schema.
+    ///
+    /// `version_cache` pulls that extraction back to where it belongs — once per
+    /// (endpoint, version) in the workspace — and the outer query joins a
+    /// two-column boolean. `MATERIALIZED` is load-bearing: Postgres 12+ inlines a
+    /// non-recursive CTE referenced once, which would push the expression back
+    /// into the join and restore exactly the behaviour this replaces.
+    ///
+    /// The RESULT is unchanged, and
+    /// `tests/activity.rs`'s `cacheable_calls_reads_the_versions_own_snapshot_not_the_live_config`
+    /// is what holds that: it must still pass, and must still fail if the
+    /// `version_cache.version = al.version` half of the join is dropped.
     pub async fn summary(
         &self,
         ws: Uuid,
         since: DateTime<Utc>,
     ) -> Result<ActivitySummaryDto, sqlx::Error> {
-        let rows: Vec<(Option<Uuid>, Option<String>, i64, i64, Option<f64>, Option<f64>, i64, i64, i32)> =
-            sqlx::query_as(
-                "SELECT al.endpoint_id, \
-                        max(e.name) AS endpoint_name, \
-                        count(*) AS calls, \
-                        count(*) FILTER (WHERE al.status_code >= 400) AS errors, \
-                        percentile_cont(0.5) WITHIN GROUP (ORDER BY al.duration_ms) \
-                          FILTER (WHERE al.status_code BETWEEN 200 AND 299) AS p50_ms, \
-                        percentile_cont(0.95) WITHIN GROUP (ORDER BY al.duration_ms) \
-                          FILTER (WHERE al.status_code BETWEEN 200 AND 299) AS p95_ms, \
-                        count(*) FILTER (WHERE al.cache_hit) AS cache_hits, \
-                        count(*) FILTER ( \
-                          WHERE al.status_code BETWEEN 200 AND 299 \
-                            AND (ev.snapshot -> 'cache' ->> 'enabled')::boolean IS TRUE \
-                        ) AS cacheable_calls, \
-                        grouping(al.endpoint_id) AS is_total \
-                 FROM dataapi.access_log al \
-                 LEFT JOIN dataapi.endpoints e ON e.id = al.endpoint_id \
-                 LEFT JOIN dataapi.endpoint_versions ev \
-                        ON ev.endpoint_id = al.endpoint_id AND ev.version = al.version \
-                 WHERE al.workspace_id = $1 AND al.ts >= $2 AND al.actor_user_id IS NULL \
-                 GROUP BY GROUPING SETS ((), (al.endpoint_id))",
-            )
-            .bind(ws)
-            .bind(since)
-            .fetch_all(&self.db.pool)
-            .await?;
+        let rows: Vec<SummaryRow> = sqlx::query_as(
+            "WITH version_cache AS MATERIALIZED ( \
+               SELECT ev.endpoint_id, \
+                      ev.version, \
+                      (ev.snapshot -> 'cache' ->> 'enabled')::boolean IS TRUE AS cache_enabled \
+                 FROM dataapi.endpoint_versions ev \
+                 JOIN dataapi.endpoints ep ON ep.id = ev.endpoint_id \
+                WHERE ep.workspace_id = $1 \
+             ) \
+             SELECT al.endpoint_id AS endpoint_id, \
+                    max(e.name) AS endpoint_name, \
+                    count(*) AS calls, \
+                    count(*) FILTER (WHERE al.status_code >= 400) AS errors, \
+                    percentile_cont(0.5) WITHIN GROUP (ORDER BY al.duration_ms) \
+                      FILTER (WHERE al.status_code BETWEEN 200 AND 299) AS p50_ms, \
+                    percentile_cont(0.95) WITHIN GROUP (ORDER BY al.duration_ms) \
+                      FILTER (WHERE al.status_code BETWEEN 200 AND 299) AS p95_ms, \
+                    count(*) FILTER (WHERE al.cache_hit) AS cache_hits, \
+                    count(*) FILTER ( \
+                      WHERE al.status_code BETWEEN 200 AND 299 \
+                        AND vc.cache_enabled \
+                    ) AS cacheable_calls, \
+                    grouping(al.endpoint_id) AS is_total \
+             FROM dataapi.access_log al \
+             LEFT JOIN dataapi.endpoints e ON e.id = al.endpoint_id \
+             LEFT JOIN version_cache vc \
+                    ON vc.endpoint_id = al.endpoint_id AND vc.version = al.version \
+             WHERE al.workspace_id = $1 AND al.ts >= $2 AND al.actor_user_id IS NULL \
+             GROUP BY GROUPING SETS ((), (al.endpoint_id))",
+        )
+        .bind(ws)
+        .bind(since)
+        .fetch_all(&self.db.pool)
+        .await?;
 
         let mut total = ActivityRow {
             endpoint_id: None,
@@ -184,21 +240,21 @@ impl ActivityStore {
         let mut endpoints = Vec::new();
         for r in rows {
             let row = ActivityRow {
-                endpoint_id: r.0,
-                endpoint_name: r.1,
-                calls: r.2,
-                errors: r.3,
-                p50_ms: r.4,
-                p95_ms: r.5,
-                cache_hits: r.6,
-                cacheable_calls: r.7,
+                endpoint_id: r.endpoint_id,
+                endpoint_name: r.endpoint_name,
+                calls: r.calls,
+                errors: r.errors,
+                p50_ms: r.p50_ms,
+                p95_ms: r.p95_ms,
+                cache_hits: r.cache_hits,
+                cacheable_calls: r.cacheable_calls,
             };
             // `grouping()` is 1 for the empty grouping set — the grand total —
             // and 0 for the per-endpoint rows. It is the only way to tell the
             // total apart from the unmatched bucket: BOTH carry a NULL
             // endpoint_id, and reading NULL as "total" would double-count every
             // 404 into the headline number.
-            if r.8 == 1 {
+            if r.is_total == 1 {
                 total = row;
             } else {
                 endpoints.push(row);
@@ -224,6 +280,11 @@ impl ActivityStore {
     ///
     /// Keyset pagination on `ts` — `OFFSET` on the fastest-growing table in the
     /// schema gets slower every page and can skip rows written mid-scroll.
+    ///
+    /// `limit` is CLAMPED to `1..=`[`MAX_CALL_PAGE`], never refused; the reason
+    /// that differs from `range`'s hard 400 is on
+    /// `routes::ActivityCallsQuery::limit`, which is also where a caller reads
+    /// it.
     #[allow(clippy::too_many_arguments)]
     pub async fn calls(
         &self,
@@ -263,7 +324,7 @@ impl ActivityStore {
         .bind(request_id)
         .bind(include_trials)
         .bind(before)
-        .bind(limit.clamp(1, 200))
+        .bind(limit.clamp(1, MAX_CALL_PAGE))
         .fetch_all(&self.db.pool)
         .await
     }
