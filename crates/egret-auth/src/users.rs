@@ -286,7 +286,16 @@ impl UserRepo {
     /// explicitly (polymorphic principal_id, no FK). The 23503 catch is now a rare
     /// safety net: it fires only if a future table adds a NOT-NULL FK to users(id)
     /// without an ON DELETE rule or reassignment here.
-    pub async fn hard_delete(&self, target: UserId, reassign_notebooks_to: UserId) -> Result<()> {
+    ///
+    /// Returns `(name, email)` straight off the row `DELETE`'s own `RETURNING` —
+    /// the row is gone once this returns, so a caller that needs to say WHO it
+    /// deleted (Data API's `service_account:delete` audit event is the case that
+    /// needs this) has those columns without a second, racing query.
+    pub async fn hard_delete(
+        &self,
+        target: UserId,
+        reassign_notebooks_to: UserId,
+    ) -> Result<(String, String)> {
         let mut tx = self.db.pool.begin().await.map_err(db_err)?;
         sqlx::query("UPDATE analytics.notebooks SET owner_user_id = $2 WHERE owner_user_id = $1")
             .bind(target.0)
@@ -314,22 +323,26 @@ impl UserRepo {
         // The row delete is the one that can trip a content-ownership FK
         // (23503). Map that specific case to a Conflict (→ 409); on return the
         // dropped `tx` rolls back, so no dependent rows above are lost.
-        let res = sqlx::query("DELETE FROM users WHERE id = $1")
-            .bind(target.0)
-            .execute(&mut *tx)
-            .await;
-        if let Err(e) = res {
-            if e.as_database_error().and_then(|d| d.code()).as_deref() == Some("23503") {
-                return Err(egret_core::Error::Conflict(
-                    "cannot delete: this user owns content in a table that isn't auto-handled \
-                     on delete — a new FK to users(id) needs an ON DELETE rule."
-                        .into(),
-                ));
+        let res: std::result::Result<(String, String), sqlx::Error> =
+            sqlx::query_as("DELETE FROM users WHERE id = $1 RETURNING name, email")
+                .bind(target.0)
+                .fetch_one(&mut *tx)
+                .await;
+        let (name, email) = match res {
+            Ok(row) => row,
+            Err(e) => {
+                if e.as_database_error().and_then(|d| d.code()).as_deref() == Some("23503") {
+                    return Err(egret_core::Error::Conflict(
+                        "cannot delete: this user owns content in a table that isn't auto-handled \
+                         on delete — a new FK to users(id) needs an ON DELETE rule."
+                            .into(),
+                    ));
+                }
+                return Err(db_err(e));
             }
-            return Err(db_err(e));
-        }
+        };
         tx.commit().await.map_err(db_err)?;
-        Ok(())
+        Ok((name, email))
     }
 }
 

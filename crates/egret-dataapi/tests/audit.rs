@@ -758,6 +758,85 @@ async fn deleting_an_endpoint_records_what_it_was() {
     assert_eq!(left, 0);
 }
 
+/// **The hardest of the four remaining routes to add later, and the most
+/// important to have.** `delete_service_account` hard-deletes a machine
+/// principal along with its `access_grants` and every OAuth2 client it owns
+/// (the `dataapi.clients`/`service_accounts` cascade off `users`, migration
+/// 0119) — so once it returns, the `service_account:delete` event is the
+/// ONLY surviving record that the principal ever existed. A bare uuid there
+/// would resolve to nothing; `name` and `email` are what let an auditor say
+/// which principal was destroyed.
+///
+/// Also exercises `service_account:create` in passing — the POST that seeds
+/// this test's own account would leave a stray event in the queue for the
+/// `one_event()` below to trip on if it did not emit exactly once, so the
+/// drain of it right after the POST is itself a (loose) check that create
+/// emits precisely one event and not zero or two.
+///
+/// Mutation: replace the detail in `delete_service_account` with `json!({})`
+/// — the `name` and `email` assertions below go red.
+#[tokio::test]
+async fn deleting_a_service_account_records_what_it_destroyed() {
+    let mut f = skip_without_db!();
+
+    let (status, created) = f
+        .send(
+            "POST",
+            &format!("/api/ws/{}/data-api/service-accounts", f.ws),
+            Some(serde_json::json!({ "name": "doomed", "description": "" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {created}");
+    let sa_id = created["id"].as_str().expect("id").to_string();
+    let email = created["email"]
+        .as_str()
+        .expect("the synthetic address identifies it")
+        .to_string();
+    let create_ev = f.one_event();
+    assert_eq!(create_ev.action, "service_account:create");
+
+    let (status, body) = f
+        .send(
+            "DELETE",
+            &format!("/api/ws/{}/data-api/service-accounts/{sa_id}", f.ws),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+
+    let ev = f.one_event();
+    assert_eq!(
+        ev.shape(),
+        (
+            Some(f.manager.user),
+            Some(f.ws_id),
+            "service_account:delete",
+            "service_account",
+            Some(sa_id.as_str()),
+        )
+    );
+    // The row is gone and its grants and clients cascaded with it, so this
+    // event is the ONLY surviving record that the principal existed. A bare
+    // uuid would say something was deleted without ever saying what.
+    assert_eq!(ev.detail["name"], serde_json::json!("doomed"));
+    assert_eq!(
+        ev.detail["email"],
+        serde_json::json!(email),
+        "the synthetic address must match what the delete itself returned, \
+         not a value fetched by a second, racing query: {:?}",
+        ev.detail
+    );
+
+    // And the row really is gone, so the event above is a record of something
+    // destroyed rather than a record beside something still readable.
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM users WHERE id = $1::uuid")
+        .bind(&sa_id)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("count users");
+    assert_eq!(left, 0);
+}
+
 /// **Anti-triviality for every assertion above.** Each of them reads a queue,
 /// and a queue that were somehow filled by something other than these handlers
 /// would still satisfy `one_event`. A REFUSED call must add nothing: an audit

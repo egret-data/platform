@@ -549,6 +549,15 @@ async fn create_service_account(
         }
     };
 
+    st.audit.emit(egret_audit::mutation_for(
+        &ctx.principal,
+        Some(ctx.workspace_id.0),
+        "service_account:create",
+        "service_account",
+        Some(user_id.0.to_string()),
+        serde_json::json!({ "name": name, "email": email }),
+    ));
+
     Ok((
         StatusCode::CREATED,
         Json(DataApiServiceAccountDto {
@@ -600,11 +609,26 @@ async fn delete_service_account(
     // `notebooks.owner_user_id` is only ever set by an interactive session and a
     // service account can never log in (`users_service_has_no_password`, 0119) —
     // so this is a no-op that stays correct if that ever changes.
-    st.users
+    let (name, email) = st
+        .users
         .hard_delete(UserId(sa), ctx.principal.user_id)
         .await?;
     // Deleting the `users` row cascades through `dataapi.service_accounts` into
     // `dataapi.clients` (migration 0119), so no client outlives its account.
+    //
+    // The hardest of the four to add later and the most important to have:
+    // this hard-deletes a machine principal along with its `access_grants` and
+    // every client it owns. Nothing else survives to say it existed. The
+    // columns come from `hard_delete`'s own `RETURNING`, so there is no second
+    // query and nothing to race.
+    st.audit.emit(egret_audit::mutation_for(
+        &ctx.principal,
+        Some(ctx.workspace_id.0),
+        "service_account:delete",
+        "service_account",
+        Some(sa.to_string()),
+        serde_json::json!({ "name": name, "email": email }),
+    ));
     Ok(Json(Ack::ok()))
 }
 
@@ -871,6 +895,19 @@ async fn create_endpoint(
             &body,
         )
         .await?;
+    st.audit.emit(egret_audit::mutation_for(
+        &ctx.principal,
+        Some(ctx.workspace_id.0),
+        "data_api_endpoint:create",
+        "data_api_endpoint",
+        Some(created.id.to_string()),
+        serde_json::json!({
+            "name": created.name,
+            "path": created.path,
+            "method": created.method,
+            "database_id": created.database_id,
+        }),
+    ));
     Ok((StatusCode::CREATED, Json(created)))
 }
 
@@ -921,9 +958,25 @@ async fn update_endpoint(
     if let Some(Some(folder_id)) = body.folder_id {
         scoped_folder(&st, ctx.workspace_id.0, folder_id).await?;
     }
-    Ok(Json(
-        st.endpoints.update(ctx.workspace_id.0, id, &body).await?,
-    ))
+    let updated = st.endpoints.update(ctx.workspace_id.0, id, &body).await?;
+    // Records the URL as it now stands, not a field-by-field diff: `path` and
+    // `method` are editable on a live row, so "which URL does this endpoint
+    // claim" is the question an auditor asks, and a diff of unchanged fields
+    // would bury it.
+    st.audit.emit(egret_audit::mutation_for(
+        &ctx.principal,
+        Some(ctx.workspace_id.0),
+        "data_api_endpoint:update",
+        "data_api_endpoint",
+        Some(id.to_string()),
+        serde_json::json!({
+            "name": updated.name,
+            "path": updated.path,
+            "method": updated.method,
+            "database_id": updated.database_id,
+        }),
+    ));
+    Ok(Json(updated))
 }
 
 #[utoipa::path(
