@@ -391,6 +391,13 @@ async fn serve(
     let request_id = Uuid::new_v4().to_string();
     let mut entry = AccessLogStore::entry(&request_id, &headers);
 
+    // Recorded BEFORE `run`, because `run` is what may fail to resolve an
+    // endpoint — and a row with no endpoint is precisely the row these two
+    // columns exist for. Populating them afterwards would mean the failure path
+    // had to remember to do it.
+    entry.request_method = Some(method.to_string());
+    entry.request_path = Some(path.1.clone());
+
     let outcome = run(
         &st,
         path,
