@@ -3,7 +3,17 @@ import { NavLink, Outlet, useParams } from "react-router-dom";
 
 import { useMyWorkspaces } from "@/api/hooks";
 
-type Section = { to: string; label: string; icon: LucideIcon };
+type Section = {
+  to: string;
+  label: string;
+  icon: LucideIcon;
+  /** Whether the NavLink requires an exact pathname match to count as active.
+   *  Defaults to true (copied from WorkspaceSettings, where every section is a
+   *  leaf). Endpoints is the one exception: `endpoints/:id` is a SIBLING leaf
+   *  route (App.tsx), not nested under `endpoints`, so with `end: true` the nav
+   *  shows nothing active while viewing an endpoint's detail page. */
+  end?: boolean;
+};
 
 /**
  * Data API shell.
@@ -18,7 +28,7 @@ type Section = { to: string; label: string; icon: LucideIcon };
  * no gain.
  */
 const SECTIONS: Section[] = [
-  { to: "endpoints", label: "Endpoints", icon: Plug },
+  { to: "endpoints", label: "Endpoints", icon: Plug, end: false },
   { to: "clients", label: "Clients", icon: KeyRound },
   { to: "activity", label: "Activity", icon: Activity },
 ];
@@ -33,7 +43,7 @@ function NavItem({ item }: { item: Section }) {
   return (
     <NavLink
       to={item.to}
-      end
+      end={item.end ?? true}
       className={({ isActive }) =>
         `flex items-center gap-2.5 rounded-md px-3 py-2 text-sm transition-colors ${focusRing} ${
           isActive ? itemActive : itemIdle
@@ -78,7 +88,7 @@ export default function DataApiLayout() {
           <NavLink
             key={item.to}
             to={item.to}
-            end
+            end={item.end ?? true}
             className={({ isActive }) =>
               `-mb-px shrink-0 border-b-2 px-3 py-2 text-sm transition-colors ${
                 isActive

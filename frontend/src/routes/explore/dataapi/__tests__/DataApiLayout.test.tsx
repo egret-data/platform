@@ -6,6 +6,9 @@ import DataApiLayout from "../DataApiLayout";
 // DataApiLayout reads the workspace name via useMyWorkspaces (react-query),
 // same as WorkspaceSettings' header — so it needs a QueryClient in scope,
 // exactly like WorkspaceSettings.test.tsx's renderAt wraps its own subject.
+// `endpoints/:id` is mounted as a SIBLING leaf of `endpoints` under `data-api`
+// (App.tsx), not nested under it — mirrored here so a regression in the nav's
+// active-matching logic shows up the same way it would in the real route tree.
 function renderAt(path: string) {
   const qc = new QueryClient();
   return render(
@@ -14,6 +17,7 @@ function renderAt(path: string) {
         <Routes>
           <Route path="/explore/:ws/data-api" element={<DataApiLayout />}>
             <Route path="endpoints" element={<p>endpoints pane</p>} />
+            <Route path="endpoints/:id" element={<p>endpoint detail pane</p>} />
           </Route>
         </Routes>
       </MemoryRouter>
@@ -29,4 +33,15 @@ it("marks the active section and renders the outlet", () => {
   expect(links.length).toBeGreaterThan(1);
   expect(links.some((l) => l.getAttribute("aria-current") === "page")).toBe(true);
   expect(screen.getByText("endpoints pane")).toBeInTheDocument();
+});
+
+it("keeps Endpoints marked active on an endpoint's detail route", () => {
+  // endpoints/:id is a sibling leaf, not a child of endpoints — an `end`-matched
+  // NavLink would go dark here even though the user is still squarely inside
+  // the Endpoints section (this is what EndpointDetail's own nav renders into).
+  renderAt("/explore/analytics/data-api/endpoints/e1");
+  const links = screen.getAllByRole("link", { name: "Endpoints" });
+  expect(links.length).toBeGreaterThan(1);
+  expect(links.every((l) => l.getAttribute("aria-current") === "page")).toBe(true);
+  expect(screen.getByText("endpoint detail pane")).toBeInTheDocument();
 });
