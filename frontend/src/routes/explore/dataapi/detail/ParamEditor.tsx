@@ -36,6 +36,21 @@ function newParam(): ParamSpec {
  * it to `string[]` `onBlur`, which is also where it re-formats the display
  * (`"a,b"` → `"a, b"`) so a typo in spacing doesn't linger once the field is
  * left.
+ *
+ * The local copy is a DRAFT, not a mirror: `draft === null` means "showing
+ * whatever `allowed` currently is", and only a keystroke puts a string in it.
+ * That is what keeps it from going stale. `EndpointDetail` re-seeds the whole
+ * form from the SERVER RESPONSE after every Save, so a mirror seeded once at
+ * mount would still show the pre-save string after a server-normalised
+ * `allowed` came back — and the next focus/blur would `commit()` that stale
+ * text straight back over what the server just returned. With a draft,
+ * `commit()` clears it, the field falls back to the committed prop, and a
+ * focus/blur that typed nothing commits nothing at all.
+ *
+ * Note what this deliberately is NOT: a `useEffect` that calls `setText` when
+ * the prop changes (the `react-hooks/set-state-in-effect` shape this file
+ * avoids everywhere else), and not a `key` on the field either — a key would
+ * remount the input and hand back a different DOM node on every commit.
  */
 function AllowedValuesField({
   id,
@@ -46,15 +61,23 @@ function AllowedValuesField({
   allowed: string[];
   onChange: (allowed: string[]) => void;
 }) {
-  const [text, setText] = useState(() => allowed.join(", "));
+  // `null` = show the committed prop; a string = the author is mid-edit.
+  const [draft, setDraft] = useState<string | null>(null);
+  const text = draft ?? allowed.join(", ");
 
   function commit() {
-    const projected = text
+    // Nothing was typed since the last commit, so there is nothing to project
+    // — and, crucially, no stale local text to push back over the prop.
+    if (draft === null) return;
+    const projected = draft
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean);
+    // Drop the draft FIRST: the field then renders the committed value, which
+    // this `onChange` is about to make `projected` — that is what re-formats
+    // `"a,b"` to `"a, b"`, without a second copy of it to keep in sync.
+    setDraft(null);
     onChange(projected);
-    setText(projected.join(", "));
   }
 
   return (
@@ -62,7 +85,7 @@ function AllowedValuesField({
       id={id}
       placeholder="comma-separated"
       value={text}
-      onChange={(e) => setText(e.target.value)}
+      onChange={(e) => setDraft(e.target.value)}
       onBlur={commit}
     />
   );

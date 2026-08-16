@@ -688,3 +688,157 @@ describe("VersionsSection", () => {
     expect(await screen.findByText(/never been published/i)).toBeInTheDocument();
   });
 });
+
+/**
+ * Final-review finding (Important #3): Publish ignored the shared `dirty` flag.
+ *
+ * The five sections share ONE form that survives section navigation
+ * (`EndpointDetail` keys the `Outlet` by id, not by pathname), so an author
+ * could edit SQL in Definition, walk to Versions with "Unsaved changes" still
+ * in the header, and publish — freezing the SAVED draft while the dialog said
+ * "Freezes the current draft", which they would read as the one on screen.
+ * Definition already guards the far cheaper Validate this way; Publish changes
+ * what every deployed consumer receives.
+ *
+ * This mounts Definition AND Versions under the real shell and NAVIGATES
+ * between them, because the bug only exists across that navigation — a test
+ * that mounted Versions alone could never see it.
+ */
+describe("VersionsSection — Publish and the shared dirty flag", () => {
+  const publishAsync = vi.fn();
+
+  beforeEach(() => {
+    publishAsync.mockReset();
+    publishAsync.mockResolvedValue({
+      status: 200,
+      data: { version_id: "v-3", version: 3, state: "live" },
+      headers: new Headers(),
+    });
+    vi.mocked(api.useDataApiPublishEndpoint).mockReturnValue(
+      { mutateAsync: publishAsync, isPending: false } as unknown as
+        ReturnType<typeof api.useDataApiPublishEndpoint>,
+    );
+    vi.mocked(api.useDataApiRollbackEndpoint).mockReturnValue(
+      { mutateAsync: vi.fn(), isPending: false } as unknown as
+        ReturnType<typeof api.useDataApiRollbackEndpoint>,
+    );
+    vi.mocked(api.useDataApiListEndpointVersions).mockReturnValue(
+      { data: { status: 200, data: [] }, isLoading: false, isError: false } as unknown as
+        ReturnType<typeof api.useDataApiListEndpointVersions>,
+    );
+  });
+
+  function renderBoth(endpoint: DataApiEndpointDto = makeEndpoint({ live_version_id: "v-2", state: "live" })) {
+    vi.mocked(api.useDataApiGetEndpoint).mockReturnValue(
+      { data: { status: 200, data: endpoint }, isLoading: false, isError: false, error: null, refetch: vi.fn() } as unknown as
+        ReturnType<typeof api.useDataApiGetEndpoint>,
+    );
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    return render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={[`/explore/eng/data-api/endpoints/${endpoint.id}`]}>
+          <Routes>
+            <Route path="/explore/:workspace/data-api/endpoints/:id" element={<EndpointDetail />}>
+              <Route index element={<Definition />} />
+              <Route path="versions" element={<VersionsSection />} />
+            </Route>
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+  }
+
+  it("refuses to publish an edit made in Definition and carried unsaved into Versions", async () => {
+    renderBoth();
+    const sql = await screen.findByDisplayValue("SELECT 1");
+    await userEvent.type(sql, " -- unsaved");
+    expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("link", { name: "Versions" }));
+    const publish = await screen.findByRole("button", { name: "Publish" });
+
+    expect(publish).toBeDisabled();
+    expect(publish).toHaveAttribute("title", expect.stringContaining("Save your changes"));
+
+    // Not merely visually disabled: the confirmation never opens, so the
+    // publish cannot be reached at all.
+    await userEvent.click(publish);
+    expect(screen.queryByText(/does not grant data access/i)).not.toBeInTheDocument();
+    expect(publishAsync).not.toHaveBeenCalled();
+  });
+
+  it("publishes normally once there is nothing unsaved", async () => {
+    renderBoth();
+    await screen.findByDisplayValue("SELECT 1");
+    await userEvent.click(screen.getByRole("link", { name: "Versions" }));
+
+    const publish = await screen.findByRole("button", { name: "Publish" });
+    expect(publish).toBeEnabled();
+    await userEvent.click(publish);
+    expect(await screen.findByText(/does not grant data access/i)).toBeInTheDocument();
+  });
+
+  // The dialog's own copy is part of the fix: "the current draft" is what the
+  // author reads as "the one I am looking at".
+  it("says the SAVED draft is what gets frozen", async () => {
+    renderBoth();
+    await screen.findByDisplayValue("SELECT 1");
+    await userEvent.click(screen.getByRole("link", { name: "Versions" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Publish" }));
+    expect(await screen.findByText(/freezes the saved draft/i)).toBeInTheDocument();
+  });
+});
+
+/**
+ * Final-review finding (#8, second half): `AllowedValuesField` holds its text
+ * locally so a trailing comma is not eaten mid-typing — but the local copy
+ * must not survive a Save. `EndpointDetail` re-seeds the whole form from the
+ * SERVER RESPONSE, so a server-normalised `allowed` list has to reach the
+ * field, and the field's stale text must never be pushed back over it.
+ */
+describe("ParamEditor — the allowed-values field resyncs from the server", () => {
+  const ENUM_PARAM = {
+    name: "region",
+    type: ParamType.enum,
+    location: ParamLocation.query,
+    required: false,
+    allowed: ["eu", "us"],
+  };
+
+  it("shows the server's normalised list after a Save, not the pre-save text", async () => {
+    const endpoint = makeEndpoint({ params: [ENUM_PARAM] } as Partial<DataApiEndpointDto>);
+    // The server normalises: it lower-cases and de-duplicates what was sent.
+    updateMutateAsync.mockResolvedValue({
+      status: 200,
+      data: makeEndpoint({ params: [{ ...ENUM_PARAM, allowed: ["eu", "us", "apac"] }] } as Partial<DataApiEndpointDto>),
+      headers: new Headers(),
+    });
+    renderDetail(endpoint);
+
+    const allowed = await screen.findByLabelText("Allowed values");
+    await userEvent.clear(allowed);
+    await userEvent.type(allowed, "EU, US, APAC");
+    await userEvent.tab();
+
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(updateMutateAsync).toHaveBeenCalled());
+
+    // What the server returned, not what was typed.
+    await waitFor(() => expect(screen.getByLabelText("Allowed values")).toHaveValue("eu, us, apac"));
+  });
+
+  // The other half of the same defect: a focus/blur that typed nothing must
+  // not `commit()` a stale local string back over the prop.
+  it("commits nothing on a focus/blur that typed nothing", async () => {
+    const endpoint = makeEndpoint({ params: [ENUM_PARAM] } as Partial<DataApiEndpointDto>);
+    renderDetail(endpoint);
+
+    const allowed = await screen.findByLabelText("Allowed values");
+    await userEvent.click(allowed);
+    await userEvent.tab();
+
+    expect(screen.getByLabelText("Allowed values")).toHaveValue("eu, us");
+    // Touching a field without changing it is not an edit.
+    expect(screen.queryByText("Unsaved changes")).not.toBeInTheDocument();
+  });
+});

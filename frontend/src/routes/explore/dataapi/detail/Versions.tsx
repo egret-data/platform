@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -11,12 +10,11 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { RelativeTime } from "@/components/explore/RelativeTime";
 import { SettingsNote } from "@/routes/explore/settings/SettingsNote";
-import {
-  getDataApiListEndpointVersionsQueryKey,
-  useDataApiListEndpointVersions,
-  useDataApiPublishEndpoint,
-  useDataApiRollbackEndpoint,
-} from "@/api/generated/data-api/data-api";
+import { useDataApiListEndpointVersions } from "@/api/generated/data-api/data-api";
+// Publish/rollback move `state` and `live_version_id`, so their invalidation
+// spans three queries (this history, the endpoint record, and the list badge).
+// That lives in the wrapper — see `src/api/dataApi.ts`.
+import { usePublishEndpoint, useRollbackEndpoint } from "@/api/dataApi";
 import type { DataApiEndpointVersionDto } from "@/api/generated/model";
 import { useEndpointDetail } from "../EndpointDetail";
 
@@ -29,8 +27,14 @@ import { useEndpointDetail } from "../EndpointDetail";
  * a contract callable, it does not make the underlying data readable.
  */
 export default function VersionsSection() {
-  const { ws, id, refetch } = useEndpointDetail();
-  const qc = useQueryClient();
+  // `dirty` is read here, not just in Definition: the five sections share ONE
+  // form that survives section navigation (`EndpointDetail` keys the Outlet by
+  // id, not by pathname), so an author can edit SQL in Definition, walk over
+  // here with "Unsaved changes" still in the header, and publish — freezing
+  // the SAVED draft, not the one on screen. Definition already guards the far
+  // cheaper Validate this way; Publish changes what every deployed consumer
+  // receives and has more reason to.
+  const { ws, id, dirty, refetch } = useEndpointDetail();
 
   const versionsQuery = useDataApiListEndpointVersions(ws, id, {
     query: { enabled: !!ws && !!id },
@@ -42,11 +46,8 @@ export default function VersionsSection() {
   // display order.
   const sorted = [...versions].sort((a, b) => b.version - a.version);
 
-  const invalidateVersions = () =>
-    qc.invalidateQueries({ queryKey: getDataApiListEndpointVersionsQueryKey(ws, id) });
-
-  const publishMutation = useDataApiPublishEndpoint();
-  const rollbackMutation = useDataApiRollbackEndpoint();
+  const publishMutation = usePublishEndpoint();
+  const rollbackMutation = useRollbackEndpoint();
 
   const [publishOpen, setPublishOpen] = useState(false);
   const [rollbackTarget, setRollbackTarget] = useState<DataApiEndpointVersionDto | null>(null);
@@ -61,7 +62,12 @@ export default function VersionsSection() {
             marked Live — never the draft sitting in Definition.
           </p>
         </div>
-        <Button type="button" onClick={() => setPublishOpen(true)}>
+        <Button
+          type="button"
+          onClick={() => setPublishOpen(true)}
+          disabled={dirty}
+          title={dirty ? "Save your changes before publishing — Publish freezes the saved draft." : undefined}
+        >
           Publish
         </Button>
       </div>
@@ -141,10 +147,7 @@ export default function VersionsSection() {
         open={publishOpen}
         onOpenChange={setPublishOpen}
         publish={publishMutation}
-        onPublished={() => {
-          invalidateVersions();
-          refetch();
-        }}
+        onPublished={refetch}
       />
 
       {/* Rollback changes what every deployed client receives, so it uses the
@@ -172,7 +175,6 @@ export default function VersionsSection() {
               toast.error("Could not roll back.");
               return;
             }
-            invalidateVersions();
             refetch();
             toast.success(`Rolled back to v${res.data.version}`);
           } catch (e) {
@@ -203,7 +205,7 @@ function PublishDialog({
   id: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  publish: ReturnType<typeof useDataApiPublishEndpoint>;
+  publish: ReturnType<typeof usePublishEndpoint>;
   onPublished: () => void;
 }) {
   const [note, setNote] = useState("");
@@ -248,8 +250,9 @@ function PublishDialog({
         </DialogHeader>
         <div className="space-y-3">
           <p className="text-sm text-muted-foreground">
-            Freezes the current draft as a new version and makes it what every consumer receives, starting
-            immediately.
+            Freezes the saved draft as a new version and makes it what every consumer receives, starting
+            immediately. (Publish is unavailable while there are unsaved changes, so what is frozen is
+            always what you last saved.)
           </p>
           <SettingsNote>
             Publishing does not grant data access. A call runs as the service account against the workspace

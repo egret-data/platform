@@ -228,3 +228,56 @@ describe("TryIt", () => {
     expect(screen.getByText(OK.request.curl)).toBeInTheDocument();
   });
 });
+
+/**
+ * Final-review finding (Important #4): the account picker collapsed `isError`
+ * into the empty case. A failed fetch rendered "This workspace has no service
+ * accounts yet. Create one…" while Run sat disabled for want of a selection —
+ * a dead end with a false explanation, sending the author off to create an
+ * account that already exists. Eight other surfaces in this feature separate
+ * the two states; this one did not.
+ */
+describe("TryIt — the service-account picker distinguishes a failure from an empty workspace", () => {
+  function mockAccounts(over: Record<string, unknown>) {
+    vi.mocked(api.useDataApiListServiceAccounts).mockReturnValue(
+      { data: undefined, isLoading: false, isError: false, error: null, ...over } as unknown as
+        ReturnType<typeof api.useDataApiListServiceAccounts>,
+    );
+  }
+
+  it("reports a failed fetch as a failure, never as 'no service accounts yet'", () => {
+    mockAccounts({ isError: true, error: new Error("workspace not found") });
+    renderTryIt();
+    expect(screen.getByText(/could not load this workspace's service accounts/i)).toBeInTheDocument();
+    // The empty-state copy is the specific lie this test exists to forbid.
+    expect(screen.queryByText(/has no service accounts yet/i)).not.toBeInTheDocument();
+  });
+
+  it("surfaces the real error message, not only a generic sentence", () => {
+    mockAccounts({ isError: true, error: new Error("workspace not found") });
+    renderTryIt();
+    expect(screen.getByText(/workspace not found/)).toBeInTheDocument();
+  });
+
+  it("still shows the create-one prompt when the workspace is genuinely empty", () => {
+    mockAccounts({ data: { status: 200, data: [] } });
+    renderTryIt();
+    expect(screen.getByText(/has no service accounts yet/i)).toBeInTheDocument();
+    expect(screen.queryByText(/could not load/i)).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * A trial traverses the real serving router, which joins `endpoint_versions`
+ * on `live_version_id` (`serving/router.rs`) — it runs the PUBLISHED contract.
+ * The parameter fields, though, are built from `endpoint.params`, the DRAFT's
+ * list. Rather than guard the section on `dirty` the way Publish is guarded
+ * (which would take the tool away exactly while an author is iterating), the
+ * section says so.
+ */
+describe("TryIt — says which version a trial runs", () => {
+  it("states that draft edits are not part of what runs", () => {
+    renderTryIt();
+    expect(screen.getByText(/a trial runs the published version/i)).toBeInTheDocument();
+  });
+});

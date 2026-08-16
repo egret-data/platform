@@ -180,16 +180,47 @@ export default function TryIt() {
                 ))}
               </SelectContent>
             </Select>
-            {accounts.length === 0 && !accountsQuery.isLoading && (
-              <p className="text-xs text-muted-foreground">
-                This workspace has no service accounts yet. Create one, then grant it invoke, in{" "}
-                <Link className="underline" to={accessHref}>
-                  Access
-                </Link>
-                .
-              </p>
+            {/* A FAILED fetch is not an empty workspace. Collapsed into one
+                branch, the "no service accounts yet" copy explains a 500 as
+                "you have not created any" while Run sits disabled — a dead end
+                with a false explanation, and the author goes off to create an
+                account that already exists. */}
+            {accountsQuery.isError ? (
+              <Alert variant="destructive">
+                <AlertDescription>
+                  Could not load this workspace&apos;s service accounts.{" "}
+                  {(accountsQuery.error as unknown as Error)?.message ?? "Try again in a moment."}
+                </AlertDescription>
+              </Alert>
+            ) : (
+              accounts.length === 0 &&
+              !accountsQuery.isLoading && (
+                <p className="text-xs text-muted-foreground">
+                  This workspace has no service accounts yet. Create one, then grant it invoke, in{" "}
+                  <Link className="underline" to={accessHref}>
+                    Access
+                  </Link>
+                  .
+                </p>
+              )
             )}
           </div>
+
+          {/* Deliberately a NOTE, not a `disabled={dirty}` guard like Publish's.
+              A trial traverses the real serving router, which joins
+              `endpoint_versions` on `live_version_id` (`serving/router.rs`) —
+              it runs the PUBLISHED contract, so it neither reads nor can be
+              corrupted by the draft. Blocking it while the form is dirty would
+              take away the one tool that answers "does what consumers get
+              still work?" at exactly the moment an author is changing things.
+              The fields below are built from `endpoint.params`, the draft's
+              parameter list, so they can even offer a parameter the live
+              version does not accept — which is why this says so out loud
+              rather than letting a 400 explain it. */}
+          <p className="text-xs text-muted-foreground">
+            A trial runs the published version. Draft edits — unsaved ones, and saved ones you have not
+            published — are not part of what runs here.
+          </p>
 
           {endpoint.params.length > 0 && (
             <div className="grid grid-cols-2 gap-3">
