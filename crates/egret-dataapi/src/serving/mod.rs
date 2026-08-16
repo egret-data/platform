@@ -109,6 +109,32 @@ pub enum ServingError {
     /// instead send an operator hunting for a deleted endpoint.
     #[error("endpoint not granted to this service account")]
     NotGranted,
+    /// The engine refused the DATA (Ranger), recognised from an OTHERWISE
+    /// UNTYPED failure by [`super::error::is_permission_denied`] rather than
+    /// from a typed signal — see that function's doc for why a substring match
+    /// is the only tool available here and why it is documented as a
+    /// heuristic, not a certainty.
+    ///
+    /// **This is the variant a real Trino or StarRocks denial actually
+    /// produces today.** [`Self::DataAccessDenied`] exists for a connector
+    /// that returns a typed `egret_core::Error::Forbidden`, but neither
+    /// connector does that — both fold a Ranger denial into the same
+    /// unstructured failure shape as everything else, distinguishable only by
+    /// its message. `DataAccessDenied` is kept as the answer for a connector
+    /// that DOES type it, should one ever exist; this is the answer for the
+    /// ones that exist now. The two share a status and a meaning, and it is
+    /// `router::engine_error` — not this file — that decides which shape it
+    /// received.
+    ///
+    /// Distinct from [`Self::NotGranted`] for the same reason
+    /// [`Self::DataAccessDenied`] is: two different people's problems with two
+    /// different fixes. `NotGranted` means egret refused the CALL before the
+    /// engine was ever contacted — the fix is `POST …/endpoints/{id}/grants`.
+    /// This variant means the engine refused the DATA — the fix is a Ranger
+    /// grant. Conflating them would send an admin to write an egret grant that
+    /// already exists while the actual gap is in Ranger.
+    #[error("data access denied by the engine's policy")]
+    RangerDenied,
     /// A `required` parameter the caller did not supply and the author gave no
     /// `default` for (spec §5, serve-time rules).
     ///

@@ -25075,7 +25075,7 @@
             }
           },
           "403": {
-            "description": "`data_access_denied` — the engine denied the data to this service account",
+            "description": "`ranger_denied` — the engine denied the data to this service account, recognised from its own failure message (the code a live Trino/StarRocks denial actually produces); `data_access_denied` — the same, from a connector that types the failure instead, which neither shipped one does today",
             "content": {
               "application/json": {
                 "schema": {
@@ -25188,7 +25188,7 @@
             }
           },
           "403": {
-            "description": "`data_access_denied` — the engine denied the data to this service account",
+            "description": "`ranger_denied` — the engine denied the data to this service account, recognised from its own failure message (the code a live Trino/StarRocks denial actually produces); `data_access_denied` — the same, from a connector that types the failure instead, which neither shipped one does today",
             "content": {
               "application/json": {
                 "schema": {

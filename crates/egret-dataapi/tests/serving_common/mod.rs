@@ -79,6 +79,9 @@ pub fn bind_signature(params: &[Param]) -> i64 {
 pub struct FakePort {
     pub executions: AtomicUsize,
     pub last: Mutex<Option<(String, Vec<Param>)>>,
+    /// Set by [`FakePort::fail_next_with`]; consumed by the next
+    /// `execute_as`/`execute_as_with_params` call.
+    next_error: Mutex<Option<String>>,
 }
 
 impl FakePort {
@@ -93,6 +96,35 @@ impl FakePort {
             .unwrap()
             .clone()
             .expect("no execution has reached the port")
+    }
+
+    /// Make the NEXT `execute_as`/`execute_as_with_params` call fail, carrying
+    /// `msg` on `egret_core::Error::Internal` — the shape `port_impl` hands an
+    /// engine's own unstructured failure text to the serving path once it has
+    /// folded the connector's error into one variant (see
+    /// `serving::router::engine_error`'s doc). Lets a test hand the classifier
+    /// under `serving::error::is_permission_denied` an arbitrary message
+    /// without teaching this fake a second SQL-substring dialect.
+    ///
+    /// One-shot and consumed BEFORE `executions`/`last` are touched: a failed
+    /// call never rendered a statement worth recording, and leaving the flag
+    /// set would fail every subsequent call in a test that only meant to
+    /// trip one.
+    ///
+    /// This only proves the MAPPING (a message containing e.g. `"Access
+    /// Denied"` becomes `ranger_denied`), not that the message is one a real
+    /// engine sends — this fake returns whatever string it is given. See
+    /// `is_permission_denied`'s own doc for what verifying THAT would take.
+    pub fn fail_next_with(&self, msg: impl Into<String>) {
+        *self.next_error.lock().unwrap() = Some(msg.into());
+    }
+
+    fn take_next_error(&self) -> Option<Error> {
+        self.next_error
+            .lock()
+            .unwrap()
+            .take()
+            .map(|msg| Error::Internal(anyhow::anyhow!(msg)))
     }
 }
 
@@ -147,6 +179,9 @@ impl egret_query_api::QueryExecPort for FakePort {
         sql: &str,
         _limits: egret_query_api::Limits,
     ) -> Result<TabularResult, Error> {
+        if let Some(e) = self.take_next_error() {
+            return Err(e);
+        }
         self.executions.fetch_add(1, Ordering::SeqCst);
         *self.last.lock().unwrap() = Some((sql.to_string(), Vec::new()));
         Ok(TabularResult {
@@ -175,6 +210,9 @@ impl egret_query_api::QueryExecPort for FakePort {
         params: &[Param],
         _limits: egret_query_api::Limits,
     ) -> Result<TabularResult, Error> {
+        if let Some(e) = self.take_next_error() {
+            return Err(e);
+        }
         self.executions.fetch_add(1, Ordering::SeqCst);
         *self.last.lock().unwrap() = Some((sql.to_string(), params.to_vec()));
         Ok(TabularResult {

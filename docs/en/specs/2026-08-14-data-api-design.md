@@ -481,8 +481,9 @@ One stable, machine-readable envelope:
 |---|---|---|
 | 400 | `row_limit_exceeded` | result exceeded the configured row cap; the message states the cap |
 | 401 | `key_invalid` | token missing, malformed, expired, wrong audience, or unverifiable — one answer for all of them (§6.2) |
-| 403 | `data_access_denied` | Ranger denied — the service account lacks a data grant (§5.3) |
-| 403 | `not_granted` | egret denied — the service account holds no `data_api_endpoint:invoke` grant on this endpoint (§6.2 step 4). A different code from the row above on purpose: the fix is a grant on the endpoint, not a Ranger grant |
+| 403 | `data_access_denied` | Ranger denied — the service account lacks a data grant (§5.3). Reachable only from a connector that returns a TYPED authorization failure; neither Trino nor StarRocks does, so this code is not what a live denial produces today (see the row below) |
+| 403 | `ranger_denied` | Ranger denied, recognised from the engine's own UNTYPED failure message rather than a typed signal, because neither connector surfaces one — Trino answers `Access Denied: …`, StarRocks answers with its own permission wording. This is the code a real engine denial produces. The match is a documented heuristic (`serving/error.rs::is_permission_denied`): narrow on purpose, so a false negative merely falls through to `internal` rather than risk a false positive that sends an operator to Ranger for a failure the endpoint's own SQL caused |
+| 403 | `not_granted` | egret denied — the service account holds no `data_api_endpoint:invoke` grant on this endpoint (§6.2 step 4). A different code from the two rows above on purpose: the fix is a grant on the endpoint, not a Ranger grant |
 | 404 | `not_found` | absent, disabled, wrong workspace, archived workspace, or an unparseable path — one answer for all of them |
 | 429 | `rate_limited` | with `Retry-After`, computed from the bucket's refill |
 | 500 | `internal` | an egret-side fault, and any engine failure P4 cannot classify further (see below) |

@@ -165,7 +165,7 @@ use uuid::Uuid;
 
 use super::access_log::{AccessLogEntry, AccessLogStore};
 use super::cache::{cache_key, cache_ttl, shared_cache_allowed};
-use super::error::{to_wire, ServingErrorBody};
+use super::error::{is_permission_denied, to_wire, ServingErrorBody};
 use super::params;
 use super::ratelimit::{check_request, retry_after_secs};
 use super::{verify_serving_token, ServingError};
@@ -304,7 +304,7 @@ impl utoipa::Modify for BearerAddon {
         (status = 200, description = "Rows from the published snapshot", body = ServingResponse),
         (status = 400, description = "`row_limit_exceeded` — the result exceeded the endpoint's row cap; `param_missing` — a required parameter was not supplied; `param_invalid` — a supplied parameter failed its declared type, its `allowed` list, or was repeated where one value is required. Neither parameter error names the parameter: the name is the author's, and naming it turns the error surface into a directory of what an endpoint declares", body = ServingErrorBody),
         (status = 401, description = "`key_invalid` — bearer token missing, expired, or not for this audience", body = ServingErrorBody),
-        (status = 403, description = "`data_access_denied` — the engine denied the data to this service account", body = ServingErrorBody),
+        (status = 403, description = "`ranger_denied` — the engine denied the data to this service account, recognised from its own failure message (the code a live Trino/StarRocks denial actually produces); `data_access_denied` — the same, from a connector that types the failure instead, which neither shipped one does today", body = ServingErrorBody),
         (status = 404, description = "`not_found` — no such live endpoint in this workspace", body = ServingErrorBody),
         (status = 429, description = "`rate_limited` — a published rate limit was exceeded; `Retry-After` states when the bucket refills", body = ServingErrorBody),
         (status = 500, description = "`internal` — an egret-side fault; quote `request_id` to support", body = ServingErrorBody),
@@ -335,7 +335,7 @@ async fn serve_get(
         (status = 200, description = "Rows from the published snapshot", body = ServingResponse),
         (status = 400, description = "`row_limit_exceeded` — the result exceeded the endpoint's row cap; `param_missing` — a required parameter was not supplied; `param_invalid` — a supplied parameter failed its declared type, its `allowed` list, or was repeated where one value is required. Neither parameter error names the parameter: the name is the author's, and naming it turns the error surface into a directory of what an endpoint declares", body = ServingErrorBody),
         (status = 401, description = "`key_invalid` — bearer token missing, expired, or not for this audience", body = ServingErrorBody),
-        (status = 403, description = "`data_access_denied` — the engine denied the data to this service account", body = ServingErrorBody),
+        (status = 403, description = "`ranger_denied` — the engine denied the data to this service account, recognised from its own failure message (the code a live Trino/StarRocks denial actually produces); `data_access_denied` — the same, from a connector that types the failure instead, which neither shipped one does today", body = ServingErrorBody),
         (status = 404, description = "`not_found` — no such live endpoint in this workspace", body = ServingErrorBody),
         (status = 429, description = "`rate_limited` — a published rate limit was exceeded; `Retry-After` states when the bucket refills", body = ServingErrorBody),
         (status = 500, description = "`internal` — an egret-side fault; quote `request_id` to support", body = ServingErrorBody),
@@ -961,8 +961,13 @@ fn execution_limits(snap: &EndpointSnapshot) -> egret_query_api::Limits {
 
 /// Map an engine failure onto the serving vocabulary.
 ///
-/// Only the Ranger denial is given its own answer, because it is the one the
-/// operator can act on and the one that must never be reported as bad input.
+/// The Ranger denial is the one given its own answer, because it is the one
+/// the operator can act on and the one that must never be reported as bad
+/// input — recognised two ways: a typed `egret_core::Error::Forbidden`
+/// ([`ServingError::DataAccessDenied`]), or, since neither shipped connector
+/// actually returns that type, a message [`is_permission_denied`] recognises
+/// on an otherwise-untyped failure ([`ServingError::RangerDenied`] — see that
+/// variant's doc for why the two exist side by side).
 ///
 /// # Everything else is `Internal`, and that is now a decision rather than a gap
 ///
@@ -1011,7 +1016,15 @@ fn execution_limits(snap: &EndpointSnapshot) -> egret_query_api::Limits {
 fn engine_error(e: egret_core::Error) -> ServingError {
     match e {
         egret_core::Error::Forbidden => ServingError::DataAccessDenied,
-        other => ServingError::internal(other),
+        other => {
+            // Computed before `other` is (possibly) moved into `internal`
+            // below — `Display`, not a consuming conversion.
+            let msg = other.to_string();
+            if is_permission_denied(&msg) {
+                return ServingError::RangerDenied;
+            }
+            ServingError::internal(other)
+        }
     }
 }
 

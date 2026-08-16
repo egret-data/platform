@@ -33,6 +33,14 @@ use std::sync::{Arc, OnceLock};
 use tower::ServiceExt;
 use uuid::Uuid;
 
+/// Only for Task 8's test below, which needs `FakePort::fail_next_with` —
+/// this file's own `FakePort` (just below) recognises a fixed set of SQL
+/// substrings and has no way to hand back an arbitrary engine message.
+/// Deliberately NOT `use serving_common::fixture` at the top level: this
+/// file's own `fixture()` (further down) already owns that name, and every
+/// other test in this file is unaffected by and should stay on the local one.
+mod serving_common;
+
 /// The host the fake coordinator "lives" on. Asserted as ABSENT from every
 /// body — it is the string a connect failure would carry out with it.
 const ENGINE_HOST: &str = "trino-coordinator.internal:8080";
@@ -1041,5 +1049,42 @@ async fn a_second_principal_is_refused_the_same_way() {
         "data_access_denied",
         "the ENGINE refused the data; egret let the call through: {}",
         res.text
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Task 8 — an engine permission error names the missing step, not the SQL
+// ---------------------------------------------------------------------------
+
+/// The untyped shape THIS file's own fake port (above) cannot produce:
+/// `denied_table` returns a typed `Error::Forbidden`, which is not what a real
+/// Trino or StarRocks denial looks like — neither connector surfaces a typed
+/// authorization error (see `serving::error::is_permission_denied`'s doc).
+/// This test uses `serving_common`'s fixture and `FakePort::fail_next_with`
+/// instead, so the engine's answer is an arbitrary message, exactly like a
+/// real one.
+#[tokio::test]
+async fn an_engine_permission_error_names_the_missing_step() {
+    let Some(f) = serving_common::fixture().await else {
+        eprintln!("DATABASE_URL unset — skipping");
+        return;
+    };
+    // The fake port answers as a Ranger-enforcing engine does when the
+    // principal may not read the table.
+    f.port
+        .fail_next_with("Access Denied: Cannot select from table sales");
+
+    let res = f.call_as_client(f.principal_a, "client-a", "probe").await;
+
+    assert_eq!(res.status, StatusCode::FORBIDDEN, "{}", res.body);
+    assert_eq!(res.body["error"]["code"], "ranger_denied");
+    // The message must point at the grant, not at the SQL. An author reading a
+    // raw engine error debugs their query — which is correct, but not here:
+    // the query was fine, and the missing piece is a Ranger grant.
+    let msg = res.body["error"]["message"].as_str().unwrap();
+    assert!(msg.contains("service account"), "{msg}");
+    assert!(
+        !msg.contains("Cannot select from table"),
+        "the raw engine error must not be echoed: {msg}"
     );
 }

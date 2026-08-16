@@ -462,8 +462,9 @@ Một envelope ổn định, máy đọc được:
 |---|---|---|
 | 400 | `row_limit_exceeded` | kết quả vượt row cap đã cấu hình; message nói rõ cap là bao nhiêu |
 | 401 | `key_invalid` | token thiếu, sai định dạng, hết hạn, sai audience, hoặc không verify được — MỘT câu trả lời cho tất cả (§6.2) |
-| 403 | `data_access_denied` | Ranger từ chối — service account chưa được cấp quyền dữ liệu (§5.3) |
-| 403 | `not_granted` | egret từ chối — service account không có grant `data_api_endpoint:invoke` trên endpoint này (§6.2 bước 4). Cố ý là một code khác với hàng trên: cách sửa là cấp grant trên endpoint, không phải grant trong Ranger |
+| 403 | `data_access_denied` | Ranger từ chối — service account chưa được cấp quyền dữ liệu (§5.3). Chỉ xảy ra được với một connector trả về lỗi authorization CÓ KIỂU RIÊNG; cả Trino lẫn StarRocks đều không làm vậy, nên code này không phải thứ một lần từ chối thật hôm nay tạo ra (xem hàng dưới) |
+| 403 | `ranger_denied` | Ranger từ chối, nhận diện từ chính message KHÔNG CÓ KIỂU của engine thay vì một tín hiệu có kiểu, vì cả hai connector đều không cung cấp tín hiệu đó — Trino trả lời `Access Denied: …`, StarRocks trả lời bằng cách diễn đạt quyền hạn riêng của nó. Đây là code mà một lần từ chối thật của engine tạo ra. Việc so khớp là một phép heuristic đã được ghi rõ (`serving/error.rs::is_permission_denied`): cố ý hẹp, để một false negative chỉ đơn giản rơi về `internal` thay vì liều một false positive đẩy operator đi tìm Ranger cho một lỗi do chính SQL của endpoint gây ra |
+| 403 | `not_granted` | egret từ chối — service account không có grant `data_api_endpoint:invoke` trên endpoint này (§6.2 bước 4). Cố ý là một code khác với hai hàng trên: cách sửa là cấp grant trên endpoint, không phải grant trong Ranger |
 | 404 | `not_found` | không tồn tại, đã disable, sai workspace, workspace đã archive, hoặc path không chuẩn hoá được — MỘT câu trả lời cho tất cả |
 | 429 | `rate_limited` | kèm `Retry-After`, tính từ thời điểm bucket đầy lại |
 | 500 | `internal` | lỗi phía egret, và mọi lỗi engine mà P4 chưa phân loại được sâu hơn (xem dưới) |

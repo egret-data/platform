@@ -93,6 +93,40 @@ use super::ServingError;
 /// clients have not come back.
 const CONFIG_DRIFT_RETRY_AFTER_SECS: u64 = 300;
 
+/// Does this engine failure mean "the principal may not read this data"?
+///
+/// Matched on the message because neither connector surfaces a typed
+/// authorization error: Trino answers `Access Denied: …` and StarRocks answers
+/// with its own permission wording. **A substring match is a heuristic and is
+/// documented as one** — a false negative merely returns today's generic
+/// `internal` error (safe: nothing leaks either way), which is why the match
+/// is deliberately narrow rather than clever. A broader match would risk the
+/// opposite failure, a false POSITIVE that sends an operator to Ranger for a
+/// denial the endpoint's own SQL caused.
+///
+/// # This heuristic is UNVERIFIED against a live engine
+///
+/// The strings below were chosen by inspecting Trino's and StarRocks'
+/// documented error wording, not by reading a real denial off either
+/// connector. This codebase has been wrong three separate times about engine
+/// behaviour asserted from the wrong instrument (see
+/// `measure-with-the-right-instrument` in project memory), so that gap is
+/// recorded here rather than implied by silence. Attempted verification:
+/// the local dev Trino coordinator cannot serve ANY Data API request —
+/// `deploy/trino/etc/config.properties` sets `required-audience=trino` while
+/// egret's engine-token minter signs `aud: "engine"`, so nothing egret mints
+/// authenticates to it at all, permission-denied or otherwise; this is a known
+/// config defect, not something fixed here. No StarRocks-backed manual
+/// integration test exists for the Data API path to fall back to. Whoever next
+/// has a live-authenticating Trino or StarRocks handy should run a genuinely
+/// unauthorized query through this path, quote the verbatim message, and
+/// either confirm a string below matches it or extend the list — the
+/// alternative is trusting a heuristic no one has watched fire.
+pub(crate) fn is_permission_denied(msg: &str) -> bool {
+    let m = msg.to_ascii_lowercase();
+    m.contains("access denied") || m.contains("permission denied") || m.contains("not authorized")
+}
+
 /// The serving surface's error envelope (spec §7).
 ///
 /// Named `ServingErrorBody` and not `ErrorBody` on purpose. `egret_core::http`
@@ -186,6 +220,20 @@ pub(crate) fn to_wire(e: &ServingError) -> Wire {
             "not_granted",
             "this service account is not granted access to this endpoint; \
              ask the endpoint's owner to grant it"
+                .into(),
+        ),
+        // Recognised from the engine's own message by `is_permission_denied`
+        // rather than from a typed signal — see that function's doc and
+        // `ServingError::RangerDenied`'s own. Names the missing STEP, not the
+        // engine's text: an author who reads a raw "Access Denied: Cannot
+        // select from table sales" debugs their SQL, which is the one thing
+        // that is not wrong here.
+        ServingError::RangerDenied => (
+            StatusCode::FORBIDDEN,
+            "ranger_denied",
+            "The service account running this endpoint is not permitted to read the \
+             underlying data. Publishing an endpoint does not grant data access — \
+             grant the service account in Ranger as well."
                 .into(),
         ),
         // The two step-7 codes. NEITHER names the parameter, and neither
@@ -291,6 +339,7 @@ pub(crate) fn to_wire(e: &ServingError) -> Wire {
         | ServingError::NotFound
         | ServingError::DataAccessDenied
         | ServingError::NotGranted
+        | ServingError::RangerDenied
         | ServingError::ParamMissing
         | ServingError::ParamInvalid
         | ServingError::RowLimitExceeded { .. }
@@ -340,6 +389,7 @@ mod tests {
             (ServingError::NotFound, 404, "not_found"),
             (ServingError::DataAccessDenied, 403, "data_access_denied"),
             (ServingError::NotGranted, 403, "not_granted"),
+            (ServingError::RangerDenied, 403, "ranger_denied"),
             (ServingError::ParamMissing, 400, "param_missing"),
             (ServingError::ParamInvalid, 400, "param_invalid"),
             (
@@ -470,6 +520,7 @@ mod tests {
             ServingError::NotFound,
             ServingError::DataAccessDenied,
             ServingError::NotGranted,
+            ServingError::RangerDenied,
             ServingError::ParamMissing,
             ServingError::ParamInvalid,
             ServingError::RowLimitExceeded { cap: 1 },
@@ -496,6 +547,11 @@ mod tests {
             // STATUS must not share a code, or the wire cannot tell "ask egret
             // for a grant" from "ask Ranger for a grant".
             to_wire(&ServingError::NotGranted).code,
+            // A third 403. Recognised from an untyped engine message rather
+            // than a typed signal, but the client-facing distinction from the
+            // two rows above is the same one that matters: which system holds
+            // the fix.
+            to_wire(&ServingError::RangerDenied).code,
             // Three 400s now. `param_missing` and `param_invalid` point at two
             // different client-side fixes, and both are different from
             // `row_limit_exceeded`, which is not the caller's fault at all.
