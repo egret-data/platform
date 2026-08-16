@@ -215,6 +215,17 @@ bảng như hiện tại, tầng này là một con số không hành động đ
 `request_path` chính vì lý do đó. Không có chúng thì "một tín hiệu chứ không phải rác" là một
 khẳng định mà schema không đỡ nổi.
 
+**Hai cột đó nằm ở CALL LIST (§4.6), không phải ở dòng này.** Một bản nháp trước của mục này
+hàm ý dòng tổng hợp sẽ tự hiển thị chúng; nó không thể, và xây như vậy chưa bao giờ khả thi.
+Dòng này do truy vấn `GROUPING SETS` sinh ra như MỘT bucket gộp *mọi* request không khớp trong
+khoảng thời gian, tức nó tóm tắt nhiều URL 404 khác nhau cùng lúc — không có một method/path
+đơn nhất nào để đặt tên, và nêu tên một cái là nói dối về n − 1 cái còn lại. Hình dạng API nói
+đúng điều đó: `ActivityRow` (kiểu row của bảng này) mang `endpoint_id`/`endpoint_name` và bốn
+metric, không có gì khác; `ActivityCallDto` — kiểu THEO TỪNG CALL của call list — mới là kiểu
+duy nhất có `request_method`/`request_path`, và ở đó nó được ghi rõ là "the ONLY identification
+a row carries when `endpoint_id` is null". Vậy dòng này chỉ có thể được **gắn nhãn** ("Không
+khớp endpoint nào") và đếm; các URL đằng sau nó được đọc từng row một ở call list bên dưới.
+
 ### 4.5 Call thử bị loại khỏi thống kê và được hiện trong danh sách
 
 Thống kê (tiles và bảng) lọc `actor_user_id IS NULL`.

@@ -215,6 +215,18 @@ stands today this tier is a number with nothing actionable behind it. §6.1 adds
 `request_method` and `request_path` for exactly this reason. Without them, "a signal, not
 noise" would be a claim the schema does not support.
 
+**Those two columns land in the CALL LIST (§4.6), not in this row.** An earlier draft of this
+section implied the aggregate row itself would render them; it cannot, and building that was
+never possible. The row is produced by the `GROUPING SETS` query as one bucket over *every*
+unmatched request in range, so it summarizes many different 404 URLs at once — there is no
+single method/path for it to name, and naming one of them would be a lie about the other
+n − 1. The API shape says the same thing: `ActivityRow` (this table's row type) carries
+`endpoint_id`/`endpoint_name` and the four metrics, and nothing else; `ActivityCallDto` — the
+call list's PER-CALL shape — is the only type with `request_method`/`request_path`, documented
+there as "the ONLY identification a row carries when `endpoint_id` is null". So this row can
+be **labelled** ("No matching endpoint") and counted, and the URLs behind it are read one row
+at a time in the call list below.
+
 ### 4.5 Trial calls are excluded from statistics and shown in the list
 
 Statistics (tiles and table) filter `actor_user_id IS NULL`.
