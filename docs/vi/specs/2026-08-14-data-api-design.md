@@ -204,6 +204,25 @@ Bốn cột cấu hình jsonb, cũng là hình dạng được đóng băng vào
 { "per_key_qps": 5, "burst": 10, "per_endpoint_qps": 50 }
 ```
 
+**Caller truyền các tham số này thế nào lúc serve** (P4.5; luật đầy đủ ở §5 của spec đó):
+
+- Chỉ qua query string. `location: "body"` bị **từ chối lúc publish** — không chỗ nào trên bề
+  mặt serving parse request body, nên tham số body không bao giờ được cấp; và nếu nó là
+  *optional* thì khối `{% if %}` của nó bị bỏ đi âm thầm, endpoint trả 200 với dữ liệu KHÔNG
+  lọc, mãi mãi.
+- Một query parameter **lặp lại** là một LIST, mỗi giá trị một bind: `?regions=EU&regions=US`
+  → `IN (?, ?)`. `enum` lặp lại là 400. `ParamSpec` không có trường multiplicity, nên
+  multiplicity đến từ request — trừ trường hợp template có **lặp** trên tham số đó, khi ấy nó
+  là list ngay cả khi chỉ cấp một giá trị, vì một scalar ở đó không phải vòng lặp một phần tử.
+- **`+` decode thành DẤU CÁCH, ở cả tên lẫn giá trị** — đúng cách đọc
+  `application/x-www-form-urlencoded` mà mọi HTTP client phổ thông đều tạo ra. Nên `?token=a+b`
+  bind `"a b"`, không phải `"a+b"`, và điều này **hỏng âm thầm**: request thành công và trả về
+  các dòng ứng với một giá trị mà caller không hề gõ. Bất cứ thứ gì có `+` trong bảng chữ cái
+  (base64 chuẩn, giá trị dạng `C++`, số có dấu) phải được gửi dưới dạng `%2B`. Đã đo sống
+  2026-08-16. Hãy ghi điều này vào tài liệu bạn đưa cho client; response không nói gì cả.
+- Tham số không khai báo bị bỏ qua (để client thêm tham số tracking không bị vỡ), và chỉ tham
+  số ĐÃ KHAI BÁO mới đi vào cache key.
+
 **Gõ sai một key trong request body là 400, không phải một giá trị bị âm thầm bỏ đi.** Body tạo (`POST`) và sửa (`PATCH`) endpoint mang `#[serde(deny_unknown_fields)]`, và các object cấu hình lồng bên trong — `params`, `output`, `cache`, `limits`, `rate_limit` — cũng vậy. Cần cả hai lớp: attribute trên request body **không** lan tới struct lồng bên trong, mà chính lớp lồng mới là nơi gây thiệt hại — `{"rate_limit": {"per_client_qps": 5}}`, đúng cách viết mà một bản nháp trước của tài liệu này đã đặc tả, từng trả về 201 với `per_key_qps` rơi về `0`. Một rate limit mà tác giả tin là mình đã đặt nhưng thực tế thì không còn tệ hơn một lỗi. Mọi trường đều hoặc bắt buộc hoặc có default, nên không có gì hợp lệ bị từ chối; các hình dạng ở trên là cách viết chính xác.
 
 Hai kiểu thuộc về nội bộ snapshot, `EndpointSnapshot` và `columns` của nó, cố ý **không** mang attribute này: server tự ghi chúng, nên tác giả không thể gõ sai ở đó. Lưu ý cái giá phải trả trên các kiểu cấu hình — chúng cũng chính là cách đọc lại `jsonb` đã lưu, nên nếu một phiên bản sau thêm trường rồi binary bị roll back, code cũ sẽ từ chối các row do code mới ghi, dưới dạng 500 khi đọc thay vì parse sai âm thầm.
@@ -368,12 +387,14 @@ GET /data-api/v1/{ws}/{path}
     data_api_endpoint:{id}
  5. rate limit (theo endpoint và theo client)                    ✗→ 429 + Retry-After
  6. cache lookup                                                 hit → trả
- 7. render params → SQL an toàn theo dialect                     ✗→ 400
+ 7. render params → SQL đã bind (`?` + binds)                    ✗→ 400
  8. machine-idp mint engine token cho SA
     → QueryExecPort::execute_as
  9. Ranger lọc row/column ở engine, dưới danh nghĩa SA
 10. shape output → lưu cache → access_log → trả
 ```
+
+**Bước 7 đã được hiện thực từ P4.5** (`2026-08-15-data-api-parameters-design.md`), và tài liệu này không còn mô tả nó là chưa có. Giá trị được **bind**, không nội suy: template render qua một environment `minijinja` đã siết, mà formatter của nó chỉ có thể phát ra một bind marker — nên mọi `{{ … }}` thành `?` và giá trị đi cạnh câu lệnh. StarRocks bind ở mức wire; Trino mang câu lệnh trong `X-Trino-Prepared-Statement` và giá trị trong `EXECUTE … USING`. Bước 7 được tách làm hai quanh bước 6 là có lý do: phần resolve (percent-decode, bỏ tham số không khai báo, áp `default`, kiểm kiểu) chạy **trước** khi tra cache, vì key phải mô tả đúng cái mà request sẽ render; phần render chạy **sau** khi cache miss, vì một cache hit không cần câu lệnh nào. `param_invalid` / `param_missing` là 400 thật, đã sống. Một version được publish trước khi cổng kiểm tham số đạt revision hiện tại sẽ bị từ chối bằng **503 `param_gate_stale`**, trước khi được key, cache hay render — xem §7 của spec P4.5. Đã live-check đầu-cuối trên StarRocks ngày 2026-08-16.
 
 **Bước 1 là stateless và không tốn round-trip DB nào.** Bearer token là JWT do chính machine-IdP của egret ký, nên serving path chỉ verify chữ ký với JWKS rồi đọc thẳng `egret_user_id` và `ws` từ claim — không có tra cứu credential, và không có Argon2, trên hot path. Đó chính là lý do §6.1 chọn đổi token thay vì key kiểm mỗi request. Cái giá là cửa sổ thu hồi mà §6.1 chặn ở 600s.
 
@@ -396,7 +417,7 @@ Vì vậy cấu hình cache mang theo một `scope`:
 - `per_principal` (mặc định) — cache key gồm `service_account_id`.
 - `shared` — **chỉ được phép khi connection không chạy query dưới danh nghĩa caller**: không `delegated` và cũng không `options.impersonate`. Kiểm tại validate time, để cấu hình sai không thể publish ngay từ đầu. Cả hai trường đều tính, và chỉ một trong hai cũng đủ để loại — xem §5.3.
 
-Bản thân key là `endpoint_id ‖ version ‖ tham số đã khai báo ‖ principal`, băm với **mọi trường có tiền tố độ dài** và principal nằm CUỐI. Hai quy tắc mà bước 7 không được phá khi thay map tham số bằng bản đã render:
+Bản thân key là `endpoint_id ‖ version ‖ tham số đã khai báo ‖ principal`, băm với **mọi trường có tiền tố độ dài** và principal nằm CUỐI. Hai quy tắc mà bước 7 phải giữ khi thay map tham số bằng bản đã resolve, và nó có giữ (P4.5 dẫn xuất key từ các `Param` đã resolve chứ không từ text của request, nên key và render không thể lệch nhau về mặt cấu trúc):
 
 - **Chỉ băm tham số ĐÃ KHAI BÁO.** Tham số không khai báo không thể ảnh hưởng đến response, nên cũng không được ảnh hưởng đến entry — băm cả query string cho phép một client đã xác thực tạo ra vô hạn entry trong cache dùng chung cho mọi workspace trong process.
 - **Tiền tố độ dài, không dùng ký tự phân tách.** Ký tự phân tách chỉ an toàn khi giá trị không thể chứa nó, hôm nay đúng vì `http::Uri` từ chối các byte điều khiển trong query string thô — một tính chất do một crate mà cache không hề nhắc tới nắm giữ, và nó biến mất ngay khi tham số được GIẢI MÃ. Với ký tự phân tách `0x00`, `?a=1%00b%002` băm ra y hệt `?a=1&b=2`. Cùng principal, nên không bao giờ là rò rỉ xuyên danh tính, nhưng khi tham số đi vào SQL thì đó là số dòng của bộ lọc này được phục vụ cho bộ lọc khác.
@@ -445,10 +466,11 @@ Một envelope ổn định, máy đọc được:
 | 503 | `schema_drift` | cột engine trả về không còn khớp cột đã đóng băng trong version; từ chối chứ không định hình lại (§5.1.2) |
 | 503 | `output_naming_collision` | `output.naming` ánh xạ hai cột đã đóng băng vào cùng một key, khiến một cột được quảng cáo trong `meta.columns` biến mất khỏi mọi dòng |
 | 503 | `cache_scope_stale` | bản `shared` có cặp `(delegated, options.impersonate)` đã đóng băng không còn khớp hàng `query.databases` hiện tại (§6.3) |
+| 503 | `param_gate_stale` | version đang live có khai báo tham số nhưng được đóng băng trước khi cổng kiểm tham số lúc publish đạt revision hiện tại, nên chưa luật nào từng nhìn vào template của nó; bị từ chối trước khi key, cache hay render (P4.5 §7) |
 
-**Cả ba cái 503 là 503 chứ không phải 500** vì một lý do: phía egret không hỏng gì cả. Cấu hình đã publish của endpoint thôi không còn mô tả đúng dữ liệu của nó, và việc sửa thuộc về tác giả hoặc người vận hành — publish lại, đổi `naming`, hoặc đưa connection về như cũ. Riêng `cache_scope_stale` cố ý KHÔNG âm thầm hạ xuống khóa theo principal: phục vụ endpoint theo kiểu khác sẽ giữ cho nó chạy được nhưng che mất chỗ lệch khỏi đúng người có thể sửa.
+**Cả bốn cái 503 là 503 chứ không phải 500** vì một lý do: phía egret không hỏng gì cả. Cấu hình đã publish của endpoint thôi không còn mô tả đúng dữ liệu của nó, và việc sửa thuộc về tác giả hoặc người vận hành — publish lại, đổi `naming`, hoặc đưa connection về như cũ. Riêng `cache_scope_stale` cố ý KHÔNG âm thầm hạ xuống khóa theo principal: phục vụ endpoint theo kiểu khác sẽ giữ cho nó chạy được nhưng che mất chỗ lệch khỏi đúng người có thể sửa.
 
-**Cả ba đều mang `Retry-After: 300`, và con số đó là một CẬN DƯỚI chứ không phải một dự báo.** Không cái nào tự lành — chỉ con người mới xoá được — nên bản năng là không gửi header nào cả. Bản năng đó hiểu sai một 503 trống làm gì: nó không dừng retry, nó để khoảng cách retry cho mặc định của client, mà với các thư viện retry phổ biến là exponential backoff bắt đầu từ khoảng một giây. Cả một đội client vì thế sẽ dập mạnh nhất đúng vào lúc con người cần nhận ra vấn đề. RFC 9110 §10.2.3 định nghĩa `Retry-After` trên 503 là *khoảng thời gian TỐI THIỂU user agent được yêu cầu chờ*, rõ ràng không phải lời hứa rằng tình trạng đã hết — nên nói năm phút vừa đúng vừa yên tĩnh hơn hẳn. Lưu ý `Retry-After` của 429 là một thứ khác mang cùng cái tên: nó tính từ bucket và LÀ một dự báo về lúc lệnh từ chối được gỡ.
+**Cả bốn đều mang `Retry-After: 300`, và con số đó là một CẬN DƯỚI chứ không phải một dự báo.** Không cái nào tự lành — chỉ con người mới xoá được — nên bản năng là không gửi header nào cả. Bản năng đó hiểu sai một 503 trống làm gì: nó không dừng retry, nó để khoảng cách retry cho mặc định của client, mà với các thư viện retry phổ biến là exponential backoff bắt đầu từ khoảng một giây. Cả một đội client vì thế sẽ dập mạnh nhất đúng vào lúc con người cần nhận ra vấn đề. RFC 9110 §10.2.3 định nghĩa `Retry-After` trên 503 là *khoảng thời gian TỐI THIỂU user agent được yêu cầu chờ*, rõ ràng không phải lời hứa rằng tình trạng đã hết — nên nói năm phút vừa đúng vừa yên tĩnh hơn hẳn. Lưu ý `Retry-After` của 429 là một thứ khác mang cùng cái tên: nó tính từ bucket và LÀ một dự báo về lúc lệnh từ chối được gỡ.
 
 ### Những code bảng này từng hứa, và vì sao P4 không phát ra chúng
 
@@ -456,7 +478,7 @@ Mỗi cái là một quyết định, không phải một thiếu sót. Một co
 
 | HTTP | code | Vì sao chưa sống |
 |---|---|---|
-| 400 | `param_invalid` / `param_missing` | §6.2 bước 7 (render `params` đã khai báo vào SQL) chưa làm, nên chưa có input nào của caller được validate ở đâu cả. Chúng đến cùng bước 7 — và khi đó, cả hai đều không được nêu TÊN tham số: tên là của tác giả, nêu ra tức là biến bề mặt lỗi thành danh mục các tham số mà endpoint khai báo. |
+| 400 | `param_invalid` / `param_missing` | **Đã sống từ P4.5**, phase hiện thực §6.2 bước 7. Cả hai đều không nêu TÊN tham số: tên là của tác giả, nêu ra tức là biến bề mặt lỗi thành danh mục các tham số mà endpoint khai báo. |
 | 502 | `engine_unavailable` | **không quyết định được ở seam này.** `QueryExecPort` trả `egret_core::Error`, và `port_impl` gộp CẢ lỗi hạ tầng của engine (`Connect`/`Storage`/`Db`) LẪN lỗi của chính egret — resolve email của principal, mở secret của database — vào cùng một `Error::Internal`. Trả 502 sẽ gọi người vận hành dậy vì Trino trong khi thứ hỏng là metastore. |
 | 504 | `timeout` | cùng seam đó. `engine_error` map `EngineError::Timeout` thành `Error::InvalidInput("query timed out")`, một cách cố ý, vì với `describe_as` thì timeout nghĩa là query quá đắt để lập kế hoạch. Nhận ra nó ở serving path sẽ phải so khớp chuỗi message của một crate khác — một phép kiểm tra vẫn biên dịch được và âm thầm hết tác dụng đúng ngày ai đó sửa lại câu chữ. |
 
@@ -501,7 +523,8 @@ Cố ý hoãn, mỗi mục đều được ghi lại để nó là một quyết
 
 - **Ghi (INSERT/UPDATE/DELETE)** và transaction nhiều statement — cần transaction boundary, rollback, audit ghi, và chính sách về việc ai được publish endpoint ghi.
 - ~~**Bound parameter ở tầng connector.**~~ **ĐÃ BỊ THAY THẾ 2026-08-15 bởi
-  `2026-08-15-data-api-parameters-design.md` (P4.5) — bound parameters đang được xây.** Lập
+  `2026-08-15-data-api-parameters-design.md` (P4.5) — bound parameters ĐÃ SHIP, đã live-check
+  trên StarRocks ngày 2026-08-16.** Lập
   luận bên dưới vẫn giữ lại làm hồ sơ vì sao nó từng bị hoãn, kèm ba điểm đã đo lại và **sai**:
   bản vá **không** mang tính trừ đi (Trino không có kênh tham số ở tầng dây, nên `quote_string`
   vẫn sống trên đường đó, và `egret-bi` vẫn nội suy); StarRocks thì **có** bind thật ở tầng

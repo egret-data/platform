@@ -1,6 +1,6 @@
 //! URL → published snapshot → rows. The serving surface's request chain
-//! (spec §6.2 steps 1-6 and 8-10; step 7 is noted below and belongs to a later
-//! task).
+//! (spec §6.2 steps 1-10, complete — step 7 landed in P4.5 and is described
+//! under "Step 7, and the two halves it is split into" below).
 //!
 //! # The one invariant this module exists to hold
 //!

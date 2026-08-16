@@ -1,6 +1,37 @@
 //! Pure chart query builder: QuerySpec → SQL. No I/O. Filter values are the only
 //! untrusted input and pass through `sql_literal`; identifiers/expressions are
 //! dataset-sourced and trusted.
+//!
+//! # Safety model: this module INTERPOLATES, and that is now the older of two
+//!
+//! egret has three SQL-building surfaces and they do not share a safety model.
+//!
+//! * **The Data API BINDS** (`egret-dataapi/src/render.rs`). Caller values never
+//!   enter the statement text at all: the renderer's formatter can only emit a
+//!   `?`, and the value travels beside the SQL as a driver bind (StarRocks) or
+//!   an `EXECUTE … USING` item (Trino). A value there cannot break out of its
+//!   own position because it was never in a position to break out of. Shipped
+//!   and live-checked in P4.5 — see
+//!   `docs/en/specs/2026-08-15-data-api-parameters-design.md`.
+//! * **This module interpolates**, escaping through
+//!   [`egret_query_api::quote_string`]. Correctness depends on that escaper
+//!   being right for the target dialect, on every caller reaching it, and on
+//!   nobody adding a fourth interpolation site that forgets to.
+//! * **`egret-query/src/execution/template.rs` interpolates** the same way, for
+//!   SQL Lab.
+//!
+//! **This and `template.rs` were both call sites of the P1 backslash bug**
+//! (`\` unescaped while `'` was doubled, so `\'` broke out of the literal on
+//! StarRocks; Trino unaffected). The escaper was fixed; the *model* was not, and
+//! a model that has already failed once is worth naming where a reader of it
+//! will see it. `sql_literal` here is reachable with `chart:read`, the lowest BI
+//! permission, which makes it the more exposed of the two.
+//!
+//! Migrating both to binding is the larger remaining prize and was deliberately
+//! left out of P4.5 (spec §8): BI alone touches 19 charts and a large test
+//! surface, and mixing it in would force one review to hold injection analysis
+//! and BI regression analysis at once. Until that lands, **treat every new value
+//! that reaches this module as needing `sql_literal`, not as needing a review.**
 
 use egret_query_api::{quote_string, Engine};
 use serde::Deserialize;

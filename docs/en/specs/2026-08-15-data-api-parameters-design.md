@@ -236,9 +236,37 @@ client-side and a subsequent `SELECT 1` returns "Connection to the server is clo
 opens a fresh `Conn` per query so today's blast radius is one query, but a future connection
 pool would inherit a poisoned connection.
 
-`{% macro %}` and `{% call %}` disappear with the `macros` feature. **`{% filter %}` and
-`{% set x %}…{% endset %}` are parsed unconditionally and no feature removes them**, so
-publish-time validation is the only lever: a template containing either is rejected.
+**S-2 — there is a THIRD capture path, and it is not a tag.** A `{% for … recursive %}` loop
+re-entered with `{{ loop(x) }}` used **as a value** rather than as the whole emit captures the
+loop body and re-emits it, desyncing exactly as `{% filter %}` does. It was not named in the
+original text and was found by reading the VM, not by review. So the capture set is four
+things, not three: `{% filter %}`, `{% set x %}…{% endset %}`, `{% macro %}`/`{% call %}`, and
+the recursive for-loop — and the last one **is rejected at publish** like the others
+(`RenderError::RecursiveLoop`), detected on the `for` tag's tokens rather than by
+`split_whitespace`, because `{% for x in (regions)recursive %}` needs no space before the
+modifier.
+
+**S-2 — `{% raw %}` is a scanner-desync vector.** Everything inside `{% raw %}…{% endraw %}`
+is literal text to the lexer but looks like live template syntax to a byte scanner. Any rule
+implemented as a byte scan over the template source therefore reads constructs the renderer
+will never execute (over-rejection, the safe direction) and can be walked out of step with
+what actually runs. This is the general reason §4.2's guarantee is stated as a **property of
+the rendered output** — placeholder count equals bind count — rather than as a list of
+forbidden spellings, and the reason the comparison gate in `check_publish` is behavioural
+(render twice, once with typed opaque values and once with the same values plainised; any
+divergence in SQL text, placeholder count or bind text is a bare comparison, whatever its
+spelling). Five separate reviews during implementation each found a different byte-scanner
+evasion; the measured spellings were `{%+` (the whitespace-PRESERVE marker), `{# {% #}`,
+`(mode)`, `regions[0]`, `| first`, `is eq`, `{% raw %}` and a loop-header alias. **Every one
+of them was the scanner disagreeing with the lexer**, which is why the answer was to stop
+asking the scanner and start asking the lexer (see S-3 in §4.3). The scanner survives only as
+serving-path enforcement, never as the thing the guarantee rests on.
+
+`{% macro %}` and `{% call %}` disappear with the `macros` feature **when it is in fact
+absent — see S-1 in §4.5, which is why they are rejected at parse level too rather than
+assumed gone**. `{% filter %}` and `{% set x %}…{% endset %}` are parsed unconditionally and
+no feature removes them, so publish-time validation is the only lever: a template containing
+either is rejected.
 
 Backing that with a property rather than a rule: every stored template is rendered at publish
 time with representative values, and **the placeholder count must equal the bind count**. A
@@ -262,6 +290,21 @@ ORDER BY {{ sort | ident }}
 `region=EU` renders `AND region = ?` with one bound value. `regions=[EU,US,APAC]` renders
 `IN (?, ?, ?)` with three. The `IN`-list problem — where `IN (?)` binds exactly one value —
 falls out of the formatter for free; it needs no `foreach` construct of its own.
+
+**S-3 — CLOSED.** An earlier revision of this document warned that this example would not
+publish, because P3's placeholder scanner treated the whole inside of `{{ }}` as a parameter
+*name*: `{{ sort | ident }}` came back as `UndeclaredPlaceholder("sort | ident")` and the loop
+variable `{{ r }}` as `UndeclaredPlaceholder("r")`. That was fixed by asking the **lexer**
+rather than by writing a better scanner — minijinja's `Template::undeclared_variables` answers
+"which names does this template read", and it already excludes loop targets and
+`{% set %}`/`{% with %}` bindings and already includes names read only by a tag, which the
+byte scan could not see at all. The byte scan still answers the different question "where in
+the SQL does a reference stand", now keyed on the raw occurrence text rather than a parsed
+name, so `PlaceholderInsideQuotedText` is unchanged in substance. **The example above now
+publishes verbatim, and there is a test that says so.** Confirmed live on 2026-08-16 against
+StarRocks: `?regions=EU&regions=US` returned two grouped rows, a *single* `?regions=EU`
+returned one (a single value resolves to a one-element list, not a scalar — see §5's
+arity-vs-shape rule), and `?sort=` outside `allowed` was a 400.
 
 ### 4.4 Identifier positions
 
@@ -287,6 +330,16 @@ minijinja = { version = "2.24", default-features = false,
 `json`, `urlencode`, `custom_syntax`, `loop_controls` and `unstable_machinery` stay off.
 Leaving `custom_syntax` off also means no template author can change the `{{ }}` delimiters.
 
+**S-1 — the feature list is a REDUCTION, not a BOUNDARY, and an earlier revision of this
+section presented it as a guarantee.** Cargo's `resolver = "2"` unifies features across the
+workspace: the moment any other member depends on `minijinja` with default features, `macros`
+and `multi_template` are compiled back in *here*, with no change to this manifest entry and no
+warning. So `{% macro %}` and `{% call %}` cannot be assumed absent from what the parser will
+accept. What actually holds is **parse-level rejection at publish** (§4.2) plus the
+placeholder-equals-bind invariant — both of which are properties of egret's own code and
+cannot be re-enabled by a third party's dependency edit. Read the feature list as removing
+attack surface when it happens to be removed, never as the reason a construct is safe.
+
 At construction, in this order:
 
 1. `remove_global("debug")` — the highest-value single call. `debug()` is
@@ -307,9 +360,19 @@ Never call `set_loader`, `set_unknown_method_callback`, `add_function` or `add_g
 `path_loader` are compiled in unconditionally and cannot be removed, so a CI grep asserting
 they are never called is part of this work, not a follow-up.
 
-Render into a size-capped sink and under a wall-clock timeout. minijinja has **no
-output-size limit**; fuel bounds instructions, not bytes, and `'a' * 99_999_999` is legal
-under the 100 MB repeated-string cap.
+Render into a size-capped sink. minijinja has **no output-size limit**; fuel bounds
+instructions, not bytes, and `'a' * 99_999_999` is legal under the 100 MB repeated-string cap.
+
+**S-4 — this section originally also said "and under a wall-clock timeout". The render has
+none, deliberately.** `render` is synchronous, so a wall clock around it needs
+`spawn_blocking`, and expiry there does not stop the work — it detaches a runaway thread that
+keeps burning a core with nothing left holding it. The render's bound is therefore **fuel +
+the 1 MiB sink + a 1 MiB bind cap**, all three of which stop the work rather than stop waiting
+for it. The wall clock lives one layer out, on the engine call: `port_impl::run_bounded` —
+shared by `execute_as` and `execute_as_with_params`, which is why it cannot be present on one
+path and missing on the other — wraps the connector future in
+`tokio::time::timeout(limits.timeout, …)`, and expiry drops the future, which drops the
+connection. Neither connector reads `limits.timeout` itself.
 
 ### 4.6 What the template can reach
 
@@ -382,9 +445,17 @@ The serving path keeps the source rules and the placeholder==bind invariant.
   there is not a one-element loop — it is "plain is not iterable", a 500 on the ordinary
   request `?regions=EU`. Publish infers the same set from the same function, so the shape a
   definition is validated against is the shape it is served.
-- `+` decodes to a space in both names and values (the `application/x-www-form-urlencoded`
-  reading `axum` and mainstream clients produce), which silently changes a `String` value:
-  `?token=a+b` binds `"a b"`. A client sending base64 or a `C++`-shaped value must send `%2B`.
+- **S-5 — `+` decodes to a SPACE in both names and values**, the
+  `application/x-www-form-urlencoded` reading that `axum` and mainstream clients produce. This
+  silently changes a `String` value rather than failing: `?token=a+b` binds `"a b"`. Anything
+  whose alphabet contains `+` — standard base64, a `C++`-shaped literal, a signed number — is
+  corrupted unless the client sends `%2B`. **Measured live on 2026-08-16**, against rows
+  holding both spellings: `?region=EU+X` and `?region=EU%20X` each returned the `EU X` row,
+  and only `?region=EU%2BX` returned the `EU+X` row. This is the documented behaviour, not a
+  defect to be fixed on the server: changing it would break the `+`-means-space reading every
+  HTML form and HTTP client library already produces. **Client-facing endpoint documentation
+  must say it**, because nothing in the response distinguishes "you got the row you asked for"
+  from "you asked for a different value than you typed".
 
 **Errors never name the parameter.** The name is the endpoint author's, and naming it turns
 the error surface into a directory of which parameters an endpoint declares. This restates
@@ -471,6 +542,19 @@ Further:
 two different values, and **confirm the results actually differ** — that is precisely what
 does not work today and the reason this phase exists. Then call it with the parameter absent
 and confirm the `{% if %}` block was omitted rather than bound as `NULL`.
+
+**PERFORMED 2026-08-16 against StarRocks** (dev, `localhost:9030`), full transcript in
+`.superpowers/sdd/2026-08-15-data-api-p45-parameters/task-8-report.md`. Summary: `?region=EU`
+and `?region=US` returned disjoint row sets; `region` absent returned every row, so the
+`{% if %}` block was omitted rather than bound as `NULL` (which would have returned zero);
+`?d=2020-02-29` matched the leap day, so the date bound as a date; `?regions=EU&regions=US`
+rendered `IN (?, ?)` and a single `?regions=EU` rendered `IN (?)` rather than 500;
+`describe_as_with_params` returned five typed columns from the publish call site on a
+template full of `{% if %}` tags; and a snapshot with `param_gate` stripped was refused
+**503 `param_gate_stale`**. Hostile values (`EU' OR '1'='1`, a trailing `\`) came back as
+**data** — zero rows, HTTP 200 — never as an error and never as extra rows. **Trino was NOT
+live-checked over HTTP** and remains proven only by its Rust integration tests; see the
+report for why.
 
 ## 10. Residual risk, stated rather than implied
 

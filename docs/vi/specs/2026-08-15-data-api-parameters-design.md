@@ -227,9 +227,37 @@ arity **giết chết kết nối**: `StmtParamsMismatch` được raise phía c
 trả về "Connection to the server is closed". egret mở `Conn` mới mỗi truy vấn nên bán kính hiện
 tại là một truy vấn, nhưng một connection pool trong tương lai sẽ thừa hưởng kết nối đã hỏng.
 
-`{% macro %}` và `{% call %}` biến mất cùng feature `macros`. **`{% filter %}` và
-`{% set x %}…{% endset %}` được parse vô điều kiện và không feature nào bỏ được**, nên kiểm lúc
-publish là đòn bẩy duy nhất: template chứa một trong hai sẽ bị từ chối.
+**S-2 — có một lối gom thân THỨ BA, và nó không phải một tag.** Một vòng
+`{% for … recursive %}` được gọi lại bằng `{{ loop(x) }}` **dùng như một giá trị** (chứ không
+phải là toàn bộ phần emit) sẽ gom thân vòng lặp rồi phát lại, lệch đúng như `{% filter %}`.
+Nó không được nêu trong bản gốc và được tìm ra bằng cách **đọc VM**, không phải bằng review.
+Vậy tập cấu trúc gom thân là **bốn** thứ chứ không phải ba: `{% filter %}`,
+`{% set x %}…{% endset %}`, `{% macro %}`/`{% call %}`, và vòng for đệ quy — và cái cuối **bị
+từ chối lúc publish** như các cái khác (`RenderError::RecursiveLoop`), phát hiện trên **token**
+của tag `for` chứ không bằng `split_whitespace`, vì `{% for x in (regions)recursive %}` không
+cần dấu cách trước modifier.
+
+**S-2 — `{% raw %}` là một vector làm lệch pha scanner.** Mọi thứ bên trong
+`{% raw %}…{% endraw %}` là văn bản thuần với lexer nhưng trông như cú pháp template sống với
+một byte scanner. Nên bất kỳ luật nào hiện thực bằng cách quét byte trên **source** của template
+đều đọc phải những cấu trúc mà renderer sẽ không bao giờ chạy (từ chối thừa — hướng an toàn) và
+có thể bị dắt lệch khỏi thứ thực sự chạy. Đây là lý do tổng quát khiến bảo đảm ở §4.2 được phát
+biểu như một **tính chất của output đã render** — số placeholder bằng số bind — thay vì như một
+danh sách cách viết bị cấm; và là lý do cổng so sánh trong `check_publish` mang tính **hành vi**
+(render hai lần, một lần với giá trị opaque có kiểu và một lần với cùng giá trị đã "plain hoá";
+mọi sai khác về văn bản SQL, số placeholder hay văn bản bind đều là một phép so sánh trần, dù
+viết kiểu gì). Năm lượt review khác nhau lúc hiện thực, mỗi lượt tìm ra một cách né scanner
+khác nhau; các cách viết đã đo được là `{%+` (marker GIỮ khoảng trắng), `{# {% #}`, `(mode)`,
+`regions[0]`, `| first`, `is eq`, `{% raw %}` và một alias ở header vòng lặp. **Cái nào cũng
+là scanner bất đồng với lexer**, và đó là lý do lời giải là thôi hỏi scanner mà quay sang hỏi
+lexer (xem S-3 ở §4.3). Scanner chỉ còn sống như một lớp thực thi trên serving path, không bao
+giờ là chỗ bảo đảm đứng lên.
+
+`{% macro %}` và `{% call %}` biến mất cùng feature `macros` **khi feature đó thực sự vắng mặt
+— xem S-1 ở §4.5, và đó là lý do chúng còn bị từ chối ở mức parse chứ không được giả định là đã
+biến mất**. `{% filter %}` và `{% set x %}…{% endset %}` được parse vô điều kiện và không
+feature nào bỏ được, nên kiểm lúc publish là đòn bẩy duy nhất: template chứa một trong hai sẽ
+bị từ chối.
 
 Chống lưng cho luật đó bằng một **bất biến** thay vì một quy tắc: mọi template lưu lại đều được
 render lúc publish với giá trị đại diện, và **số placeholder phải bằng số bind**. Khi luật từ
@@ -253,6 +281,21 @@ ORDER BY {{ sort | ident }}
 `region=EU` render ra `AND region = ?` với một giá trị. `regions=[EU,US,APAC]` render ra
 `IN (?, ?, ?)` với ba giá trị. Bài toán danh sách `IN` — nơi `IN (?)` chỉ bind đúng một giá
 trị — **rơi ra miễn phí** từ formatter; không cần cấu trúc `foreach` riêng.
+
+**S-3 — ĐÃ ĐÓNG.** Một bản trước của tài liệu này cảnh báo rằng ví dụ trên sẽ **không**
+publish được, vì scanner placeholder của P3 coi toàn bộ phần bên trong `{{ }}` là *tên* tham
+số: `{{ sort | ident }}` quay về thành `UndeclaredPlaceholder("sort | ident")` còn biến vòng
+lặp `{{ r }}` thành `UndeclaredPlaceholder("r")`. Việc này được sửa bằng cách **hỏi lexer**
+chứ không phải bằng cách viết một scanner giỏi hơn — `Template::undeclared_variables` của
+minijinja trả lời câu "template này đọc những tên nào", và nó đã sẵn loại trừ biến vòng lặp
+cùng các ràng buộc `{% set %}`/`{% with %}`, đồng thời đã sẵn **bao gồm** những tên chỉ được
+đọc bởi một tag — thứ mà byte scan không thể thấy. Byte scan vẫn trả lời câu hỏi khác: "một
+tham chiếu đứng ở đâu trong SQL", nay khoá theo văn bản thô của occurrence thay vì theo một tên
+đã parse, nên `PlaceholderInsideQuotedText` không đổi về bản chất. **Ví dụ trên nay publish
+nguyên văn, và có test nói vậy.** Đã xác nhận sống ngày 2026-08-16 trên StarRocks:
+`?regions=EU&regions=US` trả hai dòng đã group, `?regions=EU` **một giá trị** trả một dòng
+(một giá trị đơn resolve thành list một phần tử, không phải scalar — xem luật arity-vs-shape ở
+§5), và `?sort=` ngoài `allowed` là 400.
 
 ### 4.4 Vị trí định danh
 
@@ -278,6 +321,17 @@ Bỏ `macros` và `multi_template`; thêm `fuel` vì nó **không** bật mặc 
 `custom_syntax`, `loop_controls` và `unstable_machinery` giữ tắt. Tắt `custom_syntax` cũng
 đồng nghĩa không tác giả nào đổi được dấu phân cách `{{ }}`.
 
+**S-1 — danh sách feature là một sự GIẢM BỚT, không phải một RANH GIỚI, và một bản trước của
+mục này đã trình bày nó như một bảo đảm.** `resolver = "2"` của Cargo hợp nhất feature trên
+toàn workspace: ngay khi bất kỳ member nào khác phụ thuộc `minijinja` với default features,
+`macros` và `multi_template` được biên dịch trở lại *ở đây*, không đổi một dòng nào trong
+manifest này và không có cảnh báo nào. Vậy nên không được giả định `{% macro %}` và
+`{% call %}` vắng mặt khỏi thứ mà parser chấp nhận. Thứ thực sự giữ được là **từ chối ở mức
+parse lúc publish** (§4.2) cộng bất biến số-placeholder-bằng-số-bind — cả hai đều là tính chất
+của code egret và không thể bị bật lại bởi một thay đổi dependency của bên thứ ba. Hãy đọc
+danh sách feature như một cách giảm bề mặt tấn công khi nó tình cờ được giảm, đừng bao giờ đọc
+nó như lý do một cấu trúc là an toàn.
+
 Lúc dựng, theo thứ tự này:
 
 1. `remove_global("debug")` — **lệnh gọi giá trị nhất**. `debug()` là `format!("{state:#?}")`;
@@ -298,9 +352,19 @@ chỉ dùng `add_template_owned`. **Feature `loader` là no-op** — `set_loader
 luôn được biên dịch vào và không bỏ được, nên một lệnh grep trong CI khẳng định chúng không bao
 giờ được gọi là **một phần của việc này**, không phải việc làm sau.
 
-Render vào một sink giới hạn kích thước và dưới một timeout theo đồng hồ. minijinja **không có
-giới hạn kích thước output**; fuel giới hạn lệnh chứ không giới hạn byte, và `'a' * 99_999_999`
-là hợp lệ dưới ngưỡng chuỗi lặp 100 MB.
+Render vào một sink giới hạn kích thước. minijinja **không có giới hạn kích thước output**;
+fuel giới hạn lệnh chứ không giới hạn byte, và `'a' * 99_999_999` là hợp lệ dưới ngưỡng chuỗi
+lặp 100 MB.
+
+**S-4 — mục này ban đầu còn nói "và dưới một timeout theo đồng hồ". Phần render KHÔNG có
+timeout đó, một cách cố ý.** `render` là đồng bộ, nên muốn có đồng hồ bao quanh thì phải
+`spawn_blocking`, mà hết hạn ở đó không dừng được công việc — nó **tách rời** một thread chạy
+hoang, tiếp tục đốt một core mà không còn ai giữ. Vậy giới hạn của render là **fuel + sink
+1 MiB + trần bind 1 MiB**, cả ba đều dừng công việc chứ không phải dừng chờ. Đồng hồ nằm ở lớp
+ngoài, trên lệnh gọi engine: `port_impl::run_bounded` — dùng chung bởi `execute_as` và
+`execute_as_with_params`, chính vì thế nó không thể có ở đường này mà thiếu ở đường kia — bọc
+future của connector trong `tokio::time::timeout(limits.timeout, …)`, và hết hạn thì drop
+future, kéo theo drop kết nối. Bản thân hai connector đều không đọc `limits.timeout`.
 
 ### 4.6 Template với tới được những gì
 
@@ -374,10 +438,16 @@ request. Đường phục vụ giữ các luật nguồn và bất biến số p
   không phải vòng lặp một phần tử — nó là "plain is not iterable", tức 500 cho request hết sức
   bình thường `?regions=EU`. Publish suy ra cùng tập đó bằng cùng một hàm, nên hình dạng mà
   định nghĩa được kiểm và hình dạng nó được phục vụ không thể lệch nhau.
-- `+` giải mã thành dấu cách ở **cả** tên lẫn giá trị (cách đọc
-  `application/x-www-form-urlencoded` mà `axum` và các client phổ biến sinh ra), nên nó âm
-  thầm đổi một giá trị `String`: `?token=a+b` bind `"a b"`. Client gửi base64 hay giá trị dạng
-  `C++` phải gửi `%2B`.
+- **S-5 — `+` giải mã thành DẤU CÁCH ở cả tên lẫn giá trị**, đúng cách đọc
+  `application/x-www-form-urlencoded` mà `axum` và các client phổ biến sinh ra. Nó **âm thầm**
+  đổi một giá trị `String` chứ không báo lỗi: `?token=a+b` bind `"a b"`. Bất cứ thứ gì có `+`
+  trong bảng chữ cái — base64 chuẩn, một literal dạng `C++`, một số có dấu — đều bị hỏng trừ
+  khi client gửi `%2B`. **Đã đo sống 2026-08-16**, trên các dòng chứa cả hai cách viết:
+  `?region=EU+X` và `?region=EU%20X` đều trả về dòng `EU X`, chỉ `?region=EU%2BX` trả về dòng
+  `EU+X`. Đây là hành vi đã tài liệu hoá, không phải lỗi cần sửa ở server: đổi nó sẽ phá cách
+  đọc `+`-là-dấu-cách mà mọi HTML form và mọi thư viện HTTP client đều đang sinh ra. **Tài
+  liệu endpoint gửi cho client phải nói điều này**, vì không có gì trong response phân biệt
+  "bạn nhận đúng dòng bạn hỏi" với "bạn đã hỏi một giá trị khác thứ bạn gõ".
 
 **Thông báo lỗi không bao giờ nêu tên tham số.** Tên là của tác giả endpoint, và nêu tên biến
 bề mặt lỗi thành danh mục các tham số mà endpoint khai báo. Đây là nhắc lại §7 của spec gốc,
@@ -464,6 +534,19 @@ Ngoài ra:
 trị khác nhau, và **xác nhận kết quả thực sự khác nhau** — đó chính xác là thứ hôm nay không
 hoạt động và là lý do phase này tồn tại. Sau đó gọi với tham số vắng mặt và xác nhận khối
 `{% if %}` đã bị bỏ đi chứ không phải bind `NULL`.
+
+**ĐÃ THỰC HIỆN 2026-08-16 trên StarRocks** (dev, `localhost:9030`), toàn bộ transcript ở
+`.superpowers/sdd/2026-08-15-data-api-p45-parameters/task-8-report.md`. Tóm tắt: `?region=EU`
+và `?region=US` trả về hai tập dòng rời nhau; thiếu `region` trả về **mọi** dòng, tức khối
+`{% if %}` đã bị bỏ đi chứ không bind `NULL` (bind `NULL` sẽ trả về không dòng nào);
+`?d=2020-02-29` khớp đúng ngày nhuận, tức date bind như một date; `?regions=EU&regions=US`
+render `IN (?, ?)` còn `?regions=EU` một giá trị render `IN (?)` chứ không 500;
+`describe_as_with_params` trả về năm cột có kiểu từ chính call site publish, trên một template
+đầy tag `{% if %}`; và một snapshot bị xoá `param_gate` bị từ chối **503 `param_gate_stale`**.
+Các giá trị thù địch (`EU' OR '1'='1`, một `\` ở cuối) quay về dưới dạng **dữ liệu** — không
+dòng nào, HTTP 200 — không bao giờ là lỗi và không bao giờ là dòng thừa. **Trino CHƯA được
+kiểm sống qua HTTP** và hiện chỉ được chứng minh bởi các integration test Rust của nó; xem
+report để biết lý do.
 
 ## 10. Rủi ro còn lại, nói thẳng thay vì để ngầm
 
