@@ -963,11 +963,16 @@ fn execution_limits(snap: &EndpointSnapshot) -> egret_query_api::Limits {
 ///
 /// The Ranger denial is the one given its own answer, because it is the one
 /// the operator can act on and the one that must never be reported as bad
-/// input — recognised two ways: a typed `egret_core::Error::Forbidden`
-/// ([`ServingError::DataAccessDenied`]), or, since neither shipped connector
-/// actually returns that type, a message [`is_permission_denied`] recognises
-/// on an otherwise-untyped failure ([`ServingError::RangerDenied`] — see that
-/// variant's doc for why the two exist side by side).
+/// input — recognised two ways. `egret_core::Error::Forbidden` is typed and
+/// becomes [`ServingError::DataAccessDenied`]; Trino's connector produces it
+/// whenever the COORDINATOR's own HTTP response is 401/403
+/// (`connector/trino.rs`'s `send()`), which conflates a Ranger/file-ACL deny
+/// with a bad or expired engine token and cannot tell the two apart. Every
+/// OTHER shape — StarRocks entirely, and a Trino denial that instead surfaces
+/// as a query-level failure inside a 200 — arrives untyped, and
+/// [`is_permission_denied`] recognises THOSE by message into
+/// [`ServingError::RangerDenied`] (see that variant's doc for why the two
+/// exist side by side rather than one replacing the other).
 ///
 /// # Everything else is `Internal`, and that is now a decision rather than a gap
 ///
@@ -1021,7 +1026,14 @@ fn engine_error(e: egret_core::Error) -> ServingError {
             // below — `Display`, not a consuming conversion.
             let msg = other.to_string();
             if is_permission_denied(&msg) {
-                return ServingError::RangerDenied;
+                // `raw` never reaches the wire — `to_wire` ignores it, same as
+                // `Internal`'s source — but it does reach `serve`'s `error =
+                // ?e` log line, so a false-positive classification still
+                // leaves the engine's actual words in the server log. See
+                // `ServingError::RangerDenied`'s doc for why that matters.
+                return ServingError::RangerDenied {
+                    raw: anyhow::anyhow!("{msg}"),
+                };
             }
             ServingError::internal(other)
         }

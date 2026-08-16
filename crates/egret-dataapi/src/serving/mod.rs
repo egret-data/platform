@@ -115,16 +115,23 @@ pub enum ServingError {
     /// is the only tool available here and why it is documented as a
     /// heuristic, not a certainty.
     ///
-    /// **This is the variant a real Trino or StarRocks denial actually
-    /// produces today.** [`Self::DataAccessDenied`] exists for a connector
-    /// that returns a typed `egret_core::Error::Forbidden`, but neither
-    /// connector does that — both fold a Ranger denial into the same
-    /// unstructured failure shape as everything else, distinguishable only by
-    /// its message. `DataAccessDenied` is kept as the answer for a connector
-    /// that DOES type it, should one ever exist; this is the answer for the
-    /// ones that exist now. The two share a status and a meaning, and it is
-    /// `router::engine_error` — not this file — that decides which shape it
-    /// received.
+    /// **[`Self::DataAccessDenied`] IS reachable, and this variant exists
+    /// alongside it rather than instead of it.** Trino's connector
+    /// (`connector/trino.rs`'s `send()`) DOES return a typed
+    /// `egret_core::Error::Forbidden` — but only when the COORDINATOR itself
+    /// answers HTTP 401/403, which conflates two causes it cannot tell apart:
+    /// a Ranger/file-ACL deny, or simply a bad or expired engine token. That
+    /// HTTP-layer signal is what `DataAccessDenied` means, which is also why
+    /// its message cannot name Ranger specifically.
+    ///
+    /// StarRocks' connector has no equivalent typed path, and a Trino denial
+    /// that instead surfaces as a query-level error INSIDE a successful HTTP
+    /// response (the coordinator answered 200, the query itself failed) is
+    /// likewise untyped. Both land here, as an ordinary query failure whose
+    /// only distinguishing feature is its message — which is what
+    /// [`super::error::is_permission_denied`] reads. The two variants share a
+    /// status and a meaning; `router::engine_error` is what decides which
+    /// shape a given failure arrived in.
     ///
     /// Distinct from [`Self::NotGranted`] for the same reason
     /// [`Self::DataAccessDenied`] is: two different people's problems with two
@@ -133,8 +140,22 @@ pub enum ServingError {
     /// This variant means the engine refused the DATA — the fix is a Ranger
     /// grant. Conflating them would send an admin to write an egret grant that
     /// already exists while the actual gap is in Ranger.
+    ///
+    /// **Carries the raw engine message, unlike every other 4xx above.** The
+    /// wire body never renders it — [`super::error::to_wire`] ignores the
+    /// field, same as [`Self::Internal`] ignores its own source — but a
+    /// message-based heuristic can false-positive, and a false positive here
+    /// sends an admin to edit Ranger policy for a failure that was actually,
+    /// say, malformed SQL. Discarding the message at classification time would
+    /// leave production with no way to tell that had happened; keeping it lets
+    /// the log at `serve`'s failure branch (`error = ?e`) record what the
+    /// engine actually said, next to the fixed code and message the caller
+    /// received.
     #[error("data access denied by the engine's policy")]
-    RangerDenied,
+    RangerDenied {
+        #[source]
+        raw: anyhow::Error,
+    },
     /// A `required` parameter the caller did not supply and the author gave no
     /// `default` for (spec §5, serve-time rules).
     ///

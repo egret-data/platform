@@ -95,9 +95,15 @@ const CONFIG_DRIFT_RETRY_AFTER_SECS: u64 = 300;
 
 /// Does this engine failure mean "the principal may not read this data"?
 ///
-/// Matched on the message because neither connector surfaces a typed
-/// authorization error: Trino answers `Access Denied: …` and StarRocks answers
-/// with its own permission wording. **A substring match is a heuristic and is
+/// Matched on the message because this function only ever sees what
+/// `router::engine_error` could NOT type. Trino's connector does return a
+/// typed `egret_core::Error::Forbidden`, but only when the coordinator's own
+/// HTTP response is 401/403 — `engine_error` peels that case off first, into
+/// [`super::ServingError::DataAccessDenied`], before this function ever runs.
+/// Everything that reaches here is untyped: a Trino denial that instead
+/// surfaces as a query-level failure inside a 200 (`Access Denied: …`), and
+/// every StarRocks failure, typed or not — StarRocks' connector has no
+/// `Forbidden` path at all. **A substring match is a heuristic and is
 /// documented as one** — a false negative merely returns today's generic
 /// `internal` error (safe: nothing leaks either way), which is why the match
 /// is deliberately narrow rather than clever. A broader match would risk the
@@ -194,14 +200,22 @@ pub(crate) fn to_wire(e: &ServingError) -> Wire {
             "not_found",
             "no such endpoint".into(),
         ),
-        // The author's SQL is fine and the engine's policy denied the DATA.
-        // Reporting this as bad input sends the operator to debug the query
-        // instead of the grant, which is the whole reason it is not folded into
-        // a 400.
+        // Reachable via Trino's connector when the COORDINATOR's own HTTP
+        // response is 401/403 (`connector/trino.rs`'s `send()`), which
+        // conflates two causes it cannot tell apart: a Ranger/file-ACL deny,
+        // or a bad or expired engine token. Reporting either as bad input
+        // sends the operator to debug the query, which is the whole reason
+        // this is not folded into a 400 — but the message must not claim a
+        // single cause it does not have, so it names both and stays
+        // consistent with `ranger_denied`'s message below rather than the
+        // strictly less actionable answer for the same operational fix.
         ServingError::DataAccessDenied => (
             StatusCode::FORBIDDEN,
             "data_access_denied",
-            "the service account is not granted access to this data".into(),
+            "the service account running this endpoint was rejected by the engine; \
+             check its data permissions (for example, a Ranger grant) and that its \
+             engine credential is valid"
+                .into(),
         ),
         // Same status as the row above, a DIFFERENT code, because the fix is in
         // a different system: this one is cleared by granting the service
@@ -228,7 +242,13 @@ pub(crate) fn to_wire(e: &ServingError) -> Wire {
         // engine's text: an author who reads a raw "Access Denied: Cannot
         // select from table sales" debugs their SQL, which is the one thing
         // that is not wrong here.
-        ServingError::RangerDenied => (
+        //
+        // `raw` is deliberately NOT read below — the wire message is fixed
+        // regardless of what the engine said, same as `Internal`'s source is
+        // never rendered. It exists for the `error = ?e` log line in `serve`'s
+        // failure branch, so a false-positive classification still leaves a
+        // trace of the real engine text in production.
+        ServingError::RangerDenied { .. } => (
             StatusCode::FORBIDDEN,
             "ranger_denied",
             "The service account running this endpoint is not permitted to read the \
@@ -339,7 +359,7 @@ pub(crate) fn to_wire(e: &ServingError) -> Wire {
         | ServingError::NotFound
         | ServingError::DataAccessDenied
         | ServingError::NotGranted
-        | ServingError::RangerDenied
+        | ServingError::RangerDenied { .. }
         | ServingError::ParamMissing
         | ServingError::ParamInvalid
         | ServingError::RowLimitExceeded { .. }
@@ -389,7 +409,13 @@ mod tests {
             (ServingError::NotFound, 404, "not_found"),
             (ServingError::DataAccessDenied, 403, "data_access_denied"),
             (ServingError::NotGranted, 403, "not_granted"),
-            (ServingError::RangerDenied, 403, "ranger_denied"),
+            (
+                ServingError::RangerDenied {
+                    raw: anyhow::anyhow!("Access Denied: Cannot select from table sales"),
+                },
+                403,
+                "ranger_denied",
+            ),
             (ServingError::ParamMissing, 400, "param_missing"),
             (ServingError::ParamInvalid, 400, "param_invalid"),
             (
@@ -447,6 +473,33 @@ mod tests {
         assert!(
             !w.message.contains("trino-coordinator.internal"),
             "leaked the engine host: {}",
+            w.message
+        );
+    }
+
+    /// `RangerDenied::raw` exists ONLY for the server-side `error = ?e` log
+    /// line — see its doc comment. This is the wire half of that promise:
+    /// whatever the engine actually said, `to_wire` must render the same
+    /// fixed message every time, never the raw text.
+    #[test]
+    fn a_ranger_denial_never_renders_the_engines_raw_message() {
+        let e = ServingError::RangerDenied {
+            raw: anyhow::anyhow!("Access Denied: Cannot select from table sales"),
+        };
+        let w = to_wire(&e);
+        assert!(
+            !w.message.contains("Cannot select from table"),
+            "leaked the engine's raw denial text: {}",
+            w.message
+        );
+        assert!(
+            !w.message.contains("sales"),
+            "leaked a table name from the engine's message: {}",
+            w.message
+        );
+        assert!(
+            w.message.contains("service account"),
+            "must still point at the fix: {}",
             w.message
         );
     }
@@ -520,7 +573,9 @@ mod tests {
             ServingError::NotFound,
             ServingError::DataAccessDenied,
             ServingError::NotGranted,
-            ServingError::RangerDenied,
+            ServingError::RangerDenied {
+                raw: anyhow::anyhow!("Access Denied: Cannot select from table sales"),
+            },
             ServingError::ParamMissing,
             ServingError::ParamInvalid,
             ServingError::RowLimitExceeded { cap: 1 },
@@ -551,7 +606,10 @@ mod tests {
             // than a typed signal, but the client-facing distinction from the
             // two rows above is the same one that matters: which system holds
             // the fix.
-            to_wire(&ServingError::RangerDenied).code,
+            to_wire(&ServingError::RangerDenied {
+                raw: anyhow::anyhow!("Access Denied: Cannot select from table sales"),
+            })
+            .code,
             // Three 400s now. `param_missing` and `param_invalid` point at two
             // different client-side fixes, and both are different from
             // `row_limit_exceeded`, which is not the caller's fault at all.
