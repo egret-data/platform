@@ -24,6 +24,8 @@
 //! GET    /api/ws/{workspace}/data-api/endpoints/{id}/grants
 //! POST   /api/ws/{workspace}/data-api/endpoints/{id}/grants
 //! DELETE /api/ws/{workspace}/data-api/endpoints/{id}/grants/{service_account_id}
+//!
+//! GET    /api/ws/{workspace}/data-api/openapi
 //! ```
 //!
 //! Three invariants this module exists to hold, all of them security properties
@@ -1719,6 +1721,79 @@ async fn activity_calls(
     ))
 }
 
+// ── Generated OpenAPI (P5 §5) ────────────────────────────────────────────────
+//
+// The document a workspace hands a consumer team: the endpoints ONE service
+// account may call, described from its frozen published contract. Assembled
+// in `openapi_gen`, not through utoipa — utoipa describes this server's own
+// compiled routes, and these paths exist only in a user's data.
+
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct OpenApiQuery {
+    /// Whose invoke rights the document describes.
+    pub service_account_id: Uuid,
+    /// Narrow to a single endpoint's contract, e.g. for a per-endpoint download.
+    #[serde(default)]
+    pub endpoint_id: Option<Uuid>,
+}
+
+/// Map [`crate::openapi_gen::OpenApiGenError`] onto the crate's canonical
+/// [`DataApiError`], the same way every other handler in this module maps its
+/// failures: `Db` follows [`db_err`], `Core` passes the already-mapped
+/// [`Error`] through, and `NamingCollision` becomes a 409 naming the endpoint
+/// and telling the author to re-publish — there is no document to serve for a
+/// version `serving` itself answers 503 for.
+fn openapi_gen_err(e: crate::openapi_gen::OpenApiGenError) -> DataApiError {
+    use crate::openapi_gen::OpenApiGenError;
+    match e {
+        OpenApiGenError::NamingCollision { endpoint } => Error::Conflict(format!(
+            "endpoint {endpoint} has an output naming collision; re-publish it"
+        )),
+        OpenApiGenError::Db(e) => db_err(e),
+        OpenApiGenError::Core(e) => e,
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/data-api/openapi",
+    tag = "data-api",
+    params(WorkspacePath, OpenApiQuery),
+    responses(
+        (status = 200, description = "OpenAPI 3.0.3 document describing what service_account_id may invoke", body = serde_json::Value),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing data_api_endpoint:read permission", body = ErrorBody),
+        (status = 409, description = "A described endpoint's output naming collides; re-publish it", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn get_openapi(
+    State(st): State<DataApiState>,
+    WsContext(ctx): WsContext,
+    Query(q): Query<OpenApiQuery>,
+) -> Result<Json<serde_json::Value>, DataApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, EP_READ).await?;
+    // `service_account_id` is asked of Cedar via `can_invoke`, never resolved
+    // against `dataapi.service_accounts` first: `build` documents whatever a
+    // principal may invoke, and the whole point of this generator is that the
+    // answer can be "yes" for a principal — e.g. a `ws_admin` reaching invoke
+    // through the workspace->object cascade — that owns no row in that table at
+    // all. Gating this id on `scoped_account` first would silently narrow the
+    // document to literal service accounts and hide exactly the cascade case
+    // `can_invoke`'s module comment exists to describe. A `service_account_id`
+    // naming a real principal that simply cannot invoke anything here still
+    // answers 200 with an empty `paths` — not an error.
+    let doc = crate::openapi_gen::build(
+        &st,
+        ctx.workspace_id,
+        UserId(q.service_account_id),
+        q.endpoint_id,
+    )
+    .await
+    .map_err(openapi_gen_err)?;
+    Ok(Json(doc))
+}
+
 /// The Data API management router. Mount under `/api` so the live paths are
 /// `/api/ws/{workspace}/data-api/…` — `WsContext`'s feature gate only recognises
 /// a path beginning `/api/ws/` or `/ws/`, and `egret-server`'s
@@ -1791,6 +1866,7 @@ pub fn management_router() -> Router<DataApiState> {
             "/ws/{workspace}/data-api/activity/calls",
             get(activity_calls),
         )
+        .route("/ws/{workspace}/data-api/openapi", get(get_openapi))
 }
 
 #[derive(utoipa::OpenApi)]
@@ -1818,6 +1894,7 @@ pub fn management_router() -> Router<DataApiState> {
         revoke_endpoint_invoke,
         activity_summary,
         activity_calls,
+        get_openapi,
     ),
     components(schemas(
         DataApiServiceAccountDto,

@@ -933,6 +933,25 @@ impl Fixture {
         .await
     }
 
+    /// Insert a draft through the REAL `POST …/endpoints` route and leave it
+    /// unpublished (`state = 'draft'`) — used to prove a draft is excluded from
+    /// the generated OpenAPI document, the same way it is excluded from serving.
+    pub async fn create_draft_endpoint(&self, name: &str, path: &str) -> Uuid {
+        let (status, body) = self
+            .mgmt_post(
+                &format!("/api/ws/{}/data-api/endpoints", self.ws_slug),
+                Some(serde_json::json!({
+                    "name": name,
+                    "path": path,
+                    "database_id": self.database_id,
+                    "sql": "SELECT 1 AS n",
+                })),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "create draft failed: {body}");
+        body["id"].as_str().expect("id").parse().expect("uuid")
+    }
+
     /// Switch `options.impersonate` on a live connection AFTER a version was
     /// published against it — the other half of the pair, and the same
     /// no-re-validation window `set_database_delegated` opens.

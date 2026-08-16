@@ -46,6 +46,7 @@ pub mod clients;
 pub mod endpoints;
 mod invoke;
 pub mod lifecycle;
+pub mod openapi_gen;
 pub mod render;
 pub mod routes;
 pub mod serving;

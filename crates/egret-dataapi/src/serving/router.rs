@@ -1136,7 +1136,7 @@ fn shape_rows(
 /// both map to `totalRevenue`, which is what [`shape_rows`] refuses. The lossy
 /// version made those two *different* keys and looked correct while quietly
 /// mangling one of them.
-fn apply_naming(name: &str, naming: &str) -> String {
+pub(crate) fn apply_naming(name: &str, naming: &str) -> String {
     match naming {
         "camel" => {
             let mut out = String::with_capacity(name.len());
