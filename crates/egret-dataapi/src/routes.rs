@@ -609,7 +609,7 @@ async fn delete_service_account(
     // `notebooks.owner_user_id` is only ever set by an interactive session and a
     // service account can never log in (`users_service_has_no_password`, 0119) —
     // so this is a no-op that stays correct if that ever changes.
-    let (name, email) = st
+    let deleted = st
         .users
         .hard_delete(UserId(sa), ctx.principal.user_id)
         .await?;
@@ -621,14 +621,23 @@ async fn delete_service_account(
     // every client it owns. Nothing else survives to say it existed. The
     // columns come from `hard_delete`'s own `RETURNING`, so there is no second
     // query and nothing to race.
-    st.audit.emit(egret_audit::mutation_for(
-        &ctx.principal,
-        Some(ctx.workspace_id.0),
-        "service_account:delete",
-        "service_account",
-        Some(sa.to_string()),
-        serde_json::json!({ "name": name, "email": email }),
-    ));
+    //
+    // `hard_delete` returns `None` only in the TOCTOU window where `sa` was
+    // deleted between the `scoped_account` check above and the row `DELETE`
+    // itself — `hard_delete` treats that as the idempotent success it has
+    // always been for its other caller, not an error, so there is nothing
+    // this route actually destroyed to describe. Emitting a `delete` event
+    // with fabricated or absent columns would be worse than emitting none.
+    if let Some((name, email)) = deleted {
+        st.audit.emit(egret_audit::mutation_for(
+            &ctx.principal,
+            Some(ctx.workspace_id.0),
+            "service_account:delete",
+            "service_account",
+            Some(sa.to_string()),
+            serde_json::json!({ "name": name, "email": email }),
+        ));
+    }
     Ok(Json(Ack::ok()))
 }
 
