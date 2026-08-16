@@ -41,6 +41,7 @@ import SharedObjects from "@/routes/explore/settings/SharedObjects";
 import AccessRequests from "@/routes/explore/settings/AccessRequests";
 import WorkspaceGeneral from "@/routes/explore/settings/WorkspaceGeneral";
 import DataApiLayout from "@/routes/explore/dataapi/DataApiLayout";
+import Endpoints from "@/routes/explore/dataapi/Endpoints";
 import { Placeholder } from "@/routes/Placeholder";
 import Workspaces from "@/routes/control-plane/Workspaces";
 import WorkspaceDetail from "@/routes/control-plane/WorkspaceDetail";
@@ -109,13 +110,12 @@ function ExploreRoutes() {
           {/* Engine connections now live under Workspace settings; keep the old
               path working by redirecting into that tab. */}
           <Route path="engines" element={<Navigate to="../settings/engines" replace />} />
-          {/* The three sections (Endpoints/Clients/Activity) and the endpoint detail
-              route render `Placeholder` for now — Tasks 2/3/8/9 of the P5b frontend
-              plan swap each in for its real page. The shell itself, `RequireFeature`
-              gate, and full route tree are real as of this task. */}
+          {/* Clients/Activity and the endpoint detail route still render
+              `Placeholder` — Tasks 3/8/9 of the P5b frontend plan swap each in for
+              its real page. Endpoints (Task 2) is real. */}
           <Route path="data-api" element={<RequireFeature feature="data_api"><DataApiLayout /></RequireFeature>}>
             <Route index element={<Navigate to="endpoints" replace />} />
-            <Route path="endpoints" element={<Placeholder title="Endpoints" />} />
+            <Route path="endpoints" element={<Endpoints />} />
             {/* `new` is not a route here: creating an endpoint asks for a name in a
                 dialog and then navigates to the created id, so there is no draft URL
                 that can be opened cold. */}
