@@ -15,6 +15,13 @@ mod serving_common;
 
 use serving_common::{fixture, Fixture};
 
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use egret_core::{ColumnMeta, Error, TabularResult, UserId};
+use std::sync::Arc;
+use tower::ServiceExt;
+use uuid::Uuid;
+
 /// `POST …/endpoints/{id}/try` for one service account, with no parameters.
 async fn try_it(f: &Fixture, sa: uuid::Uuid) -> (axum::http::StatusCode, serde_json::Value) {
     f.mgmt_post(
@@ -144,4 +151,175 @@ async fn an_id_that_is_not_a_service_account_is_not_found() {
     // credential system bypassed by one request body.
     let (status, _) = try_it(&f, f.admin).await;
     assert_eq!(status, 404);
+}
+
+// ---------------------------------------------------------------------------
+// The audit event cannot be lost to a response the trial could not read.
+// ---------------------------------------------------------------------------
+
+/// One row, one column, and a value far past the trial's 4 MiB read cap.
+///
+/// The column NAME matches the frozen `n` the fixture published, so `shape_rows`
+/// sees no drift and the serving path answers a perfectly ordinary 200 — the
+/// overflow happens in the management handler afterwards, which is exactly the
+/// window under test. A published `limits.max_rows` may be a million rows, so
+/// this is a reachable shape rather than a contrived one; a single huge value is
+/// just the cheapest way to reach it.
+struct HugePort;
+
+fn col_n() -> ColumnMeta {
+    ColumnMeta {
+        name: "n".into(),
+        ty: "integer".into(),
+    }
+}
+
+#[async_trait::async_trait]
+impl egret_query_api::QueryExecPort for HugePort {
+    async fn describe_as(
+        &self,
+        _ws: Uuid,
+        _database_id: Uuid,
+        _principal: UserId,
+        _sql: &str,
+    ) -> Result<Vec<ColumnMeta>, Error> {
+        Ok(vec![col_n()])
+    }
+
+    async fn describe_as_with_params(
+        &self,
+        _ws: Uuid,
+        _database_id: Uuid,
+        _principal: UserId,
+        _sql: &str,
+        _param_count: usize,
+    ) -> Result<Vec<ColumnMeta>, Error> {
+        Ok(vec![col_n()])
+    }
+
+    async fn execute_as(
+        &self,
+        _ws: Uuid,
+        _database_id: Uuid,
+        _principal: UserId,
+        _sql: &str,
+        _limits: egret_query_api::Limits,
+    ) -> Result<TabularResult, Error> {
+        unreachable!("the serving path calls execute_as_with_params")
+    }
+
+    async fn execute_as_with_params(
+        &self,
+        _ws: Uuid,
+        _database_id: Uuid,
+        _principal: UserId,
+        _sql: &str,
+        _params: &[egret_query_api::Param],
+        _limits: egret_query_api::Limits,
+    ) -> Result<TabularResult, Error> {
+        Ok(TabularResult {
+            columns: vec![col_n()],
+            rows: vec![vec![serde_json::json!("x".repeat(5 * 1024 * 1024))]],
+            row_count: 1,
+            bytes_scanned: None,
+            truncated: false,
+        })
+    }
+}
+
+/// **A trial that RAN must be audited, even when its response is too large to
+/// read back.**
+///
+/// By the time the body is read the impersonation is a fact: the query has
+/// already executed as the service account. An audit event emitted after that
+/// read is an event a large result silently deletes — and `access_log` is not a
+/// substitute, because the two trails answer different people's questions.
+///
+/// The mutation that fails this test: move `st.audit.emit(…)` back below
+/// `axum::body::to_bytes` in `try_it::try_endpoint`.
+///
+/// Built on a CLONE of the fixture's state with two substitutions — an audit
+/// sink whose receiver this test keeps (the shared fixture drops its own), and a
+/// port that answers larger than the cap. Nothing in `serving_common` changes, so
+/// no sibling suite inherits either.
+#[tokio::test]
+async fn a_trial_too_large_to_read_is_still_audited() {
+    let Some(f) = fixture().await else { return };
+    let sa = f.create_service_account("huge").await;
+    let (granted, gbody) = f
+        .mgmt_post(
+            &format!(
+                "/api/ws/{}/data-api/endpoints/{}/grants",
+                f.ws_slug, f.endpoint_id
+            ),
+            Some(serde_json::json!({ "service_account_id": sa })),
+        )
+        .await;
+    assert_eq!(granted, 200, "grant failed: {gbody}");
+
+    let (sink, mut rx) = egret_audit::AuditSink::new(64);
+    let mut st = f.state.clone();
+    st.audit = sink;
+    st.query = Arc::new(HugePort);
+    let mgmt = axum::Router::new()
+        .nest("/api", egret_dataapi::management_router())
+        .with_state(st);
+
+    let res = mgmt
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/ws/{}/data-api/endpoints/{}/try",
+                    f.ws_slug, f.endpoint_id
+                ))
+                .header("Cookie", format!("egret_session={}", f.session))
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "service_account_id": sa, "params": {} }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::CONFLICT,
+        "the trial must fail on the cap — otherwise this test proves nothing"
+    );
+
+    // `emit` is a synchronous `try_send`, so the event is already queued.
+    let ev = rx.try_recv().expect(
+        "a trial that executed as a service account emitted no audit event: the impersonation \
+         happened before the body was read, so the record must not depend on reading it",
+    );
+    match ev {
+        egret_audit::AuditEvent::Mutation {
+            action,
+            resource_id,
+            detail,
+            ..
+        } => {
+            assert_eq!(action, "data_api_endpoint:try");
+            assert_eq!(
+                resource_id.as_deref(),
+                Some(f.endpoint_id.to_string().as_str())
+            );
+            // The status the SERVING path returned — 200. The cap is this
+            // route's limit, not the endpoint's answer, and recording the 409
+            // here would misreport what the service account was actually able
+            // to do.
+            assert_eq!(detail["status"], serde_json::json!(200), "detail: {detail}");
+            assert_eq!(
+                detail["service_account_id"].as_str(),
+                Some(sa.to_string().as_str())
+            );
+            assert!(!detail.to_string().contains("eyJ"));
+        }
+        other => panic!("unexpected audit event: {other:?}"),
+    }
+    assert!(
+        rx.try_recv().is_err(),
+        "exactly one event: a trial is one act"
+    );
 }

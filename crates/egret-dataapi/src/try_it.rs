@@ -301,6 +301,39 @@ pub async fn try_endpoint(
         .await
         .map_err(|e| Error::Internal(anyhow::anyhow!("serving router: {e}")))?;
     let status = res.status();
+
+    // An impersonation action, audited like one. Precedent: user impersonation
+    // (#332). The token is not in the detail and never will be — `tests/audit.rs`
+    // asserts the crate-wide half of that.
+    //
+    // **Emitted HERE — after the call returned, before the body is read — and the
+    // order is the property, not a style choice.** By this line the query has
+    // already run as the service account: the impersonation is a fact. Every
+    // remaining step can fail (the body can exceed [`MAX_TRIAL_BODY`], which a
+    // published `max_rows` of up to a million makes reachable in normal use), and
+    // with the emit below them a trial that really happened would leave no audit
+    // record at all. Nothing in the detail is derived from the body, so there is
+    // nothing to wait for. `access_log` would still carry the row — but the two
+    // trails are read by different people for different questions, and "was this
+    // endpoint ever run as that account" must be answerable from the audit log
+    // alone.
+    //
+    // Anything added below this line must therefore stay incapable of skipping
+    // it: keep the emit above every `?`.
+    st.audit.emit(egret_audit::mutation_for(
+        &ctx.principal,
+        Some(ctx.workspace_id.0),
+        "data_api_endpoint:try",
+        "data_api_endpoint",
+        Some(id.to_string()),
+        serde_json::json!({
+            "service_account_id": account,
+            "status": status.as_u16(),
+            "path": endpoint.path,
+            "method": endpoint.method,
+        }),
+    ));
+
     let bytes = axum::body::to_bytes(res.into_body(), MAX_TRIAL_BODY)
         .await
         .map_err(|_| {
@@ -315,23 +348,6 @@ pub async fn try_endpoint(
     // rather than replacing their result with a 500 about our own parser.
     let parsed: serde_json::Value =
         serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
-
-    // An impersonation action, audited like one. Precedent: user impersonation
-    // (#332). The token is not in the detail and never will be — `tests/audit.rs`
-    // asserts the crate-wide half of that.
-    st.audit.emit(egret_audit::mutation_for(
-        &ctx.principal,
-        Some(ctx.workspace_id.0),
-        "data_api_endpoint:try",
-        "data_api_endpoint",
-        Some(id.to_string()),
-        serde_json::json!({
-            "service_account_id": account,
-            "status": status.as_u16(),
-            "path": endpoint.path,
-            "method": endpoint.method,
-        }),
-    ));
 
     let origin = st.issuer.trim_end_matches('/');
     Ok(Json(TryResponse {
