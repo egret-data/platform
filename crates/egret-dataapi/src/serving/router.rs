@@ -34,15 +34,19 @@
 //!
 //! # Cancellation: decided, not deferred
 //!
-//! `QueryExecPort::execute_as` takes no `CancellationToken` parameter, so
-//! `limits.timeout` is this handler's whole budget. **The decision is not to add
-//! one**, because the port already owns the mechanism a caller-supplied token
-//! would duplicate:
+//! `QueryExecPort::execute_as_with_params` takes no `CancellationToken`
+//! parameter, so `limits.timeout` is this handler's whole budget. **The decision
+//! is not to add one**, because the port already owns the mechanism a
+//! caller-supplied token would duplicate:
 //!
-//! * `port_impl::execute_as` wraps the connector call in
-//!   `tokio::time::timeout(limits.timeout, …)`
-//!   (`egret-query/src/execution/port_impl.rs:201-210`). **Expiry releases egret
-//!   by DROPPING the connector future**, which drops the connection with it.
+//! * `port_impl::run_bounded` — shared by `execute_as` and
+//!   `execute_as_with_params`, which is why the wrapper cannot be present on one
+//!   path and missing on the other — wraps the connector call in
+//!   `tokio::time::timeout(limits.timeout, …)`. **Expiry releases egret by
+//!   DROPPING the connector future**, which drops the connection with it. That
+//!   wrapper is the whole wall clock on this path: neither
+//!   `Connector::execute_with_params` implementation reads `limits.timeout`
+//!   itself, and StarRocks sets no socket timeout at all.
 //! * On client disconnect axum drops this handler's future, which drops the
 //!   `execute_as` future, which drops the connector's — the same release path,
 //!   with no token threaded anywhere.
@@ -84,16 +88,31 @@
 //! checked the reasoning for; it is agreed with, not verified. If you are about
 //! to restate any of this, open the two files first.
 //!
+//! # Step 7, and the two halves it is split into
+//!
+//! P4.5 landed it, and it is two lines far apart in [`run`] for a reason.
+//!
+//! * [`super::params::resolve`] runs BEFORE the cache lookup, because the key
+//!   must describe what the request will RENDER. It percent-decodes names and
+//!   values, drops undeclared parameters, applies defaults, type-checks against
+//!   `ParamSpec.ty`, and produces both the renderer's context and the key's
+//!   bytes from one pass — read its module comment before touching either half.
+//! * [`crate::render::render`] runs after a cache MISS, because a hit needs no
+//!   statement. What goes to the engine is its output, never `snap.sql`: every
+//!   `{{ … }}` has become a `?` and the values travel beside it as binds.
+//!
+//! **`snap.sql` must not be executed from this module again.** It is the
+//! template, not the statement; sending it would send `{{ region }}` to the
+//! engine verbatim, which is the state P4 shipped in and P4.5 exists to end.
+//!
 //! # What is deliberately NOT here yet
 //!
 //! Named so nothing reads as done that is not:
 //!
-//! * step 7 — rendering declared `params` into the SQL. Until it lands, a
-//!   snapshot containing `{{placeholder}}` is sent to the engine verbatim and
-//!   fails there as a syntax error. That is a broken endpoint, not an injection:
-//!   P3's `check_params` already refuses to publish a placeholder that does not
-//!   stand where a value stands, and no caller input reaches the SQL at all
-//!   until step 7 exists.
+//! * `ParamLocation::Body` parameters. Nothing on this surface parses a request
+//!   body — [`serve_post`] takes no body extractor — so a declared `Body`
+//!   parameter resolves through its `default`, or through `required` to a 400.
+//!   It is a gap rather than a decision that body parameters are unsupported.
 //!
 //! # What Task 5 added: one id, and one place the request is described
 //!
@@ -122,7 +141,6 @@
 //! published limit is the endpoint's admission control, and a client that
 //! exhausts it should not be able to keep pulling cached rows out of it.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -139,6 +157,7 @@ use uuid::Uuid;
 use super::access_log::{AccessLogEntry, AccessLogStore};
 use super::cache::{cache_key, cache_ttl, shared_cache_allowed};
 use super::error::{to_wire, ServingErrorBody};
+use super::params;
 use super::ratelimit::{check_request, retry_after_secs};
 use super::{verify_serving_token, ServingError};
 use crate::routes::DataApiState;
@@ -569,14 +588,20 @@ async fn run(
     // while caching would report it the moment someone flipped `enabled` rather
     // than the moment the configuration became unsafe.
     let shared = shared_cache_allowed(&st.db, &snap).await?;
-    let params = declared_query_params(raw_query.as_deref(), &snap);
+    // Step 7's first half, and it runs BEFORE the cache lookup on purpose. The
+    // key has to describe what this request will RENDER, not what it asked for
+    // in the URL — see `params`' module comment. It also means a request that is
+    // simply invalid (a missing required parameter) is a 400 whether or not an
+    // entry happens to be warm, which is what makes the answer a property of the
+    // request rather than of the cache's state.
+    let resolved = params::resolve(raw_query.as_deref(), &snap)?;
     // The principal is in the key unless a re-checked `shared` says otherwise —
     // Ranger filters per principal, so this is the difference between a cache
     // and a cross-identity leak.
     let key = cache_key(
         endpoint_id,
         version,
-        &params,
+        &resolved.key,
         (!shared).then_some(principal.user_id),
     );
 
@@ -604,15 +629,27 @@ async fn run(
         }
     }
 
+    // Step 7's second half. The statement sent to the engine is NOT `snap.sql`:
+    // every `{{ … }}` in the definition has become a `?`, and `binds` carries
+    // the values in the order those markers appear. This is the line that makes
+    // `?region=EU` and `?region=US` return different rows — until it landed they
+    // returned the same rows, which is the reason P4.5 exists.
+    //
+    // Rendering happens after the cache lookup because a hit needs no statement,
+    // and it is the only work on this path that a hit gets to skip.
+    let (sql, binds) = crate::render::render(&snap.sql, &resolved.values)
+        .map_err(|e| render_error(e, resolved.has_repeats))?;
+
     let limits = execution_limits(&snap);
     let cap = limits.max_rows as u32;
     let out = st
         .query
-        .execute_as(
+        .execute_as_with_params(
             ws.id.0,
             snap.database_id,
             principal.user_id,
-            &snap.sql,
+            &sql,
+            &binds,
             limits,
         )
         .await
@@ -653,67 +690,54 @@ async fn run(
     })
 }
 
-/// The DECLARED query parameters of this request, as the cache key's map.
+/// Map a [`RenderError`] onto the serving vocabulary.
 ///
-/// # Only what the snapshot declares
+/// # Every one of these messages is AUTHOR-facing
 ///
-/// Anything the author did not declare is dropped, which bounds the key space
-/// for one endpoint and one principal to the parameters that exist. Hashing the
-/// whole query string instead — the first version — let one authenticated client
-/// mint unbounded distinct entries with `?junk=1`, `?junk=2`, …, each holding
-/// memory in a process-wide cache shared by every workspace. The cache's own
-/// eviction now bounds the damage, but a key space bounded at the source is the
-/// better half of that fix: an undeclared parameter cannot affect the response,
-/// so it must not be able to affect the entry either.
+/// `RenderError`'s own type comment says so: several of them quote the
+/// definition back — a syntax error names the construct and the line — which is
+/// the right thing at publish time and context disclosure on a public endpoint.
+/// So the default is [`ServingError::Internal`], whose body is the fixed string
+/// `"internal error"` and whose detail goes to `tracing` against this request's
+/// id. If one ever did leak the exposure would be a construct name and a line
+/// number (minijinja's `Display`, not its alternate form) rather than the
+/// template source — but that is an argument for the mapping being cheap, not
+/// for skipping it.
 ///
-/// It is also what step 7 needs regardless — the rendered set is exactly the
-/// declared set.
+/// # The one caller-shaped failure, and why a heuristic is the honest answer
 ///
-/// # Still not decoded, and still not validated
+/// A render error is almost always the ENDPOINT's fault: a definition that
+/// should never have published, caught here by the serve-time re-check. There is
+/// one exception, and it is caller-triggered. A template that uses a parameter
+/// as a scalar (`{{ region }}`) renders fine for `?region=EU` and fails for
+/// `?region=EU&region=US`, because a repeat resolves to a LIST and the formatter
+/// refuses to bind a sequence as one value (see `render::to_param`). The
+/// endpoint is not broken — it works for every single-valued call — so a 500
+/// would send an operator to debug a definition that is correct, while the
+/// caller's fix is to stop sending the duplicate.
 ///
-/// Step 7 owns both, and until it lands no caller input reaches the engine at
-/// all. Leaving VALUES raw errs toward a MISS: two encodings of one value are
-/// two entries, which costs an execution and never serves the wrong rows.
+/// `has_repeats` is therefore consulted, and only in the direction that is safe
+/// to be wrong in: it can turn a 500 into a 400 **only** for a request that
+/// actually repeated a declared parameter. It never turns a caller error into a
+/// 500, and it never widens what the body says. The alternative — matching on
+/// the text of minijinja's message — is the check that keeps compiling and
+/// silently stops working the day someone rewords it, which `port_impl`'s
+/// `engine_error` already carries a comment about.
 ///
-/// **That safety argument covers values and NOT names, and the difference is a
-/// landmine for step 7.** The match below is `p.name == k` against the raw,
-/// undecoded key, so `?d%61y=2026-01-01` does not match a declared `day`: it is
-/// dropped, and the request shares a cache entry with one that carries no `day`
-/// at all. Today that is inert — nothing renders parameters, so both requests
-/// genuinely produce the same rows. **The moment step 7 renders them it is a
-/// wrong-rows bug**, because the two requests would then produce different rows
-/// under one key.
-///
-/// So step 7 must percent-decode the key BEFORE matching it against
-/// `p.name`, not only decode the value. Decoding values alone would close the
-/// visible half and leave this one, which is the half that has no symptom until
-/// it has the worst one.
-///
-/// When step 7 lands, the RENDERED parameters (defaults applied, body parameters
-/// included) replace this — a default-valued parameter absent from the URL is
-/// still part of what produced the rows.
-///
-/// Repeats are kept as a LIST, not joined: [`cache_key`] length-prefixes each
-/// element, so `?a=1&a=2` cannot be spelled as a single value and vice versa.
-/// A joiner byte would reintroduce exactly the forgeability the length prefixes
-/// remove — see [`cache_key`]'s comment on why that matters the moment values
-/// are decoded.
-fn declared_query_params(
-    raw: Option<&str>,
-    snap: &EndpointSnapshot,
-) -> BTreeMap<String, Vec<String>> {
-    let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    if snap.params.is_empty() {
-        return out;
+/// [`RenderError::Ident`] is the one variant safe to surface as-is, and it is
+/// still mapped rather than echoed: [`super::params::resolve`] already checked
+/// every enum value against `allowed` and refused an enum repeat, so a caller
+/// cannot reach it. Reaching it means `| ident` was applied to something that is
+/// not an enum parameter — an author fault, which publish (Task 7) refuses.
+fn render_error(e: crate::render::RenderError, has_repeats: bool) -> ServingError {
+    if has_repeats {
+        tracing::debug!(
+            error = %e,
+            "data-api render failed on a request that repeated a declared parameter"
+        );
+        return ServingError::ParamInvalid;
     }
-    for pair in raw.unwrap_or("").split('&').filter(|s| !s.is_empty()) {
-        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
-        if !snap.params.iter().any(|p| p.name == k) {
-            continue;
-        }
-        out.entry(k.to_string()).or_default().push(v.to_string());
-    }
-    out
+    ServingError::internal(format!("render endpoint definition: {e}"))
 }
 
 /// Spec §6.2 step 4: does this service account hold `data_api_endpoint:invoke`

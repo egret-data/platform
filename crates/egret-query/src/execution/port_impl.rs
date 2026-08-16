@@ -170,43 +170,85 @@ impl egret_query_api::QueryExecPort for EngineState {
         // Same prelude, same scoping guarantee, same error table as `describe_as`
         // — only the verb differs.
         let spec = connect_as(self, ws, database_id, principal).await?;
-        // The serving path has no JobManager, so it must impose the budget that
-        // `run_query` imposes for the async path — see `job.rs::run_query`, which
-        // this mirrors deliberately.
-        //
-        // `Connector::execute` does NOT bound itself to `limits.timeout`, and the
-        // two engines fail differently, so the wrap is not belt-and-braces:
-        //   * StarRocks never reads `limits.timeout` at all, and its `mysql_async`
-        //     `Opts` set no read/wait timeout — without this wrap a serving
-        //     request hangs until the connection dies. StarRocks is in scope for
-        //     the Data API, so this is the case that matters.
-        //   * Trino turns `limits.timeout` into a PER-REQUEST reqwest timeout and
-        //     a `query_max_run_time` session property, but its `nextUri`
-        //     pagination loop restarts that per-request clock on every poll, so
-        //     total wall-clock is unbounded without this.
-        // `describe_as` needs no equivalent only because `Connector::describe`
-        // takes a timeout argument and both engines honour it.
-        //
-        // On expiry `tokio::time::timeout` drops the inner future, so the client
-        // is released either way; the `cancel()` below is deliberately kept to
-        // match `run_query` exactly, and is only load-bearing if a future caller
-        // holds a clone of the token (as the JobManager does). It is NOT what
-        // stops the engine-side query — for Trino that is the `query_max_run_time`
-        // session property the connector derives from this same `limits.timeout`.
-        //
-        // `limits.max_rows` is deliberately NOT applied as a SQL `LIMIT` — the
-        // connector fetches `max_rows + 1` and sets `truncated`, so the caller
-        // can tell a complete answer from a prefix. Rewriting the SQL would erase
-        // that distinction.
-        let cancel = CancellationToken::new();
-        let connector = build_connector(&spec);
-        let fut = connector.execute(sql, &limits, cancel.clone());
-        match tokio::time::timeout(limits.timeout, fut).await {
-            Ok(r) => r.map_err(engine_error),
-            Err(_) => {
-                cancel.cancel();
-                Err(engine_error(EngineError::Timeout))
-            }
+        run_bounded(&spec, sql, &[], limits).await
+    }
+
+    async fn execute_as_with_params(
+        &self,
+        ws: Uuid,
+        database_id: Uuid,
+        principal: UserId,
+        sql: &str,
+        params: &[egret_query_api::Param],
+        limits: Limits,
+    ) -> Result<TabularResult, Error> {
+        // The SAME prelude as `execute_as`, for the same reason `connect_as`
+        // exists at all: the workspace scope check and the delegation resolution
+        // are the security-critical half, and a second copy would be free to
+        // drift. The only difference between the two methods is the value of
+        // `params`, which is why they share `run_bounded` rather than each
+        // carrying their own timeout wrapper — the wrapper is the thing that was
+        // easiest to forget here (see `run_bounded`'s comment).
+        let spec = connect_as(self, ws, database_id, principal).await?;
+        run_bounded(&spec, sql, params, limits).await
+    }
+}
+
+/// Run a statement, bounded by `limits.timeout`.
+///
+/// **The wall clock lives here and nowhere below.** Neither
+/// `Connector::execute` nor `Connector::execute_with_params` bounds itself:
+/// both connectors' doc comments say so explicitly and name the outer caller as
+/// the one that owes it. For the async SQL Lab path that caller is the
+/// JobManager; the Data API serving path has no JobManager, so this is it.
+///
+/// The two engines fail differently, which is why the wrap is not
+/// belt-and-braces:
+///
+/// * StarRocks never reads `limits.timeout` at all, on either path, and its
+///   `mysql_async` `Opts` set no read/wait timeout — without this wrap a serving
+///   request hangs until the connection dies. StarRocks is in scope for the Data
+///   API, so this is the case that matters.
+/// * Trino turns `limits.timeout` into a per-request `reqwest` timeout and a
+///   `query_max_run_time` session property, but its `nextUri` pagination loop
+///   restarts that per-request clock on every poll, so total wall-clock is
+///   unbounded without this.
+///
+/// `describe_as` needs no equivalent only because `Connector::describe` takes a
+/// timeout argument and both engines honour it.
+///
+/// On expiry `tokio::time::timeout` drops the inner future, so the client is
+/// released either way; the `cancel()` below is deliberately kept to match
+/// `job.rs::run_query` exactly, and is only load-bearing if a future caller
+/// holds a clone of the token (as the JobManager does). It is NOT what stops the
+/// engine-side query — for Trino that is the `query_max_run_time` session
+/// property the connector derives from this same `limits.timeout`.
+///
+/// `limits.max_rows` is deliberately NOT applied as a SQL `LIMIT` — the
+/// connector fetches `max_rows + 1` and sets `truncated`, so the caller can tell
+/// a complete answer from a prefix. Rewriting the SQL would erase that
+/// distinction.
+///
+/// `execute_with_params` is called even for an empty `params`, rather than
+/// branching to `execute` here: both connectors' `execute_with_params` already
+/// delegate to `execute` on an empty list (`connector/trino.rs`,
+/// `connector/starrocks.rs`, and the trait's own default), so one call site
+/// keeps the unparameterised path from acquiring a second, subtly different
+/// spelling.
+async fn run_bounded(
+    spec: &ConnSpec,
+    sql: &str,
+    params: &[egret_query_api::Param],
+    limits: Limits,
+) -> Result<TabularResult, Error> {
+    let cancel = CancellationToken::new();
+    let connector = build_connector(spec);
+    let fut = connector.execute_with_params(sql, params, &limits, cancel.clone());
+    match tokio::time::timeout(limits.timeout, fut).await {
+        Ok(r) => r.map_err(engine_error),
+        Err(_) => {
+            cancel.cancel();
+            Err(engine_error(EngineError::Timeout))
         }
     }
 }

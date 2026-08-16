@@ -58,6 +58,12 @@ minijinja.workspace = true
 # concatenation so the key is fixed-length however many parameters an endpoint
 # declares, and so no separator question arises from a value containing one.
 sha2.workspace = true
+# `url::form_urlencoded` — the serving path's parameter decoding
+# (`serving/params.rs`). Reached through `url` rather than by adding
+# `form_urlencoded` directly because `url` is already the workspace's pinned
+# entry point for it, and because this must decode the way axum's own `Query`
+# extractor does: percent-decoding plus `+` as a space.
+url.workspace = true
 
 [dev-dependencies]
 tower.workspace = true

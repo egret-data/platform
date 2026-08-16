@@ -338,8 +338,9 @@ async fn a_per_principal_endpoint_is_unaffected_by_the_delegated_column() {
 /// An endpoint declaring one query parameter, `day`.
 ///
 /// P3 refuses to publish a parameter no placeholder references, so the SQL has
-/// to use it. Nothing renders it yet (step 7), and the fake engine ignores the
-/// SQL — what is under test here is the KEY.
+/// to use it. Since P4.5 the value really is rendered and bound; what is under
+/// test in this file is still the KEY, and `serving_params.rs` owns the
+/// rendering itself.
 async fn publish_with_day_param(f: &serving_common::Fixture, path: &str) {
     f.publish_with_params(
         path,
@@ -354,10 +355,10 @@ async fn publish_with_day_param(f: &serving_common::Fixture, path: &str) {
 
 #[tokio::test]
 async fn different_values_of_a_declared_param_do_not_share_an_entry() {
-    // Params do not reach the SQL until step 7, so this cannot be asserted on
-    // the ROWS yet — what it pins is that two values are two entries, which is
-    // the property step 7 will depend on. Measured at the engine: the second
-    // call must miss.
+    // Two values are two entries. Written before step 7 existed, when it could
+    // only be measured at the engine (the second call must MISS) because no
+    // value reached the SQL; that measurement is still the right one, and
+    // `serving_params.rs` now also asserts the rows themselves differ.
     let f = skip_without_db!();
     publish_with_day_param(&f, "/q").await;
 

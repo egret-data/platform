@@ -22,6 +22,10 @@ utoipa.workspace = true
 # `QueryExecPort` is the seam's one async trait (the Data API reaches execution
 # through it). A proc-macro + no runtime deps, so the leaf stays light.
 async-trait.workspace = true
+# `egret_core::Error::Internal` wraps an `anyhow::Error`, so constructing one —
+# which `execute_as_with_params`'s refusing default does — means naming anyhow.
+# egret-core already exposes it in its public API; this is not new weight.
+anyhow.workspace = true
 
 # Test-only. `serde_json` is NOT a runtime dependency of this leaf and must not
 # become one — it is here so the crate can assert the WIRE SPELLING of its own

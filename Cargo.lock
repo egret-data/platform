@@ -2928,6 +2928,7 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "url",
  "utoipa",
  "uuid",
 ]
@@ -3211,6 +3212,7 @@ dependencies = [
 name = "egret-query-api"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "egret-core",
  "serde",

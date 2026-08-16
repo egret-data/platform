@@ -7,11 +7,17 @@
 //! [`router`]: URL → published snapshot → rows. Task 4 lands [`cache`] and
 //! [`ratelimit`] — steps 6 and 5 of spec §6.2. Task 5 lands [`error`] (spec §7's
 //! envelope and its fixed code table) and [`access_log`] (spec §8).
+//!
+//! P4.5 lands [`params`] — step 7's first half, where a request and a snapshot's
+//! `ParamSpec`s become the values [`crate::render::render`] binds and the bytes
+//! the cache keys on. Read its module comment before touching either: the two
+//! projections come from one pass on purpose, and the reason is a wrong-rows bug.
 
 pub mod access_log;
 pub mod auth;
 pub mod cache;
 pub mod error;
+pub(crate) mod params;
 pub mod ratelimit;
 pub mod router;
 
@@ -49,9 +55,6 @@ pub use router::{serving_openapi, serving_router, ServingMeta, ServingResponse};
 /// None of them is constructible on today's serving path, and a dead variant
 /// would make the table look finished while nothing could ever produce the code:
 ///
-/// * `param_invalid` / `param_missing` — spec §6.2 step 7 (rendering declared
-///   `params` into the SQL) is not implemented, so no caller input is ever
-///   validated. They arrive with step 7.
 /// * `engine_unavailable` (502) and `timeout` (504) — **not decidable at this
 ///   seam.** `QueryExecPort` returns `egret_core::Error`, and `port_impl` folds
 ///   BOTH the engine's infrastructure failures (`Connect`/`Storage`/`Db`) AND
@@ -106,6 +109,28 @@ pub enum ServingError {
     /// instead send an operator hunting for a deleted endpoint.
     #[error("endpoint not granted to this service account")]
     NotGranted,
+    /// A `required` parameter the caller did not supply and the author gave no
+    /// `default` for (spec §5, serve-time rules).
+    ///
+    /// **Carries nothing, deliberately.** The parameter's name is the endpoint
+    /// author's, and putting it in a 400 turns the error surface into a
+    /// directory of which parameters an endpoint declares — the same free
+    /// oracle the single [`Self::Unauthorized`] and the single [`Self::NotFound`]
+    /// exist to close. A unit variant leaves nothing for a later edit to
+    /// interpolate out of habit; making it name a parameter would have to be a
+    /// deliberate change to this type.
+    #[error("a required parameter is missing")]
+    ParamMissing,
+    /// A supplied value that does not satisfy its `ParamSpec.ty` — a `Date` that
+    /// is not a date, a `Number` that is not one, an `Enum` value outside
+    /// `allowed`, a repeat of an `Enum`, or input past the size caps in
+    /// [`super::params`].
+    ///
+    /// Unit for the same reason as [`Self::ParamMissing`], and additionally
+    /// because echoing the VALUE back would reflect caller-controlled bytes into
+    /// a response body.
+    #[error("a parameter value is invalid")]
+    ParamInvalid,
     /// The result did not fit under the snapshot's `limits.max_rows`.
     ///
     /// An error rather than a truncated 200: a client that believes it has every
