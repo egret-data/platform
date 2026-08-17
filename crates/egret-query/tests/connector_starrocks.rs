@@ -2,6 +2,7 @@
 use egret_query::execution::connector::{build_connector, ConnSpec};
 use egret_query::execution::model::Limits;
 use egret_query::registry::model::{ConnOptions, Engine};
+use egret_query_api::Param;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
@@ -395,5 +396,102 @@ async fn starrocks_ignores_the_multi_statement_capability() {
         "StarRocks now refuses batched statements — the byte test's justification \
          in `connector/starrocks.rs` needs re-measuring, and `execute` may be able \
          to rely on the capability flag after all"
+    );
+}
+
+/// The execute path must report the same canonical type vocabulary as the
+/// describe paths. Mirrors `describe.rs`'s
+/// `starrocks_describe_returns_canonical_type_names` guard so BOTH paths carry
+/// the guarantee: `drain_rows` used to build `ColumnMeta.ty` with
+/// `format!("{:?}", c.column_type())`, which put raw protocol tags
+/// (`MYSQL_TYPE_LONG`, `MYSQL_TYPE_VAR_STRING`, `MYSQL_TYPE_NEWDECIMAL`,
+/// `MYSQL_TYPE_DATE`) in front of users instead of SQL type names.
+///
+/// The column set matches what was observed rendering wrongly in the browser:
+/// an int, a varchar, a date, a decimal.
+#[tokio::test]
+async fn starrocks_execute_returns_canonical_type_names() {
+    let Some((h, p)) = parse() else {
+        eprintln!("skip: EGRET_TEST_STARROCKS_URL not set");
+        return;
+    };
+    let c = build_connector(&spec(&h, p));
+    let limits = Limits {
+        max_rows: 10,
+        timeout: Duration::from_secs(30),
+    };
+    let r = c
+        .execute(
+            "SELECT CAST(1 AS int) AS id, CAST('EU' AS varchar(8)) AS region, \
+             CAST('2026-01-02' AS date) AS order_date, CAST(1.5 AS decimal(10,2)) AS amount",
+            &limits,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("execute failed");
+
+    for col in &r.columns {
+        assert!(
+            !col.ty.starts_with("MYSQL_TYPE"),
+            "column {:?} ty must be a SQL type name, not a debug protocol tag, got {:?}",
+            col.name,
+            col.ty
+        );
+    }
+
+    let ty_of = |name: &str| {
+        r.columns
+            .iter()
+            .find(|c| c.name == name)
+            .unwrap_or_else(|| panic!("no column {name:?} in {:?}", r.columns))
+            .ty
+            .clone()
+    };
+    assert_eq!(ty_of("id"), "int");
+    assert_eq!(ty_of("region"), "varchar");
+    assert_eq!(ty_of("order_date"), "date");
+    assert_eq!(ty_of("amount"), "decimal");
+}
+
+/// Same guarantee on the bound-parameter path. `execute` and
+/// `execute_with_params` share `drain_rows`, but they reach it through
+/// different protocols (text vs binary), and only a live check proves the
+/// binary path's `columns_ref()` is typed the same way.
+#[tokio::test]
+async fn starrocks_execute_with_params_returns_canonical_type_names() {
+    let Some((h, p)) = parse() else {
+        eprintln!("skip: EGRET_TEST_STARROCKS_URL not set");
+        return;
+    };
+    let c = build_connector(&spec(&h, p));
+    let limits = Limits {
+        max_rows: 10,
+        timeout: Duration::from_secs(30),
+    };
+    let r = c
+        .execute_with_params(
+            "SELECT CAST(? AS int) AS id, CAST('EU' AS varchar(8)) AS region",
+            &[Param::I64(7)],
+            &limits,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("execute_with_params failed");
+
+    for col in &r.columns {
+        assert!(
+            !col.ty.starts_with("MYSQL_TYPE"),
+            "column {:?} ty must be a SQL type name, not a debug protocol tag, got {:?}",
+            col.name,
+            col.ty
+        );
+    }
+    assert_eq!(
+        r.columns
+            .iter()
+            .find(|c| c.name == "id")
+            .expect("no column 'id'")
+            .ty,
+        "int"
     );
 }
