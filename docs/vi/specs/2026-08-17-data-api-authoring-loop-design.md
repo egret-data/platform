@@ -53,6 +53,8 @@ Preview render qua **`check_render_rules` và cổng tham số hành vi** — re
 
 Chú ý khác biệt với `validate`, và vì sao nó quan trọng: `validate` render bằng `representative(&draft.sql, &draft.params, &[])` — giá trị thay thế tổng hợp, vì nó không có input thật. Preview có giá trị thật của tác giả và render bằng chúng. Cả hai đi qua cùng một cổng.
 
+**Quy tắc một-statement ở đây là chuyện phân quyền, không phải chuyện nhất quán.** `data_api_endpoint:manage` KHÔNG phải `sqllab:write`. Một preview thực thi bất cứ gì body mang tới sẽ cấp cho một role chỉ có `:manage` quyền ghi tuỳ ý lên mọi engine workspace chạm được. `check_single_select` chạy đầu tiên trên đường này vì lý do đó, và nó là quy tắc duy nhất trong bộ publish **không bao giờ** được nới cho preview với lý do "preview chỉ là draft".
+
 ### 2.4 Bốn thứ preview KHÔNG làm
 
 Preview không phải một call của consumer, và mỗi thứ dưới đây nếu có sẽ khiến nó nói sai:
@@ -61,6 +63,7 @@ Preview không phải một call của consumer, và mỗi thứ dưới đây n
 - **Không tiêu rate-limit.** Một tác giả đang thử nghiệm không được phép throttle consumer đang chạy.
 - **Không đọc và không ghi cache.** Đọc sẽ hiện câu trả lời cũ cho SQL vừa sửa; ghi sẽ đầu độc thứ consumer đọc bằng một kết quả sinh ra dưới principal khác.
 - **`limits.max_rows` không áp dụng.** Preview cap ở **100 dòng**, cố định, không cấu hình được, vì tác giả muốn thấy hình dạng dữ liệu chứ không phải một triệu dòng trong trình duyệt. Con số nêu ở đây để không phó cho implementer, và UI phải nói khi nó đã cắt — một preview bị cap không bao giờ được đọc như một tập kết quả nhỏ.
+- **`limits.timeout_seconds` cũng không áp dụng.** Ngân sách của preview là **30 giây**, cố định — thấp hơn nhiều so với trần 300 giây của serving, vì người đang chờ ngồi trước bàn phím với editor mở, không phải một batch client. Body của draft không mang `limits` nào cả, nên đây là toàn bộ ngân sách chứ không phải một cái kẹp lên input của tác giả.
 
 ### 2.4.1 Preview hiện tên cột của engine và lỗi của engine
 

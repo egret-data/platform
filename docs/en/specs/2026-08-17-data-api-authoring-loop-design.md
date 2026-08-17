@@ -51,6 +51,8 @@ This is not defensive boilerplate. P4.5 spent five independent review rounds on 
 
 Note the difference from `validate`, and why it matters: `validate` renders with `representative(&draft.sql, &draft.params, &[])` — synthetic stand-in values, because it has no real input. Preview has the author's real values and renders with those. Both go through the same gate.
 
+**The single-statement rule is authorization here, not consistency.** `data_api_endpoint:manage` is not `sqllab:write`. A preview that executed whatever the body contained would hand a role holding only `:manage` arbitrary write access to every engine the workspace can reach. `check_single_select` runs first on this path for that reason, and it is the one rule in the publish set that must never be relaxed for preview on the grounds that "preview is only a draft".
+
 ### 2.4 Four things preview does not do
 
 Preview is not a consumer call, and every one of these would make it lie if it were included:
@@ -59,6 +61,7 @@ Preview is not a consumer call, and every one of these would make it lie if it w
 - **No rate-limit consumption.** An author iterating must not throttle a live consumer.
 - **No cache read or write.** Reading would show a stale answer for SQL that was just edited; writing would poison what consumers read with a result produced under a different principal.
 - **`limits.max_rows` does not apply.** Preview caps at **100 rows**, fixed and not configurable, because the author wants the shape of the data rather than a million rows in a browser. The number is named here so it is not left to the implementer, and the UI must state when it truncated — a capped preview must never read as a small result set.
+- **`limits.timeout_seconds` does not apply either.** Preview's budget is **30 seconds**, fixed — well under serving's 300-second ceiling, because the person waiting is at a keyboard with an editor open rather than a batch client. The draft body carries no `limits` at all, so this is the whole budget rather than a clamp on author input.
 
 ### 2.4.1 Preview shows the engine's own column names and the engine's own errors
 
