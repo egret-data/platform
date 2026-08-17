@@ -91,7 +91,9 @@ export function WorkspaceFeaturesTab({ workspaceId }: { workspaceId: string }) {
           const disabled = isDashboards && !chartsOn;
           const details = disabled
             ? `${f.description} Requires Charts to be enabled.`
-            : f.description;
+            : f.key === "data_api"
+              ? `${f.description} Turning this off hides the Data API pages here — live endpoints keep serving; unpublish each one individually to actually stop it.`
+              : f.description;
           return (
             <ConfigTableRow key={f.key} label={f.label} details={details} htmlFor={`feature-${f.key}`}>
               <Switch

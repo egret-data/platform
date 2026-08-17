@@ -1,8 +1,8 @@
 /**
  * Sidebar zone tests
  *
- * Verifies the workspace sidebar renders the four IA zones (Explore /
- * Data Engineering / Data Governance / Manage) with their items at the right
+ * Verifies the workspace sidebar renders the IA zones (Explore / Data API /
+ * Data Engineering / Automate / Manage) with their items at the right
  * `/explore/:ws/...` hrefs, and the Control Plane group at `/control-plane/...`.
  *
  * Sidebar requires:
@@ -66,9 +66,10 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe("Sidebar – workspace zones", () => {
-  test("renders the four zone headings", () => {
+  test("renders the five zone headings", () => {
     renderSidebar("/explore/eng/sql-lab");
     expect(screen.getByText("Explore")).toBeInTheDocument();
+    expect(screen.getByText("Data API")).toBeInTheDocument();
     expect(screen.getByText("Data Engineering")).toBeInTheDocument();
     expect(screen.getByText("Automate")).toBeInTheDocument();
     expect(screen.getByText("Manage")).toBeInTheDocument();
@@ -81,13 +82,18 @@ describe("Sidebar – workspace zones", () => {
     renderSidebar("/explore/eng/sql-lab");
     for (const label of [
       "SQL Lab",
-      "Data API",
+      "Endpoints",
+      "Clients",
+      "Activity",
       "Pipelines",
       "Workflows",
       "Workspace settings",
     ]) {
       expect(screen.getByRole("link", { name: label })).toBeInTheDocument();
     }
+    // Data API is a sidebar GROUP now (Endpoints/Clients/Activity), not an
+    // item with its own link — there is no "Data API" link to find.
+    expect(screen.queryByRole("link", { name: "Data API" })).not.toBeInTheDocument();
     // Engine connections moved into Workspace settings → Connections, so they're
     // no longer a top-level Manage item; the Manage entry is Workspace settings.
     expect(screen.queryByRole("link", { name: "Databases" })).not.toBeInTheDocument();
@@ -131,9 +137,17 @@ describe("Sidebar – workspace zones", () => {
 
   test("items link to /explore/:ws/<slug>", () => {
     renderSidebar("/explore/eng/sql-lab");
-    expect(screen.getByRole("link", { name: "Data API" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "Endpoints" })).toHaveAttribute(
       "href",
-      "/explore/eng/data-api",
+      "/explore/eng/data-api/endpoints",
+    );
+    expect(screen.getByRole("link", { name: "Clients" })).toHaveAttribute(
+      "href",
+      "/explore/eng/data-api/clients",
+    );
+    expect(screen.getByRole("link", { name: "Activity" })).toHaveAttribute(
+      "href",
+      "/explore/eng/data-api/activity",
     );
     expect(screen.getByRole("link", { name: "Workflows" })).toHaveAttribute(
       "href",
@@ -146,12 +160,54 @@ describe("Sidebar – workspace zones", () => {
   test("a group heading collapses/expands its items", async () => {
     const user = userEvent.setup();
     renderSidebar("/explore/eng/sql-lab");
-    // 'Data Engineering' starts expanded → Data API visible.
-    expect(screen.getByRole("link", { name: "Data API" })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /Data Engineering/i }));
-    expect(screen.queryByRole("link", { name: "Data API" })).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /Data Engineering/i }));
-    expect(screen.getByRole("link", { name: "Data API" })).toBeInTheDocument();
+    // 'Data API' starts expanded → its three items are visible.
+    expect(screen.getByRole("link", { name: "Endpoints" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /^Data API$/i }));
+    expect(screen.queryByRole("link", { name: "Endpoints" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Clients" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Activity" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /^Data API$/i }));
+    expect(screen.getByRole("link", { name: "Endpoints" })).toBeInTheDocument();
+  });
+
+  test("Data API sits right after Explore and before Automate", () => {
+    renderSidebar("/explore/eng/sql-lab");
+    const dataApiHeading = screen.getByRole("button", { name: /^Data API$/i });
+    const exploreHeading = screen.getByText("Explore");
+    const automateHeading = screen.getByRole("button", { name: /^Automate$/i });
+    // Explore precedes Data API…
+    expect(
+      exploreHeading.compareDocumentPosition(dataApiHeading) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    // …and Data API precedes Automate.
+    expect(
+      dataApiHeading.compareDocumentPosition(automateHeading) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  // The whole Data API group is gated on the `data_api` workspace
+  // entitlement — every item in it carries `feature: "data_api"`, so with the
+  // feature off the group filters down to zero items and the heading itself
+  // (per the generic group-drop rule tested elsewhere in this file) is
+  // dropped too, not just its items.
+  test("hides the entire Data API group when the workspace lacks the entitlement", async () => {
+    const wsResponse = (features: string[]) =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify([{ id: "1", slug: "eng", name: "Engineering", features }]),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      );
+    renderSidebar("/explore/eng/sql-lab", ADMIN_ME, () =>
+      wsResponse(["sql_lab", "datasets", "charts", "dashboards", "notebooks"]),
+    );
+    await waitFor(() => expect(screen.queryByRole("link", { name: "Endpoints" })).not.toBeInTheDocument());
+    expect(screen.queryByRole("link", { name: "Clients" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Activity" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Data API")).not.toBeInTheDocument();
+    // Unaffected groups still render.
+    expect(screen.getByRole("link", { name: "SQL Lab" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Pipelines" })).toBeInTheDocument();
   });
 });
 

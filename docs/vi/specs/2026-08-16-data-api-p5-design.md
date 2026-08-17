@@ -34,33 +34,59 @@ dụng cho một URL mà client đã deploy đang phụ thuộc vào.
 
 ### 2.1 Vị trí
 
-Nhóm sidebar `Data Engineering`, không phải Explore.
-`frontend/src/components/layout/Sidebar.tsx` đã có sẵn placeholder trơ:
+**Sửa lại 2026-08-17** (sau khi review UI đã ship; thay thế kế hoạch P5b gốc — kế hoạch cũ
+đặt một mục `Data API` duy nhất dưới `Data Engineering`, mở ra một shell — xem ghi chú ở
+Task 1 trong `docs/en/plans/2026-08-17-data-api-p5b-frontend.md`).
+
+**Data API là nhóm sidebar riêng của nó**, nằm ngay sau `Explore` và trước `Automate`, với
+`Endpoints` / `Clients` / `Activity` là ba mục anh em — cùng mẫu hình `Charts` và `Datasets`
+dùng bên trong `Explore`, không phải một mục duy nhất mở ra trang shell. Ba khu vực cộng thêm
+một route chi tiết đọc lên như một module, không phải một trang; cho nó một nhóm khiến sidebar
+là nơi duy nhất nói điều đó, thay vì một header mà module tự vẽ ra cho chính nó.
+`frontend/src/components/layout/Sidebar.tsx`:
 
 ```tsx
-{ heading: "Data Engineering", items: [
-    { label: "Data API", icon: Plug },      // không có `to:` — placeholder trơ
-    { label: "Pipelines", icon: Waypoints },
-]},
+{
+  heading: "Data API",
+  items: [
+    { label: "Endpoints", icon: Plug, to: "data-api/endpoints", feature: "data_api" },
+    { label: "Clients", icon: KeyRound, to: "data-api/clients", feature: "data_api" },
+    { label: "Activity", icon: Activity, to: "data-api/activity", feature: "data_api" },
+  ],
+},
 ```
 
-P5 gán cho mục đó `to: "data-api"` và `feature: "data_api"` (feature key đã tồn tại tại
-`crates/egret-workspace/src/features.rs:39`). Explore là nơi bạn *tiêu thụ* và phân tích;
-Data API là nơi bạn *sản xuất* một interface, cạnh Pipelines.
+Mỗi mục đều mang `feature: "data_api"` (feature key đã tồn tại tại
+`crates/egret-workspace/src/features.rs:39`), nên cả nhóm — kể cả heading — biến mất khi
+workspace thiếu entitlement, cùng quy tắc đã áp dụng cho mọi nhóm Explore có 0 mục hiển thị.
+`Data Engineering` giữ lại `Pipelines` là mục duy nhất; một nhóm chỉ có một mục vẫn ổn,
+`Automate` vốn đã như vậy.
 
 ### 2.2 Route và section nav
 
-Route `/explore/:ws/data-api`, với **section-nav dọc bên trái** — idiom của Workspace
-Settings, không phải dải tab, vì ba khu vực có bản chất khác nhau và sẽ còn thêm:
+**Sửa lại 2026-08-17** — không còn shell, không còn section nav. Mỗi trong ba trang được mount
+trực tiếp ở route riêng của nó và tự đứng vững bằng scaffold trang danh sách Explore chuẩn
+(`p-4`, `h1 text-lg`, không có subtitle), y hệt `Charts.tsx`:
 
 ```text
-Data API
-  Endpoints     danh sách, scaffold Explore chuẩn
-  Clients       service account + OAuth2 client
-  Activity      thống kê từ dataapi.access_log
+/explore/:ws/data-api/endpoints    Endpoints — danh sách, scaffold Explore chuẩn
+/explore/:ws/data-api/clients      Clients — service account + OAuth2 client
+/explore/:ws/data-api/activity     Activity — thống kê từ dataapi.access_log
+/explore/:ws/data-api              redirect sang endpoints, cho link cũ
 ```
 
-Giữ `Clients` *bên trong* Data API thay vì ở Workspace Settings → Connections là cố ý: bạn
+Thiết kế gốc (lịch sử ở §9) đặt ba trang này sau một shell `DataApiLayout` với section-nav dọc
+bên trái, mô phỏng theo Workspace Settings. Nav đó giờ dư thừa: nó đưa ra đúng ba lựa chọn mà
+sidebar đã đưa ra một khi Data API trở thành nhóm sidebar riêng, nên người đọc phải chọn giữa
+Endpoints/Clients/Activity hai lần trên cùng một màn hình — một lần ở sidebar, một lần nữa ở
+trang. Bỏ shell là bỏ nav thứ hai, không phải bỏ lựa chọn.
+
+`EndpointDetail` (`/data-api/endpoints/:id`) vẫn giữ section nav ngang riêng của nó —
+Definition · Response · Access · Try it · Versions — không bị ảnh hưởng bởi thay đổi này: đó
+là điều hướng *bên trong một đối tượng*, cùng hình dạng mà pattern route chi tiết của
+`EndpointDetail` vốn luôn có, không phải điều hướng giữa các khu vực.
+
+Giữ `Clients` *bên trong* Data API thay vì ở Workspace Settings → Connections vẫn là cố ý: bạn
 ship một API từ một chỗ.
 
 ### 2.3 Danh sách Endpoints
@@ -70,7 +96,19 @@ Theo scaffold trang danh sách Explore chuẩn: `p-4`, `h1 text-lg`, nút `"+ En
 hoá được nhóm theo folder — `SummaryStrip` đếm số kiêm luôn filter chip, và `RowActionsMenu`
 mỗi dòng.
 
-Cột: tên · method + path · trạng thái (draft/live/disabled) · version · engine · sửa lần cuối.
+Cột: tên · method + path · trạng thái (draft/live/disabled) · engine · sửa lần cuối.
+
+**Không có cột `version` riêng.** Một bản nháp trước của spec này từng liệt kê cột này, nhưng
+DTO của danh sách (`DataApiEndpointDto`) chỉ mang `live_version_id` — một id nullable, không
+phải số version trên `DataApiEndpointVersionDto`, thứ nằm sau một lượt gọi versions riêng cho
+từng endpoint mà trang này không có lý do gì để gọi cho mỗi dòng. Với `live`/`draft`, id đó dư
+thừa hoàn toàn so với badge trạng thái (một draft mới tạo có id null; `EndpointStore::publish`
+là nơi DUY NHẤT set nó, đồng thời với `state = 'live'`). Nơi duy nhất id đó mang thông tin thật
+là `disabled`: `EndpointStore::disable` không có guard theo trạng thái và không bao giờ đụng
+vào `live_version_id`, nên một draft có thể bị disable trực tiếp, và một badge "Disabled" trơn
+không thể phân biệt "từng phục vụ, đang tạm dừng" với "chưa từng phục vụ". Sự phân biệt đó
+thuộc về chính badge trạng thái — `Disabled · was live` so với `Disabled · never published` —
+chứ không phải một cột chỉ lặp lại màu của badge bằng lời yếu hơn.
 
 ### 2.4 Chi tiết endpoint
 
@@ -202,6 +240,17 @@ ghi path (đã kiểm chứng với migration 0123 — hai cột đó đơn gi�
 bảng như hiện tại, tầng này là một con số không hành động được. §6.1 thêm `request_method` và
 `request_path` chính vì lý do đó. Không có chúng thì "một tín hiệu chứ không phải rác" là một
 khẳng định mà schema không đỡ nổi.
+
+**Hai cột đó nằm ở CALL LIST (§4.6), không phải ở dòng này.** Một bản nháp trước của mục này
+hàm ý dòng tổng hợp sẽ tự hiển thị chúng; nó không thể, và xây như vậy chưa bao giờ khả thi.
+Dòng này do truy vấn `GROUPING SETS` sinh ra như MỘT bucket gộp *mọi* request không khớp trong
+khoảng thời gian, tức nó tóm tắt nhiều URL 404 khác nhau cùng lúc — không có một method/path
+đơn nhất nào để đặt tên, và nêu tên một cái là nói dối về n − 1 cái còn lại. Hình dạng API nói
+đúng điều đó: `ActivityRow` (kiểu row của bảng này) mang `endpoint_id`/`endpoint_name` và bốn
+metric, không có gì khác; `ActivityCallDto` — kiểu THEO TỪNG CALL của call list — mới là kiểu
+duy nhất có `request_method`/`request_path`, và ở đó nó được ghi rõ là "the ONLY identification
+a row carries when `endpoint_id` is null". Vậy dòng này chỉ có thể được **gắn nhãn** ("Không
+khớp endpoint nào") và đếm; các URL đằng sau nó được đọc từng row một ở call list bên dưới.
 
 ### 4.5 Call thử bị loại khỏi thống kê và được hiện trong danh sách
 

@@ -39,6 +39,7 @@ describe("useWorkspaceFeatures", () => {
       "dashboards",
       "notebooks",
       "alerts",
+      "data_api",
     ]);
   });
 

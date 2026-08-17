@@ -64,6 +64,15 @@ One file per section, mirroring how `routes/explore/settings/` is laid out. `End
 
 ### Task 1: Regenerate the client, mount the shell
 
+> **Superseded (2026-08-17, `feat/data-api-p5b`).** The `DataApiLayout` shell this
+> task built was removed after review of the shipped UI: Data API became its own
+> sidebar group (Endpoints/Clients/Activity as sibling items, like Charts and
+> Datasets) instead of one sidebar item opening a shell with its own section nav —
+> the section nav duplicated the sidebar once the sidebar carried the same three
+> choices. See `docs/en/specs/2026-08-16-data-api-p5-design.md` §2.1–§2.2 for the
+> current placement/route design; the steps below are kept as the historical
+> record of what P5b originally built, not as current instructions.
+
 **Files:**
 - Modify: `frontend/src/api/generated/**` (regenerated, committed)
 - Create: `frontend/src/routes/explore/dataapi/DataApiLayout.tsx`
@@ -696,7 +705,9 @@ it("labels the unmatched bucket with what was actually requested", async () => {
 - p50/p95 must say **"across successful calls"**. The number is computed over 2xx rows only, because a burst of fast 401s otherwise drags p50 down and makes latency look *better* at exactly the moment the system is failing. An unlabelled percentile is a number nobody can act on.
 - Cache-hit's denominator is `cacheable_calls`. When it is `0`, render `—`, never `0%`: zero of zero is not zero.
 
-**Per-endpoint table.** The same four metrics per row, plus the final **"No matching endpoint"** row for `endpoint_id: null` — render its `request_method` + `request_path` instead of a name. Its total will be smaller than the tile's and that is correct; those rows resolved no endpoint. Say so in a caption rather than letting a reader think the screen is inconsistent.
+**Per-endpoint table.** The same four metrics per row, plus the final **"No matching endpoint"** row for `endpoint_id: null`. Its total will be smaller than the tile's and that is correct; those rows resolved no endpoint. Say so in a caption rather than letting a reader think the screen is inconsistent.
+
+> **Correction (final review, 2026-08-17).** This step used to say "render its `request_method` + `request_path` instead of a name", and spec §4.4 implied the same. **That is not buildable and it was never right — do not re-add it.** This row is one `GROUPING SETS` bucket over *every* unmatched request in range, so it aggregates many different 404 URLs; there is no single method/path for it to name. `ActivityRow` (this table's row type) carries no such field, only `ActivityCallDto` — the call list's per-call shape — does, documented there as "the ONLY identification a row carries when `endpoint_id` is null". Labelling the row and reading the URLs one at a time in the call list below (§4.6) is the correct build, and is what shipped. Spec §4.4 has been corrected in both languages.
 
 **Call list.** `ts` · endpoint · status + `error_code` · duration · cache hit · `client_id` · `request_id`, with filters for endpoint / status / error code and a direct `request_id` lookup — support's entry point when a caller quotes it out of an error body. Cursor pagination via `before`, accumulating like `AuditLog.tsx`'s "Load more".
 

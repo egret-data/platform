@@ -31,35 +31,61 @@ not apply to a URL that deployed clients depend on.
 
 ### 2.1 Placement
 
-The `Data Engineering` sidebar group, not Explore. `frontend/src/components/layout/Sidebar.tsx`
-already carries the inert placeholder:
+**Revised 2026-08-17** (post-shipped-UI review; supersedes the original P5b plan, which
+put a single `Data API` item under `Data Engineering` opening a shell — see the note on
+Task 1 in `docs/en/plans/2026-08-17-data-api-p5b-frontend.md`).
+
+**Data API is its own sidebar group**, sitting right after `Explore` and before
+`Automate`, with `Endpoints` / `Clients` / `Activity` as three sibling items — the same
+pattern `Charts` and `Datasets` use inside `Explore`, not a single item that opens a
+shell page. Three areas plus a detail route read as a module, not a page; giving it a
+group makes the sidebar the one place that says so, rather than a header the module
+draws for itself. `frontend/src/components/layout/Sidebar.tsx`:
 
 ```tsx
-{ heading: "Data Engineering", items: [
-    { label: "Data API", icon: Plug },      // no `to:` — an inert placeholder
-    { label: "Pipelines", icon: Waypoints },
-]},
+{
+  heading: "Data API",
+  items: [
+    { label: "Endpoints", icon: Plug, to: "data-api/endpoints", feature: "data_api" },
+    { label: "Clients", icon: KeyRound, to: "data-api/clients", feature: "data_api" },
+    { label: "Activity", icon: Activity, to: "data-api/activity", feature: "data_api" },
+  ],
+},
 ```
 
-P5 gives that item `to: "data-api"` and `feature: "data_api"` (the feature key exists at
-`crates/egret-workspace/src/features.rs:39`). Explore is where you *consume* and analyse;
-Data API is where you *produce* an interface, next to Pipelines.
+Every item carries `feature: "data_api"` (the feature key exists at
+`crates/egret-workspace/src/features.rs:39`), so the whole group — heading included —
+disappears when the workspace lacks the entitlement, the same rule that already drops
+any Explore group with zero visible items. `Data Engineering` keeps `Pipelines` as its
+only item; a one-item group is fine, `Automate` already is one.
 
 ### 2.2 Route and section nav
 
-Route `/explore/:ws/data-api`, with a **vertical section-nav on the left** — the Workspace
-Settings idiom, not a tab strip, because the three areas are of different natures and more
-will come:
+**Revised 2026-08-17** — no shell, no section nav. Each of the three pages is mounted
+directly at its own route and stands on its own using the canonical Explore list-page
+scaffold (`p-4`, `h1 text-lg`, no subtitle), exactly like `Charts.tsx`:
 
 ```text
-Data API
-  Endpoints     list, canonical Explore scaffold
-  Clients       service accounts + OAuth2 clients
-  Activity      statistics from dataapi.access_log
+/explore/:ws/data-api/endpoints    Endpoints — list, canonical Explore scaffold
+/explore/:ws/data-api/clients      Clients — service accounts + OAuth2 clients
+/explore/:ws/data-api/activity     Activity — statistics from dataapi.access_log
+/explore/:ws/data-api              redirects to endpoints, for old links
 ```
 
+The original design (§9 history) put these three behind a `DataApiLayout` shell with a
+vertical section-nav on the left, modelled on Workspace Settings. That nav is now
+redundant: it offered exactly the same three choices the sidebar offers once Data API
+became its own sidebar group, so a reader chose between Endpoints/Clients/Activity
+twice on the same screen — once in the sidebar, once again in the page. Removing the
+shell removes the second nav, not the choice.
+
+`EndpointDetail` (`/data-api/endpoints/:id`) keeps its own horizontal section nav —
+Definition · Response · Access · Try it · Versions — unaffected by this change: that is
+navigation *within one object*, the same shape `EndpointDetail`'s own detail-route
+pattern always had, not navigation between areas.
+
 Keeping `Clients` *inside* Data API rather than in Workspace Settings → Connections is
-deliberate: you ship an API from one place.
+still deliberate: you ship an API from one place.
 
 ### 2.3 Endpoints list
 
@@ -68,7 +94,19 @@ button, a hand-rolled `<table>` like Charts/Datasets — **not** `FilterableTabl
 cannot model folder grouping — `SummaryStrip` counts that double as filter chips, and
 `RowActionsMenu` per row.
 
-Columns: name · method + path · state (draft/live/disabled) · version · engine · last edited.
+Columns: name · method + path · state (draft/live/disabled) · engine · last edited.
+
+**No separate `version` column.** An earlier draft of this spec listed one, but the list DTO
+(`DataApiEndpointDto`) carries only `live_version_id` — a nullable id, not the version count on
+`DataApiEndpointVersionDto`, which lives behind a per-endpoint versions fetch this page has no
+license to make once per row. For `live`/`draft` that id is fully redundant with the state
+badge anyway (a fresh draft has it null; `EndpointStore::publish` is the only place that ever
+sets it, atomically with `state = 'live'`). The one place it carries real information is
+`disabled`: `EndpointStore::disable` has no state guard and never touches `live_version_id`, so
+a draft can be disabled directly, and a bare "Disabled" badge cannot tell "was serving, paused"
+from "never served at all." That distinction belongs in the state badge itself — `Disabled ·
+was live` vs. `Disabled · never published` — not in a column that would otherwise repeat the
+badge's own colour in weaker words.
 
 ### 2.4 Endpoint detail
 
@@ -202,6 +240,18 @@ path (verified against migration 0123 — the columns simply are not there), so 
 stands today this tier is a number with nothing actionable behind it. §6.1 adds
 `request_method` and `request_path` for exactly this reason. Without them, "a signal, not
 noise" would be a claim the schema does not support.
+
+**Those two columns land in the CALL LIST (§4.6), not in this row.** An earlier draft of this
+section implied the aggregate row itself would render them; it cannot, and building that was
+never possible. The row is produced by the `GROUPING SETS` query as one bucket over *every*
+unmatched request in range, so it summarizes many different 404 URLs at once — there is no
+single method/path for it to name, and naming one of them would be a lie about the other
+n − 1. The API shape says the same thing: `ActivityRow` (this table's row type) carries
+`endpoint_id`/`endpoint_name` and the four metrics, and nothing else; `ActivityCallDto` — the
+call list's PER-CALL shape — is the only type with `request_method`/`request_path`, documented
+there as "the ONLY identification a row carries when `endpoint_id` is null". So this row can
+be **labelled** ("No matching endpoint") and counted, and the URLs behind it are read one row
+at a time in the call list below.
 
 ### 4.5 Trial calls are excluded from statistics and shown in the list
 

@@ -26,12 +26,17 @@ import type {
 
 import type {
   Ack,
+  ActivityCallDto,
+  ActivitySummaryDto,
   CreateEndpointInput,
   CreateServiceAccountInput,
+  DataApiActivityCallsParams,
+  DataApiActivitySummaryParams,
   DataApiClientDto,
   DataApiEndpointDto,
   DataApiEndpointGrantDto,
   DataApiEndpointVersionDto,
+  DataApiGetOpenapiParams,
   DataApiNewClientDto,
   DataApiPublishedDto,
   DataApiServiceAccountDto,
@@ -41,6 +46,8 @@ import type {
   IssueClientInput,
   PublishEndpointInput,
   RollbackEndpointInput,
+  TryRequest,
+  TryResponse,
   UpdateEndpointInput
 } from '../model';
 
@@ -65,6 +72,282 @@ const withQueryKey = <T extends object, K>(query: T, queryKey: K): T & { queryKe
   }
   return result;
 };
+
+export type dataApiActivityCallsResponse200 = {
+  data: ActivityCallDto[]
+  status: 200
+}
+
+export type dataApiActivityCallsResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type dataApiActivityCallsResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type dataApiActivityCallsResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type dataApiActivityCallsResponseSuccess = (dataApiActivityCallsResponse200) & {
+  headers: Headers;
+};
+export type dataApiActivityCallsResponseError = (dataApiActivityCallsResponse401 | dataApiActivityCallsResponse403 | dataApiActivityCallsResponse500) & {
+  headers: Headers;
+};
+
+export type dataApiActivityCallsResponse = (dataApiActivityCallsResponseSuccess | dataApiActivityCallsResponseError)
+
+export const getDataApiActivityCallsUrl = (workspace: string,
+    params: DataApiActivityCallsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/data-api/activity/calls?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/data-api/activity/calls`
+}
+
+export const dataApiActivityCalls = async (workspace: string,
+    params: DataApiActivityCallsParams, options?: Parameters<typeof customInstance>[1]): Promise<dataApiActivityCallsResponse> => {
+
+  return customInstance<dataApiActivityCallsResponse>(getDataApiActivityCallsUrl(workspace,params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getDataApiActivityCallsQueryKey = (workspace: string,
+    params?: DataApiActivityCallsParams,) => {
+    return [
+    `/api/ws/${encodeURIComponent(workspace)}/data-api/activity/calls`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getDataApiActivityCallsQueryOptions = <TData = Awaited<ReturnType<typeof dataApiActivityCalls>>, TError = ErrorBody>(workspace: string,
+    params: DataApiActivityCallsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof dataApiActivityCalls>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getDataApiActivityCallsQueryKey(workspace,params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof dataApiActivityCalls>>> = ({ signal }) => dataApiActivityCalls(workspace,params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: workspace !== null && workspace !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof dataApiActivityCalls>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type DataApiActivityCallsQueryResult = NonNullable<Awaited<ReturnType<typeof dataApiActivityCalls>>>
+export type DataApiActivityCallsQueryError = ErrorBody
+
+
+export function useDataApiActivityCalls<TData = Awaited<ReturnType<typeof dataApiActivityCalls>>, TError = ErrorBody>(
+ workspace: string,
+    params: DataApiActivityCallsParams, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof dataApiActivityCalls>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof dataApiActivityCalls>>,
+          TError,
+          Awaited<ReturnType<typeof dataApiActivityCalls>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useDataApiActivityCalls<TData = Awaited<ReturnType<typeof dataApiActivityCalls>>, TError = ErrorBody>(
+ workspace: string,
+    params: DataApiActivityCallsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof dataApiActivityCalls>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof dataApiActivityCalls>>,
+          TError,
+          Awaited<ReturnType<typeof dataApiActivityCalls>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useDataApiActivityCalls<TData = Awaited<ReturnType<typeof dataApiActivityCalls>>, TError = ErrorBody>(
+ workspace: string,
+    params: DataApiActivityCallsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof dataApiActivityCalls>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useDataApiActivityCalls<TData = Awaited<ReturnType<typeof dataApiActivityCalls>>, TError = ErrorBody>(
+ workspace: string,
+    params: DataApiActivityCallsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof dataApiActivityCalls>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getDataApiActivityCallsQueryOptions(workspace,params,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type dataApiActivitySummaryResponse200 = {
+  data: ActivitySummaryDto
+  status: 200
+}
+
+export type dataApiActivitySummaryResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type dataApiActivitySummaryResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type dataApiActivitySummaryResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type dataApiActivitySummaryResponseSuccess = (dataApiActivitySummaryResponse200) & {
+  headers: Headers;
+};
+export type dataApiActivitySummaryResponseError = (dataApiActivitySummaryResponse401 | dataApiActivitySummaryResponse403 | dataApiActivitySummaryResponse500) & {
+  headers: Headers;
+};
+
+export type dataApiActivitySummaryResponse = (dataApiActivitySummaryResponseSuccess | dataApiActivitySummaryResponseError)
+
+export const getDataApiActivitySummaryUrl = (workspace: string,
+    params: DataApiActivitySummaryParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/data-api/activity/summary?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/data-api/activity/summary`
+}
+
+export const dataApiActivitySummary = async (workspace: string,
+    params: DataApiActivitySummaryParams, options?: Parameters<typeof customInstance>[1]): Promise<dataApiActivitySummaryResponse> => {
+
+  return customInstance<dataApiActivitySummaryResponse>(getDataApiActivitySummaryUrl(workspace,params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getDataApiActivitySummaryQueryKey = (workspace: string,
+    params?: DataApiActivitySummaryParams,) => {
+    return [
+    `/api/ws/${encodeURIComponent(workspace)}/data-api/activity/summary`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getDataApiActivitySummaryQueryOptions = <TData = Awaited<ReturnType<typeof dataApiActivitySummary>>, TError = ErrorBody>(workspace: string,
+    params: DataApiActivitySummaryParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof dataApiActivitySummary>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getDataApiActivitySummaryQueryKey(workspace,params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof dataApiActivitySummary>>> = ({ signal }) => dataApiActivitySummary(workspace,params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: workspace !== null && workspace !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof dataApiActivitySummary>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type DataApiActivitySummaryQueryResult = NonNullable<Awaited<ReturnType<typeof dataApiActivitySummary>>>
+export type DataApiActivitySummaryQueryError = ErrorBody
+
+
+export function useDataApiActivitySummary<TData = Awaited<ReturnType<typeof dataApiActivitySummary>>, TError = ErrorBody>(
+ workspace: string,
+    params: DataApiActivitySummaryParams, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof dataApiActivitySummary>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof dataApiActivitySummary>>,
+          TError,
+          Awaited<ReturnType<typeof dataApiActivitySummary>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useDataApiActivitySummary<TData = Awaited<ReturnType<typeof dataApiActivitySummary>>, TError = ErrorBody>(
+ workspace: string,
+    params: DataApiActivitySummaryParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof dataApiActivitySummary>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof dataApiActivitySummary>>,
+          TError,
+          Awaited<ReturnType<typeof dataApiActivitySummary>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useDataApiActivitySummary<TData = Awaited<ReturnType<typeof dataApiActivitySummary>>, TError = ErrorBody>(
+ workspace: string,
+    params: DataApiActivitySummaryParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof dataApiActivitySummary>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useDataApiActivitySummary<TData = Awaited<ReturnType<typeof dataApiActivitySummary>>, TError = ErrorBody>(
+ workspace: string,
+    params: DataApiActivitySummaryParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof dataApiActivitySummary>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getDataApiActivitySummaryQueryOptions(workspace,params,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
 
 export type dataApiRevokeClientResponse200 = {
   data: Ack
@@ -1520,6 +1803,112 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
       > => {
       return useMutation(getDataApiRollbackEndpointMutationOptions(options), queryClient);
     }
+    export type dataApiTryEndpointResponse200 = {
+  data: TryResponse
+  status: 200
+}
+
+export type dataApiTryEndpointResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type dataApiTryEndpointResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type dataApiTryEndpointResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type dataApiTryEndpointResponse413 = {
+  data: ErrorBody
+  status: 413
+}
+
+export type dataApiTryEndpointResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type dataApiTryEndpointResponseSuccess = (dataApiTryEndpointResponse200) & {
+  headers: Headers;
+};
+export type dataApiTryEndpointResponseError = (dataApiTryEndpointResponse401 | dataApiTryEndpointResponse403 | dataApiTryEndpointResponse404 | dataApiTryEndpointResponse413 | dataApiTryEndpointResponse500) & {
+  headers: Headers;
+};
+
+export type dataApiTryEndpointResponse = (dataApiTryEndpointResponseSuccess | dataApiTryEndpointResponseError)
+
+export const getDataApiTryEndpointUrl = (workspace: string,
+    id: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/data-api/endpoints/${encodeURIComponent(id)}/try`
+}
+
+export const dataApiTryEndpoint = async (workspace: string,
+    id: string,
+    tryRequest: TryRequest, options?: Parameters<typeof customInstance>[1]): Promise<dataApiTryEndpointResponse> => {
+
+  return customInstance<dataApiTryEndpointResponse>(getDataApiTryEndpointUrl(workspace,id),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(tryRequest)
+  }
+);}
+
+
+
+
+
+export const getDataApiTryEndpointMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof dataApiTryEndpoint>>, TError,{workspace: string;id: string;data: TryRequest}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof dataApiTryEndpoint>>, TError,{workspace: string;id: string;data: TryRequest}, TContext> => {
+
+const mutationKey = ['dataApiTryEndpoint'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof dataApiTryEndpoint>>, {workspace: string;id: string;data: TryRequest}> = (props) => {
+          const {workspace,id,data} = props ?? {};
+
+          return  dataApiTryEndpoint(workspace,id,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type DataApiTryEndpointMutationResult = NonNullable<Awaited<ReturnType<typeof dataApiTryEndpoint>>>
+    export type DataApiTryEndpointMutationBody = TryRequest
+    export type DataApiTryEndpointMutationError = ErrorBody
+
+    export const useDataApiTryEndpoint = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof dataApiTryEndpoint>>, TError,{workspace: string;id: string;data: TryRequest}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof dataApiTryEndpoint>>,
+        TError,
+        {workspace: string;id: string;data: TryRequest},
+        TContext
+      > => {
+      return useMutation(getDataApiTryEndpointMutationOptions(options), queryClient);
+    }
     export type dataApiValidateEndpointResponse200 = {
   data: DataApiValidationDto
   status: 200
@@ -1750,6 +2139,159 @@ export function useDataApiListEndpointVersions<TData = Awaited<ReturnType<typeof
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getDataApiListEndpointVersionsQueryOptions(workspace,id,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type dataApiGetOpenapiResponse200 = {
+  data: unknown
+  status: 200
+}
+
+export type dataApiGetOpenapiResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type dataApiGetOpenapiResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type dataApiGetOpenapiResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type dataApiGetOpenapiResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type dataApiGetOpenapiResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type dataApiGetOpenapiResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type dataApiGetOpenapiResponseSuccess = (dataApiGetOpenapiResponse200) & {
+  headers: Headers;
+};
+export type dataApiGetOpenapiResponseError = (dataApiGetOpenapiResponse400 | dataApiGetOpenapiResponse401 | dataApiGetOpenapiResponse403 | dataApiGetOpenapiResponse404 | dataApiGetOpenapiResponse409 | dataApiGetOpenapiResponse500) & {
+  headers: Headers;
+};
+
+export type dataApiGetOpenapiResponse = (dataApiGetOpenapiResponseSuccess | dataApiGetOpenapiResponseError)
+
+export const getDataApiGetOpenapiUrl = (workspace: string,
+    params: DataApiGetOpenapiParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/data-api/openapi?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/data-api/openapi`
+}
+
+export const dataApiGetOpenapi = async (workspace: string,
+    params: DataApiGetOpenapiParams, options?: Parameters<typeof customInstance>[1]): Promise<dataApiGetOpenapiResponse> => {
+
+  return customInstance<dataApiGetOpenapiResponse>(getDataApiGetOpenapiUrl(workspace,params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getDataApiGetOpenapiQueryKey = (workspace: string,
+    params?: DataApiGetOpenapiParams,) => {
+    return [
+    `/api/ws/${encodeURIComponent(workspace)}/data-api/openapi`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getDataApiGetOpenapiQueryOptions = <TData = Awaited<ReturnType<typeof dataApiGetOpenapi>>, TError = ErrorBody>(workspace: string,
+    params: DataApiGetOpenapiParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof dataApiGetOpenapi>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getDataApiGetOpenapiQueryKey(workspace,params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof dataApiGetOpenapi>>> = ({ signal }) => dataApiGetOpenapi(workspace,params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: workspace !== null && workspace !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof dataApiGetOpenapi>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type DataApiGetOpenapiQueryResult = NonNullable<Awaited<ReturnType<typeof dataApiGetOpenapi>>>
+export type DataApiGetOpenapiQueryError = ErrorBody
+
+
+export function useDataApiGetOpenapi<TData = Awaited<ReturnType<typeof dataApiGetOpenapi>>, TError = ErrorBody>(
+ workspace: string,
+    params: DataApiGetOpenapiParams, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof dataApiGetOpenapi>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof dataApiGetOpenapi>>,
+          TError,
+          Awaited<ReturnType<typeof dataApiGetOpenapi>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useDataApiGetOpenapi<TData = Awaited<ReturnType<typeof dataApiGetOpenapi>>, TError = ErrorBody>(
+ workspace: string,
+    params: DataApiGetOpenapiParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof dataApiGetOpenapi>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof dataApiGetOpenapi>>,
+          TError,
+          Awaited<ReturnType<typeof dataApiGetOpenapi>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useDataApiGetOpenapi<TData = Awaited<ReturnType<typeof dataApiGetOpenapi>>, TError = ErrorBody>(
+ workspace: string,
+    params: DataApiGetOpenapiParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof dataApiGetOpenapi>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useDataApiGetOpenapi<TData = Awaited<ReturnType<typeof dataApiGetOpenapi>>, TError = ErrorBody>(
+ workspace: string,
+    params: DataApiGetOpenapiParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof dataApiGetOpenapi>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getDataApiGetOpenapiQueryOptions(workspace,params,options)
 
   const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
 

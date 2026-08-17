@@ -2,9 +2,18 @@ import { useParams } from "react-router-dom";
 import { useMyWorkspaces } from "@/api/hooks";
 import { EXPLORE_MODULES } from "@/lib/exploreModules";
 
-/** The five module keys a workspace can be entitled to, in nav order — derived
- * from `EXPLORE_MODULES`, the single source of truth shared with Sidebar.tsx. */
-export const ALL_FEATURE_KEYS: string[] = EXPLORE_MODULES.map((m) => m.key);
+/**
+ * Every workspace feature key gated anywhere in the Explore nav, used only as
+ * the "still loading" optimistic fallback below — NOT the same list
+ * `useDefaultExplorePath` searches for a landing page (that one deliberately
+ * stays scoped to `EXPLORE_MODULES`, so a non-module item can never become the
+ * default explore path just by gaining a `feature` key here).
+ *
+ * The five `EXPLORE_MODULES` keys cover the Explore group; `data_api` is a
+ * Data Engineering item gated the same way (Sidebar.tsx's `Data API` entry) but
+ * isn't a landing-page candidate, so it isn't part of `EXPLORE_MODULES` itself.
+ */
+export const ALL_FEATURE_KEYS: string[] = [...EXPLORE_MODULES.map((m) => m.key), "data_api"];
 
 /**
  * The module keys the *current route's* workspace has switched on — the
