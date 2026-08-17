@@ -337,6 +337,51 @@ async fn preview_binds_the_authors_test_values() {
     );
 }
 
+/// The browser finding, pinned at the route: a draft whose SQL references NONE
+/// of its declared parameters previews anyway.
+///
+/// Measured against a real StarRocks engine, a stored draft declaring `region`
+/// and `d` refused with "parameter `region` is declared but never referenced as
+/// `{{region}}` in the query" the moment the author replaced the SQL — so the
+/// single commonest intermediate state of the authoring loop could not be
+/// previewed at all, in either edit order. That rule guards the OpenAPI contract
+/// a PUBLISHED endpoint offers, so publish still refuses this pair; preview does
+/// not (`lifecycle::validate_preview_accepts_sql_that_references_no_declared_parameter`).
+#[tokio::test]
+async fn preview_runs_sql_that_references_none_of_the_declared_parameters() {
+    let Some(f) = fixture().await else { return };
+    let body = serde_json::json!({
+        // The parameters the stored draft declares, untouched…
+        "params": [
+            { "name": "region", "type": "string", "location": "query", "required": true },
+            { "name": "d", "type": "date", "location": "query", "required": false },
+        ],
+        "values": { "region": ["EU"] },
+        // …and SQL that reads neither of them, the way it looks mid-edit.
+        "sql": "SELECT 7 AS mid_edit",
+        "database_id": f.database_id,
+    });
+    let (status, body) = f.mgmt_post(&preview_path(&f), Some(body)).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an author must be able to preview the SQL on screen with the declarations mid-edit: {body}"
+    );
+    assert!(
+        body["rows"].as_array().is_some_and(|r| !r.is_empty()),
+        "the preview must come back with rows, not an empty result: {body}"
+    );
+    let (sql, binds) = f.port.last();
+    assert!(
+        sql.contains("mid_edit"),
+        "the engine must have run the on-screen SQL, got {sql:?}"
+    );
+    assert!(
+        binds.is_empty(),
+        "no placeholder was referenced, so nothing may be bound: {binds:?}"
+    );
+}
+
 /// Three different author mistakes, three different sentences — and none of them
 /// may claim a type failure that did not happen.
 ///

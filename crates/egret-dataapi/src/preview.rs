@@ -6,6 +6,18 @@
 //! and render path publish and serving use, capped at 100 rows, with none of the
 //! four consumer-facing side effects.
 //!
+//! # Not quite EVERY publish rule — two are about things a preview does not do
+//!
+//! [`crate::lifecycle::validate_preview`] omits the cache-scope rule (preview
+//! touches no cache) and the unreferenced-parameter rule (it protects the OpenAPI
+//! contract a PUBLISHED endpoint offers, not the statement about to run). The
+//! second one is a browser finding: with it in place, SQL edited before the
+//! parameter declarations caught up — the commonest state of the loop this route
+//! exists to close — could not be previewed at all. Every other publish scan
+//! still applies, including the statement check that keeps `:manage` from being
+//! engine write access and the placeholder-inside-quoted-text rule. That
+//! function's own comment is the authority on the split.
+//!
 //! # Why the body carries the draft rather than being read from the database
 //!
 //! Reading the saved draft would defeat the feature: the author would have to
