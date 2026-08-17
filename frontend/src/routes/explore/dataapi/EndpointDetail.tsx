@@ -100,7 +100,8 @@ export function useEndpointDetail(): EndpointDetailContext {
 }
 
 const SECTIONS: { to: string; label: string; end?: boolean }[] = [
-  { to: "", label: "Definition", end: true },
+  { to: "", label: "Query", end: true },
+  { to: "config", label: "Config" },
   { to: "response", label: "Response" },
   { to: "access", label: "Access" },
   { to: "try", label: "Try it" },
