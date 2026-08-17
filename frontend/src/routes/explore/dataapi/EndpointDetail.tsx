@@ -213,9 +213,19 @@ function EndpointDetailInner({ ws, id }: { ws: string; id: string }) {
     }
   }, [form, baselineForm, updateMutation, ws, id]);
 
+  // The page's one document-outline `h1`, on every branch below — this route has no
+  // shell to supply it (unlike the three list pages, it has no room for a *visible*
+  // `h1`: the endpoint name is already the page's title as a breadcrumb-style `h2`,
+  // and doubling it visibly would read as two titles stacked on top of each other).
+  // `sr-only`, same idiom as `SqlLab.tsx`/`ChartExplore.tsx` for a page whose design
+  // has no visible slot for one. Falls back to "Endpoint" before the name is known
+  // (loading/error), exactly as `ChartExplore.tsx`'s own `h1` falls back to "New chart".
+  const headingName = endpoint?.name ?? "Endpoint";
+
   if (isLoading) {
     return (
       <div className="p-4">
+        <h1 className="sr-only">{headingName}</h1>
         <ListSkeleton cols={2} />
       </div>
     );
@@ -223,6 +233,7 @@ function EndpointDetailInner({ ws, id }: { ws: string; id: string }) {
   if (isError || !endpoint) {
     return (
       <div className="p-4">
+        <h1 className="sr-only">{headingName}</h1>
         <Alert variant="destructive">
           <AlertDescription>
             {(error as unknown as Error)?.message ?? "Could not load this endpoint."}
@@ -239,6 +250,7 @@ function EndpointDetailInner({ ws, id }: { ws: string; id: string }) {
     // and the new endpoint hasn't arrived — one render, at most, either way.
     return (
       <div className="p-4">
+        <h1 className="sr-only">{headingName}</h1>
         <ListSkeleton cols={2} />
       </div>
     );
@@ -267,6 +279,7 @@ function EndpointDetailInner({ ws, id }: { ws: string; id: string }) {
     // `max-w-3xl` stays scoped to the Outlet below, not the header/nav above
     // it — the shell never capped those either, only the section content.
     <div className="p-4">
+      <h1 className="sr-only">{headingName}</h1>
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div className="min-w-0">
           <Link

@@ -214,9 +214,12 @@ describe("EndpointDetail dirtiness", () => {
     await user.click(screen.getByText("Go to B"));
 
     await waitFor(() => expect(screen.getByLabelText("SQL")).toHaveValue("SELECT B"));
-    expect(screen.getByText("Endpoint B")).toBeInTheDocument();
+    // The visible breadcrumb heading (`h2`), not `getByText` — the page also
+    // carries an `sr-only` `h1` with the same name (see the "document
+    // heading" describe block below), so a bare text match is now ambiguous.
+    expect(screen.getByRole("heading", { level: 2, name: "Endpoint B" })).toBeInTheDocument();
     expect(screen.queryByDisplayValue("SELECT A")).not.toBeInTheDocument();
-    expect(screen.queryByText("Endpoint A")).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { level: 2, name: "Endpoint A" })).not.toBeInTheDocument();
   });
 
   it("does not offer a location control for parameters", async () => {
@@ -840,5 +843,27 @@ describe("ParamEditor — the allowed-values field resyncs from the server", () 
     expect(screen.getByLabelText("Allowed values")).toHaveValue("eu, us");
     // Touching a field without changing it is not an edit.
     expect(screen.queryByText("Unsaved changes")).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * This route used to sit inside `DataApiLayout`'s `<Outlet/>`, which supplied
+ * the page's one document-outline `h1` ("Data API", text-2xl). Once the shell
+ * was removed (Data API became a sidebar group instead of a shell page), the
+ * three list pages (Endpoints/Clients/Activity) got their own `h1` back —
+ * but this route was missed: its visible title is a breadcrumb-style `h2`
+ * (the endpoint name), and nothing above it carries a level-1 heading, so a
+ * screen-reader user landing here got no page-level heading at all and the
+ * document's heading outline started at level 2. Fixed with an `sr-only` h1,
+ * the same idiom `SqlLab.tsx`/`ChartExplore.tsx` use for a page whose visible
+ * design has no room for one — this page already has its title on screen (the
+ * `h2` breadcrumb), so a second *visible* h1 would read as two titles.
+ */
+describe("EndpointDetail — document heading", () => {
+  it("exposes exactly one level-1 heading, naming the endpoint", async () => {
+    renderDetail(makeEndpoint({ name: "Weekly rollup" }));
+    const headings = await screen.findAllByRole("heading", { level: 1 });
+    expect(headings).toHaveLength(1);
+    expect(headings[0]).toHaveTextContent("Weekly rollup");
   });
 });
