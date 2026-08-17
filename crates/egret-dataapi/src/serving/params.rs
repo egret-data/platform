@@ -105,21 +105,33 @@ pub(crate) fn resolve(
     snap: &EndpointSnapshot,
 ) -> Result<Resolved, ServingError> {
     let supplied = decode(raw_query, snap)?;
+    resolve_supplied(&supplied, &snap.sql, &snap.params)
+}
+
+/// [`resolve`], from an ALREADY-DECODED map rather than a raw query string.
+///
+/// Preview calls this directly. The alternative — re-encoding the author's test
+/// values into a query string so they could go through [`resolve`] — is a lossy
+/// round trip: a value containing `&` or `=` splits into two parameters, and a
+/// preview would then disagree with the real call about the same value. Serving
+/// still reaches it through [`resolve`], so there is exactly one place where a
+/// declared parameter becomes a [`Param`].
+pub(crate) fn resolve_supplied(
+    supplied: &BTreeMap<String, Vec<String>>,
+    sql: &str,
+    specs: &[ParamSpec],
+) -> Result<Resolved, ServingError> {
     // Which declared parameters this definition loops over. One scan of the
     // template per request, and only when it declares parameters at all — the
     // render that follows does strictly more work. It is the same function
     // publish uses to build its representative values, deliberately: the shape a
     // definition was validated against is the shape it is served.
-    let iterated: Vec<String> = if snap.params.is_empty() {
+    let iterated: Vec<String> = if specs.is_empty() {
         Vec::new()
     } else {
         crate::render::iterated_params(
-            &snap.sql,
-            &snap
-                .params
-                .iter()
-                .map(|p| p.name.clone())
-                .collect::<Vec<_>>(),
+            sql,
+            &specs.iter().map(|p| p.name.clone()).collect::<Vec<_>>(),
         )
     };
 
@@ -127,7 +139,7 @@ pub(crate) fn resolve(
     let mut key: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut has_repeats = false;
 
-    for spec in &snap.params {
+    for spec in specs {
         let from_request = match spec.location {
             ParamLocation::Query => supplied.get(&spec.name),
             ParamLocation::Body => None,
@@ -451,6 +463,38 @@ mod tests {
             "the cache key must not distinguish two spellings of one name"
         );
         assert_eq!(rendered("day=x", &s), rendered("d%61y=x", &s));
+    }
+
+    /// Preview hands `resolve_supplied` an already-decoded map. Re-encoding it
+    /// into a query string so it could go through `resolve` would be a lossy
+    /// round trip: a value containing `&` or `=` would split into two
+    /// parameters, so a preview and a real call would disagree about the same
+    /// value. This is the assertion that preview does not take that route.
+    #[test]
+    fn resolve_supplied_takes_values_containing_query_separators() {
+        let spec = ParamSpec {
+            name: "q".into(),
+            ty: ParamType::String,
+            location: ParamLocation::Query,
+            required: false,
+            default: None,
+            allowed: None,
+            description: String::new(),
+        };
+        let mut supplied: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        supplied.insert("q".into(), vec!["a&b=c".into()]);
+        let out = resolve_supplied(&supplied, "SELECT {{ q }}", std::slice::from_ref(&spec))
+            .expect("resolves");
+        // `key` holds `key_text`'s type-tagged form, so the tag is part of the
+        // expected string — the property under test is that the separators
+        // survived, not how the key spells a `Str`.
+        assert_eq!(
+            out.key.get("q").map(Vec::as_slice),
+            Some(&["s:a&b=c".to_string()][..])
+        );
+        // And the same value reaches the engine as one bind rather than two.
+        let (_, binds) = crate::render::render("SELECT {{ q }}", &out.values).expect("render");
+        assert_eq!(binds, vec![Param::Str("a&b=c".into())]);
     }
 
     /// Values are decoded too — `+` as a space, per `form_urlencoded`.
