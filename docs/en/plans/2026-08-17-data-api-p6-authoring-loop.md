@@ -1700,7 +1700,9 @@ cd frontend && npm run dev
 
 Log in `admin@egret.local` / `Admin12345!`, workspace `default`, and check:
 
-1. **Preview a draft with an unsaved edit.** Change the SQL, do not Save, click Preview draft, and confirm the rows reflect the edit. This is the whole feature and it is the one thing a test asserts only through a mock.
+1. **Preview a draft with an unsaved edit.** Change the SQL, do not Save, click **Preview unsaved draft**, and confirm the rows reflect the edit. This is the whole feature and it is the one thing a test asserts only through a mock.
+
+   (The label above was `Preview draft` when this plan was written. The final review found that, beside `Validate saved draft` and `Publish saved draft`, a bare "draft" reads as the same thing those two mean by it — so the button now names the *unsaved* on-screen text. The three labels must all differ in that one dimension or the distinction is decoration. Lines 1100, 1635 and 1655 above are the plan as written and are left as the historical record.)
 2. **`POST …/preview` returns 200 through the real CSRF layer.** The same route must answer 403 to a bare `curl` with no `X-Egret-CSRF`. A hand-rolled `fetch` is what breaks, and only in production.
 3. **Preview an endpoint with a parameter**, with two different test values, and confirm the rows differ. A preview that ignored the values would look identical.
 4. **Break the SQL deliberately** and confirm the engine's own message is on screen, not `data_access_denied`.
