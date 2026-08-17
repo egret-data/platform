@@ -260,7 +260,14 @@ impl ActivityStore {
                 endpoints.push(row);
             }
         }
-        endpoints.sort_by(|a, b| b.calls.cmp(&a.calls));
+        // Busiest first. `sort_by_key` with `Reverse` rather than a hand-written
+        // reversed comparator (`clippy::unnecessary_sort_by`) — and `sort_by_key`
+        // rather than `sort_unstable_by_key` deliberately: both it and the
+        // comparator form are STABLE, so endpoints with equal call counts keep
+        // the order the statement returned them in. Switching to the unstable
+        // variant would let ties reorder between requests, which is how a list
+        // that looks sorted starts shuffling under a reader's eyes.
+        endpoints.sort_by_key(|e| std::cmp::Reverse(e.calls));
         Ok(ActivitySummaryDto {
             total,
             endpoints,
