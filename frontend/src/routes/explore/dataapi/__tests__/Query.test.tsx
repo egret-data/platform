@@ -29,6 +29,7 @@ import * as accessApi from "@/api/access";
 import { ParamLocation, ParamType, type DataApiEndpointDto } from "@/api/generated/model";
 import EndpointDetail from "@/routes/explore/dataapi/EndpointDetail";
 import Query from "@/routes/explore/dataapi/detail/Query";
+import Config from "@/routes/explore/dataapi/detail/Config";
 import VersionsSection from "@/routes/explore/dataapi/detail/Versions";
 
 // Copied verbatim from `EndpointDetail.test.tsx` (near the top of that file)
@@ -418,7 +419,14 @@ describe("Query section — dirtiness and save", () => {
     expect(call.data).toEqual({ sql: "SELECT 1 -- x" });
   });
 
-  it("keeps Preview enabled while dirty, unlike Validate and Publish", async () => {
+  // Only pins Preview's own half of §3.4 (stays enabled, and Save stays
+  // enabled beside it) — it does NOT reach Validate or Publish, which live in
+  // Config and Versions, different routes from Query. Those two halves of
+  // the same property are pinned separately below and in the
+  // "Publish and the shared dirty flag" block, each by navigating there with
+  // the edit still unsaved (see the doc comment on that block for why the
+  // navigation itself is load-bearing).
+  it("keeps Preview and Save enabled while dirty", async () => {
     const endpoint = makeEndpoint({ sql: "SELECT 1" });
     vi.mocked(api.useDataApiGetEndpoint).mockReturnValue({
       data: { status: 200, data: endpoint },
@@ -431,11 +439,65 @@ describe("Query section — dirtiness and save", () => {
     renderQuery(endpoint);
     const sql = await screen.findByLabelText("SQL");
     await userEvent.type(sql, " -- edited");
-    // One test, three assertions — it pins §3.4 as a SET, not one button at a
-    // time, because the property is the DIFFERENCE between them.
     expect(screen.getByRole("button", { name: /preview draft/i })).toBeEnabled();
     expect(screen.getByRole("button", { name: /^save$/i })).toBeEnabled();
     expect(screen.getByText(/unsaved changes/i)).toBeInTheDocument();
+  });
+});
+
+/**
+ * The other half of the same §3.4 property the block above pins: Validate is
+ * disabled while dirty, unlike Preview. Mirrors
+ * "Query section — Publish and the shared dirty flag" below — Validate lives
+ * in `Config`, a different route from `Query`, and the five sections share
+ * ONE form that survives section navigation, so this mounts Query AND Config
+ * under the real shell and NAVIGATES between them with the edit still
+ * unsaved, the same way that block does for Publish and Versions.
+ */
+describe("Query section — Validate and the shared dirty flag", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.mocked(databasesApi.useDatabases).mockReturnValue({
+      data: [{ id: "db-1", name: "warehouse" }],
+    } as never);
+    vi.mocked(api.useDataApiPreviewEndpoint).mockReturnValue({ mutateAsync: vi.fn(), isPending: false } as never);
+    vi.mocked(dataApi.useUpdateEndpoint).mockReturnValue({ mutateAsync: vi.fn(), isPending: false } as never);
+    vi.mocked(api.useDataApiValidateEndpoint).mockReturnValue({ mutateAsync: vi.fn(), isPending: false } as never);
+  });
+
+  function renderQueryAndConfig(endpoint: DataApiEndpointDto = makeEndpoint()) {
+    vi.mocked(api.useDataApiGetEndpoint).mockReturnValue({
+      data: { status: 200, data: endpoint },
+      isLoading: false,
+      isError: false,
+      refetch: vi.fn(),
+    } as never);
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    return render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={[`/explore/ws1/data-api/endpoints/${endpoint.id}`]}>
+          <Routes>
+            <Route path="/explore/:workspace/data-api/endpoints/:id" element={<EndpointDetail />}>
+              <Route index element={<Query />} />
+              <Route path="config" element={<Config />} />
+            </Route>
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+  }
+
+  it("disables Validate for an edit made in Query and carried unsaved into Config", async () => {
+    renderQueryAndConfig();
+    const sql = await screen.findByDisplayValue("SELECT 1");
+    await userEvent.type(sql, " -- unsaved");
+    expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("link", { name: "Config" }));
+    const validate = await screen.findByRole("button", { name: "Validate saved draft" });
+
+    expect(validate).toBeDisabled();
+    expect(validate).toHaveAttribute("title", expect.stringContaining("Save your changes"));
   });
 });
 

@@ -495,6 +495,18 @@ describe("VersionsSection", () => {
     });
   });
 
+  // Spec §3.4: Publish runs the SAVED draft, not what's on screen — unlike
+  // Preview, the same distinction Config's "labels Validate as checking the
+  // SAVED draft" test pins for Validate. Asserted here as its own test, not
+  // only implicitly via the `{ name: "Publish saved draft" }` selector the
+  // dirty-flag tests in `Query.test.tsx` already use to find this button —
+  // that selector proves the label only as a side effect of finding
+  // something to click.
+  it("labels Publish as running the SAVED draft", async () => {
+    renderVersions();
+    expect(await screen.findByRole("button", { name: /publish saved draft/i })).toBeInTheDocument();
+  });
+
   // The one thing this section must not get wrong (spec §6.3, second of its
   // three placements): this is the moment BEFORE the endpoint goes live, and
   // the one place the warning reaches an author who never opens Access. It
