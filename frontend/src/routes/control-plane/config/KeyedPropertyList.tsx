@@ -3,7 +3,7 @@ import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { ConfigTable, ConfigTableRow } from "./ConfigTable";
+import { ConfigTable, ConfigTableRow } from "@/components/config/ConfigTable";
 import { PropertyValue } from "./PropertyField";
 import { PropertyPicker } from "./PropertyPicker";
 import { type TrinoProp } from "./trinoCatalog";

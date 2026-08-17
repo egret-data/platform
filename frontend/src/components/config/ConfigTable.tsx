@@ -9,7 +9,11 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { fieldHelp } from "./fieldHelp";
+// `fieldHelp` is an engine-specific catalog (Trino/StarRocks config keys), so
+// it stays under control-plane rather than moving here with the table shell.
+// Callers outside control-plane (e.g. Data API) don't pass `fieldKey` and
+// supply `details` literals directly instead.
+import { fieldHelp } from "@/routes/control-plane/config/fieldHelp";
 
 /**
  * A `Setting | Details | Value` config table, mirroring the Storage/Warehouse

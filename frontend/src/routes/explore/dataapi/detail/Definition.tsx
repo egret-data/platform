@@ -6,7 +6,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Switch } from "@/components/ui/switch";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { ConfigSection } from "@/components/form/ConfigSection";
+import { ConfigTable, ConfigTableRow } from "@/components/config/ConfigTable";
 import { useDatabases } from "@/api/databases";
 import { useDataApiValidateEndpoint } from "@/api/generated/data-api/data-api";
 import { CacheScope } from "@/api/generated/model";
@@ -119,25 +120,29 @@ export default function Definition() {
 
       <ParamEditor params={form.params} onChange={(params) => setForm((f) => ({ ...f, params }))} />
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Cache</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <label htmlFor="def-cache-enabled" className="flex cursor-pointer items-center gap-2 text-sm">
+      <ConfigSection title="Cache">
+        <ConfigTable>
+          <ConfigTableRow
+            label="Enabled"
+            htmlFor="def-cache-enabled"
+            details="Serve repeat calls from a cached response instead of re-running the query."
+          >
             <Switch
               id="def-cache-enabled"
               checked={!!form.cache.enabled}
               onCheckedChange={(v) => setForm((f) => ({ ...f, cache: { ...f.cache, enabled: v } }))}
             />
-            Cache responses
-          </label>
+          </ConfigTableRow>
           {form.cache.enabled && (
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1.5">
-                <Label htmlFor="def-cache-ttl">TTL (seconds)</Label>
+            <>
+              <ConfigTableRow
+                label="TTL (seconds)"
+                htmlFor="def-cache-ttl"
+                details="How long a cached response stays valid. A call after this re-runs the query."
+              >
                 <Input
                   id="def-cache-ttl"
+                  className="w-full"
                   type="number"
                   min={0}
                   value={form.cache.ttl_seconds ?? 0}
@@ -145,14 +150,17 @@ export default function Definition() {
                     setForm((f) => ({ ...f, cache: { ...f.cache, ttl_seconds: Number(e.target.value) } }))
                   }
                 />
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="def-cache-scope">Scope</Label>
+              </ConfigTableRow>
+              <ConfigTableRow
+                label="Scope"
+                htmlFor="def-cache-scope"
+                details="`Per principal` caches separately for each service account, so Ranger-filtered rows never cross principals. `Shared` caches one copy for everyone — only safe when the connection does not run queries as the caller."
+              >
                 <Select
                   value={form.cache.scope ?? CacheScope.per_principal}
                   onValueChange={(v) => setForm((f) => ({ ...f, cache: { ...f.cache, scope: v as CacheScope } }))}
                 >
-                  <SelectTrigger id="def-cache-scope" aria-label="Cache scope">
+                  <SelectTrigger id="def-cache-scope" className="w-full" aria-label="Cache scope">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -165,21 +173,22 @@ export default function Definition() {
                     <SelectItem value={CacheScope.shared}>Shared</SelectItem>
                   </SelectContent>
                 </Select>
-              </div>
-            </div>
+              </ConfigTableRow>
+            </>
           )}
-        </CardContent>
-      </Card>
+        </ConfigTable>
+      </ConfigSection>
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Limits</CardTitle>
-        </CardHeader>
-        <CardContent className="grid grid-cols-2 gap-3">
-          <div className="space-y-1.5">
-            <Label htmlFor="def-max-rows">Max rows</Label>
+      <ConfigSection title="Limits">
+        <ConfigTable>
+          <ConfigTableRow
+            label="Max rows"
+            htmlFor="def-max-rows"
+            details="Hard cap on rows returned. A result larger than this fails the call rather than being silently truncated."
+          >
             <Input
               id="def-max-rows"
+              className="w-full"
               type="number"
               min={0}
               placeholder="unlimited"
@@ -191,11 +200,15 @@ export default function Definition() {
                 }))
               }
             />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="def-timeout">Timeout (seconds)</Label>
+          </ConfigTableRow>
+          <ConfigTableRow
+            label="Timeout (seconds)"
+            htmlFor="def-timeout"
+            details="How long the engine may take before the call is abandoned."
+          >
             <Input
               id="def-timeout"
+              className="w-full"
               type="number"
               min={0}
               placeholder="default"
@@ -210,19 +223,20 @@ export default function Definition() {
                 }))
               }
             />
-          </div>
-        </CardContent>
-      </Card>
+          </ConfigTableRow>
+        </ConfigTable>
+      </ConfigSection>
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Rate limit</CardTitle>
-        </CardHeader>
-        <CardContent className="grid grid-cols-3 gap-3">
-          <div className="space-y-1.5">
-            <Label htmlFor="def-rl-per-key">Per caller (qps)</Label>
+      <ConfigSection title="Rate limit">
+        <ConfigTable>
+          <ConfigTableRow
+            label="Per caller (qps)"
+            htmlFor="def-rl-per-key"
+            details="Sustained requests per second allowed for each client credential."
+          >
             <Input
               id="def-rl-per-key"
+              className="w-full"
               type="number"
               min={0}
               placeholder="unlimited"
@@ -237,11 +251,15 @@ export default function Definition() {
                 }))
               }
             />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="def-rl-burst">Burst</Label>
+          </ConfigTableRow>
+          <ConfigTableRow
+            label="Burst"
+            htmlFor="def-rl-burst"
+            details="How many requests may arrive at once above the sustained rate before throttling starts."
+          >
             <Input
               id="def-rl-burst"
+              className="w-full"
               type="number"
               min={0}
               placeholder="unlimited"
@@ -253,11 +271,15 @@ export default function Definition() {
                 }))
               }
             />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="def-rl-per-endpoint">Endpoint-wide (qps)</Label>
+          </ConfigTableRow>
+          <ConfigTableRow
+            label="Endpoint-wide (qps)"
+            htmlFor="def-rl-per-endpoint"
+            details="Ceiling across all callers of this endpoint combined, whatever their individual limits."
+          >
             <Input
               id="def-rl-per-endpoint"
+              className="w-full"
               type="number"
               min={0}
               placeholder="unlimited"
@@ -272,9 +294,9 @@ export default function Definition() {
                 }))
               }
             />
-          </div>
-        </CardContent>
-      </Card>
+          </ConfigTableRow>
+        </ConfigTable>
+      </ConfigSection>
 
       <div className="space-y-2 border-t border-border pt-4">
         <div className="flex items-center gap-2">

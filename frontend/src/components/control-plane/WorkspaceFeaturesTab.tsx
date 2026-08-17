@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
 import { useSetWorkspaceFeatures, useWorkspaceFeaturesList } from "@/api/features";
-import { ConfigTable, ConfigTableRow } from "@/routes/control-plane/config/ConfigTable";
+import { ConfigTable, ConfigTableRow } from "@/components/config/ConfigTable";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 

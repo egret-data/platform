@@ -1,9 +1,10 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { ConfigSection } from "@/components/form/ConfigSection";
+import { ConfigTable, ConfigTableRow } from "@/components/config/ConfigTable";
 import {
   useDataApiGetOpenapi,
   useDataApiListEndpointVersions,
@@ -127,18 +128,18 @@ export default function ResponseSection() {
         </CardContent>
       </Card>
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Output shape</CardTitle>
-        </CardHeader>
-        <CardContent className="grid grid-cols-2 gap-3">
-          <div className="space-y-1.5">
-            <Label htmlFor="resp-shape">Shape</Label>
+      <ConfigSection title="Output shape">
+        <ConfigTable>
+          <ConfigTableRow
+            label="Shape"
+            htmlFor="resp-shape"
+            details="`Objects` returns each row as a named object. `Arrays` returns positional rows, which are smaller but depend on column order."
+          >
             <Select
               value={form.output.shape ?? "objects"}
               onValueChange={(v) => setForm((f) => ({ ...f, output: { ...f.output, shape: v } }))}
             >
-              <SelectTrigger id="resp-shape" aria-label="Shape">
+              <SelectTrigger id="resp-shape" className="w-full" aria-label="Shape">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -146,14 +147,17 @@ export default function ResponseSection() {
                 <SelectItem value="arrays">Arrays</SelectItem>
               </SelectContent>
             </Select>
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="resp-naming">Key naming</Label>
+          </ConfigTableRow>
+          <ConfigTableRow
+            label="Naming"
+            htmlFor="resp-naming"
+            details="How column names are written in the response: as the query returns them, camelCase, or snake_case. Two columns that collapse onto one name make the endpoint refuse to serve until it is re-published."
+          >
             <Select
               value={form.output.naming ?? "as_is"}
               onValueChange={(v) => setForm((f) => ({ ...f, output: { ...f.output, naming: v } }))}
             >
-              <SelectTrigger id="resp-naming" aria-label="Key naming">
+              <SelectTrigger id="resp-naming" className="w-full" aria-label="Key naming">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -162,9 +166,9 @@ export default function ResponseSection() {
                 <SelectItem value="snake">snake_case</SelectItem>
               </SelectContent>
             </Select>
-          </div>
-        </CardContent>
-      </Card>
+          </ConfigTableRow>
+        </ConfigTable>
+      </ConfigSection>
 
       <Card>
         <CardHeader>

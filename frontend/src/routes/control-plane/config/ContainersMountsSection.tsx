@@ -20,7 +20,7 @@ import {
 } from "../EngineResourceGroups";
 import type { RoleForm } from "../useEngineConfigForm";
 import { ConfigSection } from "@/components/form/ConfigSection";
-import { ConfigTable, ConfigTableRow } from "./ConfigTable";
+import { ConfigTable, ConfigTableRow } from "@/components/config/ConfigTable";
 import { RawJsonField } from "./RawJsonField";
 import { numOrUndef } from "./podEditors";
 

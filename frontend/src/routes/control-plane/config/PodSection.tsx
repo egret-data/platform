@@ -13,7 +13,7 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { type Kv, KeyValueEditor } from "../EngineResourceGroups";
 import { ConfigSection } from "@/components/form/ConfigSection";
-import { ConfigTable, ConfigTableRow } from "./ConfigTable";
+import { ConfigTable, ConfigTableRow } from "@/components/config/ConfigTable";
 import { RawJsonField } from "./RawJsonField";
 import { SELECT_NONE, numOrUndef } from "./podEditors";
 

@@ -8,7 +8,7 @@ import { Switch } from "@/components/ui/switch";
 import { SaveBar } from "./EngineDetail";
 import { StarRocksSecuritySection } from "./StarRocksSecuritySection";
 import { type Kv, KeyValueEditor } from "./EngineResourceGroups";
-import { ConfigTable, ConfigTableRow } from "./config/ConfigTable";
+import { ConfigTable, ConfigTableRow } from "@/components/config/ConfigTable";
 import { KeyedPropertyList } from "./config/KeyedPropertyList";
 import { RawJsonField } from "./config/RawJsonField";
 import { TolerationsEditor } from "./config/PlacementSection";

@@ -12,7 +12,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { ConfigSection } from "@/components/form/ConfigSection";
-import { ConfigTable, ConfigTableRow } from "./config/ConfigTable";
+import { ConfigTable, ConfigTableRow } from "@/components/config/ConfigTable";
 import { FieldLabel } from "./config/FieldLabel";
 import { RawJsonField } from "./config/RawJsonField";
 import { useValidity } from "./config/validityRegistry";

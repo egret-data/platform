@@ -17,7 +17,7 @@ import {
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Switch } from "@/components/ui/switch";
 import { ConfigSection } from "@/components/form/ConfigSection";
-import { ConfigTable, ConfigTableRow } from "./config/ConfigTable";
+import { ConfigTable, ConfigTableRow } from "@/components/config/ConfigTable";
 import { type Kv, KeyValueEditor } from "./EngineResourceGroups";
 import type { DelegationMode, PasswordUserForm } from "./useEngineConfigForm";
 
