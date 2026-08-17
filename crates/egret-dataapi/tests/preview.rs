@@ -270,6 +270,74 @@ async fn preview_binds_the_authors_test_values() {
     );
 }
 
+/// Three different author mistakes, three different sentences — and none of them
+/// may claim a type failure that did not happen.
+///
+/// A blank required field, a value the declared type cannot read, and two values
+/// for an enum have three different fixes: fill the field in, correct the value,
+/// remove the extra one. Serving answers all three with one payload-free sentence
+/// because naming a parameter would hand a CONSUMER a directory of what an
+/// endpoint declares — a reason that does not survive on a route whose caller
+/// wrote the declarations and is looking at them. Task 3 renders this message
+/// verbatim in the editor, so a wrong sentence here is a wrong instruction there.
+#[tokio::test]
+async fn preview_names_which_test_value_is_wrong() {
+    let Some(f) = fixture().await else { return };
+    let missing = serde_json::json!({
+        "sql": "SELECT 1 AS n WHERE region = {{ region }}",
+        "params": [{ "name": "region", "type": "string", "location": "query", "required": true }],
+        "values": {},
+        "database_id": f.database_id,
+    });
+    let mistyped = serde_json::json!({
+        "sql": "SELECT 1 AS n WHERE day = {{ day }}",
+        "params": [{ "name": "day", "type": "date", "location": "query", "required": true }],
+        "values": { "day": ["not-a-date"] },
+        "database_id": f.database_id,
+    });
+    let repeated_enum = serde_json::json!({
+        "sql": "SELECT 1 AS n WHERE sort_dir = {{ sort_dir }}",
+        "params": [{
+            "name": "sort_dir",
+            "type": "enum",
+            "location": "query",
+            "required": true,
+            "allowed": ["asc", "desc"],
+        }],
+        "values": { "sort_dir": ["asc", "desc"] },
+        "database_id": f.database_id,
+    });
+
+    let mut messages = Vec::new();
+    for body in [missing, mistyped, repeated_enum] {
+        let (status, out) = f.mgmt_post(&preview_path(&f), Some(body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{out}");
+        messages.push(out["error"].as_str().unwrap_or_default().to_string());
+    }
+    let [blank, mistyped, repeated] = <[String; 3]>::try_from(messages).expect("three answers");
+
+    assert!(
+        blank.contains("region") && blank.contains("required"),
+        "a blank required field must name itself and say what it is: {blank}"
+    );
+    assert!(
+        !blank.contains("type"),
+        "a blank required field is not a type failure: {blank}"
+    );
+    assert!(
+        mistyped.contains("day") && mistyped.contains("date"),
+        "a wrong-typed value must name the parameter and the type it must satisfy: {mistyped}"
+    );
+    assert!(
+        repeated.contains("sort_dir") && repeated.contains("single"),
+        "an enum given two values must say it takes one: {repeated}"
+    );
+    assert_ne!(blank, mistyped, "these are two different mistakes");
+    assert_ne!(mistyped, repeated, "these are two different mistakes");
+    assert_ne!(blank, repeated, "these are two different mistakes");
+    assert_eq!(f.port.executions(), 0, "none of these reaches the engine");
+}
+
 /// `:read` cannot preview. egret's permissions are flat, so nothing but the
 /// explicit `require` stands between a reader and running SQL on the engine.
 ///

@@ -94,6 +94,98 @@ pub struct DataApiPreviewDto {
     pub truncated: bool,
 }
 
+/// One refusal from [`crate::serving::params::resolve_supplied`], as the sentence
+/// the AUTHOR reads.
+///
+/// # Why this is not one message
+///
+/// Serving answers **both** parameter failures with a fixed, payload-free
+/// sentence, and both reasons for that are about a CONSUMER: naming the parameter
+/// turns the error surface into a directory of what an endpoint declares, and
+/// echoing the value reflects caller bytes into a response. Neither applies to a
+/// preview. The author owns the declarations, is looking at them on screen, and
+/// typed the value themselves — so a message that will not say which input was
+/// wrong, or that calls a blank required field a type error, sends them to edit
+/// the wrong thing. That is the same defect this route exists to invert; see the
+/// module comment.
+///
+/// # This pass decides nothing
+///
+/// It runs only after `resolve_supplied` has ALREADY refused, and it re-walks the
+/// declarations for one purpose: to recover which one. It reaches that answer
+/// through [`crate::serving::params::coerce`] — the same function that made the
+/// decision, never a second copy of the rules — and when it cannot reproduce the
+/// refusal it falls back to an unnamed sentence for the variant rather than
+/// guessing. So a disagreement between this pass and `resolve_supplied` can only
+/// ever cost precision in a message; it can never change the verdict.
+fn param_error(
+    e: crate::serving::ServingError,
+    specs: &[ParamSpec],
+    values: &BTreeMap<String, Vec<String>>,
+) -> DataApiError {
+    use crate::serving::ServingError as E;
+    let supplied = |spec: &ParamSpec| values.get(&spec.name).filter(|v| !v.is_empty());
+    match e {
+        // A `required` declaration with no `default` and nothing typed in. The
+        // fix is to fill the field in, which the old blanket message actively
+        // pointed away from.
+        E::ParamMissing => {
+            let name = specs
+                .iter()
+                .find(|s| s.required && s.default.is_none() && supplied(s).is_none())
+                .map(|s| s.name.clone());
+            egret_core::Error::InvalidInput(match name {
+                Some(name) => format!("`{name}` is declared required and has no test value"),
+                None => "a parameter declared required has no test value".into(),
+            })
+        }
+        // Two different mistakes share this variant, and they have two different
+        // fixes: a value the declared type cannot read, and more than one value
+        // for an enum (which is a single choice — `serving::params` refuses a
+        // repeat so `| ident` can only ever see one).
+        E::ParamInvalid => {
+            let repeated = specs
+                .iter()
+                .find(|s| {
+                    s.ty == egret_dataapi_api::ParamType::Enum
+                        && supplied(s).is_some_and(|v| v.len() > 1)
+                })
+                .map(|s| {
+                    format!(
+                        "`{}` is an enum and takes a single test value",
+                        s.name.clone()
+                    )
+                });
+            let uncoercible = || {
+                specs.iter().find_map(|s| {
+                    let v = supplied(s)?;
+                    v.iter()
+                        .any(|t| crate::serving::params::coerce(s, t).is_err())
+                        .then(|| {
+                            format!(
+                                "the test value for `{}` is not a valid {}",
+                                s.name,
+                                crate::lifecycle::type_name(&s.ty)
+                            )
+                        })
+                })
+            };
+            egret_core::Error::InvalidInput(
+                repeated
+                    .or_else(uncoercible)
+                    .unwrap_or_else(|| "a test value is not valid for its parameter".into()),
+            )
+        }
+        // Not reachable: both `Internal` arms in `resolve_supplied` are about a
+        // published definition that `validate_preview` has already refused above
+        // (a `default` that fails its own type, an enum with no `allowed`). A 500
+        // rather than a 400 if it ever happens anyway — it would be egret's fault,
+        // not the author's, and `Error::Internal` is what redacts the detail into
+        // the log instead of the body.
+        other => egret_core::Error::Internal(anyhow::anyhow!("{other}")),
+    }
+}
+
 /// Run `body` as `principal` and return what the engine said.
 ///
 /// Every error variant passes through unchanged, which is the deliberate
@@ -120,11 +212,7 @@ pub(crate) async fn run(
     // The SAME function serving resolves through, so a value that renders one
     // way here cannot render another way for a consumer.
     let resolved = crate::serving::params::resolve_supplied(&body.values, &body.sql, &body.params)
-        .map_err(|_| {
-            egret_core::Error::InvalidInput(
-                "a test value does not satisfy its parameter's declared type".into(),
-            )
-        })?;
+        .map_err(|e| param_error(e, &body.params, &body.values))?;
 
     let (sql, binds) = crate::render::render(&body.sql, &resolved.values)
         .map_err(crate::lifecycle::ValidationError::Render)?;

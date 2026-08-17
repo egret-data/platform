@@ -941,7 +941,12 @@ pub fn check_defaults(params: &[ParamSpec]) -> std::result::Result<(), Validatio
     Ok(())
 }
 
-fn type_name(ty: &ParamType) -> &'static str {
+/// The declared type as an author wrote it, for a message an author reads.
+///
+/// `pub(crate)` because [`crate::preview`]'s diagnostics name the type a test
+/// value failed to satisfy, and the two surfaces must not describe the same
+/// `ParamType` with two different words.
+pub(crate) fn type_name(ty: &ParamType) -> &'static str {
     match ty {
         ParamType::String => "string",
         ParamType::Number => "number",
