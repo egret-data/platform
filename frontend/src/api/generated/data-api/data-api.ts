@@ -38,12 +38,14 @@ import type {
   DataApiEndpointVersionDto,
   DataApiGetOpenapiParams,
   DataApiNewClientDto,
+  DataApiPreviewDto,
   DataApiPublishedDto,
   DataApiServiceAccountDto,
   DataApiValidationDto,
   ErrorBody,
   GrantInvokeInput,
   IssueClientInput,
+  PreviewEndpointInput,
   PublishEndpointInput,
   RollbackEndpointInput,
   TryRequest,
@@ -1585,6 +1587,112 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
         TContext
       > => {
       return useMutation(getDataApiRevokeEndpointInvokeMutationOptions(options), queryClient);
+    }
+    export type dataApiPreviewEndpointResponse200 = {
+  data: DataApiPreviewDto
+  status: 200
+}
+
+export type dataApiPreviewEndpointResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type dataApiPreviewEndpointResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type dataApiPreviewEndpointResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type dataApiPreviewEndpointResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type dataApiPreviewEndpointResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type dataApiPreviewEndpointResponseSuccess = (dataApiPreviewEndpointResponse200) & {
+  headers: Headers;
+};
+export type dataApiPreviewEndpointResponseError = (dataApiPreviewEndpointResponse400 | dataApiPreviewEndpointResponse401 | dataApiPreviewEndpointResponse403 | dataApiPreviewEndpointResponse404 | dataApiPreviewEndpointResponse500) & {
+  headers: Headers;
+};
+
+export type dataApiPreviewEndpointResponse = (dataApiPreviewEndpointResponseSuccess | dataApiPreviewEndpointResponseError)
+
+export const getDataApiPreviewEndpointUrl = (workspace: string,
+    id: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/data-api/endpoints/${encodeURIComponent(id)}/preview`
+}
+
+export const dataApiPreviewEndpoint = async (workspace: string,
+    id: string,
+    previewEndpointInput: PreviewEndpointInput, options?: Parameters<typeof customInstance>[1]): Promise<dataApiPreviewEndpointResponse> => {
+
+  return customInstance<dataApiPreviewEndpointResponse>(getDataApiPreviewEndpointUrl(workspace,id),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(previewEndpointInput)
+  }
+);}
+
+
+
+
+
+export const getDataApiPreviewEndpointMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof dataApiPreviewEndpoint>>, TError,{workspace: string;id: string;data: PreviewEndpointInput}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof dataApiPreviewEndpoint>>, TError,{workspace: string;id: string;data: PreviewEndpointInput}, TContext> => {
+
+const mutationKey = ['dataApiPreviewEndpoint'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof dataApiPreviewEndpoint>>, {workspace: string;id: string;data: PreviewEndpointInput}> = (props) => {
+          const {workspace,id,data} = props ?? {};
+
+          return  dataApiPreviewEndpoint(workspace,id,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type DataApiPreviewEndpointMutationResult = NonNullable<Awaited<ReturnType<typeof dataApiPreviewEndpoint>>>
+    export type DataApiPreviewEndpointMutationBody = PreviewEndpointInput
+    export type DataApiPreviewEndpointMutationError = ErrorBody
+
+    export const useDataApiPreviewEndpoint = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof dataApiPreviewEndpoint>>, TError,{workspace: string;id: string;data: PreviewEndpointInput}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof dataApiPreviewEndpoint>>,
+        TError,
+        {workspace: string;id: string;data: PreviewEndpointInput},
+        TContext
+      > => {
+      return useMutation(getDataApiPreviewEndpointMutationOptions(options), queryClient);
     }
     export type dataApiPublishEndpointResponse200 = {
   data: DataApiPublishedDto
