@@ -143,6 +143,22 @@ describe("Config", () => {
     await screen.findByLabelText("Name");
     expect(screen.queryByLabelText("SQL")).not.toBeInTheDocument();
   });
+
+  // Reviewer finding: Config's subtitle once near-duplicated Query's ("The
+  // query this endpoint serves, and how callers reach it."), contradicting
+  // Config's own module doc that nothing here decides what the query
+  // returns. Pin Config's own copy and pin the absence of Query's, so the
+  // two sections' subtitles can't drift back into saying the same thing.
+  it("has its own subtitle, not Query's", async () => {
+    renderConfig();
+    await screen.findByLabelText("Name");
+    expect(
+      screen.getByText("The endpoint as an HTTP object: the URL contract callers use, and the cache, limits, and rate-limit policy applied to their calls."),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("The query this endpoint runs, and the parameters callers may pass it."),
+    ).not.toBeInTheDocument();
+  });
 });
 
 describe("EndpointDetail — save invalidation", () => {

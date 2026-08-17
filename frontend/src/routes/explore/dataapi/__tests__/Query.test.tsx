@@ -465,7 +465,9 @@ describe("Query section — ParamEditor", () => {
     } as never);
     const updateMutateAsync = vi.fn().mockResolvedValue({
       status: 200,
-      data: makeEndpoint(),
+      data: makeEndpoint({
+        params: [{ name: "region", type: ParamType.enum, location: ParamLocation.query, required: true, allowed: ["a", "b"] }],
+      }),
       headers: new Headers(),
     });
     vi.mocked(dataApi.useUpdateEndpoint).mockReturnValue({ mutateAsync: updateMutateAsync, isPending: false } as never);
