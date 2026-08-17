@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { NavLink, useLocation, useParams } from "react-router-dom";
 import {
-  Boxes, ChevronDown, ChevronRight, Compass,
+  Activity, Boxes, ChevronDown, ChevronRight, Compass,
   FolderKanban, Gauge, HardDrive, KeyRound, ListChecks, type LucideIcon,
   PanelLeftClose, PanelLeftOpen, Plug, ScrollText, Server, Settings, Share2, ShieldCheck,
   Tags, UserCog, Users, UsersRound, Waypoints, Workflow,
@@ -30,6 +30,20 @@ const EXPLORE_GROUPS: NavGroup[] = [
     items: EXPLORE_MODULES.map((m) => ({ label: m.label, icon: m.icon, feature: m.key, to: m.path })),
   },
   {
+    heading: "Data API",
+    // Its own area, not a page inside Data Engineering: three sibling sections
+    // plus a detail route behave like a module, the same reason Charts and
+    // Datasets are each their own group rather than items under a shared
+    // shell. Every item carries `feature: "data_api"` so the whole group
+    // hides when the workspace lacks the entitlement — see
+    // docs/en/specs/2026-08-16-data-api-p5-design.md §2.1.
+    items: [
+      { label: "Endpoints", icon: Plug, to: "data-api/endpoints", feature: "data_api" },
+      { label: "Clients", icon: KeyRound, to: "data-api/clients", feature: "data_api" },
+      { label: "Activity", icon: Activity, to: "data-api/activity", feature: "data_api" },
+    ],
+  },
+  {
     heading: "Automate",
     // Alerts moved to Explore (it is an entitlement-gated module now, listed in
     // EXPLORE_MODULES); Workflows is what remains of the original pair.
@@ -37,10 +51,7 @@ const EXPLORE_GROUPS: NavGroup[] = [
   },
   {
     heading: "Data Engineering",
-    items: [
-      { label: "Data API", icon: Plug, to: "data-api", feature: "data_api" },
-      { label: "Pipelines", icon: Waypoints },
-    ],
+    items: [{ label: "Pipelines", icon: Waypoints }],
   },
   {
     heading: "Manage",

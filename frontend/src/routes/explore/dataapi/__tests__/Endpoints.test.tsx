@@ -458,27 +458,27 @@ describe("Endpoints — cache invalidation", () => {
 });
 
 /**
- * The shell (`DataApiLayout`) renders the page's single `h1` ("Data API",
- * text-2xl) and wraps the Outlet in `p-6`. A section nested in that Outlet
- * takes `h2` and adds no padding, like every page nested under
- * `WorkspaceSettings`.
+ * Endpoints is a top-level sidebar item (its own Data API sidebar group), not
+ * a section nested under a `DataApiLayout` shell — that shell was removed
+ * once Data API got its own sidebar group (Endpoints/Clients/Activity), so
+ * this page owns its own `h1` and `p-4`, exactly like `Charts.tsx`.
  */
-describe("Endpoints — page shell", () => {
-  it("renders its title as an h2, not a second h1", async () => {
+describe("Endpoints — page scaffold", () => {
+  it("renders its title as the page's own h1", async () => {
     mockList({ data: { status: 200, data: [FOLDERED_ROW] } });
     mockFolders([{ id: "f-1", name: "Reporting" }]);
     renderEndpoints();
-    const h2 = await screen.findByRole("heading", { level: 2, name: "Endpoints" });
-    expect(h2.className).toContain("text-lg");
-    expect(screen.queryByRole("heading", { level: 1 })).not.toBeInTheDocument();
+    const h1 = await screen.findByRole("heading", { level: 1, name: "Endpoints" });
+    expect(h1.className).toContain("text-lg");
+    expect(screen.queryByRole("heading", { level: 2, name: "Endpoints" })).not.toBeInTheDocument();
   });
 
-  it("adds no padding of its own on top of the shell's", async () => {
+  it("carries its own p-4 padding, like every other top-level Explore list page", async () => {
     mockList({ data: { status: 200, data: [FOLDERED_ROW] } });
     mockFolders([{ id: "f-1", name: "Reporting" }]);
     const { container } = renderEndpoints();
-    await screen.findByRole("heading", { level: 2, name: "Endpoints" });
-    expect(container.firstElementChild?.className ?? "").not.toMatch(/\bp-4\b/);
+    await screen.findByRole("heading", { level: 1, name: "Endpoints" });
+    expect(container.firstElementChild?.className ?? "").toMatch(/\bp-4\b/);
   });
 });
 

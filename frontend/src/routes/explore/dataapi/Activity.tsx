@@ -56,12 +56,15 @@ export default function Activity() {
     "Could not load activity statistics.";
 
   return (
-    // No `p-4`: `DataApiLayout` already wraps the Outlet in `p-6`. `h2`, not
-    // `h1` — the shell owns the page's single `h1`, same as every page nested
-    // under `WorkspaceSettings`.
-    <div>
+    // Canonical Explore list-page scaffold (same as Charts.tsx/Datasets.tsx):
+    // `p-4` + a single `h1`. Activity is its own top-level sidebar item now,
+    // not a section nested under a `DataApiLayout` shell — that shell (which
+    // used to own the page's `h1` and add `p-6`) was removed once Data API
+    // got its own sidebar group, so this page owns its own heading and
+    // padding again.
+    <div className="p-4">
       <div className="mb-4">
-        <h2 className="text-lg font-semibold">Activity</h2>
+        <h1 className="text-lg font-semibold">Activity</h1>
       </div>
 
       <div className="mb-4">

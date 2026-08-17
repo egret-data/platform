@@ -259,7 +259,14 @@ function EndpointDetailInner({ ws, id }: { ws: string; id: string }) {
   };
 
   return (
-    <div>
+    // `p-4`, matching every other top-level Explore detail route (e.g.
+    // DatasetDetail.tsx) — this used to come for free from `DataApiLayout`'s
+    // `mx-auto max-w-6xl p-6`, which wrapped its `<Outlet/>`. That shell is
+    // gone (Data API is now three flat sidebar items, not a shell + section
+    // nav), so this route supplies its own padding like its siblings.
+    // `max-w-3xl` stays scoped to the Outlet below, not the header/nav above
+    // it — the shell never capped those either, only the section content.
+    <div className="p-4">
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div className="min-w-0">
           <Link

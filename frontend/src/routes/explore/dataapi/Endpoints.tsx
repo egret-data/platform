@@ -213,15 +213,16 @@ export default function Endpoints() {
     </tr>
   );
 
-  // No padding of its own: `DataApiLayout` already wraps the Outlet in `p-6`,
-  // and a nested `p-4` here made this page carry 40px where the endpoint
-  // detail route carries 24. `h2`, not `h1`, for the same reason every page
-  // nested under `WorkspaceSettings` uses one — the shell owns the page's
-  // single `h1`.
+  // Canonical Explore list-page scaffold (same as Charts.tsx/Datasets.tsx):
+  // `p-4` + a single `h1`. Endpoints is a top-level sidebar item now, not a
+  // section nested under a `DataApiLayout` shell — that shell (which used to
+  // own the page's `h1` and add `p-6`) was removed once Data API got its own
+  // sidebar group (Endpoints/Clients/Activity), so this page owns its own
+  // heading and padding again.
   return (
-    <div>
+    <div className="p-4">
       <div className="mb-4 flex items-center justify-between">
-        <h2 className="text-lg font-semibold">Endpoints</h2>
+        <h1 className="text-lg font-semibold">Endpoints</h1>
         <div className="flex items-center gap-2">
           <Button variant="outline" onClick={() => setDownloadOpen(true)}>Download OpenAPI</Button>
           <Button onClick={() => setCreateOpen(true)}>+ Endpoint</Button>

@@ -348,18 +348,22 @@ describe("Clients — cache invalidation", () => {
   });
 });
 
-/** The shell owns the page's single `h1` and its `p-6`; this section takes `h2`. */
-describe("Clients — page shell", () => {
-  it("renders its title as an h2, not a second h1", async () => {
+/**
+ * Clients is a top-level sidebar item now, not a section nested under a
+ * `DataApiLayout` shell — that shell was removed once Data API got its own
+ * sidebar group, so this page owns its own `h1` and `p-4`.
+ */
+describe("Clients — page scaffold", () => {
+  it("renders its title as the page's own h1", async () => {
     renderClients();
-    const h2 = await screen.findByRole("heading", { level: 2, name: "Clients" });
-    expect(h2.className).toContain("text-lg");
-    expect(screen.queryByRole("heading", { level: 1 })).not.toBeInTheDocument();
+    const h1 = await screen.findByRole("heading", { level: 1, name: "Clients" });
+    expect(h1.className).toContain("text-lg");
+    expect(screen.queryByRole("heading", { level: 2, name: "Clients" })).not.toBeInTheDocument();
   });
 
-  it("adds no padding of its own on top of the shell's", async () => {
+  it("carries its own p-4 padding, like every other top-level Explore list page", async () => {
     const { container } = renderClients();
-    await screen.findByRole("heading", { level: 2, name: "Clients" });
-    expect(container.firstElementChild?.className ?? "").not.toMatch(/\bp-4\b/);
+    await screen.findByRole("heading", { level: 1, name: "Clients" });
+    expect(container.firstElementChild?.className ?? "").toMatch(/\bp-4\b/);
   });
 });

@@ -480,24 +480,24 @@ describe("Activity — call list", () => {
   });
 });
 
-describe("Activity — page shell", () => {
-  // `DataApiLayout` renders the page's one `h1` ("Data API", text-2xl). A
-  // section nested in its Outlet takes `h2`, exactly like every page nested
-  // under `WorkspaceSettings` — two `h1`s on one page is a heading-outline
-  // defect a screen reader hears, and the subtitle stays the shell's.
-  it("uses the nested-section idiom: h2, no second h1, no subtitle paragraph", async () => {
+/**
+ * Activity is a top-level sidebar item now, not a section nested under a
+ * `DataApiLayout` shell — that shell was removed once Data API got its own
+ * sidebar group (Endpoints/Clients/Activity), so this page owns its own `h1`
+ * and `p-4`, exactly like `Charts.tsx`. No subtitle paragraph either way.
+ */
+describe("Activity — page scaffold", () => {
+  it("uses the top-level idiom: its own h1, no subtitle paragraph", async () => {
     renderActivity();
-    const h2 = await screen.findByRole("heading", { level: 2, name: "Activity" });
-    expect(h2.className).toContain("text-lg");
-    expect(h2.className).toContain("font-semibold");
-    expect(screen.queryByRole("heading", { level: 1 })).not.toBeInTheDocument();
+    const h1 = await screen.findByRole("heading", { level: 1, name: "Activity" });
+    expect(h1.className).toContain("text-lg");
+    expect(h1.className).toContain("font-semibold");
+    expect(screen.queryByRole("heading", { level: 2, name: "Activity" })).not.toBeInTheDocument();
   });
 
-  // The shell already wraps the Outlet in `p-6`; a `p-4` here stacked to 40px
-  // where the endpoint detail route carries 24.
-  it("adds no padding of its own on top of the shell's", async () => {
+  it("carries its own p-4 padding, like every other top-level Explore list page", async () => {
     const { container } = renderActivity();
-    await screen.findByRole("heading", { level: 2, name: "Activity" });
-    expect(container.firstElementChild?.className ?? "").not.toMatch(/\bp-4\b/);
+    await screen.findByRole("heading", { level: 1, name: "Activity" });
+    expect(container.firstElementChild?.className ?? "").toMatch(/\bp-4\b/);
   });
 });

@@ -40,7 +40,6 @@ import RolesPermissions from "@/routes/explore/settings/RolesPermissions";
 import SharedObjects from "@/routes/explore/settings/SharedObjects";
 import AccessRequests from "@/routes/explore/settings/AccessRequests";
 import WorkspaceGeneral from "@/routes/explore/settings/WorkspaceGeneral";
-import DataApiLayout from "@/routes/explore/dataapi/DataApiLayout";
 import Endpoints from "@/routes/explore/dataapi/Endpoints";
 import Clients from "@/routes/explore/dataapi/Clients";
 import Activity from "@/routes/explore/dataapi/Activity";
@@ -118,29 +117,36 @@ function ExploreRoutes() {
           {/* Engine connections now live under Workspace settings; keep the old
               path working by redirecting into that tab. */}
           <Route path="engines" element={<Navigate to="../settings/engines" replace />} />
-          <Route path="data-api" element={<RequireFeature feature="data_api"><DataApiLayout /></RequireFeature>}>
-            <Route index element={<Navigate to="endpoints" replace />} />
-            <Route path="endpoints" element={<Endpoints />} />
-            {/* `new` is not a route here: creating an endpoint asks for a name in a
-                dialog and then navigates to the created id, so there is no draft URL
-                that can be opened cold. */}
-            <Route path="endpoints/:id" element={<EndpointDetail />}>
-              <Route index element={<Definition />} />
-              {/* Each section is its own child route (not a query param) so
-                  the open section is in the URL and survives a refresh.
-                  `Access` links into `try` with `?service_account=`; `TryIt`
-                  reads that exact key to preselect the account a row is
-                  about. Nothing fails if it doesn't — the link still
-                  navigates, just without the preselection — which is why the
-                  contract is written down here and in the plan ledger. */}
-              <Route path="response" element={<ResponseSection />} />
-              <Route path="access" element={<AccessSection />} />
-              <Route path="try" element={<TryIt />} />
-              <Route path="versions" element={<VersionsSection />} />
-            </Route>
-            <Route path="clients" element={<Clients />} />
-            <Route path="activity" element={<Activity />} />
+          {/* Data API is its own sidebar area (Sidebar.tsx), not a shell page: three
+              sibling sections plus a detail route, each mounted flat here exactly
+              like every other Explore feature (Charts, Datasets…). There used to be
+              a `DataApiLayout` shell carrying the page's `h1` and a section nav that
+              duplicated the sidebar; it was removed once the sidebar itself carried
+              Endpoints/Clients/Activity as real items — see
+              docs/en/specs/2026-08-16-data-api-p5-design.md §2.1–§2.2. `/data-api`
+              itself keeps a bare redirect so an old bookmark to the shell's own URL
+              still lands somewhere real. */}
+          <Route path="data-api" element={<Navigate to="endpoints" replace />} />
+          <Route path="data-api/endpoints" element={<RequireFeature feature="data_api"><Endpoints /></RequireFeature>} />
+          {/* `new` is not a route here: creating an endpoint asks for a name in a
+              dialog and then navigates to the created id, so there is no draft URL
+              that can be opened cold. */}
+          <Route path="data-api/endpoints/:id" element={<RequireFeature feature="data_api"><EndpointDetail /></RequireFeature>}>
+            <Route index element={<Definition />} />
+            {/* Each section is its own child route (not a query param) so
+                the open section is in the URL and survives a refresh.
+                `Access` links into `try` with `?service_account=`; `TryIt`
+                reads that exact key to preselect the account a row is
+                about. Nothing fails if it doesn't — the link still
+                navigates, just without the preselection — which is why the
+                contract is written down here and in the plan ledger. */}
+            <Route path="response" element={<ResponseSection />} />
+            <Route path="access" element={<AccessSection />} />
+            <Route path="try" element={<TryIt />} />
+            <Route path="versions" element={<VersionsSection />} />
           </Route>
+          <Route path="data-api/clients" element={<RequireFeature feature="data_api"><Clients /></RequireFeature>} />
+          <Route path="data-api/activity" element={<RequireFeature feature="data_api"><Activity /></RequireFeature>} />
           <Route path="pipelines" element={<Placeholder title="Pipelines" />} />
           <Route path="workflows" element={<Placeholder title="Workflows" />} />
           <Route

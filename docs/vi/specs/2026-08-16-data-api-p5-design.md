@@ -34,33 +34,59 @@ dụng cho một URL mà client đã deploy đang phụ thuộc vào.
 
 ### 2.1 Vị trí
 
-Nhóm sidebar `Data Engineering`, không phải Explore.
-`frontend/src/components/layout/Sidebar.tsx` đã có sẵn placeholder trơ:
+**Sửa lại 2026-08-17** (sau khi review UI đã ship; thay thế kế hoạch P5b gốc — kế hoạch cũ
+đặt một mục `Data API` duy nhất dưới `Data Engineering`, mở ra một shell — xem ghi chú ở
+Task 1 trong `docs/en/plans/2026-08-17-data-api-p5b-frontend.md`).
+
+**Data API là nhóm sidebar riêng của nó**, nằm ngay sau `Explore` và trước `Automate`, với
+`Endpoints` / `Clients` / `Activity` là ba mục anh em — cùng mẫu hình `Charts` và `Datasets`
+dùng bên trong `Explore`, không phải một mục duy nhất mở ra trang shell. Ba khu vực cộng thêm
+một route chi tiết đọc lên như một module, không phải một trang; cho nó một nhóm khiến sidebar
+là nơi duy nhất nói điều đó, thay vì một header mà module tự vẽ ra cho chính nó.
+`frontend/src/components/layout/Sidebar.tsx`:
 
 ```tsx
-{ heading: "Data Engineering", items: [
-    { label: "Data API", icon: Plug },      // không có `to:` — placeholder trơ
-    { label: "Pipelines", icon: Waypoints },
-]},
+{
+  heading: "Data API",
+  items: [
+    { label: "Endpoints", icon: Plug, to: "data-api/endpoints", feature: "data_api" },
+    { label: "Clients", icon: KeyRound, to: "data-api/clients", feature: "data_api" },
+    { label: "Activity", icon: Activity, to: "data-api/activity", feature: "data_api" },
+  ],
+},
 ```
 
-P5 gán cho mục đó `to: "data-api"` và `feature: "data_api"` (feature key đã tồn tại tại
-`crates/egret-workspace/src/features.rs:39`). Explore là nơi bạn *tiêu thụ* và phân tích;
-Data API là nơi bạn *sản xuất* một interface, cạnh Pipelines.
+Mỗi mục đều mang `feature: "data_api"` (feature key đã tồn tại tại
+`crates/egret-workspace/src/features.rs:39`), nên cả nhóm — kể cả heading — biến mất khi
+workspace thiếu entitlement, cùng quy tắc đã áp dụng cho mọi nhóm Explore có 0 mục hiển thị.
+`Data Engineering` giữ lại `Pipelines` là mục duy nhất; một nhóm chỉ có một mục vẫn ổn,
+`Automate` vốn đã như vậy.
 
 ### 2.2 Route và section nav
 
-Route `/explore/:ws/data-api`, với **section-nav dọc bên trái** — idiom của Workspace
-Settings, không phải dải tab, vì ba khu vực có bản chất khác nhau và sẽ còn thêm:
+**Sửa lại 2026-08-17** — không còn shell, không còn section nav. Mỗi trong ba trang được mount
+trực tiếp ở route riêng của nó và tự đứng vững bằng scaffold trang danh sách Explore chuẩn
+(`p-4`, `h1 text-lg`, không có subtitle), y hệt `Charts.tsx`:
 
 ```text
-Data API
-  Endpoints     danh sách, scaffold Explore chuẩn
-  Clients       service account + OAuth2 client
-  Activity      thống kê từ dataapi.access_log
+/explore/:ws/data-api/endpoints    Endpoints — danh sách, scaffold Explore chuẩn
+/explore/:ws/data-api/clients      Clients — service account + OAuth2 client
+/explore/:ws/data-api/activity     Activity — thống kê từ dataapi.access_log
+/explore/:ws/data-api              redirect sang endpoints, cho link cũ
 ```
 
-Giữ `Clients` *bên trong* Data API thay vì ở Workspace Settings → Connections là cố ý: bạn
+Thiết kế gốc (lịch sử ở §9) đặt ba trang này sau một shell `DataApiLayout` với section-nav dọc
+bên trái, mô phỏng theo Workspace Settings. Nav đó giờ dư thừa: nó đưa ra đúng ba lựa chọn mà
+sidebar đã đưa ra một khi Data API trở thành nhóm sidebar riêng, nên người đọc phải chọn giữa
+Endpoints/Clients/Activity hai lần trên cùng một màn hình — một lần ở sidebar, một lần nữa ở
+trang. Bỏ shell là bỏ nav thứ hai, không phải bỏ lựa chọn.
+
+`EndpointDetail` (`/data-api/endpoints/:id`) vẫn giữ section nav ngang riêng của nó —
+Definition · Response · Access · Try it · Versions — không bị ảnh hưởng bởi thay đổi này: đó
+là điều hướng *bên trong một đối tượng*, cùng hình dạng mà pattern route chi tiết của
+`EndpointDetail` vốn luôn có, không phải điều hướng giữa các khu vực.
+
+Giữ `Clients` *bên trong* Data API thay vì ở Workspace Settings → Connections vẫn là cố ý: bạn
 ship một API từ một chỗ.
 
 ### 2.3 Danh sách Endpoints

@@ -106,12 +106,15 @@ export default function Clients() {
   ];
 
   return (
-    // The shell (`DataApiLayout`) owns the page's `p-6` and its single `h1`;
-    // this section adds neither, same as every page nested under
-    // `WorkspaceSettings`.
-    <div>
+    // Canonical Explore list-page scaffold (same as Charts.tsx/Datasets.tsx):
+    // `p-4` + a single `h1`. Clients is its own top-level sidebar item now,
+    // not a section nested under a `DataApiLayout` shell — that shell (which
+    // used to own the page's `h1` and add `p-6`) was removed once Data API
+    // got its own sidebar group, so this page owns its own heading and
+    // padding again.
+    <div className="p-4">
       <div className="mb-4 flex items-center justify-between">
-        <h2 className="text-lg font-semibold">Clients</h2>
+        <h1 className="text-lg font-semibold">Clients</h1>
         <Button onClick={() => setCreateOpen(true)}>+ Service account</Button>
       </div>
 

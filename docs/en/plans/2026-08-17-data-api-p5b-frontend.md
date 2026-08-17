@@ -64,6 +64,15 @@ One file per section, mirroring how `routes/explore/settings/` is laid out. `End
 
 ### Task 1: Regenerate the client, mount the shell
 
+> **Superseded (2026-08-17, `feat/data-api-p5b`).** The `DataApiLayout` shell this
+> task built was removed after review of the shipped UI: Data API became its own
+> sidebar group (Endpoints/Clients/Activity as sibling items, like Charts and
+> Datasets) instead of one sidebar item opening a shell with its own section nav —
+> the section nav duplicated the sidebar once the sidebar carried the same three
+> choices. See `docs/en/specs/2026-08-16-data-api-p5-design.md` §2.1–§2.2 for the
+> current placement/route design; the steps below are kept as the historical
+> record of what P5b originally built, not as current instructions.
+
 **Files:**
 - Modify: `frontend/src/api/generated/**` (regenerated, committed)
 - Create: `frontend/src/routes/explore/dataapi/DataApiLayout.tsx`
