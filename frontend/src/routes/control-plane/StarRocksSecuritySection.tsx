@@ -6,7 +6,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import { ConfigTable, ConfigTableRow } from "./config/ConfigTable";
+import { ConfigTable, ConfigTableRow } from "@/components/config/ConfigTable";
 import { DELEGATION_HELP } from "./ControlPlaneEngines";
 import {
   type StarRocksConfigForm,

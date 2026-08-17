@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Link, MemoryRouter, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -306,6 +306,35 @@ describe("EndpointDetail dirtiness", () => {
   });
 });
 
+/**
+ * Cache/Limits/Rate limit moved from bare Label+control pairs to the
+ * `Setting | Details | Value` layout the control-plane engine config pages
+ * use (`ConfigTable`/`ConfigTableRow`). This pins the one thing that layout
+ * exists for — a Details explanation actually renders in the same row as its
+ * control — so a future edit can't silently drop the `details` prop back to
+ * nothing and leave the column blank again.
+ */
+describe("Definition — config table Details column", () => {
+  it("shows the Max rows Details copy in the same row as its control", async () => {
+    renderDetail();
+    const maxRows = await screen.findByLabelText("Max rows");
+    const row = maxRows.closest("tr");
+    expect(row).not.toBeNull();
+    // The row renders the Details text twice (a `lg:table-cell` Details
+    // column, and an `lg:hidden` inline copy for narrow screens) — jsdom
+    // doesn't evaluate either media query, so both are present in the DOM;
+    // asserting "at least one" is what "renders next to its control" means
+    // here, matching how this codebase already asserts duplicated
+    // responsive text elsewhere (see EngineDetail.test.tsx's `no delegation`
+    // assertion).
+    expect(
+      within(row as HTMLElement).getAllByText(
+        /hard cap on rows returned\. a result larger than this fails the call rather than being silently truncated/i,
+      ).length,
+    ).toBeGreaterThan(0);
+  });
+});
+
 function renderResponse(endpoint: DataApiEndpointDto = makeEndpoint()) {
   vi.mocked(api.useDataApiGetEndpoint).mockReturnValue(
     { data: { status: 200, data: endpoint }, isLoading: false, isError: false, error: null, refetch: vi.fn() } as unknown as
@@ -401,8 +430,14 @@ describe("ResponseSection", () => {
       } as unknown as ReturnType<typeof api.useDataApiGetOpenapi>,
     );
     renderResponse();
-    expect(await screen.findByText(/re-publish/i)).toBeInTheDocument();
-    expect(screen.getByText(/daily/)).toBeInTheDocument();
+    // Scoped to the error alert, not a bare `findByText`: the Naming row's
+    // own Details copy ("...re-published") now also matches `/re-publish/i`
+    // (rendered twice, per the Details-column note above), so an unscoped
+    // query would fail with "multiple elements found" rather than pinning
+    // the OpenAPI card's error message specifically.
+    const alert = await screen.findByRole("alert");
+    expect(within(alert).getByText(/re-publish/i)).toBeInTheDocument();
+    expect(within(alert).getByText(/daily/)).toBeInTheDocument();
   });
 
   it("picks the is_live version's columns, not a superseded one's", async () => {

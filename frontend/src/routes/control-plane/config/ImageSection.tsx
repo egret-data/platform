@@ -12,7 +12,7 @@ import {
 } from "@/components/ui/select";
 import type { EngineConfigForm } from "../useEngineConfigForm";
 import { ConfigSection } from "@/components/form/ConfigSection";
-import { ConfigTable, ConfigTableRow } from "./ConfigTable";
+import { ConfigTable, ConfigTableRow } from "@/components/config/ConfigTable";
 import { SELECT_NONE } from "./podEditors";
 
 /**
