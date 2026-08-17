@@ -154,7 +154,7 @@ export default function Definition() {
               <ConfigTableRow
                 label="Scope"
                 htmlFor="def-cache-scope"
-                details="`Per principal` caches separately for each service account, so Ranger-filtered rows never cross principals. `Shared` caches one copy for everyone — only safe when the connection does not run queries as the caller."
+                details="Per principal caches separately for each service account, so Ranger-filtered rows never cross principals. Shared caches one copy for everyone — only safe when the connection does not run queries as the caller."
               >
                 <Select
                   value={form.cache.scope ?? CacheScope.per_principal}

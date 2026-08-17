@@ -133,7 +133,7 @@ export default function ResponseSection() {
           <ConfigTableRow
             label="Shape"
             htmlFor="resp-shape"
-            details="`Objects` returns each row as a named object. `Arrays` returns positional rows, which are smaller but depend on column order."
+            details="Objects returns each row as a named object. Arrays returns positional rows, which are smaller but depend on column order."
           >
             <Select
               value={form.output.shape ?? "objects"}
