@@ -1,0 +1,321 @@
+//! `POST …/endpoints/{id}/preview` — spec §5 of the P6 authoring-loop design.
+//!
+//! DB-gated. Self-skips (passes) when DATABASE_URL is unset, like every other
+//! suite here — so check the DURATION, not just the `ok`.
+
+mod serving_common;
+
+use axum::http::StatusCode;
+use egret_core::UserId;
+use serving_common::{bind_signature, fixture, marker};
+
+fn preview_path(f: &serving_common::Fixture) -> String {
+    format!(
+        "/api/ws/{}/data-api/endpoints/{}/preview",
+        f.ws_slug, f.endpoint_id
+    )
+}
+
+/// The body every test below starts from: a draft with no parameters.
+fn draft(f: &serving_common::Fixture, sql: &str) -> serde_json::Value {
+    serde_json::json!({
+        "sql": sql,
+        "params": [],
+        "values": {},
+        "database_id": f.database_id,
+    })
+}
+
+/// Spec §5: **preview runs as the author, not the service account.**
+///
+/// `FakePort` folds the principal into the value it returns (`marker`), the way
+/// Ranger filters per principal. A preview that ran as a service account would
+/// be `Try it` wearing the wrong label — and the author would be told their SQL
+/// works against rows they cannot actually see.
+#[tokio::test]
+async fn preview_runs_as_the_author() {
+    let Some(f) = fixture().await else { return };
+    let (status, body) = f
+        .mgmt_post(&preview_path(&f), Some(draft(&f, "SELECT 1 AS n")))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["rows"][0][0].as_i64(),
+        Some(marker(UserId(f.author))),
+        "preview must run as the session's own user, not a service account"
+    );
+}
+
+/// Spec §5: **preview reflects unsaved SQL.**
+///
+/// The property the request body exists for. It fails the moment anyone
+/// "simplifies" the handler into reading the stored draft — at which point the
+/// feature is gone and every other test here still passes.
+#[tokio::test]
+async fn preview_runs_the_body_not_the_stored_draft() {
+    let Some(f) = fixture().await else { return };
+    let (status, body) = f
+        .mgmt_post(
+            &preview_path(&f),
+            Some(draft(&f, "SELECT 42 AS unsaved_marker")),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (sql, _) = f.port.last();
+    assert!(
+        sql.contains("unsaved_marker"),
+        "the engine was sent {sql:?}, not the body's SQL"
+    );
+}
+
+/// The row cap is PREVIEW's, not the endpoint's.
+///
+/// The published draft carries `limits.max_rows = 10000` (the default nothing in
+/// this fixture overrides), so reading 100 here says the preview cap is fixed
+/// rather than inherited — the difference between "the shape of the data" and a
+/// million rows in a browser. The timeout is asserted in the same breath because
+/// it is the other half of the same fixed budget, and a route that took its
+/// `limits` from the snapshot would get both wrong at once.
+#[tokio::test]
+async fn preview_caps_at_a_hundred_rows_regardless_of_the_endpoints_limits() {
+    let Some(f) = fixture().await else { return };
+    let (status, body) = f
+        .mgmt_post(&preview_path(&f), Some(draft(&f, "SELECT 1 AS n")))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (max_rows, timeout) = f.port.last_limits();
+    assert_eq!(max_rows, 100, "the preview cap is fixed at 100 rows");
+    assert_eq!(timeout, std::time::Duration::from_secs(30));
+}
+
+/// Spec §5: **preview writes no `access_log` row.**
+///
+/// Activity measures real traffic. A preview row would inflate call counts and
+/// skew every percentile on that page.
+#[tokio::test]
+async fn preview_writes_no_access_log_row() {
+    let Some(f) = fixture().await else { return };
+    let before: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM dataapi.access_log WHERE workspace_id = $1")
+            .bind(f.ws_id)
+            .fetch_one(&f.db.pool)
+            .await
+            .unwrap();
+    let (status, body) = f
+        .mgmt_post(&preview_path(&f), Some(draft(&f, "SELECT 1 AS n")))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let after: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM dataapi.access_log WHERE workspace_id = $1")
+            .bind(f.ws_id)
+            .fetch_one(&f.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(before, after, "a preview must not appear in Activity");
+}
+
+/// Spec §5: **preview does not populate the cache.**
+///
+/// A cached preview would poison what consumers read with a result produced
+/// under a different principal — the author's, not the service account's.
+///
+/// # Why this endpoint and not the fixture's own `/probe`
+///
+/// `/probe` publishes `cache.enabled = false`, and `serving/router.rs` skips the
+/// lookup entirely for a snapshot that does not cache — so a preview could write
+/// whatever it liked and `meta.cached` would still read `false`. The assertion
+/// would pass for a reason that has nothing to do with preview.
+///
+/// So this publishes a **cache-enabled, `shared`-scope** endpoint instead. Shared
+/// is the scope whose serving key carries no principal (`cache_key`'s `None`
+/// arm), which is what makes an entry a preview wrote reachable by a consumer's
+/// key at all: a `per_principal` entry written under the AUTHOR could never be
+/// hit by a call made as `principal_a`, so the test could not fail however wrong
+/// the route was. `shared` is publishable here because `database_id` is neither
+/// delegated nor impersonating.
+#[tokio::test]
+async fn preview_does_not_populate_the_cache() {
+    let Some(f) = fixture().await else { return };
+    let ep = f
+        .publish(
+            "/cached-probe",
+            f.database_id,
+            serde_json::json!({ "enabled": true, "ttl_seconds": 60, "scope": "shared" }),
+            serde_json::json!({}),
+        )
+        .await;
+    let path = format!("/api/ws/{}/data-api/endpoints/{ep}/preview", f.ws_slug);
+    let (status, body) = f.mgmt_post(&path, Some(draft(&f, "SELECT 1 AS n"))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let res = f.call_as(f.principal_a, "cached-probe").await;
+    assert_eq!(res.status, StatusCode::OK, "{:?}", res.body);
+    assert_eq!(
+        res.body["meta"]["cached"].as_bool(),
+        Some(false),
+        "a consumer's first call must be a MISS — a preview must not seed the cache"
+    );
+}
+
+/// Spec §5: **preview refuses what publish refuses**, and with the same error —
+/// which is what proves it did not get a render path of its own.
+#[tokio::test]
+async fn preview_refuses_a_definition_publish_refuses() {
+    let Some(f) = fixture().await else { return };
+    let (status, body) = f
+        .mgmt_post(
+            &preview_path(&f),
+            Some(draft(&f, "SELECT 1 AS n; DROP TABLE t")),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a second statement must be refused: `:manage` is not engine write access — {body}"
+    );
+    assert_eq!(f.port.executions(), 0, "nothing may reach the engine");
+}
+
+/// The other half of that rule, and the half nothing else re-runs: a single
+/// statement that is not a SELECT.
+///
+/// `check_params` re-runs the separator scan on purpose, so the test above stays
+/// green even with `check_single_select` out of the bundle. A bare `DELETE`
+/// carries no separator, so this is the assertion that says `:manage` is not
+/// engine WRITE access.
+#[tokio::test]
+async fn preview_refuses_a_statement_that_is_not_a_select() {
+    let Some(f) = fixture().await else { return };
+    let (status, body) = f
+        .mgmt_post(
+            &preview_path(&f),
+            Some(draft(&f, "DELETE FROM t WHERE 1 = 1")),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(f.port.executions(), 0, "nothing may reach the engine");
+}
+
+/// Spec §5: **preview surfaces the engine's message**, not `data_access_denied`.
+///
+/// The one place serving's sanitising rule is deliberately inverted. An author
+/// owns the SQL, runs as themselves, and cannot fix a syntax error from a
+/// scrubbed message.
+#[tokio::test]
+async fn preview_surfaces_the_engines_own_message() {
+    let Some(f) = fixture().await else { return };
+    f.port.fail_next_with("line 1:8: mismatched input 'FRUM'");
+    let (status, body) = f
+        .mgmt_post(&preview_path(&f), Some(draft(&f, "SELECT 1 AS n")))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let text = body.to_string();
+    assert!(
+        text.contains("mismatched input 'FRUM'"),
+        "the author must see the engine's own text, got {text}"
+    );
+    assert!(
+        !text.contains("data_access_denied"),
+        "serving's sanitising must NOT apply to a preview"
+    );
+}
+
+/// Not in spec §5, and it belongs here anyway: a `database_id` from a request
+/// body is exactly the shape that can name another workspace's connection.
+#[tokio::test]
+async fn preview_refuses_a_foreign_database_id() {
+    let Some(f) = fixture().await else { return };
+    let mut body = draft(&f, "SELECT 1 AS n");
+    body["database_id"] = serde_json::json!(uuid::Uuid::new_v4());
+    let (status, out) = f.mgmt_post(&preview_path(&f), Some(body)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{out}");
+    assert_eq!(f.port.executions(), 0);
+}
+
+/// A parameterised preview binds the author's values — the assertion that makes
+/// every other one here non-vacuous. `bind_signature` folds the bound values
+/// into the returned row, so two different test values cannot look the same.
+#[tokio::test]
+async fn preview_binds_the_authors_test_values() {
+    let Some(f) = fixture().await else { return };
+    let body = |v: &str| {
+        serde_json::json!({
+            "sql": "SELECT 1 AS n WHERE region = {{ region }}",
+            "params": [{
+                "name": "region",
+                "type": "string",
+                "location": "query",
+                "required": true,
+            }],
+            "values": { "region": [v] },
+            "database_id": f.database_id,
+        })
+    };
+    let (s1, b1) = f.mgmt_post(&preview_path(&f), Some(body("EU"))).await;
+    let (s2, b2) = f.mgmt_post(&preview_path(&f), Some(body("US"))).await;
+    assert_eq!(s1, StatusCode::OK, "{b1}");
+    assert_eq!(s2, StatusCode::OK, "{b2}");
+    assert_ne!(
+        b1["rows"][0][0], b2["rows"][0][0],
+        "two different test values must produce different rows"
+    );
+    let (sql, binds) = f.port.last();
+    assert!(
+        !sql.contains("US"),
+        "the value must not be interpolated into the statement, got {sql:?}"
+    );
+    assert_eq!(
+        bind_signature(&binds),
+        bind_signature(&[egret_query_api::Param::Str("US".into())]),
+        "the author's value must reach the engine as a BIND, not as SQL text"
+    );
+}
+
+/// `:read` cannot preview. egret's permissions are flat, so nothing but the
+/// explicit `require` stands between a reader and running SQL on the engine.
+///
+/// The caller is a brand-new human holding EXACTLY `data_api_endpoint:read`,
+/// measured against a PDP built after its grant exists — see
+/// `Fixture::caller_with`, whose comment explains why a reused PDP would deny
+/// everything and look exactly like a gate that works. It shares the fixture's
+/// `FakePort`, so `executions()` still answers for it.
+#[tokio::test]
+async fn read_permission_cannot_preview() {
+    let Some(f) = fixture().await else { return };
+    let reader = f.caller_with(&["data_api_endpoint:read"]).await;
+    let before = f.port.executions();
+    let (status, body) = reader
+        .post(&preview_path(&f), Some(draft(&f, "SELECT 1 AS n")))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "`:read` must not reach the preview route — {body}"
+    );
+    assert_eq!(
+        f.port.executions(),
+        before,
+        "a refused preview must not reach the engine"
+    );
+}
+
+/// The other side of that measurement: the SAME request from a caller holding
+/// exactly `:manage` succeeds.
+///
+/// Without this, `read_permission_cannot_preview` could be passing because the
+/// request is malformed, the route is unmounted, or `caller_with` builds a
+/// session that fails every gate — three ways to get a green 403 that says
+/// nothing about the permission.
+#[tokio::test]
+async fn manage_permission_can_preview() {
+    let Some(f) = fixture().await else { return };
+    let author = f.caller_with(&["data_api_endpoint:manage"]).await;
+    let (status, body) = author
+        .post(&preview_path(&f), Some(draft(&f, "SELECT 1 AS n")))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["rows"][0][0].as_i64(),
+        Some(marker(UserId(author.user))),
+        "the preview runs as whoever asked for it"
+    );
+}
