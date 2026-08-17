@@ -221,14 +221,81 @@ async fn preview_surfaces_the_engines_own_message() {
 
 /// Not in spec §5, and it belongs here anyway: a `database_id` from a request
 /// body is exactly the shape that can name another workspace's connection.
+///
+/// # Why the database must really EXIST, in a real other workspace
+///
+/// This test used to send `Uuid::new_v4()`. A random uuid 404s from an
+/// implementation with NO workspace scoping whatsoever — the row is absent from
+/// `query.databases` entirely, so the answer is the same whether the read filters
+/// by workspace or not, and dropping `AND workspace_id = $2` from
+/// `EndpointStore::connection_per_principal_pair` left it green. A row that exists
+/// somewhere else is the only version that distinguishes the two.
 #[tokio::test]
 async fn preview_refuses_a_foreign_database_id() {
     let Some(f) = fixture().await else { return };
+    let foreign_db = f.database_in_another_workspace().await;
     let mut body = draft(&f, "SELECT 1 AS n");
-    body["database_id"] = serde_json::json!(uuid::Uuid::new_v4());
+    body["database_id"] = serde_json::json!(foreign_db);
     let (status, out) = f.mgmt_post(&preview_path(&f), Some(body)).await;
-    assert_eq!(status, StatusCode::NOT_FOUND, "{out}");
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a connection this workspace was never granted must be invisible, not merely forbidden — {out}"
+    );
     assert_eq!(f.port.executions(), 0);
+}
+
+/// Spec §2.4.1: **`output.naming` is NOT applied to a preview's columns.**
+///
+/// An author debugging SQL needs the names they wrote; the published contract —
+/// naming transform included — is what the `Response` section is for, and the UI's
+/// copy says which is which. Nothing asserted the code half of that, so a mutation
+/// that ran the columns through `apply_naming` before returning them failed
+/// nothing.
+///
+/// # Why the column is `total_revenue` and not the fixture's `n`
+///
+/// `apply_naming` maps `n` to itself under every mode, so with the default fake
+/// column this assertion would hold whether the transform ran or not. `camel`
+/// turns `total_revenue` into `totalRevenue` — pinned as a unit test in
+/// `serving/router.rs` — so this pair is the one that can tell the difference.
+#[tokio::test]
+async fn preview_returns_the_engines_column_names_not_the_endpoints_naming() {
+    let Some(f) = fixture().await else { return };
+    // The endpoint really does carry a renaming contract…
+    sqlx::query("UPDATE dataapi.endpoints SET output = $1 WHERE id = $2")
+        .bind(serde_json::json!({ "naming": "camel" }))
+        .bind(f.endpoint_id)
+        .execute(&f.db.pool)
+        .await
+        .expect("set output.naming");
+    let (status, ep) = f
+        .mgmt_get(&format!(
+            "/api/ws/{}/data-api/endpoints/{}",
+            f.ws_slug, f.endpoint_id
+        ))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{ep}");
+    assert_eq!(
+        ep["output"]["naming"].as_str(),
+        Some("camel"),
+        "the fixture must really declare a renaming contract, or this test is vacuous: {ep}"
+    );
+
+    // …and the engine really does return a name that contract would change.
+    f.port.set_columns(&["total_revenue"]);
+    let (status, body) = f
+        .mgmt_post(
+            &preview_path(&f),
+            Some(draft(&f, "SELECT 1 AS total_revenue")),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["columns"][0]["name"].as_str(),
+        Some("total_revenue"),
+        "preview must return the ENGINE's own column names, not the published contract's: {body}"
+    );
 }
 
 /// A parameterised preview binds the author's values — the assertion that makes

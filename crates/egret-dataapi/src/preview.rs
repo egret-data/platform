@@ -24,8 +24,42 @@
 //! and no cache write (it would poison what consumers read with a result
 //! produced under a different principal).
 //!
-//! Each absence is asserted in `tests/preview.rs`, because an absence is
-//! exactly what a later refactor adds back without noticing.
+//! # What actually asserts those four absences
+//!
+//! Two of the four are asserted end-to-end in `tests/preview.rs`:
+//! `preview_writes_no_access_log_row` counts `dataapi.access_log` before and
+//! after, and `preview_does_not_populate_the_cache` publishes a cache-enabled
+//! `shared`-scope endpoint, previews it, and requires a consumer's next call to be
+//! a MISS. **There is no cache-READ test and no rate-limit test** — do not read the
+//! four as equally covered.
+//!
+//! The absence is nonetheless STRUCTURAL, which is the stronger guarantee and the
+//! reason the two missing tests were not written: this module contains no cache,
+//! rate-limit, `access_log` or audit reference of any kind. There is nothing to
+//! disable and no flag to get wrong — [`run`] goes straight from validation to
+//! `execute_as_with_params`. So the failure mode to watch for is a refactor that
+//! ADDS one of the four (routing preview through a serving helper that does all of
+//! them), not a switch flipping; and grep for those four names in this file is the
+//! check that catches it.
+//!
+//! # Preview bypasses `decode`, so `values` is not bounded by `MAX_PARAM_BYTES`
+//!
+//! The serving path reaches `resolve` through `decode`, which enforces
+//! `MAX_PARAM_BYTES` and `MAX_PARAM_REPEATS` on a query string. [`run`] calls
+//! [`crate::serving::params::resolve_supplied`] with the body's already-parsed map
+//! instead, so neither cap applies here. Accepted, deliberately:
+//!
+//! * The body is bounded by axum's request body limit, and what reaches the engine
+//!   is bounded by `render`'s `CappedSink` — so neither this process nor the
+//!   coordinator can be made to hold an unbounded statement.
+//! * The route is `data_api_endpoint:manage`-gated. An author who wanted to send
+//!   the engine a large statement can already do so with SQL Lab, at equivalent
+//!   permission; the caps exist to stop an anonymous-ish CONSUMER, which is not
+//!   who is here.
+//! * `resolve_supplied` exists precisely because re-encoding the body's map into a
+//!   query string and pushing it back through `decode` is lossy — a value
+//!   containing `&`, `=` or `%` would not survive the round trip intact, so
+//!   "reuse `decode` for the caps" would trade a bound for a correctness bug.
 
 use std::collections::BTreeMap;
 

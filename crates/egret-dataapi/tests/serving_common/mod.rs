@@ -89,6 +89,14 @@ pub struct FakePort {
     /// Set by [`FakePort::fail_next_with`] / [`FakePort::fail_next_internal`];
     /// consumed by the next `execute_as`/`execute_as_with_params` call.
     next_error: Mutex<Option<Error>>,
+    /// The column names the next executions return, when a test needs names a
+    /// naming transform actually CHANGES.
+    ///
+    /// `None` — the default every existing assertion in these suites was written
+    /// against — means the single column `n`. `n` is a name `apply_naming` maps to
+    /// itself under every mode, so a test about `output.naming` being applied (or
+    /// not) is vacuous with it: `camel("n") == "n"`.
+    columns: Mutex<Option<Vec<String>>>,
 }
 
 impl FakePort {
@@ -154,6 +162,20 @@ impl FakePort {
     fn take_next_error(&self) -> Option<Error> {
         self.next_error.lock().unwrap().take()
     }
+
+    /// Make every following execution return these column names instead of the
+    /// default single `n`. Sticky, not one-shot: a test asserting on names wants
+    /// them for the whole test, and the fixture is per-test anyway.
+    pub fn set_columns(&self, names: &[&str]) {
+        *self.columns.lock().unwrap() = Some(names.iter().map(|n| (*n).to_string()).collect());
+    }
+
+    fn out_columns(&self) -> Vec<ColumnMeta> {
+        match self.columns.lock().unwrap().as_ref() {
+            Some(names) => names.iter().map(|n| col(n)).collect(),
+            None => vec![col("n")],
+        }
+    }
 }
 
 fn col(name: &str) -> ColumnMeta {
@@ -213,9 +235,12 @@ impl egret_query_api::QueryExecPort for FakePort {
         self.executions.fetch_add(1, Ordering::SeqCst);
         *self.last.lock().unwrap() = Some((sql.to_string(), Vec::new()));
         *self.last_limits.lock().unwrap() = Some((limits.max_rows, limits.timeout));
+        let columns = self.out_columns();
         Ok(TabularResult {
-            columns: vec![col("n")],
-            rows: vec![vec![serde_json::json!(marker(principal))]],
+            // One cell per column, so a test that asked for extra columns still
+            // gets a row the serving path's arity check accepts.
+            rows: vec![vec![serde_json::json!(marker(principal)); columns.len()]],
+            columns,
             row_count: 1,
             bytes_scanned: None,
             truncated: false,
@@ -245,11 +270,15 @@ impl egret_query_api::QueryExecPort for FakePort {
         self.executions.fetch_add(1, Ordering::SeqCst);
         *self.last.lock().unwrap() = Some((sql.to_string(), params.to_vec()));
         *self.last_limits.lock().unwrap() = Some((limits.max_rows, limits.timeout));
+        let columns = self.out_columns();
         Ok(TabularResult {
-            columns: vec![col("n")],
-            rows: vec![vec![serde_json::json!(
-                marker(principal).wrapping_add(bind_signature(params))
-            )]],
+            rows: vec![vec![
+                serde_json::json!(
+                    marker(principal).wrapping_add(bind_signature(params))
+                );
+                columns.len()
+            ]],
+            columns,
             row_count: 1,
             bytes_scanned: None,
             truncated: false,
@@ -1207,6 +1236,27 @@ impl Fixture {
             .execute(&self.db.pool)
             .await
             .expect("flip impersonate");
+    }
+
+    /// A real `query.databases` row that EXISTS, in a real workspace that is not
+    /// `self.ws_id`.
+    ///
+    /// The point is that the row is present in the table: a random `Uuid` is
+    /// refused by an implementation with no workspace scoping at all, because the
+    /// row does not exist anywhere, so it cannot tell a scoped read from an
+    /// unscoped one. This is the shape that separates them — and it is the IDOR
+    /// shape for any id that arrives in a request BODY.
+    pub async fn database_in_another_workspace(&self) -> Uuid {
+        let other: Uuid = sqlx::query_scalar(
+            "INSERT INTO workspaces (slug, name, created_by, status) \
+             VALUES ($1, 'Other workspace', $2, 'active') RETURNING id",
+        )
+        .bind(format!("other-{}", Uuid::new_v4().simple()))
+        .bind(self.admin)
+        .fetch_one(&self.db.pool)
+        .await
+        .expect("insert other workspace");
+        insert_database(&self.db, other, self.admin, false).await
     }
 
     /// Flip the live `delegated` column AFTER a version was published against
