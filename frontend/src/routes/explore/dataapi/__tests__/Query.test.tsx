@@ -12,7 +12,7 @@ vi.mock("@/api/dataApi");
 import * as api from "@/api/generated/data-api/data-api";
 import * as databasesApi from "@/api/databases";
 import * as dataApi from "@/api/dataApi";
-import type { DataApiEndpointDto } from "@/api/generated/model";
+import { ParamLocation, ParamType, type DataApiEndpointDto } from "@/api/generated/model";
 import EndpointDetail from "@/routes/explore/dataapi/EndpointDetail";
 import Query from "@/routes/explore/dataapi/detail/Query";
 
@@ -168,5 +168,60 @@ describe("Query section — preview", () => {
     renderQuery(endpoint);
     // Spec §2.1: "The consequence must reach the UI, not just this document."
     expect(await screen.findByText(/runs as you/i)).toBeInTheDocument();
+  });
+});
+
+describe("Query section — layout", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.mocked(databasesApi.useDatabases).mockReturnValue({
+      data: [{ id: "db-1", name: "warehouse" }],
+    } as never);
+    vi.mocked(dataApi.useUpdateEndpoint).mockReturnValue({ mutateAsync: vi.fn(), isPending: false } as never);
+    vi.mocked(api.useDataApiPreviewEndpoint).mockReturnValue({ mutateAsync: vi.fn(), isPending: false } as never);
+  });
+
+  it("holds the database picker, the SQL editor and the parameter declarations", async () => {
+    const endpoint = makeEndpoint({
+      params: [
+        {
+          name: "region",
+          type: ParamType.string,
+          location: ParamLocation.query,
+          required: true,
+          description: "",
+        },
+      ],
+    });
+    vi.mocked(api.useDataApiGetEndpoint).mockReturnValue({
+      data: { status: 200, data: endpoint },
+      isLoading: false,
+      isError: false,
+      refetch: vi.fn(),
+    } as never);
+
+    renderQuery(endpoint);
+    expect(await screen.findByLabelText("Database")).toBeInTheDocument();
+    expect(screen.getByLabelText("SQL")).toBeInTheDocument();
+    // The DECLARATION, from ParamEditor…
+    expect(screen.getByDisplayValue("region")).toBeInTheDocument();
+    // …and a separate test-value input for the same parameter, which is the
+    // distinction merging the two would destroy.
+    expect(screen.getByLabelText(/^region/)).toBeInTheDocument();
+  });
+
+  it("does not hold name, path or the config tables — those are Config's", async () => {
+    const endpoint = makeEndpoint();
+    vi.mocked(api.useDataApiGetEndpoint).mockReturnValue({
+      data: { status: 200, data: endpoint },
+      isLoading: false,
+      isError: false,
+      refetch: vi.fn(),
+    } as never);
+    renderQuery(endpoint);
+    await screen.findByLabelText("SQL");
+    expect(screen.queryByLabelText("Name")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Path")).not.toBeInTheDocument();
+    expect(screen.queryByText("Rate limit")).not.toBeInTheDocument();
   });
 });
