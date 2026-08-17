@@ -73,8 +73,13 @@ export default function ActivityCallList({ ws, range }: { ws: string; range: Act
 
   // Trial rows are identified by `actor_user_id`, and resolving it to an
   // email is the same problem AuditLog.tsx solves for its actor column.
+  // Query key is deliberately NOT scoped under "activity" — Versions.tsx
+  // resolves `created_by` off the exact same unfiltered `listUsers()` call
+  // and shares this cache entry rather than firing a second identical
+  // request. There is nothing for the two call sites to diverge on: the
+  // function takes no arguments.
   const usersQuery = useQuery({
-    queryKey: ["data-api", "activity", "users"],
+    queryKey: ["data-api", "users"],
     queryFn: listUsers,
     retry: false,
   });
