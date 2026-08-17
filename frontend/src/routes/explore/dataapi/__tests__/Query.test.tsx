@@ -115,6 +115,90 @@ describe("Query section — preview", () => {
     expect(mutateAsync.mock.calls[0][0].data.sql).toBe("SELECT 2");
   });
 
+  /**
+   * Final-review finding (Important #2): the request body had no composed test —
+   * only `data.sql` was ever asserted, so 3 of its 4 fields were unpinned on both
+   * sides of the wire (the backend's `tests/preview.rs` hand-crafts its own JSON,
+   * so nothing joined the two halves). Two mutations survived the whole suite:
+   * deleting `sent[p.name] = [v]` (a typed test value silently stops reaching the
+   * server, and every required-parameter preview 400s while the author looks at a
+   * filled-in field), and sending `database_id: ""` (a 422 with a `text/plain`
+   * body, which used to render as nothing at all).
+   *
+   * So: deep-equal the WHOLE `data`, not a field of it.
+   */
+  it("sends sql, params, the typed test values and the database id — the whole body", async () => {
+    const params = [
+      {
+        name: "region",
+        type: ParamType.string,
+        location: ParamLocation.query,
+        required: true,
+        description: "",
+      },
+    ];
+    const endpoint = makeEndpoint({ params } as Partial<DataApiEndpointDto>);
+    vi.mocked(api.useDataApiGetEndpoint).mockReturnValue({
+      data: { status: 200, data: endpoint },
+      isLoading: false,
+      isError: false,
+      refetch: vi.fn(),
+    } as never);
+    const mutateAsync = vi.fn().mockResolvedValue({
+      status: 200,
+      data: { columns: [], rows: [], row_count: 0, truncated: false },
+    });
+    vi.mocked(api.useDataApiPreviewEndpoint).mockReturnValue({ mutateAsync, isPending: false } as never);
+
+    renderQuery(endpoint);
+    // By label, not by DOM id: the id is index-based (see `PreviewBlock`'s comment
+    // on why a name cannot be unique mid-edit), and the label is what the author
+    // actually reads.
+    await userEvent.type(await screen.findByLabelText(/^region/), "EU");
+    await userEvent.click(screen.getByRole("button", { name: /preview unsaved draft/i }));
+
+    await waitFor(() => expect(mutateAsync).toHaveBeenCalled());
+    expect(mutateAsync.mock.calls[0][0]).toMatchObject({ workspace: "ws1", id: "ep-1" });
+    // One list per name, matching the serving path. `toEqual` on the whole object
+    // so an added, dropped or renamed field cannot pass unnoticed.
+    expect(mutateAsync.mock.calls[0][0].data).toEqual({
+      sql: "SELECT 1",
+      params,
+      values: { region: ["EU"] },
+      database_id: "db-1",
+    });
+  });
+
+  /**
+   * Final-review finding (Minor #5): the rows were keyed and id'd by `p.name`,
+   * which is not unique while the author is editing — two freshly-added rows are
+   * both blank, and a typo can duplicate an existing name. That produced duplicate
+   * React keys, duplicate DOM ids, and one input visibly driving both rows.
+   */
+  it("gives each test-value input its own id even when two declarations share a name", async () => {
+    const endpoint = makeEndpoint({
+      params: [
+        { name: "", type: ParamType.string, location: ParamLocation.query, required: false, description: "" },
+        { name: "", type: ParamType.string, location: ParamLocation.query, required: false, description: "" },
+      ],
+    } as Partial<DataApiEndpointDto>);
+    vi.mocked(api.useDataApiGetEndpoint).mockReturnValue({
+      data: { status: 200, data: endpoint },
+      isLoading: false,
+      isError: false,
+      refetch: vi.fn(),
+    } as never);
+    vi.mocked(api.useDataApiPreviewEndpoint).mockReturnValue({ mutateAsync: vi.fn(), isPending: false } as never);
+
+    const { container } = renderQuery(endpoint);
+    await screen.findByLabelText("SQL");
+    const ids = Array.from(container.querySelectorAll('input[id^="preview-param-"]')).map((el) => el.id);
+    expect(ids).toHaveLength(2);
+    // A duplicate id also means the second `<Label htmlFor>` points at the FIRST
+    // input, so the wrong field focuses when its label is clicked.
+    expect(new Set(ids).size).toBe(2);
+  });
+
   it("says the result was capped when the engine truncated it", async () => {
     const endpoint = makeEndpoint();
     vi.mocked(api.useDataApiGetEndpoint).mockReturnValue({
@@ -158,6 +242,38 @@ describe("Query section — preview", () => {
     expect(await screen.findByText(/mismatched input 'FRUM'/)).toBeInTheDocument();
   });
 
+  /**
+   * Final-review finding (Important #1): a failure whose `Error` carries an EMPTY
+   * message set the error state, cleared the previous rows, and rendered NOTHING —
+   * the author sees the button flicker "Running…" and then nothing at all, which
+   * is indistinguishable from a dead button. Two live routes to it: `api/client.ts`
+   * throws `new UnauthorizedError()` with no message on any 401 (and this frontend
+   * has no global 401 handler), and `ApiError.from` falls back to `res.statusText`,
+   * which is always `""` over HTTP/2 — so an axum extractor rejection, an ingress
+   * 413, or a 502 HTML page all arrive empty too. `TryIt` already had the `|| …`
+   * fallback; `PreviewBlock` had dropped it.
+   */
+  it("still says something actionable when the failure carries no message", async () => {
+    const endpoint = makeEndpoint();
+    vi.mocked(api.useDataApiGetEndpoint).mockReturnValue({
+      data: { status: 200, data: endpoint },
+      isLoading: false,
+      isError: false,
+      refetch: vi.fn(),
+    } as never);
+    vi.mocked(api.useDataApiPreviewEndpoint).mockReturnValue({
+      // Exactly what an expired session produces: an `Error` with `message === ""`.
+      mutateAsync: vi.fn().mockRejectedValue(new Error("")),
+      isPending: false,
+    } as never);
+
+    renderQuery(endpoint);
+    await userEvent.click(await screen.findByRole("button", { name: /preview unsaved draft/i }));
+    expect(await screen.findByText(/could not run the preview/i)).toBeInTheDocument();
+    // And it must name the thing the author can actually do about it.
+    expect(screen.getByText(/session may have expired/i)).toBeInTheDocument();
+  });
+
   it("says preview shows the engine's column names, not the published contract's", async () => {
     const endpoint = makeEndpoint();
     vi.mocked(api.useDataApiGetEndpoint).mockReturnValue({
@@ -184,6 +300,31 @@ describe("Query section — preview", () => {
     renderQuery(endpoint);
     // Spec §2.1: "The consequence must reach the UI, not just this document."
     expect(await screen.findByText(/runs as you/i)).toBeInTheDocument();
+  });
+
+  /**
+   * Final-review finding (Minor #4): "Preview draft" was the one run-something
+   * button that did not name the version it runs. Beside "Validate saved draft"
+   * and "Publish saved draft" the bare noun reads as the same SAVED thing, and
+   * spec §3.4's stated failure is exactly that inference: preview, see green,
+   * publish, get something else. Both halves of the fix — the label and the note —
+   * are pinned here.
+   */
+  it("names the version it runs: the unsaved, on-screen one", async () => {
+    const endpoint = makeEndpoint();
+    vi.mocked(api.useDataApiGetEndpoint).mockReturnValue({
+      data: { status: 200, data: endpoint },
+      isLoading: false,
+      isError: false,
+      refetch: vi.fn(),
+    } as never);
+    vi.mocked(api.useDataApiPreviewEndpoint).mockReturnValue({ mutateAsync: vi.fn(), isPending: false } as never);
+    renderQuery(endpoint);
+
+    expect(await screen.findByRole("button", { name: "Preview unsaved draft" })).toBeInTheDocument();
+    // Not merely "draft": the note has to say WHICH text runs.
+    expect(screen.getByText(/as they are on screen right now/i)).toBeInTheDocument();
+    expect(screen.getByText(/edits you have not saved/i)).toBeInTheDocument();
   });
 });
 
@@ -294,6 +435,45 @@ describe("Query section — dirtiness and save", () => {
     await userEvent.type(sql, "{Backspace}".repeat(5));
     expect(sql).toHaveValue("SELECT 1");
     expect(warnSpy).toHaveBeenLastCalledWith(false);
+  });
+
+  /**
+   * Final-review finding (Minor #6b): §3.1's entire reason for splitting the
+   * DECLARATION from the TEST VALUE is that a test value is not part of the
+   * endpoint — it lives in `PreviewBlock`'s own `useState`, never in the shared
+   * `form`, so it cannot be saved by accident and `dirty` cannot latch on typing
+   * one. The code was right and nothing asserted it: moving `setValues` into
+   * `setForm` passed every test in the suite.
+   */
+  it("does not count typing a preview test value as an unsaved change", async () => {
+    const endpoint = makeEndpoint({
+      params: [
+        {
+          name: "region",
+          type: ParamType.string,
+          location: ParamLocation.query,
+          required: true,
+          description: "",
+        },
+      ],
+    } as Partial<DataApiEndpointDto>);
+    vi.mocked(api.useDataApiGetEndpoint).mockReturnValue({
+      data: { status: 200, data: endpoint },
+      isLoading: false,
+      isError: false,
+      refetch: vi.fn(),
+    } as never);
+    renderQuery(endpoint);
+
+    const testValue = await screen.findByLabelText(/^region/);
+    await userEvent.type(testValue, "EU");
+    expect(testValue).toHaveValue("EU");
+
+    // Nothing about the endpoint changed, so: no header badge, Save stays
+    // disabled, and the beforeunload warning is never armed.
+    expect(screen.queryByText(/unsaved changes/i)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^save$/i })).toBeDisabled();
+    expect(warnSpy).not.toHaveBeenCalledWith(true);
   });
 
   it("re-baselines after a successful save", async () => {
@@ -439,7 +619,7 @@ describe("Query section — dirtiness and save", () => {
     renderQuery(endpoint);
     const sql = await screen.findByLabelText("SQL");
     await userEvent.type(sql, " -- edited");
-    expect(screen.getByRole("button", { name: /preview draft/i })).toBeEnabled();
+    expect(screen.getByRole("button", { name: /preview unsaved draft/i })).toBeEnabled();
     expect(screen.getByRole("button", { name: /^save$/i })).toBeEnabled();
     expect(screen.getByText(/unsaved changes/i)).toBeInTheDocument();
   });

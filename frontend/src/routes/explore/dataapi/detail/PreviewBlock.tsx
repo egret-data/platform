@@ -67,8 +67,17 @@ export function PreviewBlock() {
       setResult(res.data);
     } catch (e) {
       // The engine's own message, verbatim — that is what the route returns and
-      // it is the only thing an author can act on.
-      setError(e instanceof Error ? e.message : String(e));
+      // it is the only thing an author can act on. But the message can be EMPTY:
+      // `UnauthorizedError` (api/client.ts) carries none at all on a 401, and
+      // `ApiError.from` falls back to `res.statusText`, which is always `""`
+      // over HTTP/2 — so an axum extractor rejection, an ingress 413, or a
+      // 502 HTML page all arrive with nothing to say. Without the `||` fallback
+      // this set state, cleared the previous rows, and rendered NOTHING, which
+      // is indistinguishable from a dead button. `TryIt` guards this the same way.
+      setError(
+        (e instanceof Error ? e.message : String(e)) ||
+          "Could not run the preview. Your session may have expired — reload the page and try again.",
+      );
     }
   }
 
@@ -77,28 +86,49 @@ export function PreviewBlock() {
       <div className="flex flex-wrap items-center gap-2">
         <h3 className="text-sm font-medium">Preview</h3>
         <Button type="button" size="sm" onClick={onPreview} disabled={previewMutation.isPending}>
-          {previewMutation.isPending ? "Running…" : "Preview draft"}
+          {/* Names the VERSION it runs, like its two siblings do. Beside
+              "Validate saved draft" and "Publish saved draft", a bare "draft"
+              reads as the same saved thing those two mean by it — and spec §3.4's
+              stated failure is exactly that inference: preview, see green,
+              publish, get something else. */}
+          {previewMutation.isPending ? "Running…" : "Preview unsaved draft"}
         </Button>
       </div>
 
       <SettingsNote>
-        Preview runs as you, against the database above, and returns up to {PREVIEW_MAX_ROWS} rows.
-        It does not save, publish, spend a rate limit, fill the cache, or appear in Activity. Column
-        names come from the engine, not from the published contract — see Response for the names a
+        Preview runs the SQL and parameters as they are on screen right now — including edits you
+        have not saved — as you, against the database above, and returns up to {PREVIEW_MAX_ROWS}{" "}
+        rows. It does not save, publish, spend a rate limit, fill the cache, or appear in Activity.
+        Column names come from the engine, not from the published contract — see Response for the names a
         consumer receives. And because it runs as you rather than as a service account, a green
         preview does not prove a consumer can call this endpoint; Try it answers that.
       </SettingsNote>
 
       {form.params.length > 0 && (
         <div className="grid grid-cols-2 gap-3">
-          {form.params.map((p) => (
-            <div key={p.name} className="space-y-1.5">
-              <Label htmlFor={`preview-param-${p.name}`}>
+          {/* Keyed and id'd by INDEX, not by `p.name`. A name is not unique while
+              the author is editing: two freshly-added rows are both blank, and a
+              typo can duplicate an existing name — which with a name key gave
+              duplicate React keys, duplicate DOM ids, and one input visibly
+              driving both rows. Index is safe here because this list is not
+              reorderable and each input is fully controlled from `values` (see
+              `ParamEditor`, which DOES need generated row ids: its rows can be
+              removed from the middle and hold uncontrolled Radix/local state).
+
+              Considered and deliberately left: `values` stays keyed by name, so
+              deleting a parameter and adding a new one that reuses the name
+              resurrects the old test value. It is cosmetic (the value is visible
+              in the field, is never saved, and is one keystroke to clear) and
+              keying it by index instead would move the test value to whichever
+              declaration slid into that slot, which reads worse. */}
+          {form.params.map((p, i) => (
+            <div key={i} className="space-y-1.5">
+              <Label htmlFor={`preview-param-${i}`}>
                 {p.name}
                 {p.required && <span className="text-destructive"> *</span>}
               </Label>
               <Input
-                id={`preview-param-${p.name}`}
+                id={`preview-param-${i}`}
                 value={values[p.name] ?? ""}
                 placeholder={p.default ?? undefined}
                 onChange={(e) => setValues((prev) => ({ ...prev, [p.name]: e.target.value }))}
