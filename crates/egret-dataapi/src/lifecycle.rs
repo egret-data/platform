@@ -971,12 +971,51 @@ pub fn validate_definition(
     delegated: bool,
     impersonate: bool,
 ) -> std::result::Result<(), ValidationError> {
+    // Order preserved EXACTLY: `check_single_select` first (pinned by
+    // `validate_definition_runs_the_statement_check_first`), the cache rule
+    // between the scans and the renders, as it has always been.
+    check_definition_scans(sql, params)?;
+    check_cache_scope(cache, delegated, impersonate)?;
+    check_render_rules(sql, params)?;
+    Ok(())
+}
+
+/// Every publish rule that is a SCAN — no render, no engine, no connection.
+///
+/// Extracted so [`validate_preview`] and [`validate_definition`] cannot drift.
+/// A rule added here is in both by construction; a rule that belongs to only one
+/// of them has to be added to that one explicitly, which is a visible decision
+/// rather than an omission.
+fn check_definition_scans(
+    sql: &str,
+    params: &[ParamSpec],
+) -> std::result::Result<(), ValidationError> {
     check_single_select(sql)?;
     check_enum_params(params)?;
     check_param_locations(params)?;
     check_defaults(params)?;
     check_params(sql, params)?;
-    check_cache_scope(cache, delegated, impersonate)?;
+    Ok(())
+}
+
+/// The publish rules that apply to a PREVIEW of an unsaved draft.
+///
+/// Everything [`validate_definition`] enforces except [`check_cache_scope`],
+/// which is about a thing preview does not do: preview neither reads nor writes
+/// the cache, so a `shared` scope cannot leak across principals through it. The
+/// draft body carries no `CacheSpec` for the same reason.
+///
+/// # `check_single_select` is authorization here, not tidiness
+///
+/// Preview executes author-supplied SQL under `data_api_endpoint:manage`, which
+/// is NOT `sqllab:write`. Without this check a role holding only `:manage` would
+/// have arbitrary write access to every engine the workspace can reach. It is
+/// the first check for that reason.
+pub fn validate_preview(
+    sql: &str,
+    params: &[ParamSpec],
+) -> std::result::Result<(), ValidationError> {
+    check_definition_scans(sql, params)?;
     check_render_rules(sql, params)?;
     Ok(())
 }
@@ -2593,6 +2632,70 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err, ValidationError::MultipleStatements);
+    }
+
+    /// Preview and publish must refuse the SAME definitions, minus the one rule
+    /// that is about a thing preview does not do. If a rule is ever added to
+    /// `validate_definition` and not to `validate_preview`, this is what says so:
+    /// preview would run a definition publish refuses.
+    #[test]
+    fn validate_preview_refuses_what_publish_refuses() {
+        let cache = cache(CacheScope::PerPrincipal);
+        // Not a single SELECT — the rule that stops `:manage` becoming engine
+        // write access.
+        assert!(validate_preview("SELECT 1; DROP TABLE t", &[]).is_err());
+        assert!(validate_definition("SELECT 1; DROP TABLE t", &[], &cache, false, false).is_err());
+
+        // A single statement that is not a SELECT, which is the half of
+        // `check_single_select` NOTHING else re-runs. The separator case above is
+        // covered twice over — `check_params` calls `reject_unscannable_bytes`
+        // again on purpose (see its comment), so it alone cannot tell whether
+        // `check_single_select` is still in the bundle. A bare DML statement can:
+        // it carries no `;` and no `#`, and the render rules do not care what the
+        // head word is.
+        assert!(validate_preview("DELETE FROM t WHERE 1 = 1", &[]).is_err());
+        assert!(
+            validate_definition("DELETE FROM t WHERE 1 = 1", &[], &cache, false, false).is_err()
+        );
+
+        // An enum with no `allowed` list.
+        let bad_enum = vec![ParamSpec {
+            name: "sort".into(),
+            ty: ParamType::Enum,
+            location: ParamLocation::Query,
+            required: false,
+            default: None,
+            allowed: None,
+            description: String::new(),
+        }];
+        assert!(validate_preview("SELECT 1", &bad_enum).is_err());
+
+        // A `location: body` parameter.
+        let body_param = vec![ParamSpec {
+            name: "region".into(),
+            ty: ParamType::String,
+            location: ParamLocation::Body,
+            required: false,
+            default: None,
+            allowed: None,
+            description: String::new(),
+        }];
+        assert!(validate_preview("SELECT 1", &body_param).is_err());
+
+        // And a definition both accept.
+        assert!(validate_preview("SELECT 1 AS n", &[]).is_ok());
+    }
+
+    /// The ONE rule preview deliberately omits, and the reason it is safe to
+    /// omit: preview neither reads nor writes the cache, so a `shared` scope on
+    /// a delegated connection cannot leak anything through it.
+    #[test]
+    fn validate_preview_omits_only_the_cache_scope_rule() {
+        let shared = cache(CacheScope::Shared);
+        // Publish refuses it on a delegated connection…
+        assert!(validate_definition("SELECT 1 AS n", &[], &shared, true, false).is_err());
+        // …and preview never sees a cache at all, so the same SQL is fine.
+        assert!(validate_preview("SELECT 1 AS n", &[]).is_ok());
     }
 
     /// Every arm is a 400 the author can act on — never a 500.
