@@ -7,9 +7,12 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 // There is no msw in this repo — tests mock the API module directly (see
 // Endpoints.test.tsx). Definition reads `useDatabases` for the Database
 // picker unconditionally, so it needs a mock too or it fires a real,
-// unhandled `fetch` in jsdom.
+// unhandled `fetch` in jsdom. Versions resolves a version's `created_by` to
+// an email via `listUsers` (see Activity.test.tsx's equivalent mock for
+// ActivityCallList's trial-actor column), so that module needs one too.
 vi.mock("@/api/generated/data-api/data-api");
 vi.mock("@/api/databases");
+vi.mock("@/api/access");
 
 // Spy on the real hook rather than replace it with a no-op: the test needs to
 // see every call's argument, in order, to tell "armed once, on a real edit"
@@ -20,6 +23,7 @@ vi.mock("@/lib/useUnsavedChangesWarning", () => ({
 }));
 
 import * as api from "@/api/generated/data-api/data-api";
+import * as accessApi from "@/api/access";
 import * as databasesApi from "@/api/databases";
 import { ParamLocation, ParamType, type DataApiEndpointDto, type DataApiEndpointVersionDto } from "@/api/generated/model";
 import EndpointDetail from "@/routes/explore/dataapi/EndpointDetail";
@@ -85,6 +89,9 @@ beforeEach(() => {
   vi.mocked(databasesApi.useDatabases).mockReturnValue(
     { data: [DB_TRINO], isLoading: false, isError: false } as unknown as ReturnType<typeof databasesApi.useDatabases>,
   );
+  // Default: resolves with nobody, so the Who column falls back to a
+  // truncated id everywhere that doesn't set up its own fixture.
+  vi.mocked(accessApi.listUsers).mockResolvedValue([]);
 
   vi.mocked(api.useDataApiUpdateEndpoint).mockReturnValue(
     { mutateAsync: updateMutateAsync, isPending: false } as unknown as ReturnType<typeof api.useDataApiUpdateEndpoint>,
@@ -588,6 +595,58 @@ describe("VersionsSection", () => {
     expect(screen.getByText("user-2")).toBeInTheDocument();
     // Exactly one Live badge — on v-2, not on both rows.
     expect(screen.getAllByText("Live")).toHaveLength(1);
+  });
+
+  // The defect this whole section exists to fix: on the live cluster the Who
+  // column showed a raw user UUID (`5513767f-8cdd-4e48-9cf3-c493a74b683e`),
+  // exactly the class of bug the Roles page was fixed for once already. The
+  // DTO only ever carries the bare id (see `DataApiEndpointVersionDto`), so
+  // resolving it to a name is a client-side lookup, the same shape
+  // `ActivityCallList.tsx` uses for its trial-actor column.
+  it("resolves created_by to the publisher's email, not the raw user id", async () => {
+    const PUBLISHER_ID = "5513767f-8cdd-4e48-9cf3-c493a74b683e";
+    vi.mocked(accessApi.listUsers).mockResolvedValue([
+      { id: PUBLISHER_ID, email: "priya@egret.local", name: "Priya" },
+    ] as unknown as accessApi.AccessUser[]);
+    vi.mocked(api.useDataApiListEndpointVersions).mockReturnValue(
+      {
+        data: {
+          status: 200,
+          data: [makeVersion({ id: "v-1", version: 1, is_live: true, created_by: PUBLISHER_ID })],
+        },
+        isLoading: false,
+        isError: false,
+      } as unknown as ReturnType<typeof api.useDataApiListEndpointVersions>,
+    );
+    renderVersions();
+
+    expect(await screen.findByText("priya@egret.local")).toBeInTheDocument();
+    expect(screen.queryByText(PUBLISHER_ID)).not.toBeInTheDocument();
+  });
+
+  // A viewer-level operator may not be permitted `listUsers` (it's a
+  // platform-level call — see the component's comment). That failure must
+  // degrade this ONE column to a truncated id, not take down a page that
+  // otherwise has everything it needs to render.
+  it("falls back to a truncated id, not blank or a page error, when the users lookup fails", async () => {
+    const PUBLISHER_ID = "5513767f-8cdd-4e48-9cf3-c493a74b683e";
+    vi.mocked(accessApi.listUsers).mockRejectedValue(new Error("forbidden"));
+    vi.mocked(api.useDataApiListEndpointVersions).mockReturnValue(
+      {
+        data: {
+          status: 200,
+          data: [makeVersion({ id: "v-1", version: 1, is_live: true, note: "initial", created_by: PUBLISHER_ID })],
+        },
+        isLoading: false,
+        isError: false,
+      } as unknown as ReturnType<typeof api.useDataApiListEndpointVersions>,
+    );
+    renderVersions();
+
+    // The rest of the table rendered fine — this isn't the page-level error.
+    await screen.findByText("initial");
+    expect(screen.getByText(PUBLISHER_ID.slice(0, 8))).toBeInTheDocument();
+    expect(screen.queryByText(PUBLISHER_ID)).not.toBeInTheDocument();
   });
 
   it("publishes with an optional note and refetches the endpoint afterward", async () => {

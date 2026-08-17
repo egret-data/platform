@@ -1,5 +1,7 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
+import { listUsers } from "@/api/access";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -35,6 +37,24 @@ export default function VersionsSection() {
   // cheaper Validate this way; Publish changes what every deployed consumer
   // receives and has more reason to.
   const { ws, id, dirty, refetch } = useEndpointDetail();
+
+  // `created_by` on a version is a raw user id, not a name — the same
+  // problem `ActivityCallList.tsx` solves for its trial-actor column
+  // (whose own comment credits `AuditLog.tsx` as the original fix). Same
+  // query key as that call site: both are the exact same unfiltered
+  // `listUsers()` call, so they share the cache rather than each firing
+  // it. `retry: false` matters here specifically — `listUsers` is a
+  // platform-level call a viewer-level operator may not be permitted, and
+  // this column must degrade to a truncated id rather than fail the page.
+  const usersQuery = useQuery({
+    queryKey: ["data-api", "users"],
+    queryFn: listUsers,
+    retry: false,
+  });
+  const userEmailById = useMemo(
+    () => new Map((usersQuery.data ?? []).map((u) => [u.id, u.email])),
+    [usersQuery.data],
+  );
 
   const versionsQuery = useDataApiListEndpointVersions(ws, id, {
     query: { enabled: !!ws && !!id },
@@ -117,7 +137,11 @@ export default function VersionsSection() {
                       </span>
                     </td>
                     <td className="max-w-[16rem] truncate py-2 pr-2 text-muted-foreground">{v.note || "—"}</td>
-                    <td className="py-2 pr-2 text-muted-foreground">{v.created_by ?? "—"}</td>
+                    <td className="py-2 pr-2 text-muted-foreground">
+                      {(v.created_by && userEmailById.get(v.created_by)) ??
+                        v.created_by?.slice(0, 8) ??
+                        "—"}
+                    </td>
                     <td className="py-2 pr-2 text-muted-foreground">
                       <RelativeTime iso={v.created_at} />
                     </td>
