@@ -44,7 +44,8 @@ import Endpoints from "@/routes/explore/dataapi/Endpoints";
 import Clients from "@/routes/explore/dataapi/Clients";
 import Activity from "@/routes/explore/dataapi/Activity";
 import EndpointDetail from "@/routes/explore/dataapi/EndpointDetail";
-import Definition from "@/routes/explore/dataapi/detail/Definition";
+import Query from "@/routes/explore/dataapi/detail/Query";
+import Config from "@/routes/explore/dataapi/detail/Config";
 import ResponseSection from "@/routes/explore/dataapi/detail/ResponseSection";
 import AccessSection from "@/routes/explore/dataapi/detail/AccessSection";
 import VersionsSection from "@/routes/explore/dataapi/detail/Versions";
@@ -132,14 +133,19 @@ function ExploreRoutes() {
               dialog and then navigates to the created id, so there is no draft URL
               that can be opened cold. */}
           <Route path="data-api/endpoints/:id" element={<RequireFeature feature="data_api"><EndpointDetail /></RequireFeature>}>
-            <Route index element={<Definition />} />
+            {/* Query (SQL, database, params, preview) is the landing section —
+                everything that decides what the query RETURNS. */}
+            <Route index element={<Query />} />
             {/* Each section is its own child route (not a query param) so
                 the open section is in the URL and survives a refresh.
                 `Access` links into `try` with `?service_account=`; `TryIt`
                 reads that exact key to preselect the account a row is
                 about. Nothing fails if it doesn't — the link still
                 navigates, just without the preselection — which is why the
-                contract is written down here and in the plan ledger. */}
+                contract is written down here and in the plan ledger.
+                `Config` holds everything about the endpoint as an HTTP
+                object — name/path/method and cache/limits/rate-limit. */}
+            <Route path="config" element={<Config />} />
             <Route path="response" element={<ResponseSection />} />
             <Route path="access" element={<AccessSection />} />
             <Route path="try" element={<TryIt />} />

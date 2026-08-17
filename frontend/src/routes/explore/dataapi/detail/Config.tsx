@@ -8,31 +8,27 @@ import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { ConfigSection } from "@/components/form/ConfigSection";
 import { ConfigTable, ConfigTableRow } from "@/components/config/ConfigTable";
-import { useDatabases } from "@/api/databases";
 import { useDataApiValidateEndpoint } from "@/api/generated/data-api/data-api";
 import { CacheScope } from "@/api/generated/model";
 import { useEndpointDetail } from "../EndpointDetail";
-import { ParamEditor } from "./ParamEditor";
 
 type Validation =
   | { ok: true; columns: { name: string; ty: string }[] }
   | { ok: false; message: string };
 
 /**
- * The query this endpoint serves, and how callers reach it: name/description,
- * method + path, database, SQL, parameters, cache, limits and rate limit.
- * Everything the create dialog (`Endpoints.tsx`) doesn't ask for up front.
+ * Everything about the endpoint as an HTTP object: the URL contract callers use,
+ * and the cache / limits / rate-limit policy applied to their calls. Nothing here
+ * decides what the query returns — that is `Query`.
  *
  * One column, deliberately — the shell (`EndpointDetail.tsx`) sets `max-w-3xl`
- * around the `Outlet` so every section inherits it structurally. A `grid`
- * two-column layout pads the short sections (Limits, Rate limit) to the
- * height of the tall one beside them (Parameters), and CSS `columns` fights
- * the flex container this page sits in and clips the form at the fold; both
- * were tried on a comparable editor and both were wrong.
+ * around the `Outlet` so every section inherits it structurally. A two-column
+ * grid pads the short groups to the height of the tall one beside them; CSS
+ * `columns` fights the flex container this page sits in and clips the form at
+ * the fold. Both were tried on this editor and both were wrong.
  */
-export default function Definition() {
+export default function Config() {
   const { ws, id, form, setForm, dirty } = useEndpointDetail();
-  const { data: databases } = useDatabases(ws);
   const validateMutation = useDataApiValidateEndpoint();
   const [validation, setValidation] = useState<Validation | null>(null);
 
@@ -49,86 +45,60 @@ export default function Definition() {
   return (
     <div className="space-y-6">
       <div>
-        <h2 className="text-lg font-semibold">Definition</h2>
+        <h2 className="text-lg font-semibold">Config</h2>
         <p className="text-sm text-muted-foreground">
-          The query this endpoint serves, and how callers reach it.
+          The endpoint as an HTTP object: the URL contract callers use, and the cache, limits, and
+          rate-limit policy applied to their calls.
         </p>
       </div>
 
-      <div className="space-y-4">
-        <div className="space-y-1.5">
-          <Label htmlFor="def-name">Name</Label>
-          <Input id="def-name" value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} />
-        </div>
-
-        <div className="space-y-1.5">
-          <Label htmlFor="def-description">Description</Label>
-          <Textarea
-            id="def-description"
-            rows={2}
-            value={form.description}
-            onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))}
-          />
-        </div>
-
-        <div className="grid grid-cols-2 gap-3">
+      <ConfigSection title="Endpoint">
+        <div className="space-y-4">
           <div className="space-y-1.5">
-            <Label htmlFor="def-method">Method</Label>
-            <Select value={form.method} onValueChange={(v) => setForm((f) => ({ ...f, method: v }))}>
-              <SelectTrigger id="def-method" aria-label="Method">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="GET">GET</SelectItem>
-                <SelectItem value="POST">POST</SelectItem>
-              </SelectContent>
-            </Select>
+            <Label htmlFor="cfg-name">Name</Label>
+            <Input id="cfg-name" value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} />
           </div>
+
           <div className="space-y-1.5">
-            <Label htmlFor="def-path">Path</Label>
-            <Input id="def-path" value={form.path} onChange={(e) => setForm((f) => ({ ...f, path: e.target.value }))} />
+            <Label htmlFor="cfg-description">Description</Label>
+            <Textarea
+              id="cfg-description"
+              rows={2}
+              value={form.description}
+              onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))}
+            />
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1.5">
+              <Label htmlFor="cfg-method">Method</Label>
+              <Select value={form.method} onValueChange={(v) => setForm((f) => ({ ...f, method: v }))}>
+                <SelectTrigger id="cfg-method" aria-label="Method">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="GET">GET</SelectItem>
+                  <SelectItem value="POST">POST</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="cfg-path">Path</Label>
+              <Input id="cfg-path" value={form.path} onChange={(e) => setForm((f) => ({ ...f, path: e.target.value }))} />
+            </div>
           </div>
         </div>
-
-        <div className="space-y-1.5">
-          <Label htmlFor="def-db">Database</Label>
-          <Select value={form.database_id} onValueChange={(v) => setForm((f) => ({ ...f, database_id: v }))}>
-            <SelectTrigger id="def-db" aria-label="Database">
-              <SelectValue placeholder="Choose a database" />
-            </SelectTrigger>
-            <SelectContent>
-              {(databases ?? []).map((d) => (
-                <SelectItem key={d.id} value={d.id}>
-                  {d.name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-
-        <div className="space-y-1.5">
-          <Label htmlFor="def-sql">SQL</Label>
-          <Textarea
-            id="def-sql"
-            className="font-mono text-xs"
-            rows={8}
-            value={form.sql}
-            onChange={(e) => setForm((f) => ({ ...f, sql: e.target.value }))}
-          />
-        </div>
-      </div>
-
-      <ParamEditor params={form.params} onChange={(params) => setForm((f) => ({ ...f, params }))} />
+      </ConfigSection>
 
       <ConfigSection title="Cache">
         <ConfigTable>
           <ConfigTableRow
             label="Enabled"
-            htmlFor="def-cache-enabled"
+            htmlFor="cfg-cache-enabled"
             details="Serve repeat calls from a cached response instead of re-running the query."
           >
             <Switch
-              id="def-cache-enabled"
+              id="cfg-cache-enabled"
               checked={!!form.cache.enabled}
               onCheckedChange={(v) => setForm((f) => ({ ...f, cache: { ...f.cache, enabled: v } }))}
             />
@@ -137,11 +107,11 @@ export default function Definition() {
             <>
               <ConfigTableRow
                 label="TTL (seconds)"
-                htmlFor="def-cache-ttl"
+                htmlFor="cfg-cache-ttl"
                 details="How long a cached response stays valid. A call after this re-runs the query."
               >
                 <Input
-                  id="def-cache-ttl"
+                  id="cfg-cache-ttl"
                   className="w-full"
                   type="number"
                   min={0}
@@ -153,14 +123,14 @@ export default function Definition() {
               </ConfigTableRow>
               <ConfigTableRow
                 label="Scope"
-                htmlFor="def-cache-scope"
+                htmlFor="cfg-cache-scope"
                 details="Per principal caches separately for each service account, so Ranger-filtered rows never cross principals. Shared caches one copy for everyone — only safe when the connection does not run queries as the caller."
               >
                 <Select
                   value={form.cache.scope ?? CacheScope.per_principal}
                   onValueChange={(v) => setForm((f) => ({ ...f, cache: { ...f.cache, scope: v as CacheScope } }))}
                 >
-                  <SelectTrigger id="def-cache-scope" className="w-full" aria-label="Cache scope">
+                  <SelectTrigger id="cfg-cache-scope" className="w-full" aria-label="Cache scope">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -183,11 +153,11 @@ export default function Definition() {
         <ConfigTable>
           <ConfigTableRow
             label="Max rows"
-            htmlFor="def-max-rows"
+            htmlFor="cfg-max-rows"
             details="Hard cap on rows returned. A result larger than this fails the call rather than being silently truncated."
           >
             <Input
-              id="def-max-rows"
+              id="cfg-max-rows"
               className="w-full"
               type="number"
               min={0}
@@ -203,11 +173,11 @@ export default function Definition() {
           </ConfigTableRow>
           <ConfigTableRow
             label="Timeout (seconds)"
-            htmlFor="def-timeout"
+            htmlFor="cfg-timeout"
             details="How long the engine may take before the call is abandoned."
           >
             <Input
-              id="def-timeout"
+              id="cfg-timeout"
               className="w-full"
               type="number"
               min={0}
@@ -231,11 +201,11 @@ export default function Definition() {
         <ConfigTable>
           <ConfigTableRow
             label="Per caller (qps)"
-            htmlFor="def-rl-per-key"
+            htmlFor="cfg-rl-per-key"
             details="Sustained requests per second allowed for each client credential."
           >
             <Input
-              id="def-rl-per-key"
+              id="cfg-rl-per-key"
               className="w-full"
               type="number"
               min={0}
@@ -254,11 +224,11 @@ export default function Definition() {
           </ConfigTableRow>
           <ConfigTableRow
             label="Burst"
-            htmlFor="def-rl-burst"
+            htmlFor="cfg-rl-burst"
             details="How many requests may arrive at once above the sustained rate before throttling starts."
           >
             <Input
-              id="def-rl-burst"
+              id="cfg-rl-burst"
               className="w-full"
               type="number"
               min={0}
@@ -274,11 +244,11 @@ export default function Definition() {
           </ConfigTableRow>
           <ConfigTableRow
             label="Endpoint-wide (qps)"
-            htmlFor="def-rl-per-endpoint"
+            htmlFor="cfg-rl-per-endpoint"
             details="Ceiling across all callers of this endpoint combined, whatever their individual limits."
           >
             <Input
-              id="def-rl-per-endpoint"
+              id="cfg-rl-per-endpoint"
               className="w-full"
               type="number"
               min={0}
@@ -309,7 +279,7 @@ export default function Definition() {
             disabled={validateMutation.isPending || dirty}
             title={dirty ? "Save your changes before validating — Validate checks the saved draft." : undefined}
           >
-            {validateMutation.isPending ? "Validating…" : "Validate"}
+            {validateMutation.isPending ? "Validating…" : "Validate saved draft"}
           </Button>
         </div>
         {/* Inline, not a toast: a toast vanishes before an author who is mid-edit

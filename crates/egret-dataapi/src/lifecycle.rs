@@ -669,10 +669,38 @@ fn placeholders(sql: &str) -> std::result::Result<Vec<String>, ValidationError> 
     Ok(found)
 }
 
+/// Which contract a parameter scan is enforcing.
+///
+/// The whole difference is [`ValidationError::UnreferencedParameter`], and it is
+/// the only rule in [`check_params`] that is about the CONTRACT an endpoint
+/// publishes rather than about the statement that runs. A declared parameter no
+/// placeholder reads is a lie in the generated OpenAPI — a query parameter a
+/// caller can send that changes nothing — so publish must go on refusing it. It
+/// costs a preview nothing: the render simply never looks the name up.
+///
+/// Preview exists so an author sees what is on screen (spec §2.2), and the most
+/// ordinary intermediate state of that loop is SQL edited before the declarations
+/// catch up, or the reverse. Requiring the two halves to agree made preview
+/// refuse exactly the draft it was built to run — measured in a browser against a
+/// real engine, not reasoned about.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+enum ParamRules {
+    /// Every rule, including the published-contract one. What
+    /// [`validate_definition`] — `POST …/validate` and publish — enforces.
+    Published,
+    /// Every rule EXCEPT [`ValidationError::UnreferencedParameter`]. What
+    /// [`validate_preview`] enforces over an unsaved draft.
+    Draft,
+}
+
 /// Every `{{param}}` resolves to a declared parameter, and every declared
 /// parameter is referenced. Both directions matter: an unreferenced parameter
 /// is a lie in the generated OpenAPI, and an undeclared placeholder is a 500
 /// waiting to happen at serve time.
+///
+/// This entry point enforces the PUBLISHED contract. Preview reaches the same
+/// body through [`ParamRules::Draft`], which drops the unreferenced-parameter
+/// rule and nothing else; the rules live here once, so the two cannot drift.
 ///
 /// Duplicate declarations are refused too. Two `region` parameters would render
 /// as one query parameter in OpenAPI while the renderer silently picked the
@@ -711,6 +739,20 @@ fn placeholders(sql: &str) -> std::result::Result<Vec<String>, ValidationError> 
 /// Checked under both entries of [`ESCAPING_READINGS`], because which regions
 /// count as quoted is exactly what the two dialects disagree about.
 pub fn check_params(sql: &str, params: &[ParamSpec]) -> std::result::Result<(), ValidationError> {
+    check_params_with(sql, params, ParamRules::Published)
+}
+
+/// [`check_params`], told which contract it is enforcing.
+///
+/// One body, so a rule added below is in both publish and preview by
+/// construction, and the ORDER the rules report in is the same for both — which
+/// is what keeps `validate_definition_runs_the_statement_check_first` and every
+/// test pinning a specific variant honest.
+fn check_params_with(
+    sql: &str,
+    params: &[ParamSpec],
+    rules: ParamRules,
+) -> std::result::Result<(), ValidationError> {
     // Redundant inside `validate_definition`, which runs `check_single_select`
     // first — deliberately so. Both are `pub`, and the placeholder rule below is
     // a scan; a `#` reaching it would put the scanner back in the business of
@@ -741,9 +783,15 @@ pub fn check_params(sql: &str, params: &[ParamSpec]) -> std::result::Result<(), 
             return Err(ValidationError::UndeclaredPlaceholder(name.clone()));
         }
     }
-    for p in params {
-        if !read.iter().any(|r| r == &p.name) {
-            return Err(ValidationError::UnreferencedParameter(p.name.clone()));
+    // The published-contract rule, and the ONE rule preview omits — see
+    // [`ParamRules`]. Its position in this sequence is unchanged, so which error
+    // `validate_definition` reports for a draft breaking several rules at once is
+    // unchanged too.
+    if rules == ParamRules::Published {
+        for p in params {
+            if !read.iter().any(|r| r == &p.name) {
+                return Err(ValidationError::UnreferencedParameter(p.name.clone()));
+            }
         }
     }
     for backslash_escapes in ESCAPING_READINGS {
@@ -941,7 +989,12 @@ pub fn check_defaults(params: &[ParamSpec]) -> std::result::Result<(), Validatio
     Ok(())
 }
 
-fn type_name(ty: &ParamType) -> &'static str {
+/// The declared type as an author wrote it, for a message an author reads.
+///
+/// `pub(crate)` because [`crate::preview`]'s diagnostics name the type a test
+/// value failed to satisfy, and the two surfaces must not describe the same
+/// `ParamType` with two different words.
+pub(crate) fn type_name(ty: &ParamType) -> &'static str {
     match ty {
         ParamType::String => "string",
         ParamType::Number => "number",
@@ -971,12 +1024,73 @@ pub fn validate_definition(
     delegated: bool,
     impersonate: bool,
 ) -> std::result::Result<(), ValidationError> {
+    // Order preserved EXACTLY: `check_single_select` first (pinned by
+    // `validate_definition_runs_the_statement_check_first`), the cache rule
+    // between the scans and the renders, as it has always been.
+    check_definition_scans(sql, params, ParamRules::Published)?;
+    check_cache_scope(cache, delegated, impersonate)?;
+    check_render_rules(sql, params)?;
+    Ok(())
+}
+
+/// Every publish rule that is a SCAN — no render, no engine, no connection.
+///
+/// Extracted so [`validate_preview`] and [`validate_definition`] cannot drift.
+/// A rule added here is in both by construction; a rule that belongs to only one
+/// of them has to be added to that one explicitly, which is a visible decision
+/// rather than an omission.
+///
+/// `rules` carries the one such decision that exists today, and it is threaded
+/// through rather than applied here so the sequence inside [`check_params`] —
+/// including which error answers first — is identical for both callers. See
+/// [`ParamRules`].
+fn check_definition_scans(
+    sql: &str,
+    params: &[ParamSpec],
+    rules: ParamRules,
+) -> std::result::Result<(), ValidationError> {
     check_single_select(sql)?;
     check_enum_params(params)?;
     check_param_locations(params)?;
     check_defaults(params)?;
-    check_params(sql, params)?;
-    check_cache_scope(cache, delegated, impersonate)?;
+    check_params_with(sql, params, rules)?;
+    Ok(())
+}
+
+/// The publish rules that apply to a PREVIEW of an unsaved draft.
+///
+/// Everything [`validate_definition`] enforces except TWO rules, both of them
+/// about something a preview does not do:
+///
+/// * [`check_cache_scope`] — preview neither reads nor writes the cache, so a
+///   `shared` scope cannot leak across principals through it. The draft body
+///   carries no `CacheSpec` for the same reason.
+/// * [`ValidationError::UnreferencedParameter`] — a declared parameter no
+///   placeholder reads. That rule protects the OpenAPI contract a PUBLISHED
+///   endpoint offers its callers, not the statement about to run; the render
+///   never looks the name up. Requiring it here refused the commonest
+///   intermediate state of the authoring loop — SQL edited before the
+///   declarations caught up — which is the one thing preview exists to show. See
+///   [`ParamRules`].
+///
+/// Everything else in [`check_params`] still applies, and each of the four is
+/// about the statement: `reject_unscannable_bytes` keeps the scanner sound,
+/// [`ValidationError::DuplicateParameter`] would make binding ambiguous,
+/// [`ValidationError::UndeclaredPlaceholder`] is a render failure or a wrong
+/// bind, and [`ValidationError::PlaceholderInsideQuotedText`] is the
+/// injection-adjacent one a SEV-0 came from.
+///
+/// # `check_single_select` is authorization here, not tidiness
+///
+/// Preview executes author-supplied SQL under `data_api_endpoint:manage`, which
+/// is NOT `sqllab:write`. Without this check a role holding only `:manage` would
+/// have arbitrary write access to every engine the workspace can reach. It is
+/// the first check for that reason.
+pub fn validate_preview(
+    sql: &str,
+    params: &[ParamSpec],
+) -> std::result::Result<(), ValidationError> {
+    check_definition_scans(sql, params, ParamRules::Draft)?;
     check_render_rules(sql, params)?;
     Ok(())
 }
@@ -2593,6 +2707,167 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err, ValidationError::MultipleStatements);
+    }
+
+    /// Preview and publish must refuse the SAME definitions, minus the two rules
+    /// that are about things a preview does not do (the cache scope, and the
+    /// unreferenced-parameter rule that protects a PUBLISHED endpoint's OpenAPI —
+    /// each with its own test below). If any other rule is ever added to
+    /// `validate_definition` and not to `validate_preview`, this is what says so:
+    /// preview would run a definition publish refuses.
+    #[test]
+    fn validate_preview_refuses_what_publish_refuses() {
+        let cache = cache(CacheScope::PerPrincipal);
+        // Not a single SELECT — the rule that stops `:manage` becoming engine
+        // write access.
+        assert!(validate_preview("SELECT 1; DROP TABLE t", &[]).is_err());
+        assert!(validate_definition("SELECT 1; DROP TABLE t", &[], &cache, false, false).is_err());
+
+        // A single statement that is not a SELECT, which is the half of
+        // `check_single_select` NOTHING else re-runs. The separator case above is
+        // covered twice over — `check_params` calls `reject_unscannable_bytes`
+        // again on purpose (see its comment), so it alone cannot tell whether
+        // `check_single_select` is still in the bundle. A bare DML statement can:
+        // it carries no `;` and no `#`, and the render rules do not care what the
+        // head word is.
+        assert!(validate_preview("DELETE FROM t WHERE 1 = 1", &[]).is_err());
+        assert!(
+            validate_definition("DELETE FROM t WHERE 1 = 1", &[], &cache, false, false).is_err()
+        );
+
+        // An enum with no `allowed` list.
+        let bad_enum = vec![ParamSpec {
+            name: "sort".into(),
+            ty: ParamType::Enum,
+            location: ParamLocation::Query,
+            required: false,
+            default: None,
+            allowed: None,
+            description: String::new(),
+        }];
+        assert!(validate_preview("SELECT 1", &bad_enum).is_err());
+
+        // A `location: body` parameter.
+        let body_param = vec![ParamSpec {
+            name: "region".into(),
+            ty: ParamType::String,
+            location: ParamLocation::Body,
+            required: false,
+            default: None,
+            allowed: None,
+            description: String::new(),
+        }];
+        assert!(validate_preview("SELECT 1", &body_param).is_err());
+
+        // And a definition both accept.
+        assert!(validate_preview("SELECT 1 AS n", &[]).is_ok());
+    }
+
+    /// The second rule preview omits, and the browser finding that put it here.
+    ///
+    /// A stored draft declared `region` and `d`; the author replaced the SQL and
+    /// clicked *Preview unsaved draft*, and preview refused with "parameter
+    /// `region` is declared but never referenced". That intermediate state —
+    /// SQL edited before the declarations catch up, or the reverse — is the
+    /// commonest state of the loop this route exists to close, so preview could
+    /// not run the one draft it was built for. The rule is about the OpenAPI
+    /// contract a PUBLISHED endpoint offers, and publish keeps refusing it.
+    #[test]
+    fn validate_preview_accepts_sql_that_references_no_declared_parameter() {
+        let declared = vec![
+            param("region", ParamType::String),
+            param("d", ParamType::String),
+        ];
+        // Nothing in the statement reads either name — the draft mid-edit.
+        let sql = "SELECT 1 AS n";
+
+        assert!(
+            validate_preview(sql, &declared).is_ok(),
+            "preview must run the SQL on screen, declarations mid-edit and all"
+        );
+        // …and the published contract is unchanged: an endpoint may not offer a
+        // query parameter that changes nothing.
+        assert_eq!(
+            validate_definition(
+                sql,
+                &declared,
+                &cache(CacheScope::PerPrincipal),
+                false,
+                false
+            )
+            .unwrap_err(),
+            ValidationError::UnreferencedParameter("region".into())
+        );
+        // The same pair through the parameter scan directly, so the boundary is
+        // pinned at the rule and not only at the two wrappers.
+        assert!(check_params_with(sql, &declared, ParamRules::Draft).is_ok());
+        assert_eq!(
+            check_params_with(sql, &declared, ParamRules::Published).unwrap_err(),
+            ValidationError::UnreferencedParameter("region".into())
+        );
+    }
+
+    /// Dropping ONE rule must not become dropping the scan. Each of the four
+    /// rules [`check_params`] carries that is about the STATEMENT rather than
+    /// about the published contract, refused through `validate_preview`.
+    ///
+    /// Without this, `validate_preview` could skip `check_params` altogether and
+    /// every other test here would still pass — the test above only says the
+    /// unreferenced rule is gone.
+    #[test]
+    fn validate_preview_keeps_every_parameter_rule_about_the_statement() {
+        // 1. The SQL reads a name that is not declared. At serve time this is a
+        //    render failure or a bind of the wrong thing.
+        assert_eq!(
+            validate_preview("SELECT * FROM t WHERE r = {{ nope }}", &[]).unwrap_err(),
+            ValidationError::UndeclaredPlaceholder("nope".into())
+        );
+        // Still refused when OTHER parameters are declared, which is the shape
+        // the loop above walks.
+        assert_eq!(
+            validate_preview(
+                "SELECT * FROM t WHERE r = {{ nope }}",
+                &[param("region", ParamType::String)]
+            )
+            .unwrap_err(),
+            ValidationError::UndeclaredPlaceholder("nope".into())
+        );
+        // 2. A placeholder inside quoted text — the injection-adjacent rule.
+        assert_eq!(
+            validate_preview(
+                "SELECT * FROM t WHERE a = 'x{{p}}y'",
+                &[param("p", ParamType::String)]
+            )
+            .unwrap_err(),
+            ValidationError::PlaceholderInsideQuotedText("p".into())
+        );
+        // 3. A duplicate declaration, which makes binding ambiguous.
+        assert_eq!(
+            validate_preview(
+                "SELECT * FROM t WHERE r = {{ region }}",
+                &[
+                    param("region", ParamType::String),
+                    param("region", ParamType::Number),
+                ]
+            )
+            .unwrap_err(),
+            ValidationError::DuplicateParameter("region".into())
+        );
+        // 4. `reject_unscannable_bytes`: a `#` comment, which the two dialects
+        //    read differently, so the scanner refuses to guess.
+        assert!(validate_preview("SELECT 1 AS n # note", &[]).is_err());
+    }
+
+    /// The ONE rule preview deliberately omits, and the reason it is safe to
+    /// omit: preview neither reads nor writes the cache, so a `shared` scope on
+    /// a delegated connection cannot leak anything through it.
+    #[test]
+    fn validate_preview_omits_only_the_cache_scope_rule() {
+        let shared = cache(CacheScope::Shared);
+        // Publish refuses it on a delegated connection…
+        assert!(validate_definition("SELECT 1 AS n", &[], &shared, true, false).is_err());
+        // …and preview never sees a cache at all, so the same SQL is fine.
+        assert!(validate_preview("SELECT 1 AS n", &[]).is_ok());
     }
 
     /// Every arm is a 400 the author can act on — never a 500.

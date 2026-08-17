@@ -1,17 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { Link, MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 // There is no msw in this repo — tests mock the API module directly (see
-// Endpoints.test.tsx). Definition reads `useDatabases` for the Database
-// picker unconditionally, so it needs a mock too or it fires a real,
-// unhandled `fetch` in jsdom. Versions resolves a version's `created_by` to
-// an email via `listUsers` (see Activity.test.tsx's equivalent mock for
-// ActivityCallList's trial-actor column), so that module needs one too.
+// Endpoints.test.tsx). Versions resolves a version's `created_by` to an email
+// via `listUsers` (see Activity.test.tsx's equivalent mock for
+// ActivityCallList's trial-actor column), so that module needs a mock.
 vi.mock("@/api/generated/data-api/data-api");
-vi.mock("@/api/databases");
 vi.mock("@/api/access");
 
 // Spy on the real hook rather than replace it with a no-op: the test needs to
@@ -24,10 +21,9 @@ vi.mock("@/lib/useUnsavedChangesWarning", () => ({
 
 import * as api from "@/api/generated/data-api/data-api";
 import * as accessApi from "@/api/access";
-import * as databasesApi from "@/api/databases";
-import { ParamLocation, ParamType, type DataApiEndpointDto, type DataApiEndpointVersionDto } from "@/api/generated/model";
+import type { DataApiEndpointDto, DataApiEndpointVersionDto } from "@/api/generated/model";
 import EndpointDetail from "@/routes/explore/dataapi/EndpointDetail";
-import Definition from "@/routes/explore/dataapi/detail/Definition";
+import Config from "@/routes/explore/dataapi/detail/Config";
 import ResponseSection from "@/routes/explore/dataapi/detail/ResponseSection";
 import VersionsSection from "@/routes/explore/dataapi/detail/Versions";
 
@@ -57,12 +53,14 @@ function makeEndpoint(overrides: Partial<DataApiEndpointDto> = {}): DataApiEndpo
   } as unknown as DataApiEndpointDto;
 }
 
-const DB_TRINO = { id: "db-1", name: "warehouse", engine: "trino", host: "h", port: 1, options: {}, has_secret: true, status: "ok", delegated: false };
-
 const updateMutateAsync = vi.fn();
 const validateMutateAsync = vi.fn();
 
-function renderDetail(endpoint: DataApiEndpointDto = makeEndpoint()) {
+// Mounts Config at its real route (`/config`), not at the index — Query
+// (Task 3) owns the index route and its own test file mounts it there. A
+// bare `/explore/:workspace/data-api/endpoints/:id` entry with no trailing
+// segment would hit neither route and render nothing.
+function renderConfig(endpoint: DataApiEndpointDto = makeEndpoint()) {
   vi.mocked(api.useDataApiGetEndpoint).mockReturnValue(
     { data: { status: 200, data: endpoint }, isLoading: false, isError: false, error: null, refetch: vi.fn() } as unknown as
       ReturnType<typeof api.useDataApiGetEndpoint>,
@@ -71,10 +69,10 @@ function renderDetail(endpoint: DataApiEndpointDto = makeEndpoint()) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const utils = render(
     <QueryClientProvider client={qc}>
-      <MemoryRouter initialEntries={[`/explore/eng/data-api/endpoints/${endpoint.id}`]}>
+      <MemoryRouter initialEntries={[`/explore/eng/data-api/endpoints/${endpoint.id}/config`]}>
         <Routes>
           <Route path="/explore/:workspace/data-api/endpoints/:id" element={<EndpointDetail />}>
-            <Route index element={<Definition />} />
+            <Route path="config" element={<Config />} />
           </Route>
         </Routes>
       </MemoryRouter>
@@ -86,9 +84,6 @@ function renderDetail(endpoint: DataApiEndpointDto = makeEndpoint()) {
 beforeEach(() => {
   vi.clearAllMocks();
 
-  vi.mocked(databasesApi.useDatabases).mockReturnValue(
-    { data: [DB_TRINO], isLoading: false, isError: false } as unknown as ReturnType<typeof databasesApi.useDatabases>,
-  );
   // Default: resolves with nobody, so the Who column falls back to a
   // truncated id everywhere that doesn't set up its own fixture.
   vi.mocked(accessApi.listUsers).mockResolvedValue([]);
@@ -117,176 +112,80 @@ beforeEach(() => {
   validateMutateAsync.mockResolvedValue({ status: 200, data: { columns: [] }, headers: new Headers() });
 });
 
-describe("EndpointDetail dirtiness", () => {
-  it("arms the unsaved-changes warning only after a real change, and disarms it when reverted", async () => {
-    renderDetail();
-    const sql = await screen.findByDisplayValue("SELECT 1");
-    // Radix hydration and controlled-input echo must not count as a change —
-    // not even a transient one: a flag that latches `true` during hydration
-    // and only "catches up" to `false` a render later would still show the
-    // phantom dialog to anyone who closes the tab in that window, so the
-    // stronger assertion is that `true` is never seen at all, not just that
-    // the LAST call happens to be `false`.
-    expect(warnSpy).not.toHaveBeenCalledWith(true);
-    expect(warnSpy).toHaveBeenLastCalledWith(false);
-
-    await userEvent.type(sql, " -- x");
-    expect(warnSpy).toHaveBeenLastCalledWith(true);
-
-    // The property that actually separates "compare to baseline" from "a
-    // flag that only latches": reverting the edit back to the loaded value
-    // must disarm the warning. A `touched` flag can never do this without
-    // extra reset logic bolted on; the comparison gets it for free.
-    await userEvent.type(sql, "{Backspace}".repeat(5));
-    expect(sql).toHaveValue("SELECT 1");
-    expect(warnSpy).toHaveBeenLastCalledWith(false);
-  });
-
-  it("re-baselines after a successful save", async () => {
-    renderDetail();
-    await userEvent.type(await screen.findByLabelText("SQL"), " -- x");
-    await userEvent.click(screen.getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(warnSpy).toHaveBeenLastCalledWith(false));
-  });
-
-  // Pins the hydrate-once guard: ChartExplore and NotebookSettings have both
-  // shipped a regression where re-seeding the form on every data reference
-  // (rather than once) clobbers a mid-edit form the instant react-query hands
-  // back a new object identity for unchanged data (e.g. a background refetch).
-  it("does not clobber a mid-edit field when the query result gets a new object identity", async () => {
+describe("Config", () => {
+  it("Config holds the endpoint's identity and its three config tables", async () => {
     const endpoint = makeEndpoint();
-    renderDetail(endpoint);
-    const sql = await screen.findByLabelText("SQL");
-    await userEvent.type(sql, " -- x");
-    expect(sql).toHaveValue("SELECT 1 -- x");
-
-    // Simulate a react-query refetch that resolves to an equal-but-new object.
-    vi.mocked(api.useDataApiGetEndpoint).mockReturnValue(
-      { data: { status: 200, data: { ...endpoint } }, isLoading: false, isError: false, error: null, refetch: vi.fn() } as unknown as
-        ReturnType<typeof api.useDataApiGetEndpoint>,
-    );
-    // Force a re-render by re-rendering the same tree is not enough on its own
-    // (React Testing Library doesn't re-run hooks without a state change in the
-    // tree), so instead assert the value survived the mock swap plus a fresh
-    // paint triggered by a further keystroke.
-    await userEvent.type(sql, "y");
-    expect(sql).toHaveValue("SELECT 1 -- xy");
-  });
-
-  // Reviewer finding (Critical #1): a bare "ran once" ref never re-arms when
-  // only the `:id` route param changes, because React Router reconciles the
-  // SAME `EndpointDetail` instance across `/endpoints/A` → `/endpoints/B`.
-  // Without keying the hydration guard (and the nested Outlet) by id, this
-  // would show B's name in the header over A's SQL/path/params/database —
-  // and a subsequent Save would silently overwrite B's record with A's data.
-  it("shows the newly-navigated endpoint's own fields, not the previous one's, after an in-app navigation", async () => {
-    const epA = makeEndpoint({ id: "ep-a", name: "Endpoint A", sql: "SELECT A" });
-    const epB = makeEndpoint({ id: "ep-b", name: "Endpoint B", sql: "SELECT B" });
-    vi.mocked(api.useDataApiGetEndpoint).mockImplementation(((_ws: string, id: string) => ({
-      data: { status: 200, data: id === "ep-a" ? epA : epB },
+    vi.mocked(api.useDataApiGetEndpoint).mockReturnValue({
+      data: { status: 200, data: endpoint },
       isLoading: false,
       isError: false,
-      error: null,
       refetch: vi.fn(),
-    })) as unknown as typeof api.useDataApiGetEndpoint);
-
-    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    const user = userEvent.setup();
-    render(
-      <QueryClientProvider client={qc}>
-        <MemoryRouter initialEntries={["/explore/eng/data-api/endpoints/ep-a"]}>
-          <Routes>
-            {/* The `Link` inside the SAME route element is what reproduces the
-                bug: the route pattern (and so the rendered `EndpointDetail`
-                element) never changes across this navigation, only `:id` does —
-                matching what a future in-app link between endpoints (Tasks
-                8/9) will look like. */}
-            <Route
-              path="/explore/:workspace/data-api/endpoints/:id"
-              element={
-                <>
-                  <Link to="/explore/eng/data-api/endpoints/ep-b">Go to B</Link>
-                  <EndpointDetail />
-                </>
-              }
-            >
-              <Route index element={<Definition />} />
-            </Route>
-          </Routes>
-        </MemoryRouter>
-      </QueryClientProvider>,
-    );
-
-    await screen.findByDisplayValue("SELECT A");
-    await user.click(screen.getByText("Go to B"));
-
-    await waitFor(() => expect(screen.getByLabelText("SQL")).toHaveValue("SELECT B"));
-    // The visible breadcrumb heading (`h2`), not `getByText` — the page also
-    // carries an `sr-only` `h1` with the same name (see the "document
-    // heading" describe block below), so a bare text match is now ambiguous.
-    expect(screen.getByRole("heading", { level: 2, name: "Endpoint B" })).toBeInTheDocument();
-    expect(screen.queryByDisplayValue("SELECT A")).not.toBeInTheDocument();
-    expect(screen.queryByRole("heading", { level: 2, name: "Endpoint A" })).not.toBeInTheDocument();
+    } as never);
+    renderConfig(endpoint);
+    expect(await screen.findByLabelText("Name")).toBeInTheDocument();
+    expect(screen.getByLabelText("Description")).toBeInTheDocument();
+    expect(screen.getByLabelText("Method")).toBeInTheDocument();
+    expect(screen.getByLabelText("Path")).toBeInTheDocument();
+    expect(screen.getByText("Cache")).toBeInTheDocument();
+    expect(screen.getByText("Limits")).toBeInTheDocument();
+    expect(screen.getByText("Rate limit")).toBeInTheDocument();
   });
 
-  it("does not offer a location control for parameters", async () => {
-    const endpoint = makeEndpoint({
-      params: [{ name: "region", type: ParamType.string, location: ParamLocation.query, required: false }],
-    });
-    renderDetail(endpoint);
-    // Confirms ParamEditor actually rendered a row — otherwise this assertion
-    // would pass trivially against an empty editor with nothing to check.
-    await screen.findByRole("combobox", { name: "Parameter 1 type" });
-    expect(screen.queryByText(/location/i)).not.toBeInTheDocument();
-  });
-
-  // Reviewer finding (Critical #2): the field used to be fully controlled —
-  // `value={allowed.join(", ")}` with an `onChange` that immediately
-  // re-split/trimmed/filtered — which silently ate a trailing comma on every
-  // keystroke (existing "a", type "," → "a," → normalized straight back to
-  // "a"), so a second value could never be started by typing.
-  it("accepts a comma typed as a separate keystroke when building an enum's allowed values", async () => {
-    const endpoint = makeEndpoint({
-      params: [{ name: "region", type: ParamType.enum, location: ParamLocation.query, required: true, allowed: [] }],
-    });
-    renderDetail(endpoint);
-    const allowed = await screen.findByLabelText("Allowed values");
-
-    await userEvent.type(allowed, "a,b");
-    expect(allowed).toHaveValue("a,b");
-
-    // Clicking elsewhere blurs the field, committing the projected array —
-    // and re-formats the display for a stray typo in spacing.
-    await userEvent.click(screen.getByRole("button", { name: "Save" }));
-    expect(allowed).toHaveValue("a, b");
-
-    await waitFor(() => expect(updateMutateAsync).toHaveBeenCalled());
-    const call = updateMutateAsync.mock.calls[0][0];
-    expect(call.data.params[0].allowed).toEqual(["a", "b"]);
-  });
-
-  it("saves only the changed fields, not the whole form (a partial PATCH)", async () => {
+  it("Config does not hold the SQL editor — that is Query's", async () => {
     const endpoint = makeEndpoint();
-    renderDetail(endpoint);
-    await userEvent.type(await screen.findByLabelText("SQL"), " -- x");
-    await userEvent.click(screen.getByRole("button", { name: "Save" }));
-
-    await waitFor(() => expect(updateMutateAsync).toHaveBeenCalled());
-    const call = updateMutateAsync.mock.calls[0][0];
-    expect(call).toMatchObject({ workspace: "eng", id: "ep-1" });
-    // Reviewer finding (Important #6): `UpdateEndpointInput`'s own doc says an
-    // absent field means "leave it alone" — a whole-document PATCH built from
-    // a form hydrated once at mount would silently revert any change made
-    // elsewhere since. Only `sql` changed, so only `sql` should be sent.
-    expect(call.data).toEqual({ sql: "SELECT 1 -- x" });
+    vi.mocked(api.useDataApiGetEndpoint).mockReturnValue({
+      data: { status: 200, data: endpoint },
+      isLoading: false,
+      isError: false,
+      refetch: vi.fn(),
+    } as never);
+    renderConfig(endpoint);
+    await screen.findByLabelText("Name");
+    expect(screen.queryByLabelText("SQL")).not.toBeInTheDocument();
   });
 
+  // Reviewer finding: Config's subtitle once near-duplicated Query's ("The
+  // query this endpoint serves, and how callers reach it."), contradicting
+  // Config's own module doc that nothing here decides what the query
+  // returns. Pin Config's own copy and pin the absence of Query's, so the
+  // two sections' subtitles can't drift back into saying the same thing.
+  it("has its own subtitle, not Query's", async () => {
+    renderConfig();
+    await screen.findByLabelText("Name");
+    expect(
+      screen.getByText("The endpoint as an HTTP object: the URL contract callers use, and the cache, limits, and rate-limit policy applied to their calls."),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("The query this endpoint runs, and the parameters callers may pass it."),
+    ).not.toBeInTheDocument();
+  });
+
+  // Spec §3.4: Validate runs the SAVED draft, not what's on screen — unlike
+  // Preview. The label has to say so, or an author mid-edit reads "Validate"
+  // as checking their current changes.
+  it("labels Validate as checking the SAVED draft", async () => {
+    const endpoint = makeEndpoint();
+    vi.mocked(api.useDataApiGetEndpoint).mockReturnValue({
+      data: { status: 200, data: endpoint },
+      isLoading: false,
+      isError: false,
+      refetch: vi.fn(),
+    } as never);
+    renderConfig(endpoint);
+    expect(await screen.findByRole("button", { name: /validate saved draft/i })).toBeInTheDocument();
+  });
+});
+
+describe("EndpointDetail — save invalidation", () => {
   // Reviewer finding (Important #5): the generated `useDataApiUpdateEndpoint`
   // attaches no invalidation of its own, so a rename would leave the OLD name
   // in the header and the endpoints list stale, forever, until a hard reload.
+  // This is section-agnostic (the mutation and its `onSuccess` live in the
+  // shared `EndpointDetailInner` shell, not in any one section), so it is
+  // exercised through Config rather than duplicated per section.
   it("invalidates the endpoint and list query caches after a successful save", async () => {
-    const { qc } = renderDetail();
-    await screen.findByDisplayValue("SELECT 1");
+    const { qc } = renderConfig();
+    await screen.findByLabelText("Name");
     const invalidateSpy = vi.spyOn(qc, "invalidateQueries");
 
     const opts = vi.mocked(api.useDataApiUpdateEndpoint).mock.calls.at(-1)?.[0];
@@ -314,9 +213,9 @@ describe("EndpointDetail dirtiness", () => {
  * control — so a future edit can't silently drop the `details` prop back to
  * nothing and leave the column blank again.
  */
-describe("Definition — config table Details column", () => {
+describe("Config — config table Details column", () => {
   it("shows the Max rows Details copy in the same row as its control", async () => {
-    renderDetail();
+    renderConfig();
     const maxRows = await screen.findByLabelText("Max rows");
     const row = maxRows.closest("tr");
     expect(row).not.toBeNull();
@@ -596,6 +495,18 @@ describe("VersionsSection", () => {
     });
   });
 
+  // Spec §3.4: Publish runs the SAVED draft, not what's on screen — unlike
+  // Preview, the same distinction Config's "labels Validate as checking the
+  // SAVED draft" test pins for Validate. Asserted here as its own test, not
+  // only implicitly via the `{ name: "Publish saved draft" }` selector the
+  // dirty-flag tests in `Query.test.tsx` already use to find this button —
+  // that selector proves the label only as a side effect of finding
+  // something to click.
+  it("labels Publish as running the SAVED draft", async () => {
+    renderVersions();
+    expect(await screen.findByRole("button", { name: /publish saved draft/i })).toBeInTheDocument();
+  });
+
   // The one thing this section must not get wrong (spec §6.3, second of its
   // three placements): this is the moment BEFORE the endpoint goes live, and
   // the one place the warning reaches an author who never opens Access. It
@@ -787,160 +698,6 @@ describe("VersionsSection", () => {
 });
 
 /**
- * Final-review finding (Important #3): Publish ignored the shared `dirty` flag.
- *
- * The five sections share ONE form that survives section navigation
- * (`EndpointDetail` keys the `Outlet` by id, not by pathname), so an author
- * could edit SQL in Definition, walk to Versions with "Unsaved changes" still
- * in the header, and publish — freezing the SAVED draft while the dialog said
- * "Freezes the current draft", which they would read as the one on screen.
- * Definition already guards the far cheaper Validate this way; Publish changes
- * what every deployed consumer receives.
- *
- * This mounts Definition AND Versions under the real shell and NAVIGATES
- * between them, because the bug only exists across that navigation — a test
- * that mounted Versions alone could never see it.
- */
-describe("VersionsSection — Publish and the shared dirty flag", () => {
-  const publishAsync = vi.fn();
-
-  beforeEach(() => {
-    publishAsync.mockReset();
-    publishAsync.mockResolvedValue({
-      status: 200,
-      data: { version_id: "v-3", version: 3, state: "live" },
-      headers: new Headers(),
-    });
-    vi.mocked(api.useDataApiPublishEndpoint).mockReturnValue(
-      { mutateAsync: publishAsync, isPending: false } as unknown as
-        ReturnType<typeof api.useDataApiPublishEndpoint>,
-    );
-    vi.mocked(api.useDataApiRollbackEndpoint).mockReturnValue(
-      { mutateAsync: vi.fn(), isPending: false } as unknown as
-        ReturnType<typeof api.useDataApiRollbackEndpoint>,
-    );
-    vi.mocked(api.useDataApiListEndpointVersions).mockReturnValue(
-      { data: { status: 200, data: [] }, isLoading: false, isError: false } as unknown as
-        ReturnType<typeof api.useDataApiListEndpointVersions>,
-    );
-  });
-
-  function renderBoth(endpoint: DataApiEndpointDto = makeEndpoint({ live_version_id: "v-2", state: "live" })) {
-    vi.mocked(api.useDataApiGetEndpoint).mockReturnValue(
-      { data: { status: 200, data: endpoint }, isLoading: false, isError: false, error: null, refetch: vi.fn() } as unknown as
-        ReturnType<typeof api.useDataApiGetEndpoint>,
-    );
-    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    return render(
-      <QueryClientProvider client={qc}>
-        <MemoryRouter initialEntries={[`/explore/eng/data-api/endpoints/${endpoint.id}`]}>
-          <Routes>
-            <Route path="/explore/:workspace/data-api/endpoints/:id" element={<EndpointDetail />}>
-              <Route index element={<Definition />} />
-              <Route path="versions" element={<VersionsSection />} />
-            </Route>
-          </Routes>
-        </MemoryRouter>
-      </QueryClientProvider>,
-    );
-  }
-
-  it("refuses to publish an edit made in Definition and carried unsaved into Versions", async () => {
-    renderBoth();
-    const sql = await screen.findByDisplayValue("SELECT 1");
-    await userEvent.type(sql, " -- unsaved");
-    expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
-
-    await userEvent.click(screen.getByRole("link", { name: "Versions" }));
-    const publish = await screen.findByRole("button", { name: "Publish" });
-
-    expect(publish).toBeDisabled();
-    expect(publish).toHaveAttribute("title", expect.stringContaining("Save your changes"));
-
-    // Not merely visually disabled: the confirmation never opens, so the
-    // publish cannot be reached at all.
-    await userEvent.click(publish);
-    expect(screen.queryByText(/does not grant data access/i)).not.toBeInTheDocument();
-    expect(publishAsync).not.toHaveBeenCalled();
-  });
-
-  it("publishes normally once there is nothing unsaved", async () => {
-    renderBoth();
-    await screen.findByDisplayValue("SELECT 1");
-    await userEvent.click(screen.getByRole("link", { name: "Versions" }));
-
-    const publish = await screen.findByRole("button", { name: "Publish" });
-    expect(publish).toBeEnabled();
-    await userEvent.click(publish);
-    expect(await screen.findByText(/does not grant data access/i)).toBeInTheDocument();
-  });
-
-  // The dialog's own copy is part of the fix: "the current draft" is what the
-  // author reads as "the one I am looking at".
-  it("says the SAVED draft is what gets frozen", async () => {
-    renderBoth();
-    await screen.findByDisplayValue("SELECT 1");
-    await userEvent.click(screen.getByRole("link", { name: "Versions" }));
-    await userEvent.click(await screen.findByRole("button", { name: "Publish" }));
-    expect(await screen.findByText(/freezes the saved draft/i)).toBeInTheDocument();
-  });
-});
-
-/**
- * Final-review finding (#8, second half): `AllowedValuesField` holds its text
- * locally so a trailing comma is not eaten mid-typing — but the local copy
- * must not survive a Save. `EndpointDetail` re-seeds the whole form from the
- * SERVER RESPONSE, so a server-normalised `allowed` list has to reach the
- * field, and the field's stale text must never be pushed back over it.
- */
-describe("ParamEditor — the allowed-values field resyncs from the server", () => {
-  const ENUM_PARAM = {
-    name: "region",
-    type: ParamType.enum,
-    location: ParamLocation.query,
-    required: false,
-    allowed: ["eu", "us"],
-  };
-
-  it("shows the server's normalised list after a Save, not the pre-save text", async () => {
-    const endpoint = makeEndpoint({ params: [ENUM_PARAM] } as Partial<DataApiEndpointDto>);
-    // The server normalises: it lower-cases and de-duplicates what was sent.
-    updateMutateAsync.mockResolvedValue({
-      status: 200,
-      data: makeEndpoint({ params: [{ ...ENUM_PARAM, allowed: ["eu", "us", "apac"] }] } as Partial<DataApiEndpointDto>),
-      headers: new Headers(),
-    });
-    renderDetail(endpoint);
-
-    const allowed = await screen.findByLabelText("Allowed values");
-    await userEvent.clear(allowed);
-    await userEvent.type(allowed, "EU, US, APAC");
-    await userEvent.tab();
-
-    await userEvent.click(screen.getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(updateMutateAsync).toHaveBeenCalled());
-
-    // What the server returned, not what was typed.
-    await waitFor(() => expect(screen.getByLabelText("Allowed values")).toHaveValue("eu, us, apac"));
-  });
-
-  // The other half of the same defect: a focus/blur that typed nothing must
-  // not `commit()` a stale local string back over the prop.
-  it("commits nothing on a focus/blur that typed nothing", async () => {
-    const endpoint = makeEndpoint({ params: [ENUM_PARAM] } as Partial<DataApiEndpointDto>);
-    renderDetail(endpoint);
-
-    const allowed = await screen.findByLabelText("Allowed values");
-    await userEvent.click(allowed);
-    await userEvent.tab();
-
-    expect(screen.getByLabelText("Allowed values")).toHaveValue("eu, us");
-    // Touching a field without changing it is not an edit.
-    expect(screen.queryByText("Unsaved changes")).not.toBeInTheDocument();
-  });
-});
-
-/**
  * This route used to sit inside `DataApiLayout`'s `<Outlet/>`, which supplied
  * the page's one document-outline `h1` ("Data API", text-2xl). Once the shell
  * was removed (Data API became a sidebar group instead of a shell page), the
@@ -955,7 +712,7 @@ describe("ParamEditor — the allowed-values field resyncs from the server", () 
  */
 describe("EndpointDetail — document heading", () => {
   it("exposes exactly one level-1 heading, naming the endpoint", async () => {
-    renderDetail(makeEndpoint({ name: "Weekly rollup" }));
+    renderConfig(makeEndpoint({ name: "Weekly rollup" }));
     const headings = await screen.findAllByRole("heading", { level: 1 });
     expect(headings).toHaveLength(1);
     expect(headings[0]).toHaveTextContent("Weekly rollup");

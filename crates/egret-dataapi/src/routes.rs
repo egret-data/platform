@@ -1150,6 +1150,43 @@ async fn validate_endpoint(
 
 #[utoipa::path(
     post,
+    path = "/api/ws/{workspace}/data-api/endpoints/{id}/preview",
+    tag = "data-api",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Endpoint id"),
+    ),
+    request_body = crate::preview::PreviewEndpointInput,
+    responses(
+        (status = 200, description = "The draft ran; up to 100 rows, with the engine's own column names", body = crate::preview::DataApiPreviewDto),
+        (status = 400, description = "Not a single SELECT, a parameter mismatch, a test value that does not satisfy its declared type, or SQL the engine rejects — with the engine's own message", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing data_api_endpoint:manage permission, or the engine's policy denies a table the query names", body = ErrorBody),
+        (status = 404, description = "No such endpoint in this workspace, or a database_id belonging to another workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn preview_endpoint(
+    State(st): State<DataApiState>,
+    WsContext(ctx): WsContext,
+    Path((_ws_ignored, id)): Path<(String, Uuid)>,
+    Json(body): Json<crate::preview::PreviewEndpointInput>,
+) -> Result<Json<crate::preview::DataApiPreviewDto>, DataApiError> {
+    // `:manage`, exactly like `validate` and for a stronger reason: preview
+    // executes author-supplied SQL as the caller and returns the engine's own
+    // error text, which serving deliberately hides from consumers.
+    egret_core::authz::require(&*st.pdp, &ctx, EP_MANAGE).await?;
+    // The endpoint row is read for containment only — the draft's CONTENT comes
+    // from the body, which is the whole point of this route. A `{id}` naming
+    // another workspace's endpoint must 404 here as it does everywhere else,
+    // even though nothing in the body depends on the row.
+    let _ = st.endpoints.get(ctx.workspace_id.0, id).await?;
+    let out = crate::preview::run(&st, ctx.workspace_id.0, ctx.principal.user_id, &body).await?;
+    Ok(Json(out))
+}
+
+#[utoipa::path(
+    post,
     path = "/api/ws/{workspace}/data-api/endpoints/{id}/publish",
     tag = "data-api",
     params(
@@ -1869,6 +1906,10 @@ pub fn management_router() -> Router<DataApiState> {
             post(validate_endpoint),
         )
         .route(
+            "/ws/{workspace}/data-api/endpoints/{id}/preview",
+            post(preview_endpoint),
+        )
+        .route(
             "/ws/{workspace}/data-api/endpoints/{id}/publish",
             post(publish_endpoint),
         )
@@ -1929,6 +1970,7 @@ pub fn management_router() -> Router<DataApiState> {
         update_endpoint,
         delete_endpoint,
         validate_endpoint,
+        preview_endpoint,
         publish_endpoint,
         rollback_endpoint,
         disable_endpoint,
@@ -1959,6 +2001,8 @@ pub fn management_router() -> Router<DataApiState> {
         PublishEndpointInput,
         RollbackEndpointInput,
         DataApiValidationDto,
+        crate::preview::PreviewEndpointInput,
+        crate::preview::DataApiPreviewDto,
         DataApiPublishedDto,
         DataApiEndpointVersionDto,
         DataApiEndpointGrantDto,

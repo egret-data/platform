@@ -53,6 +53,10 @@ pub mod endpoints;
 mod invoke;
 pub mod lifecycle;
 pub mod openapi_gen;
+/// P6 §2: preview an author's UNSAVED draft. Private because the route in
+/// [`routes`] is its only caller — nothing outside this crate constructs a
+/// preview.
+mod preview;
 pub mod render;
 pub mod routes;
 pub mod serving;
