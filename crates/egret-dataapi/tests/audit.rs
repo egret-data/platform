@@ -129,6 +129,9 @@ fn build_state(db: Db, pdp: Arc<dyn egret_core::authz::Pdp>, audit: AuditSink) -
         audit,
         cache: egret_dataapi::serving::ResponseCache::new(),
         rate_limits: std::sync::Arc::new(egret_dataapi::serving::TokenBucket::new()),
+        // This file is about the audit trail, not Activity — a fixed retention
+        // is enough to satisfy the field.
+        activity: egret_dataapi::ActivityStore::new(db.clone(), Some(90)),
     }
 }
 
@@ -756,6 +759,160 @@ async fn deleting_an_endpoint_records_what_it_was() {
         .await
         .expect("count endpoints");
     assert_eq!(left, 0);
+}
+
+/// **The hardest of the four remaining routes to add later, and the most
+/// important to have.** `delete_service_account` hard-deletes a machine
+/// principal along with its `access_grants` and every OAuth2 client it owns
+/// (the `dataapi.clients`/`service_accounts` cascade off `users`, migration
+/// 0119) — so once it returns, the `service_account:delete` event is the
+/// ONLY surviving record that the principal ever existed. A bare uuid there
+/// would resolve to nothing; `name` and `email` are what let an auditor say
+/// which principal was destroyed.
+///
+/// Also exercises `service_account:create` in passing — the POST that seeds
+/// this test's own account would leave a stray event in the queue for the
+/// `one_event()` below to trip on if it did not emit exactly once, so the
+/// drain of it right after the POST is itself a (loose) check that create
+/// emits precisely one event and not zero or two.
+///
+/// Mutation: replace the detail in `delete_service_account` with `json!({})`
+/// — the `name` and `email` assertions below go red.
+#[tokio::test]
+async fn deleting_a_service_account_records_what_it_destroyed() {
+    let mut f = skip_without_db!();
+
+    let (status, created) = f
+        .send(
+            "POST",
+            &format!("/api/ws/{}/data-api/service-accounts", f.ws),
+            Some(serde_json::json!({ "name": "doomed", "description": "" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {created}");
+    let sa_id = created["id"].as_str().expect("id").to_string();
+    let email = created["email"]
+        .as_str()
+        .expect("the synthetic address identifies it")
+        .to_string();
+    let create_ev = f.one_event();
+    assert_eq!(create_ev.action, "service_account:create");
+
+    let (status, body) = f
+        .send(
+            "DELETE",
+            &format!("/api/ws/{}/data-api/service-accounts/{sa_id}", f.ws),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+
+    let ev = f.one_event();
+    assert_eq!(
+        ev.shape(),
+        (
+            Some(f.manager.user),
+            Some(f.ws_id),
+            "service_account:delete",
+            "service_account",
+            Some(sa_id.as_str()),
+        )
+    );
+    // The row is gone and its grants and clients cascaded with it, so this
+    // event is the ONLY surviving record that the principal existed. A bare
+    // uuid would say something was deleted without ever saying what.
+    assert_eq!(ev.detail["name"], serde_json::json!("doomed"));
+    assert_eq!(
+        ev.detail["email"],
+        serde_json::json!(email),
+        "the synthetic address must match what the delete itself returned, \
+         not a value fetched by a second, racing query: {:?}",
+        ev.detail
+    );
+
+    // And the row really is gone, so the event above is a record of something
+    // destroyed rather than a record beside something still readable.
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM users WHERE id = $1::uuid")
+        .bind(&sa_id)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("count users");
+    assert_eq!(left, 0);
+}
+
+/// A Try-it trial is an IMPERSONATION — the console runs a query as a service
+/// account — so it is audited like one (precedent: user impersonation, #332).
+///
+/// Two halves, and the second is the reason this test is in THIS file. The
+/// event must attribute the act to the human and name the account they borrowed;
+/// and it must carry no part of the token minted to make the call. A `data-api`
+/// JWT in an append-only table is the same class of mistake as a client secret
+/// there — `Fixture::drained` sweeps every event for issued secrets, and this
+/// adds the JWT shape, which no secret sweep would catch.
+///
+/// The trial itself is refused (`403 not_granted`, no invoke grant) and the
+/// event records that: what an auditor needs to know is that someone ran an
+/// endpoint as somebody else and what came back, not whether it succeeded.
+#[tokio::test]
+async fn a_trial_is_audited_as_an_impersonation_and_carries_no_token() {
+    let mut f = skip_without_db!();
+    let sa = f.service_account("trialled").await;
+    let ep = f.endpoint("trial-target", "/trial-target").await;
+    let eps = ep.to_string();
+    let url = f.endpoints_url();
+
+    let (status, body) = f
+        .send(
+            "POST",
+            &format!("{url}/{ep}/publish"),
+            Some(serde_json::json!({})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let _publish = f.one_event();
+
+    let (status, body) = f
+        .send(
+            "POST",
+            &format!("{url}/{ep}/try"),
+            Some(serde_json::json!({ "service_account_id": sa, "params": {} })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["status"], 403, "no invoke grant: {body}");
+
+    let ev = f.one_event();
+    assert_eq!(
+        ev.shape(),
+        (
+            Some(f.manager.user),
+            Some(f.ws_id),
+            "data_api_endpoint:try",
+            "data_api_endpoint",
+            Some(eps.as_str()),
+        ),
+        "the actor is the human who ran the trial, never the account it ran as",
+    );
+    assert_eq!(
+        ev.detail["service_account_id"].as_str(),
+        Some(sa.to_string().as_str()),
+        "whose access was borrowed is the whole question an auditor asks: {:?}",
+        ev.detail
+    );
+    assert_eq!(
+        ev.detail["status"],
+        serde_json::json!(403),
+        "and what the borrowed access got back: {:?}",
+        ev.detail
+    );
+    // A JWT is three base64url segments; every one this deployment signs starts
+    // `eyJ` (`{"` under base64). Checked over the WHOLE detail, so a token under
+    // any key trips it.
+    assert!(
+        !ev.detail.to_string().contains("eyJ"),
+        "a trial token reached the audit trail: {:?}",
+        ev.detail
+    );
 }
 
 /// **Anti-triviality for every assertion above.** Each of them reads a queue,

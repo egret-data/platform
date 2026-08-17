@@ -109,6 +109,9 @@ fn build_state(db: Db, pdp: Arc<dyn egret_core::authz::Pdp>) -> DataApiState {
         audit: egret_audit::AuditSink::new(1).0,
         cache: egret_dataapi::serving::ResponseCache::new(),
         rate_limits: std::sync::Arc::new(egret_dataapi::serving::TokenBucket::new()),
+        // This file is about draft CRUD, not Activity — a fixed retention is
+        // enough to satisfy the field.
+        activity: egret_dataapi::ActivityStore::new(db.clone(), Some(90)),
     }
 }
 
@@ -476,6 +479,42 @@ async fn updating_an_endpoint_requires_manage() {
         .await
         .expect("sql");
     assert_eq!(sql, "SELECT 1", "the refused edit must not have edited");
+}
+
+/// **A trial gates on `:manage`, not `:read`** — it runs a query as a service
+/// account, which is an act on somebody else's behalf rather than a look at the
+/// draft. `:read` is the permission a reviewer or a consumer-team member holds.
+///
+/// The second half is what makes the first non-vacuous: the SAME request from a
+/// manager gets past the gate and fails on the ids instead (404), so the 403
+/// above is the permission check and not the endpoint id or the body.
+#[tokio::test]
+async fn running_a_trial_requires_manage() {
+    let f = skip_without_db!();
+    let id = f
+        .create_endpoint("rev", "/reports/revenue", "SELECT 1")
+        .await;
+    let reader = f.principal_with(&["data_api_endpoint:read"]).await;
+    let body = serde_json::json!({ "service_account_id": Uuid::new_v4() });
+
+    let (status, out) = f
+        .post_as(
+            &reader,
+            &format!("{}/{id}/try", f.collection()),
+            body.clone(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body: {out}");
+
+    let manager = f.principal_with(Fixture::MANAGER).await;
+    let (status, out) = f
+        .post_as(&manager, &format!("{}/{id}/try", f.collection()), body)
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a manager reaches the containment check on the account: {out}"
+    );
 }
 
 #[tokio::test]

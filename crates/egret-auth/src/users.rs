@@ -286,7 +286,27 @@ impl UserRepo {
     /// explicitly (polymorphic principal_id, no FK). The 23503 catch is now a rare
     /// safety net: it fires only if a future table adds a NOT-NULL FK to users(id)
     /// without an ON DELETE rule or reassignment here.
-    pub async fn hard_delete(&self, target: UserId, reassign_notebooks_to: UserId) -> Result<()> {
+    ///
+    /// Returns `Some((name, email))` straight off the row `DELETE`'s own
+    /// `RETURNING` — the row is gone once this returns, so a caller that needs
+    /// to say WHO it deleted (Data API's `service_account:delete` audit event
+    /// is the case that needs this) has those columns without a second,
+    /// racing query.
+    ///
+    /// Returns `None`, rather than an error, if `target` was already gone by
+    /// the time this ran. That is deliberate and preserves the function's
+    /// original behaviour from before it grew a `RETURNING`: this is a SHARED
+    /// method, and `egret-controlplane`'s `delete_user` — which does not read
+    /// the return value at all — has always treated "already deleted" as an
+    /// idempotent success rather than a 500. `fetch_optional`, not
+    /// `fetch_one`, is what keeps that true; a caller that flipped this to
+    /// `fetch_one` made a same-row-deleted-twice race in the control plane's
+    /// user admin start failing loudly for a condition it used to shrug off.
+    pub async fn hard_delete(
+        &self,
+        target: UserId,
+        reassign_notebooks_to: UserId,
+    ) -> Result<Option<(String, String)>> {
         let mut tx = self.db.pool.begin().await.map_err(db_err)?;
         sqlx::query("UPDATE analytics.notebooks SET owner_user_id = $2 WHERE owner_user_id = $1")
             .bind(target.0)
@@ -314,22 +334,32 @@ impl UserRepo {
         // The row delete is the one that can trip a content-ownership FK
         // (23503). Map that specific case to a Conflict (→ 409); on return the
         // dropped `tx` rolls back, so no dependent rows above are lost.
-        let res = sqlx::query("DELETE FROM users WHERE id = $1")
-            .bind(target.0)
-            .execute(&mut *tx)
-            .await;
-        if let Err(e) = res {
-            if e.as_database_error().and_then(|d| d.code()).as_deref() == Some("23503") {
-                return Err(egret_core::Error::Conflict(
-                    "cannot delete: this user owns content in a table that isn't auto-handled \
-                     on delete — a new FK to users(id) needs an ON DELETE rule."
-                        .into(),
-                ));
+        //
+        // `fetch_optional`, deliberately not `fetch_one`: zero rows means
+        // `target` was already gone, which this function has always treated
+        // as an idempotent success rather than an error — see the doc comment
+        // above. `fetch_one` would turn that into a `RowNotFound` and, via
+        // `db_err`, a 500 for a caller that never asked for one.
+        let res: std::result::Result<Option<(String, String)>, sqlx::Error> =
+            sqlx::query_as("DELETE FROM users WHERE id = $1 RETURNING name, email")
+                .bind(target.0)
+                .fetch_optional(&mut *tx)
+                .await;
+        let deleted = match res {
+            Ok(row) => row,
+            Err(e) => {
+                if e.as_database_error().and_then(|d| d.code()).as_deref() == Some("23503") {
+                    return Err(egret_core::Error::Conflict(
+                        "cannot delete: this user owns content in a table that isn't auto-handled \
+                         on delete — a new FK to users(id) needs an ON DELETE rule."
+                            .into(),
+                    ));
+                }
+                return Err(db_err(e));
             }
-            return Err(db_err(e));
-        }
+        };
         tx.commit().await.map_err(db_err)?;
-        Ok(())
+        Ok(deleted)
     }
 }
 

@@ -81,12 +81,62 @@ pub enum ServingError {
     /// type comment.
     #[error("not found")]
     NotFound,
-    /// The engine refused the DATA (Ranger), not the request. Kept apart from
-    /// [`Self::Internal`] because the operator's fix is a grant, and apart from
-    /// any "bad input" code because the author's SQL is fine — telling them
+    /// The engine refused the DATA, not the request. Kept apart from
+    /// [`Self::Internal`] because the operator's fix is a permission, and apart
+    /// from any "bad input" code because the author's SQL is fine — telling them
     /// otherwise sends them to debug the wrong thing.
+    ///
+    /// # One code for two recognitions, and for two causes
+    ///
+    /// `router::engine_error` reaches this variant two ways, and the wire code
+    /// is the same for both because a caller can act on neither distinction:
+    ///
+    /// * **Typed.** Trino's connector (`connector/trino.rs`'s `send()`) returns
+    ///   `egret_core::Error::Forbidden` when the COORDINATOR's own HTTP response
+    ///   is 401 or 403.
+    /// * **Untyped, by message.** Everything else — StarRocks entirely, and a
+    ///   Trino denial that instead surfaces as a query-level failure inside a
+    ///   200 — arrives as `Error::InvalidInput` carrying the engine's own words,
+    ///   which [`super::error::is_permission_denied`] recognises. See that
+    ///   function's doc for why a substring match is the only tool available and
+    ///   why it is documented as a heuristic, not a certainty.
+    ///
+    /// **The code is deliberately NOT named for Ranger.** The typed arm cannot
+    /// tell a Ranger/file-ACL deny from a bad or expired engine credential —
+    /// Trino answers 401 and 403 through the same connector path — so a
+    /// `ranger_denied` code would state the wrong cause in half the cases it
+    /// fires. The wire message names both causes and the remedy for each
+    /// instead; see [`super::error::to_wire`].
+    ///
+    /// Distinct from [`Self::NotGranted`], which is two different people's
+    /// problem with a different fix. `NotGranted` means egret refused the CALL
+    /// before the engine was ever contacted — the fix is
+    /// `POST …/endpoints/{id}/grants`. This variant means the engine refused the
+    /// DATA — the fix is in the engine's own permission system, or in the
+    /// service account's engine credential. Conflating them would send an admin
+    /// to write an egret grant that already exists.
+    ///
+    /// # `raw` — the only 4xx that carries anything, and why
+    ///
+    /// The wire body never renders it — [`super::error::to_wire`] ignores the
+    /// field, same as [`Self::Internal`] ignores its own source — but a
+    /// message-based heuristic can false-positive, and a false positive here
+    /// sends an admin to edit engine policy for a failure that was actually,
+    /// say, malformed SQL. Discarding the message at classification time would
+    /// leave production with no way to tell that had happened; keeping it lets
+    /// the log at `serve`'s failure branch (`error = ?e`) record what the engine
+    /// actually said, next to the fixed code and message the caller received.
+    ///
+    /// **`None` on the typed arm, and that is a statement rather than an
+    /// oversight.** `egret_core::Error::Forbidden` is a unit variant: there is
+    /// no engine text to keep. `Option` makes that absence explicit at every
+    /// construction site instead of letting a future edit invent a placeholder
+    /// string that reads like something the engine said.
     #[error("data access denied")]
-    DataAccessDenied,
+    DataAccessDenied {
+        #[source]
+        raw: Option<anyhow::Error>,
+    },
     /// **egret** refused the CALL: the service account holds no
     /// `data_api_endpoint:invoke` grant on this endpoint (spec §6.2 step 4).
     ///
@@ -95,8 +145,9 @@ pub enum ServingError {
     /// would send an operator to the wrong system:
     ///
     /// * `DataAccessDenied` — the ENGINE refused the DATA. egret let the call
-    ///   through, the query ran as the service account, and Ranger filtered it
-    ///   to nothing or refused the relation. The fix is a Ranger grant.
+    ///   through, the query ran as the service account, and the engine refused
+    ///   the relation (or would not authenticate the credential at all). The fix
+    ///   is a data permission — a Ranger grant, say — or a working credential.
     /// * `NotGranted` — egret refused before the engine was ever contacted. The
     ///   fix is `POST …/endpoints/{id}/grants` naming this service account.
     ///

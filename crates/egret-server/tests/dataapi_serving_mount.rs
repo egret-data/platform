@@ -148,6 +148,10 @@ fn composed_app_with_dataapi() -> axum::Router {
         audit: egret_audit::AuditSink::new(1).0,
         cache: egret_dataapi::serving::ResponseCache::new(),
         rate_limits: std::sync::Arc::new(egret_dataapi::serving::TokenBucket::new()),
+        // Same lazy, never-connected pool as `db` above — this file never
+        // exercises Activity, so a fixed retention is enough to satisfy the
+        // field.
+        activity: egret_dataapi::ActivityStore::new(db.clone(), Some(90)),
     };
     build_router(AppState::without_db().with_dataapi(state))
 }

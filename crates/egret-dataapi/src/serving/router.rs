@@ -153,7 +153,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use axum::extract::{Path, RawQuery, State};
+use axum::extract::{Extension, Path, RawQuery, State};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -165,11 +165,12 @@ use uuid::Uuid;
 
 use super::access_log::{AccessLogEntry, AccessLogStore};
 use super::cache::{cache_key, cache_ttl, shared_cache_allowed};
-use super::error::{to_wire, ServingErrorBody};
+use super::error::{is_permission_denied, to_wire, ServingErrorBody};
 use super::params;
 use super::ratelimit::{check_request, retry_after_secs};
 use super::{verify_serving_token, ServingError};
 use crate::routes::DataApiState;
+use crate::try_it::TrialActor;
 
 /// Upper bound applied to a snapshot's `limits.max_rows` before it is acted on.
 ///
@@ -303,7 +304,7 @@ impl utoipa::Modify for BearerAddon {
         (status = 200, description = "Rows from the published snapshot", body = ServingResponse),
         (status = 400, description = "`row_limit_exceeded` — the result exceeded the endpoint's row cap; `param_missing` — a required parameter was not supplied; `param_invalid` — a supplied parameter failed its declared type, its `allowed` list, or was repeated where one value is required. Neither parameter error names the parameter: the name is the author's, and naming it turns the error surface into a directory of what an endpoint declares", body = ServingErrorBody),
         (status = 401, description = "`key_invalid` — bearer token missing, expired, or not for this audience", body = ServingErrorBody),
-        (status = 403, description = "`data_access_denied` — the engine denied the data to this service account", body = ServingErrorBody),
+        (status = 403, description = "`data_access_denied` — the engine refused this service account the underlying data, either because it lacks a data permission (a Ranger grant, say) or because its engine credential is bad or expired; one code, because the two recognitions available (Trino's typed 401/403 from the coordinator, and every other engine failure matched on its own message) cannot tell those causes apart. `not_granted` — egret refused the call because the service account holds no invoke grant on this endpoint", body = ServingErrorBody),
         (status = 404, description = "`not_found` — no such live endpoint in this workspace", body = ServingErrorBody),
         (status = 429, description = "`rate_limited` — a published rate limit was exceeded; `Retry-After` states when the bucket refills", body = ServingErrorBody),
         (status = 500, description = "`internal` — an egret-side fault; quote `request_id` to support", body = ServingErrorBody),
@@ -317,8 +318,9 @@ async fn serve_get(
     query: RawQuery,
     method: Method,
     headers: HeaderMap,
+    trial: Option<Extension<TrialActor>>,
 ) -> Response {
-    serve(state, path, query, method, headers).await
+    serve(state, path, query, method, headers, trial).await
 }
 
 #[utoipa::path(
@@ -333,7 +335,7 @@ async fn serve_get(
         (status = 200, description = "Rows from the published snapshot", body = ServingResponse),
         (status = 400, description = "`row_limit_exceeded` — the result exceeded the endpoint's row cap; `param_missing` — a required parameter was not supplied; `param_invalid` — a supplied parameter failed its declared type, its `allowed` list, or was repeated where one value is required. Neither parameter error names the parameter: the name is the author's, and naming it turns the error surface into a directory of what an endpoint declares", body = ServingErrorBody),
         (status = 401, description = "`key_invalid` — bearer token missing, expired, or not for this audience", body = ServingErrorBody),
-        (status = 403, description = "`data_access_denied` — the engine denied the data to this service account", body = ServingErrorBody),
+        (status = 403, description = "`data_access_denied` — the engine refused this service account the underlying data, either because it lacks a data permission (a Ranger grant, say) or because its engine credential is bad or expired; one code, because the two recognitions available (Trino's typed 401/403 from the coordinator, and every other engine failure matched on its own message) cannot tell those causes apart. `not_granted` — egret refused the call because the service account holds no invoke grant on this endpoint", body = ServingErrorBody),
         (status = 404, description = "`not_found` — no such live endpoint in this workspace", body = ServingErrorBody),
         (status = 429, description = "`rate_limited` — a published rate limit was exceeded; `Retry-After` states when the bucket refills", body = ServingErrorBody),
         (status = 500, description = "`internal` — an egret-side fault; quote `request_id` to support", body = ServingErrorBody),
@@ -347,8 +349,9 @@ async fn serve_post(
     query: RawQuery,
     method: Method,
     headers: HeaderMap,
+    trial: Option<Extension<TrialActor>>,
 ) -> Response {
-    serve(state, path, query, method, headers).await
+    serve(state, path, query, method, headers, trial).await
 }
 
 /// The outer half of a served call: mint the correlation id, run the chain,
@@ -376,12 +379,23 @@ async fn serve_post(
 ///
 /// The insert happens AFTER `duration_ms` is computed, so the recorded duration
 /// is what the caller experienced and not what the bookkeeping cost.
+///
+/// # The one thing that is not read off the wire
+///
+/// `trial` is an EXTENSION, so it is present only when an in-process management
+/// handler ([`crate::try_it`]) built this request. A header could be sent by
+/// anyone, and this path would then be trusting a caller's word about whether
+/// their own call was a trial; nothing outside the process can insert an
+/// extension. `Option<Extension<_>>` rather than a raw `parts.extensions.get`
+/// so absence is a typed value rather than a lookup that reads the same whether
+/// the extension is missing or the type has drifted.
 async fn serve(
     State(st): State<DataApiState>,
     path: Path<(String, String)>,
     query: RawQuery,
     method: Method,
     headers: HeaderMap,
+    trial: Option<Extension<TrialActor>>,
 ) -> Response {
     // One clock reading for the whole request, so the rate limit, the cache and
     // the recorded duration all agree about when "now" was. Monotonic, so an NTP
@@ -390,6 +404,21 @@ async fn serve(
     let started = Instant::now();
     let request_id = Uuid::new_v4().to_string();
     let mut entry = AccessLogStore::entry(&request_id, &headers);
+
+    // Recorded BEFORE `run`, because `run` is what may fail to resolve an
+    // endpoint — and a row with no endpoint is precisely the row these two
+    // columns exist for. Populating them afterwards would mean the failure path
+    // had to remember to do it.
+    entry.request_method = Some(method.to_string());
+    entry.request_path = Some(path.1.clone());
+
+    // Present only when an in-process management handler built this request; a
+    // real consumer cannot insert an extension, so this cannot be forged. Set
+    // BEFORE `run`, like the two fields above, so a trial refused at step 1 is
+    // still recorded as a trial rather than counted as consumer traffic.
+    if let Some(Extension(TrialActor(actor))) = trial {
+        entry.actor_user_id = Some(actor.0);
+    }
 
     let outcome = run(
         &st,
@@ -842,27 +871,14 @@ async fn invoke_allowed(
     ws: egret_core::WorkspaceId,
     endpoint_id: Uuid,
 ) -> Result<(), ServingError> {
-    let allowed = st
-        .pdp
-        .authorize(
-            &egret_core::authz::Subject {
-                user_id: principal.user_id,
-                group_ids: Vec::new(),
-            },
-            crate::routes::EP_INVOKE,
-            &egret_core::authz::Resource::Object(egret_core::authz::ObjectRef {
-                kind: crate::endpoints::OBJECT_KIND.to_string(),
-                id: endpoint_id,
-                folder_id: None,
-                workspace_id: ws,
-            }),
-        )
+    // The expression itself now lives in `crate::invoke` — the serving path is
+    // one of three callers that must agree, see that module's comment.
+    let allowed = crate::invoke::can_invoke(st, principal.user_id, ws, endpoint_id)
         .await
         // A PDP that could not answer is OUR fault, and it must not read as a
         // refusal: `Internal` (500) sends an operator to egret, `NotGranted`
         // (403) would send them to write a grant that already exists.
-        .map_err(ServingError::internal)?
-        .allow;
+        .map_err(ServingError::internal)?;
     if allowed {
         Ok(())
     } else {
@@ -945,8 +961,28 @@ fn execution_limits(snap: &EndpointSnapshot) -> egret_query_api::Limits {
 
 /// Map an engine failure onto the serving vocabulary.
 ///
-/// Only the Ranger denial is given its own answer, because it is the one the
-/// operator can act on and the one that must never be reported as bad input.
+/// The data denial is the one given its own answer, because it is the one the
+/// operator can act on and the one that must never be reported as bad input —
+/// recognised two ways, into ONE [`ServingError::DataAccessDenied`].
+/// `egret_core::Error::Forbidden` is typed; Trino's connector produces it
+/// whenever the COORDINATOR's own HTTP response is 401/403
+/// (`connector/trino.rs`'s `send()`), which conflates a Ranger/file-ACL deny
+/// with a bad or expired engine credential and cannot tell the two apart. Every
+/// OTHER shape — StarRocks entirely, and a Trino denial that instead surfaces
+/// as a query-level failure inside a 200 — arrives untyped **as
+/// `Error::InvalidInput`**, and [`is_permission_denied`] recognises THOSE by
+/// message. Both land on the same variant and the same wire code: see that
+/// variant's doc for why the surviving code is the neutral `data_access_denied`
+/// and not one named for Ranger.
+///
+/// # The heuristic sees ONE variant, not everything that is not `Forbidden`
+///
+/// `Error::InvalidInput` is the only variant `port_impl::engine_error` produces
+/// from the engine's own message text (`EngineError::Engine`/`BadRequest`/
+/// `Limit`). Matching more broadly — every non-`Forbidden` shape, as this
+/// function once did — hands the substring test egret's OWN faults too, and
+/// `"permission denied"` is a common OS/Kubernetes/vault string. See the match
+/// arm below for what that cost.
 ///
 /// # Everything else is `Internal`, and that is now a decision rather than a gap
 ///
@@ -994,7 +1030,42 @@ fn execution_limits(snap: &EndpointSnapshot) -> egret_query_api::Limits {
 /// would not be. See `ServingError`'s comment.
 fn engine_error(e: egret_core::Error) -> ServingError {
     match e {
-        egret_core::Error::Forbidden => ServingError::DataAccessDenied,
+        // `raw: None` is a statement, not an omission: `Error::Forbidden` is a
+        // unit variant, so there is no engine text to keep. Naming the field
+        // here forces any future edit to decide rather than default.
+        egret_core::Error::Forbidden => ServingError::DataAccessDenied { raw: None },
+        // **Only `InvalidInput` is message-matched, and the narrowing is the
+        // point.** `port_impl::engine_error` folds every query-level engine
+        // failure — `EngineError::Engine`, which is what a Trino denial inside a
+        // 200 (`connector/trino.rs:334`) and every StarRocks failure arrive as,
+        // plus `BadRequest` and `Limit` — into `Error::InvalidInput` carrying the
+        // engine's own words. That is the ONLY variant whose message came from
+        // the engine.
+        //
+        // `Internal` is deliberately excluded. It is produced for EGRET's own
+        // faults as well as the engine's: resolving the principal's email,
+        // opening the database secret, resolving delegation
+        // (`port_impl.rs`'s `connect_as`). `"permission denied"` is one of the
+        // most common OS, Kubernetes and vault error strings, so a secret this
+        // process could not open used to be reported as `403 data_access_denied`
+        // — sending an operator to audit engine grants that were fine while the
+        // actual fault was ours. A false negative here costs a generic 500 with
+        // the detail in the log; a false positive costs an operator's afternoon
+        // and points them away from the failure.
+        //
+        // `NotFound` is excluded for the same reason: `connect_as` reports a
+        // database outside the workspace as `NotFound` before it reaches an
+        // engine at all.
+        egret_core::Error::InvalidInput(msg) if is_permission_denied(&msg) => {
+            // `raw` never reaches the wire — `to_wire` ignores it, same as
+            // `Internal`'s source — but it does reach `serve`'s `error = ?e`
+            // log line, so a misclassification still leaves the engine's actual
+            // words in the server log. See `ServingError::DataAccessDenied`'s
+            // doc for why that matters.
+            ServingError::DataAccessDenied {
+                raw: Some(anyhow::anyhow!("{msg}")),
+            }
+        }
         other => ServingError::internal(other),
     }
 }
@@ -1142,7 +1213,7 @@ fn shape_rows(
 /// both map to `totalRevenue`, which is what [`shape_rows`] refuses. The lossy
 /// version made those two *different* keys and looked correct while quietly
 /// mangling one of them.
-fn apply_naming(name: &str, naming: &str) -> String {
+pub(crate) fn apply_naming(name: &str, naming: &str) -> String {
     match naming {
         "camel" => {
             let mut out = String::with_capacity(name.len());

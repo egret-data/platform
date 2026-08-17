@@ -1913,6 +1913,14 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         // cache that never hits and a limit nobody reaches.
         cache: egret_dataapi::serving::ResponseCache::new(),
         rate_limits: std::sync::Arc::new(egret_dataapi::serving::TokenBucket::new()),
+        // The SAME guard the prune scheduler above was built with (recomputed
+        // here rather than shared, since that `retention` binding is local to
+        // its own block): the UI is told what is actually happening — whether a
+        // prune is scheduled at all — not what was merely configured.
+        activity: egret_dataapi::ActivityStore::new(
+            db.clone(),
+            egret_dataapi::serving::scheduled_retention(config.data_api.access_log_retention_days),
+        ),
     });
 
     let app = build_router(AppState {

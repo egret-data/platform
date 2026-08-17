@@ -93,6 +93,47 @@ use super::ServingError;
 /// clients have not come back.
 const CONFIG_DRIFT_RETRY_AFTER_SECS: u64 = 300;
 
+/// Does this engine failure mean "the principal may not read this data"?
+///
+/// Matched on the message because this function only ever sees what
+/// `router::engine_error` could NOT type. Trino's connector does return a
+/// typed `egret_core::Error::Forbidden`, but only when the coordinator's own
+/// HTTP response is 401/403 — `engine_error` peels that case off first, into
+/// [`super::ServingError::DataAccessDenied`] with no `raw`, before this
+/// function ever runs. A match here reaches the SAME variant, carrying the
+/// message. Everything that reaches here is untyped: a Trino denial that instead
+/// surfaces as a query-level failure inside a 200 (`Access Denied: …`), and
+/// every StarRocks failure, typed or not — StarRocks' connector has no
+/// `Forbidden` path at all. **A substring match is a heuristic and is
+/// documented as one** — a false negative merely returns today's generic
+/// `internal` error (safe: nothing leaks either way), which is why the match
+/// is deliberately narrow rather than clever. A broader match would risk the
+/// opposite failure, a false POSITIVE that sends an operator to Ranger for a
+/// denial the endpoint's own SQL caused.
+///
+/// # This heuristic is UNVERIFIED against a live engine
+///
+/// The strings below were chosen by inspecting Trino's and StarRocks'
+/// documented error wording, not by reading a real denial off either
+/// connector. This codebase has been wrong three separate times about engine
+/// behaviour asserted from the wrong instrument (see
+/// `measure-with-the-right-instrument` in project memory), so that gap is
+/// recorded here rather than implied by silence. Attempted verification:
+/// the local dev Trino coordinator cannot serve ANY Data API request —
+/// `deploy/trino/etc/config.properties` sets `required-audience=trino` while
+/// egret's engine-token minter signs `aud: "engine"`, so nothing egret mints
+/// authenticates to it at all, permission-denied or otherwise; this is a known
+/// config defect, not something fixed here. No StarRocks-backed manual
+/// integration test exists for the Data API path to fall back to. Whoever next
+/// has a live-authenticating Trino or StarRocks handy should run a genuinely
+/// unauthorized query through this path, quote the verbatim message, and
+/// either confirm a string below matches it or extend the list — the
+/// alternative is trusting a heuristic no one has watched fire.
+pub(crate) fn is_permission_denied(msg: &str) -> bool {
+    let m = msg.to_ascii_lowercase();
+    m.contains("access denied") || m.contains("permission denied") || m.contains("not authorized")
+}
+
 /// The serving surface's error envelope (spec §7).
 ///
 /// Named `ServingErrorBody` and not `ErrorBody` on purpose. `egret_core::http`
@@ -160,14 +201,29 @@ pub(crate) fn to_wire(e: &ServingError) -> Wire {
             "not_found",
             "no such endpoint".into(),
         ),
-        // The author's SQL is fine and the engine's policy denied the DATA.
-        // Reporting this as bad input sends the operator to debug the query
-        // instead of the grant, which is the whole reason it is not folded into
-        // a 400.
-        ServingError::DataAccessDenied => (
+        // ONE code for both recognitions — the typed `Error::Forbidden` and the
+        // `is_permission_denied` message match — because a caller can act on
+        // neither distinction, and because neither can name a single cause.
+        // Trino's connector returns `Forbidden` for the coordinator's own HTTP
+        // 401 AND 403 (`connector/trino.rs`'s `send()`), which conflates a
+        // Ranger/file-ACL deny with a bad or expired engine credential; that is
+        // why this code is not named for Ranger, and why the message names both
+        // causes with the remedy for each rather than claiming one it does not
+        // have. Reporting any of it as bad input would send the operator to
+        // debug the query, which is the whole reason this is not a 400.
+        //
+        // `raw` is deliberately NOT read: the wire message is fixed regardless
+        // of what the engine said, same as `Internal`'s source is never
+        // rendered. It exists for the `error = ?e` log line in `serve`'s failure
+        // branch, so a false-positive classification still leaves a trace of the
+        // real engine text in production.
+        ServingError::DataAccessDenied { .. } => (
             StatusCode::FORBIDDEN,
             "data_access_denied",
-            "the service account is not granted access to this data".into(),
+            "the service account running this endpoint was rejected by the engine; \
+             check that it is granted the underlying data (in Ranger, for example) \
+             and that its engine credential is valid"
+                .into(),
         ),
         // Same status as the row above, a DIFFERENT code, because the fix is in
         // a different system: this one is cleared by granting the service
@@ -289,7 +345,7 @@ pub(crate) fn to_wire(e: &ServingError) -> Wire {
         | ServingError::ParamGateStale => Some(CONFIG_DRIFT_RETRY_AFTER_SECS),
         ServingError::Unauthorized
         | ServingError::NotFound
-        | ServingError::DataAccessDenied
+        | ServingError::DataAccessDenied { .. }
         | ServingError::NotGranted
         | ServingError::ParamMissing
         | ServingError::ParamInvalid
@@ -338,7 +394,24 @@ mod tests {
         let cases: Vec<(ServingError, u16, &str)> = vec![
             (ServingError::Unauthorized, 401, "key_invalid"),
             (ServingError::NotFound, 404, "not_found"),
-            (ServingError::DataAccessDenied, 403, "data_access_denied"),
+            // Both recognitions, one code. Spelled out as two rows because the
+            // two `raw` shapes are two construction sites in
+            // `router::engine_error`, and a change that gave either its own code
+            // would have to edit this list.
+            (
+                ServingError::DataAccessDenied { raw: None },
+                403,
+                "data_access_denied",
+            ),
+            (
+                ServingError::DataAccessDenied {
+                    raw: Some(anyhow::anyhow!(
+                        "Access Denied: Cannot select from table sales"
+                    )),
+                },
+                403,
+                "data_access_denied",
+            ),
             (ServingError::NotGranted, 403, "not_granted"),
             (ServingError::ParamMissing, 400, "param_missing"),
             (ServingError::ParamInvalid, 400, "param_invalid"),
@@ -398,6 +471,54 @@ mod tests {
             !w.message.contains("trino-coordinator.internal"),
             "leaked the engine host: {}",
             w.message
+        );
+    }
+
+    /// `DataAccessDenied::raw` exists ONLY for the server-side `error = ?e` log
+    /// line — see its doc comment. This is the wire half of that promise:
+    /// whatever the engine actually said, `to_wire` must render the same
+    /// fixed message every time, never the raw text.
+    #[test]
+    fn a_data_access_denial_never_renders_the_engines_raw_message() {
+        let e = ServingError::DataAccessDenied {
+            raw: Some(anyhow::anyhow!(
+                "Access Denied: Cannot select from table sales"
+            )),
+        };
+        let w = to_wire(&e);
+        assert!(
+            !w.message.contains("Cannot select from table"),
+            "leaked the engine's raw denial text: {}",
+            w.message
+        );
+        assert!(
+            !w.message.contains("sales"),
+            "leaked a table name from the engine's message: {}",
+            w.message
+        );
+        assert!(
+            w.message.contains("service account"),
+            "must still point at the fix: {}",
+            w.message
+        );
+
+        // The other half of the promise: the text the wire refused to render is
+        // still recoverable server-side, through the `#[source]` chain the
+        // `error = ?e` log line in `serve`'s failure branch prints. Without this
+        // assertion the field could be dropped from the attribute and only the
+        // leak test above would still pass.
+        let src =
+            std::error::Error::source(&e).expect("the engine's words must survive as a source");
+        assert!(
+            src.to_string().contains("Cannot select from table sales"),
+            "the raw message must reach the log: {src}"
+        );
+
+        // And the typed arm carries nothing, deliberately — `Error::Forbidden`
+        // is a unit variant, so there is no engine text to invent.
+        assert!(
+            std::error::Error::source(&ServingError::DataAccessDenied { raw: None }).is_none(),
+            "the typed arm has no engine message and must not fabricate one"
         );
     }
 
@@ -468,7 +589,12 @@ mod tests {
         for e in [
             ServingError::Unauthorized,
             ServingError::NotFound,
-            ServingError::DataAccessDenied,
+            ServingError::DataAccessDenied { raw: None },
+            ServingError::DataAccessDenied {
+                raw: Some(anyhow::anyhow!(
+                    "Access Denied: Cannot select from table sales"
+                )),
+            },
             ServingError::NotGranted,
             ServingError::ParamMissing,
             ServingError::ParamInvalid,
@@ -491,10 +617,10 @@ mod tests {
         let codes = [
             to_wire(&ServingError::Unauthorized).code,
             to_wire(&ServingError::NotFound).code,
-            to_wire(&ServingError::DataAccessDenied).code,
+            to_wire(&ServingError::DataAccessDenied { raw: None }).code,
             // The pair this test exists for most: two variants that share a
             // STATUS must not share a code, or the wire cannot tell "ask egret
-            // for a grant" from "ask Ranger for a grant".
+            // for a grant" from "ask the engine for a permission".
             to_wire(&ServingError::NotGranted).code,
             // Three 400s now. `param_missing` and `param_invalid` point at two
             // different client-side fixes, and both are different from

@@ -14230,6 +14230,225 @@
         }
       }
     },
+    "/api/ws/{workspace}/data-api/activity/calls": {
+      "get": {
+        "tags": [
+          "data-api"
+        ],
+        "operationId": "activity_calls",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "range",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ActivityRange"
+            }
+          },
+          {
+            "name": "endpoint_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "status_code",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32"
+            }
+          },
+          {
+            "name": "error_code",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "request_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "include_trials",
+            "in": "query",
+            "description": "Off by default. A trial is not consumer traffic, so it must be asked for.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "description": "Keyset cursor: return rows strictly older than this.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "How many rows to return. Default 50, maximum 200; a larger value is\nclamped to 200 rather than refused.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Individual calls in the range, most recent first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ActivityCallDto"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing data_api_endpoint:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/data-api/activity/summary": {
+      "get": {
+        "tags": [
+          "data-api"
+        ],
+        "operationId": "activity_summary",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "range",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ActivityRange"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Call statistics for the range",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActivitySummaryDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing data_api_endpoint:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/data-api/clients/{id}": {
       "delete": {
         "tags": [
@@ -15480,6 +15699,115 @@
         }
       }
     },
+    "/api/ws/{workspace}/data-api/endpoints/{id}/try": {
+      "post": {
+        "tags": [
+          "data-api"
+        ],
+        "operationId": "try_endpoint",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Endpoint id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The trial RAN. `status` and `body` are the serving path's own answer — a 403 or a 429 in there is a result, not a failure of this route",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TryResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing data_api_endpoint:manage — a trial runs a query as somebody else, so :read does not reach it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such endpoint, or no such service account, in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The trial RAN, but its result is larger than a console trial will read back; lower the endpoint's row limit or call it with a client",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/data-api/endpoints/{id}/validate": {
       "post": {
         "tags": [
@@ -15650,6 +15978,118 @@
           },
           "404": {
             "description": "No such endpoint in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/data-api/openapi": {
+      "get": {
+        "tags": [
+          "data-api"
+        ],
+        "operationId": "get_openapi",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "service_account_id",
+            "in": "query",
+            "description": "Whose invoke rights the document describes.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "endpoint_id",
+            "in": "query",
+            "description": "Narrow to a single endpoint's contract, e.g. for a per-endpoint download.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OpenAPI 3.0.3 document describing what service_account_id may invoke. `servers[0].url` already carries the workspace slug, so joining it with a `paths` key gives the URL a consumer calls",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "The workspace has more live endpoints than one document may describe; request them one at a time with endpoint_id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing data_api_endpoint:manage permission. The gate matches `/grants` LIST, not the other read routes: this document is the grant roster, resolved per service account",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such service account in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A described endpoint's output naming collides; re-publish it",
             "content": {
               "application/json": {
                 "schema": {
@@ -24646,7 +25086,7 @@
             }
           },
           "403": {
-            "description": "`data_access_denied` — the engine denied the data to this service account",
+            "description": "`data_access_denied` — the engine refused this service account the underlying data, either because it lacks a data permission (a Ranger grant, say) or because its engine credential is bad or expired; one code, because the two recognitions available (Trino's typed 401/403 from the coordinator, and every other engine failure matched on its own message) cannot tell those causes apart. `not_granted` — egret refused the call because the service account holds no invoke grant on this endpoint",
             "content": {
               "application/json": {
                 "schema": {
@@ -24759,7 +25199,7 @@
             }
           },
           "403": {
-            "description": "`data_access_denied` — the engine denied the data to this service account",
+            "description": "`data_access_denied` — the engine refused this service account the underlying data, either because it lacks a data permission (a Ranger grant, say) or because its engine credential is bad or expired; one code, because the two recognitions available (Trino's typed 401/403 from the coordinator, and every other engine failure matched on its own message) cannot tell those causes apart. `not_granted` — egret refused the call because the service account holds no invoke grant on this endpoint",
             "content": {
               "application/json": {
                 "schema": {
@@ -25414,6 +25854,180 @@
         "properties": {
           "ok": {
             "type": "boolean"
+          }
+        }
+      },
+      "ActivityCallDto": {
+        "type": "object",
+        "required": [
+          "id",
+          "ts",
+          "status_code",
+          "duration_ms",
+          "cache_hit",
+          "request_id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "ts": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "endpoint_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "endpoint_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "request_method": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What the caller asked for. The ONLY identification a row carries when\n`endpoint_id` is null — see migration 0125."
+          },
+          "request_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status_code": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "error_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "duration_ms": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "cache_hit": {
+            "type": "boolean"
+          },
+          "client_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "actor_user_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Non-null ⇒ a Try-it run by this person, not consumer traffic."
+          }
+        }
+      },
+      "ActivityRange": {
+        "type": "string",
+        "description": "The four ranges the UI offers, and the only ones it may ask for.\n\nA fixed set rather than a date picker: every query here narrows on\n`access_log_ws_ts_idx (workspace_id, ts DESC)`, and the presets are what keep\nit inside that index's reach. An input that accepts \"one year\" on the\nfastest-growing table in the schema has nothing stopping the person who types\nit.",
+        "enum": [
+          "1h",
+          "24h",
+          "7d",
+          "30d"
+        ]
+      },
+      "ActivityRow": {
+        "type": "object",
+        "description": "One line of the statistics table, or — with `endpoint_id: None` — either the\ngrand total or the unmatched-request bucket, depending on which grouping set\nproduced it.",
+        "required": [
+          "calls",
+          "errors",
+          "cache_hits",
+          "cacheable_calls"
+        ],
+        "properties": {
+          "endpoint_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "endpoint_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "calls": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "errors": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "p50_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "`None` when the population is empty — no successful call in range. Zero\nwould be a measurement; this is the absence of one."
+          },
+          "p95_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "cache_hits": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "cacheable_calls": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The DENOMINATOR for cache-hit rate: successful calls on a version whose\nsnapshot had caching enabled. Sent raw so the caller can render `—`\nrather than `0%` when it is zero — zero of zero is not zero."
+          }
+        }
+      },
+      "ActivitySummaryDto": {
+        "type": "object",
+        "required": [
+          "total",
+          "endpoints"
+        ],
+        "properties": {
+          "total": {
+            "$ref": "#/components/schemas/ActivityRow"
+          },
+          "endpoints": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ActivityRow"
+            }
+          },
+          "retention_days": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "`DataApiConfig::access_log_retention_days`, passed through so the UI can\ndisable ranges that reach past it (spec §4.7).\n\n**The UI cannot compute this and must not assume 30 days exist.**\nRetention may be shorter, and `0` means keep nothing — the same reading\n`AuditConfig::retention_days` has. Without this field someone selects\n`30d`, watches the data thin out at the old end, and concludes traffic\nfell; the screen would be actively supporting a wrong conclusion.\n\n`None` ⇒ no prune is scheduled (`scheduled_retention` returned `None`),\nso nothing is being deleted and every range is honest."
           }
         }
       },
@@ -32931,6 +33545,80 @@
         "properties": {
           "new_owner_id": {
             "type": "string"
+          }
+        }
+      },
+      "TryRequest": {
+        "type": "object",
+        "required": [
+          "service_account_id"
+        ],
+        "properties": {
+          "service_account_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "params": {
+            "type": "object",
+            "description": "Values exactly as they would arrive on the query string. A `Vec` per key\nbecause a repeated parameter is a LIST (P4.5), and a trial that could\nonly send one value could not exercise the case most likely to be wrong.",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "TryRequestEcho": {
+        "type": "object",
+        "required": [
+          "method",
+          "url",
+          "authorization",
+          "curl"
+        ],
+        "properties": {
+          "method": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "authorization": {
+            "type": "string",
+            "description": "Always the literal `Bearer ••••`. The token is never serialised."
+          },
+          "curl": {
+            "type": "string",
+            "description": "A copyable reproduction using a `$TOKEN` placeholder."
+          }
+        }
+      },
+      "TryResponse": {
+        "type": "object",
+        "required": [
+          "status",
+          "body",
+          "request"
+        ],
+        "properties": {
+          "status": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The status the SERVING path returned. The trial itself is a 200 whenever\nit ran — a 403 from the endpoint is a result, not a failure of the trial.",
+            "minimum": 0
+          },
+          "body": {
+            "type": "object",
+            "description": "The serving path's own body, verbatim: rows and `meta` on success, spec\n§7's `{code, message, request_id}` on a refusal. Verbatim because the\npoint of the feature is to show what the consumer gets, and a body this\nroute summarised would be a different answer than the real one."
+          },
+          "request": {
+            "$ref": "#/components/schemas/TryRequestEcho"
           }
         }
       },

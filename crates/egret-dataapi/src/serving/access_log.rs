@@ -91,6 +91,19 @@ pub struct AccessLogEntry {
     /// `None` on success; otherwise spec §7's fixed code, byte-identical to the
     /// one the caller was given.
     pub error_code: Option<String>,
+    /// Non-null ⇒ this call came from the Try-it console, run by this person on
+    /// a service account's behalf (P5 §3). Statistics filter these out; the call
+    /// list shows them, labelled.
+    ///
+    /// **Set by the management `/try` handler, never by the serving path.** A
+    /// real consumer call has no actor, and a serving path that could populate
+    /// this would make "is this a trial?" a claim rather than a fact.
+    pub actor_user_id: Option<Uuid>,
+    /// The method and path as requested. Recorded because a row that resolved no
+    /// endpoint (`endpoint_id == None`) has nothing else identifying it — see
+    /// the column comment in `0125_dataapi_access_log_p5.sql`.
+    pub request_method: Option<String>,
+    pub request_path: Option<String>,
     pub request_id: String,
 }
 
@@ -116,6 +129,9 @@ impl AccessLogEntry {
             engine_query_id: None,
             client_ip,
             error_code: None,
+            actor_user_id: None,
+            request_method: None,
+            request_path: None,
             request_id: request_id.into(),
         }
     }
@@ -202,8 +218,9 @@ impl AccessLogStore {
             "INSERT INTO dataapi.access_log \
                (workspace_id, endpoint_id, version, service_account_id, client_id, \
                 status_code, row_count, duration_ms, cache_hit, engine_query_id, \
-                client_ip, error_code, request_id) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::text::inet,$12,$13)",
+                client_ip, error_code, request_id, actor_user_id, \
+                request_method, request_path) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::text::inet,$12,$13,$14,$15,$16)",
         )
         .bind(ws)
         .bind(e.endpoint_id)
@@ -225,6 +242,9 @@ impl AccessLogStore {
         .bind(e.client_ip.map(|ip| ip.to_string()))
         .bind(e.error_code.as_deref())
         .bind(&e.request_id)
+        .bind(e.actor_user_id)
+        .bind(e.request_method.as_deref())
+        .bind(e.request_path.as_deref())
         .execute(&self.db.pool)
         .await;
         if let Err(err) = res {

@@ -35,19 +35,32 @@
 //! `egret_machine_idp::verify_with_jwk` checks NEITHER and accepts a token
 //! carrying no `exp` at all — that module's comment carries the reasoning.
 
+//! P5 §3 adds [`try_it`]: `POST …/endpoints/{id}/try` runs a published endpoint
+//! AS one of the workspace's service accounts, from the console. It drives the
+//! REAL [`serving_router`] in process through its tower `Service` — not a
+//! re-implemented equivalent and not an HTTP loopback — so a trial cannot
+//! report OK on a path a consumer is refused. See its module comment.
+
 //! P4.5 adds [`render`]: an endpoint's SQL and a caller's values become
 //! `(sql, Vec<Param>)` — a statement whose every `{{ … }}` has become a bind
 //! marker, and the values to bind to it. It is the only SQL-building surface in
 //! egret that is safe by construction rather than by escaper; its module comment
 //! carries the mechanism and the rules that keep it that way.
 
+pub mod activity;
 pub mod clients;
 pub mod endpoints;
+mod invoke;
 pub mod lifecycle;
+pub mod openapi_gen;
 pub mod render;
 pub mod routes;
 pub mod serving;
+pub mod try_it;
 
+pub use activity::{
+    ActivityCallDto, ActivityRange, ActivityRow, ActivityStore, ActivitySummaryDto,
+};
 pub use clients::{ClientStore, NewClient, DATA_API_TTL_SECS};
 pub use endpoints::{
     CreateEndpointInput, DataApiEndpointDto, DeletedEndpoint, EndpointStore, UpdateEndpointInput,
@@ -67,3 +80,20 @@ pub use serving::{
     serving_openapi, serving_router, verify_serving_token, ServingError, ServingMeta,
     ServingPrincipal, ServingResponse, DATA_API_AUDIENCE,
 };
+pub use try_it::{
+    TrialActor, TrialResultTooLarge, TryItError, TryRequest, TryRequestEcho, TryResponse,
+};
+
+/// Test-only access to the shared invoke expression (P5 §5.2). Integration
+/// tests live outside the crate and cannot see `pub(crate)`; exposing it through
+/// a named shim keeps the real function crate-private, so no production caller
+/// can drift onto a second copy of this decision.
+#[doc(hidden)]
+pub async fn can_invoke_for_test(
+    st: &crate::routes::DataApiState,
+    user_id: egret_core::ids::UserId,
+    ws: egret_core::WorkspaceId,
+    endpoint_id: uuid::Uuid,
+) -> Result<bool, egret_core::Error> {
+    crate::invoke::can_invoke(st, user_id, ws, endpoint_id).await
+}

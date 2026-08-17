@@ -24,6 +24,9 @@
 //! GET    /api/ws/{workspace}/data-api/endpoints/{id}/grants
 //! POST   /api/ws/{workspace}/data-api/endpoints/{id}/grants
 //! DELETE /api/ws/{workspace}/data-api/endpoints/{id}/grants/{service_account_id}
+//! POST   /api/ws/{workspace}/data-api/endpoints/{id}/try
+//!
+//! GET    /api/ws/{workspace}/data-api/openapi
 //! ```
 //!
 //! Three invariants this module exists to hold, all of them security properties
@@ -35,7 +38,9 @@
 //!    the three `/grants` routes — including the LIST — on
 //!    `data_api_endpoint:manage`: an invoke grant is what makes an endpoint
 //!    callable at all, so writing one mutates the authorization graph and
-//!    reading them enumerates every consumer of the endpoint.
+//!    reading them enumerates every consumer of the endpoint. `GET
+//!    …/data-api/openapi` is on `:manage` for the same reason and is the
+//!    stronger case — it answers that question per account and iterable.
 //! 2. **The workspace comes from [`WsContext`], never from the `{workspace}`
 //!    path segment read a second time.** Gating on one and querying with the
 //!    other is exactly how a cross-workspace hole opens. A service account or
@@ -62,7 +67,7 @@
 //! entirely from the snapshot. See `lifecycle.rs`' module comment for the full
 //! contract.
 
-use axum::extract::{FromRef, Path, State};
+use axum::extract::{FromRef, Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
@@ -80,6 +85,9 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::activity::{
+    ActivityCallDto, ActivityRange, ActivityRow, ActivityStore, ActivitySummaryDto,
+};
 use crate::clients::ClientStore;
 use crate::endpoints::{
     normalize_path, CreateEndpointInput, DataApiEndpointDto, EndpointStore, UpdateEndpointInput,
@@ -97,7 +105,11 @@ const SA_MANAGE: &str = "service_account:manage";
 const EP_READ: &str = "data_api_endpoint:read";
 /// Author endpoints. Flat, like every permission here: it implies no `:read`,
 /// and `:read` implies none of it.
-const EP_MANAGE: &str = "data_api_endpoint:manage";
+///
+/// `pub(crate)` because [`crate::try_it`]'s handler gates on it too — running an
+/// endpoint as somebody else is an authoring act, not a reading one — and the
+/// three action strings stay one list rather than a literal per file.
+pub(crate) const EP_MANAGE: &str = "data_api_endpoint:manage";
 /// Call a published endpoint (spec §6.2 step 4).
 ///
 /// Never checked by a route in this module — it is the action the SERVING path
@@ -183,6 +195,8 @@ pub struct DataApiState {
     /// the serving surface is in-process, and splitting the binary would
     /// otherwise multiply every published limit by the replica count in silence.
     pub rate_limits: std::sync::Arc<dyn crate::serving::RateLimitStore>,
+    /// The Activity tab's store (P5 §4) — call statistics from `dataapi.access_log`.
+    pub activity: ActivityStore,
 }
 
 impl FromRef<DataApiState> for SessionService {
@@ -266,7 +280,11 @@ fn db_err(e: sqlx::Error) -> DataApiError {
 /// Resolve a service account and confirm it belongs to the workspace the caller
 /// was authorized against. Returns 404 — never 403 — on mismatch, so a caller in
 /// another workspace cannot distinguish "no such account" from "not yours".
-async fn scoped_account(st: &DataApiState, ws: Uuid, sa: Uuid) -> Result<Uuid, DataApiError> {
+pub(crate) async fn scoped_account(
+    st: &DataApiState,
+    ws: Uuid,
+    sa: Uuid,
+) -> Result<Uuid, DataApiError> {
     let found: Option<Uuid> = sqlx::query_scalar(
         "SELECT user_id FROM dataapi.service_accounts WHERE user_id = $1 AND workspace_id = $2",
     )
@@ -549,6 +567,15 @@ async fn create_service_account(
         }
     };
 
+    st.audit.emit(egret_audit::mutation_for(
+        &ctx.principal,
+        Some(ctx.workspace_id.0),
+        "service_account:create",
+        "service_account",
+        Some(user_id.0.to_string()),
+        serde_json::json!({ "name": name, "email": email }),
+    ));
+
     Ok((
         StatusCode::CREATED,
         Json(DataApiServiceAccountDto {
@@ -600,11 +627,35 @@ async fn delete_service_account(
     // `notebooks.owner_user_id` is only ever set by an interactive session and a
     // service account can never log in (`users_service_has_no_password`, 0119) —
     // so this is a no-op that stays correct if that ever changes.
-    st.users
+    let deleted = st
+        .users
         .hard_delete(UserId(sa), ctx.principal.user_id)
         .await?;
     // Deleting the `users` row cascades through `dataapi.service_accounts` into
     // `dataapi.clients` (migration 0119), so no client outlives its account.
+    //
+    // The hardest of the four to add later and the most important to have:
+    // this hard-deletes a machine principal along with its `access_grants` and
+    // every client it owns. Nothing else survives to say it existed. The
+    // columns come from `hard_delete`'s own `RETURNING`, so there is no second
+    // query and nothing to race.
+    //
+    // `hard_delete` returns `None` only in the TOCTOU window where `sa` was
+    // deleted between the `scoped_account` check above and the row `DELETE`
+    // itself — `hard_delete` treats that as the idempotent success it has
+    // always been for its other caller, not an error, so there is nothing
+    // this route actually destroyed to describe. Emitting a `delete` event
+    // with fabricated or absent columns would be worse than emitting none.
+    if let Some((name, email)) = deleted {
+        st.audit.emit(egret_audit::mutation_for(
+            &ctx.principal,
+            Some(ctx.workspace_id.0),
+            "service_account:delete",
+            "service_account",
+            Some(sa.to_string()),
+            serde_json::json!({ "name": name, "email": email }),
+        ));
+    }
     Ok(Json(Ack::ok()))
 }
 
@@ -871,6 +922,19 @@ async fn create_endpoint(
             &body,
         )
         .await?;
+    st.audit.emit(egret_audit::mutation_for(
+        &ctx.principal,
+        Some(ctx.workspace_id.0),
+        "data_api_endpoint:create",
+        "data_api_endpoint",
+        Some(created.id.to_string()),
+        serde_json::json!({
+            "name": created.name,
+            "path": created.path,
+            "method": created.method,
+            "database_id": created.database_id,
+        }),
+    ));
     Ok((StatusCode::CREATED, Json(created)))
 }
 
@@ -921,9 +985,25 @@ async fn update_endpoint(
     if let Some(Some(folder_id)) = body.folder_id {
         scoped_folder(&st, ctx.workspace_id.0, folder_id).await?;
     }
-    Ok(Json(
-        st.endpoints.update(ctx.workspace_id.0, id, &body).await?,
-    ))
+    let updated = st.endpoints.update(ctx.workspace_id.0, id, &body).await?;
+    // Records the URL as it now stands, not a field-by-field diff: `path` and
+    // `method` are editable on a live row, so "which URL does this endpoint
+    // claim" is the question an auditor asks, and a diff of unchanged fields
+    // would bury it.
+    st.audit.emit(egret_audit::mutation_for(
+        &ctx.principal,
+        Some(ctx.workspace_id.0),
+        "data_api_endpoint:update",
+        "data_api_endpoint",
+        Some(id.to_string()),
+        serde_json::json!({
+            "name": updated.name,
+            "path": updated.path,
+            "method": updated.method,
+            "database_id": updated.database_id,
+        }),
+    ));
+    Ok(Json(updated))
 }
 
 #[utoipa::path(
@@ -1551,6 +1631,207 @@ async fn revoke_endpoint_invoke(
     Ok(Json(Ack::ok()))
 }
 
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct ActivityQuery {
+    pub range: ActivityRange,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/data-api/activity/summary",
+    tag = "data-api",
+    params(WorkspacePath, ActivityQuery),
+    responses(
+        (status = 200, description = "Call statistics for the range", body = ActivitySummaryDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing data_api_endpoint:read permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn activity_summary(
+    State(st): State<DataApiState>,
+    WsContext(ctx): WsContext,
+    Query(q): Query<ActivityQuery>,
+) -> Result<Json<ActivitySummaryDto>, DataApiError> {
+    // Workspace-scoped `:read` for the whole tab. Activity is deliberately a
+    // workspace-level view and is NOT sliced per endpoint: a per-row filter
+    // would make the totals disagree with their own rows, which is the one thing
+    // §4.2 spends a GROUPING SETS query to prevent.
+    egret_core::authz::require(&*st.pdp, &ctx, EP_READ).await?;
+    Ok(Json(
+        st.activity
+            .summary(ctx.workspace_id.0, q.range.since(Utc::now()))
+            .await
+            .map_err(db_err)?,
+    ))
+}
+
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+#[serde(deny_unknown_fields)]
+pub struct ActivityCallsQuery {
+    pub range: ActivityRange,
+    #[serde(default)]
+    pub endpoint_id: Option<Uuid>,
+    #[serde(default)]
+    pub status_code: Option<i32>,
+    #[serde(default)]
+    pub error_code: Option<String>,
+    #[serde(default)]
+    pub request_id: Option<String>,
+    /// Off by default. A trial is not consumer traffic, so it must be asked for.
+    #[serde(default)]
+    pub include_trials: bool,
+    /// Keyset cursor: return rows strictly older than this.
+    #[serde(default)]
+    pub before: Option<DateTime<Utc>>,
+    // A CLAMP, where an out-of-range `range` is a hard 400 — two different
+    // answers to "you asked for more than you may have", and the difference is
+    // deliberate. `range` names a WINDOW: honouring "one year" by quietly
+    // serving 30 days would report a number the caller reads as the year's, so
+    // it has to refuse. `limit` names a PAGE SIZE: the caller pages with
+    // `before` either way, and 200 rows in place of 1000 is not a wrong answer
+    // to any question, only a shorter page. What would be indefensible is a
+    // clamp nobody can see — hence the doc comment below, which utoipa renders
+    // as this parameter's description.
+    /// How many rows to return. Default 50, maximum 200; a larger value is
+    /// clamped to 200 rather than refused.
+    #[serde(default = "default_call_limit")]
+    pub limit: i64,
+}
+
+fn default_call_limit() -> i64 {
+    50
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/data-api/activity/calls",
+    tag = "data-api",
+    params(WorkspacePath, ActivityCallsQuery),
+    responses(
+        (status = 200, description = "Individual calls in the range, most recent first", body = Vec<ActivityCallDto>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing data_api_endpoint:read permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn activity_calls(
+    State(st): State<DataApiState>,
+    WsContext(ctx): WsContext,
+    Query(q): Query<ActivityCallsQuery>,
+) -> Result<Json<Vec<ActivityCallDto>>, DataApiError> {
+    // Same gate as `activity_summary`: workspace-scoped `:read`. The
+    // `request_id` filter does NOT relax this — see `ActivityStore::calls`'s
+    // doc comment for why the workspace predicate must stay in the statement
+    // even though `access_log_request_id_idx` is global.
+    egret_core::authz::require(&*st.pdp, &ctx, EP_READ).await?;
+    Ok(Json(
+        st.activity
+            .calls(
+                ctx.workspace_id.0,
+                q.range.since(Utc::now()),
+                q.endpoint_id,
+                q.status_code,
+                q.error_code.as_deref(),
+                q.request_id.as_deref(),
+                q.include_trials,
+                q.before,
+                q.limit,
+            )
+            .await
+            .map_err(db_err)?,
+    ))
+}
+
+// ── Generated OpenAPI (P5 §5) ────────────────────────────────────────────────
+//
+// The document a workspace hands a consumer team: the endpoints ONE service
+// account may call, described from its frozen published contract. Assembled
+// in `openapi_gen`, not through utoipa — utoipa describes this server's own
+// compiled routes, and these paths exist only in a user's data.
+
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct OpenApiQuery {
+    /// Whose invoke rights the document describes.
+    pub service_account_id: Uuid,
+    /// Narrow to a single endpoint's contract, e.g. for a per-endpoint download.
+    #[serde(default)]
+    pub endpoint_id: Option<Uuid>,
+}
+
+/// Map [`crate::openapi_gen::OpenApiGenError`] onto the crate's canonical
+/// [`DataApiError`], the same way every other handler in this module maps its
+/// failures: `Db` follows [`db_err`], `Core` passes the already-mapped
+/// [`Error`] through, and `NamingCollision` becomes a 409 naming the endpoint
+/// and telling the author to re-publish — there is no document to serve for a
+/// version `serving` itself answers 503 for.
+///
+/// `TooManyEndpoints` becomes a 400 rather than a 409 or a 500: the caller has a
+/// remedy in their own hands (`?endpoint_id=`, which the message names), and a
+/// second unrelated meaning for 409 on this surface is the confusion this branch
+/// otherwise had to fix in `try_it`.
+fn openapi_gen_err(e: crate::openapi_gen::OpenApiGenError) -> DataApiError {
+    use crate::openapi_gen::OpenApiGenError;
+    match e {
+        OpenApiGenError::NamingCollision { endpoint } => Error::Conflict(format!(
+            "endpoint {endpoint} has an output naming collision; re-publish it"
+        )),
+        e @ OpenApiGenError::TooManyEndpoints { .. } => Error::InvalidInput(e.to_string()),
+        OpenApiGenError::Db(e) => db_err(e),
+        OpenApiGenError::Core(e) => e,
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/data-api/openapi",
+    tag = "data-api",
+    params(WorkspacePath, OpenApiQuery),
+    responses(
+        (status = 200, description = "OpenAPI 3.0.3 document describing what service_account_id may invoke. `servers[0].url` already carries the workspace slug, so joining it with a `paths` key gives the URL a consumer calls", body = serde_json::Value),
+        (status = 400, description = "The workspace has more live endpoints than one document may describe; request them one at a time with endpoint_id", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing data_api_endpoint:manage permission. The gate matches `/grants` LIST, not the other read routes: this document is the grant roster, resolved per service account", body = ErrorBody),
+        (status = 404, description = "No such service account in this workspace", body = ErrorBody),
+        (status = 409, description = "A described endpoint's output naming collides; re-publish it", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn get_openapi(
+    State(st): State<DataApiState>,
+    WsContext(ctx): WsContext,
+    Query(q): Query<OpenApiQuery>,
+) -> Result<Json<serde_json::Value>, DataApiError> {
+    // **`:manage`, not `:read`, and matching `/grants` LIST on purpose.** This
+    // route takes a `service_account_id` and answers with exactly the set of
+    // endpoints that account may invoke — the grant roster, read from the other
+    // end and iterable over the workspace's accounts. The module comment's first
+    // invariant puts `/grants` LIST on `:manage` because "reading them enumerates
+    // every consumer of the endpoint"; this route answers a strictly MORE
+    // powerful question than that one — full path, parameter and schema detail
+    // for every endpoint a principal may invoke, not just a roster of ids — so
+    // gating it lower let `:read` enumerate what `:manage` was there to protect.
+    // Do not "fix" this back to `EP_READ` to match the other GETs in this
+    // module: the other GETs describe endpoints, this one describes who can call
+    // them.
+    egret_core::authz::require(&*st.pdp, &ctx, EP_MANAGE).await?;
+    // `ctx.workspace_id`, resolved through `scoped_account` before anything
+    // else, exactly like every other handler in this module that takes an id
+    // from the caller (see the module comment's containment invariant). The
+    // permission gate above is not a substitute: it says the caller may ask the
+    // question, not whose account it may ask it about. Without this, any uuid
+    // (another workspace's principal, a random value, a non-service-account
+    // user) supplied here would answer 200 with a DIFFERENT set of paths depending on
+    // what it can invoke — precisely the content oracle `scoped_account`'s
+    // uniform 404 exists to deny. The mismatch answers 404, never 403, so a
+    // caller cannot distinguish "no such account" from "not yours".
+    let sa = scoped_account(&st, ctx.workspace_id.0, q.service_account_id).await?;
+    let doc = crate::openapi_gen::build(&st, ctx.workspace_id, UserId(sa), q.endpoint_id)
+        .await
+        .map_err(openapi_gen_err)?;
+    Ok(Json(doc))
+}
+
 /// The Data API management router. Mount under `/api` so the live paths are
 /// `/api/ws/{workspace}/data-api/…` — `WsContext`'s feature gate only recognises
 /// a path beginning `/api/ws/` or `/ws/`, and `egret-server`'s
@@ -1615,6 +1896,22 @@ pub fn management_router() -> Router<DataApiState> {
             "/ws/{workspace}/data-api/endpoints/{id}/grants/{service_account_id}",
             delete(revoke_endpoint_invoke),
         )
+        // The handler lives in `try_it` rather than here: it is the one route in
+        // this module that builds and drives the SERVING router, and keeping it
+        // beside its own reasoning keeps that visible.
+        .route(
+            "/ws/{workspace}/data-api/endpoints/{id}/try",
+            post(crate::try_it::try_endpoint),
+        )
+        .route(
+            "/ws/{workspace}/data-api/activity/summary",
+            get(activity_summary),
+        )
+        .route(
+            "/ws/{workspace}/data-api/activity/calls",
+            get(activity_calls),
+        )
+        .route("/ws/{workspace}/data-api/openapi", get(get_openapi))
 }
 
 #[derive(utoipa::OpenApi)]
@@ -1640,6 +1937,10 @@ pub fn management_router() -> Router<DataApiState> {
         list_endpoint_grants,
         grant_endpoint_invoke,
         revoke_endpoint_invoke,
+        crate::try_it::try_endpoint,
+        activity_summary,
+        activity_calls,
+        get_openapi,
     ),
     components(schemas(
         DataApiServiceAccountDto,
@@ -1664,6 +1965,13 @@ pub fn management_router() -> Router<DataApiState> {
         GrantInvokeInput,
         egret_dataapi_api::EndpointSnapshot,
         egret_dataapi_api::ColumnSpec,
+        ActivitySummaryDto,
+        ActivityRow,
+        ActivityRange,
+        ActivityCallDto,
+        crate::try_it::TryRequest,
+        crate::try_it::TryResponse,
+        crate::try_it::TryRequestEcho,
     )),
     tags((name = "data-api", description = "Data API service accounts and OAuth2 clients")),
 )]

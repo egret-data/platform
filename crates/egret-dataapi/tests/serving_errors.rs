@@ -33,6 +33,14 @@ use std::sync::{Arc, OnceLock};
 use tower::ServiceExt;
 use uuid::Uuid;
 
+/// Only for Task 8's test below, which needs `FakePort::fail_next_with` —
+/// this file's own `FakePort` (just below) recognises a fixed set of SQL
+/// substrings and has no way to hand back an arbitrary engine message.
+/// Deliberately NOT `use serving_common::fixture` at the top level: this
+/// file's own `fixture()` (further down) already owns that name, and every
+/// other test in this file is unaffected by and should stay on the local one.
+mod serving_common;
+
 /// The host the fake coordinator "lives" on. Asserted as ABSENT from every
 /// body — it is the string a connect failure would carry out with it.
 const ENGINE_HOST: &str = "trino-coordinator.internal:8080";
@@ -298,6 +306,9 @@ async fn fixture() -> Option<Fixture> {
         audit: egret_audit::AuditSink::new(1).0,
         cache: egret_dataapi::serving::ResponseCache::new(),
         rate_limits: Arc::new(egret_dataapi::serving::TokenBucket::new()),
+        // This file is about serving-path error shapes, not Activity — a fixed
+        // retention is enough to satisfy the field.
+        activity: egret_dataapi::ActivityStore::new(db.clone(), Some(90)),
     };
 
     let session = st
@@ -1038,5 +1049,94 @@ async fn a_second_principal_is_refused_the_same_way() {
         "data_access_denied",
         "the ENGINE refused the data; egret let the call through: {}",
         res.text
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Task 8 — an engine permission error names the missing step, not the SQL
+// ---------------------------------------------------------------------------
+
+/// The untyped shape THIS file's own fake port (above) cannot produce:
+/// `denied_table` returns a typed `Error::Forbidden`, which is not what a real
+/// Trino or StarRocks denial looks like — neither connector surfaces a typed
+/// authorization error (see `serving::error::is_permission_denied`'s doc).
+/// This test uses `serving_common`'s fixture and `FakePort::fail_next_with`
+/// instead, so the engine's answer is an arbitrary message, exactly like a
+/// real one.
+#[tokio::test]
+async fn an_engine_permission_error_names_the_missing_step() {
+    let Some(f) = serving_common::fixture().await else {
+        eprintln!("DATABASE_URL unset — skipping");
+        return;
+    };
+    // The fake port answers as a Ranger-enforcing engine does when the
+    // principal may not read the table.
+    f.port
+        .fail_next_with("Access Denied: Cannot select from table sales");
+
+    let res = f.call_as_client(f.principal_a, "client-a", "probe").await;
+
+    assert_eq!(res.status, StatusCode::FORBIDDEN, "{}", res.body);
+    // The SAME code the typed `Error::Forbidden` path produces
+    // (`a_second_principal_is_refused_the_same_way` above). The two
+    // recognitions were once two wire codes; one of them was named for Ranger
+    // and would have stated the wrong cause whenever the real fault was a bad
+    // engine credential, which the typed path cannot distinguish. This
+    // assertion is what proves the heuristic still maps at all.
+    assert_eq!(res.body["error"]["code"], "data_access_denied");
+    // The message must point at the permission, not at the SQL. An author
+    // reading a raw engine error debugs their query — which is correct, but not
+    // here: the query was fine, and the missing piece is a data permission or a
+    // working engine credential.
+    let msg = res.body["error"]["message"].as_str().unwrap();
+    assert!(msg.contains("service account"), "{msg}");
+    assert!(
+        !msg.contains("Cannot select from table"),
+        "the raw engine error must not be echoed: {msg}"
+    );
+    assert!(
+        !msg.contains("sales"),
+        "a table name drawn from the engine's message must not reach the wire: {msg}"
+    );
+}
+
+/// **Egret's OWN fault must never be reported as a data-access denial**,
+/// however its message reads.
+///
+/// `port_impl::connect_as` produces `Error::Internal` for failures that are
+/// entirely ours — resolving the principal's email, opening the database secret —
+/// and `"permission denied"` is one of the most common OS, Kubernetes and vault
+/// error strings there is. While `engine_error` message-matched everything that
+/// was not `Error::Forbidden`, a secret this process could not open answered
+/// `403 data_access_denied` and sent an operator to audit grants that were fine.
+///
+/// The mutation that fails this test: widen `engine_error`'s guarded arm back to
+/// `other => { if is_permission_denied(&other.to_string()) { … } }`.
+#[tokio::test]
+async fn an_internal_fault_is_never_classified_as_a_data_access_denial() {
+    let Some(f) = serving_common::fixture().await else {
+        eprintln!("DATABASE_URL unset — skipping");
+        return;
+    };
+    // Verbatim the shape `open_secret`'s failure takes on a vault or a
+    // file-backed secret whose mode is wrong.
+    f.port
+        .fail_next_internal("open secret: permission denied (os error 13)");
+
+    let res = f.call_as_client(f.principal_a, "client-a", "probe").await;
+
+    assert_eq!(
+        res.status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "our fault is a 500, not a 403 pointing at the engine's permissions: {}",
+        res.body
+    );
+    assert_eq!(res.body["error"]["code"], "internal");
+    // And the operator is not handed our internals either — the message stays
+    // the fixed string, with the detail only in the log.
+    assert!(
+        !res.body.to_string().contains("os error 13"),
+        "an internal detail must not reach the caller: {}",
+        res.body
     );
 }
