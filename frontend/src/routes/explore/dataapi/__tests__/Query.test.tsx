@@ -417,6 +417,26 @@ describe("Query section — dirtiness and save", () => {
     // elsewhere since. Only `sql` changed, so only `sql` should be sent.
     expect(call.data).toEqual({ sql: "SELECT 1 -- x" });
   });
+
+  it("keeps Preview enabled while dirty, unlike Validate and Publish", async () => {
+    const endpoint = makeEndpoint({ sql: "SELECT 1" });
+    vi.mocked(api.useDataApiGetEndpoint).mockReturnValue({
+      data: { status: 200, data: endpoint },
+      isLoading: false,
+      isError: false,
+      refetch: vi.fn(),
+    } as never);
+    vi.mocked(api.useDataApiPreviewEndpoint).mockReturnValue({ mutateAsync: vi.fn(), isPending: false } as never);
+
+    renderQuery(endpoint);
+    const sql = await screen.findByLabelText("SQL");
+    await userEvent.type(sql, " -- edited");
+    // One test, three assertions — it pins §3.4 as a SET, not one button at a
+    // time, because the property is the DIFFERENCE between them.
+    expect(screen.getByRole("button", { name: /preview draft/i })).toBeEnabled();
+    expect(screen.getByRole("button", { name: /^save$/i })).toBeEnabled();
+    expect(screen.getByText(/unsaved changes/i)).toBeInTheDocument();
+  });
 });
 
 // Relocated from `EndpointDetail.test.tsx` (Task 4): parameters (declaration
@@ -628,7 +648,7 @@ describe("Query section — Publish and the shared dirty flag", () => {
     expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("link", { name: "Versions" }));
-    const publish = await screen.findByRole("button", { name: "Publish" });
+    const publish = await screen.findByRole("button", { name: "Publish saved draft" });
 
     expect(publish).toBeDisabled();
     expect(publish).toHaveAttribute("title", expect.stringContaining("Save your changes"));
@@ -645,7 +665,7 @@ describe("Query section — Publish and the shared dirty flag", () => {
     await screen.findByDisplayValue("SELECT 1");
     await userEvent.click(screen.getByRole("link", { name: "Versions" }));
 
-    const publish = await screen.findByRole("button", { name: "Publish" });
+    const publish = await screen.findByRole("button", { name: "Publish saved draft" });
     expect(publish).toBeEnabled();
     await userEvent.click(publish);
     expect(await screen.findByText(/does not grant data access/i)).toBeInTheDocument();
@@ -657,7 +677,7 @@ describe("Query section — Publish and the shared dirty flag", () => {
     renderBoth();
     await screen.findByDisplayValue("SELECT 1");
     await userEvent.click(screen.getByRole("link", { name: "Versions" }));
-    await userEvent.click(await screen.findByRole("button", { name: "Publish" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Publish saved draft" }));
     expect(await screen.findByText(/freezes the saved draft/i)).toBeInTheDocument();
   });
 });

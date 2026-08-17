@@ -159,6 +159,21 @@ describe("Config", () => {
       screen.queryByText("The query this endpoint runs, and the parameters callers may pass it."),
     ).not.toBeInTheDocument();
   });
+
+  // Spec §3.4: Validate runs the SAVED draft, not what's on screen — unlike
+  // Preview. The label has to say so, or an author mid-edit reads "Validate"
+  // as checking their current changes.
+  it("labels Validate as checking the SAVED draft", async () => {
+    const endpoint = makeEndpoint();
+    vi.mocked(api.useDataApiGetEndpoint).mockReturnValue({
+      data: { status: 200, data: endpoint },
+      isLoading: false,
+      isError: false,
+      refetch: vi.fn(),
+    } as never);
+    renderConfig(endpoint);
+    expect(await screen.findByRole("button", { name: /validate saved draft/i })).toBeInTheDocument();
+  });
 });
 
 describe("EndpointDetail — save invalidation", () => {

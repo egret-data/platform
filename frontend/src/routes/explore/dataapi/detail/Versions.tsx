@@ -88,7 +88,7 @@ export default function VersionsSection() {
           disabled={dirty}
           title={dirty ? "Save your changes before publishing — Publish freezes the saved draft." : undefined}
         >
-          Publish
+          Publish saved draft
         </Button>
       </div>
 

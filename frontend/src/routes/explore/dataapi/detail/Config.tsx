@@ -279,7 +279,7 @@ export default function Config() {
             disabled={validateMutation.isPending || dirty}
             title={dirty ? "Save your changes before validating — Validate checks the saved draft." : undefined}
           >
-            {validateMutation.isPending ? "Validating…" : "Validate"}
+            {validateMutation.isPending ? "Validating…" : "Validate saved draft"}
           </Button>
         </div>
         {/* Inline, not a toast: a toast vanishes before an author who is mid-edit
