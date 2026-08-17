@@ -437,7 +437,10 @@ async fn drain_rows<P: mysql_async::prelude::Protocol>(
         .iter()
         .map(|c| ColumnMeta {
             name: c.name_str().to_string(),
-            ty: format!("{:?}", c.column_type()),
+            // Canonical lowercase SQL name, the same vocabulary the `describe`
+            // paths report — NOT `format!("{:?}", ..)`, which leaks raw protocol
+            // tags like `MYSQL_TYPE_VAR_STRING` into every query result.
+            ty: coltype_name(c.column_type()).to_string(),
         })
         .collect();
 
@@ -634,9 +637,77 @@ fn coltype_name(ty: mysql_async::consts::ColumnType) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::StarRocksConnector;
+    use super::{coltype_name, StarRocksConnector};
     use crate::execution::connector::ConnSpec;
     use crate::registry::model::{ConnOptions, Engine};
+
+    /// `coltype_name` is the single mapping both the describe paths and the
+    /// execute path (`drain_rows`) must use to name a column's type. It is a
+    /// pure function of the protocol enum, so this pins the vocabulary without
+    /// needing an engine — the guard that catches a call site regressing to
+    /// `format!("{:?}", ..)`, which yields raw `MYSQL_TYPE_*` protocol tags.
+    ///
+    /// The names matter beyond display: `egret_bi::typegen::classify_starrocks`
+    /// matches on exactly these lowercase keywords and has no `mysql_type_*`
+    /// arm, so a debug-formatted type would silently classify as `String`.
+    #[test]
+    fn coltype_name_maps_protocol_types_to_canonical_sql_names() {
+        use mysql_async::consts::ColumnType::*;
+        for (ty, want) in [
+            (MYSQL_TYPE_TINY, "tinyint"),
+            (MYSQL_TYPE_SHORT, "smallint"),
+            (MYSQL_TYPE_LONG, "int"),
+            (MYSQL_TYPE_INT24, "int"),
+            (MYSQL_TYPE_LONGLONG, "bigint"),
+            (MYSQL_TYPE_FLOAT, "float"),
+            (MYSQL_TYPE_DOUBLE, "double"),
+            (MYSQL_TYPE_NEWDECIMAL, "decimal"),
+            (MYSQL_TYPE_DATE, "date"),
+            (MYSQL_TYPE_DATETIME, "datetime"),
+            (MYSQL_TYPE_TIMESTAMP, "datetime"),
+            (MYSQL_TYPE_TIME, "time"),
+            (MYSQL_TYPE_JSON, "json"),
+            (MYSQL_TYPE_VAR_STRING, "varchar"),
+            (MYSQL_TYPE_STRING, "varchar"),
+        ] {
+            assert_eq!(
+                coltype_name(ty),
+                want,
+                "protocol type {ty:?} must map to the canonical SQL name {want:?}"
+            );
+        }
+    }
+
+    /// Nothing `coltype_name` returns may look like a protocol tag, whatever
+    /// the input — including the `_ => "string"` fallback for types StarRocks
+    /// never sends. This is the property the display layer depends on.
+    #[test]
+    fn coltype_name_never_returns_a_protocol_tag() {
+        use mysql_async::consts::ColumnType::*;
+        for ty in [
+            MYSQL_TYPE_TINY,
+            MYSQL_TYPE_LONG,
+            MYSQL_TYPE_NEWDECIMAL,
+            MYSQL_TYPE_DATE,
+            MYSQL_TYPE_VAR_STRING,
+            // Not produced by StarRocks — exercises the fallback arm.
+            MYSQL_TYPE_GEOMETRY,
+            MYSQL_TYPE_BLOB,
+            MYSQL_TYPE_BIT,
+        ] {
+            let name = coltype_name(ty);
+            assert!(
+                !name.starts_with("MYSQL_TYPE") && !name.starts_with("mysql_type"),
+                "{ty:?} produced a raw protocol tag {name:?}"
+            );
+            assert_eq!(
+                name,
+                name.to_ascii_lowercase(),
+                "{ty:?} produced {name:?}, which is not lowercase — \
+                 typegen's classifiers key off lowercase keywords"
+            );
+        }
+    }
 
     fn spec(bearer: Option<String>, secret: Option<String>) -> ConnSpec {
         ConnSpec {
