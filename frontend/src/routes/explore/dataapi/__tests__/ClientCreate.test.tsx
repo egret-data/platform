@@ -332,15 +332,24 @@ describe("ClientCreate", () => {
     );
   });
 
-  it("renders exactly one h1 in the form state and in the created state", async () => {
+  it("renders exactly one h1 in the form state, the created state, and the spent state", async () => {
     const first = renderCreate();
     expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
     first.unmount();
 
     window.sessionStorage.clear();
-    renderCreate();
+    const second = renderCreate();
     await fillAndCreate("etl-one-h1");
     await screen.findByTestId("client-secret");
+    expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
+    second.unmount();
+
+    // A fresh mount of the same route, marker already written by the mint
+    // above — the spent state, which `ListPageShell` alone renders a heading
+    // for. This is the state a real reload lands on, and the one this
+    // invariant had not yet been asserted for.
+    renderCreate();
+    await screen.findByRole("heading", { level: 1, name: /no longer available/i });
     expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
   });
 });
