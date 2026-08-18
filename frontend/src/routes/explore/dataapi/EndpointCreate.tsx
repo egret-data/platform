@@ -72,6 +72,12 @@ export default function EndpointCreate() {
         setError("Could not create endpoint.");
         return;
       }
+      // No success toast, deliberately. The dialog needed one because it
+      // closed over a list that looked unchanged; this page hands the author
+      // straight to the new endpoint's own editor, with the name they typed in
+      // the header — the hand-off IS the confirmation, and a toast on top of it
+      // would report what is already on screen. `EngineCreate`, the precedent
+      // for this page, does the same: invalidate, navigate, no toast.
       nav(`/explore/${ws}/data-api/endpoints/${res.data.id}`);
     } catch (e) {
       // NOTHING is cleared here. A dialog could be dismissed and reopened; a

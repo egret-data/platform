@@ -130,17 +130,26 @@ function ExploreRoutes() {
               still lands somewhere real. */}
           <Route path="data-api" element={<Navigate to="endpoints" replace />} />
           <Route path="data-api/endpoints" element={<RequireFeature feature="data_api"><Endpoints /></RequireFeature>} />
-          {/* `new` before `:id`, or the literal would be captured as an id.
+          {/* Creating an endpoint is a PAGE, not a dialog: same five fields,
+              but one of them has a URL, so it can be linked to, bookmarked and
+              reached with Back. (It carries no draft persistence — the form is
+              plain component state, and a reload empties it.)
 
-              Creating an endpoint is a PAGE, not a dialog: same five fields, but
-              one of them has a URL that can be linked to, bookmarked, opened in a
-              tab and reloaded without losing what was typed. It is a dedicated
-              component (`EndpointCreate`) rather than `EndpointDetail` rendered
-              without an id — six of the detail route's seven sections read that
-              id (Preview POSTs to `…/endpoints/{id}/preview`; Response, Access,
-              Try it, Versions and Config all load the saved row), so reusing the
-              shell here would ship a page whose Preview cannot run. The
-              precedent is `control-plane/engines/new` → `EngineCreate`. */}
+              It is a dedicated component (`EndpointCreate`) rather than
+              `EndpointDetail` rendered without an id, which is what
+              `charts/new` and `alerts/new` do: six of the detail route's seven
+              sections read that id (Preview POSTs to
+              `…/endpoints/{id}/preview`; Response, Access, Try it, Versions and
+              Config all load the saved row), so reusing that shell here would
+              ship a page whose Preview cannot run and whose right-hand tabs are
+              meaningless until the first save. The precedent that fits is
+              `control-plane/engines/new` → `EngineCreate`.
+
+              `new` is written before `:id` as a CONVENTION, for readers — NOT
+              as a fix. Measured on the installed react-router-dom (7.18.2):
+              with `:id` registered FIRST, `/endpoints/new` still matches the
+              static route, because v7 ranks segments by specificity rather than
+              by declaration order. */}
           <Route path="data-api/endpoints/new" element={<RequireFeature feature="data_api"><EndpointCreate /></RequireFeature>} />
           <Route path="data-api/endpoints/:id" element={<RequireFeature feature="data_api"><EndpointDetail /></RequireFeature>}>
             {/* Query (SQL, database, params, preview) is the landing section —
@@ -173,7 +182,12 @@ function ExploreRoutes() {
               </RequireFeature>
             }
           />
-          {/* `new` before `:id`, or the literal would be captured as an id. */}
+          {/* `new` is written before `:id` as a CONVENTION, for readers — not
+              as a fix. Measured on react-router-dom 7.18.2: with `:id`
+              registered FIRST, `/alerts/new` still matches the static route,
+              because v7 ranks by segment specificity, not declaration order.
+              This comment used to claim the literal would be captured as an id;
+              it was wrong. See `data-api/endpoints/new` above. */}
           <Route
             path="alerts/new"
             element={

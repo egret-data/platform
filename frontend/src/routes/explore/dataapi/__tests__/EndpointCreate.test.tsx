@@ -48,19 +48,61 @@ describe("EndpointCreate", () => {
 
     await userEvent.type(screen.getByLabelText("Name"), "Daily report");
     await userEvent.type(screen.getByLabelText("Path"), "reports/daily");
+    await userEvent.type(screen.getByLabelText("Description (optional)"), "Yesterday's orders");
     await userEvent.type(screen.getByLabelText("SQL"), "SELECT 1");
     // Two databases in the picker, so choosing the SECOND proves the value is
     // read from the choice rather than defaulted to the only option available.
     await userEvent.click(screen.getByRole("combobox", { name: "Database" }));
     await userEvent.click(await screen.findByRole("option", { name: "lake" }));
+    // Method is picked AWAY from its default for the same reason the second
+    // database is: asserting `method: "GET"` on a form that defaults to GET
+    // passes just as well for a page that ignores the picker, or has no picker
+    // at all. POST is the only value that can only come from the control.
+    await userEvent.click(screen.getByRole("combobox", { name: "Method" }));
+    await userEvent.click(await screen.findByRole("option", { name: "POST" }));
     await userEvent.click(screen.getByRole("button", { name: /create endpoint/i }));
 
     expect(mutateAsync).toHaveBeenCalledTimes(1);
     const body = mutateAsync.mock.calls[0][0].data;
-    expect(body).toMatchObject({ name: "Daily report", path: "reports/daily", sql: "SELECT 1", database_id: "db-2" });
+    expect(body).toMatchObject({
+      name: "Daily report",
+      path: "reports/daily",
+      sql: "SELECT 1",
+      database_id: "db-2",
+      method: "POST",
+      description: "Yesterday's orders",
+    });
     // The create page must not invent config the editor owns.
     expect(Object.keys(body)).not.toContain("cache");
     expect(Object.keys(body)).not.toContain("rate_limit");
+  });
+
+  // The other half of BOTH optional-ish fields.
+  //
+  // `description`: blank must mean ABSENT, not `""` — a page that always sent
+  // the key would pass the test above.
+  //
+  // `method`: this test never touches the Method picker, so it pins the
+  // DEFAULT. Asserting only the non-default value (POST, above) turns out not
+  // to be enough — it just moves which constant is unfalsifiable: hard-coding
+  // `method: "POST"` in the request body passes a suite that only ever picks
+  // POST. Measured, not assumed: that exact mutation survived until this line
+  // existed. With both pinned, only reading the control passes.
+  it("leaves description out and method at GET when the author touches neither", async () => {
+    const mutateAsync = vi.fn().mockResolvedValue({ status: 201, data: { id: "e-9" } });
+    vi.mocked(dataApi.useCreateEndpoint).mockReturnValue({ mutateAsync, isPending: false } as never);
+    renderCreate();
+
+    await userEvent.type(screen.getByLabelText("Name"), "Daily report");
+    await userEvent.type(screen.getByLabelText("Path"), "reports/daily");
+    await userEvent.type(screen.getByLabelText("SQL"), "SELECT 1");
+    await userEvent.click(screen.getByRole("combobox", { name: "Database" }));
+    await userEvent.click(await screen.findByRole("option", { name: "warehouse" }));
+    await userEvent.click(screen.getByRole("button", { name: /create endpoint/i }));
+
+    const body = mutateAsync.mock.calls[0][0].data;
+    expect(Object.keys(body)).not.toContain("description");
+    expect(body).toMatchObject({ method: "GET" });
   });
 
   it("hands off to the created endpoint's editor, not back to the list", async () => {
