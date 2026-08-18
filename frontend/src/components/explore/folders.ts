@@ -23,10 +23,20 @@ export function groupByFolder<T extends { folder_id?: string | null }>(
   }
   const sorted = [...folders].sort((a, b) => a.name.localeCompare(b.name));
   const out: FolderGroup<T>[] = [];
+  const claimed = new Set<string>();
   for (const f of sorted) {
     const fr = byId.get(f.id) ?? [];
+    claimed.add(f.id);
     if (hideEmpty && fr.length === 0) continue;
     out.push({ folder: f, rows: fr });
+  }
+  // Any bucket no folder claimed holds rows whose `folder_id` names a folder
+  // that is not in `folders` — deleted, still loading, or another entity type.
+  // They used to vanish: bucketed under a key the output loop never read, so the
+  // row could not be seen, opened, or moved out of the folder that no longer
+  // exists. Uncategorized is where a row with no *usable* folder belongs.
+  for (const [id, orphans] of byId) {
+    if (!claimed.has(id)) uncat.push(...orphans);
   }
   if (uncat.length > 0 || !hideEmpty) out.push({ folder: null, rows: uncat });
   return out;

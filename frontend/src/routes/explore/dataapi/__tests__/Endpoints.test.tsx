@@ -428,10 +428,9 @@ describe("Endpoints — cache invalidation", () => {
   it("Disable invalidates the endpoint list, so the badge cannot keep reading Live", async () => {
     mockList({ data: { status: 200, data: [FOLDERED_ROW] } });
     // The disable/enable mutations are constructed by `EndpointActionsMenu`,
-    // i.e. per rendered ROW — so the row has to actually be on screen, and
-    // `groupByFolder` drops a row whose `folder_id` names a folder the list
-    // does not contain. Without this the hook is never called and `fireSuccess`
-    // silently fires nothing.
+    // i.e. per rendered ROW — so the row has to actually be on screen, and this
+    // row sits in `f-1`. Keep the folder mocked: without a rendered row the
+    // hook is never called and `fireSuccess` silently fires nothing.
     mockFolders([{ id: "f-1", name: "Reporting" }]);
     const { qc } = renderEndpoints();
     const spy = vi.spyOn(qc, "invalidateQueries");
@@ -747,10 +746,12 @@ describe("Endpoints — facets, row menu and bulk mode", () => {
  * only rows in a known, expanded folder passes with the bug fully present.
  */
 describe("Endpoints — bulk select only ever reaches rows that are on screen", () => {
-  it("does not select or delete a row groupByFolder dropped for an orphan folder_id", async () => {
+  it("shows and selects a row whose folder_id is an orphan, because it is now on screen", async () => {
     // `f-missing` is not in the folders list — the row a concurrent folder
-    // delete left behind. `groupByFolder` emits no bucket for it, so the row
-    // is not rendered at all.
+    // delete left behind. `groupByFolder` used to emit no bucket for it, so the
+    // row rendered nowhere and "Select all" could sweep in something invisible.
+    // It now falls into Uncategorized, so it is visible, selectable, and — with
+    // the user looking straight at it — legitimately deletable.
     mockList({
       data: {
         status: 200,
@@ -764,13 +765,13 @@ describe("Endpoints — bulk select only ever reaches rows that are on screen", 
     const user = userEvent.setup();
     renderEndpoints();
     await screen.findByText("shown row");
-    expect(screen.queryByText("orphan row")).not.toBeInTheDocument();
+    expect(screen.getByText("orphan row")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Bulk select" }));
     await user.click(screen.getByRole("checkbox", { name: "Select all" }));
 
     // The count must describe what is in front of the user, not the filtered set.
-    expect(screen.getByText("1 selected")).toBeInTheDocument();
+    expect(screen.getByText("2 selected")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: /delete selected/i }));
     await user.type(await screen.findByPlaceholderText("delete"), "delete");
@@ -779,8 +780,8 @@ describe("Endpoints — bulk select only ever reaches rows that are on screen", 
     await waitFor(() => {
       expect(deleteMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "e-shown" });
     });
-    expect(deleteMutateAsync).not.toHaveBeenCalledWith({ workspace: "eng", id: "e-orphan" });
-    expect(deleteMutateAsync).toHaveBeenCalledTimes(1);
+    expect(deleteMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "e-orphan" });
+    expect(deleteMutateAsync).toHaveBeenCalledTimes(2);
   });
 
   it("does not select a collapsed folder's rows, which are grouped but not on screen", async () => {
