@@ -100,6 +100,9 @@ function renderEndpoints() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // `useCollapsed` persists per-folder collapse state in localStorage; without
+  // this, a test that collapses a folder leaks that into every later test.
+  localStorage.clear();
 
   mockList({ data: { status: 200, data: [] } });
   mockFolders([]);
@@ -722,5 +725,85 @@ describe("Endpoints — facets, row menu and bulk mode", () => {
       expect(deleteMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "e1" });
     });
     expect(deleteMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "e2" });
+  });
+});
+
+/**
+ * Fix round 1: `useBulkSelect` was fed the pre-grouping `rows`, so "Select all"
+ * selected rows that never reached the screen. Before this page had a bulk
+ * mode those rows were merely invisible; with one, they became deletable.
+ *
+ * Both tests below are about the DANGEROUS case on purpose. A bulk test using
+ * only rows in a known, expanded folder passes with the bug fully present.
+ */
+describe("Endpoints — bulk select only ever reaches rows that are on screen", () => {
+  it("does not select or delete a row groupByFolder dropped for an orphan folder_id", async () => {
+    // `f-missing` is not in the folders list — the row a concurrent folder
+    // delete left behind. `groupByFolder` emits no bucket for it, so the row
+    // is not rendered at all.
+    mockList({
+      data: {
+        status: 200,
+        data: [
+          makeEndpoint({ id: "e-orphan", name: "orphan row", folder_id: "f-missing" }),
+          makeEndpoint({ id: "e-shown", name: "shown row", folder_id: null }),
+        ],
+      },
+    });
+    mockFolders([]);
+    const user = userEvent.setup();
+    renderEndpoints();
+    await screen.findByText("shown row");
+    expect(screen.queryByText("orphan row")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Bulk select" }));
+    await user.click(screen.getByRole("checkbox", { name: "Select all" }));
+
+    // The count must describe what is in front of the user, not the filtered set.
+    expect(screen.getByText("1 selected")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /delete selected/i }));
+    await user.type(await screen.findByPlaceholderText("delete"), "delete");
+    await user.click(screen.getByRole("button", { name: /^delete$/i }));
+
+    await waitFor(() => {
+      expect(deleteMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "e-shown" });
+    });
+    expect(deleteMutateAsync).not.toHaveBeenCalledWith({ workspace: "eng", id: "e-orphan" });
+    expect(deleteMutateAsync).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not select a collapsed folder's rows, which are grouped but not on screen", async () => {
+    mockList({
+      data: {
+        status: 200,
+        data: [
+          makeEndpoint({ id: "e-hidden", name: "hidden row", folder_id: "f-1" }),
+          makeEndpoint({ id: "e-shown", name: "shown row", folder_id: null }),
+        ],
+      },
+    });
+    mockFolders([{ id: "f-1", name: "Reporting" }]);
+    const user = userEvent.setup();
+    renderEndpoints();
+    await screen.findByText("hidden row");
+
+    await user.click(screen.getByRole("button", { name: "Toggle Reporting" }));
+    expect(screen.queryByText("hidden row")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Bulk select" }));
+    await user.click(screen.getByRole("checkbox", { name: "Select all" }));
+
+    expect(screen.getByText("1 selected")).toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: "Select hidden row" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /delete selected/i }));
+    await user.type(await screen.findByPlaceholderText("delete"), "delete");
+    await user.click(screen.getByRole("button", { name: /^delete$/i }));
+
+    await waitFor(() => {
+      expect(deleteMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "e-shown" });
+    });
+    expect(deleteMutateAsync).not.toHaveBeenCalledWith({ workspace: "eng", id: "e-hidden" });
   });
 });

@@ -39,6 +39,9 @@ import { EndpointActionsMenu } from "./EndpointActionsMenu";
 // `crates/egret-bi/src/routes.rs`'s `kind_perms("data_api_endpoints")`.
 const FOLDER_KIND = "data_api_endpoints";
 
+/** `useCollapsed`'s key for the folderless group (`groupByFolder`'s `folder: null`). */
+const UNCATEGORIZED_KEY = "__uncat__";
+
 type SortKey = "name" | "state" | "updated_at";
 
 // live is the only state that earns emphasis (--highlight is reserved for a
@@ -134,10 +137,36 @@ export default function Endpoints() {
     return r;
   }, [endpoints, query, stateFilter, engineFilter, engineOf, sort]);
 
-  const bulk = useBulkSelect(rows);
-
   const filtering = query.trim() !== "" || stateFilter !== null || engineFilter !== null;
   const groups = useMemo(() => groupByFolder(rows, folders, filtering), [rows, folders, filtering]);
+
+  /**
+   * The rows actually ON SCREEN — not `rows`, which is only what survived
+   * filtering and sorting.
+   *
+   * Two sets could be meant by "visible" here and they are different:
+   * `groups.flatMap((g) => g.rows)` is "rows that survived grouping", and this
+   * is "rows the user can see and act on". They differ twice over —
+   * `groupByFolder` silently DROPS a row whose `folder_id` names a folder the
+   * folders list does not contain (an orphan left behind by a concurrent folder
+   * delete), and a collapsed folder's rows are in `groups` but not on screen.
+   *
+   * The destructive action gets the smaller set. "Select all" followed by
+   * "Delete selected" must never destroy an endpoint the user was never shown,
+   * and the "{n} selected" count must not claim rows that are not in front of
+   * them. Feeding `useBulkSelect` anything wider is a data-loss path, which is
+   * also exactly what its own doc asks for: `rows` "should be the currently
+   * visible set".
+   */
+  const visibleRows = useMemo(
+    () => groups.flatMap((g) => (collapse.isCollapsed(g.folder?.id ?? UNCATEGORIZED_KEY) ? [] : g.rows)),
+    [groups, collapse],
+  );
+
+  // One list behind both the count and the delete: `bulk.selectedIds` is
+  // derived from exactly what was passed in here, so the strip cannot say "3
+  // selected" next to a button that acts on a different 4.
+  const bulk = useBulkSelect(visibleRows);
 
   function onSort(key: SortKey) {
     setSort((s) => (s.key === key ? { key, dir: s.dir === "asc" ? "desc" : "asc" } : { key, dir: "asc" }));
@@ -166,10 +195,10 @@ export default function Endpoints() {
     );
   }, [databases]);
 
-  // Ids are captured before the first delete: `bulk.selectedIds` is derived from
-  // the visible rows, which shrink as the list refetches mid-loop.
   async function doBulkDelete() {
-    const ids = [...bulk.selectedIds];
+    // The same `selectedIds` the BulkBar counted — this closure holds THIS
+    // render's `bulk`, so the array cannot change under the loop.
+    const ids = bulk.selectedIds;
     let failed = 0;
     for (const id of ids) {
       try {
@@ -315,7 +344,7 @@ export default function Endpoints() {
                 </tr>
               </thead>
               {groups.map((group) => {
-                const key = group.folder?.id ?? "__uncat__";
+                const key = group.folder?.id ?? UNCATEGORIZED_KEY;
                 const isCollapsed = collapse.isCollapsed(key);
                 return (
                   <tbody key={key}>
