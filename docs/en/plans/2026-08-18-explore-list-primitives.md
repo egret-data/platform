@@ -35,7 +35,7 @@
 | `frontend/src/components/explore/ListToolbarButton.tsx` | **New.** One tooltip icon-button. The `Tooltip`/`TooltipTrigger`/`TooltipContent`/`Button` cluster is written out four times per page across four pages. |
 | `frontend/src/components/explore/ListPageShell.tsx` | **New.** `p-4` wrapper, the single `h1`, a toolbar slot, a primary-action slot. |
 | `frontend/src/components/explore/ListStates.tsx` | **New.** The loading / error / empty / filtered-empty branch, copied six times as a four-way ternary. Renders `children` only when there is data. |
-| `frontend/src/components/explore/EmptyState.tsx` | **Modify.** Exists, imported by nothing. Gains the dashed-border variant the pages actually render. |
+| `frontend/src/components/explore/EmptyState.tsx` | **Modify.** Exists and is imported by **eight control-plane pages** (none of the six Explore pages). Gains the dashed-border variant the Explore pages actually render; every existing prop, default and rendered class must survive, because those eight consumers depend on them. |
 | `frontend/src/components/explore/BulkBar.tsx` | **Modify.** Exists, imported by nothing. `BulkToggle` becomes the icon+tooltip shape the pages use, not a text button. |
 | `frontend/src/routes/explore/dataapi/EndpointActionsMenu.tsx` | **New.** Endpoints' row menu, matching the four `*ActionsMenu` components the other domains have. |
 | `frontend/src/routes/explore/dataapi/ServiceAccountActionsMenu.tsx` | **New.** Clients has no row menu at all today; its actions are loose buttons in the row. |

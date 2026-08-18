@@ -20,7 +20,9 @@ The Data API pages were built page-by-page against their own requirements, and t
 
 Two findings from that survey change the approach:
 
-- **`components/explore/BulkBar.tsx` and `components/explore/EmptyState.tsx` already exist and are imported by nothing.** All four pages that have bulk-select reimplement the toggle and the action bar inline, and all six pages hand-roll the same dashed-border empty state. Copying either pattern into Data API would be the fifth and sixth copy of something that already exists as a component.
+- **`components/explore/BulkBar.tsx` is imported by nothing at all**, while all four pages that have bulk-select reimplement its toggle and action bar inline. **`components/explore/EmptyState.tsx` is used by eight control-plane pages but by none of the six Explore list pages**, which each hand-roll the same dashed-border block instead. Copying either pattern into Data API would be another copy of something that already exists as a component.
+
+  *(Corrected. An earlier version of this line said both were "imported by nothing". That was true of `BulkBar` and false of `EmptyState` — `grep` finds it in `ControlPlaneEngines`, `Warehouses`, `Workspaces`, `ControlPlaneStorage`, `ControlPlaneSecrets`, `UsersPage`, `RolesPage` and `GroupsPage`. The error came from generalising a survey that had only looked at the six Explore pages. It matters because it changes the blast radius: `EmptyState`'s existing props and defaults are load-bearing for eight live pages, so the variant work must leave them untouched rather than merely unbroken-looking.)*
 - **Bookmark logic is copy-pasted four times** with no shared component at all.
 
 So the work is not "make Data API look like Datasets". It is "extract what the four pages already share, prove it on the pages that have none of it, and write it down".
@@ -49,7 +51,7 @@ Each primitive below replaces something that exists in 4-6 near-identical copies
 | `ListPageShell` | the `p-4` + `flex items-center justify-between` header, hand-written in all six pages | Takes `title`, optional `description`, a toolbar slot, and a primary-action slot. |
 | `BookmarkToggle` | four copies of the star button and its `onlyBookmarked` state | Takes the add/remove mutations; owns nothing else. |
 | `BulkBar` + `useBulkSelect` | four inline reimplementations | **The component already exists and is unused** — adopt it rather than writing a fifth. |
-| `EmptyState` | six copies of the dashed-border block | **Already exists and is unused.** Must cover three distinct states, not two: empty, filtered-to-empty, and **error**. |
+| `EmptyState` | six copies of the dashed-border block | **Already exists and is used by eight control-plane pages** — its current props and defaults must survive unchanged. Must cover three distinct states, not two: empty, filtered-to-empty, and **error**. |
 | `TrashToggle` | four copies of the trash/restore/permanent-delete triad | |
 | `FolderToolbar` | four copies of new-folder + move-to-folder + drag-and-drop | |
 
