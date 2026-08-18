@@ -81,7 +81,9 @@ That precedent works for a chart or a schedule because each is a single form wit
 
 The right precedent is already in the repo and is a third shape, not an invention: **`engines/new` → `EngineCreate`**, a dedicated create page that collects what a row cannot exist without, creates it, and navigates to the detail route. That is also what the current dialog does — the change the user asked for is that it stops being a dialog, not that it becomes the whole editor.
 
-The route still registers the literal `new` **before** `:id`, or the literal is captured as an id.
+The route registers the literal `new` **before** `:id` as a convention for readers, **not as a fix**. An earlier version of this line said the literal would otherwise be captured as an id. That was measured false: react-router-dom **7.18.2** ranks routes by segment specificity, not declaration order, so with `:id` declared first `/endpoints/new` still matches the static route — verified twice with throwaway `matchRoutes` specs, once while implementing and once in the final review, after the same false claim was found in two pre-existing `App.tsx` comments and corrected there.
+
+*(This line is worth reading as a lesson about this document rather than about the router. The commit that corrected §4 fixed the claim in the code comments and left it standing here, in the same branch — which is exactly the "two contradictory rationales are worse than either alone" failure the correction was about. The final whole-branch review caught it. Correcting a belief means correcting every copy of it, and the copies are rarely all in one file.)*
 
 **`App.tsx:124-127` currently carries a comment arguing against this**, on the grounds that the create dialog collects only what a row cannot exist without and hands off to the real editor immediately. That reasoning is superseded, and the comment must be replaced rather than left standing beside the opposite decision — two contradictory rationales in one file is worse than either one alone.
 
