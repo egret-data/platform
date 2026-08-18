@@ -1,23 +1,26 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { Search } from "lucide-react";
+import { Search, Webhook } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
-import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
-import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
 import { SummaryStrip } from "@/components/explore/SummaryStrip";
 import { SortableHeader, type SortState } from "@/components/explore/SortableHeader";
-import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { RelativeTime } from "@/components/explore/RelativeTime";
-import { RowActionsMenu } from "@/components/explore/RowActionsMenu";
 import { FolderHeaderRow } from "@/components/explore/FolderHeaderRow";
+import { ListPageShell } from "@/components/explore/ListPageShell";
+import { ListStates } from "@/components/explore/ListStates";
+import { EmptyState } from "@/components/explore/EmptyState";
+import { BulkToggle, BulkBar } from "@/components/explore/BulkBar";
+import { FacetSelect, FACET_ALL } from "@/components/explore/FacetSelect";
+import { useBulkSelect } from "@/hooks/useBulkSelect";
 import { groupByFolder, useCollapsed } from "@/components/explore/folders";
 import { useFoldersFoldersList } from "@/api/generated/folders/folders";
 import { useDatabases, type DatabaseConn } from "@/api/databases";
@@ -26,19 +29,18 @@ import { useDataApiListEndpoints } from "@/api/generated/data-api/data-api";
 // the wrapper is what owns the cache invalidation (see `src/api/dataApi.ts`).
 // Wired to the generated hook directly, "Endpoint disabled" toasts over a row
 // whose badge still reads Live for the next 30 seconds.
-import {
-  useCreateEndpoint,
-  useDeleteEndpoint,
-  useDisableEndpoint,
-  useEnableEndpoint,
-} from "@/api/dataApi";
+import { useCreateEndpoint, useDeleteEndpoint } from "@/api/dataApi";
 import type { DataApiEndpointDto } from "@/api/generated/model";
 import { DownloadOpenApiDialog } from "./DownloadOpenApiDialog";
+import { EndpointActionsMenu } from "./EndpointActionsMenu";
 
 // Folders share the generic router (egret-bi's `kind_perms`); this is the
 // `{kind}` URL segment data-api registers there, matching
 // `crates/egret-bi/src/routes.rs`'s `kind_perms("data_api_endpoints")`.
 const FOLDER_KIND = "data_api_endpoints";
+
+/** `useCollapsed`'s key for the folderless group (`groupByFolder`'s `folder: null`). */
+const UNCATEGORIZED_KEY = "__uncat__";
 
 type SortKey = "name" | "state" | "updated_at";
 
@@ -94,22 +96,33 @@ export default function Endpoints() {
 
   const createMutation = useCreateEndpoint();
   const deleteMutation = useDeleteEndpoint();
-  const disableMutation = useDisableEndpoint();
-  const enableMutation = useEnableEndpoint();
 
   const collapse = useCollapsed(`folders:${ws}:${FOLDER_KIND}`);
 
   const [query, setQuery] = useState("");
+  // ONE piece of state behind two controls: the SummaryStrip chip (a shortcut)
+  // and the State facet (the discoverable control). Two filters that can
+  // disagree is worse than one that is hard to find.
   const [stateFilter, setStateFilter] = useState<string | null>(null);
+  const [engineFilter, setEngineFilter] = useState<string | null>(null);
   const [sort, setSort] = useState<SortState<SortKey>>({ key: "updated_at", dir: "desc" });
   const [createOpen, setCreateOpen] = useState(false);
   const [downloadOpen, setDownloadOpen] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<DataApiEndpointDto | null>(null);
+  const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
+
+  // `database_id` -> engine, so the Engine column and the Engine facet read the
+  // same source rather than each doing its own lookup.
+  const engineOf = useMemo(() => {
+    const byId = new Map((databases ?? []).map((d) => [d.id, d.engine]));
+    return (databaseId: string) => byId.get(databaseId);
+  }, [databases]);
 
   const rows = useMemo(() => {
     const q = query.trim().toLowerCase();
     let r = endpoints.filter((e) => {
       if (stateFilter && e.state !== stateFilter) return false;
+      if (engineFilter && engineOf(e.database_id) !== engineFilter) return false;
       if (!q) return true;
       return [e.name, e.path].join(" ").toLowerCase().includes(q);
     });
@@ -122,10 +135,30 @@ export default function Endpoints() {
       return sort.dir === "asc" ? cmp : -cmp;
     });
     return r;
-  }, [endpoints, query, stateFilter, sort]);
+  }, [endpoints, query, stateFilter, engineFilter, engineOf, sort]);
 
-  const filtering = query.trim() !== "" || stateFilter !== null;
+  const filtering = query.trim() !== "" || stateFilter !== null || engineFilter !== null;
   const groups = useMemo(() => groupByFolder(rows, folders, filtering), [rows, folders, filtering]);
+
+  /**
+   * The rows actually ON SCREEN — not `rows`, which is only what survived
+   * filtering and sorting: `groupByFolder` drops orphan-`folder_id` rows, and a
+   * collapsed folder's rows are in `groups` but not in front of the user.
+   *
+   * This is what `useBulkSelect` must be fed; the full argument for why — and
+   * what breaks when a caller passes more — lives on the hook itself
+   * (`src/hooks/useBulkSelect.ts`), because that is where the next caller will
+   * be reading.
+   */
+  const visibleRows = useMemo(
+    () => groups.flatMap((g) => (collapse.isCollapsed(g.folder?.id ?? UNCATEGORIZED_KEY) ? [] : g.rows)),
+    [groups, collapse],
+  );
+
+  // One list behind both the count and the delete: `bulk.selectedIds` is
+  // derived from exactly what was passed in here, so the strip cannot say "3
+  // selected" next to a button that acts on a different 4.
+  const bulk = useBulkSelect(visibleRows);
 
   function onSort(key: SortKey) {
     setSort((s) => (s.key === key ? { key, dir: s.dir === "asc" ? "desc" : "asc" } : { key, dir: "asc" }));
@@ -135,18 +168,72 @@ export default function Endpoints() {
   }
 
   const hasData = endpoints.length > 0;
+
+  // Bulk mode's only OFF switch is a toggle that renders on `hasData`. Delete
+  // the last endpoint (in bulk, or one at a time from the row menu) and the
+  // toggle unmounts while `bulkMode` stays true — the checkbox column then
+  // reappears, unasked, the moment a new endpoint is created.
+  const { bulkMode, setBulkMode } = bulk;
+  useEffect(() => {
+    if (!hasData && bulkMode) setBulkMode(false);
+  }, [hasData, bulkMode, setBulkMode]);
+
   const live = endpoints.filter((e) => e.state === "live");
   const draft = endpoints.filter((e) => e.state === "draft");
   const disabled = endpoints.filter((e) => e.state === "disabled");
 
   function engineLabel(databaseId: string): string {
-    const db = databases?.find((d) => d.id === databaseId);
-    if (!db) return "—";
-    return ENGINE_LABEL[db.engine] ?? db.engine;
+    const engine = engineOf(databaseId);
+    if (!engine) return "—";
+    return ENGINE_LABEL[engine] ?? engine;
+  }
+
+  // Only engines the workspace actually has a database for: a facet offering a
+  // value that can never match any row is a dead control.
+  const engineOptions = useMemo(() => {
+    const seen = new Set<string>();
+    return (databases ?? []).flatMap((d) =>
+      seen.has(d.engine) ? [] : (seen.add(d.engine), [{ value: d.engine, label: ENGINE_LABEL[d.engine] ?? d.engine }]),
+    );
+  }, [databases]);
+
+  async function doBulkDelete() {
+    // The same `selectedIds` the BulkBar counted — this closure holds THIS
+    // render's `bulk`, so the array cannot change under the loop.
+    const ids = bulk.selectedIds;
+    // The dialog is open across renders, and `selectedIds` is re-derived from
+    // the visible rows on each one — a refetch that drops the selected rows (or
+    // a folder collapsed behind the dialog) can empty it between "Delete
+    // selected" and the confirm click. Without this the run does nothing and
+    // then claims "Deleted 0 endpoints".
+    if (ids.length === 0) {
+      bulk.clear();
+      return;
+    }
+    let failed = 0;
+    for (const id of ids) {
+      try {
+        await deleteMutation.mutateAsync({ workspace: ws, id });
+      } catch (err) {
+        failed += 1;
+        toast.error(String(err));
+      }
+    }
+    if (failed === 0) toast.success(`Deleted ${ids.length} endpoint${ids.length === 1 ? "" : "s"}`);
+    bulk.clear();
   }
 
   const renderRow = (e: DataApiEndpointDto) => (
     <tr key={e.id} className="border-t hover:bg-accent">
+      {bulk.bulkMode && (
+        <td className="py-1">
+          <Checkbox
+            checked={bulk.selected.has(e.id)}
+            onCheckedChange={() => bulk.toggle(e.id)}
+            aria-label={`Select ${e.name}`}
+          />
+        </td>
+      )}
       <td className="py-1 pl-6">
         <Link className="font-medium hover:underline" to={`/explore/${ws}/data-api/endpoints/${e.id}`}>
           {e.name}
@@ -164,144 +251,141 @@ export default function Endpoints() {
       <td className="text-muted-foreground">{engineLabel(e.database_id)}</td>
       <td className="text-muted-foreground"><RelativeTime iso={e.updated_at} className="block" /></td>
       <td>
-        <RowActionsMenu>
-          <DropdownMenuItem onClick={() => nav(`/explore/${ws}/data-api/endpoints/${e.id}`)}>Open</DropdownMenuItem>
-          {e.state === "live" && (
-            // `disabled` while in flight, like every other mutation trigger in
-            // this feature: the menu closes on click but the row's menu can be
-            // reopened before the request settles, and a second Disable on an
-            // already-disabled endpoint is a 409 the author never asked for.
-            <DropdownMenuItem
-              disabled={disableMutation.isPending}
-              onClick={() =>
-                disableMutation.mutateAsync({ workspace: ws, id: e.id })
-                  .then(() => toast.success("Endpoint disabled"))
-                  .catch((err) => toast.error(String(err)))
-              }
-            >
-              Disable
-            </DropdownMenuItem>
-          )}
-          {e.state === "disabled" && (
-            // `useDataApiEnableEndpoint` 409s when `live_version_id` is null
-            // (EndpointStore::enable, lifecycle.rs) — there is nothing to
-            // re-enable. `disabled` + `title` communicate this up front rather
-            // than let the user discover it through a failed-mutation toast;
-            // the `live_version_id` check INSIDE the handler too, since
-            // `data-[disabled]:pointer-events-none` is CSS — real browsers
-            // honour it, but nothing stops a click from reaching `onClick`
-            // in an environment that doesn't apply CSS at all (jsdom).
-            <DropdownMenuItem
-              disabled={e.live_version_id == null || enableMutation.isPending}
-              title={e.live_version_id == null ? "This endpoint has never been published; publish it instead." : undefined}
-              onClick={() => {
-                if (e.live_version_id == null || enableMutation.isPending) return;
-                enableMutation.mutateAsync({ workspace: ws, id: e.id })
-                  .then(() => toast.success("Endpoint enabled"))
-                  .catch((err) => toast.error(String(err)));
-              }}
-            >
-              Enable
-            </DropdownMenuItem>
-          )}
-          <DropdownMenuSeparator />
-          <DropdownMenuItem className="text-destructive focus:text-destructive" onClick={() => setPendingDelete(e)}>
-            Delete
-          </DropdownMenuItem>
-        </RowActionsMenu>
+        <EndpointActionsMenu ws={ws} endpoint={e} onDelete={() => setPendingDelete(e)} />
       </td>
     </tr>
   );
 
-  // Canonical Explore list-page scaffold (same as Charts.tsx/Datasets.tsx):
-  // `p-4` + a single `h1`. Endpoints is a top-level sidebar item now, not a
-  // section nested under a `DataApiLayout` shell — that shell (which used to
-  // own the page's `h1` and add `p-6`) was removed once Data API got its own
-  // sidebar group (Endpoints/Clients/Activity), so this page owns its own
-  // heading and padding again.
+  // The canonical Explore list-page scaffold — `p-4` + a single `h1` — now
+  // comes from `ListPageShell` rather than being hand-written here. Endpoints
+  // is a top-level sidebar item, not a section nested under a `DataApiLayout`
+  // shell (that shell, which used to own the page's `h1` and add `p-6`, was
+  // removed once Data API got its own sidebar group), so the heading and the
+  // padding still belong to this route — they just come from the shared shell.
   return (
-    <div className="p-4">
-      <div className="mb-4 flex items-center justify-between">
-        <h1 className="text-lg font-semibold">Endpoints</h1>
-        <div className="flex items-center gap-2">
+    <ListPageShell
+      title="Endpoints"
+      toolbar={hasData ? <BulkToggle active={bulk.bulkMode} onToggle={() => bulk.setBulkMode(!bulk.bulkMode)} /> : undefined}
+      action={
+        <>
           <Button variant="outline" onClick={() => setDownloadOpen(true)}>Download OpenAPI</Button>
           <Button onClick={() => setCreateOpen(true)}>+ Endpoint</Button>
-        </div>
-      </div>
-
-      {isLoading ? (
-        <ListSkeleton cols={5} />
-      ) : isError ? (
-        <Alert variant="destructive">
-          {/* The generated hook types its error as `ErrorBody` (the response
-              SHAPE), but the mutator (`mutator.ts`) throws the real `ApiError`
-              it parsed that body into — same trick `Charts.tsx`/`Datasets.tsx`
-              use with their hand-written `ApiError`-typed hooks, just cast
-              through `unknown` first since `ErrorBody` and `Error` don't
-              structurally overlap. */}
-          <AlertDescription>{(error as unknown as Error)?.message ?? "Could not load endpoints. Try again in a moment."}</AlertDescription>
-        </Alert>
-      ) : hasData ? (
-        <>
-          <div className="mb-3 flex flex-wrap items-center gap-2">
-            <div className="relative max-w-xs flex-1">
-              <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-              <Input className="pl-8" placeholder="Search endpoints…" value={query} onChange={(e) => setQuery(e.target.value)} />
-            </div>
-          </div>
-
-          <div className="mb-3">
-            <SummaryStrip
-              items={[
-                { label: "endpoints", value: rows.length },
-                { label: "live", value: live.length, onClick: () => toggleStateFilter("live"), active: stateFilter === "live" },
-                { label: "draft", value: draft.length, onClick: () => toggleStateFilter("draft"), active: stateFilter === "draft" },
-                { label: "disabled", value: disabled.length, onClick: () => toggleStateFilter("disabled"), active: stateFilter === "disabled" },
-              ]}
-            />
-          </div>
-
-          {rows.length > 0 ? (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead className="text-left text-muted-foreground">
-                  <tr>
-                    <SortableHeader sortKey="name" label="Name" current={sort} onSort={onSort} />
-                    <th className="px-2 font-medium">Method &amp; path</th>
-                    <SortableHeader sortKey="state" label="State" current={sort} onSort={onSort} />
-                    <th className="px-2 font-medium">Engine</th>
-                    <SortableHeader sortKey="updated_at" label="Last edited" current={sort} onSort={onSort} />
-                    <th className="w-8" />
-                  </tr>
-                </thead>
-                {groups.map((group) => {
-                  const key = group.folder?.id ?? "__uncat__";
-                  const isCollapsed = collapse.isCollapsed(key);
-                  return (
-                    <tbody key={key}>
-                      <FolderHeaderRow
-                        name={group.folder?.name ?? "Uncategorized"}
-                        count={group.rows.length}
-                        colSpan={6}
-                        collapsed={isCollapsed}
-                        onToggle={() => collapse.toggle(key)}
-                      />
-                      {!isCollapsed && group.rows.map(renderRow)}
-                    </tbody>
-                  );
-                })}
-              </table>
-            </div>
-          ) : (
-            <p className="text-muted-foreground">No endpoints match the current filters.</p>
-          )}
         </>
-      ) : (
-        <div className="rounded border border-dashed p-8 text-center text-muted-foreground">
-          <p>No endpoints yet. Publish a query as a REST endpoint.</p>
-          <Button className="mt-3" onClick={() => setCreateOpen(true)}>Create your first endpoint</Button>
+      }
+    >
+      <ListStates
+        isLoading={isLoading}
+        isError={isError}
+        // The generated hook types its error as `ErrorBody` (the response
+        // SHAPE), but the mutator (`mutator.ts`) throws the real `ApiError` it
+        // parsed that body into — `ListStates` takes `unknown` and does the
+        // `(error as Error)?.message || errorText` read itself.
+        error={error}
+        errorText="Could not load endpoints. Try again in a moment."
+        hasData={hasData}
+        skeletonCols={5}
+        empty={
+          <EmptyState
+            variant="dashed"
+            icon={Webhook}
+            title="No endpoints yet"
+            description="Publish a query as a REST endpoint."
+            action={<Button onClick={() => setCreateOpen(true)}>Create your first endpoint</Button>}
+          />
+        }
+      >
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <div className="relative max-w-xs flex-1">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <Input className="pl-8" placeholder="Search endpoints…" value={query} onChange={(e) => setQuery(e.target.value)} />
+          </div>
+          <FacetSelect
+            label="State"
+            value={stateFilter ?? FACET_ALL}
+            onChange={(v) => setStateFilter(v === FACET_ALL ? null : v)}
+            options={[
+              { value: "live", label: "live" },
+              { value: "draft", label: "draft" },
+              { value: "disabled", label: "disabled" },
+            ]}
+          />
+          <FacetSelect
+            label="Engine"
+            value={engineFilter ?? FACET_ALL}
+            onChange={(v) => setEngineFilter(v === FACET_ALL ? null : v)}
+            options={engineOptions}
+          />
         </div>
-      )}
+
+        <div className="mb-3">
+          {/* All four numbers describe the SAME set — the whole list, unfiltered
+              — so the row always adds up. It used to read `rows.length` (post
+              filter) beside three counts taken from the raw list, so filtering
+              by Engine produced "1 endpoints · 3 live · 5 draft · 2 disabled".
+              Chosen over "make all four count the filtered set" because these
+              three are also the state FILTER's chips: recomputed against the
+              filtered rows they would read 0 for every state except the active
+              one, and a chip labelled "0 draft" that reveals five drafts when
+              clicked is worse than a total. The filtered count is not lost —
+              the table below is the filtered set, with its own empty line. */}
+          <SummaryStrip
+            items={[
+              { label: "endpoints total", value: endpoints.length },
+              { label: "live", value: live.length, onClick: () => toggleStateFilter("live"), active: stateFilter === "live" },
+              { label: "draft", value: draft.length, onClick: () => toggleStateFilter("draft"), active: stateFilter === "draft" },
+              { label: "disabled", value: disabled.length, onClick: () => toggleStateFilter("disabled"), active: stateFilter === "disabled" },
+            ]}
+          />
+        </div>
+
+        {/* Delete is the only bulk action this page can offer: moving to a
+            folder needs `folder_id` on `UpdateEndpointInput` and moving to
+            trash needs the soft-delete migration, neither of which exists yet.
+            A disabled button for either would be worse than its absence. */}
+        <BulkBar count={bulk.selectedIds.length}>
+          <Button variant="destructive" size="sm" onClick={() => setBulkDeleteOpen(true)}>Delete selected</Button>
+        </BulkBar>
+
+        {rows.length > 0 ? (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="text-left text-muted-foreground">
+                <tr>
+                  {bulk.bulkMode && (
+                    <th className="w-8 py-1">
+                      <Checkbox checked={bulk.allSelected} onCheckedChange={bulk.toggleAll} aria-label="Select all" />
+                    </th>
+                  )}
+                  <SortableHeader sortKey="name" label="Name" current={sort} onSort={onSort} />
+                  <th className="px-2 font-medium">Method &amp; path</th>
+                  <SortableHeader sortKey="state" label="State" current={sort} onSort={onSort} />
+                  <th className="px-2 font-medium">Engine</th>
+                  <SortableHeader sortKey="updated_at" label="Last edited" current={sort} onSort={onSort} />
+                  <th className="w-8" />
+                </tr>
+              </thead>
+              {groups.map((group) => {
+                const key = group.folder?.id ?? UNCATEGORIZED_KEY;
+                const isCollapsed = collapse.isCollapsed(key);
+                return (
+                  <tbody key={key}>
+                    <FolderHeaderRow
+                      name={group.folder?.name ?? "Uncategorized"}
+                      count={group.rows.length}
+                      colSpan={bulk.bulkMode ? 7 : 6}
+                      collapsed={isCollapsed}
+                      onToggle={() => collapse.toggle(key)}
+                    />
+                    {!isCollapsed && group.rows.map(renderRow)}
+                  </tbody>
+                );
+              })}
+            </table>
+          </div>
+        ) : (
+          <p className="text-muted-foreground">No endpoints match the current filters.</p>
+        )}
+      </ListStates>
 
       <CreateEndpointDialog
         ws={ws}
@@ -330,7 +414,15 @@ export default function Endpoints() {
           setPendingDelete(null);
         }}
       />
-    </div>
+
+      <ConfirmDeleteDialog
+        open={bulkDeleteOpen}
+        onOpenChange={setBulkDeleteOpen}
+        title="Delete endpoints"
+        description={`Delete ${bulk.selectedIds.length} endpoint${bulk.selectedIds.length === 1 ? "" : "s"}? Any deployed client calling their URLs will start getting 404s. This cannot be undone.`}
+        onConfirm={doBulkDelete}
+      />
+    </ListPageShell>
   );
 }
 

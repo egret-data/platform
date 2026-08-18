@@ -1,8 +1,8 @@
 import { useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
+import { KeyRound, Search } from "lucide-react";
 import { toast } from "sonner";
 import { useQueryClient } from "@tanstack/react-query";
-import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -12,7 +12,9 @@ import { Textarea } from "@/components/ui/textarea";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { FilterableTable, type Column } from "@/components/explore/FilterableTable";
 import { SummaryStrip } from "@/components/explore/SummaryStrip";
-import { ListSkeleton } from "@/components/explore/ListSkeleton";
+import { ListPageShell } from "@/components/explore/ListPageShell";
+import { ListStates } from "@/components/explore/ListStates";
+import { EmptyState } from "@/components/explore/EmptyState";
 import { RelativeTime } from "@/components/explore/RelativeTime";
 import {
   getDataApiListClientsQueryKey,
@@ -31,6 +33,7 @@ import {
 // owning account's, so it cannot be derived the way the wrapper derives its.
 import { useCreateServiceAccount, useDeleteServiceAccount } from "@/api/dataApi";
 import type { DataApiClientDto, DataApiNewClientDto, DataApiServiceAccountDto } from "@/api/generated/model";
+import { ServiceAccountActionsMenu } from "./ServiceAccountActionsMenu";
 
 /**
  * Clients — service accounts and the OAuth2 clients each one owns.
@@ -50,17 +53,35 @@ import type { DataApiClientDto, DataApiNewClientDto, DataApiServiceAccountDto } 
  */
 export default function Clients() {
   const ws = useParams().workspace!;
+  const qc = useQueryClient();
 
   const { data: envelope, isLoading, isError, error } = useDataApiListServiceAccounts(ws);
   const accounts = useMemo(() => (envelope?.status === 200 ? envelope.data : []), [envelope]);
 
   const createMutation = useCreateServiceAccount();
   const deleteMutation = useDeleteServiceAccount();
+  const issueMutation = useDataApiIssueClient();
 
+  const [query, setQuery] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<DataApiServiceAccountDto | null>(null);
+  // Issue lives on the PAGE, not in the row's menu: a `DropdownMenuItem`
+  // unmounts the whole menu on click, so a dialog rendered inside one closes
+  // the instant it is opened. `pendingIssue` names which account the open form
+  // belongs to, the same way `pendingDelete` does.
+  const [pendingIssue, setPendingIssue] = useState<DataApiServiceAccountDto | null>(null);
+  const [newClient, setNewClient] = useState<DataApiNewClientDto | null>(null);
 
+  // `hasData` is the UNFILTERED count on purpose: the first-run CTA must not
+  // appear just because a search missed. A search that narrows to zero is
+  // `FilterableTable`'s empty body, below.
   const hasData = accounts.length > 0;
+
+  const rows = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return accounts;
+    return accounts.filter((a) => `${a.name} ${a.email}`.toLowerCase().includes(q));
+  }, [accounts, query]);
 
   const columns: Column<DataApiServiceAccountDto>[] = [
     {
@@ -92,81 +113,116 @@ export default function Clients() {
       label: "",
       className: "text-right",
       cell: (a) => (
-        <Button
-          variant="ghost"
-          size="sm"
-          className="text-muted-foreground hover:text-destructive"
-          aria-label={`Delete ${a.name}`}
-          onClick={() => setPendingDelete(a)}
-        >
-          Delete
-        </Button>
+        <ServiceAccountActionsMenu
+          account={a}
+          onIssueClient={() => setPendingIssue(a)}
+          onDelete={() => setPendingDelete(a)}
+        />
       ),
     },
   ];
 
   return (
-    // Canonical Explore list-page scaffold (same as Charts.tsx/Datasets.tsx):
-    // `p-4` + a single `h1`. Clients is its own top-level sidebar item now,
-    // not a section nested under a `DataApiLayout` shell — that shell (which
-    // used to own the page's `h1` and add `p-6`) was removed once Data API
-    // got its own sidebar group, so this page owns its own heading and
-    // padding again.
-    <div className="p-4">
-      <div className="mb-4 flex items-center justify-between">
-        <h1 className="text-lg font-semibold">Clients</h1>
-        <Button onClick={() => setCreateOpen(true)}>+ Service account</Button>
-      </div>
-
-      {isLoading ? (
-        <ListSkeleton cols={4} />
-      ) : isError ? (
-        <Alert variant="destructive">
-          {/* Same cast as Endpoints.tsx: the generated hook types the error as
-              the response body shape, but the mutator throws the real ApiError
-              it parsed that body into. */}
-          <AlertDescription>
-            {(error as unknown as Error)?.message ?? "Could not load service accounts. Try again in a moment."}
-          </AlertDescription>
-        </Alert>
-      ) : hasData ? (
-        <>
-          <div className="mb-3">
-            <SummaryStrip items={[{ label: "service accounts", value: accounts.length }]} />
-          </div>
-          <FilterableTable
-            rows={accounts}
-            columns={columns}
-            getId={(a) => a.id}
-            searchPlaceholder="Search service accounts…"
-            initialSort={{ key: "name", dir: "asc" }}
-            // A search that narrows the account list to zero is not "no data" —
-            // FilterableTable's own `noMatchText` default ("No matches.") covers
-            // it. `emptyText` is passed a plain string, not the first-run CTA,
-            // per the resolution: this branch can only be reached via an
-            // external facet (there is none here beyond search today), and a
-            // CTA offering "create your first" while data plainly exists would
-            // be the same first-run/empty conflation the endpoints list fixed.
-            emptyText="No service accounts match."
-            // Each row's `ClientsCell` fires its own `useDataApiListClients`
-            // on mount — one request per VISIBLE service account, uncapped
-            // without this. `FilterableTable` only mounts `pageRows` (the
-            // current page's slice, see FilterableTable.tsx's `pageRows`),
-            // not the full `shown` set, so paging here caps concurrent
-            // requests at `pageSize` regardless of how many accounts exist.
-            // 25 matches every other control-plane list page that sets this
-            // for the same reason (Workspaces.tsx, Warehouses.tsx, etc.).
-            pageSize={25}
+    // The canonical Explore list-page scaffold — `p-4` + a single `h1` — now
+    // comes from `ListPageShell` rather than being hand-written here. Clients
+    // is its own top-level sidebar item, not a section nested under a
+    // `DataApiLayout` shell (that shell, which used to own the page's `h1` and
+    // add `p-6`, was removed once Data API got its own sidebar group), so the
+    // heading and the padding still belong to this route — they just come from
+    // the shared shell now.
+    <ListPageShell
+      title="Clients"
+      action={<Button onClick={() => setCreateOpen(true)}>+ Service account</Button>}
+    >
+      <ListStates
+        isLoading={isLoading}
+        isError={isError}
+        // The generated hook types its error as the response BODY shape, but
+        // the mutator (`mutator.ts`) throws the real `ApiError` it parsed that
+        // body into — `ListStates` takes `unknown` and does the
+        // `(error as Error)?.message || errorText` read itself.
+        error={error}
+        errorText="Could not load service accounts. Try again in a moment."
+        hasData={hasData}
+        skeletonCols={4}
+        empty={
+          <EmptyState
+            variant="dashed"
+            icon={KeyRound}
+            title="No service accounts yet"
+            description="Create one to issue OAuth2 clients for the Data API."
+            action={<Button onClick={() => setCreateOpen(true)}>Create your first service account</Button>}
           />
-        </>
-      ) : (
-        <div className="rounded border border-dashed p-8 text-center text-muted-foreground">
-          <p>No service accounts yet. Create one to issue OAuth2 clients for the Data API.</p>
-          <Button className="mt-3" onClick={() => setCreateOpen(true)}>Create your first service account</Button>
+        }
+      >
+        {/* Search sits in the page toolbar, above the summary strip, where all
+            five sibling Explore pages put theirs — `FilterableTable`'s own box
+            renders below the strip, inside the table block, which is the one
+            place no other list page has it. `FilterableTable` has no
+            controlled-filter prop (its `q` is private state), so this page
+            filters `rows` itself and suppresses that box with `hideSearch`;
+            two search inputs one row apart would be worse than either. */}
+        <div data-testid="page-toolbar" className="mb-3 flex flex-wrap items-center gap-2">
+          <div className="relative max-w-xs flex-1">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              className="pl-8"
+              placeholder="Search service accounts…"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+          </div>
         </div>
-      )}
+
+        <div className="mb-3">
+          <SummaryStrip items={[{ label: "service accounts", value: rows.length }]} />
+        </div>
+
+        <FilterableTable
+          rows={rows}
+          columns={columns}
+          getId={(a) => a.id}
+          hideSearch
+          initialSort={{ key: "name", dir: "asc" }}
+          // With `hideSearch` the component's own `q` never leaves `""`, so it
+          // can no longer tell a first-run empty from a search miss and always
+          // renders `emptyText`. That is correct here: the genuine first-run
+          // case is `ListStates`' `empty` above and never reaches this table,
+          // so the only way to see an empty body is a toolbar search that
+          // matched nothing. `noMatchText` is therefore left unset.
+          emptyText="No service accounts match."
+          // Each row's `ClientsCell` fires its own `useDataApiListClients`
+          // on mount — one request per VISIBLE service account, uncapped
+          // without this. `FilterableTable` only mounts `pageRows` (the
+          // current page's slice, see FilterableTable.tsx's `pageRows`),
+          // not the full `shown` set, so paging here caps concurrent
+          // requests at `pageSize` regardless of how many accounts exist.
+          // 25 matches every other control-plane list page that sets this
+          // for the same reason (Workspaces.tsx, Warehouses.tsx, etc.).
+          pageSize={25}
+        />
+      </ListStates>
 
       <CreateServiceAccountDialog ws={ws} open={createOpen} onOpenChange={setCreateOpen} create={createMutation} />
+
+      {/* Keyed on the account id so switching rows remounts the form rather
+          than carrying the previous account's half-typed name across. */}
+      {pendingIssue && (
+        <IssueClientDialog
+          key={pendingIssue.id}
+          ws={ws}
+          account={pendingIssue}
+          open
+          onOpenChange={(o) => { if (!o) setPendingIssue(null); }}
+          issue={issueMutation}
+          onIssued={(created, accountId) => {
+            void qc.invalidateQueries({ queryKey: getDataApiListClientsQueryKey(ws, accountId) });
+            setNewClient(created);
+          }}
+        />
+      )}
+
+      <NewClientSecretDialog client={newClient} onOpenChange={(o) => { if (!o) setNewClient(null); }} />
 
       <ConfirmDeleteDialog
         open={pendingDelete !== null}
@@ -184,33 +240,33 @@ export default function Clients() {
           setPendingDelete(null);
         }}
       />
-    </div>
+    </ListPageShell>
   );
 }
 
 /**
  * One account's clients, rendered inline in that account's own table row.
  *
- * Owns the issue/revoke flow for this account: the "+ New client" button,
- * the issue dialog, and — the one rule this task exists to hold — the
- * one-time secret dialog. `newClient` (the `DataApiNewClientDto` the issue
- * call returned) lives ONLY in this component's local state, is shown in
- * exactly one dialog, and is discarded (`setNewClient(null)`) the moment that
- * dialog closes. It is never written into the client list below: that list
- * is driven by `useDataApiListClients`, whose `DataApiClientDto` shape has no
- * secret field at all — not omitted, absent — so there is no cell here that
- * could even reach for one.
+ * Lists this account's clients and owns the REVOKE flow only. Revoke acts on
+ * one client credential, so it belongs on that client's own line — not in the
+ * account's row menu, which acts on the account.
+ *
+ * ISSUE moved up to the page (`pendingIssue`), because it acts on the account:
+ * it is the row menu's "Issue client…" item. That took the one-time secret
+ * dialog with it — `newClient` is page state now, still shown in exactly one
+ * dialog and still discarded the moment that dialog closes. Nothing changed
+ * about the rule this file exists to hold: the client list below is driven by
+ * `useDataApiListClients`, whose `DataApiClientDto` shape has no secret field
+ * at all — not omitted, absent — so there is no cell here that could even
+ * reach for one.
  */
 function ClientsCell({ ws, account }: { ws: string; account: DataApiServiceAccountDto }) {
   const { data: envelope, isLoading, isError } = useDataApiListClients(ws, account.id);
   const clients = useMemo(() => (envelope?.status === 200 ? envelope.data : []), [envelope]);
 
-  const issueMutation = useDataApiIssueClient();
   const revokeMutation = useDataApiRevokeClient();
   const qc = useQueryClient();
 
-  const [issueOpen, setIssueOpen] = useState(false);
-  const [newClient, setNewClient] = useState<DataApiNewClientDto | null>(null);
   const [pendingRevoke, setPendingRevoke] = useState<DataApiClientDto | null>(null);
 
   function invalidate() {
@@ -280,22 +336,6 @@ function ClientsCell({ ws, account }: { ws: string; account: DataApiServiceAccou
         </ul>
       )}
 
-      <Button variant="outline" size="sm" onClick={() => setIssueOpen(true)}>+ New client</Button>
-
-      <IssueClientDialog
-        ws={ws}
-        account={account}
-        open={issueOpen}
-        onOpenChange={setIssueOpen}
-        issue={issueMutation}
-        onIssued={(created) => {
-          invalidate();
-          setNewClient(created);
-        }}
-      />
-
-      <NewClientSecretDialog client={newClient} onOpenChange={(o) => { if (!o) setNewClient(null); }} />
-
       <ConfirmDeleteDialog
         open={pendingRevoke !== null}
         onOpenChange={(o) => { if (!o) setPendingRevoke(null); }}
@@ -332,7 +372,10 @@ function IssueClientDialog({ ws, account, open, onOpenChange, issue, onIssued }:
   open: boolean;
   onOpenChange: (open: boolean) => void;
   issue: ReturnType<typeof useDataApiIssueClient>;
-  onIssued: (created: DataApiNewClientDto) => void;
+  /** `accountId` is echoed back rather than re-read from the page's state: the
+   *  caller invalidates a per-account query key, and the account whose form
+   *  this was must be the account that key names. */
+  onIssued: (created: DataApiNewClientDto, accountId: string) => void;
 }) {
   const [name, setName] = useState("");
   const [expiresAt, setExpiresAt] = useState("");
@@ -368,7 +411,7 @@ function IssueClientDialog({ ws, account, open, onOpenChange, issue, onIssued }:
       if (res.status !== 201) { toast.error("Could not issue client."); return; }
       reset();
       onOpenChange(false);
-      onIssued(res.data);
+      onIssued(res.data, account.id);
     } catch (e) {
       toast.error(String(e));
     }
@@ -408,7 +451,7 @@ function IssueClientDialog({ ws, account, open, onOpenChange, issue, onIssued }:
 /**
  * The one place `client_secret` is ever rendered. `client` is
  * `DataApiNewClientDto` — "the only type in the crate carrying secret
- * material" per its own doc comment — held in `ClientsCell`'s local state
+ * material" per its own doc comment — held in the page's local state
  * only until this dialog closes. There is exactly one copy affordance, for
  * the secret; the client id is shown as plain text so `getByRole("button",
  * { name: /copy/i })` (and a reader scanning the dialog) finds one unambiguous

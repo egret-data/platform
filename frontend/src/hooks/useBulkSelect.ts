@@ -1,6 +1,36 @@
 import { useCallback, useMemo, useState } from "react";
 
-/** Multi-select state for a list of `{id}` rows. `rows` should be the currently visible set. */
+/**
+ * Multi-select state for a list of `{id}` rows.
+ *
+ * **`rows` must be the set actually RENDERED — not the page's filtered/sorted
+ * model of it.** The two are different the moment a page groups its rows:
+ * `groupByFolder` silently drops a row whose `folder_id` names a folder the
+ * folders list does not contain (an orphan left by a concurrent folder delete),
+ * and a collapsed folder's rows are in the group model but not on screen.
+ *
+ * The hook cannot enforce this. It sees an array of `{id}` and knows nothing
+ * about grouping, collapse, pagination or virtualization, so it has no way to
+ * tell "everything the page has" from "everything the user can see".
+ *
+ * Handed more than is on screen, two things go wrong, and both are silent:
+ *
+ * - `toggleAll` ("Select all") writes the ids of rows the user was never shown
+ *   into the selection, and `allSelected`/`someSelected` answer about them too;
+ * - `selectedIds` then reports them, so the "{n} selected" strip claims rows
+ *   that are not in front of the user and a bulk action acts on them. On a page
+ *   whose bulk action is a hard delete (`Endpoints.tsx`), that destroys a row
+ *   the user never saw.
+ *
+ * `selectedIds` re-derives from `rows` on every render rather than just handing
+ * back `selected`, which is what covers the other order of events: a row picked
+ * while visible and then hidden (its folder collapsed, a filter applied) drops
+ * out of the count and out of the action, instead of staying selected
+ * invisibly. Do not "simplify" it to `Array.from(selected)`.
+ *
+ * Five pages (`Charts`, `Datasets`, `Dashboards`, `Alerts`, `Notebooks`) still
+ * pass their pre-grouping `rows`; migrating them is its own task.
+ */
 export function useBulkSelect<T extends { id: string }>(rows: T[]) {
   const [bulkMode, setBulkModeRaw] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -34,7 +64,8 @@ export function useBulkSelect<T extends { id: string }>(rows: T[]) {
     if (!v) setSelected(new Set());
   }, []);
 
-  // ids that still exist in the visible rows (selection can outlive filtering)
+  // ids that still exist in the visible rows — see the note above: this filter
+  // is the ONLY thing that unselects a row hidden AFTER it was picked.
   const selectedIds = useMemo(
     () => rows.filter((r) => selected.has(r.id)).map((r) => r.id),
     [rows, selected],
