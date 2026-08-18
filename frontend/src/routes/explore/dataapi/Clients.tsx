@@ -5,9 +5,7 @@ import { toast } from "sonner";
 import { useQueryClient } from "@tanstack/react-query";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { FilterableTable, type Column } from "@/components/explore/FilterableTable";
 import { SummaryStrip } from "@/components/explore/SummaryStrip";
@@ -17,7 +15,6 @@ import { EmptyState } from "@/components/explore/EmptyState";
 import { RelativeTime } from "@/components/explore/RelativeTime";
 import {
   getDataApiListClientsQueryKey,
-  useDataApiIssueClient,
   useDataApiListClients,
   useDataApiListServiceAccounts,
   useDataApiRevokeClient,
@@ -30,11 +27,13 @@ import {
 // when this page owned the create dialog; it moved to `ServiceAccountCreate`
 // with the form, still through the wrapper, which is why the row is already
 // in this table when that page navigates back here.)
-// Issue/revoke CLIENT stay generated + invalidated locally below: their key is
-// per service account and `revoke`'s variables carry the client id, not the
-// owning account's, so it cannot be derived the way the wrapper derives its.
+// Revoke CLIENT stays generated + invalidated locally below: its key is per
+// service account and `revoke`'s variables carry the client id, not the owning
+// account's, so it cannot be derived the way the wrapper derives its. (Issue was
+// the same case and left with the form: it is `ClientCreate`, the page that owns
+// the secret it returns.)
 import { useDeleteServiceAccount } from "@/api/dataApi";
-import type { DataApiClientDto, DataApiNewClientDto, DataApiServiceAccountDto } from "@/api/generated/model";
+import type { DataApiClientDto, DataApiServiceAccountDto } from "@/api/generated/model";
 import { ServiceAccountActionsMenu } from "./ServiceAccountActionsMenu";
 
 /**
@@ -55,22 +54,19 @@ import { ServiceAccountActionsMenu } from "./ServiceAccountActionsMenu";
  */
 export default function Clients() {
   const ws = useParams().workspace!;
-  const qc = useQueryClient();
 
   const { data: envelope, isLoading, isError, error } = useDataApiListServiceAccounts(ws);
   const accounts = useMemo(() => (envelope?.status === 200 ? envelope.data : []), [envelope]);
 
   const deleteMutation = useDeleteServiceAccount();
-  const issueMutation = useDataApiIssueClient();
 
   const [query, setQuery] = useState("");
   const [pendingDelete, setPendingDelete] = useState<DataApiServiceAccountDto | null>(null);
-  // Issue lives on the PAGE, not in the row's menu: a `DropdownMenuItem`
-  // unmounts the whole menu on click, so a dialog rendered inside one closes
-  // the instant it is opened. `pendingIssue` names which account the open form
-  // belongs to, the same way `pendingDelete` does.
-  const [pendingIssue, setPendingIssue] = useState<DataApiServiceAccountDto | null>(null);
-  const [newClient, setNewClient] = useState<DataApiNewClientDto | null>(null);
+  // Issuing a client is no longer state on this page. It was two dialogs — a
+  // form, then the one-time secret — and the second opened as the first was
+  // unmounted while still open, which is how a stuck `pointer-events: none`
+  // lands on `document.body`. Both are now `ClientCreate`, a route, and the row
+  // menu's "Issue client…" is a link to it.
 
   // `hasData` is the UNFILTERED count on purpose: the first-run CTA must not
   // appear just because a search missed. A search that narrows to zero is
@@ -113,11 +109,7 @@ export default function Clients() {
       label: "",
       className: "text-right",
       cell: (a) => (
-        <ServiceAccountActionsMenu
-          account={a}
-          onIssueClient={() => setPendingIssue(a)}
-          onDelete={() => setPendingDelete(a)}
-        />
+        <ServiceAccountActionsMenu ws={ws} account={a} onDelete={() => setPendingDelete(a)} />
       ),
     },
   ];
@@ -206,25 +198,6 @@ export default function Clients() {
         />
       </ListStates>
 
-      {/* Keyed on the account id so switching rows remounts the form rather
-          than carrying the previous account's half-typed name across. */}
-      {pendingIssue && (
-        <IssueClientDialog
-          key={pendingIssue.id}
-          ws={ws}
-          account={pendingIssue}
-          open
-          onOpenChange={(o) => { if (!o) setPendingIssue(null); }}
-          issue={issueMutation}
-          onIssued={(created, accountId) => {
-            void qc.invalidateQueries({ queryKey: getDataApiListClientsQueryKey(ws, accountId) });
-            setNewClient(created);
-          }}
-        />
-      )}
-
-      <NewClientSecretDialog client={newClient} onOpenChange={(o) => { if (!o) setNewClient(null); }} />
-
       <ConfirmDeleteDialog
         open={pendingDelete !== null}
         onOpenChange={(o) => { if (!o) setPendingDelete(null); }}
@@ -252,11 +225,12 @@ export default function Clients() {
  * one client credential, so it belongs on that client's own line — not in the
  * account's row menu, which acts on the account.
  *
- * ISSUE moved up to the page (`pendingIssue`), because it acts on the account:
- * it is the row menu's "Issue client…" item. That took the one-time secret
- * dialog with it — `newClient` is page state now, still shown in exactly one
- * dialog and still discarded the moment that dialog closes. Nothing changed
- * about the rule this file exists to hold: the client list below is driven by
+ * ISSUE left this file entirely, because it acts on the account and returns a
+ * secret: it is now the `ClientCreate` route, reached by the row menu's "Issue
+ * client…" link, and the one-time secret went with it — rendered in that page's
+ * created state, held in its component state, and never in this table's data.
+ * Nothing changed about the rule this file exists to hold: the client list is
+ * driven by
  * `useDataApiListClients`, whose `DataApiClientDto` shape has no secret field
  * at all — not omitted, absent — so there is no cell here that could even
  * reach for one.
@@ -357,175 +331,5 @@ function ClientsCell({ ws, account }: { ws: string; account: DataApiServiceAccou
         }}
       />
     </div>
-  );
-}
-
-/**
- * Per the Alerts lesson (#485, also followed by `CreateEndpointDialog`): this
- * dialog collects only what a client cannot exist without — its name, plus
- * the one field `IssueClientInput` allows to be set at mint time and never
- * again (`expires_at`) — and hands off to `NewClientSecretDialog` for the
- * result.
- */
-function IssueClientDialog({ ws, account, open, onOpenChange, issue, onIssued }: {
-  ws: string;
-  account: DataApiServiceAccountDto;
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  issue: ReturnType<typeof useDataApiIssueClient>;
-  /** `accountId` is echoed back rather than re-read from the page's state: the
-   *  caller invalidates a per-account query key, and the account whose form
-   *  this was must be the account that key names. */
-  onIssued: (created: DataApiNewClientDto, accountId: string) => void;
-}) {
-  const [name, setName] = useState("");
-  const [expiresAt, setExpiresAt] = useState("");
-
-  // Reset on CLOSE (every path: Cancel, Esc, overlay click, successful
-  // submit), not in a `useEffect` keyed on `open` — the effect version sets
-  // state synchronously during a commit and trips `react-hooks/set-state-in-
-  // effect`. Same idiom `DatabasesPage.tsx`'s `resetToConn`/`closeAndReset`
-  // use.
-  function reset() {
-    setName("");
-    setExpiresAt("");
-  }
-
-  function handleOpenChange(next: boolean) {
-    if (!next) reset();
-    onOpenChange(next);
-  }
-
-  const canSubmit = name.trim() !== "";
-
-  async function submit() {
-    if (!canSubmit) return;
-    try {
-      const res = await issue.mutateAsync({
-        workspace: ws,
-        id: account.id,
-        data: {
-          name: name.trim(),
-          expires_at: expiresAt.trim() ? new Date(expiresAt).toISOString() : undefined,
-        },
-      });
-      // The mutator throws on any non-2xx (see mutator.ts), so this branch is
-      // the only one ever reached at runtime — same pattern as
-      // CreateEndpointDialog.
-      if (res.status !== 201) { toast.error("Could not issue client."); return; }
-      reset();
-      onOpenChange(false);
-      onIssued(res.data, account.id);
-    } catch (e) {
-      toast.error(String(e));
-    }
-  }
-
-  return (
-    <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>New client for {account.name}</DialogTitle>
-          <DialogDescription>
-            Issues a fresh OAuth2 client_credentials pair. The secret is shown once, right after this.
-          </DialogDescription>
-        </DialogHeader>
-        <div className="space-y-3">
-          <div className="space-y-1.5">
-            <Label htmlFor="client-name">Name</Label>
-            <Input id="client-name" autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="etl" />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="client-expiry">Expires (optional)</Label>
-            <Input id="client-expiry" type="date" value={expiresAt} onChange={(e) => setExpiresAt(e.target.value)} />
-            <p className="text-xs text-muted-foreground">Leave blank for a client that lives until revoked.</p>
-          </div>
-        </div>
-        <DialogFooter>
-          <Button variant="outline" onClick={() => handleOpenChange(false)}>Cancel</Button>
-          <Button onClick={submit} disabled={!canSubmit || issue.isPending}>
-            {issue.isPending ? "Creating…" : "Create"}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-/**
- * The one place `client_secret` is ever rendered. `client` is
- * `DataApiNewClientDto` — "the only type in the crate carrying secret
- * material" per its own doc comment — held in the page's local state
- * only until this dialog closes. There is exactly one copy affordance, for
- * the secret; the client id is shown as plain text so `getByRole("button",
- * { name: /copy/i })` (and a reader scanning the dialog) finds one unambiguous
- * button, not two.
- *
- * Known cosmetic gap: `open` is driven by `client !== null`, and `Done`
- * calls `onOpenChange(false)` which nulls `client` synchronously in the same
- * tick — so Radix's close animation plays over an already-empty body rather
- * than the last-shown content. No security implication (the secret is exactly
- * as gone either way); not fixed here because the natural fix — caching the
- * last-shown value in its own state and updating it inside a `useEffect` — is
- * exactly the `react-hooks/set-state-in-effect` shape this file went out of
- * its way to avoid elsewhere (see `IssueClientDialog`'s `reset()` comment).
- */
-function NewClientSecretDialog({ client, onOpenChange }: {
-  client: DataApiNewClientDto | null;
-  onOpenChange: (open: boolean) => void;
-}) {
-  return (
-    <Dialog open={client !== null} onOpenChange={onOpenChange}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>Client created</DialogTitle>
-          <DialogDescription>
-            Copy the secret now — it cannot be shown again. If it&apos;s lost, issue a new client and revoke
-            this one.
-          </DialogDescription>
-        </DialogHeader>
-        {client && (
-          <div className="space-y-3">
-            <div className="space-y-1.5">
-              <Label>Client ID</Label>
-              <code className="block truncate rounded bg-muted px-2 py-1.5 text-xs">{client.client_id}</code>
-            </div>
-            <div className="space-y-1.5">
-              <Label>Client secret</Label>
-              <div className="flex items-center gap-2">
-                <code className="flex-1 truncate rounded bg-muted px-2 py-1.5 text-xs">{client.client_secret}</code>
-                <CopyButton value={client.client_secret} />
-              </div>
-            </div>
-            <div className="space-y-1.5">
-              <Label>Token endpoint</Label>
-              <code className="block truncate rounded bg-muted px-2 py-1.5 text-xs">{client.token_endpoint}</code>
-            </div>
-          </div>
-        )}
-        <DialogFooter>
-          <Button onClick={() => onOpenChange(false)}>Done</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-/** Same "Copy"/"Copied" idiom as `TryIt.tsx`'s `CopyButton` / `WarehouseDetail.tsx`. */
-function CopyButton({ value }: { value: string }) {
-  const [copied, setCopied] = useState(false);
-  return (
-    <Button
-      type="button"
-      variant="outline"
-      size="sm"
-      onClick={() => {
-        void navigator.clipboard?.writeText(value);
-        setCopied(true);
-        window.setTimeout(() => setCopied(false), 1500);
-      }}
-    >
-      {copied ? "Copied" : "Copy"}
-    </Button>
   );
 }

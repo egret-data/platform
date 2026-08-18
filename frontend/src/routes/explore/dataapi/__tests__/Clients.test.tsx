@@ -62,7 +62,6 @@ function mockClients(over: Partial<{ data: unknown; isError: boolean; isLoading:
 }
 
 const deleteAccountMutateAsync = vi.fn();
-const issueMutateAsync = vi.fn();
 const revokeMutateAsync = vi.fn();
 
 function renderClients(accounts?: DataApiServiceAccountDto[]) {
@@ -101,10 +100,6 @@ beforeEach(() => {
     { mutateAsync: deleteAccountMutateAsync, isPending: false } as unknown as
       ReturnType<typeof api.useDataApiDeleteServiceAccount>,
   );
-  vi.mocked(api.useDataApiIssueClient).mockReturnValue(
-    { mutateAsync: issueMutateAsync, isPending: false } as unknown as
-      ReturnType<typeof api.useDataApiIssueClient>,
-  );
   vi.mocked(api.useDataApiRevokeClient).mockReturnValue(
     { mutateAsync: revokeMutateAsync, isPending: false } as unknown as
       ReturnType<typeof api.useDataApiRevokeClient>,
@@ -119,16 +114,6 @@ beforeEach(() => {
   );
 
   deleteAccountMutateAsync.mockResolvedValue({ status: 200, data: { ok: true }, headers: new Headers() });
-  issueMutateAsync.mockResolvedValue({
-    status: 201,
-    data: {
-      id: "cl-new",
-      client_id: "client_new123",
-      client_secret: SECRET_FIXTURE,
-      token_endpoint: "https://egret.local/oauth/token",
-    },
-    headers: new Headers(),
-  });
   revokeMutateAsync.mockResolvedValue({ status: 200, data: { ok: true }, headers: new Headers() });
 });
 
@@ -160,39 +145,34 @@ describe("Clients", () => {
     expect(screen.getByText("etl")).toBeInTheDocument();
   });
 
-  it("shows the secret once, with a copy button and a warning", async () => {
-    renderClients();
-    await screen.findByText("reporting-bot");
-    await userEvent.click(screen.getByRole("button", { name: /actions/i }));
-    await userEvent.click(await screen.findByRole("menuitem", { name: /issue client/i }));
-    await userEvent.type(await screen.findByLabelText("Name"), "etl");
-    await userEvent.click(screen.getByRole("button", { name: /create/i }));
-    expect(await screen.findByText(/cannot be shown again/i)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /copy/i })).toBeInTheDocument();
-  });
-
   it("does not show the secret anywhere in the list", async () => {
     renderClients();
     await screen.findByText("etl");
     expect(document.body.textContent).not.toContain(SECRET_FIXTURE);
   });
 
-  it("issuing a client sends the owning account id and trimmed name, with no expiry by default", async () => {
-    const user = userEvent.setup();
-    renderClients();
-    await screen.findByText("reporting-bot");
-    await user.click(screen.getByRole("button", { name: /actions/i }));
-    await user.click(await screen.findByRole("menuitem", { name: /issue client/i }));
-    await user.type(await screen.findByLabelText("Name"), "etl-2");
-    await user.click(screen.getByRole("button", { name: /^create$/i }));
+  /**
+   * Issuing a client used to be TWO dialogs this page owned — a form, then the
+   * one-time secret, the second mounting as the first was unmounted while still
+   * open. Both are the `ClientCreate` route now, so what is left for the list to
+   * get right is that the row menu points at it, for the ROW's own account.
+   *
+   * The `href` is asserted rather than clicked: this harness mounts only the
+   * `clients` route, so a click would land on nothing and "pass" for a link
+   * pointing anywhere. And no form or secret may appear here — opening the menu
+   * must navigate, not reveal a dialog.
+   */
+  it("the row menu's Issue client item links to that account's new-client page, not a dialog trigger", async () => {
+    renderClients([makeAccount({ id: "sa-7", name: "nightly-exporter" })]);
+    await screen.findByText("nightly-exporter");
+    await userEvent.click(screen.getByRole("button", { name: /actions/i }));
 
-    await waitFor(() => {
-      expect(issueMutateAsync).toHaveBeenCalledWith({
-        workspace: "eng",
-        id: "sa-1",
-        data: { name: "etl-2", expires_at: undefined },
-      });
-    });
+    const item = await screen.findByRole("menuitem", { name: /issue client/i });
+    // The account id comes from the ROW, not from a constant: `sa-7` is not the
+    // id any other test in this file uses.
+    expect(item).toHaveAttribute("href", "/explore/eng/data-api/clients/sa-7/new-client");
+    expect(screen.queryByLabelText("Name")).not.toBeInTheDocument();
+    expect(document.body.textContent).not.toContain(SECRET_FIXTURE);
   });
 
   it("shows the client-fetch error, not the empty state, when useDataApiListClients fails", async () => {

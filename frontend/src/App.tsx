@@ -44,6 +44,7 @@ import Endpoints from "@/routes/explore/dataapi/Endpoints";
 import EndpointCreate from "@/routes/explore/dataapi/EndpointCreate";
 import Clients from "@/routes/explore/dataapi/Clients";
 import ServiceAccountCreate from "@/routes/explore/dataapi/ServiceAccountCreate";
+import ClientCreate from "@/routes/explore/dataapi/ClientCreate";
 import Activity from "@/routes/explore/dataapi/Activity";
 import EndpointDetail from "@/routes/explore/dataapi/EndpointDetail";
 import Query from "@/routes/explore/dataapi/detail/Query";
@@ -188,6 +189,19 @@ function ExploreRoutes() {
               order, so this literal wins wherever it sits. Measured on the
               installed react-router-dom (7.18.2); see `endpoints/new`. */}
           <Route path="data-api/clients/new" element={<RequireFeature feature="data_api"><ServiceAccountCreate /></RequireFeature>} />
+          {/* Issuing a client credential is a PAGE for a reason the other two
+              create routes do not have: the response contains a secret shown
+              ONCE, and as dialogs that was a modal opening on top of another
+              modal (the issue dialog was unmounted while still open as the
+              secret dialog mounted — the classic stuck-`pointer-events` shape).
+              The secret now lands on this same route in a created state, which
+              cannot be dismissed by an outside click or an accidental Escape.
+
+              `:accountId` is in the URL because the credential belongs to one
+              service account; the page names that account by reading the
+              service-account list, since an id is not something a reader
+              recognises. */}
+          <Route path="data-api/clients/:accountId/new-client" element={<RequireFeature feature="data_api"><ClientCreate /></RequireFeature>} />
           <Route path="data-api/activity" element={<RequireFeature feature="data_api"><Activity /></RequireFeature>} />
           <Route path="pipelines" element={<Placeholder title="Pipelines" />} />
           <Route path="workflows" element={<Placeholder title="Workflows" />} />
