@@ -84,7 +84,6 @@ const LOOSE_ROW = makeEndpoint({
 
 const SERVICE_ACCOUNT = { id: "sa-1", name: "reporting-bot", description: "", email: "sa@egret.local", created_at: "2026-08-01T00:00:00Z" };
 
-const createMutateAsync = vi.fn();
 const deleteMutateAsync = vi.fn();
 const bookmarkMutateAsync = vi.fn();
 const unbookmarkMutateAsync = vi.fn();
@@ -127,9 +126,6 @@ beforeEach(() => {
     { data: [DB_TRINO], isLoading: false, isError: false } as unknown as ReturnType<typeof databasesApi.useDatabases>,
   );
 
-  vi.mocked(api.useDataApiCreateEndpoint).mockReturnValue(
-    { mutateAsync: createMutateAsync, isPending: false } as unknown as ReturnType<typeof api.useDataApiCreateEndpoint>,
-  );
   vi.mocked(api.useDataApiDeleteEndpoint).mockReturnValue(
     { mutateAsync: deleteMutateAsync, isPending: false } as unknown as ReturnType<typeof api.useDataApiDeleteEndpoint>,
   );
@@ -171,7 +167,6 @@ beforeEach(() => {
     (ws, id) => ["dataApiGetEndpoint", ws, id] as unknown as ReturnType<typeof api.getDataApiGetEndpointQueryKey>,
   );
 
-  createMutateAsync.mockResolvedValue({ status: 201, data: { id: "ep-new" }, headers: new Headers() });
   deleteMutateAsync.mockResolvedValue({ status: 200, data: {}, headers: new Headers() });
   bookmarkMutateAsync.mockResolvedValue({ status: 200, data: {}, headers: new Headers() });
   unbookmarkMutateAsync.mockResolvedValue({ status: 200, data: {}, headers: new Headers() });
@@ -285,29 +280,35 @@ describe("Endpoints", () => {
     expect(screen.getByText("Ad hoc query")).toBeInTheDocument();
   });
 
-  it("creating an endpoint collects name/path/method/database and navigates to the new id", async () => {
-    mockList({ data: { status: 200, data: [] } });
-    const user = userEvent.setup();
+  /**
+   * Creating an endpoint used to be a dialog this page owned; it is now the
+   * `endpoints/new` PAGE (`EndpointCreate`), which owns the fields and the
+   * mutation. What is left for the list to get right is that both of its
+   * entry points are real LINKS to that URL — a `<button>` that pushed the
+   * route imperatively would look identical on screen but could not be
+   * middle-clicked, opened in a new tab, or copied.
+   *
+   * Asserting the `href` rather than clicking is deliberate: this harness maps
+   * `endpoints/:id` to a marker, so a click would "pass" even for a link
+   * pointing at some other id.
+   */
+  it("the + Endpoint action is a link to the create page, not a dialog trigger", async () => {
+    mockList({ data: { status: 200, data: [LOOSE_ROW] } });
     renderEndpoints();
+    await screen.findByText("Ad hoc query");
+    expect(screen.getByRole("link", { name: /\+ endpoint/i })).toHaveAttribute(
+      "href",
+      "/explore/eng/data-api/endpoints/new",
+    );
+    expect(screen.queryByRole("button", { name: /\+ endpoint/i })).not.toBeInTheDocument();
+  });
 
-    await user.click(screen.getByRole("button", { name: /\+ endpoint/i }));
-    await screen.findByText("New endpoint");
-
-    await user.type(screen.getByLabelText("Name"), "Weekly rollup");
-    await user.type(screen.getByLabelText("Path"), "reports/weekly");
-    await user.click(screen.getByRole("combobox", { name: "Database" }));
-    await user.click(await screen.findByRole("option", { name: "warehouse" }));
-    await user.type(screen.getByLabelText("SQL"), "SELECT 1");
-
-    await user.click(screen.getByRole("button", { name: /^create$/i }));
-
-    await waitFor(() => {
-      expect(createMutateAsync).toHaveBeenCalledWith({
-        workspace: "eng",
-        data: { name: "Weekly rollup", path: "reports/weekly", method: "GET", database_id: "db-1", sql: "SELECT 1" },
-      });
-    });
-    expect(await screen.findByText("endpoint detail pane")).toBeInTheDocument();
+  it("the empty-state CTA links to the create page too", async () => {
+    mockList({ data: { status: 200, data: [] } });
+    renderEndpoints();
+    expect(
+      await screen.findByRole("link", { name: /create your first endpoint/i }),
+    ).toHaveAttribute("href", "/explore/eng/data-api/endpoints/new");
   });
 
   it("row menu shows Disable for a live endpoint and calls useDataApiDisableEndpoint", async () => {
@@ -495,14 +496,9 @@ describe("Endpoints — cache invalidation", () => {
     );
   });
 
-  it("Create invalidates the endpoint list, so navigating Back shows the new endpoint", async () => {
-    const { qc } = renderEndpoints();
-    const spy = vi.spyOn(qc, "invalidateQueries");
-    await fireSuccess(vi.mocked(api.useDataApiCreateEndpoint), { workspace: "eng", data: {} });
-    expect(spy).toHaveBeenCalledWith(
-      expect.objectContaining({ queryKey: ["dataApiListEndpoints", "eng"] }),
-    );
-  });
+  // Create's invalidation moved with the mutation: this page no longer builds
+  // it, `EndpointCreate` does. The same assertion lives in
+  // `EndpointCreate.invalidation.test.tsx`.
 
   // `bookmarked` only exists on the LIST row, so the list is the one query a
   // star can go stale in — and with `staleTime: 30000` an un-invalidated star

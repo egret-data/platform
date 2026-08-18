@@ -61,9 +61,7 @@ function mockClients(over: Partial<{ data: unknown; isError: boolean; isLoading:
   );
 }
 
-const createAccountMutateAsync = vi.fn();
 const deleteAccountMutateAsync = vi.fn();
-const issueMutateAsync = vi.fn();
 const revokeMutateAsync = vi.fn();
 
 function renderClients(accounts?: DataApiServiceAccountDto[]) {
@@ -98,17 +96,9 @@ beforeEach(() => {
     },
   });
 
-  vi.mocked(api.useDataApiCreateServiceAccount).mockReturnValue(
-    { mutateAsync: createAccountMutateAsync, isPending: false } as unknown as
-      ReturnType<typeof api.useDataApiCreateServiceAccount>,
-  );
   vi.mocked(api.useDataApiDeleteServiceAccount).mockReturnValue(
     { mutateAsync: deleteAccountMutateAsync, isPending: false } as unknown as
       ReturnType<typeof api.useDataApiDeleteServiceAccount>,
-  );
-  vi.mocked(api.useDataApiIssueClient).mockReturnValue(
-    { mutateAsync: issueMutateAsync, isPending: false } as unknown as
-      ReturnType<typeof api.useDataApiIssueClient>,
   );
   vi.mocked(api.useDataApiRevokeClient).mockReturnValue(
     { mutateAsync: revokeMutateAsync, isPending: false } as unknown as
@@ -123,22 +113,7 @@ beforeEach(() => {
       ReturnType<typeof api.getDataApiListServiceAccountsQueryKey>,
   );
 
-  createAccountMutateAsync.mockResolvedValue({
-    status: 201,
-    data: { ...SERVICE_ACCOUNT, id: "sa-new" },
-    headers: new Headers(),
-  });
   deleteAccountMutateAsync.mockResolvedValue({ status: 200, data: { ok: true }, headers: new Headers() });
-  issueMutateAsync.mockResolvedValue({
-    status: 201,
-    data: {
-      id: "cl-new",
-      client_id: "client_new123",
-      client_secret: SECRET_FIXTURE,
-      token_endpoint: "https://egret.local/oauth/token",
-    },
-    headers: new Headers(),
-  });
   revokeMutateAsync.mockResolvedValue({ status: 200, data: { ok: true }, headers: new Headers() });
 });
 
@@ -170,39 +145,34 @@ describe("Clients", () => {
     expect(screen.getByText("etl")).toBeInTheDocument();
   });
 
-  it("shows the secret once, with a copy button and a warning", async () => {
-    renderClients();
-    await screen.findByText("reporting-bot");
-    await userEvent.click(screen.getByRole("button", { name: /actions/i }));
-    await userEvent.click(await screen.findByRole("menuitem", { name: /issue client/i }));
-    await userEvent.type(await screen.findByLabelText("Name"), "etl");
-    await userEvent.click(screen.getByRole("button", { name: /create/i }));
-    expect(await screen.findByText(/cannot be shown again/i)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /copy/i })).toBeInTheDocument();
-  });
-
   it("does not show the secret anywhere in the list", async () => {
     renderClients();
     await screen.findByText("etl");
     expect(document.body.textContent).not.toContain(SECRET_FIXTURE);
   });
 
-  it("issuing a client sends the owning account id and trimmed name, with no expiry by default", async () => {
-    const user = userEvent.setup();
-    renderClients();
-    await screen.findByText("reporting-bot");
-    await user.click(screen.getByRole("button", { name: /actions/i }));
-    await user.click(await screen.findByRole("menuitem", { name: /issue client/i }));
-    await user.type(await screen.findByLabelText("Name"), "etl-2");
-    await user.click(screen.getByRole("button", { name: /^create$/i }));
+  /**
+   * Issuing a client used to be TWO dialogs this page owned — a form, then the
+   * one-time secret, the second mounting as the first was unmounted while still
+   * open. Both are the `ClientCreate` route now, so what is left for the list to
+   * get right is that the row menu points at it, for the ROW's own account.
+   *
+   * The `href` is asserted rather than clicked: this harness mounts only the
+   * `clients` route, so a click would land on nothing and "pass" for a link
+   * pointing anywhere. And no form or secret may appear here — opening the menu
+   * must navigate, not reveal a dialog.
+   */
+  it("the row menu's Issue client item links to that account's new-client page, not a dialog trigger", async () => {
+    renderClients([makeAccount({ id: "sa-7", name: "nightly-exporter" })]);
+    await screen.findByText("nightly-exporter");
+    await userEvent.click(screen.getByRole("button", { name: /actions/i }));
 
-    await waitFor(() => {
-      expect(issueMutateAsync).toHaveBeenCalledWith({
-        workspace: "eng",
-        id: "sa-1",
-        data: { name: "etl-2", expires_at: undefined },
-      });
-    });
+    const item = await screen.findByRole("menuitem", { name: /issue client/i });
+    // The account id comes from the ROW, not from a constant: `sa-7` is not the
+    // id any other test in this file uses.
+    expect(item).toHaveAttribute("href", "/explore/eng/data-api/clients/sa-7/new-client");
+    expect(screen.queryByLabelText("Name")).not.toBeInTheDocument();
+    expect(document.body.textContent).not.toContain(SECRET_FIXTURE);
   });
 
   it("shows the client-fetch error, not the empty state, when useDataApiListClients fails", async () => {
@@ -319,21 +289,34 @@ describe("Clients", () => {
     expect(screen.getByText("beta")).toBeInTheDocument();
   });
 
-  it("creating a service account collects a name and calls useDataApiCreateServiceAccount", async () => {
-    const user = userEvent.setup();
+  /**
+   * Creating a service account used to be a dialog this page owned; it is now
+   * the `clients/new` PAGE (`ServiceAccountCreate`), which owns the fields and
+   * the mutation. What is left for the list to get right is that both of its
+   * entry points are real LINKS to that URL — a `<button>` that pushed the
+   * route imperatively would look identical on screen but could not be
+   * middle-clicked, opened in a new tab, or copied.
+   *
+   * The `href` is asserted rather than clicked: this harness mounts only the
+   * `clients` route, so a click would land on nothing and "pass" for a link
+   * pointing anywhere.
+   */
+  it("the + Service account action is a link to the create page, not a dialog trigger", async () => {
     renderClients();
+    await screen.findByText("reporting-bot");
+    expect(screen.getByRole("link", { name: /\+ service account/i })).toHaveAttribute(
+      "href",
+      "/explore/eng/data-api/clients/new",
+    );
+    expect(screen.queryByRole("button", { name: /\+ service account/i })).not.toBeInTheDocument();
+  });
 
-    await user.click(screen.getByRole("button", { name: /service account/i }));
-    await screen.findByText("New service account");
-    await user.type(screen.getByLabelText("Name"), "new-bot");
-    await user.click(screen.getByRole("button", { name: /^create$/i }));
-
-    await waitFor(() => {
-      expect(createAccountMutateAsync).toHaveBeenCalledWith({
-        workspace: "eng",
-        data: { name: "new-bot", description: undefined },
-      });
-    });
+  it("the empty-state CTA links to the create page too", async () => {
+    mockAccounts({ data: { status: 200, data: [] } });
+    renderClients();
+    expect(
+      await screen.findByRole("link", { name: /create your first service account/i }),
+    ).toHaveAttribute("href", "/explore/eng/data-api/clients/new");
   });
 });
 
@@ -368,14 +351,9 @@ describe("Clients — cache invalidation", () => {
     );
   }
 
-  it("creating a service account invalidates the list every picker on this feature reads", async () => {
-    const { qc } = renderClients();
-    const spy = vi.spyOn(qc, "invalidateQueries");
-    await fireSuccess(vi.mocked(api.useDataApiCreateServiceAccount), { workspace: "eng", data: {} });
-    expect(spy).toHaveBeenCalledWith(
-      expect.objectContaining({ queryKey: ["dataApiListServiceAccounts", "eng"] }),
-    );
-  });
+  // Create's invalidation moved with the mutation: this page no longer builds
+  // it, `ServiceAccountCreate` does. The same assertion lives in
+  // `ServiceAccountCreate.invalidation.test.tsx`.
 
   it("deleting a service account invalidates that same list, so the row leaves the table", async () => {
     const { qc } = renderClients();
@@ -387,11 +365,13 @@ describe("Clients — cache invalidation", () => {
   });
 
   // The workspace is read from the mutation VARIABLES, never from a separate
-  // hook argument that could drift from where the write went.
+  // hook argument that could drift from where the write went. Driven through
+  // DELETE here because create's mutation left with the form; the wrapper
+  // derives the key the same way for both.
   it("invalidates the list of the workspace the write actually went to", async () => {
     const { qc } = renderClients();
     const spy = vi.spyOn(qc, "invalidateQueries");
-    await fireSuccess(vi.mocked(api.useDataApiCreateServiceAccount), { workspace: "other-ws", data: {} });
+    await fireSuccess(vi.mocked(api.useDataApiDeleteServiceAccount), { workspace: "other-ws", id: "sa-1" });
     expect(spy).toHaveBeenCalledWith(
       expect.objectContaining({ queryKey: ["dataApiListServiceAccounts", "other-ws"] }),
     );

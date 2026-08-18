@@ -75,11 +75,19 @@ Each primitive below replaces something that exists in 4-6 near-identical copies
 
 `endpoints/new`, `clients/new`, and the client-credential flow become routes rather than dialogs.
 
-The precedent is `charts/new` and `alerts/new`: both register the literal `new` **before** `:id` (or the literal is captured as an id) and both render **the same component as the detail route**, with no id in the URL yet. Data API follows that exactly rather than inventing a third shape.
+**Corrected after measuring.** This section originally said to follow `charts/new` and `alerts/new`, which render **the same component as the detail route** with no id in the URL yet. That is wrong for an endpoint, and the measurement is simple: **six of the seven detail components read `id`** — `PreviewBlock` (preview POSTs to `…/endpoints/{id}/preview`), `ResponseSection`, `AccessSection`, `TryIt`, `Versions`, and `Config`. Only `Query` itself does not. Reusing the detail shell would produce a page whose Preview cannot run and whose Response, Access, Try it and Versions tabs are all meaningless until the first save.
+
+That precedent works for a chart or a schedule because each is a single form with no id-dependent sub-resources. An endpoint has versions, grants and trials, all of which need the row to exist.
+
+The right precedent is already in the repo and is a third shape, not an invention: **`engines/new` → `EngineCreate`**, a dedicated create page that collects what a row cannot exist without, creates it, and navigates to the detail route. That is also what the current dialog does — the change the user asked for is that it stops being a dialog, not that it becomes the whole editor.
+
+The route registers the literal `new` **before** `:id` as a convention for readers, **not as a fix**. An earlier version of this line said the literal would otherwise be captured as an id. That was measured false: react-router-dom **7.18.2** ranks routes by segment specificity, not declaration order, so with `:id` declared first `/endpoints/new` still matches the static route — verified twice with throwaway `matchRoutes` specs, once while implementing and once in the final review, after the same false claim was found in two pre-existing `App.tsx` comments and corrected there.
+
+*(This line is worth reading as a lesson about this document rather than about the router. The commit that corrected §4 fixed the claim in the code comments and left it standing here, in the same branch — which is exactly the "two contradictory rationales are worse than either alone" failure the correction was about. The final whole-branch review caught it. Correcting a belief means correcting every copy of it, and the copies are rarely all in one file.)*
 
 **`App.tsx:124-127` currently carries a comment arguing against this**, on the grounds that the create dialog collects only what a row cannot exist without and hands off to the real editor immediately. That reasoning is superseded, and the comment must be replaced rather than left standing beside the opposite decision — two contradictory rationales in one file is worse than either one alone.
 
-The consequence to design for: a `/new` route has **no id**, so anything keyed on one must tolerate its absence. The detail shell currently remounts on `id` change via `key={id}`; with no id there is nothing to key on, and the first save must navigate to the created id without losing what the author typed.
+The consequence to design for is therefore smaller than it first appeared: the create page owns its own small form and never mounts the detail shell, so `key={id}` is not in play. What it must get right is the hand-off — creating the row and navigating to `…/endpoints/{id}` without losing what the author typed, and without leaving a half-created row if the navigation fails.
 
 ## 5. Detail content: one table per tab
 

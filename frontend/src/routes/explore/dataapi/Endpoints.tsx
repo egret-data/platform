@@ -1,15 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
 import { Search, Webhook } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Textarea } from "@/components/ui/textarea";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { SummaryStrip } from "@/components/explore/SummaryStrip";
 import { SortableHeader, type SortState } from "@/components/explore/SortableHeader";
@@ -27,13 +23,13 @@ import { useBulkSelect } from "@/hooks/useBulkSelect";
 import { groupByFolder, useCollapsed } from "@/components/explore/folders";
 import { useFoldersFoldersList } from "@/api/generated/folders/folders";
 import { useFolderMutations } from "@/api/folders";
-import { useDatabases, type DatabaseConn } from "@/api/databases";
+import { useDatabases } from "@/api/databases";
 import { useDataApiListEndpoints } from "@/api/generated/data-api/data-api";
 // Mutations come from the hand-written wrapper, never from the generated hooks:
 // the wrapper is what owns the cache invalidation (see `src/api/dataApi.ts`).
 // Wired to the generated hook directly, "Endpoint disabled" toasts over a row
 // whose badge still reads Live for the next 30 seconds.
-import { useBookmarkEndpoint, useCreateEndpoint, useDeleteEndpoint, useUnbookmarkEndpoint, useUpdateEndpoint } from "@/api/dataApi";
+import { useBookmarkEndpoint, useDeleteEndpoint, useUnbookmarkEndpoint, useUpdateEndpoint } from "@/api/dataApi";
 import type { DataApiEndpointDto, DataApiEndpointListItemDto } from "@/api/generated/model";
 import { DownloadOpenApiDialog } from "./DownloadOpenApiDialog";
 import { EndpointActionsMenu } from "./EndpointActionsMenu";
@@ -86,7 +82,6 @@ function stateBadgeLabel(e: DataApiEndpointDto): string {
 
 export default function Endpoints() {
   const ws = useParams().workspace!;
-  const nav = useNavigate();
 
   const { data: envelope, isLoading, isError, error } = useDataApiListEndpoints(ws);
   // useMemo (not a plain ternary) so a falsy envelope doesn't hand `rows`'
@@ -98,7 +93,6 @@ export default function Endpoints() {
 
   const { data: databases } = useDatabases(ws);
 
-  const createMutation = useCreateEndpoint();
   const deleteMutation = useDeleteEndpoint();
   // Two mutations, one control: which of them a star fires is decided per row
   // from that row's own `bookmarked`, never from a page-level "mode".
@@ -150,7 +144,6 @@ export default function Endpoints() {
    */
   const [bookmarkOverride, setBookmarkOverride] = useState<Record<string, boolean>>({});
   const [sort, setSort] = useState<SortState<SortKey>>({ key: "updated_at", dir: "desc" });
-  const [createOpen, setCreateOpen] = useState(false);
   const [downloadOpen, setDownloadOpen] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<DataApiEndpointDto | null>(null);
   const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
@@ -403,7 +396,9 @@ export default function Endpoints() {
       action={
         <>
           <Button variant="outline" onClick={() => setDownloadOpen(true)}>Download OpenAPI</Button>
-          <Button onClick={() => setCreateOpen(true)}>+ Endpoint</Button>
+          {/* A link, not a dialog trigger: creating an endpoint is its own page
+              (`endpoints/new`), so it can be opened in a new tab and reloaded. */}
+          <Button asChild><Link to={`/explore/${ws}/data-api/endpoints/new`}>+ Endpoint</Link></Button>
         </>
       }
     >
@@ -424,7 +419,7 @@ export default function Endpoints() {
             icon={Webhook}
             title="No endpoints yet"
             description="Publish a query as a REST endpoint."
-            action={<Button onClick={() => setCreateOpen(true)}>Create your first endpoint</Button>}
+            action={<Button asChild><Link to={`/explore/${ws}/data-api/endpoints/new`}>Create your first endpoint</Link></Button>}
           />
         }
       >
@@ -524,15 +519,6 @@ export default function Endpoints() {
         )}
       </ListStates>
 
-      <CreateEndpointDialog
-        ws={ws}
-        open={createOpen}
-        onOpenChange={setCreateOpen}
-        databases={databases ?? []}
-        create={createMutation}
-        onCreated={(id) => nav(`/explore/${ws}/data-api/endpoints/${id}`)}
-      />
-
       <FolderNameDialog
         open={folderDialog !== null}
         title={folderDialog?.mode === "move" ? "Move to new folder" : "New folder"}
@@ -571,112 +557,3 @@ export default function Endpoints() {
   );
 }
 
-/**
- * Per the Alerts lesson (#485): a create dialog collects only the fields a
- * row cannot exist without, then hands off to the real editor. Everything
- * else (description, params, output shape, cache, limits…) is edited on the
- * detail route — this dialog must never grow into a second editor.
- *
- * `sql` is here too, alongside name/path/method/database — `CreateEndpointInput`
- * requires it (no `#[serde(default)]`, unlike the config fields), so a row
- * cannot exist without it either. Kept to a single-line starting point; the
- * real query editor is the detail route's Definition section.
- */
-function CreateEndpointDialog({ ws, open, onOpenChange, databases, create, onCreated }: {
-  ws: string;
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  databases: DatabaseConn[];
-  create: ReturnType<typeof useCreateEndpoint>;
-  onCreated: (id: string) => void;
-}) {
-  const [name, setName] = useState("");
-  const [path, setPath] = useState("");
-  const [method, setMethod] = useState("GET");
-  const [databaseId, setDatabaseId] = useState("");
-  const [sql, setSql] = useState("");
-
-  useEffect(() => {
-    if (open) {
-      setName("");
-      setPath("");
-      setMethod("GET");
-      setDatabaseId("");
-      setSql("");
-    }
-  }, [open]);
-
-  const canSubmit = name.trim() !== "" && path.trim() !== "" && databaseId !== "" && sql.trim() !== "";
-
-  async function submit() {
-    if (!canSubmit) return;
-    try {
-      const res = await create.mutateAsync({
-        workspace: ws,
-        data: { name: name.trim(), path: path.trim(), method, database_id: databaseId, sql: sql.trim() },
-      });
-      // The mutator throws on any non-2xx (see mutator.ts), so this branch is
-      // the only one ever reached at runtime — the check just gives TS a
-      // narrower type than the response union declares.
-      if (res.status !== 201) { toast.error("Could not create endpoint."); return; }
-      toast.success("Endpoint created");
-      onOpenChange(false);
-      onCreated(res.data.id);
-    } catch (e) {
-      toast.error(String(e));
-    }
-  }
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
-        <DialogHeader><DialogTitle>New endpoint</DialogTitle></DialogHeader>
-        <div className="space-y-3">
-          <div className="space-y-1.5">
-            <Label htmlFor="ep-name">Name</Label>
-            <Input id="ep-name" autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="Daily report" />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="ep-path">Path</Label>
-            <Input id="ep-path" value={path} onChange={(e) => setPath(e.target.value)} placeholder="reports/daily" />
-          </div>
-          <div className="grid grid-cols-2 gap-3">
-            <div className="space-y-1.5">
-              <Label htmlFor="ep-method">Method</Label>
-              <Select value={method} onValueChange={setMethod}>
-                <SelectTrigger id="ep-method" aria-label="Method"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="GET">GET</SelectItem>
-                  <SelectItem value="POST">POST</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="ep-db">Database</Label>
-              <Select value={databaseId} onValueChange={setDatabaseId}>
-                <SelectTrigger id="ep-db" aria-label="Database">
-                  <SelectValue placeholder="Choose a database" />
-                </SelectTrigger>
-                <SelectContent>
-                  {databases.map((d) => (
-                    <SelectItem key={d.id} value={d.id}>{d.name}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="ep-sql">SQL</Label>
-            <Textarea id="ep-sql" className="font-mono text-xs" rows={4} value={sql} onChange={(e) => setSql(e.target.value)} placeholder="SELECT …" />
-          </div>
-        </div>
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
-          <Button onClick={submit} disabled={!canSubmit || create.isPending}>
-            {create.isPending ? "Creating…" : "Create"}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}

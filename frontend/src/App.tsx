@@ -41,7 +41,10 @@ import SharedObjects from "@/routes/explore/settings/SharedObjects";
 import AccessRequests from "@/routes/explore/settings/AccessRequests";
 import WorkspaceGeneral from "@/routes/explore/settings/WorkspaceGeneral";
 import Endpoints from "@/routes/explore/dataapi/Endpoints";
+import EndpointCreate from "@/routes/explore/dataapi/EndpointCreate";
 import Clients from "@/routes/explore/dataapi/Clients";
+import ServiceAccountCreate from "@/routes/explore/dataapi/ServiceAccountCreate";
+import ClientCreate from "@/routes/explore/dataapi/ClientCreate";
 import Activity from "@/routes/explore/dataapi/Activity";
 import EndpointDetail from "@/routes/explore/dataapi/EndpointDetail";
 import Query from "@/routes/explore/dataapi/detail/Query";
@@ -129,9 +132,27 @@ function ExploreRoutes() {
               still lands somewhere real. */}
           <Route path="data-api" element={<Navigate to="endpoints" replace />} />
           <Route path="data-api/endpoints" element={<RequireFeature feature="data_api"><Endpoints /></RequireFeature>} />
-          {/* `new` is not a route here: creating an endpoint asks for a name in a
-              dialog and then navigates to the created id, so there is no draft URL
-              that can be opened cold. */}
+          {/* Creating an endpoint is a PAGE, not a dialog: same five fields,
+              but one of them has a URL, so it can be linked to, bookmarked and
+              reached with Back. (It carries no draft persistence — the form is
+              plain component state, and a reload empties it.)
+
+              It is a dedicated component (`EndpointCreate`) rather than
+              `EndpointDetail` rendered without an id, which is what
+              `charts/new` and `alerts/new` do: six of the detail route's seven
+              sections read that id (Preview POSTs to
+              `…/endpoints/{id}/preview`; Response, Access, Try it, Versions and
+              Config all load the saved row), so reusing that shell here would
+              ship a page whose Preview cannot run and whose right-hand tabs are
+              meaningless until the first save. The precedent that fits is
+              `control-plane/engines/new` → `EngineCreate`.
+
+              `new` is written before `:id` as a CONVENTION, for readers — NOT
+              as a fix. Measured on the installed react-router-dom (7.18.2):
+              with `:id` registered FIRST, `/endpoints/new` still matches the
+              static route, because v7 ranks segments by specificity rather than
+              by declaration order. */}
+          <Route path="data-api/endpoints/new" element={<RequireFeature feature="data_api"><EndpointCreate /></RequireFeature>} />
           <Route path="data-api/endpoints/:id" element={<RequireFeature feature="data_api"><EndpointDetail /></RequireFeature>}>
             {/* Query (SQL, database, params, preview) is the landing section —
                 everything that decides what the query RETURNS. */}
@@ -152,6 +173,35 @@ function ExploreRoutes() {
             <Route path="versions" element={<VersionsSection />} />
           </Route>
           <Route path="data-api/clients" element={<RequireFeature feature="data_api"><Clients /></RequireFeature>} />
+          {/* Creating a service account is a PAGE too, for the same reasons as
+              `endpoints/new` above: a URL that can be linked, bookmarked and
+              opened in a tab. (It carries no draft persistence either — the
+              form is plain component state, and a reload empties it.)
+
+              Unlike `endpoints/new` it navigates BACK to its list on success
+              rather than into the created object, because a service account
+              has no detail route to open: it is a row in the Clients table
+              with an actions menu, so that table is its detail view.
+
+              Written before any `:id` sibling as a CONVENTION, for readers —
+              NOT as a fix. There is no `clients/:id` today, and if one is
+              added, v7 ranks segments by specificity rather than declaration
+              order, so this literal wins wherever it sits. Measured on the
+              installed react-router-dom (7.18.2); see `endpoints/new`. */}
+          <Route path="data-api/clients/new" element={<RequireFeature feature="data_api"><ServiceAccountCreate /></RequireFeature>} />
+          {/* Issuing a client credential is a PAGE for a reason the other two
+              create routes do not have: the response contains a secret shown
+              ONCE, and as dialogs that was a modal opening on top of another
+              modal (the issue dialog was unmounted while still open as the
+              secret dialog mounted — the classic stuck-`pointer-events` shape).
+              The secret now lands on this same route in a created state, which
+              cannot be dismissed by an outside click or an accidental Escape.
+
+              `:accountId` is in the URL because the credential belongs to one
+              service account; the page names that account by reading the
+              service-account list, since an id is not something a reader
+              recognises. */}
+          <Route path="data-api/clients/:accountId/new-client" element={<RequireFeature feature="data_api"><ClientCreate /></RequireFeature>} />
           <Route path="data-api/activity" element={<RequireFeature feature="data_api"><Activity /></RequireFeature>} />
           <Route path="pipelines" element={<Placeholder title="Pipelines" />} />
           <Route path="workflows" element={<Placeholder title="Workflows" />} />
@@ -163,7 +213,12 @@ function ExploreRoutes() {
               </RequireFeature>
             }
           />
-          {/* `new` before `:id`, or the literal would be captured as an id. */}
+          {/* `new` is written before `:id` as a CONVENTION, for readers — not
+              as a fix. Measured on react-router-dom 7.18.2: with `:id`
+              registered FIRST, `/alerts/new` still matches the static route,
+              because v7 ranks by segment specificity, not declaration order.
+              This comment used to claim the literal would be captured as an id;
+              it was wrong. See `data-api/endpoints/new` above. */}
           <Route
             path="alerts/new"
             element={
