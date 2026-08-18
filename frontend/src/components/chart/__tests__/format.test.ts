@@ -8,12 +8,38 @@ describe("type detection across engines", () => {
     expect(isNumericType("double")).toBe(true);
     expect(isNumericType("varchar(15)")).toBe(false);
   });
-  it("recognises MySQL-protocol enum names from StarRocks", () => {
-    expect(isNumericType("MYSQL_TYPE_LONGLONG")).toBe(true);  // bigint
-    expect(isNumericType("MYSQL_TYPE_DOUBLE")).toBe(true);
-    expect(isNumericType("MYSQL_TYPE_NEWDECIMAL")).toBe(true);
-    expect(isNumericType("MYSQL_TYPE_VAR_STRING")).toBe(false);
-    expect(isTemporalType("MYSQL_TYPE_DATETIME")).toBe(true);
+  /**
+   * This test used to feed `MYSQL_TYPE_LONGLONG` / `_DOUBLE` / `_NEWDECIMAL` /
+   * `_VAR_STRING` / `_DATETIME` in, because StarRocks' execute path leaked raw
+   * protocol tags into `ColumnMeta.ty`. #515 closed that — every StarRocks column
+   * name now goes through the connector's `coltype_name` mapper, on the execute
+   * path as well as the describe paths — so those strings can no longer reach
+   * here, and what StarRocks actually reports is what is pinned instead.
+   */
+  it("recognises the SQL type names StarRocks reports", () => {
+    for (const t of ["tinyint", "smallint", "int", "bigint", "float", "double", "decimal(10,2)"]) {
+      expect(isNumericType(t), t).toBe(true);
+    }
+    expect(isNumericType("varchar")).toBe(false);
+    expect(isTemporalType("datetime")).toBe(true);
+  });
+  /**
+   * The other direction, and the reason `long`/`short`/`tiny` came out of
+   * `NUMERIC_RE` rather than being left as harmless dead weight. Those three
+   * alternatives outlived the protocol names they were written for, and a
+   * substring matcher does not stay dead: `LONGTEXT` and `TINYTEXT` are ordinary
+   * StarRocks/MySQL string types, and while the alternatives were present both
+   * classified as numeric — a text column right-aligned and pushed through
+   * `Intl.NumberFormat`.
+   */
+  it("does not classify text types as numeric", () => {
+    expect(isNumericType("longtext")).toBe(false);
+    expect(isNumericType("tinytext")).toBe(false);
+    expect(isNumericType("varchar(15)")).toBe(false);
+    // Still numeric — proof the two above are not passing because the pattern
+    // stopped matching anything at all.
+    expect(isNumericType("bigint")).toBe(true);
+    expect(isNumericType("tinyint")).toBe(true);
   });
 });
 
