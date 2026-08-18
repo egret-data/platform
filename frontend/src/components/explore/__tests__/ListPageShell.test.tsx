@@ -37,4 +37,25 @@ describe("ListPageShell", () => {
     // all six of them today.
     expect(container.querySelector("header p")).toBeNull();
   });
+
+  it("centers the header row when there is no description, and top-aligns it when there is", () => {
+    // Checking a class name is a weaker assertion than checking behaviour, so
+    // keep it narrow: assert only the alignment class, not the whole
+    // `className` string, or this breaks on every unrelated class change.
+    const { container: withoutDescription } = render(
+      <ListPageShell title="Endpoints"><p>body</p></ListPageShell>,
+    );
+    const headerWithoutDescription = withoutDescription.querySelector("header");
+    expect(headerWithoutDescription).not.toBeNull();
+    expect(headerWithoutDescription).toHaveClass("items-center");
+    expect(headerWithoutDescription).not.toHaveClass("items-start");
+
+    const { container: withDescription } = render(
+      <ListPageShell title="Endpoints" description="Some description"><p>body</p></ListPageShell>,
+    );
+    const headerWithDescription = withDescription.querySelector("header");
+    expect(headerWithDescription).not.toBeNull();
+    expect(headerWithDescription).toHaveClass("items-start");
+    expect(headerWithDescription).not.toHaveClass("items-center");
+  });
 });
