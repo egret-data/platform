@@ -4,9 +4,16 @@ import { ListToolbarButton } from "@/components/explore/ListToolbarButton";
 /**
  * The header filter: show only bookmarked rows.
  *
- * Four pages own a copy of this button and its `onlyBookmarked` state; this is
- * the shared one. It holds no state of its own — the page owns the filter,
- * because the page is what applies it to its rows.
+ * The shared implementation, extracted here so the later migration phase has
+ * something to adopt. It is NOT yet the one the older pages use: measured on
+ * this branch, five pages (Alerts, Charts, Dashboards, Datasets, Notebooks)
+ * still own an inline copy of this button alongside their `onlyBookmarked`
+ * state, and none of them imports this file — `Endpoints.tsx` is its only
+ * consumer. So today this is a sixth copy that the other five are meant to
+ * collapse into, not a deduplication that has already happened.
+ *
+ * It holds no state of its own — the page owns the filter, because the page is
+ * what applies it to its rows.
  */
 export function BookmarkToggle({ active, onToggle }: { active: boolean; onToggle: () => void }) {
   return <ListToolbarButton icon={Star} label="Bookmarks" active={active} filled onClick={onToggle} />;

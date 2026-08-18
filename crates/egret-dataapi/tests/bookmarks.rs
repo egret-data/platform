@@ -300,12 +300,21 @@ impl Fixture {
     /// literal `entity_type` on purpose: if the store's constant were renamed,
     /// the code would keep agreeing with itself and this would go red.
     async fn bookmark_rows(&self, user: Uuid, endpoint: Uuid) -> i64 {
+        self.raw_bookmark_rows(user, "data_api_endpoint", endpoint)
+            .await
+    }
+
+    /// The same count for ANY `entity_type`, so a test can watch a row this
+    /// crate's routes must never touch — a neighbouring seam's bookmark keyed
+    /// on an endpoint's id.
+    async fn raw_bookmark_rows(&self, user: Uuid, entity_type: &str, entity_id: Uuid) -> i64 {
         sqlx::query_scalar(
             "SELECT count(*) FROM analytics.bookmarks \
-             WHERE user_id = $1 AND entity_type = 'data_api_endpoint' AND entity_id = $2",
+             WHERE user_id = $1 AND entity_type = $2 AND entity_id = $3",
         )
         .bind(user)
-        .bind(endpoint)
+        .bind(entity_type)
+        .bind(entity_id)
         .fetch_one(&self.db.pool)
         .await
         .expect("count bookmarks")
@@ -405,6 +414,63 @@ async fn a_bookmark_is_per_user() {
         "B never bookmarked it and must not see A's star"
     );
     assert_eq!(f.bookmark_rows(b.user, id).await, 0, "no row for B");
+}
+
+/// Un-starring is per user and per kind too — the DELETE's predicates, which
+/// the READ-side tests above cannot reach.
+///
+/// The delete runs against a generic table with no workspace and no ownership
+/// of its own, so its `WHERE` is the entire containment. A fixture with one
+/// user and one bookmark kind cannot tell "delete MY endpoint star" from
+/// "delete every star on this row" or "delete every bookmark on this uuid" —
+/// all three destroy the same single row. So this one arranges a state where
+/// they differ: two users starring the SAME endpoint, plus a `'chart'` bookmark
+/// keyed on that endpoint's id and owned by the deleting user.
+///
+/// Dropping `user_id` un-stars the endpoint for everyone in the workspace;
+/// dropping `entity_type` reaches into a neighbouring seam's bookmarks. Both
+/// return 200, write nothing to any log, and are visible only as somebody
+/// else's star quietly going out.
+#[tokio::test]
+async fn unbookmarking_touches_only_this_users_endpoint_star() {
+    let f = skip_without_db!();
+    let id = f.create_endpoint("rev", "/reports/revenue").await;
+    let a = f.principal_with(Fixture::MANAGER).await;
+    let b = f.principal_with(Fixture::MANAGER).await;
+
+    // BOTH users star the same endpoint, through the route.
+    let (status, body) = f.send(&a, "POST", &f.bookmark_url(id)).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let (status, body) = f.send(&b, "POST", &f.bookmark_url(id)).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    // And A holds another seam's bookmark on the very same uuid.
+    f.insert_raw_bookmark(a.user, "chart", id).await;
+
+    assert_eq!(f.bookmark_rows(a.user, id).await, 1, "A starred it");
+    assert_eq!(f.bookmark_rows(b.user, id).await, 1, "B starred it");
+
+    let (status, body) = f.send(&a, "DELETE", &f.bookmark_url(id)).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+
+    assert_eq!(
+        f.bookmark_rows(a.user, id).await,
+        0,
+        "A asked to un-star it, so A's row must be gone"
+    );
+    assert_eq!(
+        f.bookmark_rows(b.user, id).await,
+        1,
+        "B's star on the same endpoint must survive A's DELETE"
+    );
+    assert!(
+        f.listed_bookmarked(&b, id).await,
+        "and B must still SEE it starred, not merely have a row"
+    );
+    assert_eq!(
+        f.raw_bookmark_rows(a.user, "chart", id).await,
+        1,
+        "a `chart` bookmark on the same uuid belongs to another seam and must survive"
+    );
 }
 
 /// Bookmarking is a VIEW PREFERENCE, so `:read` is enough. Permissions here are

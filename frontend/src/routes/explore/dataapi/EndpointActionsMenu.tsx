@@ -18,9 +18,10 @@ import type { DataApiEndpointDto } from "@/api/generated/model";
  * Same shape as `DatasetActionsMenu`/`ChartActionsMenu`: a `RowActionsMenu`
  * wrapper, the destructive item last behind a `DropdownMenuSeparator` and
  * marked `text-destructive`, and the row's own mutations owned here rather than
- * threaded down as callbacks — `isPending` is then scoped to the row that fired
- * it. Deletion stays a callback because the confirmation dialog belongs to the
- * page, not to one row's menu.
+ * threaded down as callbacks. Disable and Enable read their `isPending` to
+ * disable themselves in flight; the move items do not, so a move is not
+ * currently guarded against a second click. Deletion stays a callback because
+ * the confirmation dialog belongs to the page, not to one row's menu.
  *
  * The trigger is NAMED after its row, like `ServiceAccountActionsMenu`'s. The
  * default bare "Actions" leaves a 30-row list with 30 identically-named
