@@ -41,6 +41,7 @@ import SharedObjects from "@/routes/explore/settings/SharedObjects";
 import AccessRequests from "@/routes/explore/settings/AccessRequests";
 import WorkspaceGeneral from "@/routes/explore/settings/WorkspaceGeneral";
 import Endpoints from "@/routes/explore/dataapi/Endpoints";
+import EndpointCreate from "@/routes/explore/dataapi/EndpointCreate";
 import Clients from "@/routes/explore/dataapi/Clients";
 import Activity from "@/routes/explore/dataapi/Activity";
 import EndpointDetail from "@/routes/explore/dataapi/EndpointDetail";
@@ -129,9 +130,18 @@ function ExploreRoutes() {
               still lands somewhere real. */}
           <Route path="data-api" element={<Navigate to="endpoints" replace />} />
           <Route path="data-api/endpoints" element={<RequireFeature feature="data_api"><Endpoints /></RequireFeature>} />
-          {/* `new` is not a route here: creating an endpoint asks for a name in a
-              dialog and then navigates to the created id, so there is no draft URL
-              that can be opened cold. */}
+          {/* `new` before `:id`, or the literal would be captured as an id.
+
+              Creating an endpoint is a PAGE, not a dialog: same five fields, but
+              one of them has a URL that can be linked to, bookmarked, opened in a
+              tab and reloaded without losing what was typed. It is a dedicated
+              component (`EndpointCreate`) rather than `EndpointDetail` rendered
+              without an id — six of the detail route's seven sections read that
+              id (Preview POSTs to `…/endpoints/{id}/preview`; Response, Access,
+              Try it, Versions and Config all load the saved row), so reusing the
+              shell here would ship a page whose Preview cannot run. The
+              precedent is `control-plane/engines/new` → `EngineCreate`. */}
+          <Route path="data-api/endpoints/new" element={<RequireFeature feature="data_api"><EndpointCreate /></RequireFeature>} />
           <Route path="data-api/endpoints/:id" element={<RequireFeature feature="data_api"><EndpointDetail /></RequireFeature>}>
             {/* Query (SQL, database, params, preview) is the landing section —
                 everything that decides what the query RETURNS. */}
