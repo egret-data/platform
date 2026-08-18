@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { Search, Webhook } from "lucide-react";
 import { toast } from "sonner";
@@ -113,6 +113,32 @@ export default function Endpoints() {
   // The page owns the bookmarked-only filter, not `BookmarkToggle` — the page
   // is what applies it to the rows, so the state lives where it is used.
   const [onlyBookmarked, setOnlyBookmarked] = useState(false);
+  /**
+   * Optimistic bookmark values, keyed by endpoint id, overriding the list's
+   * `bookmarked` until the server's own answer catches up.
+   *
+   * Without it the star is neither optimistic nor confirmed: a click waits for
+   * the POST, then for the invalidated list to refetch — two round trips — and
+   * the glyph does not move in between. The visible slowness is the smaller
+   * half. The larger half is that `e.bookmarked` is still the OLD value while
+   * that runs, so an impatient second click computes the same direction again
+   * and re-fires the mutation it just fired, instead of undoing it. The
+   * override is what both the glyph and the next click read, so the second
+   * click toggles back.
+   *
+   * Chosen over disabling the star while pending because `isPending` on these
+   * shared hooks is per-HOOK, not per-row — using it would freeze all thirty
+   * stars on the page while one is in flight — and because tracking pending
+   * ids to avoid that costs exactly as much state as this map while leaving
+   * the user with a control that ignores them rather than one that responds.
+   *
+   * An optimistic flip is only honest if it can be taken back, so a rejected
+   * mutation drops the override and the glyph returns to what the server last
+   * said. On SUCCESS the override stays: it already holds the value the
+   * refetch is about to bring, and clearing it early would flash the star back
+   * to its old state until the list lands.
+   */
+  const [bookmarkOverride, setBookmarkOverride] = useState<Record<string, boolean>>({});
   const [sort, setSort] = useState<SortState<SortKey>>({ key: "updated_at", dir: "desc" });
   const [createOpen, setCreateOpen] = useState(false);
   const [downloadOpen, setDownloadOpen] = useState(false);
@@ -126,10 +152,16 @@ export default function Endpoints() {
     return (databaseId: string) => byId.get(databaseId);
   }, [databases]);
 
+  /** This row's bookmark state as the USER last left it — override first, server otherwise. */
+  const isBookmarked = useCallback(
+    (e: DataApiEndpointListItemDto) => bookmarkOverride[e.id] ?? e.bookmarked,
+    [bookmarkOverride],
+  );
+
   const rows = useMemo(() => {
     const q = query.trim().toLowerCase();
     let r = endpoints.filter((e) => {
-      if (onlyBookmarked && !e.bookmarked) return false;
+      if (onlyBookmarked && !isBookmarked(e)) return false;
       if (stateFilter && e.state !== stateFilter) return false;
       if (engineFilter && engineOf(e.database_id) !== engineFilter) return false;
       if (!q) return true;
@@ -144,7 +176,7 @@ export default function Endpoints() {
       return sort.dir === "asc" ? cmp : -cmp;
     });
     return r;
-  }, [endpoints, query, onlyBookmarked, stateFilter, engineFilter, engineOf, sort]);
+  }, [endpoints, query, onlyBookmarked, isBookmarked, stateFilter, engineFilter, engineOf, sort]);
 
   const filtering = query.trim() !== "" || stateFilter !== null || engineFilter !== null || onlyBookmarked;
   const groups = useMemo(() => groupByFolder(rows, folders, filtering), [rows, folders, filtering]);
@@ -234,15 +266,27 @@ export default function Endpoints() {
 
   /**
    * Star a row, or un-star it. The DIRECTION is read from this row's own
-   * `bookmarked` flag and the id sent is this row's own id — a star that fired
-   * a fixed id would look identical on a one-row list and wrong on every
-   * other.
+   * state and the id sent is this row's own id — a star that fired a fixed id
+   * would look identical on a one-row list and wrong on every other.
    */
   async function toggleBookmark(e: DataApiEndpointListItemDto) {
+    // From the OVERRIDE-aware value, so a second click while the first is
+    // still in flight reverses it instead of repeating it.
+    const next = !isBookmarked(e);
+    setBookmarkOverride((prev) => ({ ...prev, [e.id]: next }));
     try {
-      const mutation = e.bookmarked ? unbookmarkMutation : bookmarkMutation;
+      const mutation = next ? bookmarkMutation : unbookmarkMutation;
       await mutation.mutateAsync({ workspace: ws, id: e.id });
     } catch (err) {
+      // Roll back — but only if THIS click's value is still the one on screen.
+      // A slow rejection must not drag the star away from a later click that
+      // has already moved it somewhere else.
+      setBookmarkOverride((prev) => {
+        if (prev[e.id] !== next) return prev;
+        const rest = { ...prev };
+        delete rest[e.id];
+        return rest;
+      });
       toast.error(String(err));
     }
   }
@@ -260,7 +304,7 @@ export default function Endpoints() {
       )}
       <td className="py-1 pl-6">
         <span className="inline-flex items-center gap-1">
-          <BookmarkStar bookmarked={e.bookmarked} name={e.name} onToggle={() => void toggleBookmark(e)} />
+          <BookmarkStar bookmarked={isBookmarked(e)} name={e.name} onToggle={() => void toggleBookmark(e)} />
           <Link className="font-medium hover:underline" to={`/explore/${ws}/data-api/endpoints/${e.id}`}>
             {e.name}
           </Link>

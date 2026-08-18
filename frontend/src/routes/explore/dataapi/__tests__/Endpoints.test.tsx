@@ -1068,6 +1068,8 @@ describe("Endpoints — row menus are named after their row", () => {
 describe("Endpoints — bookmarks", () => {
   const STARRED = makeEndpoint({ id: "ep-star", name: "Starred report", bookmarked: true, state: "draft" });
   const PLAIN = makeEndpoint({ id: "ep-plain", name: "Plain report", bookmarked: false, state: "draft" });
+  /** A second unbookmarked row: the peer that exposes an override leaking off its row. */
+  const PLAIN_PEER = makeEndpoint({ id: "ep-plain-2", name: "Second plain report", bookmarked: false, state: "draft" });
 
   function renderTwoRows() {
     mockList({ data: { status: 200, data: [STARRED, PLAIN] } });
@@ -1148,5 +1150,128 @@ describe("Endpoints — bookmarks", () => {
     await user.click(screen.getByRole("button", { name: "Bookmark Plain report" }));
 
     await waitFor(() => expect(toast.error).toHaveBeenCalled());
+  });
+
+  /**
+   * The star is OPTIMISTIC.
+   *
+   * A click has to survive two round trips before the server can answer it —
+   * the POST, then the refetch of the list the wrapper invalidated. These
+   * tests hold the mutation open on purpose (`deferred()`), because everything
+   * that goes wrong here goes wrong *during* that window and is invisible to a
+   * test whose mock resolves immediately.
+   */
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    let reject!: (reason: unknown) => void;
+    const promise = new Promise<T>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  }
+
+  const OK = { status: 200, data: {}, headers: new Headers() };
+
+  it("fills the star before the mutation resolves, and only the clicked row's", async () => {
+    const inFlight = deferred<unknown>();
+    bookmarkMutateAsync.mockReturnValue(inFlight.promise);
+    const user = userEvent.setup();
+    // THREE rows, and the third starts in the SAME state as the one clicked.
+    // With only STARRED and PLAIN an override that leaked to every row would
+    // be invisible — the leak sets `true`, and the row that could expose it is
+    // already `true`. The peer that shares the clicked row's starting state is
+    // what makes "only the clicked row's" an assertion rather than a wish.
+    mockList({ data: { status: 200, data: [STARRED, PLAIN, PLAIN_PEER] } });
+    renderEndpoints();
+    await screen.findByText("Plain report");
+
+    await user.click(screen.getByRole("button", { name: "Bookmark Plain report" }));
+
+    // Still in flight — nothing has come back, and the star has already moved.
+    expect(bookmarkMutateAsync).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "Remove bookmark from Plain report" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    // …and the rows that were not clicked are exactly where they were. An
+    // optimistic flip that leaked across rows would be the same defect as a
+    // star reading "is anything bookmarked".
+    expect(screen.getByRole("button", { name: "Bookmark Second plain report" })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    expect(screen.getByRole("button", { name: "Remove bookmark from Starred report" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+
+    inFlight.resolve(OK);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Remove bookmark from Plain report" })).toBeInTheDocument(),
+    );
+  });
+
+  it("puts the star back when the mutation is rejected", async () => {
+    const inFlight = deferred<unknown>();
+    bookmarkMutateAsync.mockReturnValue(inFlight.promise);
+    const user = userEvent.setup();
+    renderTwoRows();
+    await screen.findByText("Plain report");
+
+    await user.click(screen.getByRole("button", { name: "Bookmark Plain report" }));
+    // The optimistic flip happened…
+    expect(screen.getByRole("button", { name: "Remove bookmark from Plain report" })).toBeInTheDocument();
+
+    inFlight.reject(new ApiError(500, "boom"));
+
+    // …and it is taken back, because a flip with no rollback leaves the UI
+    // asserting a bookmark the server never stored.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Bookmark Plain report" })).toHaveAttribute("aria-pressed", "false"),
+    );
+    expect(screen.queryByRole("button", { name: "Remove bookmark from Plain report" })).not.toBeInTheDocument();
+    expect(toast.error).toHaveBeenCalled();
+  });
+
+  it("reverses on a second click instead of re-firing the first one", async () => {
+    // The failure the review named: with a non-optimistic star, `bookmarked`
+    // is still false while the POST is in flight, so an impatient second click
+    // computes the same direction and adds the bookmark twice — the control
+    // silently doing the opposite of what a toggle promises.
+    const inFlight = deferred<unknown>();
+    bookmarkMutateAsync.mockReturnValue(inFlight.promise);
+    const user = userEvent.setup();
+    renderTwoRows();
+    await screen.findByText("Plain report");
+
+    await user.click(screen.getByRole("button", { name: "Bookmark Plain report" }));
+    await user.click(screen.getByRole("button", { name: "Remove bookmark from Plain report" }));
+
+    expect(bookmarkMutateAsync).toHaveBeenCalledTimes(1);
+    await waitFor(() =>
+      expect(unbookmarkMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "ep-plain" }),
+    );
+    expect(screen.getByRole("button", { name: "Bookmark Plain report" })).toHaveAttribute("aria-pressed", "false");
+
+    inFlight.resolve(OK);
+  });
+
+  it("drops an un-starred row out of the bookmarked-only view straight away", async () => {
+    const inFlight = deferred<unknown>();
+    unbookmarkMutateAsync.mockReturnValue(inFlight.promise);
+    const user = userEvent.setup();
+    renderTwoRows();
+    await screen.findByText("Starred report");
+
+    await user.click(screen.getByRole("button", { name: "Bookmarks" }));
+    expect(screen.getByText("Starred report")).toBeInTheDocument();
+
+    // The filter reads the same override the glyph does, so the row leaves on
+    // the click rather than a refetch later.
+    await user.click(screen.getByRole("button", { name: "Remove bookmark from Starred report" }));
+    expect(screen.queryByText("Starred report")).not.toBeInTheDocument();
+
+    inFlight.resolve(OK);
   });
 });
