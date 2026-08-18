@@ -108,7 +108,9 @@ Enabled          Serve repeat calls from a cache      ( o)
 
 - **`max-w-3xl` on the detail `Outlet` is removed.** It is the direct cause of the wasted horizontal space: the `Details` column wraps to three lines while the right third of the page is empty.
 - **The `Details` column gets its own max width**, so explanatory prose does not become one unreadable line at 2560px while the `Value` column takes the slack it needs for long inputs (SQL, path).
-- `ConfigSection` is retired **from the Data API detail route only**. Nine Control Plane usages keep it; changing those is not this spec's business.
+- `ConfigSection` is retired **from the Data API detail route only** — two files there. **Measured: 16 other files consume it** (14 under Control Plane, plus `components/alerts/ScheduleEditor.tsx` and the component itself), and 15 files consume `ConfigTable`. Changing those is not this spec's business, and any change to `ConfigTable` itself must be purely additive.
+
+  *(An earlier version of this line said "nine Control Plane usages". That was a guess written as a fact, and it undercounted by more than half while also missing that one consumer is not in Control Plane at all. It is the seventh claim in this programme that asserted a state of the world without measuring it. The number above came from `grep -rl`.)*
 - **`ConfigTableRow.details` remains a plain string with no markdown.** Backticks written into it render literally — a real defect found in a browser in the previous phase. The wider table makes longer copy tempting; the constraint does not change.
 
 The `Query` tab is the exception and keeps its current form: a SQL editor and a result grid are not settings, and forcing them into a `Setting | Details | Value` row would be the same mistake as the cards, inverted.
