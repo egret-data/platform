@@ -14,6 +14,8 @@
 //! GET    /api/ws/{workspace}/data-api/endpoints/{id}
 //! PATCH  /api/ws/{workspace}/data-api/endpoints/{id}
 //! DELETE /api/ws/{workspace}/data-api/endpoints/{id}
+//! POST   /api/ws/{workspace}/data-api/endpoints/{id}/bookmark
+//! DELETE /api/ws/{workspace}/data-api/endpoints/{id}/bookmark
 //! POST   /api/ws/{workspace}/data-api/endpoints/{id}/validate
 //! POST   /api/ws/{workspace}/data-api/endpoints/{id}/publish
 //! POST   /api/ws/{workspace}/data-api/endpoints/{id}/rollback
@@ -90,8 +92,8 @@ use crate::activity::{
 };
 use crate::clients::ClientStore;
 use crate::endpoints::{
-    normalize_path, CreateEndpointInput, DataApiEndpointDto, EndpointStore, UpdateEndpointInput,
-    ALLOWED_METHODS, FOLDER_ENTITY_TYPE,
+    normalize_path, CreateEndpointInput, DataApiEndpointDto, DataApiEndpointListItemDto,
+    EndpointStore, UpdateEndpointInput, ALLOWED_METHODS, FOLDER_ENTITY_TYPE,
 };
 use crate::lifecycle::{validate, DataApiEndpointVersionDto, DataApiPublishedDto, VersionRef};
 
@@ -837,7 +839,7 @@ async fn revoke_client(
     tag = "data-api",
     params(WorkspacePath),
     responses(
-        (status = 200, description = "Endpoint drafts in the workspace", body = Vec<DataApiEndpointDto>),
+        (status = 200, description = "Endpoint drafts in the workspace, each with the caller's own `bookmarked` flag", body = Vec<DataApiEndpointListItemDto>),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing data_api_endpoint:read permission", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
@@ -846,9 +848,15 @@ async fn revoke_client(
 async fn list_endpoints(
     State(st): State<DataApiState>,
     WsContext(ctx): WsContext,
-) -> Result<Json<Vec<DataApiEndpointDto>>, DataApiError> {
+) -> Result<Json<Vec<DataApiEndpointListItemDto>>, DataApiError> {
     egret_core::authz::require(&*st.pdp, &ctx, EP_READ).await?;
-    Ok(Json(st.endpoints.list(ctx.workspace_id.0).await?))
+    // The user comes from the SESSION. `bookmarked` answers "did I star this",
+    // and there is nowhere else it could legitimately come from.
+    Ok(Json(
+        st.endpoints
+            .list_for(ctx.workspace_id.0, ctx.principal.user_id.0)
+            .await?,
+    ))
 }
 
 #[utoipa::path(
@@ -1054,6 +1062,82 @@ async fn delete_endpoint(
             "database_id": gone.database_id,
         }),
     ));
+    Ok(Json(Ack::ok()))
+}
+
+// ---------- Bookmarks ----------
+//
+// A bookmark is a per-user VIEW PREFERENCE, so both routes gate on [`EP_READ`],
+// exactly as every sibling seam does — `egret-bi`'s dataset, chart and dashboard
+// stars are all on their `:read`. Gating them on `:manage` would be a category
+// error with teeth: permissions here are FLAT, so a plain reader holds no
+// `:manage` at all and could never star anything they can see.
+//
+// The user is [`WsContext`]'s principal and never anything from the request. A
+// bookmark that could name its own user would be a way to star things on other
+// people's behalf.
+//
+// `analytics.bookmarks` is generic — `(user_id, entity_type, entity_id)` with no
+// workspace of its own — so unlike every other id route in this module the
+// containment predicate cannot ride along in the statement. Hence the explicit
+// [`EndpointStore::scoped`] first, which answers a foreign id with 404 rather
+// than 403 and, being first, ensures nothing is written before the answer.
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/data-api/endpoints/{id}/bookmark",
+    tag = "data-api",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Endpoint id"),
+    ),
+    responses(
+        (status = 200, description = "Endpoint bookmarked for the caller", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing data_api_endpoint:read permission", body = ErrorBody),
+        (status = 404, description = "No such endpoint in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn bookmark_endpoint(
+    State(st): State<DataApiState>,
+    WsContext(ctx): WsContext,
+    Path((_ws_ignored, id)): Path<(String, Uuid)>,
+) -> Result<Json<Ack>, DataApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, EP_READ).await?;
+    st.endpoints.scoped(ctx.workspace_id.0, id).await?;
+    st.endpoints
+        .add_bookmark(ctx.principal.user_id.0, id)
+        .await?;
+    Ok(Json(Ack::ok()))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/ws/{workspace}/data-api/endpoints/{id}/bookmark",
+    tag = "data-api",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Endpoint id"),
+    ),
+    responses(
+        (status = 200, description = "Endpoint bookmark removed for the caller", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing data_api_endpoint:read permission", body = ErrorBody),
+        (status = 404, description = "No such endpoint in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn unbookmark_endpoint(
+    State(st): State<DataApiState>,
+    WsContext(ctx): WsContext,
+    Path((_ws_ignored, id)): Path<(String, Uuid)>,
+) -> Result<Json<Ack>, DataApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, EP_READ).await?;
+    st.endpoints.scoped(ctx.workspace_id.0, id).await?;
+    st.endpoints
+        .remove_bookmark(ctx.principal.user_id.0, id)
+        .await?;
     Ok(Json(Ack::ok()))
 }
 
@@ -1902,6 +1986,10 @@ pub fn management_router() -> Router<DataApiState> {
                 .delete(delete_endpoint),
         )
         .route(
+            "/ws/{workspace}/data-api/endpoints/{id}/bookmark",
+            post(bookmark_endpoint).delete(unbookmark_endpoint),
+        )
+        .route(
             "/ws/{workspace}/data-api/endpoints/{id}/validate",
             post(validate_endpoint),
         )
@@ -1969,6 +2057,8 @@ pub fn management_router() -> Router<DataApiState> {
         create_endpoint,
         update_endpoint,
         delete_endpoint,
+        bookmark_endpoint,
+        unbookmark_endpoint,
         validate_endpoint,
         preview_endpoint,
         publish_endpoint,
@@ -1991,6 +2081,7 @@ pub fn management_router() -> Router<DataApiState> {
         CreateServiceAccountInput,
         IssueClientInput,
         DataApiEndpointDto,
+        DataApiEndpointListItemDto,
         CreateEndpointInput,
         UpdateEndpointInput,
         ParamSpec,
