@@ -4,10 +4,8 @@ import { useCallback, useMemo, useState } from "react";
  * Multi-select state for a list of `{id}` rows.
  *
  * **`rows` must be the set actually RENDERED — not the page's filtered/sorted
- * model of it.** The two are different the moment a page groups its rows:
- * `groupByFolder` silently drops a row whose `folder_id` names a folder the
- * folders list does not contain (an orphan left by a concurrent folder delete),
- * and a collapsed folder's rows are in the group model but not on screen.
+ * model of it.** The two are different the moment a page groups its rows: a
+ * collapsed folder's rows are in the group model but not on screen.
  *
  * The hook cannot enforce this. It sees an array of `{id}` and knows nothing
  * about grouping, collapse, pagination or virtualization, so it has no way to

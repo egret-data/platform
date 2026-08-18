@@ -44,3 +44,23 @@ test("still hides empty named folders when hideEmpty is set", () => {
   const groups = groupByFolder(oneRow, [{ id: "f1", name: "One" }, { id: "f2", name: "Two" }], true);
   expect(groups.map((g) => g.folder?.name ?? null)).toEqual(["One"]);
 });
+
+test("keeps the caller's order in Uncategorized when one of the rows is an orphan", () => {
+  // Every consumer sorts BEFORE grouping, so grouping must not reorder. An
+  // orphan is folderless like any other folderless row and takes its sorted
+  // place among them — it is not appended after them.
+  const sortedRows = [
+    { id: "alpha", folder_id: "gone" },
+    { id: "middle", folder_id: null },
+    { id: "zulu", folder_id: null },
+  ];
+  const groups = groupByFolder(sortedRows, [], false);
+  expect(groups[0].rows.map((r) => r.id)).toEqual(["alpha", "middle", "zulu"]);
+});
+
+test("emits each row exactly once across all groups", () => {
+  // A row belongs to one bucket. Asserted over the flattened output rather than
+  // a group index, so it still holds however the buckets are built.
+  const all = groupByFolder(rows, folders, false).flatMap((g) => g.rows.map((r) => r.id));
+  expect([...all].sort()).toEqual(["a", "b", "c"]);
+});

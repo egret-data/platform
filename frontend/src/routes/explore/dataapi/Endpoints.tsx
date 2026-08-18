@@ -142,8 +142,8 @@ export default function Endpoints() {
 
   /**
    * The rows actually ON SCREEN — not `rows`, which is only what survived
-   * filtering and sorting: `groupByFolder` drops orphan-`folder_id` rows, and a
-   * collapsed folder's rows are in `groups` but not in front of the user.
+   * filtering and sorting: a collapsed folder's rows are in `groups` but not in
+   * front of the user.
    *
    * This is what `useBulkSelect` must be fed; the full argument for why — and
    * what breaks when a caller passes more — lives on the hook itself
