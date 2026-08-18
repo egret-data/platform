@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { useParams } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
 import { KeyRound, Search } from "lucide-react";
 import { toast } from "sonner";
 import { useQueryClient } from "@tanstack/react-query";
@@ -8,7 +8,6 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { FilterableTable, type Column } from "@/components/explore/FilterableTable";
 import { SummaryStrip } from "@/components/explore/SummaryStrip";
@@ -23,15 +22,18 @@ import {
   useDataApiListServiceAccounts,
   useDataApiRevokeClient,
 } from "@/api/generated/data-api/data-api";
-// The service-account mutations come from the hand-written wrapper, which owns
-// their invalidation (`src/api/dataApi.ts`). That key is shared by five
-// surfaces — this table, Try-it's picker, the Access checklist, the OpenAPI
-// download dialog and the Response preview — so a create wired straight to the
-// generated hook left a new account missing from all five for 30 seconds.
+// Delete comes from the hand-written wrapper, which owns its invalidation
+// (`src/api/dataApi.ts`). That key is shared by five surfaces — this table,
+// Try-it's picker, the Access checklist, the OpenAPI download dialog and the
+// Response preview — so a delete wired straight to the generated hook left a
+// removed account in all five for 30 seconds. (Create used the same wrapper
+// when this page owned the create dialog; it moved to `ServiceAccountCreate`
+// with the form, still through the wrapper, which is why the row is already
+// in this table when that page navigates back here.)
 // Issue/revoke CLIENT stay generated + invalidated locally below: their key is
 // per service account and `revoke`'s variables carry the client id, not the
 // owning account's, so it cannot be derived the way the wrapper derives its.
-import { useCreateServiceAccount, useDeleteServiceAccount } from "@/api/dataApi";
+import { useDeleteServiceAccount } from "@/api/dataApi";
 import type { DataApiClientDto, DataApiNewClientDto, DataApiServiceAccountDto } from "@/api/generated/model";
 import { ServiceAccountActionsMenu } from "./ServiceAccountActionsMenu";
 
@@ -58,12 +60,10 @@ export default function Clients() {
   const { data: envelope, isLoading, isError, error } = useDataApiListServiceAccounts(ws);
   const accounts = useMemo(() => (envelope?.status === 200 ? envelope.data : []), [envelope]);
 
-  const createMutation = useCreateServiceAccount();
   const deleteMutation = useDeleteServiceAccount();
   const issueMutation = useDataApiIssueClient();
 
   const [query, setQuery] = useState("");
-  const [createOpen, setCreateOpen] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<DataApiServiceAccountDto | null>(null);
   // Issue lives on the PAGE, not in the row's menu: a `DropdownMenuItem`
   // unmounts the whole menu on click, so a dialog rendered inside one closes
@@ -132,7 +132,10 @@ export default function Clients() {
     // the shared shell now.
     <ListPageShell
       title="Clients"
-      action={<Button onClick={() => setCreateOpen(true)}>+ Service account</Button>}
+      // Both entry points are real LINKS to `clients/new`, not buttons that
+      // push the route imperatively: a button looks identical on screen but
+      // cannot be middle-clicked, opened in a new tab, or copied.
+      action={<Button asChild><Link to={`/explore/${ws}/data-api/clients/new`}>+ Service account</Link></Button>}
     >
       <ListStates
         isLoading={isLoading}
@@ -151,7 +154,7 @@ export default function Clients() {
             icon={KeyRound}
             title="No service accounts yet"
             description="Create one to issue OAuth2 clients for the Data API."
-            action={<Button onClick={() => setCreateOpen(true)}>Create your first service account</Button>}
+            action={<Button asChild><Link to={`/explore/${ws}/data-api/clients/new`}>Create your first service account</Link></Button>}
           />
         }
       >
@@ -202,8 +205,6 @@ export default function Clients() {
           pageSize={25}
         />
       </ListStates>
-
-      <CreateServiceAccountDialog ws={ws} open={createOpen} onOpenChange={setCreateOpen} create={createMutation} />
 
       {/* Keyed on the account id so switching rows remounts the form rather
           than carrying the previous account's half-typed name across. */}
@@ -380,8 +381,11 @@ function IssueClientDialog({ ws, account, open, onOpenChange, issue, onIssued }:
   const [name, setName] = useState("");
   const [expiresAt, setExpiresAt] = useState("");
 
-  // Reset on CLOSE, not via a `useEffect` keyed on `open` — see
-  // `CreateServiceAccountDialog.reset` for why.
+  // Reset on CLOSE (every path: Cancel, Esc, overlay click, successful
+  // submit), not in a `useEffect` keyed on `open` — the effect version sets
+  // state synchronously during a commit and trips `react-hooks/set-state-in-
+  // effect`. Same idiom `DatabasesPage.tsx`'s `resetToConn`/`closeAndReset`
+  // use.
   function reset() {
     setName("");
     setExpiresAt("");
@@ -464,8 +468,7 @@ function IssueClientDialog({ ws, account, open, onOpenChange, issue, onIssued }:
  * as gone either way); not fixed here because the natural fix — caching the
  * last-shown value in its own state and updating it inside a `useEffect` — is
  * exactly the `react-hooks/set-state-in-effect` shape this file went out of
- * its way to avoid elsewhere (see `IssueClientDialog`/`CreateServiceAccountDialog`'s
- * `reset()` comments).
+ * its way to avoid elsewhere (see `IssueClientDialog`'s `reset()` comment).
  */
 function NewClientSecretDialog({ client, onOpenChange }: {
   client: DataApiNewClientDto | null;
@@ -524,78 +527,5 @@ function CopyButton({ value }: { value: string }) {
     >
       {copied ? "Copied" : "Copy"}
     </Button>
-  );
-}
-
-function CreateServiceAccountDialog({ ws, open, onOpenChange, create }: {
-  ws: string;
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  create: ReturnType<typeof useCreateServiceAccount>;
-}) {
-  const [name, setName] = useState("");
-  const [description, setDescription] = useState("");
-
-  // Reset on CLOSE (every path: Cancel, Esc, overlay click, successful
-  // submit), not in a `useEffect` keyed on `open` — the effect version sets
-  // state synchronously during a commit and trips `react-hooks/set-state-in-
-  // effect`. Same idiom `DatabasesPage.tsx`'s `resetToConn`/`closeAndReset`
-  // use.
-  function reset() {
-    setName("");
-    setDescription("");
-  }
-
-  function handleOpenChange(next: boolean) {
-    if (!next) reset();
-    onOpenChange(next);
-  }
-
-  const canSubmit = name.trim() !== "";
-
-  async function submit() {
-    if (!canSubmit) return;
-    try {
-      const res = await create.mutateAsync({
-        workspace: ws,
-        data: { name: name.trim(), description: description.trim() || undefined },
-      });
-      if (res.status !== 201) { toast.error("Could not create service account."); return; }
-      toast.success("Service account created");
-      reset();
-      onOpenChange(false);
-    } catch (e) {
-      toast.error(String(e));
-    }
-  }
-
-  return (
-    <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent>
-        <DialogHeader><DialogTitle>New service account</DialogTitle></DialogHeader>
-        <div className="space-y-3">
-          <div className="space-y-1.5">
-            <Label htmlFor="sa-name">Name</Label>
-            <Input id="sa-name" autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="reporting-bot" />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="sa-description">Description</Label>
-            <Textarea
-              id="sa-description"
-              rows={2}
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              placeholder="Optional"
-            />
-          </div>
-        </div>
-        <DialogFooter>
-          <Button variant="outline" onClick={() => handleOpenChange(false)}>Cancel</Button>
-          <Button onClick={submit} disabled={!canSubmit || create.isPending}>
-            {create.isPending ? "Creating…" : "Create"}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
   );
 }

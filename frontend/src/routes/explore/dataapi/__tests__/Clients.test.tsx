@@ -61,7 +61,6 @@ function mockClients(over: Partial<{ data: unknown; isError: boolean; isLoading:
   );
 }
 
-const createAccountMutateAsync = vi.fn();
 const deleteAccountMutateAsync = vi.fn();
 const issueMutateAsync = vi.fn();
 const revokeMutateAsync = vi.fn();
@@ -98,10 +97,6 @@ beforeEach(() => {
     },
   });
 
-  vi.mocked(api.useDataApiCreateServiceAccount).mockReturnValue(
-    { mutateAsync: createAccountMutateAsync, isPending: false } as unknown as
-      ReturnType<typeof api.useDataApiCreateServiceAccount>,
-  );
   vi.mocked(api.useDataApiDeleteServiceAccount).mockReturnValue(
     { mutateAsync: deleteAccountMutateAsync, isPending: false } as unknown as
       ReturnType<typeof api.useDataApiDeleteServiceAccount>,
@@ -123,11 +118,6 @@ beforeEach(() => {
       ReturnType<typeof api.getDataApiListServiceAccountsQueryKey>,
   );
 
-  createAccountMutateAsync.mockResolvedValue({
-    status: 201,
-    data: { ...SERVICE_ACCOUNT, id: "sa-new" },
-    headers: new Headers(),
-  });
   deleteAccountMutateAsync.mockResolvedValue({ status: 200, data: { ok: true }, headers: new Headers() });
   issueMutateAsync.mockResolvedValue({
     status: 201,
@@ -319,21 +309,34 @@ describe("Clients", () => {
     expect(screen.getByText("beta")).toBeInTheDocument();
   });
 
-  it("creating a service account collects a name and calls useDataApiCreateServiceAccount", async () => {
-    const user = userEvent.setup();
+  /**
+   * Creating a service account used to be a dialog this page owned; it is now
+   * the `clients/new` PAGE (`ServiceAccountCreate`), which owns the fields and
+   * the mutation. What is left for the list to get right is that both of its
+   * entry points are real LINKS to that URL — a `<button>` that pushed the
+   * route imperatively would look identical on screen but could not be
+   * middle-clicked, opened in a new tab, or copied.
+   *
+   * The `href` is asserted rather than clicked: this harness mounts only the
+   * `clients` route, so a click would land on nothing and "pass" for a link
+   * pointing anywhere.
+   */
+  it("the + Service account action is a link to the create page, not a dialog trigger", async () => {
     renderClients();
+    await screen.findByText("reporting-bot");
+    expect(screen.getByRole("link", { name: /\+ service account/i })).toHaveAttribute(
+      "href",
+      "/explore/eng/data-api/clients/new",
+    );
+    expect(screen.queryByRole("button", { name: /\+ service account/i })).not.toBeInTheDocument();
+  });
 
-    await user.click(screen.getByRole("button", { name: /service account/i }));
-    await screen.findByText("New service account");
-    await user.type(screen.getByLabelText("Name"), "new-bot");
-    await user.click(screen.getByRole("button", { name: /^create$/i }));
-
-    await waitFor(() => {
-      expect(createAccountMutateAsync).toHaveBeenCalledWith({
-        workspace: "eng",
-        data: { name: "new-bot", description: undefined },
-      });
-    });
+  it("the empty-state CTA links to the create page too", async () => {
+    mockAccounts({ data: { status: 200, data: [] } });
+    renderClients();
+    expect(
+      await screen.findByRole("link", { name: /create your first service account/i }),
+    ).toHaveAttribute("href", "/explore/eng/data-api/clients/new");
   });
 });
 
@@ -368,14 +371,9 @@ describe("Clients — cache invalidation", () => {
     );
   }
 
-  it("creating a service account invalidates the list every picker on this feature reads", async () => {
-    const { qc } = renderClients();
-    const spy = vi.spyOn(qc, "invalidateQueries");
-    await fireSuccess(vi.mocked(api.useDataApiCreateServiceAccount), { workspace: "eng", data: {} });
-    expect(spy).toHaveBeenCalledWith(
-      expect.objectContaining({ queryKey: ["dataApiListServiceAccounts", "eng"] }),
-    );
-  });
+  // Create's invalidation moved with the mutation: this page no longer builds
+  // it, `ServiceAccountCreate` does. The same assertion lives in
+  // `ServiceAccountCreate.invalidation.test.tsx`.
 
   it("deleting a service account invalidates that same list, so the row leaves the table", async () => {
     const { qc } = renderClients();
@@ -387,11 +385,13 @@ describe("Clients — cache invalidation", () => {
   });
 
   // The workspace is read from the mutation VARIABLES, never from a separate
-  // hook argument that could drift from where the write went.
+  // hook argument that could drift from where the write went. Driven through
+  // DELETE here because create's mutation left with the form; the wrapper
+  // derives the key the same way for both.
   it("invalidates the list of the workspace the write actually went to", async () => {
     const { qc } = renderClients();
     const spy = vi.spyOn(qc, "invalidateQueries");
-    await fireSuccess(vi.mocked(api.useDataApiCreateServiceAccount), { workspace: "other-ws", data: {} });
+    await fireSuccess(vi.mocked(api.useDataApiDeleteServiceAccount), { workspace: "other-ws", id: "sa-1" });
     expect(spy).toHaveBeenCalledWith(
       expect.objectContaining({ queryKey: ["dataApiListServiceAccounts", "other-ws"] }),
     );

@@ -43,6 +43,7 @@ import WorkspaceGeneral from "@/routes/explore/settings/WorkspaceGeneral";
 import Endpoints from "@/routes/explore/dataapi/Endpoints";
 import EndpointCreate from "@/routes/explore/dataapi/EndpointCreate";
 import Clients from "@/routes/explore/dataapi/Clients";
+import ServiceAccountCreate from "@/routes/explore/dataapi/ServiceAccountCreate";
 import Activity from "@/routes/explore/dataapi/Activity";
 import EndpointDetail from "@/routes/explore/dataapi/EndpointDetail";
 import Query from "@/routes/explore/dataapi/detail/Query";
@@ -171,6 +172,22 @@ function ExploreRoutes() {
             <Route path="versions" element={<VersionsSection />} />
           </Route>
           <Route path="data-api/clients" element={<RequireFeature feature="data_api"><Clients /></RequireFeature>} />
+          {/* Creating a service account is a PAGE too, for the same reasons as
+              `endpoints/new` above: a URL that can be linked, bookmarked and
+              opened in a tab. (It carries no draft persistence either — the
+              form is plain component state, and a reload empties it.)
+
+              Unlike `endpoints/new` it navigates BACK to its list on success
+              rather than into the created object, because a service account
+              has no detail route to open: it is a row in the Clients table
+              with an actions menu, so that table is its detail view.
+
+              Written before any `:id` sibling as a CONVENTION, for readers —
+              NOT as a fix. There is no `clients/:id` today, and if one is
+              added, v7 ranks segments by specificity rather than declaration
+              order, so this literal wins wherever it sits. Measured on the
+              installed react-router-dom (7.18.2); see `endpoints/new`. */}
+          <Route path="data-api/clients/new" element={<RequireFeature feature="data_api"><ServiceAccountCreate /></RequireFeature>} />
           <Route path="data-api/activity" element={<RequireFeature feature="data_api"><Activity /></RequireFeature>} />
           <Route path="pipelines" element={<Placeholder title="Pipelines" />} />
           <Route path="workflows" element={<Placeholder title="Workflows" />} />
