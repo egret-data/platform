@@ -6,6 +6,7 @@ import {
   getDataApiListEndpointVersionsQueryKey,
   getDataApiListEndpointsQueryKey,
   getDataApiListServiceAccountsQueryKey,
+  useDataApiBookmarkEndpoint,
   useDataApiCreateEndpoint,
   useDataApiCreateServiceAccount,
   useDataApiDeleteEndpoint,
@@ -14,6 +15,7 @@ import {
   useDataApiEnableEndpoint,
   useDataApiPublishEndpoint,
   useDataApiRollbackEndpoint,
+  useDataApiUnbookmarkEndpoint,
   useDataApiUpdateEndpoint,
 } from "./generated/data-api/data-api";
 
@@ -132,6 +134,34 @@ export function useUpdateEndpoint() {
   const invalidateEndpoint = useInvalidateEndpoint();
   return useDataApiUpdateEndpoint({
     mutation: { onSuccess: (_res, { workspace, id }) => invalidateEndpoint(workspace, id) },
+  });
+}
+
+/**
+ * Bookmark / unbookmark.
+ *
+ * The star is rendered from `bookmarked` on the LIST row
+ * (`DataApiEndpointListItemDto`), which is the only response that carries the
+ * flag — `GET /endpoints/{id}` does not — so the list is the one query that
+ * has to be refetched, and invalidating the endpoint RECORD here would refetch
+ * something that cannot answer the question the star asks.
+ *
+ * Note these are also the only two Data API mutations whose variables are
+ * `{workspace, id}` with no `data`; the workspace still comes off the
+ * variables, so a star clicked in one workspace can never invalidate another's
+ * list.
+ */
+export function useBookmarkEndpoint() {
+  const invalidateList = useInvalidateEndpointList();
+  return useDataApiBookmarkEndpoint({
+    mutation: { onSuccess: (_res, { workspace }) => invalidateList(workspace) },
+  });
+}
+
+export function useUnbookmarkEndpoint() {
+  const invalidateList = useInvalidateEndpointList();
+  return useDataApiUnbookmarkEndpoint({
+    mutation: { onSuccess: (_res, { workspace }) => invalidateList(workspace) },
   });
 }
 

@@ -10,10 +10,19 @@ export interface FolderGroup<T> { folder: Folder | null; rows: T[] }
 export function groupByFolder<T extends { folder_id?: string | null }>(
   rows: T[], folders: Folder[], hideEmpty: boolean,
 ): FolderGroup<T>[] {
+  // A `folder_id` naming a folder that is not in `folders` — deleted, still
+  // loading, or another entity type — is not a usable folder, so such a row is
+  // Uncategorized. Deciding that HERE, in the same pass that buckets the rest,
+  // is what keeps the caller's sort: every consumer sorts before grouping, and
+  // these rows take their place among the folderless ones in input order rather
+  // than being appended after them. They used to vanish entirely, bucketed under
+  // a key the output loop never read, so the row could not be seen, opened, or
+  // moved out of the folder that no longer exists.
+  const known = new Set(folders.map((f) => f.id));
   const byId = new Map<string, T[]>();
   const uncat: T[] = [];
   for (const r of rows) {
-    if (r.folder_id) {
+    if (r.folder_id && known.has(r.folder_id)) {
       const arr = byId.get(r.folder_id) ?? [];
       arr.push(r);
       byId.set(r.folder_id, arr);

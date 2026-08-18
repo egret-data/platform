@@ -25,7 +25,7 @@ import * as api from "@/api/generated/data-api/data-api";
 import * as foldersApi from "@/api/generated/folders/folders";
 import * as databasesApi from "@/api/databases";
 import { ApiError } from "@/api/client";
-import type { DataApiEndpointDto } from "@/api/generated/model";
+import type { DataApiEndpointListItemDto } from "@/api/generated/model";
 import Endpoints from "@/routes/explore/dataapi/Endpoints";
 
 function mockList(over: Partial<{ data: unknown; isError: boolean; isLoading: boolean; error: unknown }> = {}) {
@@ -45,7 +45,7 @@ function mockFolders(folders: { id: string; name: string }[] = []) {
 const DB_TRINO = { id: "db-1", name: "warehouse", engine: "trino", host: "h", port: 1, options: {}, has_secret: true, status: "ok", delegated: false };
 const DB_STARROCKS = { id: "db-2", name: "speedy", engine: "starrocks", host: "h", port: 2, options: {}, has_secret: true, status: "ok", delegated: false };
 
-function makeEndpoint(overrides: Partial<DataApiEndpointDto> = {}): DataApiEndpointDto {
+function makeEndpoint(overrides: Partial<DataApiEndpointListItemDto> = {}): DataApiEndpointListItemDto {
   return {
     id: "ep-1",
     folder_id: null,
@@ -67,8 +67,12 @@ function makeEndpoint(overrides: Partial<DataApiEndpointDto> = {}): DataApiEndpo
     created_by: "user-1",
     created_at: "2026-08-01T00:00:00Z",
     updated_at: "2026-08-10T00:00:00Z",
+    // The list DTO carries the CALLER's own flag (`DataApiEndpointListItemDto`),
+    // so a fixture without it would render every star in a state the server
+    // never sent. Default false; the bookmark tests override it per row.
+    bookmarked: false,
     ...overrides,
-  } as unknown as DataApiEndpointDto;
+  } as unknown as DataApiEndpointListItemDto;
 }
 
 const FOLDERED_ROW = makeEndpoint({
@@ -82,8 +86,11 @@ const SERVICE_ACCOUNT = { id: "sa-1", name: "reporting-bot", description: "", em
 
 const createMutateAsync = vi.fn();
 const deleteMutateAsync = vi.fn();
+const bookmarkMutateAsync = vi.fn();
+const unbookmarkMutateAsync = vi.fn();
 const disableMutateAsync = vi.fn();
 const enableMutateAsync = vi.fn();
+const updateMutateAsync = vi.fn();
 
 function renderEndpoints() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -126,11 +133,23 @@ beforeEach(() => {
   vi.mocked(api.useDataApiDeleteEndpoint).mockReturnValue(
     { mutateAsync: deleteMutateAsync, isPending: false } as unknown as ReturnType<typeof api.useDataApiDeleteEndpoint>,
   );
+  vi.mocked(api.useDataApiBookmarkEndpoint).mockReturnValue(
+    { mutateAsync: bookmarkMutateAsync, isPending: false } as unknown as ReturnType<typeof api.useDataApiBookmarkEndpoint>,
+  );
+  vi.mocked(api.useDataApiUnbookmarkEndpoint).mockReturnValue(
+    { mutateAsync: unbookmarkMutateAsync, isPending: false } as unknown as ReturnType<typeof api.useDataApiUnbookmarkEndpoint>,
+  );
   vi.mocked(api.useDataApiDisableEndpoint).mockReturnValue(
     { mutateAsync: disableMutateAsync, isPending: false } as unknown as ReturnType<typeof api.useDataApiDisableEndpoint>,
   );
   vi.mocked(api.useDataApiEnableEndpoint).mockReturnValue(
     { mutateAsync: enableMutateAsync, isPending: false } as unknown as ReturnType<typeof api.useDataApiEnableEndpoint>,
+  );
+  // Moving a row between folders is a PATCH on the endpoint itself — the same
+  // `UpdateEndpointInput` the detail route saves through — so the folder tests
+  // assert on THIS mock's payload.
+  vi.mocked(api.useDataApiUpdateEndpoint).mockReturnValue(
+    { mutateAsync: updateMutateAsync, isPending: false } as unknown as ReturnType<typeof api.useDataApiUpdateEndpoint>,
   );
   vi.mocked(api.useDataApiListServiceAccounts).mockReturnValue(
     { data: { status: 200, data: [SERVICE_ACCOUNT] }, isLoading: false, isError: false } as unknown as
@@ -154,8 +173,23 @@ beforeEach(() => {
 
   createMutateAsync.mockResolvedValue({ status: 201, data: { id: "ep-new" }, headers: new Headers() });
   deleteMutateAsync.mockResolvedValue({ status: 200, data: {}, headers: new Headers() });
+  bookmarkMutateAsync.mockResolvedValue({ status: 200, data: {}, headers: new Headers() });
+  unbookmarkMutateAsync.mockResolvedValue({ status: 200, data: {}, headers: new Headers() });
   disableMutateAsync.mockResolvedValue({ status: 200, data: {}, headers: new Headers() });
   enableMutateAsync.mockResolvedValue({ status: 200, data: {}, headers: new Headers() });
+  updateMutateAsync.mockResolvedValue({ status: 200, data: {}, headers: new Headers() });
+
+  // `useFolderMutations` (the page's New-folder path) runs a REAL `useMutation`
+  // over this automocked fetch fn; without a resolved value it returns
+  // `undefined` and `.data` throws inside the mutation.
+  vi.mocked(foldersApi.foldersFoldersCreate).mockResolvedValue(
+    { status: 201, data: { id: "f-new", name: "New folder" }, headers: new Headers() } as unknown as
+      Awaited<ReturnType<typeof foldersApi.foldersFoldersCreate>>,
+  );
+  vi.mocked(foldersApi.getFoldersFoldersListQueryKey).mockImplementation(
+    (ws, kind) => ["foldersFoldersList", ws, kind] as unknown as
+      ReturnType<typeof foldersApi.getFoldersFoldersListQueryKey>,
+  );
 
   // jsdom has no real download machinery; the download dialog's success path
   // touches it, so stub it out rather than let it throw/log "not implemented".
@@ -428,10 +462,9 @@ describe("Endpoints — cache invalidation", () => {
   it("Disable invalidates the endpoint list, so the badge cannot keep reading Live", async () => {
     mockList({ data: { status: 200, data: [FOLDERED_ROW] } });
     // The disable/enable mutations are constructed by `EndpointActionsMenu`,
-    // i.e. per rendered ROW — so the row has to actually be on screen, and
-    // `groupByFolder` drops a row whose `folder_id` names a folder the list
-    // does not contain. Without this the hook is never called and `fireSuccess`
-    // silently fires nothing.
+    // i.e. per rendered ROW — so the row has to actually be on screen, and this
+    // row sits in `f-1`. Keep the folder mocked: without a rendered row the
+    // hook is never called and `fireSuccess` silently fires nothing.
     mockFolders([{ id: "f-1", name: "Reporting" }]);
     const { qc } = renderEndpoints();
     const spy = vi.spyOn(qc, "invalidateQueries");
@@ -466,6 +499,29 @@ describe("Endpoints — cache invalidation", () => {
     const { qc } = renderEndpoints();
     const spy = vi.spyOn(qc, "invalidateQueries");
     await fireSuccess(vi.mocked(api.useDataApiCreateEndpoint), { workspace: "eng", data: {} });
+    expect(spy).toHaveBeenCalledWith(
+      expect.objectContaining({ queryKey: ["dataApiListEndpoints", "eng"] }),
+    );
+  });
+
+  // `bookmarked` only exists on the LIST row, so the list is the one query a
+  // star can go stale in — and with `staleTime: 30000` an un-invalidated star
+  // springs back to its old fill on the next render.
+  it("Bookmark invalidates the endpoint list, so the star cannot spring back", async () => {
+    mockList({ data: { status: 200, data: [LOOSE_ROW] } });
+    const { qc } = renderEndpoints();
+    const spy = vi.spyOn(qc, "invalidateQueries");
+    await fireSuccess(vi.mocked(api.useDataApiBookmarkEndpoint), { workspace: "eng", id: "ep-2" });
+    expect(spy).toHaveBeenCalledWith(
+      expect.objectContaining({ queryKey: ["dataApiListEndpoints", "eng"] }),
+    );
+  });
+
+  it("Unbookmark invalidates the endpoint list too", async () => {
+    mockList({ data: { status: 200, data: [LOOSE_ROW] } });
+    const { qc } = renderEndpoints();
+    const spy = vi.spyOn(qc, "invalidateQueries");
+    await fireSuccess(vi.mocked(api.useDataApiUnbookmarkEndpoint), { workspace: "eng", id: "ep-2" });
     expect(spy).toHaveBeenCalledWith(
       expect.objectContaining({ queryKey: ["dataApiListEndpoints", "eng"] }),
     );
@@ -747,10 +803,12 @@ describe("Endpoints — facets, row menu and bulk mode", () => {
  * only rows in a known, expanded folder passes with the bug fully present.
  */
 describe("Endpoints — bulk select only ever reaches rows that are on screen", () => {
-  it("does not select or delete a row groupByFolder dropped for an orphan folder_id", async () => {
+  it("shows and selects a row whose folder_id is an orphan, because it is now on screen", async () => {
     // `f-missing` is not in the folders list — the row a concurrent folder
-    // delete left behind. `groupByFolder` emits no bucket for it, so the row
-    // is not rendered at all.
+    // delete left behind. `groupByFolder` used to emit no bucket for it, so the
+    // row rendered nowhere and "Select all" could sweep in something invisible.
+    // It now falls into Uncategorized, so it is visible, selectable, and — with
+    // the user looking straight at it — legitimately deletable.
     mockList({
       data: {
         status: 200,
@@ -764,13 +822,13 @@ describe("Endpoints — bulk select only ever reaches rows that are on screen", 
     const user = userEvent.setup();
     renderEndpoints();
     await screen.findByText("shown row");
-    expect(screen.queryByText("orphan row")).not.toBeInTheDocument();
+    expect(screen.getByText("orphan row")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Bulk select" }));
     await user.click(screen.getByRole("checkbox", { name: "Select all" }));
 
     // The count must describe what is in front of the user, not the filtered set.
-    expect(screen.getByText("1 selected")).toBeInTheDocument();
+    expect(screen.getByText("2 selected")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: /delete selected/i }));
     await user.type(await screen.findByPlaceholderText("delete"), "delete");
@@ -779,8 +837,8 @@ describe("Endpoints — bulk select only ever reaches rows that are on screen", 
     await waitFor(() => {
       expect(deleteMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "e-shown" });
     });
-    expect(deleteMutateAsync).not.toHaveBeenCalledWith({ workspace: "eng", id: "e-orphan" });
-    expect(deleteMutateAsync).toHaveBeenCalledTimes(1);
+    expect(deleteMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "e-orphan" });
+    expect(deleteMutateAsync).toHaveBeenCalledTimes(2);
   });
 
   it("does not select a collapsed folder's rows, which are grouped but not on screen", async () => {
@@ -891,7 +949,7 @@ describe("Endpoints — a row selected BEFORE it is hidden", () => {
  */
 describe("Endpoints — the list changing underneath the page", () => {
   /** A list hook whose data is read fresh on every render, not frozen at mock time. */
-  function mockListDynamic(get: () => DataApiEndpointDto[]) {
+  function mockListDynamic(get: () => DataApiEndpointListItemDto[]) {
     vi.mocked(api.useDataApiListEndpoints).mockImplementation(
       () => ({ data: { status: 200, data: get() }, isLoading: false, isError: false, error: null }) as unknown as
         ReturnType<typeof api.useDataApiListEndpoints>,
@@ -899,7 +957,7 @@ describe("Endpoints — the list changing underneath the page", () => {
   }
 
   it("does not report a bulk delete it never ran when the selection empties behind the dialog", async () => {
-    let rows: DataApiEndpointDto[] = [makeEndpoint({ id: "e1", name: "one", state: "draft" })];
+    let rows: DataApiEndpointListItemDto[] = [makeEndpoint({ id: "e1", name: "one", state: "draft" })];
     mockListDynamic(() => rows);
     const user = userEvent.setup();
     const { rerenderTree } = renderEndpoints();
@@ -924,7 +982,7 @@ describe("Endpoints — the list changing underneath the page", () => {
   });
 
   it("leaves bulk mode behind when the last endpoint goes, so the checkbox column does not return with the next one", async () => {
-    let rows: DataApiEndpointDto[] = [makeEndpoint({ id: "e1", name: "one", state: "draft" })];
+    let rows: DataApiEndpointListItemDto[] = [makeEndpoint({ id: "e1", name: "one", state: "draft" })];
     mockListDynamic(() => rows);
     const user = userEvent.setup();
     const { rerenderTree } = renderEndpoints();
@@ -1015,5 +1073,360 @@ describe("Endpoints — row menus are named after their row", () => {
     // rows fall back to the bare default.
     expect(screen.getByRole("button", { name: "Actions for one" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Actions for two" })).toBeInTheDocument();
+  });
+});
+
+/**
+ * Bookmarks.
+ *
+ * Every fixture here has TWO rows in DIFFERENT bookmark states, deliberately.
+ * A one-row fixture cannot tell "this star reflects THIS row" apart from "this
+ * star reflects whether anything at all is bookmarked", and it cannot tell "the
+ * click sent this row's id" apart from "the click sent a constant" — which is
+ * exactly how a real defect survived four green tests one task ago.
+ */
+describe("Endpoints — bookmarks", () => {
+  const STARRED = makeEndpoint({ id: "ep-star", name: "Starred report", bookmarked: true, state: "draft" });
+  const PLAIN = makeEndpoint({ id: "ep-plain", name: "Plain report", bookmarked: false, state: "draft" });
+  /** A second unbookmarked row: the peer that exposes an override leaking off its row. */
+  const PLAIN_PEER = makeEndpoint({ id: "ep-plain-2", name: "Second plain report", bookmarked: false, state: "draft" });
+
+  function renderTwoRows() {
+    mockList({ data: { status: 200, data: [STARRED, PLAIN] } });
+    return renderEndpoints();
+  }
+
+  it("gives each row a star that reads that row's own flag", async () => {
+    renderTwoRows();
+    await screen.findByText("Starred report");
+    // Two rows, two different states, two different labels — a star driven by
+    // "does the user have any bookmark" would make these two agree.
+    expect(screen.getByRole("button", { name: "Remove bookmark from Starred report" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByRole("button", { name: "Bookmark Plain report" })).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("filters to bookmarked-only, hiding the unbookmarked row", async () => {
+    const user = userEvent.setup();
+    renderTwoRows();
+    await screen.findByText("Plain report");
+
+    await user.click(screen.getByRole("button", { name: "Bookmarks" }));
+
+    expect(screen.getByText("Starred report")).toBeInTheDocument();
+    expect(screen.queryByText("Plain report")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Bookmarks" })).toHaveAttribute("aria-pressed", "true");
+
+    // …and it is a TOGGLE: the hidden row comes back.
+    await user.click(screen.getByRole("button", { name: "Bookmarks" }));
+    expect(screen.getByText("Plain report")).toBeInTheDocument();
+  });
+
+  it("says the list is empty because of the bookmark filter, not because of a facet", async () => {
+    const user = userEvent.setup();
+    mockList({ data: { status: 200, data: [PLAIN, makeEndpoint({ id: "ep-3", name: "Another plain" })] } });
+    renderEndpoints();
+    await screen.findByText("Plain report");
+
+    await user.click(screen.getByRole("button", { name: "Bookmarks" }));
+    expect(screen.getByText("No bookmarked endpoints.")).toBeInTheDocument();
+  });
+
+  it("adds the bookmark for the row whose star was clicked", async () => {
+    const user = userEvent.setup();
+    renderTwoRows();
+    await screen.findByText("Plain report");
+
+    await user.click(screen.getByRole("button", { name: "Bookmark Plain report" }));
+
+    await waitFor(() =>
+      expect(bookmarkMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "ep-plain" }),
+    );
+    // The direction is read from the row, so the OTHER mutation must stay put.
+    expect(unbookmarkMutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("removes the bookmark for the row whose filled star was clicked", async () => {
+    const user = userEvent.setup();
+    renderTwoRows();
+    await screen.findByText("Starred report");
+
+    await user.click(screen.getByRole("button", { name: "Remove bookmark from Starred report" }));
+
+    await waitFor(() =>
+      expect(unbookmarkMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "ep-star" }),
+    );
+    expect(bookmarkMutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a failed star instead of swallowing it", async () => {
+    bookmarkMutateAsync.mockRejectedValue(new ApiError(500, "boom"));
+    const user = userEvent.setup();
+    renderTwoRows();
+    await screen.findByText("Plain report");
+
+    await user.click(screen.getByRole("button", { name: "Bookmark Plain report" }));
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalled());
+  });
+
+  /**
+   * The star is OPTIMISTIC.
+   *
+   * A click has to survive two round trips before the server can answer it —
+   * the POST, then the refetch of the list the wrapper invalidated. These
+   * tests hold the mutation open on purpose (`deferred()`), because everything
+   * that goes wrong here goes wrong *during* that window and is invisible to a
+   * test whose mock resolves immediately.
+   */
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    let reject!: (reason: unknown) => void;
+    const promise = new Promise<T>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  }
+
+  const OK = { status: 200, data: {}, headers: new Headers() };
+
+  it("fills the star before the mutation resolves, and only the clicked row's", async () => {
+    const inFlight = deferred<unknown>();
+    bookmarkMutateAsync.mockReturnValue(inFlight.promise);
+    const user = userEvent.setup();
+    // THREE rows, and the third starts in the SAME state as the one clicked.
+    // With only STARRED and PLAIN an override that leaked to every row would
+    // be invisible — the leak sets `true`, and the row that could expose it is
+    // already `true`. The peer that shares the clicked row's starting state is
+    // what makes "only the clicked row's" an assertion rather than a wish.
+    mockList({ data: { status: 200, data: [STARRED, PLAIN, PLAIN_PEER] } });
+    renderEndpoints();
+    await screen.findByText("Plain report");
+
+    await user.click(screen.getByRole("button", { name: "Bookmark Plain report" }));
+
+    // Still in flight — nothing has come back, and the star has already moved.
+    expect(bookmarkMutateAsync).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "Remove bookmark from Plain report" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    // …and the rows that were not clicked are exactly where they were. An
+    // optimistic flip that leaked across rows would be the same defect as a
+    // star reading "is anything bookmarked".
+    expect(screen.getByRole("button", { name: "Bookmark Second plain report" })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    expect(screen.getByRole("button", { name: "Remove bookmark from Starred report" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+
+    inFlight.resolve(OK);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Remove bookmark from Plain report" })).toBeInTheDocument(),
+    );
+  });
+
+  it("puts the star back when the mutation is rejected", async () => {
+    const inFlight = deferred<unknown>();
+    bookmarkMutateAsync.mockReturnValue(inFlight.promise);
+    const user = userEvent.setup();
+    renderTwoRows();
+    await screen.findByText("Plain report");
+
+    await user.click(screen.getByRole("button", { name: "Bookmark Plain report" }));
+    // The optimistic flip happened…
+    expect(screen.getByRole("button", { name: "Remove bookmark from Plain report" })).toBeInTheDocument();
+
+    inFlight.reject(new ApiError(500, "boom"));
+
+    // …and it is taken back, because a flip with no rollback leaves the UI
+    // asserting a bookmark the server never stored.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Bookmark Plain report" })).toHaveAttribute("aria-pressed", "false"),
+    );
+    expect(screen.queryByRole("button", { name: "Remove bookmark from Plain report" })).not.toBeInTheDocument();
+    expect(toast.error).toHaveBeenCalled();
+  });
+
+  it("reverses on a second click instead of re-firing the first one", async () => {
+    // The failure the review named: with a non-optimistic star, `bookmarked`
+    // is still false while the POST is in flight, so an impatient second click
+    // computes the same direction and adds the bookmark twice — the control
+    // silently doing the opposite of what a toggle promises.
+    const inFlight = deferred<unknown>();
+    bookmarkMutateAsync.mockReturnValue(inFlight.promise);
+    const user = userEvent.setup();
+    renderTwoRows();
+    await screen.findByText("Plain report");
+
+    await user.click(screen.getByRole("button", { name: "Bookmark Plain report" }));
+    await user.click(screen.getByRole("button", { name: "Remove bookmark from Plain report" }));
+
+    expect(bookmarkMutateAsync).toHaveBeenCalledTimes(1);
+    await waitFor(() =>
+      expect(unbookmarkMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "ep-plain" }),
+    );
+    expect(screen.getByRole("button", { name: "Bookmark Plain report" })).toHaveAttribute("aria-pressed", "false");
+
+    inFlight.resolve(OK);
+  });
+
+  it("drops an un-starred row out of the bookmarked-only view straight away", async () => {
+    const inFlight = deferred<unknown>();
+    unbookmarkMutateAsync.mockReturnValue(inFlight.promise);
+    const user = userEvent.setup();
+    renderTwoRows();
+    await screen.findByText("Starred report");
+
+    await user.click(screen.getByRole("button", { name: "Bookmarks" }));
+    expect(screen.getByText("Starred report")).toBeInTheDocument();
+
+    // The filter reads the same override the glyph does, so the row leaves on
+    // the click rather than a refetch later.
+    await user.click(screen.getByRole("button", { name: "Remove bookmark from Starred report" }));
+    expect(screen.queryByText("Starred report")).not.toBeInTheDocument();
+
+    inFlight.resolve(OK);
+  });
+});
+
+/**
+ * Folders: creating one, and moving a row between them.
+ *
+ * Every fixture here has TWO folders and a row that is ALREADY IN ONE. With a
+ * single folder, "moved to the right folder" and "moved to some folder" are the
+ * same assertion, and a move that ignored its argument would pass; with a row
+ * that starts folderless, "sent an explicit null" and "sent nothing" both leave
+ * it where it was.
+ */
+describe("Endpoints — folders", () => {
+  const REPORTING = { id: "f-1", name: "Reporting" };
+  const ARCHIVE = { id: "f-2", name: "Archive" };
+  const IN_REPORTING = makeEndpoint({ id: "ep-1", name: "Daily report", folder_id: "f-1" });
+  const IN_ARCHIVE = makeEndpoint({ id: "ep-2", name: "Old export", folder_id: "f-2" });
+
+  function renderTwoFolders() {
+    mockList({ data: { status: 200, data: [IN_REPORTING, IN_ARCHIVE] } });
+    mockFolders([REPORTING, ARCHIVE]);
+    return renderEndpoints();
+  }
+
+  /** The one PATCH body the page sent, as the request object it really was. */
+  function soleUpdateBody(): Record<string, unknown> {
+    expect(updateMutateAsync).toHaveBeenCalledTimes(1);
+    const [vars] = updateMutateAsync.mock.calls[0] as [{ workspace: string; id: string; data: Record<string, unknown> }];
+    return vars.data;
+  }
+
+  it("moves a row into the folder that was chosen, not merely into a folder", async () => {
+    const user = userEvent.setup();
+    renderTwoFolders();
+    await screen.findByText("Daily report");
+
+    await user.click(screen.getByRole("button", { name: "Actions for Daily report" }));
+    // The row's OWN folder is offered but inert — a live "Move to Reporting" on
+    // a row already in Reporting is a request that changes nothing.
+    expect(await screen.findByRole("menuitem", { name: 'Move to "Reporting"' })).toHaveAttribute("aria-disabled", "true");
+
+    await user.click(screen.getByRole("menuitem", { name: 'Move to "Archive"' }));
+
+    await waitFor(() => expect(updateMutateAsync).toHaveBeenCalled());
+    expect(updateMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "ep-1", data: { folder_id: "f-2" } });
+  });
+
+  it("sends an explicit null — not an omitted key — when moving to Uncategorized", async () => {
+    const user = userEvent.setup();
+    renderTwoFolders();
+    await screen.findByText("Daily report");
+
+    await user.click(screen.getByRole("button", { name: "Actions for Daily report" }));
+    await user.click(await screen.findByRole("menuitem", { name: /remove from folder/i }));
+
+    await waitFor(() => expect(updateMutateAsync).toHaveBeenCalled());
+    const body = soleUpdateBody();
+    // `folder_id` is `Option<Option<Uuid>>` server-side: an ABSENT key means
+    // "leave the folder alone" and `null` means "clear it". `{}` and
+    // `{folder_id: null}` are therefore different requests with opposite
+    // meanings, and only the key's PRESENCE tells them apart.
+    expect(Object.prototype.hasOwnProperty.call(body, "folder_id")).toBe(true);
+    expect(body.folder_id).toBeNull();
+    // …and nothing else rides along: a PATCH carrying the row's name or sql
+    // would re-submit whatever the list last fetched for them.
+    expect(Object.keys(body)).toEqual(["folder_id"]);
+  });
+
+  it("does not offer Remove from folder to a row that is already uncategorized", async () => {
+    mockList({ data: { status: 200, data: [IN_REPORTING, makeEndpoint({ id: "ep-3", name: "Loose one", folder_id: null })] } });
+    mockFolders([REPORTING, ARCHIVE]);
+    const user = userEvent.setup();
+    renderEndpoints();
+    await screen.findByText("Loose one");
+
+    await user.click(screen.getByRole("button", { name: "Actions for Loose one" }));
+    await screen.findByRole("menuitem", { name: 'Move to "Archive"' });
+    expect(screen.queryByRole("menuitem", { name: /remove from folder/i })).not.toBeInTheDocument();
+  });
+
+  it("creates a folder from the toolbar, and the list groups under it", async () => {
+    const user = userEvent.setup();
+    const { rerenderTree } = renderTwoFolders();
+    await screen.findByText("Daily report");
+
+    await user.click(screen.getByRole("button", { name: "New folder" }));
+    await user.type(await screen.findByPlaceholderText("Folder name"), "Ops");
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() => {
+      expect(foldersApi.foldersFoldersCreate).toHaveBeenCalledWith("eng", "data_api_endpoints", { name: "Ops" });
+    });
+    // Creating a folder must not move anything.
+    expect(updateMutateAsync).not.toHaveBeenCalled();
+    expect(toast.success).toHaveBeenCalledWith("Folder created");
+
+    // The refetch the invalidation triggers, played back: the new folder is a
+    // section header of its own, alongside the two that were already there.
+    mockFolders([REPORTING, ARCHIVE, { id: "f-new", name: "Ops" }]);
+    rerenderTree();
+    expect(await screen.findByText("Ops")).toBeInTheDocument();
+    expect(screen.getByText("Reporting")).toBeInTheDocument();
+  });
+
+  it("moves the row whose menu was used into a brand-new folder", async () => {
+    const user = userEvent.setup();
+    renderTwoFolders();
+    await screen.findByText("Old export");
+
+    // The SECOND row's menu, with a peer in the same starting state one row
+    // above it: a handler that moved "the first row" would look identical here
+    // if only one row existed.
+    await user.click(screen.getByRole("button", { name: "Actions for Old export" }));
+    await user.click(await screen.findByRole("menuitem", { name: /move to new folder/i }));
+    await user.type(await screen.findByPlaceholderText("Folder name"), "Ops");
+    await user.click(screen.getByRole("button", { name: "Move" }));
+
+    await waitFor(() => expect(updateMutateAsync).toHaveBeenCalled());
+    expect(foldersApi.foldersFoldersCreate).toHaveBeenCalledWith("eng", "data_api_endpoints", { name: "Ops" });
+    // `f-new` is what the create resolved with — the id has to come from the
+    // response, not from the name that was typed.
+    expect(updateMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "ep-2", data: { folder_id: "f-new" } });
+  });
+
+  it("reports a failed move rather than leaving the row looking moved", async () => {
+    updateMutateAsync.mockRejectedValueOnce(new ApiError(403, "forbidden"));
+    const user = userEvent.setup();
+    renderTwoFolders();
+    await screen.findByText("Daily report");
+
+    await user.click(screen.getByRole("button", { name: "Actions for Daily report" }));
+    await user.click(await screen.findByRole("menuitem", { name: 'Move to "Archive"' }));
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalled());
+    expect(toast.success).not.toHaveBeenCalled();
   });
 });

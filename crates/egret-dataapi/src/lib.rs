@@ -67,8 +67,8 @@ pub use activity::{
 };
 pub use clients::{ClientStore, NewClient, DATA_API_TTL_SECS};
 pub use endpoints::{
-    CreateEndpointInput, DataApiEndpointDto, DeletedEndpoint, EndpointStore, UpdateEndpointInput,
-    ALLOWED_METHODS, OBJECT_KIND,
+    CreateEndpointInput, DataApiEndpointDto, DataApiEndpointListItemDto, DeletedEndpoint,
+    EndpointStore, UpdateEndpointInput, ALLOWED_METHODS, BOOKMARK_ENTITY, OBJECT_KIND,
 };
 pub use lifecycle::{
     check_cache_scope, check_enum_params, check_params, check_single_select, validate,

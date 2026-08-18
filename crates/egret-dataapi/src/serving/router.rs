@@ -856,15 +856,18 @@ fn render_error(e: crate::render::RenderError, has_repeats: bool) -> ServingErro
 ///
 /// Endpoints carry a `folder_id` and the PDP would cascade a folder-scoped grant
 /// to the items inside it, but this passes `None` — only a grant on the endpoint
-/// ITSELF can allow the call. That is deliberate for now: endpoint folders are
-/// not creatable (`egret-bi`'s `kind_perms` has no entry for them, see
-/// [`crate::endpoints::FOLDER_ENTITY_TYPE`]), so a cascade would be a code path
-/// nothing can currently exercise and nothing tests. Reading the folder would
-/// also cost a second query per request for that unreachable case. When P5 makes
-/// folders reachable, whoever wires them must decide whether "invoke everything
-/// in this folder" is a grant an operator should be able to write, and pass the
-/// real `folder_id` here if so — it widens access, so it is a decision, not a
-/// fix.
+/// ITSELF can allow the call.
+///
+/// Endpoint folders ARE creatable now: `egret-bi`'s `kind_perms` gained a
+/// `"data_api_endpoints"` arm (see [`crate::endpoints::FOLDER_ENTITY_TYPE`]) and
+/// the Endpoints page creates them and moves rows between them. `None` stays
+/// anyway, and is now a live choice rather than an unreachable branch: passing
+/// the real `folder_id` would let a folder-scoped grant authorize INVOKING every
+/// endpoint filed into that folder, including ones moved in later by someone
+/// who was only tidying a list. That widens access, so it is a decision for
+/// whoever wants it — with a test that pins the cascade — not a fix to apply
+/// while wiring the UI. Reading the folder would also cost a second query per
+/// served request.
 async fn invoke_allowed(
     st: &DataApiState,
     principal: &super::ServingPrincipal,

@@ -23,11 +23,27 @@ use uuid::Uuid;
 
 /// Whether `user_id` may invoke `endpoint_id` in `ws`.
 ///
-/// `folder_id: None` — a folder-scoped grant does NOT cascade to invoke. That is
-/// a decision, not an omission: "invoke everything in this folder" widens access
-/// and nobody has asked for it. When P5's UI makes endpoint folders reachable,
-/// whoever wants that cascade passes the real folder here and accepts what it
-/// means.
+/// `folder_id: None` — a folder-scoped grant does NOT cascade to invoke. This is
+/// a conservative choice on a path that is now REACHABLE: endpoint folders ship
+/// in this branch (create, and move a row between them), so the endpoint passed
+/// here may well sit in one. Passing its folder anyway would mean "invoke
+/// everything in this folder", which widens access and nobody has asked for it.
+///
+/// What that leaves open, measured rather than assumed:
+///
+/// * This crate only ever writes `scope_type = 'object'` grants (`routes.rs`,
+///   the endpoint Access seam), so it creates no folder-scoped invoke grant of
+///   its own and nothing here is contradicted by its own writes.
+/// * `egret-bi`'s shares router DOES accept `kind = "folder"`, and its
+///   `object_ref` resolves a folder straight out of `analytics.folders` with no
+///   `entity_type` filter (`shares.rs`). `analytics.folders` is polymorphic, so
+///   an admin can share a Data API endpoint FOLDER today — and because this
+///   call passes `None`, that share will not cascade to invoke.
+///
+/// The result is a silently INEFFECTIVE grant, not an over-permission: the
+/// admin is told nothing, and the grantee still cannot invoke. That is a
+/// deferred product decision (either cascade it, or refuse the share), not a
+/// bug to fix inside this function.
 ///
 /// An error is an error, never a refusal. A PDP that could not answer is our
 /// fault: returning `false` would send an operator to write a grant that already

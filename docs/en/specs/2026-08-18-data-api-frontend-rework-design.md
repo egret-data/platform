@@ -35,10 +35,12 @@ The request was for frontend work. Three of the seven capabilities cannot be del
 |---|---|---|
 | Bulk select, New pages, detail layout, facets, row menu | none | no |
 | Bookmark | two routes, `POST`/`DELETE /ws/{workspace}/data-api/endpoints/{id}/bookmark` | **no** — `bookmarks` is generic (`entity_type text`, `entity_id uuid`) |
-| Move to folder | `folder_id` on `UpdateEndpointInput` and the store | **no** — `dataapi.endpoints.folder_id` already exists |
+| Move to folder | **none — already implemented.** `UpdateEndpointInput.folder_id` is `Option<Option<Uuid>>` (`endpoints.rs:254`), the store honours it (`SET folder_id = CASE WHEN $14 …`), and `routes.rs:912` validates workspace containment via `scoped_folder`. Only the UI is missing. | no |
 | Trash | `deleted_at`, store, routes, **and the serving path must exclude trashed endpoints** | **yes** |
 
 Trash is the one with a dangerous edge, and §6 is about that edge rather than about the UI.
+
+*(Corrected. An earlier version of this table said moving to a folder needed a `folder_id` field added to `UpdateEndpointInput`. It is already there, complete with containment validation — the claim came from grepping `routes.rs`, where the struct does not live, and reading the empty result as proof of absence. That is the same mistake this spec already had to correct once about `EmptyState`. **Absence of a grep hit is not absence of the feature; grep the file that would define it, or ask the compiler.**)*
 
 ## 2. Shared primitives, extracted first
 

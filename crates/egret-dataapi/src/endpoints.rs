@@ -76,6 +76,14 @@ struct Row {
     updated_at: DateTime<Utc>,
 }
 
+/// [`Row`] plus the calling user's `bookmarked` flag, for [`EndpointStore::list_for`].
+#[derive(Debug, sqlx::FromRow)]
+struct RowWithBookmark {
+    #[sqlx(flatten)]
+    row: Row,
+    bookmarked: bool,
+}
+
 /// An endpoint draft as the management UI sees it.
 ///
 /// Named with the `DataApi` prefix for the same reason `DataApiClientDto` is:
@@ -106,6 +114,31 @@ pub struct DataApiEndpointDto {
     pub created_by: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// One row of the endpoint LIST: the draft, plus the calling user's own
+/// `bookmarked` flag.
+///
+/// A separate type rather than a field on [`DataApiEndpointDto`] because that
+/// DTO is also what `GET /endpoints/{id}`, `POST /endpoints`, `PATCH
+/// /endpoints/{id}`, disable/enable and the publish lifecycle's locked read
+/// return — and half of those have no user to be per-user ABOUT. A
+/// `bookmarked` on the create response would be a field that is always `false`
+/// by construction, and one on the lifecycle's read would be a field with
+/// nobody to answer for; either is a value a client could believe. The flag
+/// exists where it is asked for and nowhere else.
+///
+/// `#[serde(flatten)]` so the wire shape stays FLAT — `{...endpoint,
+/// "bookmarked": true}`, one object, exactly as if the field lived on the DTO —
+/// and so a field added to [`DataApiEndpointDto`] tomorrow appears in the list
+/// with nothing here to update. The same idiom `NotebookDetail` and
+/// `EngineDetailDto` use; utoipa renders it as an `allOf`.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct DataApiEndpointListItemDto {
+    #[serde(flatten)]
+    pub endpoint: DataApiEndpointDto,
+    /// Whether the CALLER has starred this endpoint. Per user, never global.
+    pub bookmarked: bool,
 }
 
 /// Parse one stored jsonb spec.
@@ -282,13 +315,13 @@ pub const ALLOWED_METHODS: [&str; 2] = ["GET", "POST"];
 /// the other seams use: the singular object name, as `alert` and `saved_query`
 /// do.
 ///
-/// Folders of this type are not creatable yet: `egret-bi`'s generic folder
-/// router maps a URL `kind` to `(entity_type, read_perm, manage_perm)` in
-/// `kind_perms`, and has no entry for endpoints. Adding
-/// `"data_api_endpoints" => ("data_api_endpoint", "data_api_endpoint:read",
-/// "data_api_endpoint:manage")` there is what makes `folder_id` reachable from
-/// the UI. The guard is written first on purpose — an unmatched rule is inert,
-/// but a field that lands before its guard is a hole.
+/// Folders of this type are creatable through `egret-bi`'s generic folder
+/// router, which maps a URL `kind` to `(entity_type, read_perm, manage_perm)`
+/// in `kind_perms`; the `"data_api_endpoints" => ("data_api_endpoint",
+/// "data_api_endpoint:read", "data_api_endpoint:manage")` arm is what makes
+/// `folder_id` reachable from the UI, and both permissions are seeded by
+/// migration 0122. The guard was written before that arm on purpose — an
+/// unmatched rule is inert, but a field that lands before its guard is a hole.
 pub const FOLDER_ENTITY_TYPE: &str = "data_api_endpoint";
 
 /// The Cedar object KIND an endpoint appears as in an authorization decision,
@@ -301,6 +334,31 @@ pub const FOLDER_ENTITY_TYPE: &str = "data_api_endpoint";
 /// re-point every invoke grant at a kind nothing checks — grants that keep
 /// matching the schema and stop matching the decision.
 pub const OBJECT_KIND: &str = "data_api_endpoint";
+
+/// The `analytics.bookmarks.entity_type` an endpoint's bookmarks are filed
+/// under.
+///
+/// A macro rather than a bare `const` because the three statements that must
+/// agree on it — the INSERT, the DELETE, and the list's `EXISTS` — are
+/// `concat!`-ed `&'static str` literals (sqlx 0.9), and a `const` cannot be
+/// spliced into one. If those three ever disagreed, bookmarks would be written
+/// into one bucket and read from another: the star would take the click, the
+/// row would be there, and the list would never light it — a silent failure
+/// with nothing to grep for. Spelling it once makes that impossible.
+///
+/// A third constant spelling `data_api_endpoint`, beside [`FOLDER_ENTITY_TYPE`]
+/// and [`OBJECT_KIND`], and separate for the same reason they are separate from
+/// each other: this one names a row in `analytics.bookmarks`, and renaming any
+/// one of the three must not silently re-point the other two.
+macro_rules! bookmark_entity {
+    () => {
+        "data_api_endpoint"
+    };
+}
+
+/// [`bookmark_entity!`] as a value, for callers that need it outside a SQL
+/// literal.
+pub const BOOKMARK_ENTITY: &str = bookmark_entity!();
 
 /// The longest a stored endpoint path may be, in bytes.
 ///
@@ -448,18 +506,107 @@ impl EndpointStore {
         Self { db }
     }
 
-    /// Every draft in `workspace`.
-    pub async fn list(&self, workspace: Uuid) -> Result<Vec<DataApiEndpointDto>> {
-        let rows: Vec<Row> = sqlx::query_as(concat!(
+    /// Every draft in `workspace`, each carrying whether `user` has starred it.
+    ///
+    /// `user` is the CALLER — the route passes `ctx.principal`, never anything
+    /// from the request — so the flag answers "did I star this", which is the
+    /// only question a per-user bookmark can answer. There is no unfiltered
+    /// variant of this read: a list without a caller has no `bookmarked` to
+    /// report, so making one would only be a way to get the flag wrong.
+    ///
+    /// The `EXISTS` is a correlated sub-select rather than a join so a row
+    /// appears exactly once whatever the bookmarks table holds.
+    pub async fn list_for(
+        &self,
+        workspace: Uuid,
+        user: Uuid,
+    ) -> Result<Vec<DataApiEndpointListItemDto>> {
+        let rows: Vec<RowWithBookmark> = sqlx::query_as(concat!(
             "SELECT ",
             endpoint_cols!(),
-            " FROM dataapi.endpoints WHERE workspace_id = $1 ORDER BY created_at DESC"
+            ", EXISTS (SELECT 1 FROM analytics.bookmarks b \
+               WHERE b.user_id = $2 AND b.entity_type = '",
+            bookmark_entity!(),
+            "' AND b.entity_id = endpoints.id) AS bookmarked \
+             FROM dataapi.endpoints WHERE workspace_id = $1 ORDER BY created_at DESC"
         ))
         .bind(workspace)
+        .bind(user)
         .fetch_all(&self.db.pool)
         .await
         .map_err(db_err)?;
-        rows.into_iter().map(DataApiEndpointDto::try_from).collect()
+        rows.into_iter()
+            .map(|r| {
+                Ok(DataApiEndpointListItemDto {
+                    endpoint: r.row.try_into()?,
+                    bookmarked: r.bookmarked,
+                })
+            })
+            .collect()
+    }
+
+    /// Confirm `id` names an endpoint in `workspace`, or [`Error::NotFound`].
+    ///
+    /// The bookmark routes need this and cannot get it the way every other
+    /// statement in this module does: `analytics.bookmarks` is generic and has
+    /// no `workspace_id` to put in a `WHERE`, so a bookmark write carries no
+    /// containment of its own. Without this call a caller could file a row
+    /// against any endpoint id in any workspace — and, because the list only
+    /// ever joins its own workspace's rows, would get no feedback either way,
+    /// which is exactly the shape of a bug nobody reports.
+    ///
+    /// Cheaper than [`Self::get`] on purpose: it answers existence, and does
+    /// not parse five jsonb specs whose unreadability would turn a bookmark
+    /// into a 500.
+    pub async fn scoped(&self, workspace: Uuid, id: Uuid) -> Result<()> {
+        let found: Option<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM dataapi.endpoints WHERE id = $1 AND workspace_id = $2",
+        )
+        .bind(id)
+        .bind(workspace)
+        .fetch_optional(&self.db.pool)
+        .await
+        .map_err(db_err)?;
+        found
+            .map(|_| ())
+            .ok_or_else(|| Error::NotFound("endpoint".into()))
+    }
+
+    /// Star `endpoint` for `user`.
+    ///
+    /// Idempotent: a second call is a no-op rather than an error, because the
+    /// UI's star is a toggle and a double click must not 500. Containment is
+    /// the CALLER's job — see [`Self::scoped`].
+    pub async fn add_bookmark(&self, user: Uuid, endpoint: Uuid) -> Result<()> {
+        sqlx::query(concat!(
+            "INSERT INTO analytics.bookmarks (user_id, entity_type, entity_id) \
+             VALUES ($1, '",
+            bookmark_entity!(),
+            "', $2) ON CONFLICT (user_id, entity_type, entity_id) DO NOTHING"
+        ))
+        .bind(user)
+        .bind(endpoint)
+        .execute(&self.db.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(())
+    }
+
+    /// Unstar `endpoint` for `user`. Deleting nothing is success — the other
+    /// half of the toggle.
+    pub async fn remove_bookmark(&self, user: Uuid, endpoint: Uuid) -> Result<()> {
+        sqlx::query(concat!(
+            "DELETE FROM analytics.bookmarks \
+             WHERE user_id = $1 AND entity_type = '",
+            bookmark_entity!(),
+            "' AND entity_id = $2"
+        ))
+        .bind(user)
+        .bind(endpoint)
+        .execute(&self.db.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(())
     }
 
     /// One draft, if it belongs to `workspace`. `NotFound` otherwise — see the

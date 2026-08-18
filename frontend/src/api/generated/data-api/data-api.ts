@@ -35,6 +35,7 @@ import type {
   DataApiClientDto,
   DataApiEndpointDto,
   DataApiEndpointGrantDto,
+  DataApiEndpointListItemDto,
   DataApiEndpointVersionDto,
   DataApiGetOpenapiParams,
   DataApiNewClientDto,
@@ -452,7 +453,7 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
       return useMutation(getDataApiRevokeClientMutationOptions(options), queryClient);
     }
     export type dataApiListEndpointsResponse200 = {
-  data: DataApiEndpointDto[]
+  data: DataApiEndpointListItemDto[]
   status: 200
 }
 
@@ -1029,6 +1030,206 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
         TContext
       > => {
       return useMutation(getDataApiUpdateEndpointMutationOptions(options), queryClient);
+    }
+    export type dataApiBookmarkEndpointResponse200 = {
+  data: Ack
+  status: 200
+}
+
+export type dataApiBookmarkEndpointResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type dataApiBookmarkEndpointResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type dataApiBookmarkEndpointResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type dataApiBookmarkEndpointResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type dataApiBookmarkEndpointResponseSuccess = (dataApiBookmarkEndpointResponse200) & {
+  headers: Headers;
+};
+export type dataApiBookmarkEndpointResponseError = (dataApiBookmarkEndpointResponse401 | dataApiBookmarkEndpointResponse403 | dataApiBookmarkEndpointResponse404 | dataApiBookmarkEndpointResponse500) & {
+  headers: Headers;
+};
+
+export type dataApiBookmarkEndpointResponse = (dataApiBookmarkEndpointResponseSuccess | dataApiBookmarkEndpointResponseError)
+
+export const getDataApiBookmarkEndpointUrl = (workspace: string,
+    id: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/data-api/endpoints/${encodeURIComponent(id)}/bookmark`
+}
+
+export const dataApiBookmarkEndpoint = async (workspace: string,
+    id: string, options?: Parameters<typeof customInstance>[1]): Promise<dataApiBookmarkEndpointResponse> => {
+
+  return customInstance<dataApiBookmarkEndpointResponse>(getDataApiBookmarkEndpointUrl(workspace,id),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getDataApiBookmarkEndpointMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof dataApiBookmarkEndpoint>>, TError,{workspace: string;id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof dataApiBookmarkEndpoint>>, TError,{workspace: string;id: string}, TContext> => {
+
+const mutationKey = ['dataApiBookmarkEndpoint'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof dataApiBookmarkEndpoint>>, {workspace: string;id: string}> = (props) => {
+          const {workspace,id} = props ?? {};
+
+          return  dataApiBookmarkEndpoint(workspace,id,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type DataApiBookmarkEndpointMutationResult = NonNullable<Awaited<ReturnType<typeof dataApiBookmarkEndpoint>>>
+
+    export type DataApiBookmarkEndpointMutationError = ErrorBody
+
+    export const useDataApiBookmarkEndpoint = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof dataApiBookmarkEndpoint>>, TError,{workspace: string;id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof dataApiBookmarkEndpoint>>,
+        TError,
+        {workspace: string;id: string},
+        TContext
+      > => {
+      return useMutation(getDataApiBookmarkEndpointMutationOptions(options), queryClient);
+    }
+    export type dataApiUnbookmarkEndpointResponse200 = {
+  data: Ack
+  status: 200
+}
+
+export type dataApiUnbookmarkEndpointResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type dataApiUnbookmarkEndpointResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type dataApiUnbookmarkEndpointResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type dataApiUnbookmarkEndpointResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type dataApiUnbookmarkEndpointResponseSuccess = (dataApiUnbookmarkEndpointResponse200) & {
+  headers: Headers;
+};
+export type dataApiUnbookmarkEndpointResponseError = (dataApiUnbookmarkEndpointResponse401 | dataApiUnbookmarkEndpointResponse403 | dataApiUnbookmarkEndpointResponse404 | dataApiUnbookmarkEndpointResponse500) & {
+  headers: Headers;
+};
+
+export type dataApiUnbookmarkEndpointResponse = (dataApiUnbookmarkEndpointResponseSuccess | dataApiUnbookmarkEndpointResponseError)
+
+export const getDataApiUnbookmarkEndpointUrl = (workspace: string,
+    id: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/data-api/endpoints/${encodeURIComponent(id)}/bookmark`
+}
+
+export const dataApiUnbookmarkEndpoint = async (workspace: string,
+    id: string, options?: Parameters<typeof customInstance>[1]): Promise<dataApiUnbookmarkEndpointResponse> => {
+
+  return customInstance<dataApiUnbookmarkEndpointResponse>(getDataApiUnbookmarkEndpointUrl(workspace,id),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+);}
+
+
+
+
+
+export const getDataApiUnbookmarkEndpointMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof dataApiUnbookmarkEndpoint>>, TError,{workspace: string;id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof dataApiUnbookmarkEndpoint>>, TError,{workspace: string;id: string}, TContext> => {
+
+const mutationKey = ['dataApiUnbookmarkEndpoint'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof dataApiUnbookmarkEndpoint>>, {workspace: string;id: string}> = (props) => {
+          const {workspace,id} = props ?? {};
+
+          return  dataApiUnbookmarkEndpoint(workspace,id,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type DataApiUnbookmarkEndpointMutationResult = NonNullable<Awaited<ReturnType<typeof dataApiUnbookmarkEndpoint>>>
+
+    export type DataApiUnbookmarkEndpointMutationError = ErrorBody
+
+    export const useDataApiUnbookmarkEndpoint = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof dataApiUnbookmarkEndpoint>>, TError,{workspace: string;id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof dataApiUnbookmarkEndpoint>>,
+        TError,
+        {workspace: string;id: string},
+        TContext
+      > => {
+      return useMutation(getDataApiUnbookmarkEndpointMutationOptions(options), queryClient);
     }
     export type dataApiDisableEndpointResponse200 = {
   data: DataApiEndpointDto
