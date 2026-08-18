@@ -101,3 +101,29 @@ it("renders checkboxes and fires selection callbacks", () => {
   fireEvent.click(rowBoxes[1]);
   expect(onToggle).toHaveBeenCalledWith("b");
 });
+
+it("hides its own search box when the page owns the search", () => {
+  const { rerender } = render(
+    <FilterableTable rows={rows} columns={columns} getId={(r) => r.id} />,
+  );
+  expect(screen.getByPlaceholderText("Search…")).toBeInTheDocument();
+
+  rerender(<FilterableTable rows={rows} columns={columns} getId={(r) => r.id} hideSearch />);
+  expect(screen.queryByPlaceholderText("Search…")).toBeNull();
+  // The rows themselves are untouched — only the box is gone.
+  expect(screen.getByText("Alice")).toBeInTheDocument();
+  expect(screen.getByText("Bob")).toBeInTheDocument();
+});
+
+it("still renders external filters when its own search box is hidden", () => {
+  render(
+    <FilterableTable
+      rows={rows}
+      columns={columns}
+      getId={(r) => r.id}
+      hideSearch
+      filters={<button type="button">State</button>}
+    />,
+  );
+  expect(screen.getByRole("button", { name: "State" })).toBeInTheDocument();
+});

@@ -36,6 +36,7 @@ export function FilterableTable<T>({
   selection,
   pageSize,
   bordered,
+  hideSearch,
 }: {
   rows: T[];
   columns: Column<T>[];
@@ -61,6 +62,19 @@ export function FilterableTable<T>({
   /** Wrap the table in a rounded border so it reads as a contained block
    * (for card-less pages). */
   bordered?: boolean;
+  /**
+   * Suppress this component's own search box, for a page that owns its search
+   * in its toolbar and hands `rows` in already filtered (see `Clients.tsx`).
+   *
+   * The internal `q` then stays `""` for the component's lifetime, so the
+   * empty body always renders `emptyText` and never `noMatchText` — a page
+   * using this must pass the "nothing matched" copy as `emptyText`, because
+   * the component can no longer tell the two apart. `noMatchText` is only
+   * meaningful while this box is the thing doing the filtering.
+   *
+   * Opt-in: omitted, the box renders exactly as it always has.
+   */
+  hideSearch?: boolean;
 }) {
   const [q, setQ] = useState("");
   const [sort, setSort] = useState<SortState<string> | undefined>(initialSort);
@@ -117,21 +131,25 @@ export function FilterableTable<T>({
 
   return (
     <div className="space-y-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <div className="relative max-w-xs flex-1">
-          <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-          <Input
-            className="pl-8"
-            placeholder={searchPlaceholder}
-            value={q}
-            onChange={(e) => {
-              setPage(0);
-              setQ(e.target.value);
-            }}
-          />
+      {(!hideSearch || filters) && (
+        <div className="flex flex-wrap items-center gap-2">
+          {!hideSearch && (
+            <div className="relative max-w-xs flex-1">
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                className="pl-8"
+                placeholder={searchPlaceholder}
+                value={q}
+                onChange={(e) => {
+                  setPage(0);
+                  setQ(e.target.value);
+                }}
+              />
+            </div>
+          )}
+          {filters}
         </div>
-        {filters}
-      </div>
+      )}
       <div className={cn("overflow-x-auto", bordered && "rounded-md border")}>
         <Table>
           <TableHeader>

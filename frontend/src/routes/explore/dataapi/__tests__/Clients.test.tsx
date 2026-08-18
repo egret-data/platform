@@ -28,6 +28,10 @@ const SERVICE_ACCOUNT: DataApiServiceAccountDto = {
   created_at: "2026-08-01T00:00:00Z",
 };
 
+function makeAccount(overrides: Partial<DataApiServiceAccountDto> = {}): DataApiServiceAccountDto {
+  return { ...SERVICE_ACCOUNT, ...overrides };
+}
+
 function makeClient(overrides: Partial<DataApiClientDto> = {}): DataApiClientDto {
   return {
     id: "cl-1",
@@ -62,7 +66,10 @@ const deleteAccountMutateAsync = vi.fn();
 const issueMutateAsync = vi.fn();
 const revokeMutateAsync = vi.fn();
 
-function renderClients() {
+function renderClients(accounts?: DataApiServiceAccountDto[]) {
+  // Optional so every pre-existing call site keeps `beforeEach`'s single
+  // account; passing a list is how the multi-row cases (search) set up.
+  if (accounts) mockAccounts({ data: { status: 200, data: accounts } });
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const utils = render(
     <QueryClientProvider client={qc}>
@@ -165,8 +172,10 @@ describe("Clients", () => {
 
   it("shows the secret once, with a copy button and a warning", async () => {
     renderClients();
-    await userEvent.click(await screen.findByRole("button", { name: /new client/i }));
-    await userEvent.type(screen.getByLabelText("Name"), "etl");
+    await screen.findByText("reporting-bot");
+    await userEvent.click(screen.getByRole("button", { name: /actions/i }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: /issue client/i }));
+    await userEvent.type(await screen.findByLabelText("Name"), "etl");
     await userEvent.click(screen.getByRole("button", { name: /create/i }));
     expect(await screen.findByText(/cannot be shown again/i)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /copy/i })).toBeInTheDocument();
@@ -181,8 +190,10 @@ describe("Clients", () => {
   it("issuing a client sends the owning account id and trimmed name, with no expiry by default", async () => {
     const user = userEvent.setup();
     renderClients();
-    await user.click(await screen.findByRole("button", { name: /new client/i }));
-    await user.type(screen.getByLabelText("Name"), "etl-2");
+    await screen.findByText("reporting-bot");
+    await user.click(screen.getByRole("button", { name: /actions/i }));
+    await user.click(await screen.findByRole("menuitem", { name: /issue client/i }));
+    await user.type(await screen.findByLabelText("Name"), "etl-2");
     await user.click(screen.getByRole("button", { name: /^create$/i }));
 
     await waitFor(() => {
@@ -257,7 +268,8 @@ describe("Clients", () => {
     renderClients();
     await screen.findByText("reporting-bot");
 
-    await user.click(screen.getByRole("button", { name: /delete reporting-bot/i }));
+    await user.click(screen.getByRole("button", { name: /actions/i }));
+    await user.click(await screen.findByRole("menuitem", { name: /delete/i }));
     expect(await screen.findByText(/grants and every client/i)).toBeInTheDocument();
 
     const input = screen.getByPlaceholderText("delete");
@@ -267,6 +279,44 @@ describe("Clients", () => {
     await waitFor(() => {
       expect(deleteAccountMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "sa-1" });
     });
+  });
+
+  it("shows the error, not the empty state, when the list fails to load", async () => {
+    vi.mocked(api.useDataApiListServiceAccounts).mockReturnValue({
+      data: undefined, isLoading: false, isError: true, error: new Error("nope"),
+    } as never);
+    renderClients();
+    expect(await screen.findByText("nope")).toBeInTheDocument();
+    expect(screen.queryByText(/no service accounts yet/i)).not.toBeInTheDocument();
+  });
+
+  it("puts the account's actions in a menu, not loose in the row", async () => {
+    renderClients([makeAccount({ id: "a1", name: "bot" })]);
+    await screen.findByText("bot");
+    await userEvent.click(screen.getByRole("button", { name: /actions/i }));
+    expect(await screen.findByRole("menuitem", { name: /issue client/i })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: /delete/i })).toBeInTheDocument();
+  });
+
+  it("searches from the page toolbar, where every other Explore page has it", async () => {
+    renderClients([makeAccount({ id: "a1", name: "alpha" }), makeAccount({ id: "a2", name: "beta" })]);
+    await screen.findByText("alpha");
+    // `FilterableTable` has its own internal search box, so this page's search
+    // sat in a different place from all five siblings.
+    //
+    // WHERE it is, not just that it filters: the brief's version of this test
+    // passed against the OLD page unchanged, because FilterableTable's own box
+    // carried this very placeholder. These two assertions are what make it a
+    // test of the move — the box is in the page toolbar, and there is exactly
+    // one of it (an uncontrolled second box would filter a set this one had
+    // already filtered).
+    const box = screen.getByPlaceholderText(/search service accounts/i);
+    expect(screen.getByTestId("page-toolbar")).toContainElement(box);
+    expect(screen.getAllByPlaceholderText(/^search/i)).toHaveLength(1);
+
+    await userEvent.type(box, "bet");
+    expect(screen.queryByText("alpha")).not.toBeInTheDocument();
+    expect(screen.getByText("beta")).toBeInTheDocument();
   });
 
   it("creating a service account collects a name and calls useDataApiCreateServiceAccount", async () => {
