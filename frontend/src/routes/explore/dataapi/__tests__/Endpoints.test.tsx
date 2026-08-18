@@ -3,6 +3,10 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+// `ListToolbarButton` (which `BulkToggle` renders) is a Radix `Tooltip`, and a
+// bare `Tooltip` throws without a provider above it. Production mounts one once
+// in `AppShell`; tests supply their own — same as `Charts.test.tsx`.
+import { TooltipProvider } from "@/components/ui/tooltip";
 
 // There is no msw in this repo — tests mock the API module directly (see
 // AuditLog.test.tsx). Endpoints.tsx also reads folders (grouping) and
@@ -35,6 +39,7 @@ function mockFolders(folders: { id: string; name: string }[] = []) {
 }
 
 const DB_TRINO = { id: "db-1", name: "warehouse", engine: "trino", host: "h", port: 1, options: {}, has_secret: true, status: "ok", delegated: false };
+const DB_STARROCKS = { id: "db-2", name: "speedy", engine: "starrocks", host: "h", port: 2, options: {}, has_secret: true, status: "ok", delegated: false };
 
 function makeEndpoint(overrides: Partial<DataApiEndpointDto> = {}): DataApiEndpointDto {
   return {
@@ -80,12 +85,14 @@ function renderEndpoints() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const utils = render(
     <QueryClientProvider client={qc}>
-      <MemoryRouter initialEntries={["/explore/eng/data-api/endpoints"]}>
-        <Routes>
-          <Route path="/explore/:workspace/data-api/endpoints" element={<Endpoints />} />
-          <Route path="/explore/:workspace/data-api/endpoints/:id" element={<p>endpoint detail pane</p>} />
-        </Routes>
-      </MemoryRouter>
+      <TooltipProvider>
+        <MemoryRouter initialEntries={["/explore/eng/data-api/endpoints"]}>
+          <Routes>
+            <Route path="/explore/:workspace/data-api/endpoints" element={<Endpoints />} />
+            <Route path="/explore/:workspace/data-api/endpoints/:id" element={<p>endpoint detail pane</p>} />
+          </Routes>
+        </MemoryRouter>
+      </TooltipProvider>
     </QueryClientProvider>,
   );
   return { ...utils, qc };
@@ -408,6 +415,12 @@ describe("Endpoints — cache invalidation", () => {
 
   it("Disable invalidates the endpoint list, so the badge cannot keep reading Live", async () => {
     mockList({ data: { status: 200, data: [FOLDERED_ROW] } });
+    // The disable/enable mutations are constructed by `EndpointActionsMenu`,
+    // i.e. per rendered ROW — so the row has to actually be on screen, and
+    // `groupByFolder` drops a row whose `folder_id` names a folder the list
+    // does not contain. Without this the hook is never called and `fireSuccess`
+    // silently fires nothing.
+    mockFolders([{ id: "f-1", name: "Reporting" }]);
     const { qc } = renderEndpoints();
     const spy = vi.spyOn(qc, "invalidateQueries");
     await fireSuccess(vi.mocked(api.useDataApiDisableEndpoint), { workspace: "eng", id: "ep-1" });
@@ -418,6 +431,7 @@ describe("Endpoints — cache invalidation", () => {
 
   it("Enable invalidates the endpoint list, so the badge cannot keep reading Disabled", async () => {
     mockList({ data: { status: 200, data: [FOLDERED_ROW] } });
+    mockFolders([{ id: "f-1", name: "Reporting" }]);
     const { qc } = renderEndpoints();
     const spy = vi.spyOn(qc, "invalidateQueries");
     await fireSuccess(vi.mocked(api.useDataApiEnableEndpoint), { workspace: "eng", id: "ep-1" });
@@ -562,5 +576,151 @@ describe("DownloadOpenApiDialog — a failed account fetch is not an empty works
 
     expect(screen.getByText(/no service accounts yet/i)).toBeInTheDocument();
     expect(screen.queryByText(/could not load service accounts/i)).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * Task 5: the page adopts the shared Explore list primitives (`ListPageShell`,
+ * `ListStates`, `EmptyState`, `BulkToggle`/`BulkBar`, `ListToolbarButton`) and
+ * gains the two capabilities it lacked that need no backend — facet filters and
+ * a row-actions menu of its own.
+ */
+describe("Endpoints — facets, row menu and bulk mode", () => {
+  it("filters by state through a facet, not only by clicking a summary chip", async () => {
+    // The state filter exists today but is reachable only by clicking a chip in
+    // the SummaryStrip, which does not read as a filter control.
+    mockList({
+      data: {
+        status: 200,
+        data: [
+          makeEndpoint({ id: "e1", name: "live one", state: "live", live_version_id: "v-1" }),
+          makeEndpoint({ id: "e2", name: "draft one", state: "draft" }),
+        ],
+      },
+    });
+    const user = userEvent.setup();
+    renderEndpoints();
+    await screen.findByText("live one");
+
+    await user.click(screen.getByRole("combobox", { name: "State" }));
+    await user.click(await screen.findByRole("option", { name: "draft" }));
+
+    expect(screen.queryByText("live one")).not.toBeInTheDocument();
+    expect(screen.getByText("draft one")).toBeInTheDocument();
+  });
+
+  // The facet and the SummaryStrip chip are two controls over ONE piece of
+  // state. If they were separate, filtering to `draft` by chip would leave the
+  // facet reading "All" — a page showing two filters that disagree.
+  it("the summary chip and the facet drive the same state filter", async () => {
+    mockList({
+      data: {
+        status: 200,
+        data: [
+          makeEndpoint({ id: "e1", name: "live one", state: "live", live_version_id: "v-1" }),
+          makeEndpoint({ id: "e2", name: "draft one", state: "draft" }),
+        ],
+      },
+    });
+    const user = userEvent.setup();
+    renderEndpoints();
+    await screen.findByText("live one");
+
+    // Filter by chip…
+    await user.click(screen.getByRole("button", { name: /draft/ }));
+    // …and the facet must have moved with it.
+    expect(screen.getByRole("combobox", { name: "State" })).toHaveTextContent("draft");
+
+    // Clear it through the facet, and the chip must let go too.
+    await user.click(screen.getByRole("combobox", { name: "State" }));
+    await user.click(await screen.findByRole("option", { name: "All" }));
+    expect(screen.getByRole("button", { name: /draft/ })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByText("live one")).toBeInTheDocument();
+  });
+
+  it("filters by engine through a facet", async () => {
+    vi.mocked(databasesApi.useDatabases).mockReturnValue(
+      { data: [DB_TRINO, DB_STARROCKS], isLoading: false, isError: false } as unknown as
+        ReturnType<typeof databasesApi.useDatabases>,
+    );
+    mockList({
+      data: {
+        status: 200,
+        data: [
+          makeEndpoint({ id: "e1", name: "on trino", database_id: "db-1" }),
+          makeEndpoint({ id: "e2", name: "on starrocks", database_id: "db-2" }),
+        ],
+      },
+    });
+    const user = userEvent.setup();
+    renderEndpoints();
+    await screen.findByText("on trino");
+
+    await user.click(screen.getByRole("combobox", { name: "Engine" }));
+    await user.click(await screen.findByRole("option", { name: "StarRocks" }));
+
+    expect(screen.queryByText("on trino")).not.toBeInTheDocument();
+    expect(screen.getByText("on starrocks")).toBeInTheDocument();
+  });
+
+  it("shows the error, not the empty state, when the list fails to load", async () => {
+    mockList({ isError: true, error: new Error("nope") });
+    renderEndpoints();
+    expect(await screen.findByText("nope")).toBeInTheDocument();
+    expect(screen.queryByText(/no endpoints yet/i)).not.toBeInTheDocument();
+  });
+
+  it("puts row actions in a menu rather than loose in the row", async () => {
+    mockList({ data: { status: 200, data: [makeEndpoint({ id: "e1", name: "one", state: "live", live_version_id: "v-1" })] } });
+    const user = userEvent.setup();
+    renderEndpoints();
+    await screen.findByText("one");
+
+    await user.click(screen.getByRole("button", { name: /actions/i }));
+    expect(await screen.findByRole("menuitem", { name: /open/i })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: /disable/i })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: /delete/i })).toBeInTheDocument();
+  });
+
+  it("offers a bulk action only once rows are selected", async () => {
+    mockList({ data: { status: 200, data: [makeEndpoint({ id: "e1", name: "one", state: "draft" })] } });
+    const user = userEvent.setup();
+    renderEndpoints();
+    await screen.findByText("one");
+
+    await user.click(screen.getByRole("button", { name: "Bulk select" }));
+    // Bulk mode is on but nothing is chosen: the action strip must not be there
+    // at all, or the table jumps down the moment the mode is entered.
+    expect(screen.queryByRole("button", { name: /delete selected/i })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("checkbox", { name: /select one/i }));
+    expect(screen.getByRole("button", { name: /delete selected/i })).toBeInTheDocument();
+  });
+
+  it("bulk Delete selected deletes every selected row after confirmation", async () => {
+    mockList({
+      data: {
+        status: 200,
+        data: [
+          makeEndpoint({ id: "e1", name: "one", state: "draft" }),
+          makeEndpoint({ id: "e2", name: "two", state: "draft" }),
+        ],
+      },
+    });
+    const user = userEvent.setup();
+    renderEndpoints();
+    await screen.findByText("one");
+
+    await user.click(screen.getByRole("button", { name: "Bulk select" }));
+    await user.click(screen.getByRole("checkbox", { name: "Select all" }));
+    await user.click(screen.getByRole("button", { name: /delete selected/i }));
+
+    await user.type(await screen.findByPlaceholderText("delete"), "delete");
+    await user.click(screen.getByRole("button", { name: /^delete$/i }));
+
+    await waitFor(() => {
+      expect(deleteMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "e1" });
+    });
+    expect(deleteMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "e2" });
   });
 });
