@@ -25,7 +25,7 @@ import * as api from "@/api/generated/data-api/data-api";
 import * as foldersApi from "@/api/generated/folders/folders";
 import * as databasesApi from "@/api/databases";
 import { ApiError } from "@/api/client";
-import type { DataApiEndpointDto } from "@/api/generated/model";
+import type { DataApiEndpointListItemDto } from "@/api/generated/model";
 import Endpoints from "@/routes/explore/dataapi/Endpoints";
 
 function mockList(over: Partial<{ data: unknown; isError: boolean; isLoading: boolean; error: unknown }> = {}) {
@@ -45,7 +45,7 @@ function mockFolders(folders: { id: string; name: string }[] = []) {
 const DB_TRINO = { id: "db-1", name: "warehouse", engine: "trino", host: "h", port: 1, options: {}, has_secret: true, status: "ok", delegated: false };
 const DB_STARROCKS = { id: "db-2", name: "speedy", engine: "starrocks", host: "h", port: 2, options: {}, has_secret: true, status: "ok", delegated: false };
 
-function makeEndpoint(overrides: Partial<DataApiEndpointDto> = {}): DataApiEndpointDto {
+function makeEndpoint(overrides: Partial<DataApiEndpointListItemDto> = {}): DataApiEndpointListItemDto {
   return {
     id: "ep-1",
     folder_id: null,
@@ -67,8 +67,12 @@ function makeEndpoint(overrides: Partial<DataApiEndpointDto> = {}): DataApiEndpo
     created_by: "user-1",
     created_at: "2026-08-01T00:00:00Z",
     updated_at: "2026-08-10T00:00:00Z",
+    // The list DTO carries the CALLER's own flag (`DataApiEndpointListItemDto`),
+    // so a fixture without it would render every star in a state the server
+    // never sent. Default false; the bookmark tests override it per row.
+    bookmarked: false,
     ...overrides,
-  } as unknown as DataApiEndpointDto;
+  } as unknown as DataApiEndpointListItemDto;
 }
 
 const FOLDERED_ROW = makeEndpoint({
@@ -82,6 +86,8 @@ const SERVICE_ACCOUNT = { id: "sa-1", name: "reporting-bot", description: "", em
 
 const createMutateAsync = vi.fn();
 const deleteMutateAsync = vi.fn();
+const bookmarkMutateAsync = vi.fn();
+const unbookmarkMutateAsync = vi.fn();
 const disableMutateAsync = vi.fn();
 const enableMutateAsync = vi.fn();
 
@@ -126,6 +132,12 @@ beforeEach(() => {
   vi.mocked(api.useDataApiDeleteEndpoint).mockReturnValue(
     { mutateAsync: deleteMutateAsync, isPending: false } as unknown as ReturnType<typeof api.useDataApiDeleteEndpoint>,
   );
+  vi.mocked(api.useDataApiBookmarkEndpoint).mockReturnValue(
+    { mutateAsync: bookmarkMutateAsync, isPending: false } as unknown as ReturnType<typeof api.useDataApiBookmarkEndpoint>,
+  );
+  vi.mocked(api.useDataApiUnbookmarkEndpoint).mockReturnValue(
+    { mutateAsync: unbookmarkMutateAsync, isPending: false } as unknown as ReturnType<typeof api.useDataApiUnbookmarkEndpoint>,
+  );
   vi.mocked(api.useDataApiDisableEndpoint).mockReturnValue(
     { mutateAsync: disableMutateAsync, isPending: false } as unknown as ReturnType<typeof api.useDataApiDisableEndpoint>,
   );
@@ -154,6 +166,8 @@ beforeEach(() => {
 
   createMutateAsync.mockResolvedValue({ status: 201, data: { id: "ep-new" }, headers: new Headers() });
   deleteMutateAsync.mockResolvedValue({ status: 200, data: {}, headers: new Headers() });
+  bookmarkMutateAsync.mockResolvedValue({ status: 200, data: {}, headers: new Headers() });
+  unbookmarkMutateAsync.mockResolvedValue({ status: 200, data: {}, headers: new Headers() });
   disableMutateAsync.mockResolvedValue({ status: 200, data: {}, headers: new Headers() });
   enableMutateAsync.mockResolvedValue({ status: 200, data: {}, headers: new Headers() });
 
@@ -465,6 +479,29 @@ describe("Endpoints — cache invalidation", () => {
     const { qc } = renderEndpoints();
     const spy = vi.spyOn(qc, "invalidateQueries");
     await fireSuccess(vi.mocked(api.useDataApiCreateEndpoint), { workspace: "eng", data: {} });
+    expect(spy).toHaveBeenCalledWith(
+      expect.objectContaining({ queryKey: ["dataApiListEndpoints", "eng"] }),
+    );
+  });
+
+  // `bookmarked` only exists on the LIST row, so the list is the one query a
+  // star can go stale in — and with `staleTime: 30000` an un-invalidated star
+  // springs back to its old fill on the next render.
+  it("Bookmark invalidates the endpoint list, so the star cannot spring back", async () => {
+    mockList({ data: { status: 200, data: [LOOSE_ROW] } });
+    const { qc } = renderEndpoints();
+    const spy = vi.spyOn(qc, "invalidateQueries");
+    await fireSuccess(vi.mocked(api.useDataApiBookmarkEndpoint), { workspace: "eng", id: "ep-2" });
+    expect(spy).toHaveBeenCalledWith(
+      expect.objectContaining({ queryKey: ["dataApiListEndpoints", "eng"] }),
+    );
+  });
+
+  it("Unbookmark invalidates the endpoint list too", async () => {
+    mockList({ data: { status: 200, data: [LOOSE_ROW] } });
+    const { qc } = renderEndpoints();
+    const spy = vi.spyOn(qc, "invalidateQueries");
+    await fireSuccess(vi.mocked(api.useDataApiUnbookmarkEndpoint), { workspace: "eng", id: "ep-2" });
     expect(spy).toHaveBeenCalledWith(
       expect.objectContaining({ queryKey: ["dataApiListEndpoints", "eng"] }),
     );
@@ -892,7 +929,7 @@ describe("Endpoints — a row selected BEFORE it is hidden", () => {
  */
 describe("Endpoints — the list changing underneath the page", () => {
   /** A list hook whose data is read fresh on every render, not frozen at mock time. */
-  function mockListDynamic(get: () => DataApiEndpointDto[]) {
+  function mockListDynamic(get: () => DataApiEndpointListItemDto[]) {
     vi.mocked(api.useDataApiListEndpoints).mockImplementation(
       () => ({ data: { status: 200, data: get() }, isLoading: false, isError: false, error: null }) as unknown as
         ReturnType<typeof api.useDataApiListEndpoints>,
@@ -900,7 +937,7 @@ describe("Endpoints — the list changing underneath the page", () => {
   }
 
   it("does not report a bulk delete it never ran when the selection empties behind the dialog", async () => {
-    let rows: DataApiEndpointDto[] = [makeEndpoint({ id: "e1", name: "one", state: "draft" })];
+    let rows: DataApiEndpointListItemDto[] = [makeEndpoint({ id: "e1", name: "one", state: "draft" })];
     mockListDynamic(() => rows);
     const user = userEvent.setup();
     const { rerenderTree } = renderEndpoints();
@@ -925,7 +962,7 @@ describe("Endpoints — the list changing underneath the page", () => {
   });
 
   it("leaves bulk mode behind when the last endpoint goes, so the checkbox column does not return with the next one", async () => {
-    let rows: DataApiEndpointDto[] = [makeEndpoint({ id: "e1", name: "one", state: "draft" })];
+    let rows: DataApiEndpointListItemDto[] = [makeEndpoint({ id: "e1", name: "one", state: "draft" })];
     mockListDynamic(() => rows);
     const user = userEvent.setup();
     const { rerenderTree } = renderEndpoints();
@@ -1016,5 +1053,100 @@ describe("Endpoints — row menus are named after their row", () => {
     // rows fall back to the bare default.
     expect(screen.getByRole("button", { name: "Actions for one" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Actions for two" })).toBeInTheDocument();
+  });
+});
+
+/**
+ * Bookmarks.
+ *
+ * Every fixture here has TWO rows in DIFFERENT bookmark states, deliberately.
+ * A one-row fixture cannot tell "this star reflects THIS row" apart from "this
+ * star reflects whether anything at all is bookmarked", and it cannot tell "the
+ * click sent this row's id" apart from "the click sent a constant" — which is
+ * exactly how a real defect survived four green tests one task ago.
+ */
+describe("Endpoints — bookmarks", () => {
+  const STARRED = makeEndpoint({ id: "ep-star", name: "Starred report", bookmarked: true, state: "draft" });
+  const PLAIN = makeEndpoint({ id: "ep-plain", name: "Plain report", bookmarked: false, state: "draft" });
+
+  function renderTwoRows() {
+    mockList({ data: { status: 200, data: [STARRED, PLAIN] } });
+    return renderEndpoints();
+  }
+
+  it("gives each row a star that reads that row's own flag", async () => {
+    renderTwoRows();
+    await screen.findByText("Starred report");
+    // Two rows, two different states, two different labels — a star driven by
+    // "does the user have any bookmark" would make these two agree.
+    expect(screen.getByRole("button", { name: "Remove bookmark from Starred report" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByRole("button", { name: "Bookmark Plain report" })).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("filters to bookmarked-only, hiding the unbookmarked row", async () => {
+    const user = userEvent.setup();
+    renderTwoRows();
+    await screen.findByText("Plain report");
+
+    await user.click(screen.getByRole("button", { name: "Bookmarks" }));
+
+    expect(screen.getByText("Starred report")).toBeInTheDocument();
+    expect(screen.queryByText("Plain report")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Bookmarks" })).toHaveAttribute("aria-pressed", "true");
+
+    // …and it is a TOGGLE: the hidden row comes back.
+    await user.click(screen.getByRole("button", { name: "Bookmarks" }));
+    expect(screen.getByText("Plain report")).toBeInTheDocument();
+  });
+
+  it("says the list is empty because of the bookmark filter, not because of a facet", async () => {
+    const user = userEvent.setup();
+    mockList({ data: { status: 200, data: [PLAIN, makeEndpoint({ id: "ep-3", name: "Another plain" })] } });
+    renderEndpoints();
+    await screen.findByText("Plain report");
+
+    await user.click(screen.getByRole("button", { name: "Bookmarks" }));
+    expect(screen.getByText("No bookmarked endpoints.")).toBeInTheDocument();
+  });
+
+  it("adds the bookmark for the row whose star was clicked", async () => {
+    const user = userEvent.setup();
+    renderTwoRows();
+    await screen.findByText("Plain report");
+
+    await user.click(screen.getByRole("button", { name: "Bookmark Plain report" }));
+
+    await waitFor(() =>
+      expect(bookmarkMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "ep-plain" }),
+    );
+    // The direction is read from the row, so the OTHER mutation must stay put.
+    expect(unbookmarkMutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("removes the bookmark for the row whose filled star was clicked", async () => {
+    const user = userEvent.setup();
+    renderTwoRows();
+    await screen.findByText("Starred report");
+
+    await user.click(screen.getByRole("button", { name: "Remove bookmark from Starred report" }));
+
+    await waitFor(() =>
+      expect(unbookmarkMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "ep-star" }),
+    );
+    expect(bookmarkMutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a failed star instead of swallowing it", async () => {
+    bookmarkMutateAsync.mockRejectedValue(new ApiError(500, "boom"));
+    const user = userEvent.setup();
+    renderTwoRows();
+    await screen.findByText("Plain report");
+
+    await user.click(screen.getByRole("button", { name: "Bookmark Plain report" }));
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalled());
   });
 });

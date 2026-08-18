@@ -19,6 +19,7 @@ import { ListPageShell } from "@/components/explore/ListPageShell";
 import { ListStates } from "@/components/explore/ListStates";
 import { EmptyState } from "@/components/explore/EmptyState";
 import { BulkToggle, BulkBar } from "@/components/explore/BulkBar";
+import { BookmarkToggle, BookmarkStar } from "@/components/explore/BookmarkToggle";
 import { FacetSelect, FACET_ALL } from "@/components/explore/FacetSelect";
 import { useBulkSelect } from "@/hooks/useBulkSelect";
 import { groupByFolder, useCollapsed } from "@/components/explore/folders";
@@ -29,8 +30,8 @@ import { useDataApiListEndpoints } from "@/api/generated/data-api/data-api";
 // the wrapper is what owns the cache invalidation (see `src/api/dataApi.ts`).
 // Wired to the generated hook directly, "Endpoint disabled" toasts over a row
 // whose badge still reads Live for the next 30 seconds.
-import { useCreateEndpoint, useDeleteEndpoint } from "@/api/dataApi";
-import type { DataApiEndpointDto } from "@/api/generated/model";
+import { useBookmarkEndpoint, useCreateEndpoint, useDeleteEndpoint, useUnbookmarkEndpoint } from "@/api/dataApi";
+import type { DataApiEndpointDto, DataApiEndpointListItemDto } from "@/api/generated/model";
 import { DownloadOpenApiDialog } from "./DownloadOpenApiDialog";
 import { EndpointActionsMenu } from "./EndpointActionsMenu";
 
@@ -96,6 +97,10 @@ export default function Endpoints() {
 
   const createMutation = useCreateEndpoint();
   const deleteMutation = useDeleteEndpoint();
+  // Two mutations, one control: which of them a star fires is decided per row
+  // from that row's own `bookmarked`, never from a page-level "mode".
+  const bookmarkMutation = useBookmarkEndpoint();
+  const unbookmarkMutation = useUnbookmarkEndpoint();
 
   const collapse = useCollapsed(`folders:${ws}:${FOLDER_KIND}`);
 
@@ -105,6 +110,9 @@ export default function Endpoints() {
   // disagree is worse than one that is hard to find.
   const [stateFilter, setStateFilter] = useState<string | null>(null);
   const [engineFilter, setEngineFilter] = useState<string | null>(null);
+  // The page owns the bookmarked-only filter, not `BookmarkToggle` — the page
+  // is what applies it to the rows, so the state lives where it is used.
+  const [onlyBookmarked, setOnlyBookmarked] = useState(false);
   const [sort, setSort] = useState<SortState<SortKey>>({ key: "updated_at", dir: "desc" });
   const [createOpen, setCreateOpen] = useState(false);
   const [downloadOpen, setDownloadOpen] = useState(false);
@@ -121,6 +129,7 @@ export default function Endpoints() {
   const rows = useMemo(() => {
     const q = query.trim().toLowerCase();
     let r = endpoints.filter((e) => {
+      if (onlyBookmarked && !e.bookmarked) return false;
       if (stateFilter && e.state !== stateFilter) return false;
       if (engineFilter && engineOf(e.database_id) !== engineFilter) return false;
       if (!q) return true;
@@ -135,9 +144,9 @@ export default function Endpoints() {
       return sort.dir === "asc" ? cmp : -cmp;
     });
     return r;
-  }, [endpoints, query, stateFilter, engineFilter, engineOf, sort]);
+  }, [endpoints, query, onlyBookmarked, stateFilter, engineFilter, engineOf, sort]);
 
-  const filtering = query.trim() !== "" || stateFilter !== null || engineFilter !== null;
+  const filtering = query.trim() !== "" || stateFilter !== null || engineFilter !== null || onlyBookmarked;
   const groups = useMemo(() => groupByFolder(rows, folders, filtering), [rows, folders, filtering]);
 
   /**
@@ -223,7 +232,22 @@ export default function Endpoints() {
     bulk.clear();
   }
 
-  const renderRow = (e: DataApiEndpointDto) => (
+  /**
+   * Star a row, or un-star it. The DIRECTION is read from this row's own
+   * `bookmarked` flag and the id sent is this row's own id — a star that fired
+   * a fixed id would look identical on a one-row list and wrong on every
+   * other.
+   */
+  async function toggleBookmark(e: DataApiEndpointListItemDto) {
+    try {
+      const mutation = e.bookmarked ? unbookmarkMutation : bookmarkMutation;
+      await mutation.mutateAsync({ workspace: ws, id: e.id });
+    } catch (err) {
+      toast.error(String(err));
+    }
+  }
+
+  const renderRow = (e: DataApiEndpointListItemDto) => (
     <tr key={e.id} className="border-t hover:bg-accent">
       {bulk.bulkMode && (
         <td className="py-1">
@@ -235,9 +259,12 @@ export default function Endpoints() {
         </td>
       )}
       <td className="py-1 pl-6">
-        <Link className="font-medium hover:underline" to={`/explore/${ws}/data-api/endpoints/${e.id}`}>
-          {e.name}
-        </Link>
+        <span className="inline-flex items-center gap-1">
+          <BookmarkStar bookmarked={e.bookmarked} name={e.name} onToggle={() => void toggleBookmark(e)} />
+          <Link className="font-medium hover:underline" to={`/explore/${ws}/data-api/endpoints/${e.id}`}>
+            {e.name}
+          </Link>
+        </span>
       </td>
       <td className="text-muted-foreground">
         <span className="font-mono text-xs uppercase">{e.method}</span>{" "}
@@ -265,7 +292,14 @@ export default function Endpoints() {
   return (
     <ListPageShell
       title="Endpoints"
-      toolbar={hasData ? <BulkToggle active={bulk.bulkMode} onToggle={() => bulk.setBulkMode(!bulk.bulkMode)} /> : undefined}
+      toolbar={
+        hasData ? (
+          <>
+            <BookmarkToggle active={onlyBookmarked} onToggle={() => setOnlyBookmarked((v) => !v)} />
+            <BulkToggle active={bulk.bulkMode} onToggle={() => bulk.setBulkMode(!bulk.bulkMode)} />
+          </>
+        ) : undefined
+      }
       action={
         <>
           <Button variant="outline" onClick={() => setDownloadOpen(true)}>Download OpenAPI</Button>
@@ -383,7 +417,9 @@ export default function Endpoints() {
             </table>
           </div>
         ) : (
-          <p className="text-muted-foreground">No endpoints match the current filters.</p>
+          <p className="text-muted-foreground">
+            {onlyBookmarked ? "No bookmarked endpoints." : "No endpoints match the current filters."}
+          </p>
         )}
       </ListStates>
 

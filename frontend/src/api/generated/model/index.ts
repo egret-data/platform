@@ -103,6 +103,7 @@ export * from './dataApiActivitySummaryParams';
 export * from './dataApiClientDto';
 export * from './dataApiEndpointDto';
 export * from './dataApiEndpointGrantDto';
+export * from './dataApiEndpointListItemDto';
 export * from './dataApiEndpointVersionDto';
 export * from './dataApiGetOpenapiParams';
 export * from './dataApiNewClientDto';
