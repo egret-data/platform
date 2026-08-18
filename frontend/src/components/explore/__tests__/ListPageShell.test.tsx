@@ -28,6 +28,21 @@ describe("ListPageShell", () => {
     expect(screen.getByText("body")).toBeInTheDocument();
   });
 
+  it("wraps the action group, not only the header row", () => {
+    // The header's own `flex-wrap` only breaks the title away from the button
+    // group. Endpoints puts three controls in that group (bulk toggle,
+    // "Download OpenAPI", "+ Endpoint"), which overflows a narrow viewport on
+    // its own — the exact overflow the shell's comment claims to fix.
+    const { container } = render(
+      <ListPageShell title="Endpoints" toolbar={<button type="button">tb</button>} action={<button type="button">+ Endpoint</button>}>
+        <p>body</p>
+      </ListPageShell>,
+    );
+    const actions = container.querySelector("header")!.lastElementChild;
+    expect(actions).toHaveTextContent("+ Endpoint");
+    expect(actions).toHaveClass("flex-wrap");
+  });
+
   it("omits the description element entirely when there is none", () => {
     const { container } = render(
       <ListPageShell title="Endpoints"><p>body</p></ListPageShell>,

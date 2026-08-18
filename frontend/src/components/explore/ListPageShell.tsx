@@ -47,7 +47,11 @@ export function ListPageShell({
             <p className="mt-0.5 text-sm text-muted-foreground">{description}</p>
           ) : null}
         </div>
-        <div className="flex items-center gap-2">
+        {/* `flex-wrap` here too, not only on the header row: the action slot is
+            itself a group (Endpoints puts a bulk toggle, "Download OpenAPI" and
+            "+ Endpoint" in it), so wrapping only the outer row still overflows
+            once that group alone is wider than a narrow viewport. */}
+        <div className="flex flex-wrap items-center gap-2">
           {toolbar}
           {action}
         </div>

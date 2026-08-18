@@ -16,7 +16,11 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 vi.mock("@/api/generated/data-api/data-api");
 vi.mock("@/api/generated/folders/folders");
 vi.mock("@/api/databases");
+// The bulk-delete run REPORTS what it did; "Deleted 0 endpoints" over a run
+// that deleted nothing is a defect only a toast assertion can see.
+vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
+import { toast } from "sonner";
 import * as api from "@/api/generated/data-api/data-api";
 import * as foldersApi from "@/api/generated/folders/folders";
 import * as databasesApi from "@/api/databases";
@@ -83,7 +87,11 @@ const enableMutateAsync = vi.fn();
 
 function renderEndpoints() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  const utils = render(
+  // A FACTORY, not a stored element: React bails out of re-rendering a
+  // referentially identical element, so `rerender(sameElement)` would not
+  // re-run `Endpoints` and a test could never observe the list changing
+  // underneath an open dialog.
+  const tree = () => (
     <QueryClientProvider client={qc}>
       <TooltipProvider>
         <MemoryRouter initialEntries={["/explore/eng/data-api/endpoints"]}>
@@ -93,9 +101,10 @@ function renderEndpoints() {
           </Routes>
         </MemoryRouter>
       </TooltipProvider>
-    </QueryClientProvider>,
+    </QueryClientProvider>
   );
-  return { ...utils, qc };
+  const utils = render(tree());
+  return { ...utils, qc, rerenderTree: () => utils.rerender(tree()) };
 }
 
 beforeEach(() => {
@@ -274,7 +283,7 @@ describe("Endpoints", () => {
     renderEndpoints();
     await screen.findByText("Daily report");
 
-    await user.click(screen.getByRole("button", { name: "Actions" }));
+    await user.click(screen.getByRole("button", { name: "Actions for Daily report" }));
     await user.click(await screen.findByText("Disable"));
 
     await waitFor(() => {
@@ -289,7 +298,7 @@ describe("Endpoints", () => {
     renderEndpoints();
     await screen.findByText("Paused feed");
 
-    await user.click(screen.getByRole("button", { name: "Actions" }));
+    await user.click(screen.getByRole("button", { name: "Actions for Paused feed" }));
     const enableItem = await screen.findByText("Enable");
     expect(enableItem).toBeInTheDocument();
     expect(screen.queryByText("Disable")).not.toBeInTheDocument();
@@ -306,7 +315,7 @@ describe("Endpoints", () => {
     renderEndpoints();
     await screen.findByText("Stillborn draft");
 
-    await user.click(screen.getByRole("button", { name: "Actions" }));
+    await user.click(screen.getByRole("button", { name: "Actions for Stillborn draft" }));
     const enableItem = await screen.findByText("Enable");
     const menuitem = enableItem.closest('[role="menuitem"]')!;
     expect(menuitem).toHaveAttribute("data-disabled");
@@ -322,7 +331,7 @@ describe("Endpoints", () => {
     renderEndpoints();
     await screen.findByText("Ad hoc query");
 
-    await user.click(screen.getByRole("button", { name: "Actions" }));
+    await user.click(screen.getByRole("button", { name: "Actions for Ad hoc query" }));
     await user.click(await screen.findByText("Delete"));
 
     const input = await screen.findByPlaceholderText("delete");
@@ -516,7 +525,7 @@ describe("Endpoints — in-flight guards", () => {
     renderEndpoints();
     await screen.findByText("Daily report");
 
-    await user.click(screen.getByRole("button", { name: "Actions" }));
+    await user.click(screen.getByRole("button", { name: "Actions for Daily report" }));
     const item = (await screen.findByText("Disable")).closest('[role="menuitem"]')!;
     expect(item).toHaveAttribute("data-disabled");
   });
@@ -532,7 +541,7 @@ describe("Endpoints — in-flight guards", () => {
     renderEndpoints();
     await screen.findByText("Paused feed");
 
-    await user.click(screen.getByRole("button", { name: "Actions" }));
+    await user.click(screen.getByRole("button", { name: "Actions for Paused feed" }));
     const label = await screen.findByText("Enable");
     expect(label.closest('[role="menuitem"]')).toHaveAttribute("data-disabled");
     // `data-[disabled]:pointer-events-none` is CSS, which jsdom does not apply
@@ -629,15 +638,16 @@ describe("Endpoints — facets, row menu and bulk mode", () => {
     renderEndpoints();
     await screen.findByText("live one");
 
-    // Filter by chip…
-    await user.click(screen.getByRole("button", { name: /draft/ }));
+    // Filter by chip… (`/draft$/`, not `/draft/`: the row menus are named after
+    // their row, and one of these rows is called "draft one".)
+    await user.click(screen.getByRole("button", { name: /draft$/ }));
     // …and the facet must have moved with it.
     expect(screen.getByRole("combobox", { name: "State" })).toHaveTextContent("draft");
 
     // Clear it through the facet, and the chip must let go too.
     await user.click(screen.getByRole("combobox", { name: "State" }));
     await user.click(await screen.findByRole("option", { name: "All" }));
-    expect(screen.getByRole("button", { name: /draft/ })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByRole("button", { name: /draft$/ })).toHaveAttribute("aria-pressed", "false");
     expect(screen.getByText("live one")).toBeInTheDocument();
   });
 
@@ -805,5 +815,205 @@ describe("Endpoints — bulk select only ever reaches rows that are on screen", 
       expect(deleteMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "e-shown" });
     });
     expect(deleteMutateAsync).not.toHaveBeenCalledWith({ workspace: "eng", id: "e-hidden" });
+  });
+});
+
+/**
+ * Final-review finding (Important #1). The bulk fix has TWO independent halves:
+ * the call site narrowing `useBulkSelect`'s input to `visibleRows` (which
+ * constrains `toggleAll`), and `selectedIds` re-filtering through `rows` on
+ * every render. Only the first was covered — both tests above HIDE first and
+ * SELECT second, so `toggleAll` never had a chance to write a hidden id and the
+ * re-filter was never the thing under test. Replacing `selectedIds` with
+ * `Array.from(selected)` typechecked and left every test green.
+ *
+ * These reverse the order. The failure they pin is the one this page cannot
+ * take back: its bulk action is a hard DELETE, not a move to trash.
+ */
+describe("Endpoints — a row selected BEFORE it is hidden", () => {
+  const HIDDEN = makeEndpoint({ id: "e-hidden", name: "hidden row", folder_id: "f-1" });
+  const SHOWN = makeEndpoint({ id: "e-shown", name: "shown row", folder_id: null });
+
+  it("stops counting a selected row the moment its folder collapses", async () => {
+    mockList({ data: { status: 200, data: [HIDDEN, SHOWN] } });
+    mockFolders([{ id: "f-1", name: "Reporting" }]);
+    const user = userEvent.setup();
+    renderEndpoints();
+    await screen.findByText("hidden row");
+
+    await user.click(screen.getByRole("button", { name: "Bulk select" }));
+    // SELECT first — the row is on screen and legitimately selectable.
+    await user.click(screen.getByRole("checkbox", { name: "Select hidden row" }));
+    expect(screen.getByText("1 selected")).toBeInTheDocument();
+
+    // …then HIDE it. `toggleAll` is not involved at all here: the id is already
+    // in `selected`, and only `selectedIds`' re-filter can take it back out.
+    await user.click(screen.getByRole("button", { name: "Toggle Reporting" }));
+    expect(screen.queryByText("hidden row")).not.toBeInTheDocument();
+
+    expect(screen.queryByText("1 selected")).not.toBeInTheDocument();
+    // The strip renders nothing at zero, so the destructive button goes with it
+    // — there is no way left to act on a row that is not on screen.
+    expect(screen.queryByRole("button", { name: /delete selected/i })).not.toBeInTheDocument();
+  });
+
+  it("deletes only the row still on screen when a selected row is hidden behind it", async () => {
+    mockList({ data: { status: 200, data: [HIDDEN, SHOWN] } });
+    mockFolders([{ id: "f-1", name: "Reporting" }]);
+    const user = userEvent.setup();
+    renderEndpoints();
+    await screen.findByText("hidden row");
+
+    await user.click(screen.getByRole("button", { name: "Bulk select" }));
+    await user.click(screen.getByRole("checkbox", { name: "Select hidden row" }));
+    await user.click(screen.getByRole("checkbox", { name: "Select shown row" }));
+    expect(screen.getByText("2 selected")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Toggle Reporting" }));
+    expect(screen.getByText("1 selected")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /delete selected/i }));
+    await user.type(await screen.findByPlaceholderText("delete"), "delete");
+    await user.click(screen.getByRole("button", { name: /^delete$/i }));
+
+    await waitFor(() => {
+      expect(deleteMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "e-shown" });
+    });
+    // The one the user can no longer see must survive.
+    expect(deleteMutateAsync).not.toHaveBeenCalledWith({ workspace: "eng", id: "e-hidden" });
+    expect(deleteMutateAsync).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * A list whose rows change under an open dialog, and a mode whose only OFF
+ * switch can unmount (final review, Minor #7).
+ */
+describe("Endpoints — the list changing underneath the page", () => {
+  /** A list hook whose data is read fresh on every render, not frozen at mock time. */
+  function mockListDynamic(get: () => DataApiEndpointDto[]) {
+    vi.mocked(api.useDataApiListEndpoints).mockImplementation(
+      () => ({ data: { status: 200, data: get() }, isLoading: false, isError: false, error: null }) as unknown as
+        ReturnType<typeof api.useDataApiListEndpoints>,
+    );
+  }
+
+  it("does not report a bulk delete it never ran when the selection empties behind the dialog", async () => {
+    let rows: DataApiEndpointDto[] = [makeEndpoint({ id: "e1", name: "one", state: "draft" })];
+    mockListDynamic(() => rows);
+    const user = userEvent.setup();
+    const { rerenderTree } = renderEndpoints();
+    await screen.findByText("one");
+
+    await user.click(screen.getByRole("button", { name: "Bulk select" }));
+    await user.click(screen.getByRole("checkbox", { name: "Select one" }));
+    await user.click(screen.getByRole("button", { name: /delete selected/i }));
+    await screen.findByPlaceholderText("delete");
+
+    // A refetch lands while the confirmation sits open and the row is gone.
+    rows = [];
+    rerenderTree();
+
+    await user.type(screen.getByPlaceholderText("delete"), "delete");
+    await user.click(screen.getByRole("button", { name: /^delete$/i }));
+
+    expect(deleteMutateAsync).not.toHaveBeenCalled();
+    // …and above all it must not claim it did something. "Deleted 0 endpoints"
+    // is a success toast over a run that deleted nothing.
+    expect(toast.success).not.toHaveBeenCalled();
+  });
+
+  it("leaves bulk mode behind when the last endpoint goes, so the checkbox column does not return with the next one", async () => {
+    let rows: DataApiEndpointDto[] = [makeEndpoint({ id: "e1", name: "one", state: "draft" })];
+    mockListDynamic(() => rows);
+    const user = userEvent.setup();
+    const { rerenderTree } = renderEndpoints();
+    await screen.findByText("one");
+
+    await user.click(screen.getByRole("button", { name: "Bulk select" }));
+    expect(screen.getByRole("checkbox", { name: "Select all" })).toBeInTheDocument();
+
+    // Every row is deleted. The toggle — bulk mode's only OFF switch — unmounts
+    // with the table, so the mode has to let go of itself here.
+    rows = [];
+    rerenderTree();
+    await screen.findByText(/no endpoints yet/i);
+
+    // A new endpoint is created.
+    rows = [makeEndpoint({ id: "e2", name: "two", state: "draft" })];
+    rerenderTree();
+    await screen.findByText("two");
+
+    expect(screen.queryByRole("checkbox", { name: "Select all" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: "Select two" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Bulk select" })).toHaveAttribute("aria-pressed", "false");
+  });
+});
+
+/**
+ * Minor #6: the summary strip used to mix one filtered count (`rows.length`)
+ * with three unfiltered ones, so filtering by Engine produced four numbers on
+ * one line that did not add up.
+ */
+describe("Endpoints — the summary strip is internally consistent", () => {
+  it("keeps all four numbers on the same (unfiltered) set while a facet is applied", async () => {
+    vi.mocked(databasesApi.useDatabases).mockReturnValue(
+      { data: [DB_TRINO, DB_STARROCKS], isLoading: false, isError: false } as unknown as
+        ReturnType<typeof databasesApi.useDatabases>,
+    );
+    mockList({
+      data: {
+        status: 200,
+        data: [
+          makeEndpoint({ id: "e1", name: "on trino", database_id: "db-1", state: "live", live_version_id: "v-1" }),
+          makeEndpoint({ id: "e2", name: "on starrocks", database_id: "db-2", state: "draft" }),
+          makeEndpoint({ id: "e3", name: "also starrocks", database_id: "db-2", state: "draft" }),
+        ],
+      },
+    });
+    const user = userEvent.setup();
+    renderEndpoints();
+    await screen.findByText("on trino");
+
+    await user.click(screen.getByRole("combobox", { name: "Engine" }));
+    await user.click(await screen.findByRole("option", { name: "StarRocks" }));
+
+    // The table is filtered…
+    expect(screen.queryByText("on trino")).not.toBeInTheDocument();
+    expect(screen.getByText("on starrocks")).toBeInTheDocument();
+
+    // …and the strip still describes ONE set: 1 + 2 + 0 = 3, the total it
+    // states. Before the fix this read "2 endpoints · 1 live · 2 draft · 0
+    // disabled" — a leading number that matched none of the three beside it.
+    expect(screen.getByText("endpoints total").textContent).toBe("3endpoints total");
+    expect(screen.getByText("live").textContent).toBe("1live");
+    expect(screen.getByText("draft").textContent).toBe("2draft");
+    expect(screen.getByText("disabled").textContent).toBe("0disabled");
+  });
+});
+
+/**
+ * Minor #4: `ServiceAccountActionsMenu` names its trigger after its row and
+ * this one did not, so a 30-row Endpoints list gave a screen-reader user 30
+ * controls all called "Actions".
+ */
+describe("Endpoints — row menus are named after their row", () => {
+  it("gives every row's actions trigger its own accessible name", async () => {
+    mockList({
+      data: {
+        status: 200,
+        data: [
+          makeEndpoint({ id: "e1", name: "one", state: "draft" }),
+          makeEndpoint({ id: "e2", name: "two", state: "draft" }),
+        ],
+      },
+    });
+    renderEndpoints();
+    await screen.findByText("one");
+
+    // `getByRole` throws on more than one match, so this fails outright if both
+    // rows fall back to the bare default.
+    expect(screen.getByRole("button", { name: "Actions for one" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Actions for two" })).toBeInTheDocument();
   });
 });

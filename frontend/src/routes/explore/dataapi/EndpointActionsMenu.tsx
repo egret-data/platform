@@ -19,6 +19,10 @@ import type { DataApiEndpointDto } from "@/api/generated/model";
  * threaded down as callbacks — `isPending` is then scoped to the row that fired
  * it. Deletion stays a callback because the confirmation dialog belongs to the
  * page, not to one row's menu.
+ *
+ * The trigger is NAMED after its row, like `ServiceAccountActionsMenu`'s. The
+ * default bare "Actions" leaves a 30-row list with 30 identically-named
+ * controls, which a screen-reader user navigating by button cannot tell apart.
  */
 export function EndpointActionsMenu({ ws, endpoint, onDelete }: {
   ws: string;
@@ -30,7 +34,7 @@ export function EndpointActionsMenu({ ws, endpoint, onDelete }: {
   const enableMutation = useEnableEndpoint();
 
   return (
-    <RowActionsMenu>
+    <RowActionsMenu label={`Actions for ${endpoint.name}`}>
       <DropdownMenuItem onClick={() => nav(`/explore/${ws}/data-api/endpoints/${endpoint.id}`)}>Open</DropdownMenuItem>
       {endpoint.state === "live" && (
         // `disabled` while in flight, like every other mutation trigger in

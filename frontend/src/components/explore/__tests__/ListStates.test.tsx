@@ -6,11 +6,20 @@ const empty = <p>No endpoints yet</p>;
 
 describe("ListStates", () => {
   it("shows a skeleton while loading and nothing else", () => {
+    // 7, not the default 4 and not the 5 every other case here passes: a column
+    // count that no default could produce is what makes the last assertion
+    // prove `skeletonCols` was actually threaded through.
     render(
-      <ListStates isLoading isError={false} errorText="Could not load." hasData={false} skeletonCols={5} empty={empty}>
+      <ListStates isLoading isError={false} errorText="Could not load." hasData={false} skeletonCols={7} empty={empty}>
         <p>rows</p>
       </ListStates>,
     );
+    // Two absences alone were vacuous — `if (isLoading) return null;` satisfied
+    // them, and nothing anywhere asserted `skeletonCols` reached anything.
+    const skeleton = screen.getByTestId("list-skeleton");
+    expect(skeleton).toBeInTheDocument();
+    expect(skeleton.firstElementChild?.childElementCount).toBe(7);
+
     expect(screen.queryByText("rows")).not.toBeInTheDocument();
     expect(screen.queryByText("No endpoints yet")).not.toBeInTheDocument();
   });

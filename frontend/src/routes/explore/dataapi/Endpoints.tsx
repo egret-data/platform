@@ -142,21 +142,13 @@ export default function Endpoints() {
 
   /**
    * The rows actually ON SCREEN — not `rows`, which is only what survived
-   * filtering and sorting.
+   * filtering and sorting: `groupByFolder` drops orphan-`folder_id` rows, and a
+   * collapsed folder's rows are in `groups` but not in front of the user.
    *
-   * Two sets could be meant by "visible" here and they are different:
-   * `groups.flatMap((g) => g.rows)` is "rows that survived grouping", and this
-   * is "rows the user can see and act on". They differ twice over —
-   * `groupByFolder` silently DROPS a row whose `folder_id` names a folder the
-   * folders list does not contain (an orphan left behind by a concurrent folder
-   * delete), and a collapsed folder's rows are in `groups` but not on screen.
-   *
-   * The destructive action gets the smaller set. "Select all" followed by
-   * "Delete selected" must never destroy an endpoint the user was never shown,
-   * and the "{n} selected" count must not claim rows that are not in front of
-   * them. Feeding `useBulkSelect` anything wider is a data-loss path, which is
-   * also exactly what its own doc asks for: `rows` "should be the currently
-   * visible set".
+   * This is what `useBulkSelect` must be fed; the full argument for why — and
+   * what breaks when a caller passes more — lives on the hook itself
+   * (`src/hooks/useBulkSelect.ts`), because that is where the next caller will
+   * be reading.
    */
   const visibleRows = useMemo(
     () => groups.flatMap((g) => (collapse.isCollapsed(g.folder?.id ?? UNCATEGORIZED_KEY) ? [] : g.rows)),
@@ -176,6 +168,16 @@ export default function Endpoints() {
   }
 
   const hasData = endpoints.length > 0;
+
+  // Bulk mode's only OFF switch is a toggle that renders on `hasData`. Delete
+  // the last endpoint (in bulk, or one at a time from the row menu) and the
+  // toggle unmounts while `bulkMode` stays true — the checkbox column then
+  // reappears, unasked, the moment a new endpoint is created.
+  const { bulkMode, setBulkMode } = bulk;
+  useEffect(() => {
+    if (!hasData && bulkMode) setBulkMode(false);
+  }, [hasData, bulkMode, setBulkMode]);
+
   const live = endpoints.filter((e) => e.state === "live");
   const draft = endpoints.filter((e) => e.state === "draft");
   const disabled = endpoints.filter((e) => e.state === "disabled");
@@ -199,6 +201,15 @@ export default function Endpoints() {
     // The same `selectedIds` the BulkBar counted — this closure holds THIS
     // render's `bulk`, so the array cannot change under the loop.
     const ids = bulk.selectedIds;
+    // The dialog is open across renders, and `selectedIds` is re-derived from
+    // the visible rows on each one — a refetch that drops the selected rows (or
+    // a folder collapsed behind the dialog) can empty it between "Delete
+    // selected" and the confirm click. Without this the run does nothing and
+    // then claims "Deleted 0 endpoints".
+    if (ids.length === 0) {
+      bulk.clear();
+      return;
+    }
     let failed = 0;
     for (const id of ids) {
       try {
@@ -307,9 +318,19 @@ export default function Endpoints() {
         </div>
 
         <div className="mb-3">
+          {/* All four numbers describe the SAME set — the whole list, unfiltered
+              — so the row always adds up. It used to read `rows.length` (post
+              filter) beside three counts taken from the raw list, so filtering
+              by Engine produced "1 endpoints · 3 live · 5 draft · 2 disabled".
+              Chosen over "make all four count the filtered set" because these
+              three are also the state FILTER's chips: recomputed against the
+              filtered rows they would read 0 for every state except the active
+              one, and a chip labelled "0 draft" that reveals five drafts when
+              clicked is worse than a total. The filtered count is not lost —
+              the table below is the filtered set, with its own empty line. */}
           <SummaryStrip
             items={[
-              { label: "endpoints", value: rows.length },
+              { label: "endpoints total", value: endpoints.length },
               { label: "live", value: live.length, onClick: () => toggleStateFilter("live"), active: stateFilter === "live" },
               { label: "draft", value: draft.length, onClick: () => toggleStateFilter("draft"), active: stateFilter === "draft" },
               { label: "disabled", value: disabled.length, onClick: () => toggleStateFilter("disabled"), active: stateFilter === "disabled" },
