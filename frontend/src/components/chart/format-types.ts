@@ -48,9 +48,21 @@ export interface ColorRangeRule {
 }
 export type Rule = SingleColorRule | ColorRangeRule;
 
-// Covers SQL type names (Trino: bigint, double…) and MySQL-protocol enum names
-// returned by StarRocks (MYSQL_TYPE_LONGLONG / LONG / SHORT / TINY / NEWDECIMAL…).
-const NUMERIC_RE = /int|double|decimal|real|numeric|float|bigint|long|short|tiny/i;
+// Covers SQL type names as the two engines report them — Trino `bigint`,
+// `double`, `real`, `decimal(10,2)`…; StarRocks `tinyint`, `smallint`, `int`,
+// `bigint`, `float`, `double`, `decimal`.
+//
+// It used to carry `long`, `short` and `tiny` as well, for the raw MySQL-protocol
+// enum names (`MYSQL_TYPE_LONGLONG`…) StarRocks' execute path once leaked into
+// `ColumnMeta.ty`. Nothing produces those any more: the StarRocks connector's
+// describe paths always mapped the protocol tag to a SQL name, and #515 made its
+// execute path do the same, so `coltype_name` is now the only thing that names a
+// StarRocks column. Trino reports SQL names natively, and those two connectors are
+// the only writers of `ColumnMeta.ty`. The three alternatives were therefore dead
+// for their purpose — `tinyint`/`smallint`/`bigint` all match on `int` already —
+// and could only still fire as FALSE positives: `longtext` and `tinytext` were
+// classified as numeric and formatted as numbers.
+const NUMERIC_RE = /int|double|decimal|real|numeric|float|bigint/i;
 const TEMPORAL_RE = /date|time|timestamp/i;
 
 export function isNumericType(type: string): boolean {
@@ -74,10 +86,14 @@ export function isTemporalType(type: string): boolean {
  * This exists for the conditional-formatting operator list, which is the one place the DISTINCTION
  * between a boolean and a string changes what the panel may offer.
  *
- * StarRocks is a known asymmetry and not one this can close: its connector reports the MySQL
- * protocol type, and `BOOLEAN` and `TINYINT` are the same wire type there (`MYSQL_TYPE_TINY`), so a
- * StarRocks boolean arrives numeric-looking and `isNumericType` claims it first. `typegen.rs`
- * records the same limitation on the backend side.
+ * StarRocks is a known asymmetry and not one this can close. Its connector reports a SQL type name
+ * like every other path does, but the name it can report for a boolean is `tinyint`: StarRocks
+ * `BOOLEAN` and `TINYINT` travel as one wire type (`MYSQL_TYPE_TINY`), so by the time the connector
+ * maps that tag to a SQL name the distinction is already gone and there is nothing to map it to.
+ * A StarRocks boolean therefore arrives spelled `tinyint`, `isNumericType` matches it on `int` and
+ * claims it first, and this never sees it. `typegen.rs` records the same limitation on the backend
+ * side (there it is visible as physical-vs-virtual: DESCRIBE says `boolean`, the wire says
+ * `tinyint`).
  */
 const BOOLEAN_RE = /^bool(ean)?$/i;
 export function isBooleanType(type: string): boolean {

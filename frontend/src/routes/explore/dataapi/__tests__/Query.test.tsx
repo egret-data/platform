@@ -199,6 +199,82 @@ describe("Query section — preview", () => {
     expect(new Set(ids).size).toBe(2);
   });
 
+  /**
+   * The same finding one level down, and the half the id fix above did NOT
+   * reach: the rows were re-keyed by index, but `values` stayed a
+   * `Record<name, string>` — so two declarations sharing a name still read and
+   * wrote one entry, and the second field echoed the first keystroke by
+   * keystroke. Two blank names is not an exotic case, it is what two freshly
+   * added rows look like before either is named; a duplicate of a real name is
+   * one mistyped character.
+   *
+   * Asserted as INDEPENDENCE of the two fields, not merely as "the ids differ":
+   * distinct ids were already true while the mirroring was happening.
+   */
+  function twoParams(name: string) {
+    const p = { type: ParamType.string, location: ParamLocation.query, required: false, description: "" };
+    return [{ name, ...p }, { name, ...p }];
+  }
+  function previewInputs(container: HTMLElement) {
+    return Array.from(container.querySelectorAll<HTMLInputElement>('input[id^="preview-param-"]'));
+  }
+
+  it("holds a separate test value per row when two declarations share a name", async () => {
+    const endpoint = makeEndpoint({ params: twoParams("region") } as Partial<DataApiEndpointDto>);
+    vi.mocked(api.useDataApiGetEndpoint).mockReturnValue({
+      data: { status: 200, data: endpoint },
+      isLoading: false,
+      isError: false,
+      refetch: vi.fn(),
+    } as never);
+    const mutateAsync = vi.fn().mockResolvedValue({
+      status: 200,
+      data: { columns: [], rows: [], row_count: 0, truncated: false },
+    });
+    vi.mocked(api.useDataApiPreviewEndpoint).mockReturnValue({ mutateAsync, isPending: false } as never);
+
+    const { container } = renderQuery(endpoint);
+    await screen.findByLabelText("SQL");
+    const inputs = previewInputs(container);
+    expect(inputs).toHaveLength(2);
+
+    await userEvent.type(inputs[0], "EU");
+    // The mirror, stated as its own assertion: with one entry behind both rows
+    // this already reads "EU" before the second row has been touched.
+    expect(inputs[1]).toHaveValue("");
+    await userEvent.type(inputs[1], "US");
+    expect(inputs[0]).toHaveValue("EU");
+    expect(inputs[1]).toHaveValue("US");
+
+    // The wire format is unchanged — one list per NAME — so the two rows must
+    // still collapse to one entry, and it is the last filled row's value.
+    await userEvent.click(screen.getByRole("button", { name: /preview unsaved draft/i }));
+    await waitFor(() => expect(mutateAsync).toHaveBeenCalled());
+    expect(mutateAsync.mock.calls[0][0].data.values).toEqual({ region: ["US"] });
+  });
+
+  it("holds a separate test value per row when two freshly added declarations are both unnamed", async () => {
+    const endpoint = makeEndpoint({ params: twoParams("") } as Partial<DataApiEndpointDto>);
+    vi.mocked(api.useDataApiGetEndpoint).mockReturnValue({
+      data: { status: 200, data: endpoint },
+      isLoading: false,
+      isError: false,
+      refetch: vi.fn(),
+    } as never);
+    vi.mocked(api.useDataApiPreviewEndpoint).mockReturnValue({ mutateAsync: vi.fn(), isPending: false } as never);
+
+    const { container } = renderQuery(endpoint);
+    await screen.findByLabelText("SQL");
+    const inputs = previewInputs(container);
+    expect(inputs).toHaveLength(2);
+
+    await userEvent.type(inputs[0], "a");
+    expect(inputs[1]).toHaveValue("");
+    await userEvent.type(inputs[1], "b");
+    expect(inputs[0]).toHaveValue("a");
+    expect(inputs[1]).toHaveValue("b");
+  });
+
   it("says the result was capped when the engine truncated it", async () => {
     const endpoint = makeEndpoint();
     vi.mocked(api.useDataApiGetEndpoint).mockReturnValue({

@@ -28,7 +28,9 @@ const PREVIEW_MAX_ROWS = 100;
 export function PreviewBlock() {
   const { ws, id, form } = useEndpointDetail();
   const previewMutation = useDataApiPreviewEndpoint();
-  const [values, setValues] = useState<Record<string, string>>({});
+  // Keyed by the declaration's POSITION, not by its name — a name is not unique
+  // while the author is editing (see the render comment below).
+  const [values, setValues] = useState<Record<number, string>>({});
   const [result, setResult] = useState<DataApiPreviewDto | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -39,14 +41,24 @@ export function PreviewBlock() {
     setResult(null);
     setError(null);
     try {
-      // One list per name, matching the serving path: a repeated parameter is a
-      // list there too. A blank field is omitted rather than sent as `[""]`, so
-      // an unfilled optional parameter behaves like it was never supplied.
+      // One list per NAME, matching the serving path: a repeated parameter is a
+      // list there too, and this is the wire format the route parses. A blank
+      // field is omitted rather than sent as `[""]`, so an unfilled optional
+      // parameter behaves like it was never supplied.
+      //
+      // The state above is keyed by position, so two declarations sharing a name
+      // hold two values while the server can only be told one. The LAST FILLED
+      // one wins (a later blank does not erase an earlier value, because blanks
+      // are skipped): it is the row the author reached most recently, and the
+      // one nearest the button they pressed. Little rides on the choice —
+      // `validate_preview` refuses a duplicate declaration outright
+      // (`ValidationError::DuplicateParameter`), so a body like this cannot
+      // produce a green preview whichever value it carries.
       const sent: Record<string, string[]> = {};
-      for (const p of form.params) {
-        const v = values[p.name];
+      form.params.forEach((p, i) => {
+        const v = values[i];
         if (v !== undefined && v !== "") sent[p.name] = [v];
-      }
+      });
       const res = await previewMutation.mutateAsync({
         workspace: ws,
         id,
@@ -115,12 +127,26 @@ export function PreviewBlock() {
               `ParamEditor`, which DOES need generated row ids: its rows can be
               removed from the middle and hold uncontrolled Radix/local state).
 
-              Considered and deliberately left: `values` stays keyed by name, so
-              deleting a parameter and adding a new one that reuses the name
-              resurrects the old test value. It is cosmetic (the value is visible
-              in the field, is never saved, and is one keystroke to clear) and
-              keying it by index instead would move the test value to whichever
-              declaration slid into that slot, which reads worse. */}
+              `values` is keyed by index for the same reason. Keying the STATE by
+              name was the same collision one level down, and rendering by index
+              did not fix it: two rows sharing a name still read and wrote one
+              entry, so the second field echoed the first keystroke by keystroke
+              — including the ordinary case of two freshly-added rows, which are
+              both blank. A row id generated the way `ParamEditor` does it would
+              also work, but this component does not OWN `form.params` (it reads
+              them from context, and they change under it as the author edits the
+              declarations), so keeping such ids in step would take the
+              `useEffect`-that-calls-`setState` shape this feature avoids.
+
+              Considered and deliberately left, in the shape index keying gives
+              it: a test value belongs to a SLOT, not to a declaration, so
+              removing or reordering a declaration leaves each surviving value
+              where it was and it now sits beside whichever declaration slid into
+              that position. (Keying by name instead traded this for a value that
+              outlives its declaration and reappears when a new one reuses the
+              name — and cost the collision above.) Cosmetic either way: the
+              value is on screen, is never saved, and is one keystroke to
+              clear. */}
           {form.params.map((p, i) => (
             <div key={i} className="space-y-1.5">
               <Label htmlFor={`preview-param-${i}`}>
@@ -129,9 +155,9 @@ export function PreviewBlock() {
               </Label>
               <Input
                 id={`preview-param-${i}`}
-                value={values[p.name] ?? ""}
+                value={values[i] ?? ""}
                 placeholder={p.default ?? undefined}
-                onChange={(e) => setValues((prev) => ({ ...prev, [p.name]: e.target.value }))}
+                onChange={(e) => setValues((prev) => ({ ...prev, [i]: e.target.value }))}
               />
             </div>
           ))}

@@ -51,8 +51,22 @@
 //! disable and no flag to get wrong — [`run`] goes straight from validation to
 //! `execute_as_with_params`. So the failure mode to watch for is a refactor that
 //! ADDS one of the four (routing preview through a serving helper that does all of
-//! them), not a switch flipping; and grep for those four names in this file is the
-//! check that catches it.
+//! them), not a switch flipping.
+//!
+//! Grepping this file for those four names is NOT that check, and cannot be: the
+//! paragraphs above name all four, so such a grep matches whatever the code does.
+//! Grep the CODE — every line that is not a comment — and the answer changes with
+//! the property:
+//!
+//! ```text
+//! grep -vE '^\s*//' crates/egret-dataapi/src/preview.rs \
+//!   | grep -nE 'access_log|audit|cache|rate_limit'
+//! ```
+//!
+//! No output is the property holding; any hit is the refactor to look at. Run the
+//! same two commands against `serving/router.rs` for the positive control — that
+//! is the file that legitimately does all four, it prints ~20 lines, and it is
+//! what a preview must never be routed through.
 //!
 //! # Preview bypasses `decode`, so `values` is not bounded by `MAX_PARAM_BYTES`
 //!
