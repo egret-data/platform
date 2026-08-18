@@ -315,13 +315,13 @@ pub const ALLOWED_METHODS: [&str; 2] = ["GET", "POST"];
 /// the other seams use: the singular object name, as `alert` and `saved_query`
 /// do.
 ///
-/// Folders of this type are not creatable yet: `egret-bi`'s generic folder
-/// router maps a URL `kind` to `(entity_type, read_perm, manage_perm)` in
-/// `kind_perms`, and has no entry for endpoints. Adding
-/// `"data_api_endpoints" => ("data_api_endpoint", "data_api_endpoint:read",
-/// "data_api_endpoint:manage")` there is what makes `folder_id` reachable from
-/// the UI. The guard is written first on purpose — an unmatched rule is inert,
-/// but a field that lands before its guard is a hole.
+/// Folders of this type are creatable through `egret-bi`'s generic folder
+/// router, which maps a URL `kind` to `(entity_type, read_perm, manage_perm)`
+/// in `kind_perms`; the `"data_api_endpoints" => ("data_api_endpoint",
+/// "data_api_endpoint:read", "data_api_endpoint:manage")` arm is what makes
+/// `folder_id` reachable from the UI, and both permissions are seeded by
+/// migration 0122. The guard was written before that arm on purpose — an
+/// unmatched rule is inert, but a field that lands before its guard is a hole.
 pub const FOLDER_ENTITY_TYPE: &str = "data_api_endpoint";
 
 /// The Cedar object KIND an endpoint appears as in an authorization decision,

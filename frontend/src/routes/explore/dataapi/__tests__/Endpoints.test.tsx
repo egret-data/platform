@@ -90,6 +90,7 @@ const bookmarkMutateAsync = vi.fn();
 const unbookmarkMutateAsync = vi.fn();
 const disableMutateAsync = vi.fn();
 const enableMutateAsync = vi.fn();
+const updateMutateAsync = vi.fn();
 
 function renderEndpoints() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -144,6 +145,12 @@ beforeEach(() => {
   vi.mocked(api.useDataApiEnableEndpoint).mockReturnValue(
     { mutateAsync: enableMutateAsync, isPending: false } as unknown as ReturnType<typeof api.useDataApiEnableEndpoint>,
   );
+  // Moving a row between folders is a PATCH on the endpoint itself — the same
+  // `UpdateEndpointInput` the detail route saves through — so the folder tests
+  // assert on THIS mock's payload.
+  vi.mocked(api.useDataApiUpdateEndpoint).mockReturnValue(
+    { mutateAsync: updateMutateAsync, isPending: false } as unknown as ReturnType<typeof api.useDataApiUpdateEndpoint>,
+  );
   vi.mocked(api.useDataApiListServiceAccounts).mockReturnValue(
     { data: { status: 200, data: [SERVICE_ACCOUNT] }, isLoading: false, isError: false } as unknown as
       ReturnType<typeof api.useDataApiListServiceAccounts>,
@@ -170,6 +177,19 @@ beforeEach(() => {
   unbookmarkMutateAsync.mockResolvedValue({ status: 200, data: {}, headers: new Headers() });
   disableMutateAsync.mockResolvedValue({ status: 200, data: {}, headers: new Headers() });
   enableMutateAsync.mockResolvedValue({ status: 200, data: {}, headers: new Headers() });
+  updateMutateAsync.mockResolvedValue({ status: 200, data: {}, headers: new Headers() });
+
+  // `useFolderMutations` (the page's New-folder path) runs a REAL `useMutation`
+  // over this automocked fetch fn; without a resolved value it returns
+  // `undefined` and `.data` throws inside the mutation.
+  vi.mocked(foldersApi.foldersFoldersCreate).mockResolvedValue(
+    { status: 201, data: { id: "f-new", name: "New folder" }, headers: new Headers() } as unknown as
+      Awaited<ReturnType<typeof foldersApi.foldersFoldersCreate>>,
+  );
+  vi.mocked(foldersApi.getFoldersFoldersListQueryKey).mockImplementation(
+    (ws, kind) => ["foldersFoldersList", ws, kind] as unknown as
+      ReturnType<typeof foldersApi.getFoldersFoldersListQueryKey>,
+  );
 
   // jsdom has no real download machinery; the download dialog's success path
   // touches it, so stub it out rather than let it throw/log "not implemented".
@@ -1273,5 +1293,140 @@ describe("Endpoints — bookmarks", () => {
     expect(screen.queryByText("Starred report")).not.toBeInTheDocument();
 
     inFlight.resolve(OK);
+  });
+});
+
+/**
+ * Folders: creating one, and moving a row between them.
+ *
+ * Every fixture here has TWO folders and a row that is ALREADY IN ONE. With a
+ * single folder, "moved to the right folder" and "moved to some folder" are the
+ * same assertion, and a move that ignored its argument would pass; with a row
+ * that starts folderless, "sent an explicit null" and "sent nothing" both leave
+ * it where it was.
+ */
+describe("Endpoints — folders", () => {
+  const REPORTING = { id: "f-1", name: "Reporting" };
+  const ARCHIVE = { id: "f-2", name: "Archive" };
+  const IN_REPORTING = makeEndpoint({ id: "ep-1", name: "Daily report", folder_id: "f-1" });
+  const IN_ARCHIVE = makeEndpoint({ id: "ep-2", name: "Old export", folder_id: "f-2" });
+
+  function renderTwoFolders() {
+    mockList({ data: { status: 200, data: [IN_REPORTING, IN_ARCHIVE] } });
+    mockFolders([REPORTING, ARCHIVE]);
+    return renderEndpoints();
+  }
+
+  /** The one PATCH body the page sent, as the request object it really was. */
+  function soleUpdateBody(): Record<string, unknown> {
+    expect(updateMutateAsync).toHaveBeenCalledTimes(1);
+    const [vars] = updateMutateAsync.mock.calls[0] as [{ workspace: string; id: string; data: Record<string, unknown> }];
+    return vars.data;
+  }
+
+  it("moves a row into the folder that was chosen, not merely into a folder", async () => {
+    const user = userEvent.setup();
+    renderTwoFolders();
+    await screen.findByText("Daily report");
+
+    await user.click(screen.getByRole("button", { name: "Actions for Daily report" }));
+    // The row's OWN folder is offered but inert — a live "Move to Reporting" on
+    // a row already in Reporting is a request that changes nothing.
+    expect(await screen.findByRole("menuitem", { name: 'Move to "Reporting"' })).toHaveAttribute("aria-disabled", "true");
+
+    await user.click(screen.getByRole("menuitem", { name: 'Move to "Archive"' }));
+
+    await waitFor(() => expect(updateMutateAsync).toHaveBeenCalled());
+    expect(updateMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "ep-1", data: { folder_id: "f-2" } });
+  });
+
+  it("sends an explicit null — not an omitted key — when moving to Uncategorized", async () => {
+    const user = userEvent.setup();
+    renderTwoFolders();
+    await screen.findByText("Daily report");
+
+    await user.click(screen.getByRole("button", { name: "Actions for Daily report" }));
+    await user.click(await screen.findByRole("menuitem", { name: /remove from folder/i }));
+
+    await waitFor(() => expect(updateMutateAsync).toHaveBeenCalled());
+    const body = soleUpdateBody();
+    // `folder_id` is `Option<Option<Uuid>>` server-side: an ABSENT key means
+    // "leave the folder alone" and `null` means "clear it". `{}` and
+    // `{folder_id: null}` are therefore different requests with opposite
+    // meanings, and only the key's PRESENCE tells them apart.
+    expect(Object.prototype.hasOwnProperty.call(body, "folder_id")).toBe(true);
+    expect(body.folder_id).toBeNull();
+    // …and nothing else rides along: a PATCH carrying the row's name or sql
+    // would re-submit whatever the list last fetched for them.
+    expect(Object.keys(body)).toEqual(["folder_id"]);
+  });
+
+  it("does not offer Remove from folder to a row that is already uncategorized", async () => {
+    mockList({ data: { status: 200, data: [IN_REPORTING, makeEndpoint({ id: "ep-3", name: "Loose one", folder_id: null })] } });
+    mockFolders([REPORTING, ARCHIVE]);
+    const user = userEvent.setup();
+    renderEndpoints();
+    await screen.findByText("Loose one");
+
+    await user.click(screen.getByRole("button", { name: "Actions for Loose one" }));
+    await screen.findByRole("menuitem", { name: 'Move to "Archive"' });
+    expect(screen.queryByRole("menuitem", { name: /remove from folder/i })).not.toBeInTheDocument();
+  });
+
+  it("creates a folder from the toolbar, and the list groups under it", async () => {
+    const user = userEvent.setup();
+    const { rerenderTree } = renderTwoFolders();
+    await screen.findByText("Daily report");
+
+    await user.click(screen.getByRole("button", { name: "New folder" }));
+    await user.type(await screen.findByPlaceholderText("Folder name"), "Ops");
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() => {
+      expect(foldersApi.foldersFoldersCreate).toHaveBeenCalledWith("eng", "data_api_endpoints", { name: "Ops" });
+    });
+    // Creating a folder must not move anything.
+    expect(updateMutateAsync).not.toHaveBeenCalled();
+    expect(toast.success).toHaveBeenCalledWith("Folder created");
+
+    // The refetch the invalidation triggers, played back: the new folder is a
+    // section header of its own, alongside the two that were already there.
+    mockFolders([REPORTING, ARCHIVE, { id: "f-new", name: "Ops" }]);
+    rerenderTree();
+    expect(await screen.findByText("Ops")).toBeInTheDocument();
+    expect(screen.getByText("Reporting")).toBeInTheDocument();
+  });
+
+  it("moves the row whose menu was used into a brand-new folder", async () => {
+    const user = userEvent.setup();
+    renderTwoFolders();
+    await screen.findByText("Old export");
+
+    // The SECOND row's menu, with a peer in the same starting state one row
+    // above it: a handler that moved "the first row" would look identical here
+    // if only one row existed.
+    await user.click(screen.getByRole("button", { name: "Actions for Old export" }));
+    await user.click(await screen.findByRole("menuitem", { name: /move to new folder/i }));
+    await user.type(await screen.findByPlaceholderText("Folder name"), "Ops");
+    await user.click(screen.getByRole("button", { name: "Move" }));
+
+    await waitFor(() => expect(updateMutateAsync).toHaveBeenCalled());
+    expect(foldersApi.foldersFoldersCreate).toHaveBeenCalledWith("eng", "data_api_endpoints", { name: "Ops" });
+    // `f-new` is what the create resolved with — the id has to come from the
+    // response, not from the name that was typed.
+    expect(updateMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "ep-2", data: { folder_id: "f-new" } });
+  });
+
+  it("reports a failed move rather than leaving the row looking moved", async () => {
+    updateMutateAsync.mockRejectedValueOnce(new ApiError(403, "forbidden"));
+    const user = userEvent.setup();
+    renderTwoFolders();
+    await screen.findByText("Daily report");
+
+    await user.click(screen.getByRole("button", { name: "Actions for Daily report" }));
+    await user.click(await screen.findByRole("menuitem", { name: 'Move to "Archive"' }));
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalled());
+    expect(toast.success).not.toHaveBeenCalled();
   });
 });

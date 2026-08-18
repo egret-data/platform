@@ -33,6 +33,22 @@ export type EntityKind =
   | "notebooks"
   | "saved_queries"
   | "alerts";
+
+/**
+ * Every `{kind}` the GENERIC folder router accepts — `egret-bi`'s `kind_perms`
+ * — which is a superset of [`EntityKind`].
+ *
+ * `EntityKind` is narrower on purpose: it is the key of the `listKeyOf` and
+ * `setFolderOf` records below, so a kind may only join it once it has BOTH a
+ * list query key and a `PATCH …/{id}/folder` fetch fn. Data API endpoints have
+ * folders and no such route — an endpoint moves through the generic `PATCH
+ * /endpoints/{id}` with `folder_id`, owned by `useUpdateEndpoint` in
+ * `dataApi.ts` — so widening `EntityKind` would force a `setFolderOf` entry
+ * that nothing calls, i.e. a second, dead way to move an endpoint sitting
+ * beside the real one. Listing and creating folders need neither record, so
+ * they take this wider type instead.
+ */
+export type FolderKind = EntityKind | "data_api_endpoints";
 export type Folder = FolderDto;
 
 /** Invalidation key for each entity's list; generated for migrated domains,
@@ -57,15 +73,15 @@ const setFolderOf: Record<EntityKind, (ws: string, id: string, folderId: string 
   alerts: (ws, id, folder_id) => alertsSetFolder(ws, id, { folder_id }),
 };
 
-export const folderKeys = { list: (ws: string, kind: EntityKind) => getFoldersFoldersListQueryKey(ws, kind) };
+export const folderKeys = { list: (ws: string, kind: FolderKind) => getFoldersFoldersListQueryKey(ws, kind) };
 
-export function useFolders(ws: string, kind: EntityKind) {
+export function useFolders(ws: string, kind: FolderKind) {
   return useFoldersFoldersList<Folder[], ApiError>(ws, kind, {
     query: { select: (r) => r.data as Folder[] },
   });
 }
 
-export function useFolderMutations(ws: string, kind: EntityKind) {
+export function useFolderMutations(ws: string, kind: FolderKind) {
   const qc = useQueryClient();
   const inval = () => qc.invalidateQueries({ queryKey: getFoldersFoldersListQueryKey(ws, kind) });
   const create = useMutation<Folder, ApiError, string>({

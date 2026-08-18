@@ -15,6 +15,8 @@ import { SummaryStrip } from "@/components/explore/SummaryStrip";
 import { SortableHeader, type SortState } from "@/components/explore/SortableHeader";
 import { RelativeTime } from "@/components/explore/RelativeTime";
 import { FolderHeaderRow } from "@/components/explore/FolderHeaderRow";
+import { FolderNameDialog } from "@/components/explore/FolderNameDialog";
+import { FolderToolbar } from "@/components/explore/FolderToolbar";
 import { ListPageShell } from "@/components/explore/ListPageShell";
 import { ListStates } from "@/components/explore/ListStates";
 import { EmptyState } from "@/components/explore/EmptyState";
@@ -24,13 +26,14 @@ import { FacetSelect, FACET_ALL } from "@/components/explore/FacetSelect";
 import { useBulkSelect } from "@/hooks/useBulkSelect";
 import { groupByFolder, useCollapsed } from "@/components/explore/folders";
 import { useFoldersFoldersList } from "@/api/generated/folders/folders";
+import { useFolderMutations } from "@/api/folders";
 import { useDatabases, type DatabaseConn } from "@/api/databases";
 import { useDataApiListEndpoints } from "@/api/generated/data-api/data-api";
 // Mutations come from the hand-written wrapper, never from the generated hooks:
 // the wrapper is what owns the cache invalidation (see `src/api/dataApi.ts`).
 // Wired to the generated hook directly, "Endpoint disabled" toasts over a row
 // whose badge still reads Live for the next 30 seconds.
-import { useBookmarkEndpoint, useCreateEndpoint, useDeleteEndpoint, useUnbookmarkEndpoint } from "@/api/dataApi";
+import { useBookmarkEndpoint, useCreateEndpoint, useDeleteEndpoint, useUnbookmarkEndpoint, useUpdateEndpoint } from "@/api/dataApi";
 import type { DataApiEndpointDto, DataApiEndpointListItemDto } from "@/api/generated/model";
 import { DownloadOpenApiDialog } from "./DownloadOpenApiDialog";
 import { EndpointActionsMenu } from "./EndpointActionsMenu";
@@ -101,6 +104,13 @@ export default function Endpoints() {
   // from that row's own `bookmarked`, never from a page-level "mode".
   const bookmarkMutation = useBookmarkEndpoint();
   const unbookmarkMutation = useUnbookmarkEndpoint();
+  const { create: createFolder } = useFolderMutations(ws, FOLDER_KIND);
+  // The page's own copy of the endpoint PATCH, used ONLY by the folder dialog's
+  // "move to a new folder" path — the folder has to exist before the row can be
+  // put in it, and the create half lives here with the dialog. A row's direct
+  // moves are fired by `EndpointActionsMenu`'s own instance, so `isPending`
+  // there stays scoped to the row that was clicked.
+  const updateMutation = useUpdateEndpoint();
 
   const collapse = useCollapsed(`folders:${ws}:${FOLDER_KIND}`);
 
@@ -144,6 +154,17 @@ export default function Endpoints() {
   const [downloadOpen, setDownloadOpen] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<DataApiEndpointDto | null>(null);
   const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
+  /**
+   * The folder-name dialog, in one of two modes.
+   *
+   * `"new"` just creates a folder. `"move"` creates one AND puts `endpoint`
+   * into it — the row that opened it is carried here rather than in a separate
+   * piece of state, so the dialog cannot be open in "move" mode with nothing
+   * to move.
+   */
+  const [folderDialog, setFolderDialog] = useState<
+    { mode: "new" } | { mode: "move"; endpoint: DataApiEndpointDto } | null
+  >(null);
 
   // `database_id` -> engine, so the Engine column and the Engine facet read the
   // same source rather than each doing its own lookup.
@@ -291,6 +312,34 @@ export default function Endpoints() {
     }
   }
 
+  /**
+   * The folder dialog's submit: create the folder, and in `"move"` mode put the
+   * row that opened it inside.
+   *
+   * The move is a second request on purpose — the create response is the only
+   * place the new folder's id exists, so the PATCH cannot be sent until it has
+   * come back. `folder_id` is the ONLY key in that PATCH body: `folder_id` is
+   * `Option<Option<Uuid>>` server-side, so a body carrying the row's other
+   * fields would re-submit whatever the list last fetched for them.
+   */
+  async function submitFolderDialog(name: string) {
+    // Read from THIS render's state: `FolderNameDialog` closes itself right
+    // after calling us, which sets `folderDialog` back to null.
+    const d = folderDialog;
+    if (!d) return;
+    try {
+      const folder = await createFolder.mutateAsync(name);
+      if (d.mode === "move") {
+        await updateMutation.mutateAsync({ workspace: ws, id: d.endpoint.id, data: { folder_id: folder.id } });
+        toast.success("Moved");
+      } else {
+        toast.success("Folder created");
+      }
+    } catch (err) {
+      toast.error(String(err));
+    }
+  }
+
   const renderRow = (e: DataApiEndpointListItemDto) => (
     <tr key={e.id} className="border-t hover:bg-accent">
       {bulk.bulkMode && (
@@ -322,7 +371,13 @@ export default function Endpoints() {
       <td className="text-muted-foreground">{engineLabel(e.database_id)}</td>
       <td className="text-muted-foreground"><RelativeTime iso={e.updated_at} className="block" /></td>
       <td>
-        <EndpointActionsMenu ws={ws} endpoint={e} onDelete={() => setPendingDelete(e)} />
+        <EndpointActionsMenu
+          ws={ws}
+          endpoint={e}
+          folders={folders}
+          onNewFolder={() => setFolderDialog({ mode: "move", endpoint: e })}
+          onDelete={() => setPendingDelete(e)}
+        />
       </td>
     </tr>
   );
@@ -341,6 +396,7 @@ export default function Endpoints() {
           <>
             <BookmarkToggle active={onlyBookmarked} onToggle={() => setOnlyBookmarked((v) => !v)} />
             <BulkToggle active={bulk.bulkMode} onToggle={() => bulk.setBulkMode(!bulk.bulkMode)} />
+            <FolderToolbar onNewFolder={() => setFolderDialog({ mode: "new" })} />
           </>
         ) : undefined
       }
@@ -416,10 +472,11 @@ export default function Endpoints() {
           />
         </div>
 
-        {/* Delete is the only bulk action this page can offer: moving to a
-            folder needs `folder_id` on `UpdateEndpointInput` and moving to
-            trash needs the soft-delete migration, neither of which exists yet.
-            A disabled button for either would be worse than its absence. */}
+        {/* Delete is the only bulk action this page offers. A per-row move now
+            exists (the row menu's folder items), but a BULK move is not wired
+            yet, and bulk trash needs the soft-delete migration, which does not
+            exist. A disabled button for either would be worse than its
+            absence. */}
         <BulkBar count={bulk.selectedIds.length}>
           <Button variant="destructive" size="sm" onClick={() => setBulkDeleteOpen(true)}>Delete selected</Button>
         </BulkBar>
@@ -474,6 +531,14 @@ export default function Endpoints() {
         databases={databases ?? []}
         create={createMutation}
         onCreated={(id) => nav(`/explore/${ws}/data-api/endpoints/${id}`)}
+      />
+
+      <FolderNameDialog
+        open={folderDialog !== null}
+        title={folderDialog?.mode === "move" ? "Move to new folder" : "New folder"}
+        submitLabel={folderDialog?.mode === "move" ? "Move" : "Create"}
+        onOpenChange={(o) => { if (!o) setFolderDialog(null); }}
+        onSubmit={(name) => void submitFolderDialog(name)}
       />
 
       <DownloadOpenApiDialog ws={ws} open={downloadOpen} onOpenChange={setDownloadOpen} />
