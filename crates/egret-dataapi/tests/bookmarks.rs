@@ -311,6 +311,25 @@ impl Fixture {
         .expect("count bookmarks")
     }
 
+    /// A bookmark row written straight to the generic table, so a test can put
+    /// one there that the routes would never write. `analytics.bookmarks` has a
+    /// FK on `user_id` only (0020) — `entity_type` is unconstrained text and
+    /// `entity_id` a bare uuid with no FK — so a `'chart'` row keyed on an
+    /// endpoint's id is perfectly insertable, which is exactly the row a query
+    /// that forgot its `entity_type` predicate would pick up.
+    async fn insert_raw_bookmark(&self, user: Uuid, entity_type: &str, entity_id: Uuid) {
+        sqlx::query(
+            "INSERT INTO analytics.bookmarks (user_id, entity_type, entity_id) \
+             VALUES ($1, $2, $3)",
+        )
+        .bind(user)
+        .bind(entity_type)
+        .bind(entity_id)
+        .execute(&self.db.pool)
+        .await
+        .expect("insert raw bookmark");
+    }
+
     /// The `bookmarked` flag the list shows `c` for `id`.
     async fn listed_bookmarked(&self, c: &Caller, id: Uuid) -> bool {
         let (status, body) = self.send(c, "GET", &self.collection()).await;
@@ -448,5 +467,42 @@ async fn bookmarking_another_workspaces_endpoint_is_404() {
         status,
         StatusCode::NOT_FOUND,
         "the same on the way out: {body}"
+    );
+}
+
+/// The flag is per ROW and per KIND, not merely per user.
+///
+/// The `EXISTS` sub-select has three predicates and a test with one endpoint
+/// and one bookmark kind cannot tell them apart: with a single row in the
+/// workspace, "this user has a bookmark" and "this user has a bookmark for THIS
+/// endpoint, as an endpoint" are the same sentence. So this one holds a
+/// workspace where they differ — two endpoints with only the first starred, and
+/// a `'chart'` bookmark deliberately keyed on the SECOND endpoint's id.
+///
+/// A correlation dropped from the sub-select would light every star in the
+/// list for anyone holding any bookmark at all; a dropped `entity_type` would
+/// let another seam's star light an endpoint. Both are silent, both look
+/// exactly like a working feature until someone bookmarks a second thing.
+#[tokio::test]
+async fn the_flag_is_per_endpoint_and_per_entity_type() {
+    let f = skip_without_db!();
+    let starred = f.create_endpoint("rev", "/reports/revenue").await;
+    let plain = f.create_endpoint("cost", "/reports/cost").await;
+    let c = f.principal_with(Fixture::MANAGER).await;
+
+    let (status, body) = f.send(&c, "POST", &f.bookmark_url(starred)).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    // Same user, same uuid as `plain`, different KIND. Nothing about this row
+    // concerns the endpoint list.
+    f.insert_raw_bookmark(c.user, "chart", plain).await;
+
+    assert!(
+        f.listed_bookmarked(&c, starred).await,
+        "the endpoint this caller starred must read true"
+    );
+    assert!(
+        !f.listed_bookmarked(&c, plain).await,
+        "an endpoint this caller never starred must read false, even though the \
+         caller holds a bookmark elsewhere and a `chart` bookmark on this very id"
     );
 }
