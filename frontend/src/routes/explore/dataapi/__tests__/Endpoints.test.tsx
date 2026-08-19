@@ -1681,6 +1681,37 @@ describe("Endpoints — trash", () => {
     expect(trashMutateAsync).toHaveBeenCalledTimes(1);
   });
 
+  /**
+   * Move to Trash is the ONLY bulk action, the same as `Datasets.tsx`,
+   * `Charts.tsx` and `Dashboards.tsx`.
+   *
+   * A bulk permanent delete used to sit beside it and undid single-row
+   * deletion's whole reason for moving behind the trash — it destroyed served
+   * URLs and their published version history in one click, `live` rows
+   * included. This pins its absence rather than trusting the edit: the strip is
+   * exactly where it would come back, and it came back once already in the form
+   * of the row menu's `Delete`.
+   *
+   * Asserted as "no destructive-delete control in the strip", not as "the
+   * button named `Delete selected` is gone" — the latter passes against a
+   * re-added button called anything else.
+   */
+  it("offers Move to Trash and no permanent delete as a bulk action", async () => {
+    mockListByView([DRAFT_ROW, makeEndpoint({ id: "ep-d2", name: "Second draft", state: "draft" })], []);
+    const user = userEvent.setup();
+    renderEndpoints();
+    await screen.findByText("Second draft");
+
+    await user.click(screen.getByRole("button", { name: "Bulk select" }));
+    await user.click(screen.getByRole("checkbox", { name: "Select all" }));
+
+    expect(screen.getByText("2 selected")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /move 2 to trash/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /delete/i })).not.toBeInTheDocument();
+    // And no confirmation dialog is waiting behind one either.
+    expect(screen.queryByPlaceholderText("delete")).not.toBeInTheDocument();
+  });
+
   it("bulk Move to Trash trashes every selected row and reports the number", async () => {
     const D2 = makeEndpoint({ id: "ep-draft-2", name: "Second draft", state: "draft" });
     mockListByView([DRAFT_ROW, D2], []);
