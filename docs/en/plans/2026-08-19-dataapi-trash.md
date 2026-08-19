@@ -110,6 +110,11 @@ Four behaviours, each its own test:
 3. **Restore returns the endpoint to `disabled`**, never `live`, whatever it was before.
 4. **The list excludes trashed rows by default** and includes them only when asked. Follow the dataset precedent for the parameter's name and shape: `?trashed=true` lists only trashed rows.
 5. **Trash and restore each emit their audit event.** Assert the action string and the resource id — an audit test that only counts events passes when the wrong action is recorded.
+6. **A trashed endpoint keeps its URL slot, and the conflict says so.** `migrations/0121_dataapi_endpoints.sql:44` has `UNIQUE (workspace_id, method, path)`, and `crates/egret-dataapi/src/endpoints.rs:498` raises `"an endpoint already exists at {method} {path} in this workspace"`. After trashing `GET /orders`, that message points at a row the author cannot see anywhere — a dead end.
+
+   **User-approved decision:** the trashed endpoint keeps the slot (so restore never fails), but the refusal must name the real cause — that a *trashed* endpoint holds the path, and that restoring it or deleting it permanently is the way forward. Detecting which case applies needs a lookup once the unique violation is caught; `is_path_conflict` at `endpoints.rs:494` is where that branch belongs.
+
+   **The test must distinguish the two messages** — one fixture where a LIVE endpoint blocks the path, one where a TRASHED one does. A test asserting only the trashed message would pass unchanged if both cases produced it, which is the whole defect it is supposed to prevent.
 
 **The fixture must contain a case where correct and broken disagree**: at least two endpoints, one trashed and one not, so "the list filters" is distinguishable from "the list happens to be empty".
 
