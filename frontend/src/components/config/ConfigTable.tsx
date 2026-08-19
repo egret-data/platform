@@ -49,6 +49,34 @@ export function ConfigTable({
 }
 
 /**
+ * A full-width heading row inside a `ConfigTable`.
+ *
+ * The Data API detail sections used to stack one `ConfigSection` card per group,
+ * each framing a table of one or two rows — read down the page, a column of
+ * mostly-empty boxes. Groups belong inside the table instead, and a group row
+ * has to span all three columns: one that occupied only the Setting column
+ * would read as a setting with no value, which is the confusion the cards were
+ * replaced to remove.
+ *
+ * `scope="colgroup"` and the `rowheader` role are what make it a heading rather
+ * than a stray cell for anything not reading it visually.
+ */
+export function ConfigTableGroup({ label }: { label: string }) {
+  return (
+    <TableRow className="hover:bg-transparent">
+      <TableCell
+        colSpan={3}
+        scope="colgroup"
+        role="rowheader"
+        className="pt-6 text-xs font-semibold uppercase tracking-wide text-muted-foreground"
+      >
+        {label}
+      </TableCell>
+    </TableRow>
+  );
+}
+
+/**
  * One row of a {@link ConfigTable}: the label, a muted Details cell (help text
  * from `fieldHelp[fieldKey]` unless overridden, plus a docs link), and the edit
  * control passed as `children`. `details === null` forces an empty Details cell
