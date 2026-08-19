@@ -513,6 +513,88 @@ describe("ResponseSection", () => {
     // control on this page even touched.
     expect(call.data).toEqual({ output: { shape: "arrays", naming: "snake" } });
   });
+
+  // Shape's sibling. Two near-identical rows written by hand is exactly how a
+  // control ends up bound to its neighbour's field (Task 2 hit this with four
+  // of them), and this task rewrote the JSX around both. Asserting the WHOLE
+  // PATCH body catches it: the shell sends only what changed, so a Naming
+  // control wired to `shape` puts "camel" under `shape` and leaves `naming` at
+  // its fixture value — a `naming: "camel"`-only assertion would miss that,
+  // and a dead `onValueChange` drops the key entirely. The fixture's starting
+  // values are distinct from the ones typed here so no swap can coincide.
+  it("changes only the touched output field when the naming is switched, via a partial PATCH", async () => {
+    vi.mocked(api.useDataApiGetOpenapi).mockReturnValue(
+      { data: undefined, isError: false } as unknown as ReturnType<typeof api.useDataApiGetOpenapi>,
+    );
+    const endpoint = makeEndpoint({ output: { shape: "arrays", naming: "as_is" } });
+    const user = userEvent.setup();
+    renderResponse(endpoint);
+
+    await user.click(screen.getByRole("combobox", { name: "Key naming" }));
+    await user.click(await screen.findByRole("option", { name: "camelCase" }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(updateMutateAsync).toHaveBeenCalled());
+    expect(updateMutateAsync.mock.calls[0][0].data).toEqual({
+      output: { shape: "arrays", naming: "camel" },
+    });
+  });
+
+  // Phase 5 §5, the Response half: "Output shape" used to be a `ConfigSection`
+  // card framing a table of two rows. It is now a group ROW of that table.
+  //
+  // The two assertions on each block are deliberately opposite, so neither a
+  // half-done conversion nor an over-eager one passes. `ConfigSection` renders
+  // its title as an `<h3>`; `ConfigTableGroup` renders it as a `rowheader`
+  // cell. So "Output shape" must be a rowheader and NOT a heading (a leftover
+  // card fails), while "Frozen columns" and "OpenAPI document" must stay
+  // headings and NOT be rowheaders (a later cleanup that swallows those two
+  // real cards into the table fails). A group row that rendered nothing fails
+  // the `getByRole("rowheader")` lookup, which is also the precondition the
+  // row-order assertions below are computed from — they cannot pass without it.
+  it("renders Output shape as a group row while the columns and document stay cards", async () => {
+    vi.mocked(api.useDataApiGetOpenapi).mockReturnValue(
+      { data: { status: 200, data: OPENAPI_FIXTURE }, isError: false } as unknown as
+        ReturnType<typeof api.useDataApiGetOpenapi>,
+    );
+    // A live version so the Frozen columns card renders its own real `<table>`
+    // — the harder case, and the one where scoping by "the table holding the
+    // controls" rather than by a bare table count actually matters.
+    vi.mocked(api.useDataApiListEndpointVersions).mockReturnValue(
+      { data: { status: 200, data: [makeVersion()] }, isLoading: false, isError: false } as unknown as
+        ReturnType<typeof api.useDataApiListEndpointVersions>,
+    );
+    renderResponse(makeEndpoint({ live_version_id: "v-1" }));
+
+    const shape = await screen.findByRole("combobox", { name: "Shape" });
+    const configTable = shape.closest("table") as HTMLElement;
+    expect(configTable).not.toBeNull();
+
+    // The group heading is a row of the very table that holds the controls.
+    const group = within(configTable).getByRole("rowheader", { name: "Output shape" });
+    // ...and it spans the whole row. A group occupying only the Setting column
+    // reads as a setting with no value — the confusion the cards were removed
+    // to fix.
+    expect(group).toHaveAttribute("colspan", "3");
+    // No `ConfigSection` left behind: that would render "Output shape" as an h3.
+    expect(screen.queryByRole("heading", { name: "Output shape" })).not.toBeInTheDocument();
+
+    const rows = within(configTable).getAllByRole("row");
+    const rowIndexOf = (el: HTMLElement) => rows.indexOf(el.closest("tr") as HTMLElement);
+    const groupAt = rowIndexOf(group);
+    for (const control of ["Shape", "Key naming"]) {
+      const at = rowIndexOf(within(configTable).getByRole("combobox", { name: control }));
+      expect(at).toBeGreaterThan(groupAt);
+    }
+
+    // These two are NOT `Setting | Details | Value` shaped — a frozen column
+    // list and a download button — so they keep their cards.
+    for (const card of ["Frozen columns", "OpenAPI document"]) {
+      const title = screen.getByRole("heading", { name: card });
+      expect(title.closest("table")).toBeNull();
+      expect(screen.queryByRole("rowheader", { name: card })).not.toBeInTheDocument();
+    }
+  });
 });
 
 function renderVersions(

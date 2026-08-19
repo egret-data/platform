@@ -3,8 +3,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { ConfigSection } from "@/components/form/ConfigSection";
-import { ConfigTable, ConfigTableRow } from "@/components/config/ConfigTable";
+import { ConfigTable, ConfigTableGroup, ConfigTableRow } from "@/components/config/ConfigTable";
 import {
   useDataApiGetOpenapi,
   useDataApiListEndpointVersions,
@@ -31,6 +30,18 @@ interface OpenApiDocPreview {
  * contract), the `output.shape`/`naming` controls that decide how those
  * columns are keyed in the response body, and the served base URL plus the
  * per-service-account OpenAPI download.
+ *
+ * The `output` controls are a `Setting | Details | Value` table whose "Output
+ * shape" heading is a `ConfigTableGroup` row, replacing the `ConfigSection`
+ * card that used to frame those two rows.
+ *
+ * The other two blocks keep their cards, deliberately. A frozen column list is
+ * a `Name | Type` table of the PUBLISHED contract — data, not settings, with no
+ * Value to edit — and the OpenAPI block is a paragraph, a download button and
+ * a base URL. Neither is `Setting | Details | Value` shaped, and folding them
+ * into the config table would make read-only output look editable. The
+ * complaint that removed the `ConfigSection`s was about cards framing
+ * near-empty tables, not about cards.
  */
 export default function ResponseSection() {
   const { ws, id, endpoint, form, setForm } = useEndpointDetail();
@@ -128,47 +139,46 @@ export default function ResponseSection() {
         </CardContent>
       </Card>
 
-      <ConfigSection title="Output shape">
-        <ConfigTable>
-          <ConfigTableRow
-            label="Shape"
-            htmlFor="resp-shape"
-            details="Objects returns each row as a named object. Arrays returns positional rows, which are smaller but depend on column order."
+      <ConfigTable>
+        <ConfigTableGroup label="Output shape" />
+        <ConfigTableRow
+          label="Shape"
+          htmlFor="resp-shape"
+          details="Objects returns each row as a named object. Arrays returns positional rows, which are smaller but depend on column order."
+        >
+          <Select
+            value={form.output.shape ?? "objects"}
+            onValueChange={(v) => setForm((f) => ({ ...f, output: { ...f.output, shape: v } }))}
           >
-            <Select
-              value={form.output.shape ?? "objects"}
-              onValueChange={(v) => setForm((f) => ({ ...f, output: { ...f.output, shape: v } }))}
-            >
-              <SelectTrigger id="resp-shape" className="w-full" aria-label="Shape">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="objects">Objects</SelectItem>
-                <SelectItem value="arrays">Arrays</SelectItem>
-              </SelectContent>
-            </Select>
-          </ConfigTableRow>
-          <ConfigTableRow
-            label="Naming"
-            htmlFor="resp-naming"
-            details="How column names are written in the response: as the query returns them, camelCase, or snake_case. Two columns that collapse onto one name make the endpoint refuse to serve until it is re-published."
+            <SelectTrigger id="resp-shape" className="w-full" aria-label="Shape">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="objects">Objects</SelectItem>
+              <SelectItem value="arrays">Arrays</SelectItem>
+            </SelectContent>
+          </Select>
+        </ConfigTableRow>
+        <ConfigTableRow
+          label="Naming"
+          htmlFor="resp-naming"
+          details="How column names are written in the response: as the query returns them, camelCase, or snake_case. Two columns that collapse onto one name make the endpoint refuse to serve until it is re-published."
+        >
+          <Select
+            value={form.output.naming ?? "as_is"}
+            onValueChange={(v) => setForm((f) => ({ ...f, output: { ...f.output, naming: v } }))}
           >
-            <Select
-              value={form.output.naming ?? "as_is"}
-              onValueChange={(v) => setForm((f) => ({ ...f, output: { ...f.output, naming: v } }))}
-            >
-              <SelectTrigger id="resp-naming" className="w-full" aria-label="Key naming">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="as_is">As-is</SelectItem>
-                <SelectItem value="camel">camelCase</SelectItem>
-                <SelectItem value="snake">snake_case</SelectItem>
-              </SelectContent>
-            </Select>
-          </ConfigTableRow>
-        </ConfigTable>
-      </ConfigSection>
+            <SelectTrigger id="resp-naming" className="w-full" aria-label="Key naming">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="as_is">As-is</SelectItem>
+              <SelectItem value="camel">camelCase</SelectItem>
+              <SelectItem value="snake">snake_case</SelectItem>
+            </SelectContent>
+          </Select>
+        </ConfigTableRow>
+      </ConfigTable>
 
       <Card>
         <CardHeader>
