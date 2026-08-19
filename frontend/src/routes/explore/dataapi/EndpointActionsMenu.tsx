@@ -20,7 +20,16 @@ import type { DataApiEndpointDto } from "@/api/generated/model";
  * enable, disable, rollback and PATCH all refuse it, each naming restore as
  * the way forward), so offering them would be offering guaranteed failures.
  * Otherwise: Open, the state-dependent Disable/Enable, the move-to-folder
- * choices, Move to Trash, then the permanent Delete.
+ * choices, then Move to Trash.
+ *
+ * **Permanent delete is offered ONLY from the trash**, the same as
+ * `DatasetActionsMenu` and the chart/dashboard menus this page is meant to be
+ * at parity with. Beside `Move to Trash` it let an author destroy a served URL
+ * and its published version history without ever passing through the trash —
+ * and because trash REFUSES a `live` endpoint, Delete was the easier of the
+ * two paths on exactly the endpoints where it is most destructive. Reaching it
+ * now costs three deliberate steps: disable, trash, delete. The `DELETE` route
+ * itself is unchanged; this is only which menu offers it.
  *
  * Same shape as `DatasetActionsMenu`/`ChartActionsMenu`: a `RowActionsMenu`
  * wrapper, the destructive item last behind a `DropdownMenuSeparator` and
@@ -44,6 +53,8 @@ export function EndpointActionsMenu({ ws, endpoint, trashed = false, folders, on
   folders: Folder[];
   /** Open the page's folder dialog in "move to a new folder" mode for THIS row. */
   onNewFolder: () => void;
+  /** Open the page's permanent-delete confirmation. Only the TRASHED menu
+   *  offers it; see the note above. */
   onDelete: () => void;
 }) {
   const nav = useNavigate();
@@ -186,9 +197,6 @@ export function EndpointActionsMenu({ ws, endpoint, trashed = false, folders, on
           <span>Move to Trash</span>
           {liveBlocksTrash && <span className="text-xs text-muted-foreground">Disable it first</span>}
         </span>
-      </DropdownMenuItem>
-      <DropdownMenuItem className="text-destructive focus:text-destructive" onClick={onDelete}>
-        Delete
       </DropdownMenuItem>
     </RowActionsMenu>
   );

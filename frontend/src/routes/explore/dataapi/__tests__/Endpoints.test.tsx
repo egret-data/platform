@@ -394,14 +394,19 @@ describe("Endpoints", () => {
     expect(enableMutateAsync).not.toHaveBeenCalled();
   });
 
-  it("row menu Delete opens ConfirmDeleteDialog and calls useDataApiDeleteEndpoint on confirm", async () => {
-    mockList({ data: { status: 200, data: [LOOSE_ROW] } });
+  // Permanent delete is reachable only from the TRASH, so the only route to
+  // this dialog now runs through the Trash view. `LOOSE_ROW`'s id is still what
+  // has to reach the mutation — the dialog is opened from a row, and a dialog
+  // that deleted the wrong one would look identical here.
+  it("Delete permanently opens ConfirmDeleteDialog and calls useDataApiDeleteEndpoint on confirm", async () => {
+    mockListByView([], [LOOSE_ROW]);
     const user = userEvent.setup();
     renderEndpoints();
+    await user.click(screen.getByRole("button", { name: "Trash" }));
     await screen.findByText("Ad hoc query");
 
     await user.click(screen.getByRole("button", { name: "Actions for Ad hoc query" }));
-    await user.click(await screen.findByText("Delete"));
+    await user.click(await screen.findByText("Delete permanently"));
 
     const input = await screen.findByPlaceholderText("delete");
     await user.type(input, "delete");
@@ -781,7 +786,9 @@ describe("Endpoints — facets, row menu and bulk mode", () => {
     // carries "Move to Trash / Disable it first", whose accessible name a
     // loose match now finds too.
     expect(screen.getByRole("menuitem", { name: /^disable$/i })).toBeInTheDocument();
-    expect(screen.getByRole("menuitem", { name: /^delete$/i })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: /move to trash/i })).toBeInTheDocument();
+    // Permanent delete is a TRASH action now — see the dedicated test below.
+    expect(screen.queryByRole("menuitem", { name: /delete/i })).not.toBeInTheDocument();
   });
 
   it("offers a bulk action only once rows are selected", async () => {
@@ -1621,6 +1628,44 @@ describe("Endpoints — trash", () => {
     expect(screen.queryByRole("menuitem", { name: /^enable$/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("menuitem", { name: /move to trash/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("menuitem", { name: /^open$/i })).not.toBeInTheDocument();
+  });
+
+  /**
+   * Permanent delete belongs to the trash and to nowhere else — the same shape
+   * as `DatasetActionsMenu`, and the reason the whole phase exists. Offered
+   * beside Move to Trash it let an author destroy a served URL and its version
+   * history without passing through the trash at all, and since trash REFUSES
+   * a `live` endpoint it was the easier of the two paths on exactly the rows
+   * where it is most destructive.
+   *
+   * BOTH halves are in one test on purpose. "Delete permanently is in the trash
+   * menu" is satisfied by an implementation that puts it in every menu, so the
+   * absence assertions are what carry the claim — and they run over a `live`
+   * row AND a `draft` row, because an item removed for only one state would
+   * otherwise pass.
+   */
+  it("offers permanent delete ONLY from the trash — not from a live row, not from a draft one", async () => {
+    mockListByView([LIVE_ROW, DRAFT_ROW], [TRASHED_A]);
+    const user = userEvent.setup();
+    renderEndpoints();
+    await screen.findByText("Live report");
+
+    await user.click(screen.getByRole("button", { name: "Actions for Live report" }));
+    // `/delete/i`, deliberately loose: it also catches a "Delete permanently"
+    // leaking into the live menu, which an anchored `/^delete$/` would miss.
+    expect(await screen.findByRole("menuitem", { name: /move to trash/i })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: /delete/i })).not.toBeInTheDocument();
+
+    await user.keyboard("{Escape}");
+    await user.click(screen.getByRole("button", { name: "Actions for Draft report" }));
+    expect(await screen.findByRole("menuitem", { name: /move to trash/i })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: /delete/i })).not.toBeInTheDocument();
+
+    await user.keyboard("{Escape}");
+    await user.click(screen.getByRole("button", { name: "Trash" }));
+    await screen.findByText("Trashed alpha");
+    await user.click(screen.getByRole("button", { name: "Actions for Trashed alpha" }));
+    expect(await screen.findByRole("menuitem", { name: "Delete permanently" })).toBeInTheDocument();
   });
 
   it("disables Move to Trash for a live row and says why, while the draft beside it can be trashed", async () => {

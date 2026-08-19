@@ -681,12 +681,12 @@ export default function Endpoints() {
       <ConfirmDeleteDialog
         open={pendingDelete !== null}
         onOpenChange={(o) => { if (!o) setPendingDelete(null); }}
-        title={showTrash ? "Delete permanently" : "Delete endpoint"}
-        description={
-          showTrash
-            ? `Permanently delete "${pendingDelete?.name ?? ""}"? This cannot be undone.`
-            : `Delete "${pendingDelete?.name ?? ""}"? Any deployed client calling its URL will start getting 404s. This cannot be undone.`
-        }
+        // Unconditional, not a `showTrash` ternary: the row menu offers
+        // permanent delete ONLY in the trash, so this dialog has exactly one
+        // caller and a second branch would be dead copy claiming to describe a
+        // path that no longer exists.
+        title="Delete permanently"
+        description={`Permanently delete "${pendingDelete?.name ?? ""}"? This cannot be undone.`}
         onConfirm={async () => {
           if (!pendingDelete) return;
           try {
