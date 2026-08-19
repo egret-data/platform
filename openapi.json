@@ -14981,7 +14981,7 @@
             }
           },
           "409": {
-            "description": "Another endpoint already serves that method and path",
+            "description": "Another endpoint already serves that method and path, or the endpoint is in the trash — restore it before editing it",
             "content": {
               "application/json": {
                 "schema": {
@@ -15255,6 +15255,16 @@
               }
             }
           },
+          "409": {
+            "description": "The endpoint is in the trash — restore it first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal error",
             "content": {
@@ -15346,7 +15356,7 @@
             }
           },
           "409": {
-            "description": "The endpoint has never been published, so there is nothing to serve",
+            "description": "The endpoint has never been published, so there is nothing to serve, or it is in the trash — restore it first",
             "content": {
               "application/json": {
                 "schema": {
@@ -15862,7 +15872,7 @@
             }
           },
           "409": {
-            "description": "The draft was edited while it was being published",
+            "description": "The draft was edited while it was being published, or the endpoint is in the trash — restore it first",
             "content": {
               "application/json": {
                 "schema": {
@@ -16073,6 +16083,16 @@
           },
           "404": {
             "description": "No such endpoint here, or no such version OF THIS ENDPOINT",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The endpoint is in the trash — restore it before changing which version it serves",
             "content": {
               "application/json": {
                 "schema": {

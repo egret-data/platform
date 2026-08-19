@@ -721,6 +721,17 @@ impl EndpointStore {
     ///
     /// `state` is a caller-chosen `&'static str` rather than a bound parameter of
     /// unknown provenance; the column's CHECK constraint is the backstop.
+    ///
+    /// **`deleted_at IS NULL` is in the `WHERE`, and this is the statement that
+    /// made it necessary.** [`crate::lifecycle::EndpointStore::enable`] calls this
+    /// with `"live"` after checking only that a version exists; on a trashed row
+    /// that would have set `state = 'live'`, and `live_snapshot` — which filters
+    /// `state = 'live'` and nothing else — would then have served a trashed
+    /// endpoint. Migration 0126's CHECK refuses it, which is the guarantee, but a
+    /// CHECK violation reaches the author as a 500 naming
+    /// `dataapi_endpoints_trashed_not_live`. The predicate here is what turns that
+    /// into an answer, and it is in the UPDATE rather than in a preceding read so a
+    /// concurrent trash cannot land between the two.
     pub(crate) async fn set_state(
         &self,
         workspace: Uuid,
@@ -729,7 +740,7 @@ impl EndpointStore {
     ) -> Result<DataApiEndpointDto> {
         let row: Option<Row> = sqlx::query_as(concat!(
             "UPDATE dataapi.endpoints SET state = $3, updated_at = now() \
-             WHERE id = $1 AND workspace_id = $2 RETURNING ",
+             WHERE id = $1 AND workspace_id = $2 AND deleted_at IS NULL RETURNING ",
             endpoint_cols!()
         ))
         .bind(id)
@@ -738,8 +749,54 @@ impl EndpointStore {
         .fetch_optional(&self.db.pool)
         .await
         .map_err(db_err)?;
-        row.ok_or_else(|| Error::NotFound("endpoint".into()))?
-            .try_into()
+        match row {
+            Some(row) => row.try_into(),
+            None => Err(self
+                .trashed_conflict_or(
+                    workspace,
+                    id,
+                    "changing whether it serves",
+                    Error::NotFound("endpoint".into()),
+                )
+                .await),
+        }
+    }
+
+    /// The answer a guarded writer owes when its statement matched no row.
+    ///
+    /// Every writer that grew an `AND deleted_at IS NULL` needs the same
+    /// disambiguation, and none of them should invent its own message: a foreign or
+    /// absent id must stay a 404 (this re-read is workspace-scoped, so
+    /// [`Self::get`] answers that first and the 409 never confirms that an id names
+    /// something), and only a row that really is in the trash becomes a 409.
+    ///
+    /// `action` completes "restore it before …", so the refusal names both the
+    /// state the endpoint is in and the call to repeat once it is out — which is
+    /// the whole difference between this and the 500 it replaces.
+    ///
+    /// `otherwise` is the answer for a row that exists and is NOT in the trash.
+    /// That is reachable two ways: a genuine no-such-thing (rollback naming a
+    /// version of another endpoint) and a restore that committed between the
+    /// statement and this read. Both are the caller's own not-found, which is why
+    /// the caller supplies it rather than this helper assuming "endpoint".
+    ///
+    /// Reads AFTER the write attempt, never before it: a read-then-write guard
+    /// would leave a window for a concurrent trash, which is the shape
+    /// [`Self::trash`] and [`Self::restore`] already avoid.
+    pub(crate) async fn trashed_conflict_or(
+        &self,
+        workspace: Uuid,
+        id: Uuid,
+        action: &str,
+        otherwise: Error,
+    ) -> Error {
+        match self.get(workspace, id).await {
+            Ok(current) if current.deleted_at.is_some() => Error::Conflict(format!(
+                "endpoint is in the trash; restore it before {action}"
+            )),
+            Ok(_) => otherwise,
+            Err(e) => e,
+        }
     }
 
     /// Insert a draft. `path` must already be normalised, and `database_id` and
@@ -922,6 +979,16 @@ impl EndpointStore {
     /// `folder_id` (if present) already confirmed to belong to `workspace` — those
     /// name OTHER tables, so their absence has to be answered by the route, which
     /// is the layer that picks the status code.
+    ///
+    /// **A trashed endpoint is not editable, and `deleted_at IS NULL` in the `WHERE`
+    /// is what says so.** This statement touches neither `state` nor
+    /// `live_version_id`, so it cannot resurrect serving and migration 0126's CHECK
+    /// never fires — which is precisely why it needed a guard: before this
+    /// predicate it answered 200 and edited a row that appears on no list the
+    /// author is looking at. The concrete harm is `path`: a trashed endpoint KEEPS
+    /// its URL, because `UNIQUE (workspace_id, method, path)` has no
+    /// `WHERE deleted_at IS NULL`, so an edit here silently changed WHICH URL was
+    /// held and the 409 the next author got pointed at a row they could not see.
     pub async fn update(
         &self,
         workspace: Uuid,
@@ -945,7 +1012,7 @@ impl EndpointStore {
                folder_id = CASE WHEN $14 THEN $15 ELSE folder_id END, \
                source_ref = CASE WHEN $16 THEN $17 ELSE source_ref END, \
                updated_at = now() \
-             WHERE id = $1 AND workspace_id = $18 \
+             WHERE id = $1 AND workspace_id = $18 AND deleted_at IS NULL \
              RETURNING ",
             endpoint_cols!()
         ))
@@ -983,9 +1050,19 @@ impl EndpointStore {
         // `fetch_optional` rather than `fetch_one`: no row means either no such
         // endpoint or not this workspace's — the SAME answer, deliberately — and
         // also covers a concurrent delete, which must read as 404 rather than as
-        // an internal error.
-        row.ok_or_else(|| Error::NotFound("endpoint".into()))?
-            .try_into()
+        // an internal error. The trash is the one reason among those that is NOT
+        // a 404, so it is separated out here and nowhere else.
+        match row {
+            Some(row) => row.try_into(),
+            None => Err(self
+                .trashed_conflict_or(
+                    workspace,
+                    id,
+                    "editing it",
+                    Error::NotFound("endpoint".into()),
+                )
+                .await),
+        }
     }
 
     /// The effective method and path an update WOULD have written, for the

@@ -980,7 +980,7 @@ async fn create_endpoint(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing data_api_endpoint:manage permission", body = ErrorBody),
         (status = 404, description = "No such endpoint, or no such database, in this workspace", body = ErrorBody),
-        (status = 409, description = "Another endpoint already serves that method and path", body = ErrorBody),
+        (status = 409, description = "Another endpoint already serves that method and path, or the endpoint is in the trash — restore it before editing it", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -1422,7 +1422,7 @@ async fn preview_endpoint(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing data_api_endpoint:manage permission, or the engine's policy denies a table", body = ErrorBody),
         (status = 404, description = "No such endpoint in this workspace", body = ErrorBody),
-        (status = 409, description = "The draft was edited while it was being published", body = ErrorBody),
+        (status = 409, description = "The draft was edited while it was being published, or the endpoint is in the trash — restore it first", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -1477,6 +1477,7 @@ async fn publish_endpoint(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing data_api_endpoint:manage permission", body = ErrorBody),
         (status = 404, description = "No such endpoint here, or no such version OF THIS ENDPOINT", body = ErrorBody),
+        (status = 409, description = "The endpoint is in the trash — restore it before changing which version it serves", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -1530,6 +1531,7 @@ async fn rollback_endpoint(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing data_api_endpoint:manage permission", body = ErrorBody),
         (status = 404, description = "No such endpoint in this workspace", body = ErrorBody),
+        (status = 409, description = "The endpoint is in the trash — restore it first", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -1569,7 +1571,7 @@ async fn disable_endpoint(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing data_api_endpoint:manage permission", body = ErrorBody),
         (status = 404, description = "No such endpoint in this workspace", body = ErrorBody),
-        (status = 409, description = "The endpoint has never been published, so there is nothing to serve", body = ErrorBody),
+        (status = 409, description = "The endpoint has never been published, so there is nothing to serve, or it is in the trash — restore it first", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]

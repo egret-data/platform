@@ -26,6 +26,16 @@
 //! it compares can differ only in their reason. Two different paths would have
 //! produced two different messages whether or not the branch existed.
 //!
+//! The last section is the **trash boundary against the state machine**: six
+//! writers could reach a trashed row and none of them knew the trash existed. Two
+//! failed loudly (a 500 from the CHECK) and four succeeded silently, which is why
+//! each of those tests asserts the status IS 409 rather than merely "an error" — see
+//! the section comment for the full argument.
+//!
+//! The consumer-side end state is a separate file, `trash_serving.rs`: it needs the
+//! serving router, and its module doc is careful about what a serving test of the
+//! trash can and cannot prove.
+//!
 //! DB-gated. Self-skips (passes) when DATABASE_URL is unset, like every sibling
 //! suite in this crate — so check the DURATION, not just the `ok`.
 
@@ -40,11 +50,12 @@ use tokio::sync::mpsc::Receiver;
 use tower::ServiceExt;
 use uuid::Uuid;
 
-/// Nothing in this file publishes or serves, so neither port method should ever be
-/// reached. `describe_as` answers rather than panicking only because a panic in a
-/// port would be reported as a 500 and read as a route bug; `execute_as` is
-/// `unreachable!` because a query executed from a trash test would mean a handler
-/// reached the engine, which is a finding rather than a nuisance.
+/// `describe_as` is reached — the task-3 tests drive `POST /publish`, whose
+/// pre-flight validation resolves the output columns before any write — so it
+/// answers rather than panicking; a panic in a port surfaces as a 500 and would read
+/// as a route bug. Nothing in this file SERVES, so `execute_as` is `unreachable!`: a
+/// query executed from a trash test would mean a handler reached the engine, which
+/// is a finding rather than a nuisance.
 struct OkPort;
 
 #[async_trait::async_trait]
@@ -866,4 +877,404 @@ async fn restore_cannot_collide_because_the_slot_was_never_released() {
         "restore must not be able to 409 on its own URL: {body}"
     );
     assert_eq!(body["path"], serde_json::json!(PATH), "body: {body}");
+}
+
+// ---------- The trash boundary against the state machine (task 3) ----------
+//
+// `crates/egret-dataapi/src/lifecycle.rs` contained ZERO occurrences of
+// `deleted_at` before this task: the trash boundary and the state machine did not
+// know about each other. Six writers could reach a trashed row, and they failed in
+// two very different ways:
+//
+// * **Loudly.** `publish` on a trashed DRAFT and `enable` on a trashed endpoint
+//   both try to write `state = 'live'`, which migration 0126's
+//   `CHECK (deleted_at IS NULL OR state <> 'live')` refuses. That is the design
+//   working — but it reaches the author as a 500 naming
+//   `dataapi_endpoints_trashed_not_live`, which is not a refusal: it leaks a
+//   database error and names no way forward.
+// * **Silently.** `publish` on a trashed DISABLED endpoint, `disable`, `rollback`
+//   and `PATCH` all leave `state` alone or write a non-`live` value, so the CHECK
+//   stays satisfied and every one of them SUCCEEDS. They mutate a row that appears
+//   on no list the author is looking at.
+//
+// **The falsifiability trap is specific.** Asserting only "it returned an error"
+// would pass against the 500 the first two produced before the guards existed, and
+// would prove nothing at all against the four that returned 200. So every test
+// below asserts three things: the status IS 409, the body does NOT carry the
+// constraint name (which is the CHECK answering, i.e. the route wrote first), and
+// the message names RESTORE as the way forward. Each also asserts the row was left
+// alone, because a guard that refuses after writing is the mirror-image defect.
+
+impl Fixture {
+    /// A published version of `id`, with `live_version_id` pointed at it.
+    ///
+    /// Written straight to the table rather than through `POST /publish`, because
+    /// the endpoint under test is about to be TRASHED and the guards this file
+    /// measures would refuse the publish. The snapshot is a bare `{}` — nothing
+    /// here deserialises it; `enable` and `rollback` read only the pointer.
+    async fn add_version(&self, id: Uuid, version: i32) -> Uuid {
+        let vid: Uuid = sqlx::query_scalar(
+            "INSERT INTO dataapi.endpoint_versions (endpoint_id, version, snapshot, note, created_by) \
+             VALUES ($1, $2, '{}'::jsonb, '', $3) RETURNING id",
+        )
+        .bind(id)
+        .bind(version)
+        .bind(self.admin)
+        .fetch_one(&self.db.pool)
+        .await
+        .expect("insert endpoint version");
+        sqlx::query("UPDATE dataapi.endpoints SET live_version_id = $2 WHERE id = $1")
+            .bind(id)
+            .bind(vid)
+            .execute(&self.db.pool)
+            .await
+            .expect("point live_version_id");
+        vid
+    }
+
+    async fn live_version_of(&self, id: Uuid) -> Option<Uuid> {
+        sqlx::query_scalar("SELECT live_version_id FROM dataapi.endpoints WHERE id = $1")
+            .bind(id)
+            .fetch_one(&self.db.pool)
+            .await
+            .expect("select live_version_id")
+    }
+
+    async fn version_count(&self, id: Uuid) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM dataapi.endpoint_versions WHERE endpoint_id = $1")
+            .bind(id)
+            .fetch_one(&self.db.pool)
+            .await
+            .expect("count versions")
+    }
+
+    async fn name_of(&self, id: Uuid) -> String {
+        sqlx::query_scalar("SELECT name FROM dataapi.endpoints WHERE id = $1")
+            .bind(id)
+            .fetch_one(&self.db.pool)
+            .await
+            .expect("select name")
+    }
+
+    /// The three assertions every trash-boundary refusal owes the author.
+    ///
+    /// A helper rather than six copies so no test can quietly settle for two of
+    /// them — and it takes the STATUS, not a bool, so the failure message names
+    /// what actually came back (a 500 from the CHECK and a 200 from an unguarded
+    /// write are the two things that were happening, and they must be told apart
+    /// in the output).
+    fn assert_refused_naming_restore(what: &str, status: StatusCode, body: &serde_json::Value) {
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "{what}: a trashed endpoint must be refused as a 409 conflict. \
+             A 500 means the CHECK constraint answered after the route wrote; \
+             a 2xx means nothing refused it at all. Got {status}: {body}"
+        );
+        assert_ne!(
+            status,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "{what}: a constraint violation is not a refusal: {body}"
+        );
+        let msg = Fixture::error_text(body);
+        assert!(
+            !msg.contains("dataapi_endpoints_trashed_not_live"),
+            "{what}: the author must not be shown a constraint name — that is the \
+             CHECK answering, which means the route wrote first: {body}"
+        );
+        let lower = msg.to_lowercase();
+        assert!(
+            lower.contains("trash"),
+            "{what}: the refusal must say the endpoint is in the trash: {body}"
+        );
+        assert!(
+            lower.contains("restore"),
+            "{what}: the refusal must name RESTORE as the way forward — that is the \
+             whole difference between this and the 500 it replaces: {body}"
+        );
+    }
+}
+
+/// **`publish` on a trashed DRAFT.** The loud half: `state = CASE WHEN state =
+/// 'disabled' THEN 'disabled' ELSE 'live' END` moves a draft to `live`, which
+/// migration 0126's CHECK refuses — so before the guard this was a 500 naming the
+/// constraint.
+///
+/// The version count is asserted at zero afterwards, because `publish` INSERTs the
+/// frozen version before it updates the endpoint: a guard that lived only in the
+/// UPDATE and did not roll the transaction back would leave an immutable published
+/// version behind for an endpoint that was refused.
+#[tokio::test]
+async fn publishing_a_trashed_draft_endpoint_is_refused() {
+    let f = skip_without_db!();
+    let id = f
+        .create_trashed_endpoint("binned-draft", "/reports/pub-draft", "draft")
+        .await;
+    let before = f.deleted_at(id).await;
+
+    let (status, body) = f
+        .send(
+            "POST",
+            &format!("{}/{id}/publish", f.collection()),
+            Some(serde_json::json!({})),
+        )
+        .await;
+
+    Fixture::assert_refused_naming_restore("publish a trashed draft", status, &body);
+    assert_eq!(f.state_of(id).await, "draft", "the row must be left alone");
+    assert_eq!(f.deleted_at(id).await, before, "and must stay in the trash");
+    assert_eq!(
+        f.version_count(id).await,
+        0,
+        "a refused publish must not leave a frozen version behind"
+    );
+    assert_eq!(f.live_version_of(id).await, None);
+}
+
+/// **`publish` on a trashed DISABLED endpoint — the asymmetric case, and the one
+/// that failed SILENTLY.**
+///
+/// The `CASE` leaves a `disabled` endpoint disabled, so the CHECK stays satisfied
+/// and before the guard this returned **200**: it froze a new immutable version
+/// into the trash and told the author it had published. No 500, no refusal, and
+/// nothing on any list to show what happened. A test asserting merely "an error"
+/// would have passed on the sibling above and failed here, which is exactly why
+/// this case needs its own test rather than a loop over both states.
+#[tokio::test]
+async fn publishing_a_trashed_disabled_endpoint_is_refused() {
+    let f = skip_without_db!();
+    let id = f
+        .create_trashed_endpoint("binned-off", "/reports/pub-off", "disabled")
+        .await;
+
+    let (status, body) = f
+        .send(
+            "POST",
+            &format!("{}/{id}/publish", f.collection()),
+            Some(serde_json::json!({})),
+        )
+        .await;
+
+    Fixture::assert_refused_naming_restore("publish a trashed disabled endpoint", status, &body);
+    assert_eq!(f.state_of(id).await, "disabled");
+    assert!(f.deleted_at(id).await.is_some(), "still in the trash");
+    assert_eq!(
+        f.version_count(id).await,
+        0,
+        "publishing into the trash must not have frozen a version"
+    );
+    assert_eq!(
+        f.live_version_of(id).await,
+        None,
+        "and must not have repointed what the endpoint would serve"
+    );
+}
+
+/// **`enable` on a trashed endpoint — the danger this whole task exists for.**
+///
+/// `enable` calls `set_state(.., "live")` after checking only that
+/// `live_version_id` is set. Without migration 0126's CHECK this would have put a
+/// trashed row into `live`, and `live_snapshot` — which filters `state = 'live'`
+/// and nothing else — would have served it. The CHECK turns that into a 500; the
+/// guard turns the 500 into an answer.
+///
+/// The endpoint is set up PUBLISHED and disabled, which is the only shape that
+/// reaches the `set_state` call at all: a never-published trashed endpoint is
+/// refused earlier by `enable`'s own `live_version_id` check, so it would have
+/// measured that guard instead of this one.
+#[tokio::test]
+async fn enabling_a_trashed_endpoint_is_refused() {
+    let f = skip_without_db!();
+    let id = f
+        .create_trashed_endpoint("binned-live", "/reports/en-off", "disabled")
+        .await;
+    let vid = f.add_version(id, 1).await;
+
+    let (status, body) = f
+        .send("POST", &format!("{}/{id}/enable", f.collection()), None)
+        .await;
+
+    Fixture::assert_refused_naming_restore("enable a trashed endpoint", status, &body);
+    assert_eq!(
+        f.state_of(id).await,
+        "disabled",
+        "a trashed endpoint must not be put back into service"
+    );
+    assert!(f.deleted_at(id).await.is_some(), "still in the trash");
+    assert_eq!(f.live_version_of(id).await, Some(vid));
+}
+
+/// **`disable` on a trashed endpoint.** Silent before the guard: `state =
+/// 'disabled'` satisfies the CHECK, so a trashed DRAFT was quietly restated to
+/// `disabled` and answered 200.
+///
+/// It cannot resurrect serving, so this is the mildest of the six — but it
+/// rewrites what `restore` will bring back, and it is a mutation of a row that
+/// appears on no list the author is looking at. `draft` is the interesting state
+/// precisely because the write is observable: on an already-`disabled` endpoint an
+/// unguarded `disable` is indistinguishable from a no-op.
+#[tokio::test]
+async fn disabling_a_trashed_endpoint_is_refused() {
+    let f = skip_without_db!();
+    let id = f
+        .create_trashed_endpoint("binned-dis", "/reports/dis", "draft")
+        .await;
+
+    let (status, body) = f
+        .send("POST", &format!("{}/{id}/disable", f.collection()), None)
+        .await;
+
+    Fixture::assert_refused_naming_restore("disable a trashed endpoint", status, &body);
+    assert_eq!(
+        f.state_of(id).await,
+        "draft",
+        "a refused disable must not have restated a trashed draft — that is what \
+         restore would then bring back"
+    );
+    assert!(f.deleted_at(id).await.is_some(), "still in the trash");
+}
+
+/// **`rollback` on a trashed endpoint.** Silent before the guard: rollback writes
+/// `live_version_id` and deliberately leaves `state` alone, so the CHECK never
+/// fires and it answered 200 — repointing which frozen SQL a trashed endpoint
+/// would serve the moment anything enabled it.
+///
+/// Two versions exist so the write is observable: with one version a rollback to
+/// it is indistinguishable from a no-op, and the assertion would hold whether the
+/// guard existed or not.
+#[tokio::test]
+async fn rolling_back_a_trashed_endpoint_is_refused() {
+    let f = skip_without_db!();
+    let id = f
+        .create_trashed_endpoint("binned-rb", "/reports/rb", "disabled")
+        .await;
+    let v1 = f.add_version(id, 1).await;
+    let v2 = f.add_version(id, 2).await;
+    assert_eq!(
+        f.live_version_of(id).await,
+        Some(v2),
+        "fixture precondition"
+    );
+
+    let (status, body) = f
+        .send(
+            "POST",
+            &format!("{}/{id}/rollback", f.collection()),
+            Some(serde_json::json!({ "version": 1 })),
+        )
+        .await;
+
+    Fixture::assert_refused_naming_restore("roll a trashed endpoint back", status, &body);
+    assert_eq!(
+        f.live_version_of(id).await,
+        Some(v2),
+        "a refused rollback must not have repointed the live version"
+    );
+    assert_ne!(f.live_version_of(id).await, Some(v1));
+    assert!(f.deleted_at(id).await.is_some(), "still in the trash");
+}
+
+/// **`PATCH` on a trashed endpoint.** Silent before the guard: the UPDATE touches
+/// neither `state` nor `live_version_id`, so it answered 200 and edited a row the
+/// author can only see on the Trash screen.
+///
+/// The concrete harm is not hypothetical. A trashed endpoint KEEPS its URL —
+/// `UNIQUE (workspace_id, method, path)` has no `WHERE deleted_at IS NULL`, which
+/// is what [`restore_cannot_collide_because_the_slot_was_never_released`] pins — so
+/// a PATCH of `path` on a trashed row silently changes WHICH URL is held hostage,
+/// and the 409 another author then gets points at a row they cannot see.
+#[tokio::test]
+async fn editing_a_trashed_endpoint_is_refused() {
+    let f = skip_without_db!();
+    let id = f
+        .create_trashed_endpoint("binned-edit", "/reports/edit", "draft")
+        .await;
+
+    let (status, body) = f
+        .send(
+            "PATCH",
+            &format!("{}/{id}", f.collection()),
+            Some(serde_json::json!({ "name": "renamed-in-the-trash" })),
+        )
+        .await;
+
+    Fixture::assert_refused_naming_restore("edit a trashed endpoint", status, &body);
+    assert_eq!(
+        f.name_of(id).await,
+        "binned-edit",
+        "a refused edit must not have landed"
+    );
+    assert!(f.deleted_at(id).await.is_some(), "still in the trash");
+}
+
+/// The other half of every test above: the SAME six calls against the SAME
+/// endpoints, once restored, must all succeed.
+///
+/// Without this, a guard could refuse everything unconditionally — `deleted_at IS
+/// NOT NULL` mistyped as a tautology, or the predicate dropped into the wrong
+/// clause — and all six refusal tests would still pass. This is what makes them
+/// tests of the trash boundary rather than tests that the routes are broken.
+#[tokio::test]
+async fn every_refused_transition_succeeds_once_the_endpoint_is_restored() {
+    let f = skip_without_db!();
+    let id = f
+        .create_trashed_endpoint("binned-all", "/reports/all", "disabled")
+        .await;
+    let v1 = f.add_version(id, 1).await;
+    let _v2 = f.add_version(id, 2).await;
+
+    let (status, body) = f
+        .send("POST", &format!("{}/{id}/restore", f.collection()), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "restore: {body}");
+
+    // PATCH.
+    let (status, body) = f
+        .send(
+            "PATCH",
+            &format!("{}/{id}", f.collection()),
+            Some(serde_json::json!({ "name": "renamed" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "patch after restore: {body}");
+    assert_eq!(f.name_of(id).await, "renamed");
+
+    // rollback.
+    let (status, body) = f
+        .send(
+            "POST",
+            &format!("{}/{id}/rollback", f.collection()),
+            Some(serde_json::json!({ "version": 1 })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "rollback after restore: {body}");
+    assert_eq!(f.live_version_of(id).await, Some(v1));
+
+    // enable, then disable — the pair that writes `state`.
+    let (status, body) = f
+        .send("POST", &format!("{}/{id}/enable", f.collection()), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "enable after restore: {body}");
+    assert_eq!(f.state_of(id).await, "live");
+    let (status, body) = f
+        .send("POST", &format!("{}/{id}/disable", f.collection()), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "disable after restore: {body}");
+    assert_eq!(f.state_of(id).await, "disabled");
+
+    // publish. Last, because it freezes a NEW version and the rollback assertion
+    // above would then be reading a moved target.
+    let (status, body) = f
+        .send(
+            "POST",
+            &format!("{}/{id}/publish", f.collection()),
+            Some(serde_json::json!({})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "publish after restore: {body}");
+    assert_eq!(
+        f.version_count(id).await,
+        3,
+        "publish after restore must have frozen a third version: {body}"
+    );
 }
