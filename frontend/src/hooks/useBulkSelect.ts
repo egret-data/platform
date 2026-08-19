@@ -16,9 +16,9 @@ import { useCallback, useMemo, useState } from "react";
  * - `toggleAll` ("Select all") writes the ids of rows the user was never shown
  *   into the selection, and `allSelected`/`someSelected` answer about them too;
  * - `selectedIds` then reports them, so the "{n} selected" strip claims rows
- *   that are not in front of the user and a bulk action acts on them. On a page
- *   whose bulk action is a hard delete (`Endpoints.tsx`), that destroys a row
- *   the user never saw.
+ *   that are not in front of the user and a bulk action acts on them. Every
+ *   list's bulk action is a Move to Trash, so what that costs is recoverable —
+ *   but it is still a row the user never saw being taken off their list.
  *
  * `selectedIds` re-derives from `rows` on every render rather than just handing
  * back `selected`, which is what covers the other order of events: a row picked
@@ -26,8 +26,14 @@ import { useCallback, useMemo, useState } from "react";
  * out of the count and out of the action, instead of staying selected
  * invisibly. Do not "simplify" it to `Array.from(selected)`.
  *
- * Five pages (`Charts`, `Datasets`, `Dashboards`, `Alerts`, `Notebooks`) still
- * pass their pre-grouping `rows`; migrating them is its own task.
+ * Every grouped list — `Charts`, `Datasets`, `Dashboards`, `Alerts`,
+ * `Notebooks` and `Endpoints` — now derives a `visibleRows` from its groups,
+ * dropping the collapsed ones, and passes that. Copy one of them rather than
+ * reaching for `rows`.
+ *
+ * The two remaining callers, `MembersPanel` and `UsersPage`, do not group at
+ * all; they hand their whole filtered list to `FilterableTable`, which owns the
+ * search box and the pager the rows are actually drawn through.
  */
 export function useBulkSelect<T extends { id: string }>(rows: T[]) {
   const [bulkMode, setBulkModeRaw] = useState(false);
