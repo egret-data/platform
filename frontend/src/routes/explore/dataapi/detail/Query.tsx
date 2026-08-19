@@ -11,9 +11,15 @@ import { PreviewBlock } from "./PreviewBlock";
  * the SQL, the parameters it declares, and a preview of the rows.
  *
  * **Vertical — editor above, results below — following SQL Lab, not
- * ChartExplore's left/right split.** ChartExplore owns the full page width; this
- * section sits inside the detail route under the shell's `max-w-3xl`, and a
- * right-hand results column would squeeze both halves.
+ * ChartExplore's left/right split.** A right-hand results column would squeeze
+ * both halves at the widths this route is actually read at.
+ *
+ * Uncapped, and the only tab that needed nothing else: the SQL editor and the
+ * preview's row grid are exactly the two things here that improve with every
+ * pixel, and the Database picker sizes to its content on its own (shadcn's
+ * `SelectTrigger` is `w-fit`) rather than stretching with the page. Measured
+ * at a 1728px viewport, the editor went from 768px to 1424px and the picker
+ * stayed at 108px.
  *
  * Parameters appear twice here on purpose. `ParamEditor` holds the DECLARATION
  * (name, type, required, default, allowed) which is saved with the endpoint;

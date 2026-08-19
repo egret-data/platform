@@ -3,8 +3,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { ConfigSection } from "@/components/form/ConfigSection";
-import { ConfigTable, ConfigTableRow } from "@/components/config/ConfigTable";
+import { ConfigTable, ConfigTableGroup, ConfigTableRow } from "@/components/config/ConfigTable";
 import {
   useDataApiGetOpenapi,
   useDataApiListEndpointVersions,
@@ -31,6 +30,18 @@ interface OpenApiDocPreview {
  * contract), the `output.shape`/`naming` controls that decide how those
  * columns are keyed in the response body, and the served base URL plus the
  * per-service-account OpenAPI download.
+ *
+ * The `output` controls are a `Setting | Details | Value` table whose "Output
+ * shape" heading is a `ConfigTableGroup` row, replacing the `ConfigSection`
+ * card that used to frame those two rows.
+ *
+ * The other two blocks keep their cards, deliberately. A frozen column list is
+ * a `Name | Type` table of the PUBLISHED contract — data, not settings, with no
+ * Value to edit — and the OpenAPI block is a paragraph, a download button and
+ * a base URL. Neither is `Setting | Details | Value` shaped, and folding them
+ * into the config table would make read-only output look editable. The
+ * complaint that removed the `ConfigSection`s was about cards framing
+ * near-empty tables, not about cards.
  */
 export default function ResponseSection() {
   const { ws, id, endpoint, form, setForm } = useEndpointDetail();
@@ -80,7 +91,18 @@ export default function ResponseSection() {
   const [downloadOpen, setDownloadOpen] = useState(false);
 
   return (
-    <div className="space-y-6">
+    // Capped like `Access`, `Try it` and `Versions`, and for the same reason:
+    // removing the route cap moved width into the sections, and this section
+    // was measured in neither the pass that built it (there was no cap to
+    // remove yet) nor the pass that measured Config and the tabs it rebuilt.
+    // Uncapped at a ~1470px content box, `table-fixed` gives Setting 288 /
+    // Value 208 / Details ~975 while `max-w-prose` stops the sentence near
+    // 585px — ~390px of empty column, with the two Selects sitting ~1260px
+    // right of the labels they answer to. `max-w-5xl` puts them back at
+    // ~816px, and it is the same cap the three sibling sections already use.
+    // It also reins in the two Cards below, which were stretching the full
+    // viewport (the frozen-columns TABLE got `max-w-xl`; its Card did not).
+    <div className="max-w-5xl space-y-6">
       <div>
         <h2 className="text-lg font-semibold">Response</h2>
         <p className="text-sm text-muted-foreground">
@@ -108,7 +130,10 @@ export default function ResponseSection() {
               — these come from the published contract, not the draft.
             </p>
           ) : (
-            <table className="w-full text-sm">
+            // Two short columns — a column name and a type. Left at `w-full`
+            // with the page cap gone, `bigint` sat a screen-width away from the
+            // column it describes.
+            <table className="w-full max-w-xl text-sm">
               <thead className="text-left text-muted-foreground">
                 <tr>
                   <th className="pb-1 font-medium">Name</th>
@@ -128,47 +153,46 @@ export default function ResponseSection() {
         </CardContent>
       </Card>
 
-      <ConfigSection title="Output shape">
-        <ConfigTable>
-          <ConfigTableRow
-            label="Shape"
-            htmlFor="resp-shape"
-            details="Objects returns each row as a named object. Arrays returns positional rows, which are smaller but depend on column order."
+      <ConfigTable detailsClassName="max-w-prose">
+        <ConfigTableGroup label="Output shape" />
+        <ConfigTableRow
+          label="Shape"
+          htmlFor="resp-shape"
+          details="Objects returns each row as a named object. Arrays returns positional rows, which are smaller but depend on column order."
+        >
+          <Select
+            value={form.output.shape ?? "objects"}
+            onValueChange={(v) => setForm((f) => ({ ...f, output: { ...f.output, shape: v } }))}
           >
-            <Select
-              value={form.output.shape ?? "objects"}
-              onValueChange={(v) => setForm((f) => ({ ...f, output: { ...f.output, shape: v } }))}
-            >
-              <SelectTrigger id="resp-shape" className="w-full" aria-label="Shape">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="objects">Objects</SelectItem>
-                <SelectItem value="arrays">Arrays</SelectItem>
-              </SelectContent>
-            </Select>
-          </ConfigTableRow>
-          <ConfigTableRow
-            label="Naming"
-            htmlFor="resp-naming"
-            details="How column names are written in the response: as the query returns them, camelCase, or snake_case. Two columns that collapse onto one name make the endpoint refuse to serve until it is re-published."
+            <SelectTrigger id="resp-shape" className="w-full" aria-label="Shape">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="objects">Objects</SelectItem>
+              <SelectItem value="arrays">Arrays</SelectItem>
+            </SelectContent>
+          </Select>
+        </ConfigTableRow>
+        <ConfigTableRow
+          label="Naming"
+          htmlFor="resp-naming"
+          details="How column names are written in the response: as the query returns them, camelCase, or snake_case. Two columns that collapse onto one name make the endpoint refuse to serve until it is re-published."
+        >
+          <Select
+            value={form.output.naming ?? "as_is"}
+            onValueChange={(v) => setForm((f) => ({ ...f, output: { ...f.output, naming: v } }))}
           >
-            <Select
-              value={form.output.naming ?? "as_is"}
-              onValueChange={(v) => setForm((f) => ({ ...f, output: { ...f.output, naming: v } }))}
-            >
-              <SelectTrigger id="resp-naming" className="w-full" aria-label="Key naming">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="as_is">As-is</SelectItem>
-                <SelectItem value="camel">camelCase</SelectItem>
-                <SelectItem value="snake">snake_case</SelectItem>
-              </SelectContent>
-            </Select>
-          </ConfigTableRow>
-        </ConfigTable>
-      </ConfigSection>
+            <SelectTrigger id="resp-naming" className="w-full" aria-label="Key naming">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="as_is">As-is</SelectItem>
+              <SelectItem value="camel">camelCase</SelectItem>
+              <SelectItem value="snake">snake_case</SelectItem>
+            </SelectContent>
+          </Select>
+        </ConfigTableRow>
+      </ConfigTable>
 
       <Card>
         <CardHeader>

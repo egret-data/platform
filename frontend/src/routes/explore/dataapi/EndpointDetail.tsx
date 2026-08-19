@@ -277,8 +277,8 @@ function EndpointDetailInner({ ws, id }: { ws: string; id: string }) {
     // `mx-auto max-w-6xl p-6`, which wrapped its `<Outlet/>`. That shell is
     // gone (Data API is now three flat sidebar items, not a shell + section
     // nav), so this route supplies its own padding like its siblings.
-    // `max-w-3xl` stays scoped to the Outlet below, not the header/nav above
-    // it — the shell never capped those either, only the section content.
+    // The header and nav were never capped by the shell either — and as of the
+    // width pass below, neither is the section content.
     <div className="p-4">
       <h1 className="sr-only">{headingName}</h1>
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
@@ -321,15 +321,22 @@ function EndpointDetailInner({ ws, id }: { ws: string; id: string }) {
         ))}
       </nav>
 
-      {/* `max-w-3xl` lives here, not in each section — one structural width
-          rule every section inherits for free, rather than something Tasks
-          4-7 each have to remember to add to their own root element. `key={id}`
-          is redundant with `EndpointDetail`'s own remount-per-id above, kept
-          anyway as a second, independent guarantee that a section can never
-          carry its own local state across two different endpoints. */}
-      <div className="max-w-3xl">
-        <Outlet key={id} context={ctx} />
-      </div>
+      {/* No width cap here. This wrapper used to carry `max-w-3xl`, which is
+          what left the right third of the page empty while Config's Details
+          column wrapped to three lines. A single page-level cap turned out to
+          be the wrong instrument: the six sections do not want the same width.
+          Config and Query should use the page — Config holds the two widest
+          controls of any tab, Query a SQL editor and a result grid. Access,
+          Try it, Versions and Response read worse stretched to a wide monitor
+          (prose, short-column lists, and in Response's case a three-column
+          table whose two Selects ended up ~1260px right of their labels), so
+          each of those four carries its own cap on its own root element —
+          visible next to the layout it constrains, rather than imposed on
+          siblings that did not ask for it. `key={id}` is redundant with `EndpointDetail`'s
+          own remount-per-id above, kept anyway as a second, independent
+          guarantee that a section can never carry its own local state across
+          two different endpoints. */}
+      <Outlet key={id} context={ctx} />
     </div>
   );
 }

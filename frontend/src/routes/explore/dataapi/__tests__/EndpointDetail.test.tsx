@@ -113,7 +113,7 @@ beforeEach(() => {
 });
 
 describe("Config", () => {
-  it("Config holds the endpoint's identity and its three config tables", async () => {
+  it("Config holds the endpoint's identity and its four config groups", async () => {
     const endpoint = makeEndpoint();
     vi.mocked(api.useDataApiGetEndpoint).mockReturnValue({
       data: { status: 200, data: endpoint },
@@ -173,6 +173,89 @@ describe("Config", () => {
     } as never);
     renderConfig(endpoint);
     expect(await screen.findByRole("button", { name: /validate saved draft/i })).toBeInTheDocument();
+  });
+
+  // Phase 5 §5: the four groups used to be four `ConfigSection` cards, each
+  // framing a table of one or two rows — a column of mostly-empty boxes. They
+  // are now group rows of ONE table.
+  //
+  // Every assertion here has to die on a wrong implementation, which is why
+  // this test does not stop at counting tables: the group rows are looked up
+  // *inside* that table, and the four identity fields are located by row index
+  // between the `Endpoint` group row and the `Cache` one. A `ConfigTableGroup`
+  // that rendered nothing, a group row rendered outside the table, or the
+  // identity form left sitting above the table all fail — and none of those
+  // would disturb a bare table count.
+  it("renders its groups as rows of one table, not as separate cards", async () => {
+    const endpoint = makeEndpoint();
+    vi.mocked(api.useDataApiGetEndpoint).mockReturnValue({
+      data: { status: 200, data: endpoint },
+      isLoading: false,
+      isError: false,
+      refetch: vi.fn(),
+    } as never);
+    renderConfig(endpoint);
+    await screen.findByLabelText("Name");
+
+    // Two tables would mean the cards were renamed rather than removed.
+    expect(screen.getAllByRole("table")).toHaveLength(1);
+    const table = screen.getByRole("table");
+    const rows = within(table).getAllByRole("row");
+    const rowIndexOf = (el: HTMLElement) => rows.indexOf(el.closest("tr") as HTMLElement);
+    const groupAt = (name: string) => rowIndexOf(within(table).getByRole("rowheader", { name }));
+
+    const endpointAt = groupAt("Endpoint");
+    const cacheAt = groupAt("Cache");
+    const limitsAt = groupAt("Limits");
+    const rateLimitAt = groupAt("Rate limit");
+    expect(endpointAt).toBeLessThan(cacheAt);
+    expect(cacheAt).toBeLessThan(limitsAt);
+    expect(limitsAt).toBeLessThan(rateLimitAt);
+
+    // The identity fields are rows of that same table, under the `Endpoint`
+    // group — not a form above it. This is the half of the change a table
+    // count cannot see.
+    for (const field of ["Name", "Description", "Method", "Path"]) {
+      const at = rowIndexOf(within(table).getByLabelText(field));
+      expect(at).toBeGreaterThan(endpointAt);
+      expect(at).toBeLessThan(cacheAt);
+    }
+  });
+
+  // Fix round 1, Minor 1: the reviewer replaced Name's `onChange` with
+  // `() => {}` and the whole file stayed green — the four identity controls'
+  // wiring was pinned by nothing, and this task rewrote the JSX around all
+  // four of them. Four near-identical rows edited by hand is exactly how a
+  // control ends up bound to its neighbour's field, so this drives all four
+  // and asserts the WHOLE save payload with `toEqual`, not one key: a dead
+  // `onChange` drops a key, and a cross-wired one puts the value under
+  // someone else's. The values are deliberately distinct from each other and
+  // from every default in `makeEndpoint`, so no swap can coincide.
+  it("carries every identity field's edit to Save under its own key", async () => {
+    const user = userEvent.setup();
+    renderConfig();
+    await screen.findByLabelText("Name");
+
+    await user.clear(screen.getByLabelText("Name"));
+    await user.type(screen.getByLabelText("Name"), "Weekly report");
+    await user.clear(screen.getByLabelText("Description"));
+    await user.type(screen.getByLabelText("Description"), "Rows for the weekly digest");
+    await user.clear(screen.getByLabelText("Path"));
+    await user.type(screen.getByLabelText("Path"), "reports/weekly");
+    await user.click(screen.getByRole("combobox", { name: "Method" }));
+    await user.click(await screen.findByRole("option", { name: "POST" }));
+
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(updateMutateAsync).toHaveBeenCalled());
+    // The shell PATCHes only what changed (`diffToUpdateInput`), so these four
+    // keys and nothing else is the exact contract of "four edits, four fields".
+    expect(updateMutateAsync.mock.calls[0][0].data).toEqual({
+      name: "Weekly report",
+      description: "Rows for the weekly digest",
+      method: "POST",
+      path: "reports/weekly",
+    });
   });
 });
 
@@ -429,6 +512,88 @@ describe("ResponseSection", () => {
     // Task 3's review flagged: it would silently drop or reorder fields no
     // control on this page even touched.
     expect(call.data).toEqual({ output: { shape: "arrays", naming: "snake" } });
+  });
+
+  // Shape's sibling. Two near-identical rows written by hand is exactly how a
+  // control ends up bound to its neighbour's field (Task 2 hit this with four
+  // of them), and this task rewrote the JSX around both. Asserting the WHOLE
+  // PATCH body catches it: the shell sends only what changed, so a Naming
+  // control wired to `shape` puts "camel" under `shape` and leaves `naming` at
+  // its fixture value — a `naming: "camel"`-only assertion would miss that,
+  // and a dead `onValueChange` drops the key entirely. The fixture's starting
+  // values are distinct from the ones typed here so no swap can coincide.
+  it("changes only the touched output field when the naming is switched, via a partial PATCH", async () => {
+    vi.mocked(api.useDataApiGetOpenapi).mockReturnValue(
+      { data: undefined, isError: false } as unknown as ReturnType<typeof api.useDataApiGetOpenapi>,
+    );
+    const endpoint = makeEndpoint({ output: { shape: "arrays", naming: "as_is" } });
+    const user = userEvent.setup();
+    renderResponse(endpoint);
+
+    await user.click(screen.getByRole("combobox", { name: "Key naming" }));
+    await user.click(await screen.findByRole("option", { name: "camelCase" }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(updateMutateAsync).toHaveBeenCalled());
+    expect(updateMutateAsync.mock.calls[0][0].data).toEqual({
+      output: { shape: "arrays", naming: "camel" },
+    });
+  });
+
+  // Phase 5 §5, the Response half: "Output shape" used to be a `ConfigSection`
+  // card framing a table of two rows. It is now a group ROW of that table.
+  //
+  // The two assertions on each block are deliberately opposite, so neither a
+  // half-done conversion nor an over-eager one passes. `ConfigSection` renders
+  // its title as an `<h3>`; `ConfigTableGroup` renders it as a `rowheader`
+  // cell. So "Output shape" must be a rowheader and NOT a heading (a leftover
+  // card fails), while "Frozen columns" and "OpenAPI document" must stay
+  // headings and NOT be rowheaders (a later cleanup that swallows those two
+  // real cards into the table fails). A group row that rendered nothing fails
+  // the `getByRole("rowheader")` lookup, which is also the precondition the
+  // row-order assertions below are computed from — they cannot pass without it.
+  it("renders Output shape as a group row while the columns and document stay cards", async () => {
+    vi.mocked(api.useDataApiGetOpenapi).mockReturnValue(
+      { data: { status: 200, data: OPENAPI_FIXTURE }, isError: false } as unknown as
+        ReturnType<typeof api.useDataApiGetOpenapi>,
+    );
+    // A live version so the Frozen columns card renders its own real `<table>`
+    // — the harder case, and the one where scoping by "the table holding the
+    // controls" rather than by a bare table count actually matters.
+    vi.mocked(api.useDataApiListEndpointVersions).mockReturnValue(
+      { data: { status: 200, data: [makeVersion()] }, isLoading: false, isError: false } as unknown as
+        ReturnType<typeof api.useDataApiListEndpointVersions>,
+    );
+    renderResponse(makeEndpoint({ live_version_id: "v-1" }));
+
+    const shape = await screen.findByRole("combobox", { name: "Shape" });
+    const configTable = shape.closest("table") as HTMLElement;
+    expect(configTable).not.toBeNull();
+
+    // The group heading is a row of the very table that holds the controls.
+    const group = within(configTable).getByRole("rowheader", { name: "Output shape" });
+    // ...and it spans the whole row. A group occupying only the Setting column
+    // reads as a setting with no value — the confusion the cards were removed
+    // to fix.
+    expect(group).toHaveAttribute("colspan", "3");
+    // No `ConfigSection` left behind: that would render "Output shape" as an h3.
+    expect(screen.queryByRole("heading", { name: "Output shape" })).not.toBeInTheDocument();
+
+    const rows = within(configTable).getAllByRole("row");
+    const rowIndexOf = (el: HTMLElement) => rows.indexOf(el.closest("tr") as HTMLElement);
+    const groupAt = rowIndexOf(group);
+    for (const control of ["Shape", "Key naming"]) {
+      const at = rowIndexOf(within(configTable).getByRole("combobox", { name: control }));
+      expect(at).toBeGreaterThan(groupAt);
+    }
+
+    // These two are NOT `Setting | Details | Value` shaped — a frozen column
+    // list and a download button — so they keep their cards.
+    for (const card of ["Frozen columns", "OpenAPI document"]) {
+      const title = screen.getByRole("heading", { name: card });
+      expect(title.closest("table")).toBeNull();
+      expect(screen.queryByRole("rowheader", { name: card })).not.toBeInTheDocument();
+    }
   });
 });
 
@@ -716,5 +881,146 @@ describe("EndpointDetail — document heading", () => {
     const headings = await screen.findAllByRole("heading", { level: 1 });
     expect(headings).toHaveLength(1);
     expect(headings[0]).toHaveTextContent("Weekly rollup");
+  });
+});
+
+/**
+ * `max-w-3xl` on the `Outlet` wrapper is why the Details column wrapped to
+ * three lines while the right third of the page sat empty.
+ *
+ * **The first assertion below is weak and is meant to be**: it pins a class
+ * name, not a layout. It exists only so the cap cannot come back silently.
+ * Whether the result is a good use of the width is a question only the browser
+ * check can answer. The second assertion is the one with teeth — it says the
+ * space the cap used to waste actually reaches the *controls*, not only the
+ * muted Details prose that `table-fixed` would otherwise hand all of it to.
+ */
+describe("EndpointDetail — width", () => {
+  it("wraps the Outlet in nothing that caps the width", async () => {
+    // The subject is the ROUTE, so the section is a sentinel rather than a real
+    // one. Two earlier shapes of this guard were wrong in opposite directions
+    // and both are worth naming, because the sentinel is what makes each
+    // impossible rather than merely unlikely:
+    //
+    //  - `container.querySelector(".max-w-3xl")` scanned the whole subtree, so
+    //    it forbade one class name to an entire page. A section may legitimately
+    //    cap its own children (Try it's parameter grid does).
+    //  - Walking up from a real section's content and stopping at "the child of
+    //    the route container" reads the wrapper we are hunting AS the section
+    //    root whenever it exists — measured: a restored `max-w-3xl` around the
+    //    `Outlet` passes 31/31 under that shape. The guard would be dead in
+    //    exactly the case it was written for.
+    //
+    // With a sentinel there is no section root to confuse for a wrapper: every
+    // element strictly above it belongs to the route. So this asserts the route
+    // interposes no cap, and says nothing about what any section does to itself
+    // — which is what lets `Versions` cap its own root while `Config` does
+    // not. Both of those are pinned by their own guards below; being silent
+    // about sections is this guard's design, not an oversight, but it is also
+    // why those two guards have to exist.
+    const endpoint = makeEndpoint();
+    vi.mocked(api.useDataApiGetEndpoint).mockReturnValue(
+      { data: { status: 200, data: endpoint }, isLoading: false, isError: false, error: null, refetch: vi.fn() } as unknown as
+        ReturnType<typeof api.useDataApiGetEndpoint>,
+    );
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { container } = render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={[`/explore/eng/data-api/endpoints/${endpoint.id}/config`]}>
+          <Routes>
+            <Route path="/explore/:workspace/data-api/endpoints/:id" element={<EndpointDetail />}>
+              <Route path="config" element={<div data-testid="section-content" />} />
+            </Route>
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    const sentinel = await screen.findByTestId("section-content");
+    const routeRoot = container.querySelector(".p-4");
+    expect(routeRoot).not.toBeNull();
+
+    const capped: string[] = [];
+    for (let el = sentinel.parentElement; el && el !== routeRoot!.parentElement; el = el.parentElement) {
+      if (/(?:^|\s)(?:[a-z0-9]+:)*max-w-/.test(el.className)) capped.push(el.className);
+    }
+    expect(capped).toEqual([]);
+  });
+
+  it("leaves Versions constraining its own width, now that the route does not", async () => {
+    const { container } = renderVersions();
+    const heading = await screen.findByRole("heading", { name: "Versions", level: 2 });
+    const routeRoot = container.querySelector(".p-4");
+    // Removing the route cap moved responsibility for width into the sections,
+    // and this is the one where full width was worst: five short columns
+    // (`v3`, a truncated note, an email, a relative time, one button) spread
+    // across a wide monitor, with Roll back marooned at the far right of the
+    // row it acts on. One guard, on the section that most needs it — the point
+    // is that a section owning its own cap cannot lose it silently, not that
+    // any particular number is correct.
+    // The section root is whichever ancestor of the heading the route renders
+    // directly — found by walking, not by counting `parentElement`s, so an
+    // extra wrapper inside Versions does not quietly re-point this assertion.
+    let sectionRoot = heading.parentElement;
+    while (sectionRoot && sectionRoot.parentElement !== routeRoot) sectionRoot = sectionRoot.parentElement;
+    expect(sectionRoot).not.toBeNull();
+    expect(sectionRoot!.className).toMatch(/(?:^|\s)max-w-/);
+  });
+
+  it("caps Response on its own root, like its three sibling sections", async () => {
+    // Added in the fix wave: Response was built before there was a route cap to
+    // remove and was not in the set the width pass measured, so it was the one
+    // section left uncapped that wanted a cap. Uncapped at a ~1470px content
+    // box its two Selects sat ~1260px right of their labels — the same
+    // complaint that earned `Versions` its cap. Class name only; jsdom cannot
+    // judge the geometry (§5.5), the browser measurement is in the report.
+    const { container } = renderResponse();
+    const heading = await screen.findByRole("heading", { name: "Response", level: 2 });
+    const routeRoot = container.querySelector(".p-4");
+    expect(routeRoot).not.toBeNull();
+    let sectionRoot = heading.parentElement;
+    while (sectionRoot && sectionRoot.parentElement !== routeRoot) sectionRoot = sectionRoot.parentElement;
+    expect(sectionRoot).not.toBeNull();
+    expect(sectionRoot!.className).toMatch(/(?:^|\s)max-w-/);
+  });
+
+  it("leaves Config's own root uncapped, which is where the width was meant to go", async () => {
+    // The route guard above mounts a SENTINEL by design, so it says the ROUTE
+    // interposes no cap and deliberately says nothing about what a section does
+    // to itself. That leaves a hole exactly the shape of the defect this branch
+    // exists to remove: re-applying the cap to Config's OWN root wastes the
+    // same right third of the page, and measured, `<div className="max-w-3xl
+    // space-y-6">` at Config.tsx's root passed the sentinel guard and every
+    // other Config test — 230/230 green. `Versions` has a guard saying it OWNS
+    // its cap; this is the inverse, on the tab the width pass was motivated by.
+    const { container } = renderConfig();
+    const heading = await screen.findByRole("heading", { name: "Config", level: 2 });
+    const routeRoot = container.querySelector(".p-4");
+    expect(routeRoot).not.toBeNull();
+    // Walked, not counted, for the same reason as the Versions guard: an extra
+    // wrapper inside Config must not quietly re-point the assertion.
+    let sectionRoot = heading.parentElement;
+    while (sectionRoot && sectionRoot.parentElement !== routeRoot) sectionRoot = sectionRoot.parentElement;
+    expect(sectionRoot).not.toBeNull();
+    // Responsive prefixes included: `lg:max-w-3xl` would waste the page on
+    // exactly the wide viewports the pass was measured on.
+    expect(sectionRoot!.className).not.toMatch(/(?:^|\s)(?:[a-z0-9]+:)*max-w-/);
+  });
+
+  it("gives Config's Value column more than the shared default", async () => {
+    renderConfig();
+    await screen.findByLabelText("Max rows");
+    const valueHead = screen.getByRole("columnheader", { name: "Value" });
+    // Config owns the two widest controls on any detail tab (a 2-row
+    // Description textarea and the Path input); at the shared `w-52` they show
+    // roughly 50 and 25 characters. Removing the page cap does not help them —
+    // under `table-fixed` the surplus goes only to the unsized Details column
+    // — so this section opts into a wider one.
+    expect(valueHead).toHaveClass("lg:w-96");
+    // The `lg:` half is the whole point and jsdom cannot evaluate it, so this
+    // second line is what stops a later "simplification" to a flat `w-96`:
+    // below `lg` the sized columns do not shrink, they scroll, and a flat
+    // `w-96` more than doubles that scroll on a narrow screen.
+    expect(valueHead).toHaveClass("w-52");
   });
 });

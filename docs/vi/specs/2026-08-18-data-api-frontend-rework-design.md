@@ -81,7 +81,7 @@ Hệ quả phải thiết kế cho: route `/new` **không có id**, nên mọi t
 
 ## 5. Nội dung detail: một bảng mỗi tab
 
-**Vấn đề là card, không phải bảng.** Các mục detail hiện xếp chồng vài card `ConfigSection`, mỗi card đóng khung một bảng một hai dòng. Đọc dọc trang, đó là một cột những cái hộp gần như rỗng.
+**Vấn đề là card, không phải bảng.** Các mục detail hiện xếp chồng vài card `ConfigSection` — `Endpoint` đóng khung một form bốn field viết tay, `Cache` ba dòng bảng, `Limits` hai, `Rate limit` ba. Đọc dọc trang, đó là một cột những cái hộp gần như rỗng.
 
 Mỗi tab thành **một bảng full width**. Các nhóm (`Endpoint`, `Cache`, `Limits`, `Rate limit`) thành **hàng tiêu đề trải ngang bảng**, không phải khung riêng:
 
@@ -98,7 +98,7 @@ Enabled          Phục vụ lại từ cache thay vì chạy lại ( o)
 
 - **Bỏ `max-w-3xl` trên `Outlet` của detail.** Nó là nguyên nhân trực tiếp của khoảng trống ngang: cột `Details` xuống ba dòng trong khi một phần ba bên phải trang bỏ không.
 - **Cột `Details` có max width riêng**, để đoạn văn giải thích không thành một dòng dài không đọc nổi ở 2560px, còn cột `Value` lấy phần dư nó cần cho input dài (SQL, path).
-- `ConfigSection` chỉ nghỉ **ở route detail của Data API**. Chín chỗ dùng ở Control Plane giữ nguyên; sửa chúng không phải việc của spec này.
+- `ConfigSection` chỉ nghỉ **ở route detail của Data API**. Các chỗ dùng còn lại giữ nguyên; sửa chúng không phải việc của spec này. **Đo bằng import, không bằng chuỗi con — và đo lại tại `HEAD` cho dòng này: 13 file import `ConfigSection`, và 11 file production import `ConfigTable`, ở ngoài route này** (tổng số file import `ConfigTable` là 14: 13 file production cộng test của chính nó). Con số "chín chỗ dùng ở Control Plane" ở bản trước là **đoán**, chưa từng đo.
 - **`ConfigTableRow.details` vẫn là chuỗi thuần, không render markdown.** Backtick viết vào đó hiện ra nguyên ký tự — một lỗi thật tìm được trên trình duyệt ở phase trước. Bảng rộng hơn làm người ta muốn viết dài hơn; ràng buộc thì không đổi.
 
 Tab `Query` là ngoại lệ và giữ nguyên hình dạng hiện tại: một editor SQL và một lưới kết quả không phải là *setting*, và ép chúng vào hàng `Setting | Details | Value` là đúng sai lầm của card, lộn ngược.
@@ -158,4 +158,4 @@ Tài liệu quy ước viết ở cuối phase 5 và cập nhật bởi phase 6,
 - **Certification cho endpoint và client** — thay đổi mô hình dữ liệu, không phải UI.
 - **Share và Tags cho đối tượng Data API.** Mô hình truy cập của endpoint là Cedar cộng grant invoke theo từng endpoint, còn `ShareDialog` nói ngôn ngữ mô hình đối tượng analytics. Cho hai thứ đó gặp nhau là một thiết kế riêng.
 - **Phân trang cho năm trang list còn lại.** `Clients` có nó vì `FilterableTable` sẵn có; số còn lại render mọi hàng. Đáng làm, nhưng không liên quan việc này.
-- **Cho `ConfigSection` nghỉ ở Control Plane.** Chín chỗ dùng, không chỗ nào là việc của lần này.
+- **Cho `ConfigSection` nghỉ ở Control Plane.** 13 file vẫn import nó, không file nào là việc của lần này.

@@ -141,7 +141,13 @@ export default function TryIt() {
   const notGranted = !!result && result.status === 403 && refusal?.code === "not_granted";
 
   return (
-    <div className="space-y-6">
+    // Capped here, not by the route. The result body and the curl line do read
+    // better with room, but the form above them does not — a two-column
+    // parameter grid of 700px inputs for `region=EU` is worse than what the
+    // page cap used to give. `max-w-5xl` keeps the JSON comfortable (it is
+    // `overflow-auto` inside a fixed height, so it never relied on the page
+    // width) while the form stays a form.
+    <div className="max-w-5xl space-y-6">
       <div>
         <h2 className="text-lg font-semibold">Try it</h2>
         <p className="text-sm text-muted-foreground">
@@ -222,8 +228,10 @@ export default function TryIt() {
             published — are not part of what runs here.
           </p>
 
+          {/* A parameter is a scalar — `region=EU`, a date. Two ~700px inputs
+              for those was the worst thing full width did to this tab. */}
           {endpoint.params.length > 0 && (
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid max-w-2xl grid-cols-2 gap-3">
               {endpoint.params.map((p) => (
                 <div key={p.name} className="space-y-1.5">
                   <Label htmlFor={`try-param-${p.name}`}>
