@@ -16,6 +16,10 @@ const updateMutate = vi.fn().mockResolvedValue({ id: "s1" });
 const removeMutate = vi.fn().mockResolvedValue(undefined);
 const runNowMutate = vi.fn().mockResolvedValue({ id: "r1", state: "success" });
 const setActiveMutate = vi.fn().mockResolvedValue({ id: "s1", active: false });
+const trashMutate = vi.fn().mockResolvedValue(undefined);
+// Read inside the folders mock factory's closure, never at module scope, so a
+// test can swap the folder list between renders.
+let folders: { id: string; name: string }[] = [];
 
 vi.mock("@/api/alerts", async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
@@ -28,6 +32,22 @@ vi.mock("@/api/alerts", async (orig) => ({
     remove: { mutateAsync: removeMutate, isPending: false },
     runNow: { mutateAsync: runNowMutate, isPending: false },
     setActive: { mutateAsync: setActiveMutate, isPending: false },
+    trash: { mutateAsync: trashMutate, isPending: false },
+    restore: { mutateAsync: vi.fn().mockResolvedValue(undefined), isPending: false },
+    addBookmark: { mutateAsync: vi.fn().mockResolvedValue(undefined), isPending: false },
+    removeBookmark: { mutateAsync: vi.fn().mockResolvedValue(undefined), isPending: false },
+  }),
+}));
+
+// Unmocked, `useFolders` would fire a real query and the page would only ever
+// render the single Uncategorized bucket — no folder to collapse.
+vi.mock("@/api/folders", () => ({
+  useFolders: () => ({ data: folders }),
+  useSetFolder: () => ({ mutateAsync: vi.fn().mockResolvedValue({}) }),
+  useFolderMutations: () => ({
+    create: { mutateAsync: vi.fn().mockResolvedValue({ id: "f1", name: "F1" }) },
+    rename: { mutateAsync: vi.fn().mockResolvedValue({}) },
+    remove: { mutateAsync: vi.fn().mockResolvedValue(undefined) },
   }),
 }));
 
@@ -86,6 +106,11 @@ function renderPage() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  folders = [];
+  // `useCollapsed` persists collapse state in localStorage under
+  // `folders:eng:alerts`; without this a test that collapses a folder leaks
+  // that collapse into every later test in the file.
+  localStorage.clear();
   schedulesMock.mockReturnValue({ data: [row()], isLoading: false, isError: false });
   runsMock.mockReturnValue({ data: [], isLoading: false });
   scheduleMock.mockReturnValue({ data: undefined, isLoading: false });
@@ -265,5 +290,75 @@ describe("Alerts & Reports list", () => {
     schedulesMock.mockReturnValue({ data: [], isLoading: false, isError: false });
     renderPage();
     expect(screen.getByText(/no alerts yet/i)).toBeInTheDocument();
+  });
+});
+
+/**
+ * Bulk select must only ever reach rows that are ON SCREEN. `useBulkSelect` was
+ * fed the pre-grouping `rows`, so "Select all" swept in the rows of a collapsed
+ * folder and "Move n to Trash" trashed schedules the user had never seen.
+ *
+ * The fixture puts one schedule in each of TWO folders and collapses only one.
+ * A fixture with everything inside the collapsed folder cannot tell a correct
+ * fix from one that selects nothing at all — both end at an empty selection.
+ */
+describe("Alerts — bulk select only reaches rows on screen", () => {
+  const TWO_FOLDERS = [{ id: "f-rep", name: "Reporting" }, { id: "f-fin", name: "Finance" }];
+  const inTwoFolders = () => [
+    row({ id: "s-hidden", name: "Hidden alert", folder_id: "f-rep" }),
+    row({ id: "s-shown", name: "Shown alert", folder_id: "f-fin" }),
+  ];
+
+  it("leaves a collapsed folder's rows out of Select all and out of the trash call", async () => {
+    schedulesMock.mockReturnValue({ data: inTwoFolders(), isLoading: false, isError: false });
+    folders = TWO_FOLDERS;
+    const user = userEvent.setup();
+    renderPage();
+    // Both folders start expanded, so both rows are genuinely on screen first.
+    expect(screen.getByText("Hidden alert")).toBeInTheDocument();
+    expect(screen.getByText("Shown alert")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Toggle Reporting" }));
+    expect(screen.queryByText("Hidden alert")).not.toBeInTheDocument();
+    // Finance is still open — the fix has something left to select.
+    expect(screen.getByText("Shown alert")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Bulk select" }));
+    await user.click(screen.getByLabelText("Select all"));
+
+    expect(screen.getByRole("button", { name: "Move 1 to Trash" })).toBeInTheDocument();
+    expect(screen.queryByLabelText("Select Hidden alert")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Move 1 to Trash" }));
+
+    // The ids, not merely that it was called: `toHaveBeenCalled()` is satisfied
+    // by trashing exactly the wrong schedule, which is the whole defect.
+    await waitFor(() => expect(trashMutate).toHaveBeenCalledWith("s-shown"));
+    expect(trashMutate).not.toHaveBeenCalledWith("s-hidden");
+    expect(trashMutate).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops a row from the selection when its folder collapses after it was picked", async () => {
+    schedulesMock.mockReturnValue({ data: inTwoFolders(), isLoading: false, isError: false });
+    folders = TWO_FOLDERS;
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(screen.getByRole("button", { name: "Bulk select" }));
+    // SELECT first, while it is legitimately on screen…
+    await user.click(screen.getByLabelText("Select Hidden alert"));
+    await user.click(screen.getByLabelText("Select Shown alert"));
+    expect(screen.getByRole("button", { name: "Move 2 to Trash" })).toBeInTheDocument();
+
+    // …then HIDE it. `toggleAll` is not involved: the id is already in
+    // `selected`, and only `selectedIds`' re-filter can take it back out.
+    await user.click(screen.getByRole("button", { name: "Toggle Reporting" }));
+    expect(screen.getByRole("button", { name: "Move 1 to Trash" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Move 1 to Trash" }));
+
+    await waitFor(() => expect(trashMutate).toHaveBeenCalledWith("s-shown"));
+    expect(trashMutate).not.toHaveBeenCalledWith("s-hidden");
+    expect(trashMutate).toHaveBeenCalledTimes(1);
   });
 });
