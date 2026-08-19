@@ -180,17 +180,75 @@ Remove one guard at a time, rebuild to zero errors, confirm, then read the resul
 ### Task 4: The UI
 
 **Files:**
-- Modify: `frontend/src/routes/explore/dataapi/Endpoints.tsx`, `EndpointActionsMenu.tsx`
-- Modify: `frontend/src/api/dataApi.ts`
+- Modify: `frontend/src/api/dataApi.ts`, `frontend/src/routes/explore/dataapi/Endpoints.tsx`, `frontend/src/routes/explore/dataapi/EndpointActionsMenu.tsx`
+- Regenerate: `frontend/src/api/generated/data-api/data-api.ts` (+ its model file)
 - Test: `frontend/src/routes/explore/dataapi/__tests__/Endpoints.test.tsx`
 
-Adopt the existing primitives rather than inventing anything: `ListToolbarButton` for the trash toggle, and the row menu for Move to Trash / Restore / Delete permanently. Read `frontend/src/routes/explore/Datasets.tsx` for the shape the other four pages use, and `docs/en/ui-conventions.md` §1 for what the toolbar owns.
+**Interfaces:**
+- Consumes: `POST …/endpoints/{id}/trash`, `POST …/endpoints/{id}/restore`, and `GET …/endpoints?trashed=true` from Task 2.
 
-- **Route the mutations through `frontend/src/api/dataApi.ts`** so the list invalidates; six mutations in an earlier phase toasted success over a stale list.
-- **Move to Trash must be absent or disabled for a `live` endpoint**, and the reason must be visible — a control that silently does nothing is worse than one that is not there. The server refuses it regardless; this is about not offering it.
-- **Bulk mode gains Move to Trash** only if every selected row can be trashed. If any is `live`, say so rather than partially succeeding.
+- [ ] **Step 1: Regenerate the API client — this is measured, not optional**
 
-Mutation-check: make the live-state guard a no-op, and confirm a test dies. Assert on the **payload**, not just that a mutation was called.
+`openapi.json` already carries both new paths (Task 2 regenerated it), but `frontend/src/api/generated/data-api/data-api.ts` contains **zero** occurrences of trash or restore. Nothing in Task 4 can work until the client is regenerated.
+
+Run it from `frontend/`: `npm run gen:api`. **Not bare `orval`** — the script is `orval && node scripts/encode-path-params.mjs`, and skipping the post-processing step leaves path params encoded differently from every other route in the app.
+
+Then confirm the hooks exist before writing any component code, and report their exact generated names. Do not guess them.
+
+- [ ] **Step 2: Add the two mutation wrappers to `frontend/src/api/dataApi.ts`**
+
+That file already wraps eleven mutations (`useCreateEndpoint`, `useDeleteEndpoint`, `useDisableEndpoint`, `useEnableEndpoint`, `useUpdateEndpoint`, `useBookmarkEndpoint`, `usePublishEndpoint`, …). Follow the shape of `useDisableEndpoint` exactly — it is the closest analogue, being a state-changing POST on one endpoint id.
+
+**The wrapper is what invalidates the list.** A phase in this programme shipped six mutations that toasted success while the list kept showing stale rows; routing through this file is the fix, so do not call the generated hook directly from the component.
+
+Because the list is now keyed by whether the trash is being shown, invalidation must cover **both** views — a restore performed inside the trash has to refresh the normal list too, or the restored endpoint stays invisible until a reload.
+
+- [ ] **Step 3: Follow the measured sibling idiom in `Endpoints.tsx`**
+
+`frontend/src/routes/explore/Datasets.tsx` is the reference; these line numbers were measured, so read them rather than inventing an approach:
+
+- `:37` — `const [showTrash, setShowTrash] = useState(false)`
+- `:38` — the list hook takes `{ trashed: showTrash }`
+- `:148` — the heading swaps to `Trash` when showing trash
+- `:167-171` — the toolbar toggle
+- `:168` — turning the trash ON also clears the bookmark filter and leaves bulk mode
+- `:252`, `:282-283` — the trash view renders its own columns and its own empty text
+
+**Use `ListToolbarButton` for the toggle, not the raw `Button` + `Tooltip` pair Datasets still uses.** That primitive landed in phase 1 of this programme (`frontend/src/components/explore/ListToolbarButton.tsx`) and carries the `aria-pressed` state the hand-written copies lacked; it takes `{icon, label, active, filled, onClick}`. Datasets migrating onto it is a deferred item, not your task — but a new toggle must not add a fifth hand-written copy.
+
+**The eight `!showTrash` guards are the part that gets forgotten.** In the trash view there is no bookmark star, no drag source, no bulk checkbox column, no folder control, and no New button; the row menu offers Restore and Delete permanently instead of the live actions. Enumerate them from `Datasets.tsx:114-180` and check each one.
+
+- [ ] **Step 4: Decide the live-endpoint case as specified — disabled with the reason visible**
+
+A `live` endpoint cannot be trashed; Task 2's API refuses it with a 409 reading `endpoint is live and cannot be moved to the trash; disable it first`.
+
+**Render the menu item disabled, with `Disable it first` visible as its secondary line — do not hide it, and do not leave it enabled to let the server refuse.** Hiding it makes the capability undiscoverable precisely for the endpoints whose authors most need to find it; leaving it enabled spends a round trip to say what the UI already knows. A disabled item with the reason beside it is the only one of the three that teaches the rule.
+
+The server still refuses regardless — that is the actual enforcement, and it must not be weakened on the assumption the UI prevents the call.
+
+- [ ] **Step 5: Bulk Move to Trash**
+
+The page already has `useBulkSelect`. Follow `Datasets.tsx:98-100` and `:221-222` for the loop-and-toast shape.
+
+**Enable it only when every selected row can be trashed.** If any selection is `live`, disable the action and say how many are live, rather than trashing the rest and leaving the author to work out which ones silently failed.
+
+- [ ] **Step 6: Write the tests**
+
+Add to `frontend/src/routes/explore/dataapi/__tests__/Endpoints.test.tsx`. No msw — follow the existing mocking idiom in that file.
+
+Cover: the toggle requests the trashed list; the trash view hides the star, the bulk checkbox and New; Restore calls the mutation with the right id; Move to Trash is disabled for a `live` row and enabled for a `draft` one; bulk is disabled when a `live` row is selected.
+
+**Two falsifiability requirements, both learned the hard way here:**
+- **Assert the payload, not merely that a mutation was called.** `expect(mock).toHaveBeenCalled()` passes when the wrong id is sent.
+- **The fixture needs at least one `live` row AND one non-`live` row.** A single-state fixture cannot tell a working guard from a guard that disables the item unconditionally — and an all-rows-disabled bug looks identical to correct behaviour.
+
+- [ ] **Step 7: Commit, then mutation-check**
+
+**Commit before cutting the first mutation.** Task 2's implementer lost every uncommitted edit to a `git checkout --` restore and had to re-apply eleven of them by hand.
+
+Then: make the live-state guard a no-op and confirm a test fails; change the id passed to `restore` and confirm a test fails. Build to zero errors and confirm that BEFORE reading either result — a mutation that fails to compile looks exactly like a test that did not catch it.
+
+Baseline to respect: eslint 0 errors / 177 warnings.
 
 ---
 
