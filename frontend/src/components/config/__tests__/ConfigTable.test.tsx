@@ -47,3 +47,58 @@ describe("ConfigTableGroup", () => {
     expect(screen.getByRole("rowheader", { name: "Rate limit" })).toBeInTheDocument();
   });
 });
+
+/**
+ * The Value column's width is a `<th>` class and nothing else can move it.
+ * Under `table-layout: fixed` a column is exactly as wide as its header says,
+ * so a control that wants more room cannot get it from a wrapper inside the
+ * cell — an inner `w-96` in a 208px cell overflows into its neighbour rather
+ * than widening the column. `valueClassName` is therefore the only place the
+ * knob can live, and these two tests are the additive contract: thirteen other
+ * consumers pass nothing and must keep the width they have.
+ */
+describe("ConfigTable — Value column width", () => {
+  it("defaults the Value column to w-52, so existing consumers are unchanged", () => {
+    render(
+      <ConfigTable>
+        <ConfigTableRow label="Enabled"><span /></ConfigTableRow>
+      </ConfigTable>,
+    );
+    const valueHead = screen.getByRole("columnheader", { name: "Value" });
+    expect(valueHead).toHaveClass("w-52");
+  });
+
+  it("lets a caller widen it, and the default does not come along", () => {
+    render(
+      <ConfigTable valueClassName="w-96">
+        <ConfigTableRow label="Enabled"><span /></ConfigTableRow>
+      </ConfigTable>,
+    );
+    const valueHead = screen.getByRole("columnheader", { name: "Value" });
+    expect(valueHead).toHaveClass("w-96");
+    // An assertion about the rendered `<th>`, not about how it got there.
+    // `TableHead` runs its className through `cn` (= `twMerge`), which already
+    // collapses two conflicting width utilities to the last one — so writing
+    // the default and the override into the same string still renders `w-96`
+    // and is not a defect. What would be a defect is the default winning, and
+    // that is exactly what this line catches.
+    expect(valueHead).not.toHaveClass("w-52");
+  });
+
+  it("caps the Details cell's prose at a readable measure, not at the column's width", () => {
+    render(
+      <ConfigTable>
+        <ConfigTableRow label="Enabled" details="Serve repeat calls from a cache."><span /></ConfigTableRow>
+      </ConfigTable>,
+    );
+    // With the page-level cap gone, `table-fixed` hands ALL surplus width to
+    // the one unsized column — Details. On a wide monitor that is a single
+    // muted line hundreds of characters long. The measure is capped on the
+    // cell's content so the column may still absorb the width.
+    const detailsCell = screen
+      .getAllByText("Serve repeat calls from a cache.")
+      .map((el) => el.closest("td"))
+      .find((td) => td?.className.includes("lg:table-cell"));
+    expect(detailsCell?.querySelector(".max-w-prose")).not.toBeNull();
+  });
+});

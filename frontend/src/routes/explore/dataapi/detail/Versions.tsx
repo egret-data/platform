@@ -73,7 +73,11 @@ export default function VersionsSection() {
   const [rollbackTarget, setRollbackTarget] = useState<DataApiEndpointVersionDto | null>(null);
 
   return (
-    <div className="space-y-6">
+    // Capped here, not by the route. The history table is five short columns —
+    // `v3`, a truncated note, an email, a relative time, one button. Uncapped
+    // it is a mostly-empty band the width of the monitor with the Roll back
+    // button marooned at the far right of the row it belongs to.
+    <div className="max-w-5xl space-y-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h2 className="text-lg font-semibold">Versions</h2>

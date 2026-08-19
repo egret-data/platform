@@ -119,7 +119,10 @@ export default function ResponseSection() {
               — these come from the published contract, not the draft.
             </p>
           ) : (
-            <table className="w-full text-sm">
+            // Two short columns — a column name and a type. Left at `w-full`
+            // with the page cap gone, `bigint` sat a screen-width away from the
+            // column it describes.
+            <table className="w-full max-w-xl text-sm">
               <thead className="text-left text-muted-foreground">
                 <tr>
                   <th className="pb-1 font-medium">Name</th>

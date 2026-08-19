@@ -24,13 +24,23 @@ import { fieldHelp } from "@/routes/control-plane/config/fieldHelp";
  *
  * `settingLabel` renames the first column — property-map editors pass
  * "Property" so the key column reads correctly.
+ *
+ * `valueClassName` widens (or narrows) the Value column for a caller whose
+ * controls need more room than the shared 208px. It has to live here rather
+ * than in the caller's cell: under `table-layout: fixed` a column is exactly
+ * as wide as its `<th>` says, so a `w-96` wrapper inside a `w-52` cell
+ * overflows into its neighbour instead of widening the column. The default
+ * keeps every existing consumer byte-identical.
  */
 export function ConfigTable({
   children,
   settingLabel = "Setting",
+  valueClassName = "w-52",
 }: {
   children: ReactNode;
   settingLabel?: string;
+  /** Width utility for the Value column. Replaces the default. */
+  valueClassName?: string;
 }) {
   return (
     // table-fixed so the (often long) Details help text wraps instead of
@@ -40,7 +50,7 @@ export function ConfigTable({
         <TableRow>
           <TableHead className="w-72">{settingLabel}</TableHead>
           <TableHead className="hidden lg:table-cell">Details</TableHead>
-          <TableHead className="w-52">Value</TableHead>
+          <TableHead className={valueClassName}>Value</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>{children}</TableBody>
@@ -147,8 +157,13 @@ export function ConfigTableRow({
           </div>
         ) : null}
       </TableCell>
+      {/* `max-w-prose` caps the TEXT, not the column. Details is the only
+          unsized column, so under `table-fixed` it absorbs every pixel of
+          surplus width the page has — on a wide monitor that would set this
+          muted help as one line hundreds of characters long. The column may
+          still take the width; the sentence stops at a readable measure. */}
       <TableCell className="hidden align-top whitespace-normal break-words text-sm text-muted-foreground lg:table-cell">
-        {helpNode}
+        {helpNode ? <div className="max-w-prose">{helpNode}</div> : null}
       </TableCell>
       <TableCell className="align-top">{children}</TableCell>
     </TableRow>

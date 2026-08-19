@@ -883,3 +883,40 @@ describe("EndpointDetail — document heading", () => {
     expect(headings[0]).toHaveTextContent("Weekly rollup");
   });
 });
+
+/**
+ * `max-w-3xl` on the `Outlet` wrapper is why the Details column wrapped to
+ * three lines while the right third of the page sat empty.
+ *
+ * **The first assertion below is weak and is meant to be**: it pins a class
+ * name, not a layout. It exists only so the cap cannot come back silently.
+ * Whether the result is a good use of the width is a question only the browser
+ * check can answer. The second assertion is the one with teeth — it says the
+ * space the cap used to waste actually reaches the *controls*, not only the
+ * muted Details prose that `table-fixed` would otherwise hand all of it to.
+ */
+describe("EndpointDetail — width", () => {
+  it("does not cap the detail sections at max-w-3xl", async () => {
+    const endpoint = makeEndpoint();
+    const { container } = renderConfig(endpoint);
+    await screen.findByLabelText("Max rows");
+    expect(container.querySelector(".max-w-3xl")).toBeNull();
+  });
+
+  it("gives Config's Value column more than the shared default", async () => {
+    renderConfig();
+    await screen.findByLabelText("Max rows");
+    const valueHead = screen.getByRole("columnheader", { name: "Value" });
+    // Config owns the two widest controls on any detail tab (a 2-row
+    // Description textarea and the Path input); at the shared `w-52` they show
+    // roughly 50 and 25 characters. Removing the page cap does not help them —
+    // under `table-fixed` the surplus goes only to the unsized Details column
+    // — so this section opts into a wider one.
+    expect(valueHead).toHaveClass("lg:w-96");
+    // The `lg:` half is the whole point and jsdom cannot evaluate it, so this
+    // second line is what stops a later "simplification" to a flat `w-96`:
+    // below `lg` the sized columns do not shrink, they scroll, and a flat
+    // `w-96` more than doubles that scroll on a narrow screen.
+    expect(valueHead).toHaveClass("w-52");
+  });
+});

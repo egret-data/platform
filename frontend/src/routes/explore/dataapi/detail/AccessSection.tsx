@@ -195,7 +195,12 @@ export default function AccessSection() {
   );
 
   return (
-    <div className="space-y-6">
+    // Capped here, not by the route — this tab is a note, a short account list
+    // and two badges per row. Uncapped, every row's name and its Grant button
+    // end up at opposite ends of a wide monitor with nothing between them, and
+    // the explanatory note above sets as one very long line. `max-w-5xl` is
+    // still well past the `max-w-3xl` the whole route used to sit under.
+    <div className="max-w-5xl space-y-6">
       <div>
         <h2 className="text-lg font-semibold">Access</h2>
         <p className="text-sm text-muted-foreground">

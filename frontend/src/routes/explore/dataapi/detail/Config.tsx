@@ -56,7 +56,21 @@ export default function Config() {
         </p>
       </div>
 
-      <ConfigTable>
+      {/* Removing the page-level cap did NOT help the controls on its own:
+          `ConfigTable` is `table-fixed`, so all surplus width goes to the one
+          unsized column — Details — and Value stays pinned wherever its `<th>`
+          puts it. This tab owns the two widest controls of any detail section
+          (see Description and Path below), so it opts into a wider one.
+
+          `lg:` and not plain `w-96`, which is a measurement, not a hunch. Below
+          `lg` the Details column is hidden but the two sized columns do NOT
+          shrink to fit — `table-fixed` honours their pixel widths and the
+          shadcn `Table` wrapper (`overflow-x-auto`) scrolls instead. At a 500px
+          viewport the content box is 356px, so the table already scrolled 140px
+          at `w-52`; a flat `w-96` would have pushed that to 316px. Gating the
+          widening at `lg` leaves the narrow regime exactly as it was and takes
+          the space only where there is space to take. */}
+      <ConfigTable valueClassName="w-52 lg:w-96">
         <ConfigTableGroup label="Endpoint" />
         <ConfigTableRow
           label="Name"
@@ -70,14 +84,11 @@ export default function Config() {
             onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
           />
         </ConfigTableRow>
-        {/* Description and Path are the two widest controls on the tab and the
-            Value column is `w-52` (208px): a 2-row Textarea shows about 50
-            characters and the Path input about 25 before it scrolls. Usable,
-            but the tightest fit here. Widening the column is not this section's
-            call to make — `ConfigTable` is imported by 14 files, 12 of them
-            production consumers besides this one, and
-            under the current `max-w-3xl` cap the width would have to come out
-            of the Details column, which is worse. Revisit when the cap goes. */}
+        {/* Description and Path are the two widest controls on the tab. At the
+            shared `w-52` (208px) a 2-row Textarea showed about 50 characters
+            and the Path input about 25 before it scrolled — the reason this
+            table passes a wider `valueClassName` above. Measured after: both
+            controls render 368px at a 1728px viewport. */}
         <ConfigTableRow
           label="Description"
           htmlFor="cfg-description"
