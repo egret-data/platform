@@ -142,7 +142,7 @@ export default function ResponseSection() {
         </CardContent>
       </Card>
 
-      <ConfigTable>
+      <ConfigTable detailsClassName="max-w-prose">
         <ConfigTableGroup label="Output shape" />
         <ConfigTableRow
           label="Shape"

@@ -228,9 +228,8 @@ export default function TryIt() {
             published — are not part of what runs here.
           </p>
 
-          {/* The grid is deliberately not `max-w-3xl`: that exact class is the
-              cap this page was just freed from, and the regression guard in
-              `EndpointDetail.test.tsx` looks for it by name. */}
+          {/* A parameter is a scalar — `region=EU`, a date. Two ~700px inputs
+              for those was the worst thing full width did to this tab. */}
           {endpoint.params.length > 0 && (
             <div className="grid max-w-2xl grid-cols-2 gap-3">
               {endpoint.params.map((p) => (

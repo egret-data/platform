@@ -1,4 +1,5 @@
 import { ExternalLink } from "lucide-react";
+import { createContext, useContext } from "react";
 import type { ReactNode } from "react";
 
 import {
@@ -31,16 +32,26 @@ import { fieldHelp } from "@/routes/control-plane/config/fieldHelp";
  * as wide as its `<th>` says, so a `w-96` wrapper inside a `w-52` cell
  * overflows into its neighbour instead of widening the column. The default
  * keeps every existing consumer byte-identical.
+ *
+ * `detailsClassName` wraps each row's Details content in a div carrying that
+ * class — for a caller whose page has no width cap, where `table-fixed` hands
+ * ALL surplus width to Details (the only unsized column) and a help sentence
+ * can set hundreds of characters wide. Opt-in for the same reason: eleven other
+ * consumers render this cell today and none of them were measured, so the
+ * default emits no wrapper at all and their markup is unchanged.
  */
 export function ConfigTable({
   children,
   settingLabel = "Setting",
   valueClassName = "w-52",
+  detailsClassName,
 }: {
   children: ReactNode;
   settingLabel?: string;
   /** Width utility for the Value column. Replaces the default. */
   valueClassName?: string;
+  /** Class for a wrapper around each Details cell's content. Omitted = no wrapper. */
+  detailsClassName?: string;
 }) {
   return (
     // table-fixed so the (often long) Details help text wraps instead of
@@ -53,10 +64,18 @@ export function ConfigTable({
           <TableHead className={valueClassName}>Value</TableHead>
         </TableRow>
       </TableHeader>
-      <TableBody>{children}</TableBody>
+      {/* Through context rather than a prop on every `ConfigTableRow`: this is
+          column geometry, which the table owns, and Config alone has twenty
+          rows that would each have to repeat it (and could each forget it). */}
+      <ConfigTableContext.Provider value={{ detailsClassName }}>
+        <TableBody>{children}</TableBody>
+      </ConfigTableContext.Provider>
     </Table>
   );
 }
+
+/** Column geometry `ConfigTable` sets and `ConfigTableRow` reads. */
+const ConfigTableContext = createContext<{ detailsClassName?: string }>({});
 
 /**
  * A full-width heading row inside a `ConfigTable`.
@@ -113,6 +132,7 @@ export function ConfigTableRow({
   mono?: boolean;
   children: ReactNode;
 }) {
+  const { detailsClassName } = useContext(ConfigTableContext);
   const mapped = fieldKey ? fieldHelp[fieldKey] : undefined;
   const detailText = details === undefined ? mapped?.help : details;
   const unit = mapped?.unit;
@@ -157,13 +177,14 @@ export function ConfigTableRow({
           </div>
         ) : null}
       </TableCell>
-      {/* `max-w-prose` caps the TEXT, not the column. Details is the only
-          unsized column, so under `table-fixed` it absorbs every pixel of
-          surplus width the page has — on a wide monitor that would set this
-          muted help as one line hundreds of characters long. The column may
-          still take the width; the sentence stops at a readable measure. */}
+      {/* The wrapper caps the TEXT, not the column: Details is the only unsized
+          column, so under `table-fixed` it absorbs every pixel of surplus width
+          an uncapped page has, and the column may keep that width while the
+          sentence stops at a readable measure. Emitted only when the table asked
+          for it — with no `detailsClassName` this renders exactly what it always
+          did, no wrapper element at all. */}
       <TableCell className="hidden align-top whitespace-normal break-words text-sm text-muted-foreground lg:table-cell">
-        {helpNode ? <div className="max-w-prose">{helpNode}</div> : null}
+        {detailsClassName && helpNode ? <div className={detailsClassName}>{helpNode}</div> : helpNode}
       </TableCell>
       <TableCell className="align-top">{children}</TableCell>
     </TableRow>

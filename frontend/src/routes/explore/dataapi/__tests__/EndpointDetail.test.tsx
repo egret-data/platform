@@ -896,11 +896,49 @@ describe("EndpointDetail — document heading", () => {
  * muted Details prose that `table-fixed` would otherwise hand all of it to.
  */
 describe("EndpointDetail — width", () => {
-  it("does not cap the detail sections at max-w-3xl", async () => {
-    const endpoint = makeEndpoint();
-    const { container } = renderConfig(endpoint);
+  it("puts no width cap on any ancestor between the section and the route root", async () => {
+    const { container } = renderConfig(makeEndpoint());
     await screen.findByLabelText("Max rows");
-    expect(container.querySelector(".max-w-3xl")).toBeNull();
+
+    // Deliberately NOT `container.querySelector(".max-w-3xl")`. That matched
+    // anywhere in the subtree, so it forbade the class to a whole page rather
+    // than to the one element that had it — Try it legitimately caps its own
+    // parameter grid, and under the subtree form it could never use this class
+    // to do it. Walking the ancestor chain asks the question that actually
+    // matters, and asks it about ANY cap rather than one class name: is
+    // anything between this section's content and the route container
+    // constraining the width? A restored `<div className="max-w-3xl">` around
+    // the `Outlet` is an ancestor and fails; a `max-w-2xl` on a grid *inside*
+    // a section is not, and passes.
+    const routeRoot = container.querySelector(".p-4");
+    expect(routeRoot).not.toBeNull();
+    const heading = screen.getByRole("heading", { name: "Config", level: 2 });
+
+    const capped: string[] = [];
+    for (let el = heading.parentElement; el && el !== routeRoot!.parentElement; el = el.parentElement) {
+      if (/(?:^|\s)(?:[a-z0-9]+:)*max-w-/.test(el.className)) capped.push(el.className);
+    }
+    expect(capped).toEqual([]);
+  });
+
+  it("leaves Versions constraining its own width, now that the route does not", async () => {
+    const { container } = renderVersions();
+    const heading = await screen.findByRole("heading", { name: "Versions", level: 2 });
+    const routeRoot = container.querySelector(".p-4");
+    // Removing the route cap moved responsibility for width into the sections,
+    // and this is the one where full width was worst: five short columns
+    // (`v3`, a truncated note, an email, a relative time, one button) spread
+    // across a wide monitor, with Roll back marooned at the far right of the
+    // row it acts on. One guard, on the section that most needs it — the point
+    // is that a section owning its own cap cannot lose it silently, not that
+    // any particular number is correct.
+    // The section root is whichever ancestor of the heading the route renders
+    // directly — found by walking, not by counting `parentElement`s, so an
+    // extra wrapper inside Versions does not quietly re-point this assertion.
+    let sectionRoot = heading.parentElement;
+    while (sectionRoot && sectionRoot.parentElement !== routeRoot) sectionRoot = sectionRoot.parentElement;
+    expect(sectionRoot).not.toBeNull();
+    expect(sectionRoot!.className).toMatch(/(?:^|\s)max-w-/);
   });
 
   it("gives Config's Value column more than the shared default", async () => {

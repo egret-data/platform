@@ -69,8 +69,23 @@ export default function Config() {
           viewport the content box is 356px, so the table already scrolled 140px
           at `w-52`; a flat `w-96` would have pushed that to 316px. Gating the
           widening at `lg` leaves the narrow regime exactly as it was and takes
-          the space only where there is space to take. */}
-      <ConfigTable valueClassName="w-52 lg:w-96">
+          the space only where there is space to take.
+
+          Between those two regimes there is a third, and it has a PRE-EXISTING
+          defect worth knowing about before anyone "fixes" the widths here.
+          `ConfigTableGroup` spans `colSpan={3}`, which keeps the table three
+          columns wide even where Details is `display:none` — so fixed layout
+          hands the leftover to a phantom third column with no first-row cell,
+          and it lands as dead space to the RIGHT of Value. Measured at a 1010px
+          viewport (content box 706px): columns 288/0/208 with 210px dead.
+          Deleting the four group rows from that same live table gives 410/0/296
+          and no dead space. This is not caused by the width pass — the old
+          `max-w-3xl` (768px) never bound below `lg`, where the sidebar already
+          holds the content box under ~720px — and `lg:` gating neither creates
+          nor cures it. Fixing it means making Value the unsized column below
+          `lg`, which changes the shared default for eleven other consumers and
+          belongs in its own change. */}
+      <ConfigTable valueClassName="w-52 lg:w-96" detailsClassName="max-w-prose">
         <ConfigTableGroup label="Endpoint" />
         <ConfigTableRow
           label="Name"
