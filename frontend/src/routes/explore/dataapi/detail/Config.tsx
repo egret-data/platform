@@ -74,7 +74,7 @@ export default function Config() {
             Value column is `w-52` (208px): a 2-row Textarea shows about 50
             characters and the Path input about 25 before it scrolls. Usable,
             but the tightest fit here. Widening the column is not this section's
-            call to make — `ConfigTable` is shared with 15 other files, and
+            call to make — `ConfigTable` is shared with 12 other files, and
             under the current `max-w-3xl` cap the width would have to come out
             of the Details column, which is worse. Revisit when the cap goes. */}
         <ConfigTableRow

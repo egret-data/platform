@@ -221,6 +221,42 @@ describe("Config", () => {
       expect(at).toBeLessThan(cacheAt);
     }
   });
+
+  // Fix round 1, Minor 1: the reviewer replaced Name's `onChange` with
+  // `() => {}` and the whole file stayed green — the four identity controls'
+  // wiring was pinned by nothing, and this task rewrote the JSX around all
+  // four of them. Four near-identical rows edited by hand is exactly how a
+  // control ends up bound to its neighbour's field, so this drives all four
+  // and asserts the WHOLE save payload with `toEqual`, not one key: a dead
+  // `onChange` drops a key, and a cross-wired one puts the value under
+  // someone else's. The values are deliberately distinct from each other and
+  // from every default in `makeEndpoint`, so no swap can coincide.
+  it("carries every identity field's edit to Save under its own key", async () => {
+    const user = userEvent.setup();
+    renderConfig();
+    await screen.findByLabelText("Name");
+
+    await user.clear(screen.getByLabelText("Name"));
+    await user.type(screen.getByLabelText("Name"), "Weekly report");
+    await user.clear(screen.getByLabelText("Description"));
+    await user.type(screen.getByLabelText("Description"), "Rows for the weekly digest");
+    await user.clear(screen.getByLabelText("Path"));
+    await user.type(screen.getByLabelText("Path"), "reports/weekly");
+    await user.click(screen.getByRole("combobox", { name: "Method" }));
+    await user.click(await screen.findByRole("option", { name: "POST" }));
+
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(updateMutateAsync).toHaveBeenCalled());
+    // The shell PATCHes only what changed (`diffToUpdateInput`), so these four
+    // keys and nothing else is the exact contract of "four edits, four fields".
+    expect(updateMutateAsync.mock.calls[0][0].data).toEqual({
+      name: "Weekly report",
+      description: "Rows for the weekly digest",
+      method: "POST",
+      path: "reports/weekly",
+    });
+  });
 });
 
 describe("EndpointDetail — save invalidation", () => {
