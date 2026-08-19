@@ -18,14 +18,25 @@ describe("ConfigTableGroup", () => {
     expect(cell).toHaveAttribute("colspan", "3");
   });
 
-  it("keeps ordinary rows in their three columns", () => {
+  it("keeps ordinary rows in their three columns, positioned after the group row", () => {
     render(
       <ConfigTable>
         <ConfigTableGroup label="Cache" />
         <ConfigTableRow label="Enabled" details="Serve repeat calls from a cache."><span data-testid="ctl" /></ConfigTableRow>
       </ConfigTable>,
     );
-    expect(screen.getByText("Enabled").closest("td")).not.toHaveAttribute("colspan", "3");
+    // Getting the group row by its accessible role, not just its text, means a
+    // group that rendered nothing (or rendered without the rowheader role)
+    // fails right here, before either assertion below runs.
+    const groupRow = screen.getByRole("rowheader", { name: "Cache" }).closest("tr");
+    const dataRow = screen.getByText("Enabled").closest("tr");
+    // Position, not just presence: the data row has to immediately follow the
+    // group row it belongs to. A group that rendered nothing leaves no <tr> to
+    // be "before" — this is what `return null` cannot satisfy.
+    expect(groupRow?.nextElementSibling).toBe(dataRow);
+    // Still three columns of its own — the group's single spanning cell is a
+    // different row, not a fourth cell bleeding into this one.
+    expect(dataRow?.querySelectorAll("td")).toHaveLength(3);
     expect(screen.getByTestId("ctl")).toBeInTheDocument();
   });
 
