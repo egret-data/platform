@@ -127,3 +127,69 @@ it("still renders external filters when its own search box is hidden", () => {
   );
   expect(screen.getByRole("button", { name: "State" })).toBeInTheDocument();
 });
+
+/**
+ * "Select all" must act on the rows the table DREW, not on everything that
+ * survived its search.
+ *
+ * Before this was fixed, `UsersPage` (`pageSize={25}`) let one click on a
+ * 25-row table select every filtered user across every page — and its bulk
+ * Disable then disabled all of them. There is no folder to collapse and no
+ * deliberate act involved: pagination is the default state, so the gap between
+ * what was drawn and what was selected opened on its own.
+ *
+ * The fixture is 5 rows over 2 pages, so a correct implementation and one that
+ * selects nothing are distinguishable — both would leave rows 2-4 unselected,
+ * but only the correct one selects rows 0-1.
+ */
+it("selects only the page it drew, not every row the search left", () => {
+  const many: Row[] = Array.from({ length: 5 }, (_, i) => ({
+    id: `r${i}`,
+    name: `Row ${i}`,
+  }));
+  const onToggle = vi.fn();
+  render(
+    <FilterableTable
+      rows={many}
+      columns={columns}
+      getId={(r) => r.id}
+      pageSize={2}
+      selection={{ selected: new Set<string>(), onToggle }}
+    />,
+  );
+
+  // The table drew exactly two rows; the other three are on later pages.
+  expect(screen.getByText("Row 0")).toBeInTheDocument();
+  expect(screen.getByText("Row 1")).toBeInTheDocument();
+  expect(screen.queryByText("Row 2")).toBeNull();
+
+  fireEvent.click(screen.getByLabelText("Select all"));
+
+  // Asserting the ids, not the call count: a header that toggled the whole
+  // filtered set would also "have been called".
+  expect(onToggle).toHaveBeenCalledWith("r0");
+  expect(onToggle).toHaveBeenCalledWith("r1");
+  expect(onToggle).not.toHaveBeenCalledWith("r2");
+  expect(onToggle).not.toHaveBeenCalledWith("r3");
+  expect(onToggle).not.toHaveBeenCalledWith("r4");
+  expect(onToggle).toHaveBeenCalledTimes(2);
+});
+
+it("its checked state follows the drawn page, not the whole result set", () => {
+  const many: Row[] = Array.from({ length: 5 }, (_, i) => ({
+    id: `r${i}`,
+    name: `Row ${i}`,
+  }));
+  render(
+    <FilterableTable
+      rows={many}
+      columns={columns}
+      getId={(r) => r.id}
+      pageSize={2}
+      // Exactly the drawn page is selected, and nothing else is.
+      selection={{ selected: new Set(["r0", "r1"]), onToggle: vi.fn() }}
+    />,
+  );
+  // Ticked, even though r2-r4 are unselected: they were not drawn.
+  expect(screen.getByLabelText("Select all")).toBeChecked();
+});

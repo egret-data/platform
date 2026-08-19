@@ -155,9 +155,16 @@ export function FilterableTable<T>({
           <TableHeader>
             <TableRow>
               {selection && (() => {
-                const shownIds = shown.map(getId);
+                // The rows this table DREW — `pageRows`, not `shown`. `shown`
+                // is everything that survived the search, across every page, so
+                // reading it here made one click on a 25-row `UsersPage` select
+                // every filtered user and its bulk Disable turn all of them
+                // off. Unlike the collapsed-folder case on the Explore lists,
+                // this needed no deliberate act: pagination is the default
+                // state, so the gap opened on its own.
+                const drawnIds = pageRows.map(getId);
                 const allShownSelected =
-                  shownIds.length > 0 && shownIds.every((id) => selection.selected.has(id));
+                  drawnIds.length > 0 && drawnIds.every((id) => selection.selected.has(id));
                 return (
                   <TableHead className="w-8">
                     <Checkbox
@@ -165,7 +172,7 @@ export function FilterableTable<T>({
                       checked={allShownSelected}
                       onCheckedChange={() => {
                         const target = !allShownSelected;
-                        for (const id of shownIds) {
+                        for (const id of drawnIds) {
                           if (selection.selected.has(id) !== target) selection.onToggle(id);
                         }
                       }}
