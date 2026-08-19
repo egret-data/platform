@@ -83,7 +83,7 @@ export default function Config() {
           410/0/296 and no dead space.
 
           Do not read that as "pre-existing". `ConfigTableGroup` is new in this
-          phase and is the only source of `colSpan={3}` in the tree: at the
+          phase and is the only source of `colSpan={3}` inside a `ConfigTable` in the tree: at the
           merge base, no file importing `ConfigTable` contained a `colSpan` at
           all, so relative to `main` there was no phantom column on any page.
           It was already there when the WIDTH pass measured — the group rows had

@@ -379,7 +379,7 @@ các cột 288/0/208 với 210px chết; xoá bốn dòng nhóm khỏi chính b�
 410/0/296 và không còn khoảng chết.
 
 **Nó KHÔNG có sẵn từ trước, và ba chỗ trong tài liệu này từng nói là có.** `ConfigTableGroup`
-là mới trong phase này và là nguồn duy nhất của `colSpan={3}` trong cây: đo tại merge base
+là mới trong phase này và là nguồn duy nhất của `colSpan={3}` bên trong một `ConfigTable` trong cây: đo tại merge base
 (`63a4fb90`), không file nào import `ConfigTable` chứa một `colSpan` nào cả — nên so với `main`
 thì không hề có cột ma, trên bất kỳ trang nào. Điều hẹp hơn mà *đúng*: các dòng nhóm đã đáp
 xuống ở những task trước, nên cột đó đã có mặt khi đợt **sửa chiều rộng** đo, và đợt sửa chiều
@@ -609,7 +609,7 @@ sửa cái trước. Chỉ một phép đo trên trình duyệt mới kết thú
    (`w-16`), cap cũ có ràng buộc thật, và đợt sửa nới cột chết từ 272px lên 370px ở đó.
 6. Đợt review toàn branch cuối cùng phát hiện **cái nhãn** mới là chỗ sai, sau khi năm vòng đã
    chấp nhận nó: "đã có sẵn" chỉ đúng khi so với đợt sửa chiều rộng. `ConfigTableGroup` — và cùng
-   nó là `colSpan={3}` duy nhất trong cây — là mới trong branch này, nên so với `main` thì cột
+   nó là `colSpan={3}` duy nhất bên trong một `ConfigTable` — là mới trong branch này, nên so với `main` thì cột
    chết là của chính branch này (§5.4). Không ai đo lại cái khẳng định cần một `git grep` chứ
    không cần trình duyệt, và tài liệu thì đã chứa bằng chứng phản lại chính nó ở câu ngay trước.
 

@@ -390,7 +390,7 @@ Value. Measured at a 1010px viewport (content box 706px): columns 288/0/208 with
 deleting the four group rows from that same live table gives 410/0/296 and no dead space.
 
 **It is not pre-existing, and three places in this document used to say it was.**
-`ConfigTableGroup` is new in this phase and is the only source of `colSpan={3}` in the tree:
+`ConfigTableGroup` is new in this phase and is the only source of `colSpan={3}` inside a `ConfigTable` in the tree:
 measured at the merge base (`63a4fb90`), no file importing `ConfigTable` contained a `colSpan`
 at all — so relative to `main` there was no phantom column, on any page. The narrower thing
 that *is* true: the group rows landed in the earlier tasks, so the column was already there
@@ -624,7 +624,7 @@ merge base settled the attribution.
    272px → 370px there.
 6. The final whole-branch review found the **label** wrong, after five rounds had accepted it:
    "pre-existing" was true only relative to the width pass. `ConfigTableGroup` — and with it the
-   only `colSpan={3}` in the tree — is new in this branch, so relative to `main` the dead column
+   only `colSpan={3}` inside a `ConfigTable` — is new in this branch, so relative to `main` the dead column
    is this branch's own (§5.4). Nobody re-measured the claim that needed a `git grep`, not a
    browser, and the document contained its own disproof one sentence earlier.
 
