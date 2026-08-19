@@ -45,7 +45,7 @@ macro_rules! endpoint_cols {
     () => {
         "id, folder_id, name, description, path, method, database_id, sql, params, output, \
          cache, limits, rate_limit, source_kind, source_ref, live_version_id, state, \
-         created_by, created_at, updated_at"
+         created_by, created_at, updated_at, deleted_at"
     };
 }
 
@@ -74,6 +74,7 @@ struct Row {
     created_by: Option<Uuid>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
+    deleted_at: Option<DateTime<Utc>>,
 }
 
 /// [`Row`] plus the calling user's `bookmarked` flag, for [`EndpointStore::list_for`].
@@ -114,6 +115,16 @@ pub struct DataApiEndpointDto {
     pub created_by: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// When this endpoint was moved to the trash, or `null` if it is live in the
+    /// authoring sense — present, listed, editable.
+    ///
+    /// On the DTO rather than a bare `trashed: bool` because WHEN it was trashed
+    /// is what a "Trash" screen sorts and ages by, and because the column itself
+    /// is the timestamp — a boolean projection here would be a second
+    /// representation of the same fact for the frontend to disagree with. The
+    /// schema's `CHECK (deleted_at IS NULL OR state <> 'live')` (migration 0126)
+    /// means a non-null value here can never coexist with `state = "live"`.
+    pub deleted_at: Option<DateTime<Utc>>,
 }
 
 /// One row of the endpoint LIST: the draft, plus the calling user's own
@@ -182,6 +193,7 @@ impl TryFrom<Row> for DataApiEndpointDto {
             created_by: r.created_by,
             created_at: r.created_at,
             updated_at: r.updated_at,
+            deleted_at: r.deleted_at,
         })
     }
 }
@@ -495,9 +507,35 @@ fn is_path_conflict(e: &sqlx::Error) -> bool {
     matches!(e, sqlx::Error::Database(d) if d.is_unique_violation())
 }
 
+/// The `UNIQUE (workspace_id, method, path)` refusal, as an author reads it.
+///
+/// Names the URL rather than the constraint: a bare "conflict" on a screen with a
+/// dozen drafts is not actionable.
 fn conflict(method: &str, path: &str) -> Error {
     Error::Conflict(format!(
         "an endpoint already exists at {method} {path} in this workspace"
+    ))
+}
+
+/// The same refusal when the row holding the slot is IN THE TRASH.
+///
+/// `UNIQUE (workspace_id, method, path)` (0121) has no `WHERE deleted_at IS NULL`
+/// — deliberately, per the decision recorded on this task: a trashed endpoint
+/// keeps its URL so that restoring it can never fail with a conflict of its own.
+/// The cost is that [`conflict`]'s message would point at a row the author cannot
+/// see in any list, which is a dead end — the author looks at a screen with no
+/// `GET /orders` on it and is told `GET /orders` exists. So the refusal has to
+/// name the real cause AND the two ways out: restore that endpoint, or delete it
+/// permanently to free the URL.
+///
+/// The method and path are still in the text, because
+/// `duplicate_method_and_path_is_a_conflict` and
+/// `renaming_a_path_onto_an_existing_one_is_a_conflict` require the colliding URL
+/// in every 409 from this pair, whichever branch produced it.
+fn trashed_conflict(method: &str, path: &str) -> Error {
+    Error::Conflict(format!(
+        "a trashed endpoint still holds {method} {path} in this workspace — \
+         restore it, or delete it permanently to free the URL"
     ))
 }
 
@@ -516,10 +554,25 @@ impl EndpointStore {
     ///
     /// The `EXISTS` is a correlated sub-select rather than a join so a row
     /// appears exactly once whatever the bookmarks table holds.
+    ///
+    /// `trashed` partitions the workspace rather than widening it: `false` — the
+    /// default the route applies when the query string says nothing — lists only
+    /// rows with `deleted_at IS NULL`, and `true` lists only the trashed ones.
+    /// The same shape `egret-bi`'s dataset and dashboard lists established, so
+    /// "Trash" is a separate screen fed by the same endpoint and no list can show
+    /// a trashed row beside a live one.
+    ///
+    /// The predicate is `$3 = (deleted_at IS NOT NULL)` and not two statements
+    /// chosen at runtime: sqlx 0.9's `query_as` takes `&'static str`, so a
+    /// branch would mean either two `concat!`-ed literals that can drift apart or
+    /// a `format!` through `AssertSqlSafe`. One statement, one bound boolean, and
+    /// the index added by 0126 is on `(workspace_id, deleted_at)` for exactly
+    /// this read.
     pub async fn list_for(
         &self,
         workspace: Uuid,
         user: Uuid,
+        trashed: bool,
     ) -> Result<Vec<DataApiEndpointListItemDto>> {
         let rows: Vec<RowWithBookmark> = sqlx::query_as(concat!(
             "SELECT ",
@@ -528,10 +581,13 @@ impl EndpointStore {
                WHERE b.user_id = $2 AND b.entity_type = '",
             bookmark_entity!(),
             "' AND b.entity_id = endpoints.id) AS bookmarked \
-             FROM dataapi.endpoints WHERE workspace_id = $1 ORDER BY created_at DESC"
+             FROM dataapi.endpoints \
+             WHERE workspace_id = $1 AND $3 = (deleted_at IS NOT NULL) \
+             ORDER BY created_at DESC"
         ))
         .bind(workspace)
         .bind(user)
+        .bind(trashed)
         .fetch_all(&self.db.pool)
         .await
         .map_err(db_err)?;
@@ -698,7 +754,7 @@ impl EndpointStore {
         path: &str,
         input: &CreateEndpointInput,
     ) -> Result<DataApiEndpointDto> {
-        let row: Row = sqlx::query_as(concat!(
+        let row: std::result::Result<Row, sqlx::Error> = sqlx::query_as(concat!(
             "INSERT INTO dataapi.endpoints \
                (workspace_id, folder_id, name, description, path, method, database_id, sql, \
                 params, output, cache, limits, rate_limit, source_kind, source_ref, created_by) \
@@ -726,15 +782,132 @@ impl EndpointStore {
         .bind(input.source_ref)
         .bind(by.0)
         .fetch_one(&self.db.pool)
-        .await
-        .map_err(|e| {
-            if is_path_conflict(&e) {
-                conflict(method, path)
-            } else {
-                db_err(e)
+        .await;
+        // A `match` rather than `map_err`: telling a trashed collision apart from
+        // a visible one needs a second query, and a query can only be awaited.
+        let row = match row {
+            Ok(row) => row,
+            Err(e) if is_path_conflict(&e) => {
+                return Err(self.path_conflict(workspace, method, path).await)
             }
-        })?;
+            Err(e) => return Err(db_err(e)),
+        };
         row.try_into()
+    }
+
+    /// Which conflict this is: a visible endpoint holding the slot, or a trashed
+    /// one the author cannot see.
+    ///
+    /// Called only after [`is_path_conflict`] has already established that the
+    /// UNIQUE fired, so the row it looks for is there by construction. If it
+    /// somehow is not — the holder was deleted between the failed write and this
+    /// read — the answer falls back to [`conflict`], which is the message that was
+    /// correct before trash existed. A missing row must never become "a trashed
+    /// endpoint holds it": that would send the author to a Trash screen with
+    /// nothing on it.
+    async fn path_conflict(&self, workspace: Uuid, method: &str, path: &str) -> Error {
+        let holder: std::result::Result<Option<Option<DateTime<Utc>>>, sqlx::Error> =
+            sqlx::query_scalar(
+                "SELECT deleted_at FROM dataapi.endpoints \
+                 WHERE workspace_id = $1 AND method = $2 AND path = $3",
+            )
+            .bind(workspace)
+            .bind(method)
+            .bind(path)
+            .fetch_optional(&self.db.pool)
+            .await;
+        match holder {
+            Ok(Some(Some(_))) => trashed_conflict(method, path),
+            _ => conflict(method, path),
+        }
+    }
+
+    /// Move an endpoint to the trash: `deleted_at = now()`, the row and its
+    /// published versions left where they are.
+    ///
+    /// **A `live` endpoint is refused with a 409 naming disable-first, and the
+    /// refusal is in the statement's own `WHERE`.** Migration 0126's
+    /// `CHECK (deleted_at IS NULL OR state <> 'live')` would refuse it too — that
+    /// is the guarantee, and it holds against writers that never come through
+    /// here — but a CHECK violation surfaces as an opaque 500 naming a constraint,
+    /// which tells an author nothing about what to do. Both layers are wanted:
+    /// this one for the message, the constraint for the promise. Putting the
+    /// predicate in the UPDATE rather than in a read-then-write also means a
+    /// publish landing in between cannot slip a live endpoint into the trash —
+    /// the row simply stops matching.
+    ///
+    /// Trashing an already-trashed endpoint is a no-op returning the row as it
+    /// stands, so a double click does not restamp `deleted_at` and lose when it
+    /// was actually trashed.
+    ///
+    /// The invoke grants are NOT swept, unlike [`Self::delete`]: trash is
+    /// reversible, and a restore that came back without its grants would silently
+    /// break every client that had been calling it. What stops a trashed endpoint
+    /// answering a request is `state <> 'live'`, not the absence of grants.
+    pub async fn trash(&self, workspace: Uuid, id: Uuid) -> Result<DataApiEndpointDto> {
+        let row: Option<Row> = sqlx::query_as(concat!(
+            "UPDATE dataapi.endpoints SET deleted_at = now(), updated_at = now() \
+             WHERE id = $1 AND workspace_id = $2 \
+               AND deleted_at IS NULL AND state <> 'live' \
+             RETURNING ",
+            endpoint_cols!()
+        ))
+        .bind(id)
+        .bind(workspace)
+        .fetch_optional(&self.db.pool)
+        .await
+        .map_err(db_err)?;
+        if let Some(row) = row {
+            return row.try_into();
+        }
+        // No row matched, and the three reasons need three different answers. The
+        // read is scoped to the workspace, so a foreign id is `NotFound` here and
+        // never reaches the state check.
+        let current = self.get(workspace, id).await?;
+        if current.deleted_at.is_some() {
+            return Ok(current);
+        }
+        Err(Error::Conflict(format!(
+            "endpoint is {} and cannot be moved to the trash; disable it first",
+            current.state
+        )))
+    }
+
+    /// Bring an endpoint back from the trash, `disabled`.
+    ///
+    /// **`disabled`, never `live`, whatever it was before.** A restore that
+    /// resumed serving would put an endpoint back on the internet as a side effect
+    /// of a Trash screen's undo button, and the author who trashed it may not be
+    /// the one restoring it. `live_version_id` is untouched, so `enable` is one
+    /// click away and needs no re-publish — the same contract `disable` keeps.
+    ///
+    /// Refuses a row that is not in the trash rather than treating restore as a
+    /// generic state setter: applied to a LIVE endpoint, an unconditional
+    /// `state = 'disabled'` would take it out of service, which is `disable`'s job
+    /// and its audit event. `deleted_at IS NOT NULL` is in the `WHERE` for the same
+    /// reason it is in [`Self::trash`] — no read-then-write window.
+    pub async fn restore(&self, workspace: Uuid, id: Uuid) -> Result<DataApiEndpointDto> {
+        let row: Option<Row> = sqlx::query_as(concat!(
+            "UPDATE dataapi.endpoints \
+                SET deleted_at = NULL, state = 'disabled', updated_at = now() \
+             WHERE id = $1 AND workspace_id = $2 AND deleted_at IS NOT NULL \
+             RETURNING ",
+            endpoint_cols!()
+        ))
+        .bind(id)
+        .bind(workspace)
+        .fetch_optional(&self.db.pool)
+        .await
+        .map_err(db_err)?;
+        if let Some(row) = row {
+            return row.try_into();
+        }
+        // Existence first — a foreign or absent id is a 404, not a 409 that would
+        // confirm the id names something.
+        self.get(workspace, id).await?;
+        Err(Error::Conflict(
+            "endpoint is not in the trash; there is nothing to restore".into(),
+        ))
     }
 
     /// Apply a partial edit. Absent fields are left alone by `COALESCE`ing the
@@ -803,7 +976,7 @@ impl EndpointStore {
             Ok(row) => row,
             Err(e) if is_path_conflict(&e) => {
                 let (method, path) = self.effective_route(workspace, id, input).await;
-                return Err(conflict(&method, &path));
+                return Err(self.path_conflict(workspace, &method, &path).await);
             }
             Err(e) => return Err(db_err(e)),
         };
@@ -842,6 +1015,13 @@ impl EndpointStore {
     /// Delete a draft belonging to `workspace`. `NotFound` if it belongs to
     /// anyone else, and — this is the part a bare `DELETE` gets wrong — the row
     /// is not deleted either.
+    ///
+    /// **PERMANENT, and unchanged by the arrival of trash.** `DELETE` did not
+    /// become a soft delete when [`Self::trash`] was added: the trash is a
+    /// separate, reversible state, and this is still the statement that destroys
+    /// the endpoint and cascades its published versions away. It applies to a
+    /// trashed row as readily as to a visible one — emptying the trash is this
+    /// call — which is also what frees a URL that a trashed endpoint still holds.
     ///
     /// `dataapi.endpoint_versions` cascades from here (0121), so deleting an
     /// endpoint takes its published history with it — which is why the route

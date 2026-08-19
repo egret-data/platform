@@ -14,6 +14,8 @@
 //! GET    /api/ws/{workspace}/data-api/endpoints/{id}
 //! PATCH  /api/ws/{workspace}/data-api/endpoints/{id}
 //! DELETE /api/ws/{workspace}/data-api/endpoints/{id}
+//! POST   /api/ws/{workspace}/data-api/endpoints/{id}/trash
+//! POST   /api/ws/{workspace}/data-api/endpoints/{id}/restore
 //! POST   /api/ws/{workspace}/data-api/endpoints/{id}/bookmark
 //! DELETE /api/ws/{workspace}/data-api/endpoints/{id}/bookmark
 //! POST   /api/ws/{workspace}/data-api/endpoints/{id}/validate
@@ -833,11 +835,27 @@ async fn revoke_client(
 // an endpoint live, and the SQL a live endpoint runs comes from its frozen
 // snapshot rather than from this row. Its URL does not — see the module comment.
 
+/// The endpoint list's only query parameter.
+///
+/// `#[serde(default)]` so an absent `?trashed=` means "the ones that are not in
+/// the trash" — the answer this route gave before trash existed, so no caller
+/// that predates it changes behaviour. The name and shape are `egret-bi`'s
+/// dataset and dashboard lists', because a second spelling of one idea is a thing
+/// for the frontend to get wrong once per screen.
+#[derive(Debug, Deserialize)]
+struct ListEndpointsQuery {
+    #[serde(default)]
+    trashed: bool,
+}
+
 #[utoipa::path(
     get,
     path = "/api/ws/{workspace}/data-api/endpoints",
     tag = "data-api",
-    params(WorkspacePath),
+    params(
+        WorkspacePath,
+        ("trashed" = Option<bool>, Query, description = "List only trashed endpoints when true; only untrashed ones when absent or false"),
+    ),
     responses(
         (status = 200, description = "Endpoint drafts in the workspace, each with the caller's own `bookmarked` flag", body = Vec<DataApiEndpointListItemDto>),
         (status = 401, description = "Not authenticated", body = ErrorBody),
@@ -848,13 +866,14 @@ async fn revoke_client(
 async fn list_endpoints(
     State(st): State<DataApiState>,
     WsContext(ctx): WsContext,
+    Query(q): Query<ListEndpointsQuery>,
 ) -> Result<Json<Vec<DataApiEndpointListItemDto>>, DataApiError> {
     egret_core::authz::require(&*st.pdp, &ctx, EP_READ).await?;
     // The user comes from the SESSION. `bookmarked` answers "did I star this",
     // and there is nowhere else it could legitimately come from.
     Ok(Json(
         st.endpoints
-            .list_for(ctx.workspace_id.0, ctx.principal.user_id.0)
+            .list_for(ctx.workspace_id.0, ctx.principal.user_id.0, q.trashed)
             .await?,
     ))
 }
@@ -1063,6 +1082,125 @@ async fn delete_endpoint(
         }),
     ));
     Ok(Json(Ack::ok()))
+}
+
+// ---------- Trash ----------
+//
+// `DELETE …/endpoints/{id}` above keeps its meaning: permanent, cascading the
+// published versions away. These two are the reversible pair beside it.
+//
+// Both gate on [`EP_MANAGE`] — the same permission as `delete` and `disable`, and
+// not `:read`. Trashing takes an endpoint out of the authoring surface and, for a
+// disabled one, is the step before deleting it; restoring puts it back. Neither is
+// a per-user view preference like a bookmark.
+//
+// Both emit an audit event, which is where this pair departs from the dataset
+// trash in `egret-bi` that it otherwise copies. Every lifecycle mutation in this
+// module is audited — create, update, delete, publish, rollback, disable, enable,
+// grant, revoke — and only the per-user bookmark routes are not. An unaudited
+// trash would be the one way to remove an endpoint from every list that leaves no
+// trace of who did it, sitting next to a `delete` whose whole justification is
+// that the trail is the only surviving record.
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/data-api/endpoints/{id}/trash",
+    tag = "data-api",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Endpoint id"),
+    ),
+    responses(
+        (status = 200, description = "Endpoint moved to the trash. Reversible: the row, its published versions and its invoke grants are all kept.", body = DataApiEndpointDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing data_api_endpoint:manage permission", body = ErrorBody),
+        (status = 404, description = "No such endpoint in this workspace", body = ErrorBody),
+        (status = 409, description = "The endpoint is live — disable it first, so trashing can never take a served URL off the internet by surprise", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn trash_endpoint(
+    State(st): State<DataApiState>,
+    WsContext(ctx): WsContext,
+    Path((_ws_ignored, id)): Path<(String, Uuid)>,
+) -> Result<Json<DataApiEndpointDto>, DataApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, EP_MANAGE).await?;
+    // The live-state refusal is inside `trash`, in the UPDATE's own `WHERE`, so it
+    // cannot be bypassed by a second caller of the store and cannot race a
+    // concurrent publish. Migration 0126's CHECK is the backstop under it — but a
+    // constraint violation reaches the author as a 500 naming
+    // `dataapi_endpoints_trashed_not_live`, and what they need to be told is to
+    // disable it first.
+    let trashed = st.endpoints.trash(ctx.workspace_id.0, id).await?;
+    // `path` and `method` go in the detail for the same reason they do on
+    // `delete`: trashing removes the endpoint from every list an auditor would
+    // join back to, and while the row survives, "which URL stopped being
+    // authorable" is the question asked of the trail. `deleted_at` is the fact
+    // itself.
+    st.audit.emit(egret_audit::mutation_for(
+        &ctx.principal,
+        Some(ctx.workspace_id.0),
+        "data_api_endpoint:trash",
+        "data_api_endpoint",
+        Some(id.to_string()),
+        serde_json::json!({
+            "name": trashed.name,
+            "path": trashed.path,
+            "method": trashed.method,
+            "state": trashed.state,
+            "deleted_at": trashed.deleted_at,
+        }),
+    ));
+    Ok(Json(trashed))
+}
+
+/// The other half of `trash`, and the reason trash keeps the invoke grants and the
+/// live version pointer: without this route that promise is unfalsifiable.
+///
+/// Comes back `disabled`, never `live`. See [`EndpointStore::restore`].
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/data-api/endpoints/{id}/restore",
+    tag = "data-api",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Endpoint id"),
+    ),
+    responses(
+        (status = 200, description = "Endpoint restored from the trash, `disabled` — never straight back to serving", body = DataApiEndpointDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing data_api_endpoint:manage permission", body = ErrorBody),
+        (status = 404, description = "No such endpoint in this workspace", body = ErrorBody),
+        (status = 409, description = "The endpoint is not in the trash", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn restore_endpoint(
+    State(st): State<DataApiState>,
+    WsContext(ctx): WsContext,
+    Path((_ws_ignored, id)): Path<(String, Uuid)>,
+) -> Result<Json<DataApiEndpointDto>, DataApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, EP_MANAGE).await?;
+    let restored = st.endpoints.restore(ctx.workspace_id.0, id).await?;
+    // Symmetric with `trash`, and not optional: auditing one half of a reversible
+    // pair records that an endpoint left the authoring surface and never that it
+    // came back. `state` is in the detail because the state restore lands in is
+    // the decision this route makes — a trail showing `live` here would be the
+    // first sign that the "never straight back to serving" rule had been lost.
+    st.audit.emit(egret_audit::mutation_for(
+        &ctx.principal,
+        Some(ctx.workspace_id.0),
+        "data_api_endpoint:restore",
+        "data_api_endpoint",
+        Some(id.to_string()),
+        serde_json::json!({
+            "name": restored.name,
+            "path": restored.path,
+            "method": restored.method,
+            "state": restored.state,
+        }),
+    ));
+    Ok(Json(restored))
 }
 
 // ---------- Bookmarks ----------
@@ -1986,6 +2124,14 @@ pub fn management_router() -> Router<DataApiState> {
                 .delete(delete_endpoint),
         )
         .route(
+            "/ws/{workspace}/data-api/endpoints/{id}/trash",
+            post(trash_endpoint),
+        )
+        .route(
+            "/ws/{workspace}/data-api/endpoints/{id}/restore",
+            post(restore_endpoint),
+        )
+        .route(
             "/ws/{workspace}/data-api/endpoints/{id}/bookmark",
             post(bookmark_endpoint).delete(unbookmark_endpoint),
         )
@@ -2057,6 +2203,8 @@ pub fn management_router() -> Router<DataApiState> {
         create_endpoint,
         update_endpoint,
         delete_endpoint,
+        trash_endpoint,
+        restore_endpoint,
         bookmark_endpoint,
         unbookmark_endpoint,
         validate_endpoint,
