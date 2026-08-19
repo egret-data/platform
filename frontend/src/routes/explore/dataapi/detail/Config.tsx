@@ -79,12 +79,21 @@ export default function Config() {
           and it lands as dead space to the RIGHT of Value. Measured at a 1010px
           viewport (content box 706px): columns 288/0/208 with 210px dead.
           Deleting the four group rows from that same live table gives 410/0/296
-          and no dead space. This is not caused by the width pass — the old
-          `max-w-3xl` (768px) never bound below `lg`, where the sidebar already
-          holds the content box under ~720px — and `lg:` gating neither creates
-          nor cures it. Fixing it means making Value the unsized column below
-          `lg`, which changes the shared default for eleven other consumers and
-          belongs in its own change. */}
+          and no dead space.
+
+          The phantom column is NOT created by the width pass — it is there at
+          768px too — but this pass does make it bigger in one sub-regime, and
+          that depends on something easy to miss: the sidebar is a user-toggled
+          rail, `w-56` expanded and `w-16` collapsed. Measured at that same
+          1010px viewport with the rail COLLAPSED (content box 866px): 370px
+          dead, where the old 768px cap would have given 272px. Expanded, the
+          content box is 706px and the cap never bound, so nothing changed.
+          Fixing it means making Value the unsized column below `lg`. That does
+          not require touching the shared default — `valueClassName` replaces it
+          outright, so this section could pass `"lg:w-96"` with no base width
+          and affect nobody else. It is deferred because it is UNVERIFIED that
+          an unsized Value actually absorbs the phantom column rather than
+          splitting with it, not because it is blocked. */}
       <ConfigTable valueClassName="w-52 lg:w-96" detailsClassName="max-w-prose">
         <ConfigTableGroup label="Endpoint" />
         <ConfigTableRow

@@ -896,26 +896,49 @@ describe("EndpointDetail — document heading", () => {
  * muted Details prose that `table-fixed` would otherwise hand all of it to.
  */
 describe("EndpointDetail — width", () => {
-  it("puts no width cap on any ancestor between the section and the route root", async () => {
-    const { container } = renderConfig(makeEndpoint());
-    await screen.findByLabelText("Max rows");
+  it("wraps the Outlet in nothing that caps the width", async () => {
+    // The subject is the ROUTE, so the section is a sentinel rather than a real
+    // one. Two earlier shapes of this guard were wrong in opposite directions
+    // and both are worth naming, because the sentinel is what makes each
+    // impossible rather than merely unlikely:
+    //
+    //  - `container.querySelector(".max-w-3xl")` scanned the whole subtree, so
+    //    it forbade one class name to an entire page. A section may legitimately
+    //    cap its own children (Try it's parameter grid does).
+    //  - Walking up from a real section's content and stopping at "the child of
+    //    the route container" reads the wrapper we are hunting AS the section
+    //    root whenever it exists — measured: a restored `max-w-3xl` around the
+    //    `Outlet` passes 31/31 under that shape. The guard would be dead in
+    //    exactly the case it was written for.
+    //
+    // With a sentinel there is no section root to confuse for a wrapper: every
+    // element strictly above it belongs to the route. So this asserts the route
+    // interposes no cap, and says nothing about what any section does to itself
+    // — which is what lets `Config` and `Versions` both cap their own roots.
+    const endpoint = makeEndpoint();
+    vi.mocked(api.useDataApiGetEndpoint).mockReturnValue(
+      { data: { status: 200, data: endpoint }, isLoading: false, isError: false, error: null, refetch: vi.fn() } as unknown as
+        ReturnType<typeof api.useDataApiGetEndpoint>,
+    );
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { container } = render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={[`/explore/eng/data-api/endpoints/${endpoint.id}/config`]}>
+          <Routes>
+            <Route path="/explore/:workspace/data-api/endpoints/:id" element={<EndpointDetail />}>
+              <Route path="config" element={<div data-testid="section-content" />} />
+            </Route>
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
 
-    // Deliberately NOT `container.querySelector(".max-w-3xl")`. That matched
-    // anywhere in the subtree, so it forbade the class to a whole page rather
-    // than to the one element that had it — Try it legitimately caps its own
-    // parameter grid, and under the subtree form it could never use this class
-    // to do it. Walking the ancestor chain asks the question that actually
-    // matters, and asks it about ANY cap rather than one class name: is
-    // anything between this section's content and the route container
-    // constraining the width? A restored `<div className="max-w-3xl">` around
-    // the `Outlet` is an ancestor and fails; a `max-w-2xl` on a grid *inside*
-    // a section is not, and passes.
+    const sentinel = await screen.findByTestId("section-content");
     const routeRoot = container.querySelector(".p-4");
     expect(routeRoot).not.toBeNull();
-    const heading = screen.getByRole("heading", { name: "Config", level: 2 });
 
     const capped: string[] = [];
-    for (let el = heading.parentElement; el && el !== routeRoot!.parentElement; el = el.parentElement) {
+    for (let el = sentinel.parentElement; el && el !== routeRoot!.parentElement; el = el.parentElement) {
       if (/(?:^|\s)(?:[a-z0-9]+:)*max-w-/.test(el.className)) capped.push(el.className);
     }
     expect(capped).toEqual([]);
