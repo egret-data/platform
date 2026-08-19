@@ -43,7 +43,23 @@ const FOLDER_KIND = "data_api_endpoints";
 /** `useCollapsed`'s key for the folderless group (`groupByFolder`'s `folder: null`). */
 const UNCATEGORIZED_KEY = "__uncat__";
 
-type SortKey = "name" | "state" | "updated_at";
+/**
+ * `deleted_at` is a sort key and not merely a column because the Trash is sorted
+ * by the timestamp it SHOWS. The two views render different last columns —
+ * `updated_at` (Last edited) in the normal list, `deleted_at` (Trashed) in the
+ * trash — and leaving the trash on `updated_at` produced a table whose visible
+ * timestamps disagreed with its own row order: trash A (edited Aug 1) at 10:00,
+ * then B (edited Jul 1) at 11:00, and A sorted above B while the column said
+ * the opposite. An invisible sort key is unarguable-with, which is worse than a
+ * wrong one you can click.
+ */
+type SortKey = "name" | "state" | "updated_at" | "deleted_at";
+
+/** The default sort for each view — the column that view actually displays. */
+const DEFAULT_SORT: Record<"list" | "trash", SortState<SortKey>> = {
+  list: { key: "updated_at", dir: "desc" },
+  trash: { key: "deleted_at", dir: "desc" },
+};
 
 // live is the only state that earns emphasis (--highlight is reserved for a
 // page's single primary accent, not a state chip) — draft and disabled both
@@ -156,7 +172,7 @@ export default function Endpoints() {
    * to its old state until the list lands.
    */
   const [bookmarkOverride, setBookmarkOverride] = useState<Record<string, boolean>>({});
-  const [sort, setSort] = useState<SortState<SortKey>>({ key: "updated_at", dir: "desc" });
+  const [sort, setSort] = useState<SortState<SortKey>>(DEFAULT_SORT.list);
   const [downloadOpen, setDownloadOpen] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<DataApiEndpointDto | null>(null);
   /**
@@ -198,6 +214,11 @@ export default function Endpoints() {
       let cmp: number;
       if (sort.key === "name") cmp = a.name.localeCompare(b.name);
       else if (sort.key === "state") cmp = a.state.localeCompare(b.state);
+      // `?? ""` and not a non-null assertion: `deleted_at` is nullable on the
+      // DTO, and the cell above already renders "—" for a trash row that
+      // somehow arrived without one. Sorting must not throw where the table
+      // renders.
+      else if (sort.key === "deleted_at") cmp = (a.deleted_at ?? "").localeCompare(b.deleted_at ?? "");
       else cmp = a.updated_at.localeCompare(b.updated_at);
       return sort.dir === "asc" ? cmp : -cmp;
     });
@@ -253,6 +274,12 @@ export default function Endpoints() {
   function toggleTrash() {
     const next = !showTrash;
     setShowTrash(next);
+    // Both directions, unconditionally. The sort has to follow the view because
+    // the two views do not render the same last column — see `DEFAULT_SORT`.
+    // Resetting only on the way IN would strand a trash sort (`deleted_at`) on
+    // the normal list, where no header claims it, which is the same defect
+    // mirrored.
+    setSort(next ? DEFAULT_SORT.trash : DEFAULT_SORT.list);
     if (next) {
       setOnlyBookmarked(false);
       setStateFilter(null);
@@ -315,6 +342,16 @@ export default function Endpoints() {
     // that does nothing and then toasts "Moved 0 endpoints to Trash" would be
     // worse than one that fails.
     if (ids.length === 0 || liveSelected.length > 0) {
+      // Saying nothing here was the bug. From the author's side the button was
+      // enabled, they clicked it, and N rows silently stayed put — no toast, no
+      // selection, nothing to act on. Not claiming a false "Moved 0 to Trash"
+      // was right; being silent about it was not, so each of the two re-checks
+      // reports the reason it tripped and what to do about it.
+      toast.error(
+        liveSelected.length > 0
+          ? `Nothing moved — ${liveSelected.length} of the selected endpoint${liveSelected.length === 1 ? " is" : "s are"} now live. Disable ${liveSelected.length === 1 ? "it" : "them"} first.`
+          : "Nothing moved — the selected endpoints are no longer on this page. Select them again.",
+      );
       bulk.clear();
       return;
     }
@@ -611,7 +648,7 @@ export default function Endpoints() {
                   <SortableHeader sortKey="state" label="State" current={sort} onSort={onSort} />
                   <th className="px-2 font-medium">Engine</th>
                   {showTrash ? (
-                    <th className="px-2 font-medium">Trashed</th>
+                    <SortableHeader sortKey="deleted_at" label="Trashed" current={sort} onSort={onSort} />
                   ) : (
                     <SortableHeader sortKey="updated_at" label="Last edited" current={sort} onSort={onSort} />
                   )}

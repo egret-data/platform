@@ -507,6 +507,31 @@ impl Fixture {
             .await
             .expect("read state")
     }
+
+    /// A draft already in the trash, written in ONE statement rather than through
+    /// the route — an authorization test must not depend on the very route it is
+    /// proving a caller cannot reach.
+    async fn create_trashed_endpoint(&self, name: &str, path: &str, sql: &str) -> Uuid {
+        let id = self.create_endpoint(name, path, sql).await;
+        sqlx::query("UPDATE dataapi.endpoints SET deleted_at = now() WHERE id = $1")
+            .bind(id)
+            .execute(&self.db.pool)
+            .await
+            .expect("trash endpoint directly");
+        id
+    }
+
+    /// Whether the row is in the trash. Read as `Option<Option<_>>` so "no such
+    /// row" cannot be mistaken for "not trashed".
+    async fn deleted_at(&self, ep: Uuid) -> Option<chrono::DateTime<chrono::Utc>> {
+        let row: Option<Option<chrono::DateTime<chrono::Utc>>> =
+            sqlx::query_scalar("SELECT deleted_at FROM dataapi.endpoints WHERE id = $1")
+                .bind(ep)
+                .fetch_optional(&self.db.pool)
+                .await
+                .expect("read deleted_at");
+        row.expect("endpoint row still exists")
+    }
 }
 
 // ---------- The invariant ----------
@@ -1323,31 +1348,57 @@ async fn rollback_does_not_silently_re_enable_a_disabled_endpoint() {
 /// `:read` cannot author, and each lifecycle route is its own `require` call —
 /// permissions here are FLAT, so nothing but the explicit check stands between a
 /// reader and a publish.
+///
+/// `trash` and `restore` are in this list, and they are the two that needed a
+/// fixture of their own. Driven against `ep` — which is LIVE — an unguarded trash
+/// would still be refused, by the store's `AND state <> 'live'`, and an unguarded
+/// restore by its `AND deleted_at IS NOT NULL`; the assertion would then hold for
+/// a reason that has nothing to do with the permission. `trashable` and `trashed`
+/// are each in exactly the state their route accepts, so deleting the `require`
+/// turns those two calls into 200s that write.
 #[tokio::test]
 async fn read_permission_cannot_drive_the_lifecycle() {
     let f = skip_without_db!();
     let ep = f.create_endpoint("rev", "rev", "SELECT 1 AS n").await;
     f.publish(ep).await;
+    let trashable = f
+        .create_endpoint("trashable", "trashable", "SELECT 1 AS n")
+        .await;
+    let trashed = f
+        .create_trashed_endpoint("trashed", "trashed", "SELECT 1 AS n")
+        .await;
     let reader =
         principal_with_in(&f.db, f.port.clone(), &["data_api_endpoint:read"], f.ws_id).await;
 
-    for (route, body) in [
-        ("validate", None),
-        ("publish", Some(serde_json::json!({}))),
-        ("rollback", Some(serde_json::json!({ "version": 1 }))),
-        ("disable", None),
-        ("enable", None),
+    for (target, route, body) in [
+        (ep, "validate", None),
+        (ep, "publish", Some(serde_json::json!({}))),
+        (ep, "rollback", Some(serde_json::json!({ "version": 1 }))),
+        (ep, "disable", None),
+        (ep, "enable", None),
+        (trashable, "trash", None),
+        (trashed, "restore", None),
     ] {
         let (status, b) = f
             .send(
                 &reader,
                 "POST",
-                &format!("{}/{ep}/{route}", f.collection()),
+                &format!("{}/{target}/{route}", f.collection()),
                 body,
             )
             .await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{route}: {b}");
     }
+    // …and neither row moved. A 403 that had already written would read exactly
+    // the same on the status line above.
+    assert!(
+        f.deleted_at(trashable).await.is_none(),
+        "a refused trash must not have written deleted_at"
+    );
+    assert!(
+        f.deleted_at(trashed).await.is_some(),
+        "a refused restore must not have cleared deleted_at"
+    );
     // The read side still works, or the loop above would pass against a router
     // that denied a reader everything.
     let (status, b) = f
@@ -1391,31 +1442,52 @@ async fn listing_versions_requires_read_not_manage() {
 
 /// Cross-workspace is 404, never 403: a legitimate manager in ANOTHER workspace
 /// must not be able to tell "no such endpoint" from "exists, but not yours" —
-/// and must not be able to publish, roll back or disable it.
+/// and must not be able to publish, roll back, disable, trash or restore it.
+///
+/// `trash` and `restore` get their own targets for the same reason as in
+/// `read_permission_cannot_drive_the_lifecycle` above, and here it decides
+/// whether the test binds at all: aimed at the LIVE `ep`, a store that had lost
+/// its `workspace_id` predicate would still answer 404 — `trash` falls through to
+/// a workspace-scoped `get` on the no-row path — so the assertion would pass
+/// against the very defect it is named for. Against a draft in this workspace's
+/// trash-able state, the unscoped write succeeds and returns 200.
 #[tokio::test]
 async fn the_lifecycle_of_another_workspaces_endpoint_is_not_found() {
     let f = skip_without_db!();
     let ep = f.create_endpoint("rev", "rev", "SELECT 1 AS n").await;
     f.publish(ep).await;
+    let trashable = f
+        .create_endpoint("trashable", "trashable", "SELECT 1 AS n")
+        .await;
+    let trashed = f
+        .create_trashed_endpoint("trashed", "trashed", "SELECT 1 AS n")
+        .await;
 
     let (other_ws, other_slug) = insert_workspace(&f.db, f.admin, "lifecycle-other").await;
     let outsider = principal_with_in(&f.db, f.port.clone(), MANAGER, other_ws).await;
-    let base = format!("/api/ws/{other_slug}/data-api/endpoints/{ep}");
 
-    for (method, route, body) in [
-        ("POST", "validate", None),
-        ("POST", "publish", Some(serde_json::json!({}))),
+    for (method, target, route, body) in [
+        ("POST", ep, "validate", None),
+        ("POST", ep, "publish", Some(serde_json::json!({}))),
         (
             "POST",
+            ep,
             "rollback",
             Some(serde_json::json!({ "version": 1 })),
         ),
-        ("POST", "disable", None),
-        ("POST", "enable", None),
-        ("GET", "versions", None),
+        ("POST", ep, "disable", None),
+        ("POST", ep, "enable", None),
+        ("GET", ep, "versions", None),
+        ("POST", trashable, "trash", None),
+        ("POST", trashed, "restore", None),
     ] {
         let (status, b) = f
-            .send(&outsider, method, &format!("{base}/{route}"), body)
+            .send(
+                &outsider,
+                method,
+                &format!("/api/ws/{other_slug}/data-api/endpoints/{target}/{route}"),
+                body,
+            )
             .await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{route}: {b}");
     }
@@ -1423,6 +1495,14 @@ async fn the_lifecycle_of_another_workspaces_endpoint_is_not_found() {
     let (state, _) = f.state_of(ep).await;
     assert_eq!(state, "live");
     assert_eq!(f.versions(ep).await.len(), 1);
+    assert!(
+        f.deleted_at(trashable).await.is_none(),
+        "an outsider's trash must not have written deleted_at"
+    );
+    assert!(
+        f.deleted_at(trashed).await.is_some(),
+        "an outsider's restore must not have cleared deleted_at"
+    );
 }
 
 /// An unpublished endpoint has an EMPTY version list; an endpoint that is not

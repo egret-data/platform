@@ -2,12 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, NavLink, Outlet, useOutletContext, useParams } from "react-router-dom";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
-import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { useDataApiGetEndpoint } from "@/api/generated/data-api/data-api";
 // Save's invalidation (this record + the list its Name column feeds) lives in
 // the wrapper, next to every other Data API mutation — see `src/api/dataApi.ts`.
-import { useUpdateEndpoint } from "@/api/dataApi";
+import { useRestoreEndpoint, useUpdateEndpoint } from "@/api/dataApi";
 import type { DataApiEndpointDto, UpdateEndpointInput } from "@/api/generated/model";
 import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
 
@@ -88,6 +88,17 @@ export interface EndpointDetailContext {
   dirty: boolean;
   saving: boolean;
   save: () => Promise<void>;
+  /**
+   * This endpoint is in the trash (`deleted_at` is set).
+   *
+   * Every state transition the server offers — update, publish, rollback,
+   * enable, disable — answers a trashed endpoint with a 409 naming restore.
+   * Sections read this so they do not present a control whose only possible
+   * outcome is that refusal; the shell additionally wraps the whole `Outlet` in
+   * a disabled `fieldset`, so a control that forgets to check is inert rather
+   * than merely misleading.
+   */
+  trashed: boolean;
   /** Re-fetch the endpoint record — for a section (Versions, Task 7) that just
    *  changed `state`/`live_version_id` server-side (publish/rollback) and needs
    *  the read-only half of this context to catch up. Does not touch `form`. */
@@ -156,6 +167,17 @@ function EndpointDetailInner({ ws, id }: { ws: string; id: string }) {
   const endpoint = envelope?.status === 200 ? envelope.data : undefined;
 
   const updateMutation = useUpdateEndpoint();
+  const restoreMutation = useRestoreEndpoint();
+
+  /**
+   * The one fact this page had no idea about until now.
+   *
+   * The Trash links straight here by name, so this route is reachable for an
+   * endpoint every mutating route will refuse. Read from the record rather than
+   * from where the reader came from: a bookmark, a pasted URL and the Trash all
+   * have to arrive at the same page.
+   */
+  const trashed = !!endpoint?.deleted_at;
 
   const [form, setFormState] = useState<EndpointFormState | null>(null);
   const [baselineForm, setBaselineForm] = useState<EndpointFormState | null>(null);
@@ -171,6 +193,12 @@ function EndpointDetailInner({ ws, id }: { ws: string; id: string }) {
 
   const setForm = useCallback(
     (updater: EndpointFormState | ((f: EndpointFormState) => EndpointFormState)) => {
+      // A trashed endpoint is read-only, and this is the floor under that: the
+      // `fieldset` below and every section's own `trashed` check are what the
+      // author SEES, but neither is what makes the form unable to move. With
+      // the form pinned, `dirty` can never go true either, so the unsaved-
+      // changes warning cannot fire on a page that has nothing to save.
+      if (trashed) return;
       setFormState((prev) => {
         if (!prev) return prev;
         return typeof updater === "function"
@@ -178,7 +206,7 @@ function EndpointDetailInner({ ws, id }: { ws: string; id: string }) {
           : updater;
       });
     },
-    [],
+    [trashed],
   );
 
   const currentJson = useMemo(() => (form ? JSON.stringify(form) : null), [form]);
@@ -187,7 +215,10 @@ function EndpointDetailInner({ ws, id }: { ws: string; id: string }) {
   useUnsavedChangesWarning(dirty);
 
   const save = useCallback(async () => {
-    if (!form || !baselineForm) return;
+    // `trashed` here as well as on the button: Save is also reachable from a
+    // section that renders its own submit, and the server's answer would be a
+    // 409 read out as a red toast.
+    if (!form || !baselineForm || trashed) return;
     try {
       const res = await updateMutation.mutateAsync({
         workspace: ws,
@@ -212,7 +243,34 @@ function EndpointDetailInner({ ws, id }: { ws: string; id: string }) {
     } catch (e) {
       toast.error(String(e));
     }
-  }, [form, baselineForm, updateMutation, ws, id]);
+  }, [form, baselineForm, trashed, updateMutation, ws, id]);
+
+  /**
+   * Come back from the trash. The one action this page offers a trashed
+   * endpoint, and the only reason the page is worth rendering at all in that
+   * state.
+   *
+   * The form is re-seeded from what the server returned rather than left as it
+   * was: restore lands the endpoint in `disabled`, never back in `live`, and
+   * the read-only half of this page (the state badge sections render) has to
+   * agree with that immediately. The wrapper's invalidation refreshes the
+   * record and both lists on its own — see `src/api/dataApi.ts`.
+   */
+  const restore = useCallback(async () => {
+    try {
+      const res = await restoreMutation.mutateAsync({ workspace: ws, id });
+      if (res.status !== 200) {
+        toast.error("Could not restore.");
+        return;
+      }
+      const seeded = toForm(res.data);
+      setFormState(seeded);
+      setBaselineForm(seeded);
+      toast.success("Endpoint restored as disabled");
+    } catch (e) {
+      toast.error(String(e));
+    }
+  }, [restoreMutation, ws, id]);
 
   // The page's one document-outline `h1`, on every branch below — this route has no
   // shell to supply it (unlike the three list pages, it has no room for a *visible*
@@ -266,6 +324,7 @@ function EndpointDetailInner({ ws, id }: { ws: string; id: string }) {
     dirty,
     saving: updateMutation.isPending,
     save,
+    trashed,
     refetch: () => {
       void refetch();
     },
@@ -291,13 +350,44 @@ function EndpointDetailInner({ ws, id }: { ws: string; id: string }) {
           </Link>
           <h2 className="truncate text-lg font-semibold leading-tight">{endpoint.name}</h2>
         </div>
-        <div className="flex items-center gap-2">
-          {dirty && <span className="text-xs text-muted-foreground">Unsaved changes</span>}
-          <Button onClick={save} disabled={!dirty || updateMutation.isPending}>
-            {updateMutation.isPending ? "Saving…" : "Save"}
-          </Button>
-        </div>
+        {/* No Save at all for a trashed endpoint — not a disabled one either.
+            A greyed-out Save still says "this page edits things, just not right
+            now"; the only thing this page can do to a trashed endpoint is
+            restore it, and that control lives in the banner below with the
+            sentence that explains it. */}
+        {!trashed && (
+          <div className="flex items-center gap-2">
+            {dirty && <span className="text-xs text-muted-foreground">Unsaved changes</span>}
+            <Button onClick={save} disabled={!dirty || updateMutation.isPending}>
+              {updateMutation.isPending ? "Saving…" : "Save"}
+            </Button>
+          </div>
+        )}
       </div>
+
+      {/* The page saying plainly what it is. Before this, the Trash linked by
+          name straight into a six-section editor with an enabled Save, no
+          banner and no way back: every edit, publish and rollback made from
+          here came back as `toast.error("Error: endpoint is in the trash;
+          restore it before editing it")`. The row menu in the Trash had already
+          dropped its Open item for exactly that reason — the link beside it had
+          not. */}
+      {trashed && (
+        <Alert className="mb-5 border-destructive/50">
+          <AlertTitle>This endpoint is in the trash</AlertTitle>
+          <AlertDescription className="mt-1 flex flex-wrap items-center justify-between gap-3">
+            <span className="max-w-prose">
+              It is not serving, and it cannot be edited, published, rolled back, enabled or
+              disabled while it is here — every one of those is refused. Everything below is
+              read-only. Restoring brings it back <strong>disabled</strong>, never straight back to
+              serving.
+            </span>
+            <Button size="sm" onClick={() => void restore()} disabled={restoreMutation.isPending}>
+              {restoreMutation.isPending ? "Restoring…" : "Restore"}
+            </Button>
+          </AlertDescription>
+        </Alert>
+      )}
 
       <nav
         className="-mx-1 mb-5 flex gap-1 overflow-x-auto border-b border-border px-1"
@@ -336,7 +426,18 @@ function EndpointDetailInner({ ws, id }: { ws: string; id: string }) {
           own remount-per-id above, kept anyway as a second, independent
           guarantee that a section can never carry its own local state across
           two different endpoints. */}
-      <Outlet key={id} context={ctx} />
+      {/* `fieldset[disabled]` is the floor, not the explanation. Every section
+          also reads `ctx.trashed` and greys its own actions with a reason
+          beside them — but a section added later will not, and the failure mode
+          of forgetting is a control that looks live and answers 409. HTML
+          disables every descendant input, button, select and textarea of a
+          disabled fieldset, so the default for anything new here is inert.
+          `min-w-0` because a `fieldset`'s UA `min-inline-size: min-content` is
+          not part of Tailwind's preflight reset and would otherwise refuse to
+          shrink below its widest child. */}
+      <fieldset disabled={trashed} className="min-w-0">
+        <Outlet key={id} context={ctx} />
+      </fieldset>
     </div>
   );
 }

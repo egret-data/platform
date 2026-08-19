@@ -197,8 +197,19 @@ async fn insert_database(db: &Db, ws: Uuid, owner: Uuid) -> Uuid {
 
 /// What the trash pair gates on: `:manage` to trash and restore, `:read` to list.
 /// Held by ONE principal so a single caller can drive the whole surface — this file
-/// is about the trash behaviour, and `routes_authz.rs` is where the permission
-/// boundary itself is measured.
+/// is about the trash BEHAVIOUR, not about who may drive it.
+///
+/// The permission boundary for `/trash` and `/restore` is measured in
+/// `lifecycle.rs`, beside every other lifecycle route:
+/// `read_permission_cannot_drive_the_lifecycle` for the 403 a `:read`-only
+/// principal gets, and `the_lifecycle_of_another_workspaces_endpoint_is_not_found`
+/// for the 404 a manager in another workspace gets. Both also assert the row was
+/// left alone, because a refusal that still wrote would look identical from the
+/// status line.
+///
+/// It is NOT measured in `routes_authz.rs`, whatever an earlier version of this
+/// comment claimed: that file covers service accounts and clients only and names
+/// no endpoint route at all.
 const MANAGER: &[&str] = &["data_api_endpoint:read", "data_api_endpoint:manage"];
 
 async fn principal_with_in(db: &Db, audit: AuditSink, perms: &[&str], ws: Uuid) -> Caller {
@@ -964,17 +975,17 @@ impl Fixture {
     /// write are the two things that were happening, and they must be told apart
     /// in the output).
     fn assert_refused_naming_restore(what: &str, status: StatusCode, body: &serde_json::Value) {
+        // One status assertion, not two. An `assert_ne!(status, 500)` used to sit
+        // under this and could never fail: 500 != 409, so the equality above has
+        // already returned by the time it is reached. It advertised a
+        // falsifiability it did not supply — the 500 case is real, and it is this
+        // assertion's message that has to name it.
         assert_eq!(
             status,
             StatusCode::CONFLICT,
             "{what}: a trashed endpoint must be refused as a 409 conflict. \
              A 500 means the CHECK constraint answered after the route wrote; \
              a 2xx means nothing refused it at all. Got {status}: {body}"
-        );
-        assert_ne!(
-            status,
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "{what}: a constraint violation is not a refusal: {body}"
         );
         let msg = Fixture::error_text(body);
         assert!(

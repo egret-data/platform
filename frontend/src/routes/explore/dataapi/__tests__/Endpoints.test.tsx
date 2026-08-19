@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -26,6 +26,9 @@ import * as foldersApi from "@/api/generated/folders/folders";
 import * as databasesApi from "@/api/databases";
 import { ApiError } from "@/api/client";
 import type { DataApiEndpointListItemDto } from "@/api/generated/model";
+// The exact string `RelativeTime` puts in its `title` — imported rather than
+// hardcoded so the assertion does not silently become timezone-dependent.
+import { fullTimestamp } from "@/lib/relativeTime";
 import Endpoints from "@/routes/explore/dataapi/Endpoints";
 
 function mockList(over: Partial<{ data: unknown; isError: boolean; isLoading: boolean; error: unknown }> = {}) {
@@ -1541,6 +1544,100 @@ describe("Endpoints — trash", () => {
     expect(screen.getByRole("button", { name: "Trash" })).toBeInTheDocument();
     // And an empty trash is not a first-run workspace.
     expect(screen.queryByText(/no endpoints yet/i)).not.toBeInTheDocument();
+  });
+
+  /**
+   * The Trash's last column, pinned two ways: the HEADER it is under, and the
+   * timestamp the CELL renders.
+   *
+   * Neither half was covered, and the gap was not theoretical — an
+   * implementation that kept rendering `updated_at` under a `Trashed` heading
+   * passed all 237 tests in the frontend suite. That is why the fixture's two
+   * timestamps must differ: `TRASHED_A` was last edited on Aug 10 and trashed on
+   * Aug 18, so a cell reading the wrong field renders a visibly different value
+   * rather than the same one by luck.
+   */
+  it("the Trash's last column is Trashed, and it renders deleted_at rather than updated_at", async () => {
+    mockListByView([DRAFT_ROW], [TRASHED_A]);
+    const user = userEvent.setup();
+    renderEndpoints();
+    await screen.findByText("Draft report");
+    // The normal view first, so the swap below is a swap rather than the only
+    // column this page has ever rendered.
+    expect(screen.getByText("Last edited")).toBeInTheDocument();
+    expect(screen.queryByText("Trashed")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Trash" }));
+    const row = (await screen.findByText("Trashed alpha")).closest("tr");
+    expect(row).not.toBeNull();
+
+    expect(screen.getByText("Trashed")).toBeInTheDocument();
+    expect(screen.queryByText("Last edited")).not.toBeInTheDocument();
+    // `deleted_at` is on screen…
+    expect(
+      within(row as HTMLElement).getByTitle(fullTimestamp("2026-08-18T09:00:00Z")),
+    ).toBeInTheDocument();
+    // …and `updated_at` is NOT. Without this half, a cell rendering both — or
+    // the wrong one under a right-looking header — still passes.
+    expect(
+      within(row as HTMLElement).queryByTitle(fullTimestamp("2026-08-10T00:00:00Z")),
+    ).not.toBeInTheDocument();
+  });
+
+  /**
+   * The Trash is ordered by the column it SHOWS.
+   *
+   * The two rows are built to disagree: alpha was edited more recently but
+   * trashed first, beta was edited long ago but trashed last. Under the old
+   * default (`updated_at`, desc, carried unchanged into the trash) the order was
+   * alpha-then-beta while the visible Trashed column read 09:00 above 10:00 —
+   * a table sorted by a column that is not on screen, and therefore an order the
+   * author cannot argue with. Any fixture where the two agree would pass either
+   * way.
+   */
+  it("sorts the Trash by when rows were trashed, not by when they were last edited", async () => {
+    const EDITED_LAST_TRASHED_FIRST = makeEndpoint({
+      id: "ep-trash-a", name: "Trashed alpha", state: "draft",
+      updated_at: "2026-08-17T00:00:00Z", deleted_at: "2026-08-18T09:00:00Z",
+    } as Partial<DataApiEndpointListItemDto>);
+    const EDITED_FIRST_TRASHED_LAST = makeEndpoint({
+      id: "ep-trash-b", name: "Trashed beta", state: "draft",
+      updated_at: "2026-07-01T00:00:00Z", deleted_at: "2026-08-18T10:00:00Z",
+    } as Partial<DataApiEndpointListItemDto>);
+    // Server order is the WRONG order, so a page that merely passes the payload
+    // through fails rather than coincidentally agreeing.
+    mockListByView([DRAFT_ROW], [EDITED_LAST_TRASHED_FIRST, EDITED_FIRST_TRASHED_LAST]);
+    const user = userEvent.setup();
+    renderEndpoints();
+    await screen.findByText("Draft report");
+
+    await user.click(screen.getByRole("button", { name: "Trash" }));
+    await screen.findByText("Trashed beta");
+
+    const names = () =>
+      screen
+        .getAllByRole("row")
+        .slice(1)
+        .map((r) => within(r).getByRole("link").textContent);
+    // Most recently trashed first — the reverse of `updated_at` desc, which is
+    // what the page used to do here.
+    expect(names()).toEqual(["Trashed beta", "Trashed alpha"]);
+    // And the header says so, rather than the order being an accident of the
+    // payload: `aria-sort` sits on the column the rows are actually ordered by.
+    expect(screen.getByText("Trashed").closest("th")).toHaveAttribute("aria-sort", "descending");
+
+    // The header drives the same key it advertises — clicking it reverses the
+    // order it claims, which a decorative `aria-sort` would not.
+    await user.click(screen.getByText("Trashed"));
+    expect(names()).toEqual(["Trashed alpha", "Trashed beta"]);
+    expect(screen.getByText("Trashed").closest("th")).toHaveAttribute("aria-sort", "ascending");
+
+    // Leaving the trash hands the sort back to the column THAT view displays —
+    // a `deleted_at` sort stranded on the normal list is the same defect
+    // mirrored, and no header there would own it.
+    await user.click(screen.getByRole("button", { name: "Trash" }));
+    await screen.findByText("Draft report");
+    expect(screen.getByText("Last edited").closest("th")).toHaveAttribute("aria-sort", "descending");
   });
 
   it("Restore sends the id of the row whose menu was used, not the first row's", async () => {
