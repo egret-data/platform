@@ -14,7 +14,7 @@ import {
   useRemoveNotebookBookmark,
 } from "@/api/notebooks";
 import { useFolders, useFolderMutations, useSetFolder } from "@/api/folders";
-import { groupByFolder, useCollapsed } from "@/components/explore/folders";
+import { groupByFolder, useCollapsed, UNCATEGORIZED_KEY } from "@/components/explore/folders";
 import { FolderHeaderRow } from "@/components/explore/FolderHeaderRow";
 import { FolderNameDialog } from "@/components/explore/FolderNameDialog";
 import { MoveToFolderItems } from "@/components/explore/MoveToFolderSub";
@@ -300,9 +300,33 @@ export default function Notebooks() {
     return r;
   }, [data, onlyBookmarked, query, sort]);
 
-  const bulk = useBulkSelect(rows);
   const filtering = query.trim() !== "" || onlyBookmarked;
   const groups = useMemo(() => groupByFolder(rows, folders, filtering), [rows, folders, filtering]);
+
+  /**
+   * The rows actually ON SCREEN — not `rows`, which is only what survived
+   * filtering and sorting: a collapsed folder's rows are in `groups` but not in
+   * front of the user.
+   *
+   * This is what `useBulkSelect` must be fed; the full argument for why — and
+   * what breaks when a caller passes more — lives on the hook itself
+   * (`src/hooks/useBulkSelect.ts`), because that is where the next caller will
+   * be reading.
+   */
+  const visibleRows = useMemo(
+    () =>
+      // The trash is a flat table — no folder headers, so nothing is collapsed
+      // and `rows` IS what is on screen.
+      showTrash
+        ? rows
+        : groups.flatMap((g) => (collapse.isCollapsed(g.folder?.id ?? UNCATEGORIZED_KEY) ? [] : g.rows)),
+    [showTrash, rows, groups, collapse],
+  );
+
+  // One list behind both the count and the trash: `bulk.selectedIds` is derived
+  // from exactly what was passed in here, so "Move n to Trash" cannot name one
+  // number next to an action that reaches a different set.
+  const bulk = useBulkSelect(visibleRows);
 
   const hasData = !!data && data.length > 0;
 
@@ -555,7 +579,7 @@ export default function Notebooks() {
                 <tbody>{rows.map(renderRow)}</tbody>
               ) : (
                 groups.map((group) => {
-                  const key = group.folder?.id ?? "__uncat__";
+                  const key = group.folder?.id ?? UNCATEGORIZED_KEY;
                   const isCollapsed = collapse.isCollapsed(key);
                   return (
                     <tbody key={key}>

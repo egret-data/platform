@@ -138,6 +138,10 @@ beforeEach(() => {
   deleteMutateAsync.mockReset();
   foldersMock.mockReset();
   foldersMock.mockReturnValue({ data: [] });
+  // `useCollapsed` persists collapse state in localStorage under
+  // `folders:eng:notebooks`; without this a test that collapses a folder leaks
+  // that collapse into every later test in the file.
+  localStorage.clear();
 
   notebooksMock.mockReturnValue({
     data: [mockNb1, mockNb2],
@@ -496,5 +500,76 @@ describe("Notebooks list", () => {
     await waitFor(() => {
       expect(screen.getByText("NotebookSettingsPage")).toBeInTheDocument();
     });
+  });
+});
+
+/**
+ * Bulk select must only ever reach rows that are ON SCREEN. `useBulkSelect` was
+ * fed the pre-grouping `rows`, so "Select all" swept in the rows of a collapsed
+ * folder and "Move n to Trash" trashed notebooks the user had never seen.
+ *
+ * The fixture puts one notebook in each of TWO folders and collapses only one.
+ * A fixture with everything inside the collapsed folder cannot tell a correct
+ * fix from one that selects nothing at all — both end at an empty selection.
+ */
+describe("Notebooks — bulk select only reaches rows on screen", () => {
+  const TWO_FOLDERS = [{ id: "f-rep", name: "Reporting" }, { id: "f-fin", name: "Finance" }];
+  const hiddenNb = { ...mockNb1, id: "nb-hidden", name: "Hidden notebook", folder_id: "f-rep" };
+  const shownNb = { ...mockNb2, id: "nb-shown", name: "Shown notebook", folder_id: "f-fin" };
+
+  function arrangeTwoFolders() {
+    notebooksMock.mockReturnValue({ data: [hiddenNb, shownNb], isLoading: false, isError: false, error: null });
+    foldersMock.mockReturnValue({ data: TWO_FOLDERS });
+  }
+
+  it("leaves a collapsed folder's rows out of Select all and out of the trash call", async () => {
+    arrangeTwoFolders();
+    const user = userEvent.setup();
+    renderAt();
+    // Both folders start expanded, so both rows are genuinely on screen first.
+    expect(screen.getByText("Hidden notebook")).toBeInTheDocument();
+    expect(screen.getByText("Shown notebook")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Toggle Reporting" }));
+    expect(screen.queryByText("Hidden notebook")).not.toBeInTheDocument();
+    // Finance is still open — the fix has something left to select.
+    expect(screen.getByText("Shown notebook")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Bulk select" }));
+    await user.click(screen.getByLabelText("Select all"));
+
+    expect(screen.getByRole("button", { name: "Move 1 to Trash" })).toBeInTheDocument();
+    expect(screen.queryByLabelText("Select Hidden notebook")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Move 1 to Trash" }));
+
+    // The ids, not merely that it was called: `toHaveBeenCalled()` is satisfied
+    // by trashing exactly the wrong notebook, which is the whole defect.
+    await waitFor(() => expect(trashMutateAsync).toHaveBeenCalledWith("nb-shown"));
+    expect(trashMutateAsync).not.toHaveBeenCalledWith("nb-hidden");
+    expect(trashMutateAsync).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops a row from the selection when its folder collapses after it was picked", async () => {
+    arrangeTwoFolders();
+    const user = userEvent.setup();
+    renderAt();
+
+    await user.click(screen.getByRole("button", { name: "Bulk select" }));
+    // SELECT first, while it is legitimately on screen…
+    await user.click(screen.getByLabelText("Select Hidden notebook"));
+    await user.click(screen.getByLabelText("Select Shown notebook"));
+    expect(screen.getByRole("button", { name: "Move 2 to Trash" })).toBeInTheDocument();
+
+    // …then HIDE it. `toggleAll` is not involved: the id is already in
+    // `selected`, and only `selectedIds`' re-filter can take it back out.
+    await user.click(screen.getByRole("button", { name: "Toggle Reporting" }));
+    expect(screen.getByRole("button", { name: "Move 1 to Trash" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Move 1 to Trash" }));
+
+    await waitFor(() => expect(trashMutateAsync).toHaveBeenCalledWith("nb-shown"));
+    expect(trashMutateAsync).not.toHaveBeenCalledWith("nb-hidden");
+    expect(trashMutateAsync).toHaveBeenCalledTimes(1);
   });
 });
