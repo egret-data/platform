@@ -113,7 +113,7 @@ beforeEach(() => {
 });
 
 describe("Config", () => {
-  it("Config holds the endpoint's identity and its three config tables", async () => {
+  it("Config holds the endpoint's identity and its four config groups", async () => {
     const endpoint = makeEndpoint();
     vi.mocked(api.useDataApiGetEndpoint).mockReturnValue({
       data: { status: 200, data: endpoint },
@@ -173,6 +173,53 @@ describe("Config", () => {
     } as never);
     renderConfig(endpoint);
     expect(await screen.findByRole("button", { name: /validate saved draft/i })).toBeInTheDocument();
+  });
+
+  // Phase 5 §5: the four groups used to be four `ConfigSection` cards, each
+  // framing a table of one or two rows — a column of mostly-empty boxes. They
+  // are now group rows of ONE table.
+  //
+  // Every assertion here has to die on a wrong implementation, which is why
+  // this test does not stop at counting tables: the group rows are looked up
+  // *inside* that table, and the four identity fields are located by row index
+  // between the `Endpoint` group row and the `Cache` one. A `ConfigTableGroup`
+  // that rendered nothing, a group row rendered outside the table, or the
+  // identity form left sitting above the table all fail — and none of those
+  // would disturb a bare table count.
+  it("renders its groups as rows of one table, not as separate cards", async () => {
+    const endpoint = makeEndpoint();
+    vi.mocked(api.useDataApiGetEndpoint).mockReturnValue({
+      data: { status: 200, data: endpoint },
+      isLoading: false,
+      isError: false,
+      refetch: vi.fn(),
+    } as never);
+    renderConfig(endpoint);
+    await screen.findByLabelText("Name");
+
+    // Two tables would mean the cards were renamed rather than removed.
+    expect(screen.getAllByRole("table")).toHaveLength(1);
+    const table = screen.getByRole("table");
+    const rows = within(table).getAllByRole("row");
+    const rowIndexOf = (el: HTMLElement) => rows.indexOf(el.closest("tr") as HTMLElement);
+    const groupAt = (name: string) => rowIndexOf(within(table).getByRole("rowheader", { name }));
+
+    const endpointAt = groupAt("Endpoint");
+    const cacheAt = groupAt("Cache");
+    const limitsAt = groupAt("Limits");
+    const rateLimitAt = groupAt("Rate limit");
+    expect(endpointAt).toBeLessThan(cacheAt);
+    expect(cacheAt).toBeLessThan(limitsAt);
+    expect(limitsAt).toBeLessThan(rateLimitAt);
+
+    // The identity fields are rows of that same table, under the `Endpoint`
+    // group — not a form above it. This is the half of the change a table
+    // count cannot see.
+    for (const field of ["Name", "Description", "Method", "Path"]) {
+      const at = rowIndexOf(within(table).getByLabelText(field));
+      expect(at).toBeGreaterThan(endpointAt);
+      expect(at).toBeLessThan(cacheAt);
+    }
   });
 });
 
