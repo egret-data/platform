@@ -325,12 +325,14 @@ function EndpointDetailInner({ ws, id }: { ws: string; id: string }) {
           what left the right third of the page empty while Config's Details
           column wrapped to three lines. A single page-level cap turned out to
           be the wrong instrument: the six sections do not want the same width.
-          Config and Response hold `table-fixed` config tables that should use
-          the page; Access, Try it and Versions are prose and short-column
-          lists that read worse stretched to a wide monitor, so each of those
-          three carries its own cap on its own root element — visible next to
-          the layout it constrains, rather than imposed on five siblings that
-          did not ask for it. `key={id}` is redundant with `EndpointDetail`'s
+          Config and Query should use the page — Config holds the two widest
+          controls of any tab, Query a SQL editor and a result grid. Access,
+          Try it, Versions and Response read worse stretched to a wide monitor
+          (prose, short-column lists, and in Response's case a three-column
+          table whose two Selects ended up ~1260px right of their labels), so
+          each of those four carries its own cap on its own root element —
+          visible next to the layout it constrains, rather than imposed on
+          siblings that did not ask for it. `key={id}` is redundant with `EndpointDetail`'s
           own remount-per-id above, kept anyway as a second, independent
           guarantee that a section can never carry its own local state across
           two different endpoints. */}

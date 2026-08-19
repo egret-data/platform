@@ -94,6 +94,12 @@ describe("ConfigTableGroup", () => {
 Run: `cd frontend && npx vitest run src/components/config/__tests__/ConfigTable.test.tsx`
 Expected: FAIL — `ConfigTableGroup` is not exported.
 
+> Amended by the final fix wave: the snippet below originally also set
+> `scope="colgroup"` on the `<td>`, and the doc comment credited it jointly with the
+> role. `scope` is a `<th>`-only attribute and is inert on a `<td>` — dropping `role`
+> while keeping `scope` still kills four tests. It was removed; do not re-add it from
+> an older copy of this plan.
+
 - [ ] **Step 3: Write it**
 
 ```tsx
@@ -107,15 +113,14 @@ Expected: FAIL — `ConfigTableGroup` is not exported.
  * would read as a setting with no value, which is the confusion the cards were
  * replaced to remove.
  *
- * `scope="colgroup"` and the `rowheader` role are what make it a heading rather
- * than a stray cell for anything not reading it visually.
+ * `role="rowheader"` is what makes it a heading rather than a stray cell for
+ * anything not reading it visually.
  */
 export function ConfigTableGroup({ label }: { label: string }) {
   return (
     <TableRow className="hover:bg-transparent">
       <TableCell
         colSpan={3}
-        scope="colgroup"
         role="rowheader"
         className="pt-6 text-xs font-semibold uppercase tracking-wide text-muted-foreground"
       >

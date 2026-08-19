@@ -91,7 +91,18 @@ export default function ResponseSection() {
   const [downloadOpen, setDownloadOpen] = useState(false);
 
   return (
-    <div className="space-y-6">
+    // Capped like `Access`, `Try it` and `Versions`, and for the same reason:
+    // removing the route cap moved width into the sections, and this section
+    // was measured in neither the pass that built it (there was no cap to
+    // remove yet) nor the pass that measured Config and the tabs it rebuilt.
+    // Uncapped at a ~1470px content box, `table-fixed` gives Setting 288 /
+    // Value 208 / Details ~975 while `max-w-prose` stops the sentence near
+    // 585px — ~390px of empty column, with the two Selects sitting ~1260px
+    // right of the labels they answer to. `max-w-5xl` puts them back at
+    // ~816px, and it is the same cap the three sibling sections already use.
+    // It also reins in the two Cards below, which were stretching the full
+    // viewport (the frozen-columns TABLE got `max-w-xl`; its Card did not).
+    <div className="max-w-5xl space-y-6">
       <div>
         <h2 className="text-lg font-semibold">Response</h2>
         <p className="text-sm text-muted-foreground">

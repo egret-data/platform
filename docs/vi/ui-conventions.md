@@ -206,9 +206,10 @@ Tiền lệ đã đo, cả hai đều có thật:
   tiết, không id.
 
 Cách dùng lại chạy được với chart và alert vì các đối tượng đó không có sub-resource phụ thuộc
-id. Nó sẽ không chạy được với endpoint: sáu trong bảy section của route chi tiết đọc id
-(Preview `POST` tới `…/endpoints/{id}/preview`; Response, Access, Try it, Versions và Config
-đều nạp bản ghi đã lưu), nên dùng lại shell đó sẽ cho ra một trang mà Preview không chạy được
+id. Nó sẽ không chạy được với endpoint: `App.tsx` đăng ký **sáu** section và cả sáu đều đọc id
+(Preview của `Query` `POST` tới `…/endpoints/{id}/preview`; Response, Access, Try it, Versions và
+Config đều nạp bản ghi đã lưu — Preview là một phần của `Query`, không phải section thứ bảy), nên
+dùng lại shell đó sẽ cho ra một trang mà Preview không chạy được
 và các tab bên phải vô nghĩa cho tới lần save đầu tiên. Vì vậy `EndpointCreate` là component
 riêng.
 
@@ -234,10 +235,16 @@ việc này.
 
 ### 3.6 Khi thành công: invalidate, điều hướng, không toast
 
-Cả ba luồng tạo đều làm vậy, và `EngineCreate` của control-plane là tiền lệ chúng dẫn ra. Việc
-bàn giao **chính là** lời xác nhận — tác giả đáp xuống hoặc trình soạn thảo của đối tượng mới
-với cái tên họ vừa gõ ở header, hoặc danh sách đang chứa dòng họ vừa tạo — và một toast đè lên
-đó chỉ báo lại thứ đã hiện trên màn hình.
+`EndpointCreate` và `ServiceAccountCreate` làm cả ba, và `EngineCreate` của control-plane là
+tiền lệ chúng dẫn ra. Việc bàn giao **chính là** lời xác nhận — tác giả đáp xuống hoặc trình
+soạn thảo của đối tượng mới với cái tên họ vừa gõ ở header, hoặc danh sách đang chứa dòng họ vừa
+tạo — và một toast đè lên đó chỉ báo lại thứ đã hiện trên màn hình.
+
+**`ClientCreate` invalidate và cố tình KHÔNG điều hướng**, điều mà bản trước của mục này viết
+sai khi nói "cả ba luồng tạo đều làm vậy". Nó render trạng thái đã tạo ngay tại chỗ, vì response
+mang client secret và secret đó chỉ hiện đúng một lần (§3.1) — một developer làm theo câu cũ ở
+đây sẽ điều hướng đi và phá mất secret. Vậy nửa "invalidate, không toast" là phổ quát; nửa "điều
+hướng" chỉ áp dụng khi response không giữ thứ gì tác giả còn cần đọc.
 
 Dialog cần toast vì nó đóng lại trên một danh sách trông như không đổi. Trang thì không. (Việc
 invalidate chạy trước điều hướng, nên dòng mới đã có sẵn khi danh sách render.)
@@ -268,21 +275,25 @@ chỉnh sửa duy nhất với một nút Save.
 
 `ConfigTableGroup({ label })` render một dòng tiêu đề chiếm trọn chiều ngang bên trong bảng.
 
-**Lỗi đã xảy ra.** Các section chi tiết của Data API từng xếp mỗi nhóm một card `ConfigSection`,
-mỗi card đóng khung một bảng chỉ có một hoặc hai dòng. Đọc dọc trang, đó là một cột toàn hộp
-gần rỗng. `src/routes/explore/dataapi/detail/Config.tsx` nay là **một** bảng với bốn dòng
+**Lỗi đã xảy ra.** Các section chi tiết của Data API từng xếp mỗi nhóm một card `ConfigSection`
+— `Endpoint` đóng khung một form bốn field viết tay, `Cache` ba dòng bảng, `Limits` hai,
+`Rate limit` ba. Đọc dọc trang, đó là một cột toàn hộp gần rỗng.
+`src/routes/explore/dataapi/detail/Config.tsx` nay là **một** bảng với bốn dòng
 `ConfigTableGroup` (`Endpoint`, `Cache`, `Limits`, `Rate limit`), và các trường định danh
-(name, description, method, path) — trước đây là một form riêng phía trên các card — nay là
-những dòng bình thường, nên mọi setting trên tab đọc giống nhau và cột Details có thể giải
-thích chúng.
+(name, description, method, path) nay là những dòng bình thường, nên mọi setting trên tab đọc
+giống nhau và cột Details có thể giải thích chúng. Các trường đó nằm *bên trong* card đầu tiên,
+không phải một form riêng phía trên các card như bản trước của mục này viết.
 
-Hai chi tiết của `ConfigTableGroup` là chịu lực:
+Chi tiết chịu lực của `ConfigTableGroup`:
 
 - Nó `colSpan={3}`. Một dòng nhóm chỉ chiếm cột Setting sẽ đọc thành một setting không có giá
   trị — đúng sự nhầm lẫn mà việc bỏ card sinh ra để loại trừ.
-- `scope="colgroup"` **và** `role="rowheader"`. `role` tường minh không thừa so với `scope`, và
-  đó chính là loại thuộc tính mà một đợt dọn dẹp sau này sẽ xoá đi. Đã đo: bỏ `role` mà giữ
-  `scope` làm chết một test một mình nó.
+- `role="rowheader"`, và chỉ nó. Ô này từng mang thêm `scope="colgroup"`, và đợt sửa cuối đã bỏ:
+  `scope` là thuộc tính chỉ dành cho `<th>`, trên một `<td>` nó vô tác dụng. Chính mutation của
+  branch này đã nói vậy mà bị đọc thành bằng chứng cho cả cặp — bỏ `role` mà **giữ** `scope` làm
+  chết bốn test, nên `scope` không gánh phần ý nghĩa nào. Nó vẫn là `<td role="rowheader">` chứ
+  không thành `<th scope="colgroup">`, vì `<th>` mang theo implicit role của riêng nó để tranh
+  chấp.
 
 Một cột, có chủ đích. Lưới hai cột kéo các nhóm ngắn cao bằng nhóm dài bên cạnh, còn CSS
 `columns` xung đột với flex container mà trang này nằm trong và cắt cụt form ở nếp gấp. Cả hai
@@ -316,13 +327,14 @@ nào, và có một test nói đúng như vậy.
 
 **Lỗi đã xảy ra.** Wrapper đó từng mang `max-w-3xl`, thứ đã để trống một phần ba bên phải trang
 trong khi cột Details của Config xuống ba dòng. Một cap cấp trang duy nhất là dụng cụ sai: sáu
-section không muốn cùng một chiều rộng. Config và Response chứa bảng cấu hình `table-fixed` nên
-dùng hết trang; Access, Try it và Versions là văn xuôi và danh sách cột ngắn, đọc tệ hơn khi
-kéo dãn trên màn hình rộng.
+section không muốn cùng một chiều rộng. Config và Query nên dùng hết trang — Config chứa hai
+control rộng nhất trong mọi tab, Query chứa editor SQL và lưới kết quả; Access, Try it, Versions
+và Response là văn xuôi, danh sách cột ngắn và control ngắn, đọc tệ hơn khi kéo dãn trên màn
+hình rộng.
 
 **Vậy nên section tự sở hữu cap của mình**, trên chính element gốc của nó, nằm ngay cạnh layout
-nó ràng buộc: `AccessSection.tsx` và `TryIt.tsx` dùng `max-w-5xl`, `Versions.tsx` `max-w-5xl`,
-bảng frozen-column của `ResponseSection.tsx` dùng `max-w-xl`. Query không cần cap nào và được
+nó ràng buộc: `AccessSection.tsx`, `TryIt.tsx`, `Versions.tsx` và `ResponseSection.tsx` đều dùng
+`max-w-5xl`, và bảng frozen-column của `ResponseSection.tsx` thêm `max-w-xl`. Query không cần cap nào và được
 lợi nhiều nhất — editor SQL từ 768px lên 1424px (đo trong đợt sửa chiều rộng, không phải
 bởi tài liệu này; các con số ở §5.4 và §5.5 cũng vậy).
 
@@ -357,7 +369,7 @@ Dưới `lg`, Details bị `hidden` nhưng hai cột có kích thước **không
 140px ngay ở `w-52`; một `w-96` phẳng sẽ đẩy con số đó lên 316px. Đặt điều kiện `lg` giữ nguyên
 chế độ hẹp y như cũ.
 
-### 5.4 Một cột chết đã có sẵn dưới `lg`
+### 5.4 Một cột chết dưới `lg`, do CHÍNH phase này tạo ra
 
 Ghi lại để không ai "sửa" chiều rộng mà không biết, và được viết đầy đủ trong comment của
 `Config.tsx`. `ConfigTableGroup` `colSpan={3}`, khiến bảng vẫn rộng ba cột ngay cả nơi Details
@@ -366,11 +378,35 @@ và nó đáp xuống thành khoảng chết **bên phải** Value. Đo ở view
 các cột 288/0/208 với 210px chết; xoá bốn dòng nhóm khỏi chính bảng đang chạy đó cho ra
 410/0/296 và không còn khoảng chết.
 
-Nó có sẵn từ trước (có cả ở 768px), nhưng đợt sửa chiều rộng làm nó to hơn trong một chế độ con,
-và điều đó phụ thuộc vào việc sidebar là một thanh ray người dùng gập được (`w-56` khi mở,
-`w-16` khi gập): ở 1010px với ray gập, 370px chết, trong khi cap cũ cho 272px (đo trong đợt sửa chiều rộng). Cách sửa là để
+**Nó KHÔNG có sẵn từ trước, và ba chỗ trong tài liệu này từng nói là có.** `ConfigTableGroup`
+là mới trong phase này và là nguồn duy nhất của `colSpan={3}` trong cây: đo tại merge base
+(`63a4fb90`), không file nào import `ConfigTable` chứa một `colSpan` nào cả — nên so với `main`
+thì không hề có cột ma, trên bất kỳ trang nào. Điều hẹp hơn mà *đúng*: các dòng nhóm đã đáp
+xuống ở những task trước, nên cột đó đã có mặt khi đợt **sửa chiều rộng** đo, và đợt sửa chiều
+rộng không tạo ra nó. Chính số đo ở đoạn trên là bằng chứng phản lại — xoá bốn dòng nhóm thì
+khoảng chết biến mất.
+
+Đợt sửa chiều rộng có làm nó to hơn trong một chế độ con, và điều đó phụ thuộc vào việc sidebar
+là một thanh ray người dùng gập được (`w-56` khi mở, `w-16` khi gập): ở 1010px với ray gập,
+370px chết, trong khi cap cũ cho 272px (đo trong đợt sửa chiều rộng). Cách sửa là để
 Value thành cột không kích thước dưới `lg`; nó bị hoãn vì **chưa kiểm chứng** rằng một Value
 không kích thước sẽ hút hết cột ma chứ không chia đôi với nó.
+
+`ResponseSection` có đúng cột ma đó, từ một dòng nhóm `Output shape` của nó.
+
+### 5.4a Section rơi vào giữa hai task
+
+`ResponseSection` được dựng trước khi có cap cấp route để mà gỡ, còn đợt sửa chiều rộng thì đo
+`Config` cùng các tab nó dựng lại — Response không thuộc tập nào, nên nó ship ra mà không có cap.
+Đo ở hộp nội dung ~1470px: Setting 288 / Value 208 / Details ~975, với `max-w-prose` chặn câu chữ
+ở khoảng 585px — tức ~390px cột rỗng, và hai Select Shape với Key-naming nằm cách nhãn của chúng
+~1260px về bên phải, chỗ mà cap cấp route cũ đặt chúng ở ~560px. Đó đúng là lời phàn nàn đã cho
+`Versions` cái cap của nó, nên đợt sửa cuối cho Response cùng một gốc `max-w-5xl` (~816px), thứ
+cũng thu lại hai Card `Frozen columns` và `OpenAPI document` — *bảng* frozen có `max-w-xl`, Card
+của nó thì không.
+
+Quy tắc chung: **một task dựng lại bề mặt và một task đo chiều rộng phải thống nhất cùng một
+danh sách bề mặt**, nếu không phần chênh giữa hai danh sách sẽ ship ra.
 
 ### 5.5 Test chiều rộng nói được gì và KHÔNG nói được gì
 
@@ -391,9 +427,18 @@ hình dạng trước đó sai theo hai hướng ngược nhau và cả hai đ�
 Sentinel làm cho mâu thuẫn trở nên bất khả *về mặt cấu trúc*, chứ không phải nhờ chọn đúng
 điểm xuất phát.
 
-Comment của chính test thành thật về giới hạn của nó: assertion tên class là yếu và cố ý yếu —
-nó chỉ tồn tại để cap không thể quay lại trong im lặng. **Chiều rộng có được dùng tốt hay không
-là câu hỏi chỉ trình duyệt trả lời được.** Xem §10.
+Điểm mạnh của sentinel cũng là một lỗ hổng, và đợt sửa cuối đã bịt nó. Vì được thu hẹp về route
+theo thiết kế, chốt chặn không nói gì về việc một section làm gì với chính nó — nên đặt lại
+`max-w-3xl` lên **gốc của chính `Config`**, đúng cái lỗi mà phase này tồn tại để loại bỏ, vẫn qua
+chốt chặn sentinel và qua mọi test Config khác: 230/230 xanh. `Versions` đã có chốt chặn nói nó
+*sở hữu* cap của mình; `Config` — tab mà cả đợt sửa chiều rộng sinh ra vì nó — thì không có cái
+tương ứng. Nay thì có: assertion nghịch đảo, rằng gốc của Config không mang `max-w-*` nào (kể cả
+tiền tố responsive), và nó đã được kiểm bằng mutation đúng bằng chính mutation đó — mutation này
+nay làm chết một test, và chỉ một. Cap mới của `Response` được chốt theo đúng cách của `Versions`.
+
+Comment của chính test thành thật về giới hạn của nó: các assertion tên class là yếu và cố ý yếu
+— chúng chỉ tồn tại để một cap không thể quay lại, hoặc biến mất, trong im lặng. **Chiều rộng có
+được dùng tốt hay không là câu hỏi chỉ trình duyệt trả lời được.** Xem §10.
 
 ---
 
@@ -441,10 +486,14 @@ cần suy luận về bất kỳ consumer nào.
 ### 7.2 Đo theo import specifier, không bao giờ theo tên symbol
 
 `grep -rl "ConfigSection"` là tìm kiếm **chuỗi con**. Trên cây này nó trả 19 file;
-`grep -rl 'from "@/components/form/ConfigSection"'` trả 13. Trong sáu file dư có
-`src/routes/control-plane/StarRocksConfigTab.tsx`, file **không hề** import `ConfigSection` —
-nó tự định nghĩa `FeConfigSection` và `CnConfigSection` cục bộ. Phần còn lại là những lần nhắc
-`{@link ConfigSection}` trong doc comment.
+`grep -rl 'from "@/components/form/ConfigSection"'` trả 13. Sáu file dư nên được gọi tên từng
+cái, vì cách nói "những lần nhắc trong doc comment" là tô hồng chúng:
+`src/components/form/ConfigSection.tsx` là định nghĩa của chính component;
+`src/routes/control-plane/StarRocksConfigTab.tsx` **không hề** import `ConfigSection` — nó tự
+định nghĩa `FeConfigSection` và `CnConfigSection` cục bộ; `ConfigTable.tsx` mang `{@link
+ConfigSection}` thật duy nhất; còn `Config.tsx`, `ResponseSection.tsx` và
+`EndpointDetail.test.tsx` nhắc nó trong văn xuôi thuần, khi kể lại thứ chúng đã thay thế. Phần
+nội dung vẫn đúng — grep chuỗi con đếm dư sáu — nhưng đúng một trong sáu là `{@link}`.
 
 Con số này đã sai ba lần, và mỗi kiểu sai đều đáng nhận diện:
 
@@ -544,8 +593,9 @@ code và không thể nhớ lại — nó phải được chạy.
 
 ## 10. Đọc code không quyết định được layout
 
-Bốn lời giải thích nối tiếp nhau về hành vi của một bảng dưới breakpoint `lg` đều sai, cái sau
-sửa cái trước. Chỉ một phép đo trên trình duyệt mới kết thúc được chuyện đó.
+Năm lời giải thích nối tiếp nhau về hành vi của một bảng dưới breakpoint `lg` đều sai, cái sau
+sửa cái trước. Chỉ một phép đo trên trình duyệt mới kết thúc được phần hình học — và một
+`git grep` ở merge base mới kết thúc được phần quy trách nhiệm.
 
 1. Hai implementer suy từ các class rằng cột Value nở ra dưới `lg`.
 2. Người thứ ba mở trình duyệt: **sai** — và tiện thể phát hiện rằng `max-w-md` vừa thêm vào hai
@@ -557,6 +607,11 @@ sửa cái trước. Chỉ một phép đo trên trình duyệt mới kết thú
    chết vốn đã có sẵn.
 5. Reviewer thu hẹp thêm một lần nữa: số đo chỉ đúng khi thanh ray sidebar **đang mở**. Khi gập
    (`w-16`), cap cũ có ràng buộc thật, và đợt sửa nới cột chết từ 272px lên 370px ở đó.
+6. Đợt review toàn branch cuối cùng phát hiện **cái nhãn** mới là chỗ sai, sau khi năm vòng đã
+   chấp nhận nó: "đã có sẵn" chỉ đúng khi so với đợt sửa chiều rộng. `ConfigTableGroup` — và cùng
+   nó là `colSpan={3}` duy nhất trong cây — là mới trong branch này, nên so với `main` thì cột
+   chết là của chính branch này (§5.4). Không ai đo lại cái khẳng định cần một `git grep` chứ
+   không cần trình duyệt, và tài liệu thì đã chứa bằng chứng phản lại chính nó ở câu ngay trước.
 
 Những quy tắc thực tế rút ra:
 
@@ -585,7 +640,10 @@ tại:
 - `EmptyState` — 10 file (2 Data API, 8 control-plane).
 - `ConfigTable` — 13 file production; `ConfigTableGroup` được dùng bởi `Config` và
   `ResponseSection` của Data API.
-- `ConfigSection` — 13 file. Đã giảm từ 14; nếu thêm section chuyển sang dòng nhóm, hãy xem lại
+- `ConfigSection` — 13 file, giảm từ **15** ở merge base. Đây là lần đếm thứ năm của con số này
+  trong chương trình và là lần đầu đo ở cả hai đầu:
+  `grep -rl 'from "@/components/form/ConfigSection"' src` cho 15 ở `63a4fb90` và 13 ở `HEAD`.
+  14 là một trạng thái giữa branch, bị dẫn ra như thể nó là base. Nếu thêm section chuyển sang dòng nhóm, hãy xem lại
   xem nó còn xứng đáng tồn tại không.
 
 Đưa một trang lên các primitive này là một thay đổi *của trang đó*. **Bản thân các primitive chỉ

@@ -54,7 +54,7 @@ describe("ConfigTableGroup", () => {
  * so a control that wants more room cannot get it from a wrapper inside the
  * cell — an inner `w-96` in a 208px cell overflows into its neighbour rather
  * than widening the column. `valueClassName` is therefore the only place the
- * knob can live, and these two tests are the additive contract: thirteen other
+ * knob can live, and these two tests are the additive contract: eleven other
  * consumers pass nothing and must keep the width they have.
  */
 /** The `lg:table-cell` Details cell for a row, as opposed to its `lg:hidden` inline twin. */

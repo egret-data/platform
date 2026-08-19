@@ -20,11 +20,12 @@ type Validation =
  * decides what the query returns — that is `Query`.
  *
  * ONE `Setting | Details | Value` table, its four groups being `ConfigTableGroup`
- * rows. This replaced four `ConfigSection` cards, each framing a table of one or
- * two rows — read down the page, that was a column of mostly-empty boxes. The
- * identity fields (name, description, method, path) were a separate form above
- * those cards and are now ordinary rows, so every setting on the tab reads the
- * same way and the Details column can explain them.
+ * rows. This replaced four `ConfigSection` cards — `Endpoint` framing a
+ * four-field form, `Cache` three rows, `Limits` two, `Rate limit` three. Read
+ * down the page, that was a column of mostly-empty boxes. The identity fields
+ * (name, description, method, path) lived inside the first of those cards as a
+ * hand-written form and are now ordinary rows, so every setting on the tab
+ * reads the same way and the Details column can explain them.
  *
  * One column, deliberately: a two-column grid pads the short groups to the height
  * of the tall one beside them, and CSS `columns` fights the flex container this
@@ -71,23 +72,32 @@ export default function Config() {
           widening at `lg` leaves the narrow regime exactly as it was and takes
           the space only where there is space to take.
 
-          Between those two regimes there is a third, and it has a PRE-EXISTING
-          defect worth knowing about before anyone "fixes" the widths here.
-          `ConfigTableGroup` spans `colSpan={3}`, which keeps the table three
-          columns wide even where Details is `display:none` — so fixed layout
-          hands the leftover to a phantom third column with no first-row cell,
-          and it lands as dead space to the RIGHT of Value. Measured at a 1010px
-          viewport (content box 706px): columns 288/0/208 with 210px dead.
-          Deleting the four group rows from that same live table gives 410/0/296
-          and no dead space.
+          Between those two regimes there is a third, and it has a defect THIS
+          PHASE INTRODUCED, worth knowing about before anyone "fixes" the widths
+          here. `ConfigTableGroup` spans `colSpan={3}`, which keeps the table
+          three columns wide even where Details is `display:none` — so fixed
+          layout hands the leftover to a phantom third column with no first-row
+          cell, and it lands as dead space to the RIGHT of Value. Measured at a
+          1010px viewport (content box 706px): columns 288/0/208 with 210px
+          dead. Deleting the four group rows from that same live table gives
+          410/0/296 and no dead space.
 
-          The phantom column is NOT created by the width pass — it is there at
-          768px too — but this pass does make it bigger in one sub-regime, and
-          that depends on something easy to miss: the sidebar is a user-toggled
-          rail, `w-56` expanded and `w-16` collapsed. Measured at that same
-          1010px viewport with the rail COLLAPSED (content box 866px): 370px
-          dead, where the old 768px cap would have given 272px. Expanded, the
-          content box is 706px and the cap never bound, so nothing changed.
+          Do not read that as "pre-existing". `ConfigTableGroup` is new in this
+          phase and is the only source of `colSpan={3}` in the tree: at the
+          merge base, no file importing `ConfigTable` contained a `colSpan` at
+          all, so relative to `main` there was no phantom column on any page.
+          It was already there when the WIDTH pass measured — the group rows had
+          landed in the earlier tasks — and that is the only sense in which it
+          pre-dates anything. `ResponseSection` has the same phantom column from
+          its one group row.
+
+          The width pass did not create it, then, but it does make it bigger in
+          one sub-regime, and that depends on something easy to miss: the
+          sidebar is a user-toggled rail, `w-56` expanded and `w-16` collapsed.
+          Measured at that same 1010px viewport with the rail COLLAPSED (content
+          box 866px): 370px dead, where the old 768px cap would have given
+          272px. Expanded, the content box is 706px and the cap never bound, so
+          nothing changed.
           Fixing it means making Value the unsized column below `lg`. That does
           not require touching the shared default — `valueClassName` replaces it
           outright, so this section could pass `"lg:w-96"` with no base width

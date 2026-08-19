@@ -914,7 +914,10 @@ describe("EndpointDetail — width", () => {
     // With a sentinel there is no section root to confuse for a wrapper: every
     // element strictly above it belongs to the route. So this asserts the route
     // interposes no cap, and says nothing about what any section does to itself
-    // — which is what lets `Config` and `Versions` both cap their own roots.
+    // — which is what lets `Versions` cap its own root while `Config` does
+    // not. Both of those are pinned by their own guards below; being silent
+    // about sections is this guard's design, not an oversight, but it is also
+    // why those two guards have to exist.
     const endpoint = makeEndpoint();
     vi.mocked(api.useDataApiGetEndpoint).mockReturnValue(
       { data: { status: 200, data: endpoint }, isLoading: false, isError: false, error: null, refetch: vi.fn() } as unknown as
@@ -962,6 +965,46 @@ describe("EndpointDetail — width", () => {
     while (sectionRoot && sectionRoot.parentElement !== routeRoot) sectionRoot = sectionRoot.parentElement;
     expect(sectionRoot).not.toBeNull();
     expect(sectionRoot!.className).toMatch(/(?:^|\s)max-w-/);
+  });
+
+  it("caps Response on its own root, like its three sibling sections", async () => {
+    // Added in the fix wave: Response was built before there was a route cap to
+    // remove and was not in the set the width pass measured, so it was the one
+    // section left uncapped that wanted a cap. Uncapped at a ~1470px content
+    // box its two Selects sat ~1260px right of their labels — the same
+    // complaint that earned `Versions` its cap. Class name only; jsdom cannot
+    // judge the geometry (§5.5), the browser measurement is in the report.
+    const { container } = renderResponse();
+    const heading = await screen.findByRole("heading", { name: "Response", level: 2 });
+    const routeRoot = container.querySelector(".p-4");
+    expect(routeRoot).not.toBeNull();
+    let sectionRoot = heading.parentElement;
+    while (sectionRoot && sectionRoot.parentElement !== routeRoot) sectionRoot = sectionRoot.parentElement;
+    expect(sectionRoot).not.toBeNull();
+    expect(sectionRoot!.className).toMatch(/(?:^|\s)max-w-/);
+  });
+
+  it("leaves Config's own root uncapped, which is where the width was meant to go", async () => {
+    // The route guard above mounts a SENTINEL by design, so it says the ROUTE
+    // interposes no cap and deliberately says nothing about what a section does
+    // to itself. That leaves a hole exactly the shape of the defect this branch
+    // exists to remove: re-applying the cap to Config's OWN root wastes the
+    // same right third of the page, and measured, `<div className="max-w-3xl
+    // space-y-6">` at Config.tsx's root passed the sentinel guard and every
+    // other Config test — 230/230 green. `Versions` has a guard saying it OWNS
+    // its cap; this is the inverse, on the tab the width pass was motivated by.
+    const { container } = renderConfig();
+    const heading = await screen.findByRole("heading", { name: "Config", level: 2 });
+    const routeRoot = container.querySelector(".p-4");
+    expect(routeRoot).not.toBeNull();
+    // Walked, not counted, for the same reason as the Versions guard: an extra
+    // wrapper inside Config must not quietly re-point the assertion.
+    let sectionRoot = heading.parentElement;
+    while (sectionRoot && sectionRoot.parentElement !== routeRoot) sectionRoot = sectionRoot.parentElement;
+    expect(sectionRoot).not.toBeNull();
+    // Responsive prefixes included: `lg:max-w-3xl` would waste the page on
+    // exactly the wide viewports the pass was measured on.
+    expect(sectionRoot!.className).not.toMatch(/(?:^|\s)(?:[a-z0-9]+:)*max-w-/);
   });
 
   it("gives Config's Value column more than the shared default", async () => {

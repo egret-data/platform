@@ -87,15 +87,20 @@ const ConfigTableContext = createContext<{ detailsClassName?: string }>({});
  * would read as a setting with no value, which is the confusion the cards were
  * replaced to remove.
  *
- * `scope="colgroup"` and the `rowheader` role are what make it a heading rather
- * than a stray cell for anything not reading it visually.
+ * `role="rowheader"` is what makes it a heading rather than a stray cell for
+ * anything not reading it visually — and it is the whole of it. This cell also
+ * carried `scope="colgroup"`, which was removed: `scope` is a `<th>`-only
+ * attribute and does nothing on a `<td>`. The branch's own mutation said so
+ * before anyone read the spec — dropping `role` while KEEPING `scope` still
+ * kills four tests, so `scope` was contributing nothing. It stays a `<td>` with
+ * an explicit role rather than becoming a `<th scope="colgroup">`, because a
+ * `<th>` brings its own implicit role to argue with.
  */
 export function ConfigTableGroup({ label }: { label: string }) {
   return (
     <TableRow className="hover:bg-transparent">
       <TableCell
         colSpan={3}
-        scope="colgroup"
         role="rowheader"
         className="pt-6 text-xs font-semibold uppercase tracking-wide text-muted-foreground"
       >

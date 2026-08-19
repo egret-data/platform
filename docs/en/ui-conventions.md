@@ -210,9 +210,10 @@ Measured precedent, both real:
   reused with no id.
 
 The reuse works for charts and alerts because those objects have no id-dependent
-sub-resources. It would not have worked for endpoints: six of the detail route's seven
-sections read the id (Preview `POST`s to `…/endpoints/{id}/preview`; Response, Access, Try it,
-Versions and Config all load the saved row), so reusing that shell would have shipped a page
+sub-resources. It would not have worked for endpoints: `App.tsx` registers **six** sections and
+every one of them reads the id (Query's Preview `POST`s to `…/endpoints/{id}/preview`; Response,
+Access, Try it, Versions and Config all load the saved row — Preview is part of `Query`, not a
+seventh section), so reusing that shell would have shipped a page
 whose Preview cannot run and whose right-hand tabs are meaningless until the first save.
 `EndpointCreate` is therefore its own component.
 
@@ -237,12 +238,19 @@ with a `title` and a `description` — so the create page gets the same one-`h1`
 padding as the list it came from, and §1.1 holds for it too. The shell's `description` slot
 exists for exactly this.
 
-### 3.6 On success: invalidate, navigate, no toast
+### 3.6 On success: invalidate and no toast — navigate unless the response *is* the point
 
-All three creates do this, and `control-plane`'s `EngineCreate` is the precedent they cite.
-The hand-off **is** the confirmation — the author lands either on the new object's editor with
-the name they typed in the header, or on the list holding the row they just created — and a
-toast on top of that reports what is already on screen.
+`EndpointCreate` and `ServiceAccountCreate` do all three, and `control-plane`'s `EngineCreate`
+is the precedent they cite. The hand-off **is** the confirmation — the author lands either on
+the new object's editor with the name they typed in the header, or on the list holding the row
+they just created — and a toast on top of that reports what is already on screen.
+
+**`ClientCreate` invalidates and deliberately does not navigate**, which an earlier draft of
+this section got wrong by saying "all three creates do this". It renders the created state in
+place, because the response carries the client secret and that is shown exactly once (§3.1) —
+a developer who followed the old wording here would navigate away and destroy the secret. So
+the invalidate-and-no-toast half is universal; the navigate half applies only where the
+response holds nothing the author still needs to read.
 
 The dialog needed a toast because it closed over a list that looked unchanged. A page does
 not. (The invalidation runs before the navigation, so the row is already there when the list
@@ -276,20 +284,24 @@ single editing surface with one Save.
 `ConfigTableGroup({ label })` renders a full-width heading row inside the table.
 
 **The defect.** The Data API detail sections used to stack one `ConfigSection` card per
-group, each framing a table of one or two rows. Read down the page, that was a column of
-mostly-empty boxes. `src/routes/explore/dataapi/detail/Config.tsx` is now **one** table with
-four `ConfigTableGroup` rows (`Endpoint`, `Cache`, `Limits`, `Rate limit`), and the identity
-fields (name, description, method, path) — previously a separate form above the cards — are
-ordinary rows, so every setting on the tab reads the same way and the Details column can
-explain them.
+group — `Endpoint` framing a hand-written four-field form, `Cache` three table rows, `Limits`
+two, `Rate limit` three. Read down the page, that was a column of mostly-empty boxes.
+`src/routes/explore/dataapi/detail/Config.tsx` is now **one** table with four
+`ConfigTableGroup` rows (`Endpoint`, `Cache`, `Limits`, `Rate limit`), and the identity fields
+(name, description, method, path) are ordinary rows, so every setting on the tab reads the same
+way and the Details column can explain them. Those fields were *inside* the first card, not a
+separate form above the cards, as an earlier draft of this section said.
 
 Two details of `ConfigTableGroup` are load-bearing:
 
 - It spans `colSpan={3}`. A group row occupying only the Setting column would read as a
   setting with no value, which is the confusion the cards were replaced to remove.
-- `scope="colgroup"` **and** `role="rowheader"`. The explicit `role` is not redundant with the
-  `scope`, which is exactly what a later cleanup would delete. Measured: dropping `role`
-  while keeping `scope` kills a test on its own.
+- `role="rowheader"`, and that alone. The cell also carried `scope="colgroup"`, which the fix
+  wave removed: `scope` is a `<th>`-only attribute and is inert on a `<td>`. The branch's own
+  mutation had already said so and it was misread as proving the pair — dropping `role` while
+  **keeping** `scope` kills four tests, so `scope` was carrying none of the meaning. It stays a
+  `<td role="rowheader">` rather than becoming a `<th scope="colgroup">`, because a `<th>`
+  brings its own implicit role to argue with.
 
 One column, deliberately. A two-column grid pads the short groups to the height of the tall
 one beside them, and CSS `columns` fights the flex container the page sits in and clips the
@@ -323,13 +335,15 @@ not a setting.
 
 **The defect.** That wrapper used to carry `max-w-3xl`, which left the right third of the
 page empty while Config's Details column wrapped to three lines. A single page-level cap is
-the wrong instrument: the six sections do not want the same width. Config and Response hold
-`table-fixed` config tables that should use the page; Access, Try it and Versions are prose
-and short-column lists that read worse stretched across a wide monitor.
+the wrong instrument: the six sections do not want the same width. Config and Query should use
+the page — Config holds the two widest controls of any tab, Query a SQL editor and a result
+grid; Access, Try it, Versions and Response are prose, short-column lists and short controls
+that read worse stretched across a wide monitor.
 
 **So sections own their own caps**, on their own root element, visible next to the layout they
-constrain: `AccessSection.tsx` and `TryIt.tsx` use `max-w-5xl`, `Versions.tsx` `max-w-5xl`,
-`ResponseSection.tsx`'s frozen-column table `max-w-xl`. Query needs none and gained the most —
+constrain: `AccessSection.tsx`, `TryIt.tsx`, `Versions.tsx` and `ResponseSection.tsx` all use
+`max-w-5xl`, and `ResponseSection.tsx`'s frozen-column table adds `max-w-xl`. Query needs none
+and gained the most —
 its SQL editor went from 768px to 1424px (measured during the width pass, not by this
 document; the same applies to the figures in §5.4 and §5.5).
 
@@ -366,7 +380,7 @@ scrolls instead. At a 500px viewport the content box is 356px, so the table alre
 140px at `w-52`; a flat `w-96` would have pushed that to 316px. Gating the widening at `lg`
 leaves the narrow regime exactly as it was.
 
-### 5.4 A known, pre-existing dead column below `lg`
+### 5.4 A dead column below `lg`, introduced by this phase
 
 Recorded so nobody "fixes" the widths without knowing about it, and documented in full in
 `Config.tsx`'s comment. `ConfigTableGroup` spans `colSpan={3}`, which keeps the table three
@@ -375,12 +389,35 @@ phantom third column with no first-row cell, and it lands as dead space to the *
 Value. Measured at a 1010px viewport (content box 706px): columns 288/0/208 with 210px dead;
 deleting the four group rows from that same live table gives 410/0/296 and no dead space.
 
-It is pre-existing (present at 768px too), but the width pass enlarges it in one sub-regime,
-and that depends on the sidebar being a user-toggled rail (`w-56` expanded, `w-16` collapsed):
-at 1010px collapsed, 370px dead where the old cap gave 272px (measured during the width
-pass). The fix is to make Value the
+**It is not pre-existing, and three places in this document used to say it was.**
+`ConfigTableGroup` is new in this phase and is the only source of `colSpan={3}` in the tree:
+measured at the merge base (`63a4fb90`), no file importing `ConfigTable` contained a `colSpan`
+at all — so relative to `main` there was no phantom column, on any page. The narrower thing
+that *is* true: the group rows landed in the earlier tasks, so the column was already there
+when the **width** pass measured, and the width pass did not create it. The measurement one
+paragraph above is its own disproof — delete the four group rows and the dead space goes away.
+
+The width pass does enlarge it in one sub-regime, and that depends on the sidebar being a
+user-toggled rail (`w-56` expanded, `w-16` collapsed): at 1010px collapsed, 370px dead where
+the old cap gave 272px (measured during the width pass). The fix is to make Value the
 unsized column below `lg`; it is deferred because it is **unverified** that an unsized Value
 absorbs the phantom column rather than splitting with it.
+
+`ResponseSection` has the same phantom column, from its one `Output shape` group row.
+
+### 5.4a The section that fell between two tasks
+
+`ResponseSection` was built before there was a route cap to remove, and the width pass measured
+`Config` plus the tabs it rebuilt — Response was in neither set, so it shipped uncapped. Measured
+at a ~1470px content box: Setting 288 / Value 208 / Details ~975, with `max-w-prose` stopping the
+sentence near 585px — ~390px of empty column, and the Shape and Key-naming Selects ~1260px right
+of the labels they answer to, where the old route cap put them at ~560px. That is the same
+complaint that earned `Versions` its cap, so the fix wave gave Response the same `max-w-5xl` root
+(~816px), which also reins in the `Frozen columns` and `OpenAPI document` Cards — the frozen
+*table* had `max-w-xl`, its Card did not.
+
+The general rule: **a task that rebuilds a surface and a task that measures widths must agree on
+the same list of surfaces**, or the difference between the two lists ships.
 
 ### 5.5 What the width test can and cannot say
 
@@ -402,9 +439,18 @@ test:
 The sentinel makes the contradiction impossible by construction rather than by picking the
 right starting element.
 
-The test's own comment is honest about its limits: the class-name assertion is weak and is
-meant to be — it exists only so the cap cannot come back silently. **Whether the width is
-well spent is a question only a browser can answer.** See §10.
+The sentinel's strength is also a hole, and the fix wave closed it. Being scoped to the route
+by design, the guard says nothing about what a section does to itself — so re-applying
+`max-w-3xl` to **`Config`'s own root**, the exact defect this phase exists to remove, passed the
+sentinel guard and every other Config test: 230/230 green. `Versions` had a guard saying it
+*owns* its cap; `Config`, the tab the whole width pass was motivated by, had no counterpart. It
+has one now — the inverse assertion, that Config's own root carries no `max-w-*` (responsive
+prefixes included) — and it was mutation-checked with that exact mutation, which now fails one
+test and only that one. `Response`'s new cap is pinned the same way as `Versions`'s.
+
+The test's own comment is honest about its limits: the class-name assertions are weak and are
+meant to be — they exist only so a cap cannot come back, or vanish, silently. **Whether the
+width is well spent is a question only a browser can answer.** See §10.
 
 ---
 
@@ -452,10 +498,15 @@ reason about any of them.
 ### 7.2 Measure by import specifier, never by symbol name
 
 `grep -rl "ConfigSection"` is a **substring** search. On this tree it returns 19 files;
-`grep -rl 'from "@/components/form/ConfigSection"'` returns 13. Among the six extras is
-`src/routes/control-plane/StarRocksConfigTab.tsx`, which does **not** import `ConfigSection`
-at all — it defines its own local `FeConfigSection` and `CnConfigSection`. The rest are
-`{@link ConfigSection}` mentions in doc comments.
+`grep -rl 'from "@/components/form/ConfigSection"'` returns 13. The six extras are worth
+naming one by one, because "doc-comment mentions" flatters them:
+`src/components/form/ConfigSection.tsx` is the component's own definition;
+`src/routes/control-plane/StarRocksConfigTab.tsx` does **not** import `ConfigSection` at all —
+it defines its own local `FeConfigSection` and `CnConfigSection`; `ConfigTable.tsx` carries the
+one real `{@link ConfigSection}`; and `Config.tsx`, `ResponseSection.tsx` and
+`EndpointDetail.test.tsx` mention it in plain prose, describing what they replaced. The
+substance holds — the substring grep over-counts by six — but exactly one of the six is a
+`{@link}`.
 
 This number was wrong three times, and each way of being wrong is worth recognising:
 
@@ -556,8 +607,9 @@ tree and cannot be recalled — it has to be run.
 
 ## 10. Reading the code does not settle layout
 
-Four successive accounts of one table's behaviour below the `lg` breakpoint were wrong, each
-corrected by the next. Only a browser measurement settled it.
+Five successive accounts of one table's behaviour below the `lg` breakpoint were wrong, each
+corrected by the next. Only a browser measurement settled the geometry — and a `git grep` at the
+merge base settled the attribution.
 
 1. Two implementers inferred from the classes that the Value column grows below `lg`.
 2. A third opened a browser: **wrong** — and incidentally found that a `max-w-md` just added
@@ -570,6 +622,11 @@ corrected by the next. Only a browser measurement settled it.
 5. The reviewer narrowed it once more: the measurement holds only with the sidebar rail
    **expanded**. Collapsed (`w-16`), the old cap did bind, and the pass widens the dead column
    272px → 370px there.
+6. The final whole-branch review found the **label** wrong, after five rounds had accepted it:
+   "pre-existing" was true only relative to the width pass. `ConfigTableGroup` — and with it the
+   only `colSpan={3}` in the tree — is new in this branch, so relative to `main` the dead column
+   is this branch's own (§5.4). Nobody re-measured the claim that needed a `git grep`, not a
+   browser, and the document contained its own disproof one sentence earlier.
 
 Practical rules that fall out of this:
 
@@ -598,8 +655,11 @@ not exist yet:
 - `EmptyState` — 10 files (2 Data API, 8 control-plane).
 - `ConfigTable` — 13 production files; `ConfigTableGroup` is used by Data API's `Config` and
   `ResponseSection`.
-- `ConfigSection` — 13 files. It is down from 14; if further sections convert to group rows,
-  revisit whether it still earns its place.
+- `ConfigSection` — 13 files, down from **15** at the merge base. This is the fifth count of
+  this number in the programme and the first measured at both ends:
+  `grep -rl 'from "@/components/form/ConfigSection"' src` gives 15 at `63a4fb90` and 13 at
+  `HEAD`. 14 was a mid-branch state, quoted as if it were the base. If further sections convert
+  to group rows, revisit whether `ConfigSection` still earns its place.
 
 Bringing a page onto these primitives is a change to that page. **The primitives themselves
 change additively** (§7).
