@@ -14,7 +14,9 @@ import {
   useDataApiDisableEndpoint,
   useDataApiEnableEndpoint,
   useDataApiPublishEndpoint,
+  useDataApiRestoreEndpoint,
   useDataApiRollbackEndpoint,
+  useDataApiTrashEndpoint,
   useDataApiUnbookmarkEndpoint,
   useDataApiUpdateEndpoint,
 } from "./generated/data-api/data-api";
@@ -63,7 +65,21 @@ import {
  * that invalidation correctly against the account it is rendered for.
  */
 
-/** Invalidates the endpoint list for one workspace. */
+/**
+ * Invalidates the endpoint list for one workspace — BOTH views of it.
+ *
+ * The list is now parameterised: `getDataApiListEndpointsQueryKey(ws, params)`
+ * appends the params object, so the normal list is cached under `[url]` and
+ * the trash under `[url, {trashed: true}]` — two entries, not one. Called with
+ * no `params` this builds the bare `[url]`, and `invalidateQueries` matches by
+ * PREFIX, so the one call reaches both.
+ *
+ * That is load-bearing rather than incidental: a restore is performed from
+ * inside the trash and its whole point is that the row reappears in the normal
+ * list. Passing the current view's params here would invalidate only the view
+ * the user is already looking at, and the restored endpoint would stay
+ * invisible in the other one until a full reload.
+ */
 function useInvalidateEndpointList() {
   const qc = useQueryClient();
   return useCallback(
@@ -193,6 +209,35 @@ export function useRollbackEndpoint() {
   const invalidate = useInvalidateVersions();
   return useDataApiRollbackEndpoint({
     mutation: { onSuccess: (_res, { workspace, id }) => invalidate(workspace, id) },
+  });
+}
+
+/**
+ * Trash / restore — the soft-delete pair, as opposed to `useDeleteEndpoint`,
+ * which is still the permanent `DELETE`.
+ *
+ * Both invalidate the endpoint RECORD as well as the list, because both move
+ * server state the detail route renders: `trash` sets `deleted_at`, and
+ * `restore` clears it and returns the endpoint as `disabled` — never back to
+ * `live`, whatever it was before (Task 2, behaviour 3). A wrapper that
+ * refreshed only the list would leave a detail tab open on the same endpoint
+ * insisting it is still live.
+ *
+ * The list half is what makes the row MOVE between the two views, and
+ * `useInvalidateEndpoint` reaches both of them through the prefix key — see
+ * `useInvalidateEndpointList` above for why that is not an accident.
+ */
+export function useTrashEndpoint() {
+  const invalidateEndpoint = useInvalidateEndpoint();
+  return useDataApiTrashEndpoint({
+    mutation: { onSuccess: (_res, { workspace, id }) => invalidateEndpoint(workspace, id) },
+  });
+}
+
+export function useRestoreEndpoint() {
+  const invalidateEndpoint = useInvalidateEndpoint();
+  return useDataApiRestoreEndpoint({
+    mutation: { onSuccess: (_res, { workspace, id }) => invalidateEndpoint(workspace, id) },
   });
 }
 

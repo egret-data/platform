@@ -72,8 +72,21 @@ first, primary action last.**
 - `toolbar`: `BookmarkToggle`, `BulkToggle`, `FolderToolbar` — in that order.
 - `action`: `Download OpenAPI` (secondary, `variant="outline"`), then `+ Endpoint` (primary).
 
-The toolbar is rendered **only when `hasData`**: filters and bulk mode over zero rows are
-controls that cannot do anything.
+Toolbar **filters** are rendered **only when `hasData`**: a filter or a bulk mode over zero
+rows is a control that cannot do anything.
+
+**A view SWITCH is not a filter, and is not gated.** `Endpoints.tsx`'s Trash toggle renders
+whatever `hasData` says, because it does not filter the rows in front of the user — it
+selects a different server query (`GET /endpoints` vs `?trashed=true`), and an empty endpoint
+list says nothing about whether the trash is empty. Gated on `hasData` it would also be the
+only way *out* of an empty trash, removed exactly when it is the only control left. The guard
+is `"keeps the way OUT of an empty trash"` in
+`src/routes/explore/dataapi/__tests__/Endpoints.test.tsx`.
+
+Everything the trash view does not render is cleared on the way IN, not merely hidden
+(`toggleTrash`): the bookmark filter, both facets and bulk mode. A filter left engaged behind
+a control that is no longer on screen makes the trash report "No endpoints match the current
+filters" over rows that are genuinely there, with nothing visible to un-set.
 
 ### 1.3 Toolbar icon buttons come from `ListToolbarButton`
 

@@ -35,6 +35,24 @@ function mockList(over: Partial<{ data: unknown; isError: boolean; isLoading: bo
   );
 }
 
+/**
+ * The list mock, but ANSWERING THE `trashed` PARAM — the normal view and the
+ * trash return different rows.
+ *
+ * `mockList` above returns one payload whatever it is asked for, which cannot
+ * distinguish a Trash toggle that re-queries the API from one that only
+ * repaints the same rows: both render the same table. This is the fixture the
+ * trash tests use for that reason.
+ */
+function mockListByView(normal: DataApiEndpointListItemDto[], trashed: DataApiEndpointListItemDto[]) {
+  vi.mocked(api.useDataApiListEndpoints).mockImplementation(((_ws: string, params?: { trashed?: boolean }) => ({
+    data: { status: 200, data: params?.trashed ? trashed : normal },
+    isLoading: false,
+    isError: false,
+    error: null,
+  })) as unknown as typeof api.useDataApiListEndpoints);
+}
+
 function mockFolders(folders: { id: string; name: string }[] = []) {
   vi.mocked(foldersApi.useFoldersFoldersList).mockReturnValue(
     { data: { status: 200, data: folders }, isLoading: false, isError: false } as unknown as
@@ -90,6 +108,8 @@ const unbookmarkMutateAsync = vi.fn();
 const disableMutateAsync = vi.fn();
 const enableMutateAsync = vi.fn();
 const updateMutateAsync = vi.fn();
+const trashMutateAsync = vi.fn();
+const restoreMutateAsync = vi.fn();
 
 function renderEndpoints() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -147,6 +167,12 @@ beforeEach(() => {
   vi.mocked(api.useDataApiUpdateEndpoint).mockReturnValue(
     { mutateAsync: updateMutateAsync, isPending: false } as unknown as ReturnType<typeof api.useDataApiUpdateEndpoint>,
   );
+  vi.mocked(api.useDataApiTrashEndpoint).mockReturnValue(
+    { mutateAsync: trashMutateAsync, isPending: false } as unknown as ReturnType<typeof api.useDataApiTrashEndpoint>,
+  );
+  vi.mocked(api.useDataApiRestoreEndpoint).mockReturnValue(
+    { mutateAsync: restoreMutateAsync, isPending: false } as unknown as ReturnType<typeof api.useDataApiRestoreEndpoint>,
+  );
   vi.mocked(api.useDataApiListServiceAccounts).mockReturnValue(
     { data: { status: 200, data: [SERVICE_ACCOUNT] }, isLoading: false, isError: false } as unknown as
       ReturnType<typeof api.useDataApiListServiceAccounts>,
@@ -160,8 +186,14 @@ beforeEach(() => {
   // `vi.fn()`s returning `undefined` — give them argument-sensitive fakes so
   // "the right list was invalidated" is distinguishable from
   // "invalidateQueries was called with nothing".
+  // Params-aware, exactly like the real builder (which appends the params
+  // object when there is one). That is what lets the trash tests below assert
+  // the invalidated key is the bare PREFIX — a wrapper that invalidated
+  // `[..., {trashed: true}]` would refresh only the view the user is already
+  // looking at, and the assertion has to be able to see the difference.
   vi.mocked(api.getDataApiListEndpointsQueryKey).mockImplementation(
-    (ws) => ["dataApiListEndpoints", ws] as unknown as ReturnType<typeof api.getDataApiListEndpointsQueryKey>,
+    (ws, params) => (params ? ["dataApiListEndpoints", ws, params] : ["dataApiListEndpoints", ws]) as unknown as
+      ReturnType<typeof api.getDataApiListEndpointsQueryKey>,
   );
   vi.mocked(api.getDataApiGetEndpointQueryKey).mockImplementation(
     (ws, id) => ["dataApiGetEndpoint", ws, id] as unknown as ReturnType<typeof api.getDataApiGetEndpointQueryKey>,
@@ -173,6 +205,8 @@ beforeEach(() => {
   disableMutateAsync.mockResolvedValue({ status: 200, data: {}, headers: new Headers() });
   enableMutateAsync.mockResolvedValue({ status: 200, data: {}, headers: new Headers() });
   updateMutateAsync.mockResolvedValue({ status: 200, data: {}, headers: new Headers() });
+  trashMutateAsync.mockResolvedValue({ status: 200, data: {}, headers: new Headers() });
+  restoreMutateAsync.mockResolvedValue({ status: 200, data: {}, headers: new Headers() });
 
   // `useFolderMutations` (the page's New-folder path) runs a REAL `useMutation`
   // over this automocked fetch fn; without a resolved value it returns
@@ -743,8 +777,11 @@ describe("Endpoints — facets, row menu and bulk mode", () => {
 
     await user.click(screen.getByRole("button", { name: /actions/i }));
     expect(await screen.findByRole("menuitem", { name: /open/i })).toBeInTheDocument();
-    expect(screen.getByRole("menuitem", { name: /disable/i })).toBeInTheDocument();
-    expect(screen.getByRole("menuitem", { name: /delete/i })).toBeInTheDocument();
+    // `/^disable$/`, not `/disable/`: this row is `live`, so its menu also
+    // carries "Move to Trash / Disable it first", whose accessible name a
+    // loose match now finds too.
+    expect(screen.getByRole("menuitem", { name: /^disable$/i })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: /^delete$/i })).toBeInTheDocument();
   });
 
   it("offers a bulk action only once rows are selected", async () => {
@@ -1424,5 +1461,300 @@ describe("Endpoints — folders", () => {
 
     await waitFor(() => expect(toast.error).toHaveBeenCalled());
     expect(toast.success).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The trash (P6, task 4).
+ *
+ * Two things make these tests able to fail, and both were deliberate:
+ *
+ *  - the fixture answers the `trashed` PARAM (`mockListByView`), so a toggle
+ *    that repaints the same rows instead of re-querying is visible; and
+ *  - every fixture that exercises the live-state guard carries a `live` row AND
+ *    a non-`live` one. With only a `live` row, "Move to Trash is disabled" is
+ *    equally satisfied by an implementation that disables it for everything —
+ *    the two are literally the same rendering.
+ *
+ * Payloads, never call counts: `expect(mock).toHaveBeenCalled()` is true when
+ * the wrong row's id was sent, which on a Restore is the difference between
+ * bringing back the endpoint the author clicked and bringing back another one.
+ */
+describe("Endpoints — trash", () => {
+  const LIVE_ROW = makeEndpoint({ id: "ep-live", name: "Live report", state: "live", live_version_id: "v-1" });
+  const DRAFT_ROW = makeEndpoint({ id: "ep-draft", name: "Draft report", state: "draft" });
+  const TRASHED_A = makeEndpoint({
+    id: "ep-trash-a", name: "Trashed alpha", state: "disabled", live_version_id: "v-9",
+    deleted_at: "2026-08-18T09:00:00Z",
+  } as Partial<DataApiEndpointListItemDto>);
+  const TRASHED_B = makeEndpoint({
+    id: "ep-trash-b", name: "Trashed beta", state: "draft",
+    deleted_at: "2026-08-18T10:00:00Z",
+  } as Partial<DataApiEndpointListItemDto>);
+
+  it("asks the API for the trashed LIST, rather than filtering the live one", async () => {
+    mockListByView([DRAFT_ROW], [TRASHED_A]);
+    const user = userEvent.setup();
+    renderEndpoints();
+    await screen.findByText("Draft report");
+
+    // The default view is an explicit `trashed: false`, not an absent param:
+    // the two views have to be separate cache entries or the toggle would
+    // serve one from the other.
+    expect(api.useDataApiListEndpoints).toHaveBeenCalledWith("eng", { trashed: false });
+    expect(api.useDataApiListEndpoints).not.toHaveBeenCalledWith("eng", { trashed: true });
+
+    await user.click(screen.getByRole("button", { name: "Trash" }));
+
+    expect(api.useDataApiListEndpoints).toHaveBeenCalledWith("eng", { trashed: true });
+    // …and the rows really are the other list's, not the same ones relabelled.
+    expect(await screen.findByText("Trashed alpha")).toBeInTheDocument();
+    expect(screen.queryByText("Draft report")).not.toBeInTheDocument();
+  });
+
+  it("renames the page's h1 to Trash, and the toggle reports itself pressed", async () => {
+    mockListByView([DRAFT_ROW], [TRASHED_A]);
+    const user = userEvent.setup();
+    renderEndpoints();
+    await screen.findByText("Draft report");
+    expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("Endpoints");
+
+    await user.click(screen.getByRole("button", { name: "Trash" }));
+
+    expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("Trash");
+    // `aria-pressed` is the whole reason this toggle uses `ListToolbarButton`
+    // rather than a fifth hand-written Button+Tooltip pair.
+    expect(screen.getByRole("button", { name: "Trash" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("drops the star, the bulk toggle, the folder control and + Endpoint in the trash", async () => {
+    mockListByView([DRAFT_ROW], [TRASHED_A]);
+    const user = userEvent.setup();
+    renderEndpoints();
+    // All four are present in the normal view — otherwise their absence in the
+    // trash would prove nothing about the trash.
+    expect(await screen.findByRole("button", { name: "Bookmark Draft report" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Bulk select" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "New folder" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "+ Endpoint" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Trash" }));
+    await screen.findByText("Trashed alpha");
+
+    expect(screen.queryByRole("button", { name: /^Bookmark / })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Bulk select" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "New folder" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "+ Endpoint" })).not.toBeInTheDocument();
+    // The Bookmarks FILTER goes with them; so do the two facets.
+    expect(screen.queryByRole("button", { name: "Bookmarks" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "State" })).not.toBeInTheDocument();
+  });
+
+  it("leaves the checkbox column behind even if bulk mode was on when the trash was opened", async () => {
+    mockListByView([DRAFT_ROW], [TRASHED_A]);
+    const user = userEvent.setup();
+    renderEndpoints();
+    await screen.findByText("Draft report");
+
+    await user.click(screen.getByRole("button", { name: "Bulk select" }));
+    expect(screen.getByRole("checkbox", { name: "Select all" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Trash" }));
+    await screen.findByText("Trashed alpha");
+    // A `bulkMode` left true here would strand a checkbox column whose only
+    // OFF switch is a toggle the trash does not render.
+    expect(screen.queryByRole("checkbox", { name: "Select all" })).not.toBeInTheDocument();
+  });
+
+  it("keeps the way OUT of an empty trash", async () => {
+    mockListByView([DRAFT_ROW], []);
+    const user = userEvent.setup();
+    renderEndpoints();
+    await screen.findByText("Draft report");
+
+    await user.click(screen.getByRole("button", { name: "Trash" }));
+
+    expect(await screen.findByText("Trash is empty.")).toBeInTheDocument();
+    // The toolbar is gated on `hasData` for filters — the Trash toggle is not,
+    // or it would vanish exactly when it is the only control left.
+    expect(screen.getByRole("button", { name: "Trash" })).toBeInTheDocument();
+    // And an empty trash is not a first-run workspace.
+    expect(screen.queryByText(/no endpoints yet/i)).not.toBeInTheDocument();
+  });
+
+  it("Restore sends the id of the row whose menu was used, not the first row's", async () => {
+    mockListByView([DRAFT_ROW], [TRASHED_A, TRASHED_B]);
+    const user = userEvent.setup();
+    renderEndpoints();
+    await user.click(screen.getByRole("button", { name: "Trash" }));
+    await screen.findByText("Trashed beta");
+
+    await user.click(screen.getByRole("button", { name: "Actions for Trashed beta" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Restore" }));
+
+    // The PAYLOAD. Two trashed rows exist precisely so a hard-coded or
+    // first-row id is a failure rather than a coincidence.
+    await waitFor(() => {
+      expect(restoreMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "ep-trash-b" });
+    });
+    expect(restoreMutateAsync).not.toHaveBeenCalledWith({ workspace: "eng", id: "ep-trash-a" });
+    // Restore returns the endpoint as `disabled`, never as whatever it was
+    // before; the toast is where the author is told so.
+    await waitFor(() => {
+      expect(vi.mocked(toast.success)).toHaveBeenCalledWith("Endpoint restored as disabled");
+    });
+  });
+
+  it("offers Restore and Delete permanently in the trash, and none of the live actions", async () => {
+    mockListByView([DRAFT_ROW], [TRASHED_A]);
+    const user = userEvent.setup();
+    renderEndpoints();
+    await user.click(screen.getByRole("button", { name: "Trash" }));
+    await screen.findByText("Trashed alpha");
+
+    await user.click(screen.getByRole("button", { name: "Actions for Trashed alpha" }));
+    expect(await screen.findByRole("menuitem", { name: "Restore" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "Delete permanently" })).toBeInTheDocument();
+    // `TRASHED_A` is `disabled` WITH a `live_version_id`, so in the normal view
+    // its menu would offer a clickable Enable — task 3 made that a 409 for a
+    // trashed endpoint, so it must not be offered here.
+    expect(screen.queryByRole("menuitem", { name: /^enable$/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: /move to trash/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: /^open$/i })).not.toBeInTheDocument();
+  });
+
+  it("disables Move to Trash for a live row and says why, while the draft beside it can be trashed", async () => {
+    // ONE fixture, BOTH states. With only the live row, an implementation that
+    // disables Move to Trash unconditionally renders identically.
+    mockListByView([LIVE_ROW, DRAFT_ROW], []);
+    const user = userEvent.setup();
+    renderEndpoints();
+    await screen.findByText("Live report");
+
+    await user.click(screen.getByRole("button", { name: "Actions for Live report" }));
+    const blocked = await screen.findByRole("menuitem", { name: /move to trash/i });
+    expect(blocked).toHaveAttribute("aria-disabled", "true");
+    // Visible, not a `title` — the rule is only taught if it is on screen.
+    expect(screen.getByText("Disable it first")).toBeInTheDocument();
+    // Disabled, so nothing is sent even in jsdom, where the CSS that blocks
+    // the click does not apply.
+    await user.click(blocked);
+    expect(trashMutateAsync).not.toHaveBeenCalled();
+
+    await user.keyboard("{Escape}");
+    await user.click(screen.getByRole("button", { name: "Actions for Draft report" }));
+    const allowed = await screen.findByRole("menuitem", { name: /move to trash/i });
+    expect(allowed).not.toHaveAttribute("aria-disabled", "true");
+    expect(screen.queryByText("Disable it first")).not.toBeInTheDocument();
+
+    await user.click(allowed);
+    await waitFor(() => {
+      expect(trashMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "ep-draft" });
+    });
+    expect(trashMutateAsync).not.toHaveBeenCalledWith({ workspace: "eng", id: "ep-live" });
+  });
+
+  it("disables bulk Move to Trash while a live row is selected, and says how many", async () => {
+    mockListByView([LIVE_ROW, DRAFT_ROW], []);
+    const user = userEvent.setup();
+    renderEndpoints();
+    await screen.findByText("Live report");
+
+    await user.click(screen.getByRole("button", { name: "Bulk select" }));
+    await user.click(screen.getByRole("checkbox", { name: "Select Draft report" }));
+    // Draft only: the action is live, which is what makes the next assertion
+    // about the live row mean something.
+    expect(screen.getByRole("button", { name: /move 1 to trash/i })).toBeEnabled();
+
+    await user.click(screen.getByRole("checkbox", { name: "Select Live report" }));
+    expect(screen.getByRole("button", { name: /move 2 to trash/i })).toBeDisabled();
+    // The COUNT, so the author knows how much of the selection to go and disable.
+    expect(screen.getByText("1 live — disable it first")).toBeInTheDocument();
+
+    // Un-select the live row and the action comes back — a guard that latched
+    // would pass every assertion above.
+    await user.click(screen.getByRole("checkbox", { name: "Select Live report" }));
+    await user.click(screen.getByRole("button", { name: /move 1 to trash/i }));
+    await waitFor(() => {
+      expect(trashMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "ep-draft" });
+    });
+    expect(trashMutateAsync).not.toHaveBeenCalledWith({ workspace: "eng", id: "ep-live" });
+    expect(trashMutateAsync).toHaveBeenCalledTimes(1);
+  });
+
+  it("bulk Move to Trash trashes every selected row and reports the number", async () => {
+    const D2 = makeEndpoint({ id: "ep-draft-2", name: "Second draft", state: "draft" });
+    mockListByView([DRAFT_ROW, D2], []);
+    const user = userEvent.setup();
+    renderEndpoints();
+    await screen.findByText("Second draft");
+
+    await user.click(screen.getByRole("button", { name: "Bulk select" }));
+    await user.click(screen.getByRole("checkbox", { name: "Select all" }));
+    await user.click(screen.getByRole("button", { name: /move 2 to trash/i }));
+
+    await waitFor(() => {
+      expect(trashMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "ep-draft" });
+    });
+    expect(trashMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "ep-draft-2" });
+    await waitFor(() => {
+      expect(vi.mocked(toast.success)).toHaveBeenCalledWith("Moved 2 endpoints to Trash");
+    });
+  });
+
+  /**
+   * Invalidation, driven through the `onSuccess` `src/api/dataApi.ts` attaches
+   * — the same way the `cache invalidation` block above pins the others.
+   *
+   * The key asserted is the bare PREFIX, with no params object. That is the
+   * load-bearing part: react-query matches by prefix, so `["…", ws]` reaches
+   * BOTH `["…", ws]` (the normal list) and `["…", ws, {trashed: true}]` (the
+   * trash), while the parameterised key would reach only one of them. A
+   * restore that refreshed only the trash would leave the restored endpoint
+   * invisible in the list it was restored INTO until a full reload.
+   */
+  const INVALIDATION_RESULT = { status: 200, data: {}, headers: new Headers() } as never;
+  async function fireSuccessOn(hook: { mock: { calls: unknown[][] } }, variables: Record<string, unknown>) {
+    const opts = hook.mock.calls.at(-1)?.[0] as
+      | { mutation?: { onSuccess?: (...a: never[]) => unknown } }
+      | undefined;
+    await opts?.mutation?.onSuccess?.(
+      INVALIDATION_RESULT, variables as never, undefined as never, undefined as never,
+    );
+  }
+
+  it("Trash invalidates BOTH lists, so the row leaves one view and appears in the other", async () => {
+    mockListByView([DRAFT_ROW], []);
+    const { qc } = renderEndpoints();
+    await screen.findByText("Draft report");
+    const spy = vi.spyOn(qc, "invalidateQueries");
+    await fireSuccessOn(vi.mocked(api.useDataApiTrashEndpoint), { workspace: "eng", id: "ep-draft" });
+    expect(spy).toHaveBeenCalledWith(
+      expect.objectContaining({ queryKey: ["dataApiListEndpoints", "eng"] }),
+    );
+    // The endpoint RECORD too: a detail tab open on it must not keep claiming
+    // the endpoint is present and editable.
+    expect(spy).toHaveBeenCalledWith(
+      expect.objectContaining({ queryKey: ["dataApiGetEndpoint", "eng", "ep-draft"] }),
+    );
+  });
+
+  it("Restore invalidates BOTH lists, so the restored row is not stuck in the trash", async () => {
+    mockListByView([], [TRASHED_A]);
+    const user = userEvent.setup();
+    const { qc } = renderEndpoints();
+    // The restore mutation is constructed per rendered ROW, so the row has to
+    // be on screen or `fireSuccessOn` fires nothing and the test passes empty.
+    await user.click(screen.getByRole("button", { name: "Trash" }));
+    await screen.findByText("Trashed alpha");
+
+    const spy = vi.spyOn(qc, "invalidateQueries");
+    await fireSuccessOn(vi.mocked(api.useDataApiRestoreEndpoint), { workspace: "eng", id: "ep-trash-a" });
+    expect(spy).toHaveBeenCalledWith(
+      expect.objectContaining({ queryKey: ["dataApiListEndpoints", "eng"] }),
+    );
+    expect(spy).toHaveBeenCalledWith(
+      expect.objectContaining({ queryKey: ["dataApiGetEndpoint", "eng", "ep-trash-a"] }),
+    );
   });
 });

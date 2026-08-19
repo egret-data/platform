@@ -7,13 +7,20 @@ import { MoveToFolderItems } from "@/components/explore/MoveToFolderSub";
 // the wrapper is what owns the cache invalidation (see `src/api/dataApi.ts`).
 // Wired to the generated hook directly, "Endpoint disabled" toasts over a row
 // whose badge still reads Live for the next 30 seconds.
-import { useDisableEndpoint, useEnableEndpoint, useUpdateEndpoint } from "@/api/dataApi";
+import { useDisableEndpoint, useEnableEndpoint, useRestoreEndpoint, useTrashEndpoint, useUpdateEndpoint } from "@/api/dataApi";
 import type { Folder } from "@/api/folders";
 import type { DataApiEndpointDto } from "@/api/generated/model";
 
 /**
- * Per-row actions for a Data API endpoint: Open, the state-dependent
- * Disable/Enable, the move-to-folder choices, then Delete.
+ * Per-row actions for a Data API endpoint.
+ *
+ * Two menus, chosen by `trashed`. In the TRASH the row can only be brought
+ * back or destroyed — Restore, then Delete permanently — because every other
+ * action here 409s on a trashed endpoint server-side (task 3 made publish,
+ * enable, disable, rollback and PATCH all refuse it, each naming restore as
+ * the way forward), so offering them would be offering guaranteed failures.
+ * Otherwise: Open, the state-dependent Disable/Enable, the move-to-folder
+ * choices, Move to Trash, then the permanent Delete.
  *
  * Same shape as `DatasetActionsMenu`/`ChartActionsMenu`: a `RowActionsMenu`
  * wrapper, the destructive item last behind a `DropdownMenuSeparator` and
@@ -27,9 +34,11 @@ import type { DataApiEndpointDto } from "@/api/generated/model";
  * default bare "Actions" leaves a 30-row list with 30 identically-named
  * controls, which a screen-reader user navigating by button cannot tell apart.
  */
-export function EndpointActionsMenu({ ws, endpoint, folders, onNewFolder, onDelete }: {
+export function EndpointActionsMenu({ ws, endpoint, trashed = false, folders, onNewFolder, onDelete }: {
   ws: string;
   endpoint: DataApiEndpointDto;
+  /** Whether this row is being rendered in the Trash view. */
+  trashed?: boolean;
   /** The workspace's endpoint folders, owned by the page (it already queries
    *  them to group the table) so the menu cannot hold a second, disagreeing copy. */
   folders: Folder[];
@@ -41,6 +50,27 @@ export function EndpointActionsMenu({ ws, endpoint, folders, onNewFolder, onDele
   const disableMutation = useDisableEndpoint();
   const enableMutation = useEnableEndpoint();
   const updateMutation = useUpdateEndpoint();
+  const trashMutation = useTrashEndpoint();
+  const restoreMutation = useRestoreEndpoint();
+
+  /**
+   * A `live` endpoint cannot be trashed: `POST …/trash` refuses it with a 409
+   * reading "endpoint is live and cannot be moved to the trash; disable it
+   * first", and the schema's own CHECK constraint (migration 0126) makes the
+   * combination unrepresentable.
+   *
+   * The item is therefore rendered DISABLED with the reason beside it, rather
+   * than hidden or left live. Hidden would make the capability undiscoverable
+   * for exactly the endpoints whose authors most need to find it — you cannot
+   * learn "disable it first" from a menu that never mentions trashing. Left
+   * live it would spend a round trip for the server to say what this component
+   * already knows. Disabled-with-a-reason is the only one of the three that
+   * teaches the rule.
+   *
+   * None of that weakens the server: the 409 is the enforcement, and it stands
+   * whether or not this menu ever renders.
+   */
+  const liveBlocksTrash = endpoint.state === "live";
 
   /**
    * Move this endpoint into `folderId`, or out of every folder when it is null.
@@ -60,6 +90,31 @@ export function EndpointActionsMenu({ ws, endpoint, folders, onNewFolder, onDele
     } catch (err) {
       toast.error(String(err));
     }
+  }
+
+  if (trashed) {
+    return (
+      <RowActionsMenu label={`Actions for ${endpoint.name}`}>
+        <DropdownMenuItem
+          disabled={restoreMutation.isPending}
+          onClick={() => {
+            if (restoreMutation.isPending) return;
+            // Restore always brings the endpoint back as `disabled`, never as
+            // whatever it was before — say so, because an author who trashed a
+            // once-live endpoint will otherwise assume its URL is serving again.
+            restoreMutation.mutateAsync({ workspace: ws, id: endpoint.id })
+              .then(() => toast.success("Endpoint restored as disabled"))
+              .catch((err) => toast.error(String(err)));
+          }}
+        >
+          Restore
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem className="text-destructive focus:text-destructive" onClick={onDelete}>
+          Delete permanently
+        </DropdownMenuItem>
+      </RowActionsMenu>
+    );
   }
 
   return (
@@ -114,6 +169,24 @@ export function EndpointActionsMenu({ ws, endpoint, folders, onNewFolder, onDele
         onNewFolder={onNewFolder}
       />
       <DropdownMenuSeparator />
+      <DropdownMenuItem
+        disabled={liveBlocksTrash || trashMutation.isPending}
+        onClick={() => {
+          // The guard is repeated inside the handler for the same reason the
+          // Enable item repeats its own: `data-[disabled]:pointer-events-none`
+          // is CSS, which jsdom does not apply, so `disabled` alone stops the
+          // click in a browser and nowhere else.
+          if (liveBlocksTrash || trashMutation.isPending) return;
+          trashMutation.mutateAsync({ workspace: ws, id: endpoint.id })
+            .then(() => toast.success("Moved to Trash"))
+            .catch((err) => toast.error(String(err)));
+        }}
+      >
+        <span className="flex flex-col items-start">
+          <span>Move to Trash</span>
+          {liveBlocksTrash && <span className="text-xs text-muted-foreground">Disable it first</span>}
+        </span>
+      </DropdownMenuItem>
       <DropdownMenuItem className="text-destructive focus:text-destructive" onClick={onDelete}>
         Delete
       </DropdownMenuItem>
