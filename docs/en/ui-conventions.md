@@ -330,7 +330,8 @@ and short-column lists that read worse stretched across a wide monitor.
 **So sections own their own caps**, on their own root element, visible next to the layout they
 constrain: `AccessSection.tsx` and `TryIt.tsx` use `max-w-5xl`, `Versions.tsx` `max-w-5xl`,
 `ResponseSection.tsx`'s frozen-column table `max-w-xl`. Query needs none and gained the most —
-its SQL editor went from 768px to 1424px.
+its SQL editor went from 768px to 1424px (measured during the width pass, not by this
+document; the same applies to the figures in §5.4 and §5.5).
 
 ### 5.2 Removing the cap is not enough, because `ConfigTable` is `table-fixed`
 
@@ -376,7 +377,8 @@ deleting the four group rows from that same live table gives 410/0/296 and no de
 
 It is pre-existing (present at 768px too), but the width pass enlarges it in one sub-regime,
 and that depends on the sidebar being a user-toggled rail (`w-56` expanded, `w-16` collapsed):
-at 1010px collapsed, 370px dead where the old cap gave 272px. The fix is to make Value the
+at 1010px collapsed, 370px dead where the old cap gave 272px (measured during the width
+pass). The fix is to make Value the
 unsized column below `lg`; it is deferred because it is **unverified** that an unsized Value
 absorbs the phantom column rather than splitting with it.
 
@@ -393,7 +395,8 @@ test:
   to an entire page — but a section may legitimately cap its own children.
 - Walking up from a *real* section's content and stopping at "the child of the route
   container" reads the wrapper being hunted **as** the section root whenever it exists.
-  Measured: a restored `max-w-3xl` around the `Outlet` passes 31/31 under that shape. The
+  Measured during the width pass: a restored `max-w-3xl` around the `Outlet` passes 31/31
+  under that shape. The
   guard would have been dead in exactly the case it was written for.
 
 The sentinel makes the contradiction impossible by construction rather than by picking the
@@ -489,9 +492,9 @@ so that no constant can.
 |---|---|
 | **A one-row list.** | A star, a label, or an id hardcoded to *that* row looks identical on one row and is wrong on every other. It cost this project enough rounds that the reason is now written into the code: `Endpoints.tsx`'s `toggleBookmark` doc comment, `__tests__/BookmarkToggle.test.tsx`'s `"gives two rows two different accessible names"`, and `crates/egret-dataapi/tests/bookmarks.rs`. |
 | **An empty folders list.** SQL Lab's saved tab short-circuits with `folders.length === 0 ? <flat list> : groups.map(…)`, so orphaned rows were already visible on a workspace with no folders. The bug only bit once at least one folder existed. | A grouping that drops rows into a bucket the output loop never reads — the defect `groupByFolder` in `src/components/explore/folders.ts` now documents and guards. (That asymmetry — same data, visible or invisible depending on whether an *unrelated* folder exists — is itself evidence it was never intended.) |
-| **One user.** No test ever had a second user with a row to destroy, so **both** predicates on `remove_bookmark`'s `DELETE` were free. | A `DELETE` missing `user_id = $1`. Closed by one fixture where A and B both star the same endpoint and A deletes; the mutation now fails on *"B's star must survive A's DELETE"* alone. |
+| **One user.** No test ever had a second user with a row to destroy, so **both** predicates on `remove_bookmark`'s `DELETE` were free. | A `DELETE` missing `user_id = $1`. Closed by one fixture where A and B both star the same endpoint and A deletes; the mutation now fails on *"B's star on the same endpoint must survive A's DELETE"* alone (`crates/egret-dataapi/tests/bookmarks.rs:463`). |
 | **One database in a picker.** | `database_id = databases[0].id`. Closed by a two-database fixture that chooses the second. |
-| **A test value identical to the field's own placeholder.** All five tests typed `"reporting-bot"`, which is the input's `placeholder`. | `name: "reporting-bot"` hardcoded into the request body — it passed all five. Closed by making no two tests type the same name and none type the placeholder. |
+| **A test value identical to the field's own placeholder.** All five tests typed `"reporting-bot"`, which is the input's `placeholder`. | `name: "reporting-bot"` hardcoded into the request body — it passed all five. Closed by making **no test that asserts `name` in the body** type the placeholder, and no two of them type the same value; the reason is written at the top of `__tests__/ServiceAccountCreate.test.tsx`. (Tests that assert nothing about the body still type it, so the rule is about the asserting tests, not about the file.) |
 | **An enum where you assert the non-default value.** Picking POST and asserting POST *still* passed a body hardcoded to POST. | Asserting the non-default does not make a two-value enum falsifiable — **it only moves which constant is unfalsifiable.** Both values must be pinned: one test picks POST and asserts POST, another never touches the picker and asserts GET. Only an implementation that reads the control passes both. |
 | **A test named for a relationship whose assertions never reach the related thing.** `"keeps ordinary rows in their three columns"` survived `ConfigTableGroup → return null`; it only re-confirmed pre-existing `ConfigTableRow` behaviour. | Anything. This is the hardest to see, because the *name* describes an interaction and each assertion looks reasonable in isolation. The fix was not a third assertion beside two that pass, but making the existing ones **depend** on the group row — `getByRole("rowheader")` as a precondition, plus `nextElementSibling` for adjacency, a property `return null` cannot satisfy. |
 
@@ -530,7 +533,7 @@ coverage has been mis-assessed"*, and once by reproducing a cross-wiring mutatio
 ## 9. Measure, do not recall
 
 Seven claims in this programme asserted a state of the world without measuring it. Each was
-caught only downstream, and none was malicious — each was a confident memory.
+caught only downstream.
 
 - A field was reported **missing** when it already existed (`folder_id`).
 - A component was reported **unused** — `EmptyState`, which **ten files** import today

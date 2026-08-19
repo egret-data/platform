@@ -323,7 +323,8 @@ kéo dãn trên màn hình rộng.
 **Vậy nên section tự sở hữu cap của mình**, trên chính element gốc của nó, nằm ngay cạnh layout
 nó ràng buộc: `AccessSection.tsx` và `TryIt.tsx` dùng `max-w-5xl`, `Versions.tsx` `max-w-5xl`,
 bảng frozen-column của `ResponseSection.tsx` dùng `max-w-xl`. Query không cần cap nào và được
-lợi nhiều nhất — editor SQL từ 768px lên 1424px.
+lợi nhiều nhất — editor SQL từ 768px lên 1424px (đo trong đợt sửa chiều rộng, không phải
+bởi tài liệu này; các con số ở §5.4 và §5.5 cũng vậy).
 
 ### 5.2 Gỡ cap là chưa đủ, vì `ConfigTable` là `table-fixed`
 
@@ -367,7 +368,7 @@ các cột 288/0/208 với 210px chết; xoá bốn dòng nhóm khỏi chính b�
 
 Nó có sẵn từ trước (có cả ở 768px), nhưng đợt sửa chiều rộng làm nó to hơn trong một chế độ con,
 và điều đó phụ thuộc vào việc sidebar là một thanh ray người dùng gập được (`w-56` khi mở,
-`w-16` khi gập): ở 1010px với ray gập, 370px chết, trong khi cap cũ cho 272px. Cách sửa là để
+`w-16` khi gập): ở 1010px với ray gập, 370px chết, trong khi cap cũ cho 272px (đo trong đợt sửa chiều rộng). Cách sửa là để
 Value thành cột không kích thước dưới `lg`; nó bị hoãn vì **chưa kiểm chứng** rằng một Value
 không kích thước sẽ hút hết cột ma chứ không chia đôi với nó.
 
@@ -383,8 +384,8 @@ hình dạng trước đó sai theo hai hướng ngược nhau và cả hai đ�
 - `container.querySelector(".max-w-3xl")` quét cả cây con, cấm một tên class trên toàn trang —
   nhưng một section hoàn toàn có quyền chặn chiều rộng con của chính nó.
 - Đi ngược lên từ nội dung của một section *thật* rồi dừng ở "con của route container" sẽ đọc
-  chính cái wrapper đang bị săn **thành** gốc section mỗi khi nó tồn tại. Đã đo: khôi phục
-  `max-w-3xl` quanh `Outlet` vẫn qua 31/31 dưới hình dạng đó. Chốt chặn sẽ chết đúng trong
+  chính cái wrapper đang bị săn **thành** gốc section mỗi khi nó tồn tại. Đã đo trong đợt sửa chiều rộng: khôi
+  phục `max-w-3xl` quanh `Outlet` vẫn qua 31/31 dưới hình dạng đó. Chốt chặn sẽ chết đúng trong
   trường hợp nó được viết ra để bắt.
 
 Sentinel làm cho mâu thuẫn trở nên bất khả *về mặt cấu trúc*, chứ không phải nhờ chọn đúng
@@ -479,9 +480,9 @@ dựng fixture sao cho không hằng số nào qua được.
 |---|---|
 | **Danh sách một dòng.** | Một ngôi sao, một nhãn, hay một id hardcode vào *đúng dòng đó* trông y hệt trên một dòng và sai trên mọi dòng khác. Nó tốn đủ nhiều vòng để lý do nay được viết thẳng vào code: doc comment của `toggleBookmark` trong `Endpoints.tsx`, test `"gives two rows two different accessible names"` trong `__tests__/BookmarkToggle.test.tsx`, và `crates/egret-dataapi/tests/bookmarks.rs`. |
 | **Danh sách folder rỗng.** Tab saved của SQL Lab đoản mạch bằng `folders.length === 0 ? <danh sách phẳng> : groups.map(…)`, nên các dòng mồ côi vốn đã hiện ra trên workspace không có folder nào. Lỗi chỉ cắn khi đã tồn tại ít nhất một folder. | Một phép gom nhóm ném dòng vào một bucket mà vòng lặp đầu ra không bao giờ đọc — đúng lỗi mà `groupByFolder` trong `src/components/explore/folders.ts` nay ghi lại và phòng. (Chính sự bất đối xứng đó — cùng dữ liệu, hiện hay không tuỳ vào việc có tồn tại một folder *không liên quan* — đã là bằng chứng nó chưa bao giờ là hành vi có chủ đích.) |
-| **Một user.** Chưa test nào từng có user thứ hai với một dòng để phá, nên **cả hai** vị từ trên câu `DELETE` của `remove_bookmark` đều tự do. | Một `DELETE` thiếu `user_id = $1`. Đóng lại bằng một fixture nơi A và B cùng star một endpoint rồi A xoá; mutation nay chết một mình ở *"star của B phải sống sót qua lệnh DELETE của A"*. |
+| **Một user.** Chưa test nào từng có user thứ hai với một dòng để phá, nên **cả hai** vị từ trên câu `DELETE` của `remove_bookmark` đều tự do. | Một `DELETE` thiếu `user_id = $1`. Đóng lại bằng một fixture nơi A và B cùng star một endpoint rồi A xoá; mutation nay chết một mình ở *"B's star on the same endpoint must survive A's DELETE"* (`crates/egret-dataapi/tests/bookmarks.rs:463`). |
 | **Một database trong picker.** | `database_id = databases[0].id`. Đóng lại bằng fixture hai database và chọn cái thứ hai. |
-| **Giá trị test trùng với chính placeholder của trường.** Cả năm test đều gõ `"reporting-bot"`, cũng chính là `placeholder` của ô nhập. | `name: "reporting-bot"` hardcode vào body request — nó qua cả năm test. Đóng lại bằng cách không hai test nào gõ cùng một tên và không test nào gõ placeholder. |
+| **Giá trị test trùng với chính placeholder của trường.** Cả năm test đều gõ `"reporting-bot"`, cũng chính là `placeholder` của ô nhập. | `name: "reporting-bot"` hardcode vào body request — nó qua cả năm test. Đóng lại bằng cách **không test nào ASSERT `name` trong body** còn gõ placeholder, và không hai test trong số đó gõ cùng một giá trị; lý do được viết ở đầu `__tests__/ServiceAccountCreate.test.tsx`. (Các test không assert gì về body thì vẫn gõ nó, nên quy tắc là về những test có assert, không phải về cả file.) |
 | **Một enum mà bạn assert giá trị KHÔNG mặc định.** Chọn POST rồi assert POST *vẫn* qua được một body hardcode POST. | Assert giá trị không-mặc-định không làm một enum hai giá trị trở nên bác bỏ được — **nó chỉ dời xem hằng số nào là không bác bỏ được.** Phải chốt cả hai giá trị: một test chọn POST và assert POST, một test khác không chạm picker và assert GET. Chỉ bản hiện thực thật sự đọc control mới qua cả hai. |
 | **Một test đặt tên theo một quan hệ mà các assertion của nó không bao giờ chạm tới thứ liên quan.** `"keeps ordinary rows in their three columns"` sống sót qua `ConfigTableGroup → return null`; nó chỉ tái xác nhận hành vi có sẵn của `ConfigTableRow`. | Bất cứ thứ gì. Đây là kiểu khó thấy nhất, vì *tên* test mô tả một tương tác và từng assertion nhìn riêng đều hợp lý. Cách sửa không phải thêm assertion thứ ba bên cạnh hai cái đã qua, mà làm cho các assertion sẵn có **phụ thuộc** vào dòng nhóm — `getByRole("rowheader")` làm tiền điều kiện, cộng `nextElementSibling` cho tính kề nhau, một tính chất mà `return null` không thể thoả mãn. |
 
@@ -520,7 +521,7 @@ Khi kết quả mutation quan trọng, hãy chạy lại thay vì chấp nhận 
 ## 9. Hãy ĐO, đừng nhớ lại
 
 Bảy khẳng định trong chương trình này nói về trạng thái của thế giới mà không đo. Cả bảy đều chỉ
-được bắt ở hạ nguồn, và không cái nào là ác ý — mỗi cái là một ký ức tự tin.
+được bắt ở hạ nguồn.
 
 - Một trường bị báo là **thiếu** trong khi nó đã tồn tại (`folder_id`).
 - Một component bị báo là **không ai dùng** — `EmptyState`, thứ hôm nay có **mười file** import
