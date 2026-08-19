@@ -122,19 +122,60 @@ Mutation-check each: remove the live-state refusal; make restore set `live`; dro
 
 ---
 
-### Task 3: Serving still refuses a trashed endpoint
+### Task 3: The trash boundary holds against every state transition
 
 **Files:**
+- Modify: `crates/egret-dataapi/src/lifecycle.rs`
 - Test: `crates/egret-dataapi/tests/trash.rs`
 
-This task adds **no production code**. It exists because the rule is about serving, and the only evidence that counts is a request driven through the real serving router.
+**This task replaces an earlier version of itself, and the reason matters.**
 
-- [ ] **Write the test:** publish an endpoint, confirm a consumer call succeeds, disable it, trash it, then call again and assert the consumer gets the same answer as for an endpoint that never existed.
-- [ ] **Then mutate the guarantee, not the test:** temporarily relax the CHECK and force `state = 'live'` with `deleted_at` set, and confirm the test fails. If it still passes, the test is checking the wrong layer — say so rather than adjusting it until it goes green.
+The original Task 3 said: test that a trashed endpoint stops serving, and mutation-check it by removing the `deleted_at` predicate from the serving query. Both halves were wrong, and measuring is what showed it:
 
-**Use `serving_common`'s fixture** (`crates/egret-dataapi/tests/serving_common/mod.rs`) — it builds a real serving router. A test that calls the store instead of the router would pass while the product was broken.
+- **`trash` never changes `state`** (`crates/egret-dataapi/src/endpoints.rs:851` refuses `AND state <> 'live'`). An endpoint can only reach the trash from `draft` or `disabled`, so by the time it is trashed it was already not being served. "Trashing stops serving" is a property of `disable`, and a test asserting it would pass even if trash did nothing at all.
+- **There is no `deleted_at` predicate in the serving query to remove**, and there should not be one. `live_snapshot` (`crates/egret-dataapi/src/serving/router.rs:918`) filters `state = 'live'`; because the CHECK makes `(live, trashed)` unrepresentable, a `deleted_at IS NULL` there could never change an outcome — unverifiable dead code that invites a reader to believe the predicate is what protects them.
 
----
+**The real danger runs the other way: a route that puts a trashed row back into `live`.** Measured — `crates/egret-dataapi/src/lifecycle.rs` contains **zero** occurrences of `deleted_at`:
+
+- `enable` (`lifecycle.rs:1884`) calls `set_state(workspace, id, "live")` with no trash guard.
+- `publish` (`lifecycle.rs:1803`) sets `state = CASE WHEN state = 'disabled' THEN 'disabled' ELSE 'live' END`.
+
+**Without Task 1's CHECK, `enable` on a trashed endpoint would set it live and `live_snapshot` would serve it** — a trashed object serving traffic, precisely the Alerts defect. The CHECK converts that hole into a constraint violation, which is the design working. But a constraint violation surfaces as a **500**, and a 500 is not a refusal: it leaks a database error and tells the author nothing.
+
+- [ ] **Step 1: Enumerate every transition that writes `state` or `live_version_id`**
+
+Search `lifecycle.rs` yourself and list them; the ones already measured are `publish`, `enable`, `disable`, and `set_state`. **Check `rollback` and `update` too** — they were not measured, so treat them as unknown rather than assuming they are safe. Report what you find, including anything the list above missed.
+
+- [ ] **Step 2: Write the failing tests, one per transition**
+
+For each transition that could put a trashed endpoint into `live`, or that writes to a trashed endpoint at all: trash the endpoint, attempt the transition, and assert a **409 whose message names restoring first**.
+
+**The falsifiability trap here is specific and worth stating.** Asserting only "it returned an error" passes against the 500 that exists today, which means the test would prove nothing. Assert the **status is 409**, assert it is **not 500**, and assert the message names restore. Run these before writing the guards and confirm they fail with a 500 — that is your evidence the tests bind.
+
+Note also: publishing a trashed **`disabled`** endpoint currently **succeeds**, because the `CASE` leaves the state alone and the CHECK is therefore satisfied. It publishes a new version into the trash. That one fails silently rather than with a 500, so it needs its own test.
+
+- [ ] **Step 3: Add the guards**
+
+Refuse the transition when `deleted_at IS NOT NULL`, with a message naming restore as the way forward. Prefer putting the predicate **in the statement's `WHERE`** and distinguishing the reasons on the no-row path, the way `trash` (`endpoints.rs:847-873`) and `restore` already do — a separate read-then-write is a race.
+
+- [ ] **Step 4: Run the tests**
+
+Run: `DATABASE_URL="postgres://egret:egret@localhost:5432/egret_test" cargo test -p egret-dataapi --test trash`
+Expected: PASS, with a duration proving the DB gate engaged.
+
+- [ ] **Step 5: The serving test, for the end state**
+
+Drive the real serving router (`crates/egret-dataapi/tests/serving_common/mod.rs`): publish an endpoint, confirm a consumer call succeeds, disable it, trash it, and confirm the consumer now gets the same answer as for an endpoint that never existed. Then **restore it and confirm it still does not serve** until explicitly enabled.
+
+Be honest in the report about what this test does and does not prove: it pins the end state and would catch a trash or restore that resurrected serving, but the endpoint was already disabled, so it is a regression guard rather than proof that trash stops traffic. The guarantee lives in Step 3's guards plus Task 1's CHECK.
+
+- [ ] **Step 6: Mutation-check each guard**
+
+Remove one guard at a time, rebuild to zero errors, confirm, then read the result. Each removal must make its own test fail — and note whether it fails with a **500** (the CHECK catching it) or by **serving traffic** (nothing catching it). Those two outcomes mean very different things, and which one each guard produces is worth recording.
+
+- [ ] **Step 7: Commit**
+
+**Commit before your first mutation.** Task 2's implementer lost every uncommitted store edit to a `git checkout --` restore and had to re-apply eleven edits by hand.
 
 ### Task 4: The UI
 
