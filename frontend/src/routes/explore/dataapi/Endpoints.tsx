@@ -159,7 +159,6 @@ export default function Endpoints() {
   const [sort, setSort] = useState<SortState<SortKey>>({ key: "updated_at", dir: "desc" });
   const [downloadOpen, setDownloadOpen] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<DataApiEndpointDto | null>(null);
-  const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
   /**
    * The folder-name dialog, in one of two modes.
    *
@@ -306,11 +305,15 @@ export default function Endpoints() {
   );
 
   async function doBulkTrash() {
+    // The same `selectedIds` the BulkBar counted — this closure holds THIS
+    // render's `bulk`, so the array cannot change under the loop.
     const ids = bulk.selectedIds;
-    // Same two guards as `doBulkDelete`, for the same reason: `selectedIds` is
-    // re-derived every render, so it can empty out between the click and the
-    // run. The liveness re-check is not redundant with the disabled button —
-    // the list can refetch a row into `live` while the selection stands.
+    // Both guards are defence, not decoration. `selectedIds` is re-derived from
+    // the visible rows every render, so it can empty out under a refetch; and
+    // the liveness re-check is not redundant with the disabled button, because
+    // a refetch can move a row into `live` while the selection stands. A run
+    // that does nothing and then toasts "Moved 0 endpoints to Trash" would be
+    // worse than one that fails.
     if (ids.length === 0 || liveSelected.length > 0) {
       bulk.clear();
       return;
@@ -325,32 +328,6 @@ export default function Endpoints() {
       }
     }
     if (failed === 0) toast.success(`Moved ${ids.length} endpoint${ids.length === 1 ? "" : "s"} to Trash`);
-    bulk.clear();
-  }
-
-  async function doBulkDelete() {
-    // The same `selectedIds` the BulkBar counted — this closure holds THIS
-    // render's `bulk`, so the array cannot change under the loop.
-    const ids = bulk.selectedIds;
-    // The dialog is open across renders, and `selectedIds` is re-derived from
-    // the visible rows on each one — a refetch that drops the selected rows (or
-    // a folder collapsed behind the dialog) can empty it between "Delete
-    // selected" and the confirm click. Without this the run does nothing and
-    // then claims "Deleted 0 endpoints".
-    if (ids.length === 0) {
-      bulk.clear();
-      return;
-    }
-    let failed = 0;
-    for (const id of ids) {
-      try {
-        await deleteMutation.mutateAsync({ workspace: ws, id });
-      } catch (err) {
-        failed += 1;
-        toast.error(String(err));
-      }
-    }
-    if (failed === 0) toast.success(`Deleted ${ids.length} endpoint${ids.length === 1 ? "" : "s"}`);
     bulk.clear();
   }
 
@@ -589,9 +566,17 @@ export default function Endpoints() {
           />
         </div>
 
-        {/* Two bulk actions now: the soft Move to Trash and the permanent
-            Delete. A BULK move between folders is still not wired — a disabled
-            button for it would be worse than its absence. */}
+        {/* Move to Trash is the ONLY bulk action, exactly as in `Datasets.tsx`,
+            `Charts.tsx` and `Dashboards.tsx`. A bulk permanent delete used to
+            sit here, and it undid single-row deletion's whole reason for moving
+            behind the trash: it destroyed served URLs and their published
+            version history in one click, `live` rows included, which is the
+            same act the row menu now charges three deliberate steps for and
+            strictly more dangerous for being N at a time. The replacement path
+            exists — bulk trash, then delete from the trash — so nothing became
+            impossible, only deliberate. A BULK move between folders is still
+            not wired; a disabled button for it would be worse than its
+            absence. */}
         <BulkBar count={bulk.selectedIds.length}>
           <Button
             variant="outline"
@@ -609,7 +594,6 @@ export default function Endpoints() {
               {liveSelected.length} live — disable {liveSelected.length === 1 ? "it" : "them"} first
             </span>
           )}
-          <Button variant="destructive" size="sm" onClick={() => setBulkDeleteOpen(true)}>Delete selected</Button>
         </BulkBar>
 
         {rows.length > 0 ? (
@@ -697,14 +681,6 @@ export default function Endpoints() {
           }
           setPendingDelete(null);
         }}
-      />
-
-      <ConfirmDeleteDialog
-        open={bulkDeleteOpen}
-        onOpenChange={setBulkDeleteOpen}
-        title="Delete endpoints"
-        description={`Delete ${bulk.selectedIds.length} endpoint${bulk.selectedIds.length === 1 ? "" : "s"}? Any deployed client calling their URLs will start getting 404s. This cannot be undone.`}
-        onConfirm={doBulkDelete}
       />
     </ListPageShell>
   );

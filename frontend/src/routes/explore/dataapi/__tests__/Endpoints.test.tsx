@@ -800,37 +800,10 @@ describe("Endpoints — facets, row menu and bulk mode", () => {
     await user.click(screen.getByRole("button", { name: "Bulk select" }));
     // Bulk mode is on but nothing is chosen: the action strip must not be there
     // at all, or the table jumps down the moment the mode is entered.
-    expect(screen.queryByRole("button", { name: /delete selected/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /to trash/i })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("checkbox", { name: /select one/i }));
-    expect(screen.getByRole("button", { name: /delete selected/i })).toBeInTheDocument();
-  });
-
-  it("bulk Delete selected deletes every selected row after confirmation", async () => {
-    mockList({
-      data: {
-        status: 200,
-        data: [
-          makeEndpoint({ id: "e1", name: "one", state: "draft" }),
-          makeEndpoint({ id: "e2", name: "two", state: "draft" }),
-        ],
-      },
-    });
-    const user = userEvent.setup();
-    renderEndpoints();
-    await screen.findByText("one");
-
-    await user.click(screen.getByRole("button", { name: "Bulk select" }));
-    await user.click(screen.getByRole("checkbox", { name: "Select all" }));
-    await user.click(screen.getByRole("button", { name: /delete selected/i }));
-
-    await user.type(await screen.findByPlaceholderText("delete"), "delete");
-    await user.click(screen.getByRole("button", { name: /^delete$/i }));
-
-    await waitFor(() => {
-      expect(deleteMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "e1" });
-    });
-    expect(deleteMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "e2" });
+    expect(screen.getByRole("button", { name: /move 1 to trash/i })).toBeInTheDocument();
   });
 });
 
@@ -848,7 +821,7 @@ describe("Endpoints — bulk select only ever reaches rows that are on screen", 
     // delete left behind. `groupByFolder` used to emit no bucket for it, so the
     // row rendered nowhere and "Select all" could sweep in something invisible.
     // It now falls into Uncategorized, so it is visible, selectable, and — with
-    // the user looking straight at it — legitimately deletable.
+    // the user looking straight at it — legitimately actionable.
     mockList({
       data: {
         status: 200,
@@ -870,15 +843,13 @@ describe("Endpoints — bulk select only ever reaches rows that are on screen", 
     // The count must describe what is in front of the user, not the filtered set.
     expect(screen.getByText("2 selected")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /delete selected/i }));
-    await user.type(await screen.findByPlaceholderText("delete"), "delete");
-    await user.click(screen.getByRole("button", { name: /^delete$/i }));
+    await user.click(screen.getByRole("button", { name: /move 2 to trash/i }));
 
     await waitFor(() => {
-      expect(deleteMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "e-shown" });
+      expect(trashMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "e-shown" });
     });
-    expect(deleteMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "e-orphan" });
-    expect(deleteMutateAsync).toHaveBeenCalledTimes(2);
+    expect(trashMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "e-orphan" });
+    expect(trashMutateAsync).toHaveBeenCalledTimes(2);
   });
 
   it("does not select a collapsed folder's rows, which are grouped but not on screen", async () => {
@@ -905,14 +876,12 @@ describe("Endpoints — bulk select only ever reaches rows that are on screen", 
     expect(screen.getByText("1 selected")).toBeInTheDocument();
     expect(screen.queryByRole("checkbox", { name: "Select hidden row" })).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /delete selected/i }));
-    await user.type(await screen.findByPlaceholderText("delete"), "delete");
-    await user.click(screen.getByRole("button", { name: /^delete$/i }));
+    await user.click(screen.getByRole("button", { name: /move 1 to trash/i }));
 
     await waitFor(() => {
-      expect(deleteMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "e-shown" });
+      expect(trashMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "e-shown" });
     });
-    expect(deleteMutateAsync).not.toHaveBeenCalledWith({ workspace: "eng", id: "e-hidden" });
+    expect(trashMutateAsync).not.toHaveBeenCalledWith({ workspace: "eng", id: "e-hidden" });
   });
 });
 
@@ -925,8 +894,12 @@ describe("Endpoints — bulk select only ever reaches rows that are on screen", 
  * re-filter was never the thing under test. Replacing `selectedIds` with
  * `Array.from(selected)` typechecked and left every test green.
  *
- * These reverse the order. The failure they pin is the one this page cannot
- * take back: its bulk action is a hard DELETE, not a move to trash.
+ * These reverse the order. The bulk action is a move to Trash now, not the
+ * hard DELETE it was when these were written — so the failure they pin is
+ * recoverable where it used to be permanent. They are kept, and retargeted,
+ * because what they actually guard is `selectedIds`' re-filter, which is
+ * untouched by that change: acting on a row the user cannot see is the defect,
+ * whatever the action then does.
  */
 describe("Endpoints — a row selected BEFORE it is hidden", () => {
   const HIDDEN = makeEndpoint({ id: "e-hidden", name: "hidden row", folder_id: "f-1" });
@@ -950,12 +923,12 @@ describe("Endpoints — a row selected BEFORE it is hidden", () => {
     expect(screen.queryByText("hidden row")).not.toBeInTheDocument();
 
     expect(screen.queryByText("1 selected")).not.toBeInTheDocument();
-    // The strip renders nothing at zero, so the destructive button goes with it
-    // — there is no way left to act on a row that is not on screen.
-    expect(screen.queryByRole("button", { name: /delete selected/i })).not.toBeInTheDocument();
+    // The strip renders nothing at zero, so the action goes with it — there is
+    // no way left to act on a row that is not on screen.
+    expect(screen.queryByRole("button", { name: /to trash/i })).not.toBeInTheDocument();
   });
 
-  it("deletes only the row still on screen when a selected row is hidden behind it", async () => {
+  it("trashes only the row still on screen when a selected row is hidden behind it", async () => {
     mockList({ data: { status: 200, data: [HIDDEN, SHOWN] } });
     mockFolders([{ id: "f-1", name: "Reporting" }]);
     const user = userEvent.setup();
@@ -970,16 +943,14 @@ describe("Endpoints — a row selected BEFORE it is hidden", () => {
     await user.click(screen.getByRole("button", { name: "Toggle Reporting" }));
     expect(screen.getByText("1 selected")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /delete selected/i }));
-    await user.type(await screen.findByPlaceholderText("delete"), "delete");
-    await user.click(screen.getByRole("button", { name: /^delete$/i }));
+    await user.click(screen.getByRole("button", { name: /move 1 to trash/i }));
 
     await waitFor(() => {
-      expect(deleteMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "e-shown" });
+      expect(trashMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "e-shown" });
     });
-    // The one the user can no longer see must survive.
-    expect(deleteMutateAsync).not.toHaveBeenCalledWith({ workspace: "eng", id: "e-hidden" });
-    expect(deleteMutateAsync).toHaveBeenCalledTimes(1);
+    // The one the user can no longer see must be left alone.
+    expect(trashMutateAsync).not.toHaveBeenCalledWith({ workspace: "eng", id: "e-hidden" });
+    expect(trashMutateAsync).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -996,30 +967,13 @@ describe("Endpoints — the list changing underneath the page", () => {
     );
   }
 
-  it("does not report a bulk delete it never ran when the selection empties behind the dialog", async () => {
-    let rows: DataApiEndpointListItemDto[] = [makeEndpoint({ id: "e1", name: "one", state: "draft" })];
-    mockListDynamic(() => rows);
-    const user = userEvent.setup();
-    const { rerenderTree } = renderEndpoints();
-    await screen.findByText("one");
-
-    await user.click(screen.getByRole("button", { name: "Bulk select" }));
-    await user.click(screen.getByRole("checkbox", { name: "Select one" }));
-    await user.click(screen.getByRole("button", { name: /delete selected/i }));
-    await screen.findByPlaceholderText("delete");
-
-    // A refetch lands while the confirmation sits open and the row is gone.
-    rows = [];
-    rerenderTree();
-
-    await user.type(screen.getByPlaceholderText("delete"), "delete");
-    await user.click(screen.getByRole("button", { name: /^delete$/i }));
-
-    expect(deleteMutateAsync).not.toHaveBeenCalled();
-    // …and above all it must not claim it did something. "Deleted 0 endpoints"
-    // is a success toast over a run that deleted nothing.
-    expect(toast.success).not.toHaveBeenCalled();
-  });
+  // The "selection empties behind the open confirmation" test lived here. It
+  // went with the bulk permanent delete: that dialog was its whole premise —
+  // the race needed a step that stayed open across renders, and bulk Move to
+  // Trash fires straight from the click against THIS render's `selectedIds`.
+  // `doBulkTrash` keeps the `ids.length === 0` guard as defence, but there is
+  // no longer a way to drive it, and a test that cannot reach the code it
+  // names is worse than none.
 
   it("leaves bulk mode behind when the last endpoint goes, so the checkbox column does not return with the next one", async () => {
     let rows: DataApiEndpointListItemDto[] = [makeEndpoint({ id: "e1", name: "one", state: "draft" })];
