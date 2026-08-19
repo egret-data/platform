@@ -95,18 +95,25 @@ Drop the CHECK from the migration, re-run against a fresh `egret_test`, and conf
 **Interfaces:**
 - Produces: `POST …/endpoints/{id}/trash`, `POST …/endpoints/{id}/restore`, and `deleted_at` on the list DTO. `DELETE …/endpoints/{id}` keeps its meaning: permanent.
 
-**Read `crates/egret-bi/src/routes.rs`'s dataset trash/restore handlers first** and follow their shape, including which permission they gate on — measure it rather than assuming it matches `:manage`.
+**Measured facts — use these, they have been checked:**
+
+- The permission constant is `EP_MANAGE` (`data_api_endpoint:manage`), the same one `delete_endpoint` and `disable` use. `crates/egret-dataapi/src/routes.rs:1043` is the delete handler; read it for the handler shape.
+- `st.endpoints.scoped(ctx.workspace_id.0, id).await?` is this crate's existing workspace-ownership check. Use it — it is what makes a cross-workspace id a 404 instead of an IDOR.
+- **Both new routes must emit an audit event**, `data_api_endpoint:trash` and `data_api_endpoint:restore`. This is measured, not assumed: all thirteen `audit.emit` calls in this file cover every lifecycle mutation — create, update, delete, publish, rollback, disable, enable, grant_invoke, revoke_invoke — and only the per-user bookmark routes are exempt. **`egret-bi`'s dataset trash does NOT audit**, so copying that precedent wholesale would make trash the only unaudited lifecycle change in this crate. Follow the crate, not the sibling.
+
+Read `crates/egret-bi/src/routes.rs:906-951` for the route/DTO shape and the `?trashed=` list parameter it established — but take the authz and audit idiom from this crate.
 
 Four behaviours, each its own test:
 
 1. **Trashing a `live` endpoint is refused at the API** with a clear error naming disable-first. Not a 500 from the CHECK — the route must refuse before it writes, so the message is useful.
 2. **Trashing a `draft` or `disabled` endpoint succeeds** and sets `deleted_at`.
 3. **Restore returns the endpoint to `disabled`**, never `live`, whatever it was before.
-4. **The list excludes trashed rows by default** and includes them only when asked.
+4. **The list excludes trashed rows by default** and includes them only when asked. Follow the dataset precedent for the parameter's name and shape: `?trashed=true` lists only trashed rows.
+5. **Trash and restore each emit their audit event.** Assert the action string and the resource id — an audit test that only counts events passes when the wrong action is recorded.
 
 **The fixture must contain a case where correct and broken disagree**: at least two endpoints, one trashed and one not, so "the list filters" is distinguishable from "the list happens to be empty".
 
-Mutation-check each: remove the live-state refusal; make restore set `live`; drop the list's `deleted_at IS NULL`.
+Mutation-check each: remove the live-state refusal; make restore set `live`; drop the list's `deleted_at IS NULL`; change the audit action string to a wrong-but-plausible value.
 
 ---
 
