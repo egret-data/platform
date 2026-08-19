@@ -106,6 +106,7 @@ export * from './dataApiEndpointGrantDto';
 export * from './dataApiEndpointListItemDto';
 export * from './dataApiEndpointVersionDto';
 export * from './dataApiGetOpenapiParams';
+export * from './dataApiListEndpointsParams';
 export * from './dataApiNewClientDto';
 export * from './dataApiPreviewDto';
 export * from './dataApiPreviewDtoRowsItemItem';

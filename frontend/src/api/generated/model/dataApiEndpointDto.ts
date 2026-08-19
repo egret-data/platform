@@ -48,4 +48,17 @@ export interface DataApiEndpointDto {
   created_by?: string | null;
   created_at: string;
   updated_at: string;
+  /**
+     * When this endpoint was moved to the trash, or `null` if it is live in the
+     * authoring sense — present, listed, editable.
+     *
+     * On the DTO rather than a bare `trashed: bool` because WHEN it was trashed
+     * is what a "Trash" screen sorts and ages by, and because the column itself
+     * is the timestamp — a boolean projection here would be a second
+     * representation of the same fact for the frontend to disagree with. The
+     * schema's `CHECK (deleted_at IS NULL OR state <> 'live')` (migration 0126)
+     * means a non-null value here can never coexist with `state = "live"`.
+     * @nullable
+     */
+  deleted_at?: string | null;
 }

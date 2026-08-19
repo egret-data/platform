@@ -38,6 +38,7 @@ import type {
   DataApiEndpointListItemDto,
   DataApiEndpointVersionDto,
   DataApiGetOpenapiParams,
+  DataApiListEndpointsParams,
   DataApiNewClientDto,
   DataApiPreviewDto,
   DataApiPublishedDto,
@@ -481,17 +482,26 @@ export type dataApiListEndpointsResponseError = (dataApiListEndpointsResponse401
 
 export type dataApiListEndpointsResponse = (dataApiListEndpointsResponseSuccess | dataApiListEndpointsResponseError)
 
-export const getDataApiListEndpointsUrl = (workspace: string,) => {
+export const getDataApiListEndpointsUrl = (workspace: string,
+    params?: DataApiListEndpointsParams,) => {
+  const normalizedParams = new URLSearchParams();
 
+  Object.entries(params || {}).forEach(([key, value]) => {
 
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
 
+  const stringifiedParams = normalizedParams.toString();
 
-  return `/api/ws/${encodeURIComponent(workspace)}/data-api/endpoints`
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/data-api/endpoints?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/data-api/endpoints`
 }
 
-export const dataApiListEndpoints = async (workspace: string, options?: Parameters<typeof customInstance>[1]): Promise<dataApiListEndpointsResponse> => {
+export const dataApiListEndpoints = async (workspace: string,
+    params?: DataApiListEndpointsParams, options?: Parameters<typeof customInstance>[1]): Promise<dataApiListEndpointsResponse> => {
 
-  return customInstance<dataApiListEndpointsResponse>(getDataApiListEndpointsUrl(workspace),
+  return customInstance<dataApiListEndpointsResponse>(getDataApiListEndpointsUrl(workspace,params),
   {
     ...options,
     method: 'GET'
@@ -504,23 +514,25 @@ export const dataApiListEndpoints = async (workspace: string, options?: Paramete
 
 
 
-export const getDataApiListEndpointsQueryKey = (workspace: string,) => {
+export const getDataApiListEndpointsQueryKey = (workspace: string,
+    params?: DataApiListEndpointsParams,) => {
     return [
-    `/api/ws/${encodeURIComponent(workspace)}/data-api/endpoints`
+    `/api/ws/${encodeURIComponent(workspace)}/data-api/endpoints`, ...(params ? [params] : [])
     ] as const;
     }
 
 
-export const getDataApiListEndpointsQueryOptions = <TData = Awaited<ReturnType<typeof dataApiListEndpoints>>, TError = ErrorBody>(workspace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof dataApiListEndpoints>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+export const getDataApiListEndpointsQueryOptions = <TData = Awaited<ReturnType<typeof dataApiListEndpoints>>, TError = ErrorBody>(workspace: string,
+    params?: DataApiListEndpointsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof dataApiListEndpoints>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
 ) => {
 
 const {query: queryOptions, request: requestOptions} = options ?? {};
 
-  const queryKey =  queryOptions?.queryKey ?? getDataApiListEndpointsQueryKey(workspace);
+  const queryKey =  queryOptions?.queryKey ?? getDataApiListEndpointsQueryKey(workspace,params);
 
 
 
-    const queryFn: QueryFunction<Awaited<ReturnType<typeof dataApiListEndpoints>>> = ({ signal }) => dataApiListEndpoints(workspace, { signal, ...requestOptions });
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof dataApiListEndpoints>>> = ({ signal }) => dataApiListEndpoints(workspace,params, { signal, ...requestOptions });
 
 
 
@@ -534,7 +546,8 @@ export type DataApiListEndpointsQueryError = ErrorBody
 
 
 export function useDataApiListEndpoints<TData = Awaited<ReturnType<typeof dataApiListEndpoints>>, TError = ErrorBody>(
- workspace: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof dataApiListEndpoints>>, TError, TData>> & Pick<
+ workspace: string,
+    params: undefined |  DataApiListEndpointsParams, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof dataApiListEndpoints>>, TError, TData>> & Pick<
         DefinedInitialDataOptions<
           Awaited<ReturnType<typeof dataApiListEndpoints>>,
           TError,
@@ -544,7 +557,8 @@ export function useDataApiListEndpoints<TData = Awaited<ReturnType<typeof dataAp
  , queryClient?: QueryClient
   ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
 export function useDataApiListEndpoints<TData = Awaited<ReturnType<typeof dataApiListEndpoints>>, TError = ErrorBody>(
- workspace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof dataApiListEndpoints>>, TError, TData>> & Pick<
+ workspace: string,
+    params?: DataApiListEndpointsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof dataApiListEndpoints>>, TError, TData>> & Pick<
         UndefinedInitialDataOptions<
           Awaited<ReturnType<typeof dataApiListEndpoints>>,
           TError,
@@ -554,16 +568,18 @@ export function useDataApiListEndpoints<TData = Awaited<ReturnType<typeof dataAp
  , queryClient?: QueryClient
   ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
 export function useDataApiListEndpoints<TData = Awaited<ReturnType<typeof dataApiListEndpoints>>, TError = ErrorBody>(
- workspace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof dataApiListEndpoints>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ workspace: string,
+    params?: DataApiListEndpointsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof dataApiListEndpoints>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
  , queryClient?: QueryClient
   ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
 
 export function useDataApiListEndpoints<TData = Awaited<ReturnType<typeof dataApiListEndpoints>>, TError = ErrorBody>(
- workspace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof dataApiListEndpoints>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ workspace: string,
+    params?: DataApiListEndpointsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof dataApiListEndpoints>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
  , queryClient?: QueryClient
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
-  const queryOptions = getDataApiListEndpointsQueryOptions(workspace,options)
+  const queryOptions = getDataApiListEndpointsQueryOptions(workspace,params,options)
 
   const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
 
@@ -1251,6 +1267,11 @@ export type dataApiDisableEndpointResponse404 = {
   status: 404
 }
 
+export type dataApiDisableEndpointResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type dataApiDisableEndpointResponse500 = {
   data: ErrorBody
   status: 500
@@ -1259,7 +1280,7 @@ export type dataApiDisableEndpointResponse500 = {
 export type dataApiDisableEndpointResponseSuccess = (dataApiDisableEndpointResponse200) & {
   headers: Headers;
 };
-export type dataApiDisableEndpointResponseError = (dataApiDisableEndpointResponse401 | dataApiDisableEndpointResponse403 | dataApiDisableEndpointResponse404 | dataApiDisableEndpointResponse500) & {
+export type dataApiDisableEndpointResponseError = (dataApiDisableEndpointResponse401 | dataApiDisableEndpointResponse403 | dataApiDisableEndpointResponse404 | dataApiDisableEndpointResponse409 | dataApiDisableEndpointResponse500) & {
   headers: Headers;
 };
 
@@ -2006,6 +2027,120 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
       > => {
       return useMutation(getDataApiPublishEndpointMutationOptions(options), queryClient);
     }
+    export type dataApiRestoreEndpointResponse200 = {
+  data: DataApiEndpointDto
+  status: 200
+}
+
+export type dataApiRestoreEndpointResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type dataApiRestoreEndpointResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type dataApiRestoreEndpointResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type dataApiRestoreEndpointResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type dataApiRestoreEndpointResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type dataApiRestoreEndpointResponseSuccess = (dataApiRestoreEndpointResponse200) & {
+  headers: Headers;
+};
+export type dataApiRestoreEndpointResponseError = (dataApiRestoreEndpointResponse401 | dataApiRestoreEndpointResponse403 | dataApiRestoreEndpointResponse404 | dataApiRestoreEndpointResponse409 | dataApiRestoreEndpointResponse500) & {
+  headers: Headers;
+};
+
+export type dataApiRestoreEndpointResponse = (dataApiRestoreEndpointResponseSuccess | dataApiRestoreEndpointResponseError)
+
+export const getDataApiRestoreEndpointUrl = (workspace: string,
+    id: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/data-api/endpoints/${encodeURIComponent(id)}/restore`
+}
+
+/**
+ * Comes back `disabled`, never `live`. See [`EndpointStore::restore`].
+ * @summary The other half of `trash`, and the reason trash keeps the invoke grants and the
+live version pointer: without this route that promise is unfalsifiable.
+ */
+export const dataApiRestoreEndpoint = async (workspace: string,
+    id: string, options?: Parameters<typeof customInstance>[1]): Promise<dataApiRestoreEndpointResponse> => {
+
+  return customInstance<dataApiRestoreEndpointResponse>(getDataApiRestoreEndpointUrl(workspace,id),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getDataApiRestoreEndpointMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof dataApiRestoreEndpoint>>, TError,{workspace: string;id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof dataApiRestoreEndpoint>>, TError,{workspace: string;id: string}, TContext> => {
+
+const mutationKey = ['dataApiRestoreEndpoint'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof dataApiRestoreEndpoint>>, {workspace: string;id: string}> = (props) => {
+          const {workspace,id} = props ?? {};
+
+          return  dataApiRestoreEndpoint(workspace,id,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type DataApiRestoreEndpointMutationResult = NonNullable<Awaited<ReturnType<typeof dataApiRestoreEndpoint>>>
+
+    export type DataApiRestoreEndpointMutationError = ErrorBody
+
+    /**
+ * @summary The other half of `trash`, and the reason trash keeps the invoke grants and the
+live version pointer: without this route that promise is unfalsifiable.
+ */
+export const useDataApiRestoreEndpoint = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof dataApiRestoreEndpoint>>, TError,{workspace: string;id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof dataApiRestoreEndpoint>>,
+        TError,
+        {workspace: string;id: string},
+        TContext
+      > => {
+      return useMutation(getDataApiRestoreEndpointMutationOptions(options), queryClient);
+    }
     export type dataApiRollbackEndpointResponse200 = {
   data: DataApiPublishedDto
   status: 200
@@ -2031,6 +2166,11 @@ export type dataApiRollbackEndpointResponse404 = {
   status: 404
 }
 
+export type dataApiRollbackEndpointResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type dataApiRollbackEndpointResponse500 = {
   data: ErrorBody
   status: 500
@@ -2039,7 +2179,7 @@ export type dataApiRollbackEndpointResponse500 = {
 export type dataApiRollbackEndpointResponseSuccess = (dataApiRollbackEndpointResponse200) & {
   headers: Headers;
 };
-export type dataApiRollbackEndpointResponseError = (dataApiRollbackEndpointResponse400 | dataApiRollbackEndpointResponse401 | dataApiRollbackEndpointResponse403 | dataApiRollbackEndpointResponse404 | dataApiRollbackEndpointResponse500) & {
+export type dataApiRollbackEndpointResponseError = (dataApiRollbackEndpointResponse400 | dataApiRollbackEndpointResponse401 | dataApiRollbackEndpointResponse403 | dataApiRollbackEndpointResponse404 | dataApiRollbackEndpointResponse409 | dataApiRollbackEndpointResponse500) & {
   headers: Headers;
 };
 
@@ -2111,6 +2251,111 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
         TContext
       > => {
       return useMutation(getDataApiRollbackEndpointMutationOptions(options), queryClient);
+    }
+    export type dataApiTrashEndpointResponse200 = {
+  data: DataApiEndpointDto
+  status: 200
+}
+
+export type dataApiTrashEndpointResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type dataApiTrashEndpointResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type dataApiTrashEndpointResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type dataApiTrashEndpointResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type dataApiTrashEndpointResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type dataApiTrashEndpointResponseSuccess = (dataApiTrashEndpointResponse200) & {
+  headers: Headers;
+};
+export type dataApiTrashEndpointResponseError = (dataApiTrashEndpointResponse401 | dataApiTrashEndpointResponse403 | dataApiTrashEndpointResponse404 | dataApiTrashEndpointResponse409 | dataApiTrashEndpointResponse500) & {
+  headers: Headers;
+};
+
+export type dataApiTrashEndpointResponse = (dataApiTrashEndpointResponseSuccess | dataApiTrashEndpointResponseError)
+
+export const getDataApiTrashEndpointUrl = (workspace: string,
+    id: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/data-api/endpoints/${encodeURIComponent(id)}/trash`
+}
+
+export const dataApiTrashEndpoint = async (workspace: string,
+    id: string, options?: Parameters<typeof customInstance>[1]): Promise<dataApiTrashEndpointResponse> => {
+
+  return customInstance<dataApiTrashEndpointResponse>(getDataApiTrashEndpointUrl(workspace,id),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getDataApiTrashEndpointMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof dataApiTrashEndpoint>>, TError,{workspace: string;id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof dataApiTrashEndpoint>>, TError,{workspace: string;id: string}, TContext> => {
+
+const mutationKey = ['dataApiTrashEndpoint'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof dataApiTrashEndpoint>>, {workspace: string;id: string}> = (props) => {
+          const {workspace,id} = props ?? {};
+
+          return  dataApiTrashEndpoint(workspace,id,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type DataApiTrashEndpointMutationResult = NonNullable<Awaited<ReturnType<typeof dataApiTrashEndpoint>>>
+
+    export type DataApiTrashEndpointMutationError = ErrorBody
+
+    export const useDataApiTrashEndpoint = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof dataApiTrashEndpoint>>, TError,{workspace: string;id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof dataApiTrashEndpoint>>,
+        TError,
+        {workspace: string;id: string},
+        TContext
+      > => {
+      return useMutation(getDataApiTrashEndpointMutationOptions(options), queryClient);
     }
     export type dataApiTryEndpointResponse200 = {
   data: TryResponse
