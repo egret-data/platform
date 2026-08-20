@@ -8,6 +8,7 @@ pub mod http;
 pub mod ids;
 pub mod openapi;
 pub mod pagination;
+pub mod ratelimit;
 pub mod rbac;
 pub mod tabular;
 #[cfg(feature = "token")]

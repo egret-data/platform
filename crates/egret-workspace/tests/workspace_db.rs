@@ -712,7 +712,7 @@ async fn platform_admin_can_create_workspace() {
             chrono::Duration::minutes(1),
         ),
         config: Config::default(),
-        rate_limiter: egret_auth::ratelimit::RateLimiter::new(5, 300, 300),
+        rate_limiter: egret_core::ratelimit::RateLimiter::new(5, 300, 300),
         audit: egret_audit::AuditSink::new(16).0,
         impersonations: egret_auth::impersonation::ImpersonationRepo::new(db.clone()),
         oidc: None,

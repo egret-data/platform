@@ -1,4 +1,12 @@
-//! In-memory per-process login rate limiter (IP+email key). Resets on restart.
+//! In-memory per-process rate limiter over an opaque string key. Resets on
+//! restart.
+//!
+//! Shared, not login-specific: the caller chooses the key, and that choice is
+//! the security-relevant part. Both current callers key on the pair
+//! `ip:<subject>` — `ip:email` for local login, `ip:client_id` for the
+//! machine-IdP token endpoint — so a flood only ever exhausts the flooder's own
+//! bucket. Keying on the subject alone would let anyone lock a legitimate
+//! account or client out by spamming an identifier that is not a secret.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

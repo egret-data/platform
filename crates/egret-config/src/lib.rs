@@ -13,6 +13,19 @@ pub struct RateLimitConfig {
     pub login_max_attempts: u32,
     pub login_window_secs: u64,
     pub login_lockout_secs: u64,
+    /// Machine-IdP `POST /oauth/token` (`client_credentials`). Keyed on
+    /// `ip:client_id`, not on `client_id` — see `egret_core::ratelimit`.
+    ///
+    /// Looser than the login trio on purpose: this endpoint is polled by
+    /// machines, whose tokens are short-lived (the Data API's are 600s), so a
+    /// legitimate fleet re-mints far more often than a human logs in. The limit
+    /// exists because the endpoint became internet-reachable and every request
+    /// with a KNOWN `client_id` costs one Argon2 verify — it is a CPU-cost
+    /// bound, not a credential-guessing defence (secrets are 256-bit random and
+    /// unknown ids never reach the hash).
+    pub token_max_attempts: u32,
+    pub token_window_secs: u64,
+    pub token_lockout_secs: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -377,6 +390,9 @@ impl Default for Config {
                 login_max_attempts: 5,
                 login_window_secs: 300,
                 login_lockout_secs: 300,
+                token_max_attempts: 60,
+                token_window_secs: 60,
+                token_lockout_secs: 60,
             },
             oidc: OidcConfig {
                 enabled: false,
