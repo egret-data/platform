@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -26,6 +26,9 @@ import * as foldersApi from "@/api/generated/folders/folders";
 import * as databasesApi from "@/api/databases";
 import { ApiError } from "@/api/client";
 import type { DataApiEndpointListItemDto } from "@/api/generated/model";
+// The exact string `RelativeTime` puts in its `title` — imported rather than
+// hardcoded so the assertion does not silently become timezone-dependent.
+import { fullTimestamp } from "@/lib/relativeTime";
 import Endpoints from "@/routes/explore/dataapi/Endpoints";
 
 function mockList(over: Partial<{ data: unknown; isError: boolean; isLoading: boolean; error: unknown }> = {}) {
@@ -33,6 +36,24 @@ function mockList(over: Partial<{ data: unknown; isError: boolean; isLoading: bo
     { data: undefined, isLoading: false, isError: false, error: null, ...over } as unknown as
       ReturnType<typeof api.useDataApiListEndpoints>,
   );
+}
+
+/**
+ * The list mock, but ANSWERING THE `trashed` PARAM — the normal view and the
+ * trash return different rows.
+ *
+ * `mockList` above returns one payload whatever it is asked for, which cannot
+ * distinguish a Trash toggle that re-queries the API from one that only
+ * repaints the same rows: both render the same table. This is the fixture the
+ * trash tests use for that reason.
+ */
+function mockListByView(normal: DataApiEndpointListItemDto[], trashed: DataApiEndpointListItemDto[]) {
+  vi.mocked(api.useDataApiListEndpoints).mockImplementation(((_ws: string, params?: { trashed?: boolean }) => ({
+    data: { status: 200, data: params?.trashed ? trashed : normal },
+    isLoading: false,
+    isError: false,
+    error: null,
+  })) as unknown as typeof api.useDataApiListEndpoints);
 }
 
 function mockFolders(folders: { id: string; name: string }[] = []) {
@@ -90,6 +111,8 @@ const unbookmarkMutateAsync = vi.fn();
 const disableMutateAsync = vi.fn();
 const enableMutateAsync = vi.fn();
 const updateMutateAsync = vi.fn();
+const trashMutateAsync = vi.fn();
+const restoreMutateAsync = vi.fn();
 
 function renderEndpoints() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -147,6 +170,12 @@ beforeEach(() => {
   vi.mocked(api.useDataApiUpdateEndpoint).mockReturnValue(
     { mutateAsync: updateMutateAsync, isPending: false } as unknown as ReturnType<typeof api.useDataApiUpdateEndpoint>,
   );
+  vi.mocked(api.useDataApiTrashEndpoint).mockReturnValue(
+    { mutateAsync: trashMutateAsync, isPending: false } as unknown as ReturnType<typeof api.useDataApiTrashEndpoint>,
+  );
+  vi.mocked(api.useDataApiRestoreEndpoint).mockReturnValue(
+    { mutateAsync: restoreMutateAsync, isPending: false } as unknown as ReturnType<typeof api.useDataApiRestoreEndpoint>,
+  );
   vi.mocked(api.useDataApiListServiceAccounts).mockReturnValue(
     { data: { status: 200, data: [SERVICE_ACCOUNT] }, isLoading: false, isError: false } as unknown as
       ReturnType<typeof api.useDataApiListServiceAccounts>,
@@ -160,8 +189,14 @@ beforeEach(() => {
   // `vi.fn()`s returning `undefined` — give them argument-sensitive fakes so
   // "the right list was invalidated" is distinguishable from
   // "invalidateQueries was called with nothing".
+  // Params-aware, exactly like the real builder (which appends the params
+  // object when there is one). That is what lets the trash tests below assert
+  // the invalidated key is the bare PREFIX — a wrapper that invalidated
+  // `[..., {trashed: true}]` would refresh only the view the user is already
+  // looking at, and the assertion has to be able to see the difference.
   vi.mocked(api.getDataApiListEndpointsQueryKey).mockImplementation(
-    (ws) => ["dataApiListEndpoints", ws] as unknown as ReturnType<typeof api.getDataApiListEndpointsQueryKey>,
+    (ws, params) => (params ? ["dataApiListEndpoints", ws, params] : ["dataApiListEndpoints", ws]) as unknown as
+      ReturnType<typeof api.getDataApiListEndpointsQueryKey>,
   );
   vi.mocked(api.getDataApiGetEndpointQueryKey).mockImplementation(
     (ws, id) => ["dataApiGetEndpoint", ws, id] as unknown as ReturnType<typeof api.getDataApiGetEndpointQueryKey>,
@@ -173,6 +208,8 @@ beforeEach(() => {
   disableMutateAsync.mockResolvedValue({ status: 200, data: {}, headers: new Headers() });
   enableMutateAsync.mockResolvedValue({ status: 200, data: {}, headers: new Headers() });
   updateMutateAsync.mockResolvedValue({ status: 200, data: {}, headers: new Headers() });
+  trashMutateAsync.mockResolvedValue({ status: 200, data: {}, headers: new Headers() });
+  restoreMutateAsync.mockResolvedValue({ status: 200, data: {}, headers: new Headers() });
 
   // `useFolderMutations` (the page's New-folder path) runs a REAL `useMutation`
   // over this automocked fetch fn; without a resolved value it returns
@@ -360,14 +397,19 @@ describe("Endpoints", () => {
     expect(enableMutateAsync).not.toHaveBeenCalled();
   });
 
-  it("row menu Delete opens ConfirmDeleteDialog and calls useDataApiDeleteEndpoint on confirm", async () => {
-    mockList({ data: { status: 200, data: [LOOSE_ROW] } });
+  // Permanent delete is reachable only from the TRASH, so the only route to
+  // this dialog now runs through the Trash view. `LOOSE_ROW`'s id is still what
+  // has to reach the mutation — the dialog is opened from a row, and a dialog
+  // that deleted the wrong one would look identical here.
+  it("Delete permanently opens ConfirmDeleteDialog and calls useDataApiDeleteEndpoint on confirm", async () => {
+    mockListByView([], [LOOSE_ROW]);
     const user = userEvent.setup();
     renderEndpoints();
+    await user.click(screen.getByRole("button", { name: "Trash" }));
     await screen.findByText("Ad hoc query");
 
     await user.click(screen.getByRole("button", { name: "Actions for Ad hoc query" }));
-    await user.click(await screen.findByText("Delete"));
+    await user.click(await screen.findByText("Delete permanently"));
 
     const input = await screen.findByPlaceholderText("delete");
     await user.type(input, "delete");
@@ -743,8 +785,13 @@ describe("Endpoints — facets, row menu and bulk mode", () => {
 
     await user.click(screen.getByRole("button", { name: /actions/i }));
     expect(await screen.findByRole("menuitem", { name: /open/i })).toBeInTheDocument();
-    expect(screen.getByRole("menuitem", { name: /disable/i })).toBeInTheDocument();
-    expect(screen.getByRole("menuitem", { name: /delete/i })).toBeInTheDocument();
+    // `/^disable$/`, not `/disable/`: this row is `live`, so its menu also
+    // carries "Move to Trash / Disable it first", whose accessible name a
+    // loose match now finds too.
+    expect(screen.getByRole("menuitem", { name: /^disable$/i })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: /move to trash/i })).toBeInTheDocument();
+    // Permanent delete is a TRASH action now — see the dedicated test below.
+    expect(screen.queryByRole("menuitem", { name: /delete/i })).not.toBeInTheDocument();
   });
 
   it("offers a bulk action only once rows are selected", async () => {
@@ -756,37 +803,10 @@ describe("Endpoints — facets, row menu and bulk mode", () => {
     await user.click(screen.getByRole("button", { name: "Bulk select" }));
     // Bulk mode is on but nothing is chosen: the action strip must not be there
     // at all, or the table jumps down the moment the mode is entered.
-    expect(screen.queryByRole("button", { name: /delete selected/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /to trash/i })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("checkbox", { name: /select one/i }));
-    expect(screen.getByRole("button", { name: /delete selected/i })).toBeInTheDocument();
-  });
-
-  it("bulk Delete selected deletes every selected row after confirmation", async () => {
-    mockList({
-      data: {
-        status: 200,
-        data: [
-          makeEndpoint({ id: "e1", name: "one", state: "draft" }),
-          makeEndpoint({ id: "e2", name: "two", state: "draft" }),
-        ],
-      },
-    });
-    const user = userEvent.setup();
-    renderEndpoints();
-    await screen.findByText("one");
-
-    await user.click(screen.getByRole("button", { name: "Bulk select" }));
-    await user.click(screen.getByRole("checkbox", { name: "Select all" }));
-    await user.click(screen.getByRole("button", { name: /delete selected/i }));
-
-    await user.type(await screen.findByPlaceholderText("delete"), "delete");
-    await user.click(screen.getByRole("button", { name: /^delete$/i }));
-
-    await waitFor(() => {
-      expect(deleteMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "e1" });
-    });
-    expect(deleteMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "e2" });
+    expect(screen.getByRole("button", { name: /move 1 to trash/i })).toBeInTheDocument();
   });
 });
 
@@ -804,7 +824,7 @@ describe("Endpoints — bulk select only ever reaches rows that are on screen", 
     // delete left behind. `groupByFolder` used to emit no bucket for it, so the
     // row rendered nowhere and "Select all" could sweep in something invisible.
     // It now falls into Uncategorized, so it is visible, selectable, and — with
-    // the user looking straight at it — legitimately deletable.
+    // the user looking straight at it — legitimately actionable.
     mockList({
       data: {
         status: 200,
@@ -826,15 +846,13 @@ describe("Endpoints — bulk select only ever reaches rows that are on screen", 
     // The count must describe what is in front of the user, not the filtered set.
     expect(screen.getByText("2 selected")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /delete selected/i }));
-    await user.type(await screen.findByPlaceholderText("delete"), "delete");
-    await user.click(screen.getByRole("button", { name: /^delete$/i }));
+    await user.click(screen.getByRole("button", { name: /move 2 to trash/i }));
 
     await waitFor(() => {
-      expect(deleteMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "e-shown" });
+      expect(trashMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "e-shown" });
     });
-    expect(deleteMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "e-orphan" });
-    expect(deleteMutateAsync).toHaveBeenCalledTimes(2);
+    expect(trashMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "e-orphan" });
+    expect(trashMutateAsync).toHaveBeenCalledTimes(2);
   });
 
   it("does not select a collapsed folder's rows, which are grouped but not on screen", async () => {
@@ -861,14 +879,12 @@ describe("Endpoints — bulk select only ever reaches rows that are on screen", 
     expect(screen.getByText("1 selected")).toBeInTheDocument();
     expect(screen.queryByRole("checkbox", { name: "Select hidden row" })).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /delete selected/i }));
-    await user.type(await screen.findByPlaceholderText("delete"), "delete");
-    await user.click(screen.getByRole("button", { name: /^delete$/i }));
+    await user.click(screen.getByRole("button", { name: /move 1 to trash/i }));
 
     await waitFor(() => {
-      expect(deleteMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "e-shown" });
+      expect(trashMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "e-shown" });
     });
-    expect(deleteMutateAsync).not.toHaveBeenCalledWith({ workspace: "eng", id: "e-hidden" });
+    expect(trashMutateAsync).not.toHaveBeenCalledWith({ workspace: "eng", id: "e-hidden" });
   });
 });
 
@@ -881,8 +897,12 @@ describe("Endpoints — bulk select only ever reaches rows that are on screen", 
  * re-filter was never the thing under test. Replacing `selectedIds` with
  * `Array.from(selected)` typechecked and left every test green.
  *
- * These reverse the order. The failure they pin is the one this page cannot
- * take back: its bulk action is a hard DELETE, not a move to trash.
+ * These reverse the order. The bulk action is a move to Trash now, not the
+ * hard DELETE it was when these were written — so the failure they pin is
+ * recoverable where it used to be permanent. They are kept, and retargeted,
+ * because what they actually guard is `selectedIds`' re-filter, which is
+ * untouched by that change: acting on a row the user cannot see is the defect,
+ * whatever the action then does.
  */
 describe("Endpoints — a row selected BEFORE it is hidden", () => {
   const HIDDEN = makeEndpoint({ id: "e-hidden", name: "hidden row", folder_id: "f-1" });
@@ -906,12 +926,12 @@ describe("Endpoints — a row selected BEFORE it is hidden", () => {
     expect(screen.queryByText("hidden row")).not.toBeInTheDocument();
 
     expect(screen.queryByText("1 selected")).not.toBeInTheDocument();
-    // The strip renders nothing at zero, so the destructive button goes with it
-    // — there is no way left to act on a row that is not on screen.
-    expect(screen.queryByRole("button", { name: /delete selected/i })).not.toBeInTheDocument();
+    // The strip renders nothing at zero, so the action goes with it — there is
+    // no way left to act on a row that is not on screen.
+    expect(screen.queryByRole("button", { name: /to trash/i })).not.toBeInTheDocument();
   });
 
-  it("deletes only the row still on screen when a selected row is hidden behind it", async () => {
+  it("trashes only the row still on screen when a selected row is hidden behind it", async () => {
     mockList({ data: { status: 200, data: [HIDDEN, SHOWN] } });
     mockFolders([{ id: "f-1", name: "Reporting" }]);
     const user = userEvent.setup();
@@ -926,16 +946,14 @@ describe("Endpoints — a row selected BEFORE it is hidden", () => {
     await user.click(screen.getByRole("button", { name: "Toggle Reporting" }));
     expect(screen.getByText("1 selected")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /delete selected/i }));
-    await user.type(await screen.findByPlaceholderText("delete"), "delete");
-    await user.click(screen.getByRole("button", { name: /^delete$/i }));
+    await user.click(screen.getByRole("button", { name: /move 1 to trash/i }));
 
     await waitFor(() => {
-      expect(deleteMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "e-shown" });
+      expect(trashMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "e-shown" });
     });
-    // The one the user can no longer see must survive.
-    expect(deleteMutateAsync).not.toHaveBeenCalledWith({ workspace: "eng", id: "e-hidden" });
-    expect(deleteMutateAsync).toHaveBeenCalledTimes(1);
+    // The one the user can no longer see must be left alone.
+    expect(trashMutateAsync).not.toHaveBeenCalledWith({ workspace: "eng", id: "e-hidden" });
+    expect(trashMutateAsync).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -952,30 +970,13 @@ describe("Endpoints — the list changing underneath the page", () => {
     );
   }
 
-  it("does not report a bulk delete it never ran when the selection empties behind the dialog", async () => {
-    let rows: DataApiEndpointListItemDto[] = [makeEndpoint({ id: "e1", name: "one", state: "draft" })];
-    mockListDynamic(() => rows);
-    const user = userEvent.setup();
-    const { rerenderTree } = renderEndpoints();
-    await screen.findByText("one");
-
-    await user.click(screen.getByRole("button", { name: "Bulk select" }));
-    await user.click(screen.getByRole("checkbox", { name: "Select one" }));
-    await user.click(screen.getByRole("button", { name: /delete selected/i }));
-    await screen.findByPlaceholderText("delete");
-
-    // A refetch lands while the confirmation sits open and the row is gone.
-    rows = [];
-    rerenderTree();
-
-    await user.type(screen.getByPlaceholderText("delete"), "delete");
-    await user.click(screen.getByRole("button", { name: /^delete$/i }));
-
-    expect(deleteMutateAsync).not.toHaveBeenCalled();
-    // …and above all it must not claim it did something. "Deleted 0 endpoints"
-    // is a success toast over a run that deleted nothing.
-    expect(toast.success).not.toHaveBeenCalled();
-  });
+  // The "selection empties behind the open confirmation" test lived here. It
+  // went with the bulk permanent delete: that dialog was its whole premise —
+  // the race needed a step that stayed open across renders, and bulk Move to
+  // Trash fires straight from the click against THIS render's `selectedIds`.
+  // `doBulkTrash` keeps the `ids.length === 0` guard as defence, but there is
+  // no longer a way to drive it, and a test that cannot reach the code it
+  // names is worse than none.
 
   it("leaves bulk mode behind when the last endpoint goes, so the checkbox column does not return with the next one", async () => {
     let rows: DataApiEndpointListItemDto[] = [makeEndpoint({ id: "e1", name: "one", state: "draft" })];
@@ -1424,5 +1425,463 @@ describe("Endpoints — folders", () => {
 
     await waitFor(() => expect(toast.error).toHaveBeenCalled());
     expect(toast.success).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The trash (P6, task 4).
+ *
+ * Two things make these tests able to fail, and both were deliberate:
+ *
+ *  - the fixture answers the `trashed` PARAM (`mockListByView`), so a toggle
+ *    that repaints the same rows instead of re-querying is visible; and
+ *  - every fixture that exercises the live-state guard carries a `live` row AND
+ *    a non-`live` one. With only a `live` row, "Move to Trash is disabled" is
+ *    equally satisfied by an implementation that disables it for everything —
+ *    the two are literally the same rendering.
+ *
+ * Payloads, never call counts: `expect(mock).toHaveBeenCalled()` is true when
+ * the wrong row's id was sent, which on a Restore is the difference between
+ * bringing back the endpoint the author clicked and bringing back another one.
+ */
+describe("Endpoints — trash", () => {
+  const LIVE_ROW = makeEndpoint({ id: "ep-live", name: "Live report", state: "live", live_version_id: "v-1" });
+  const DRAFT_ROW = makeEndpoint({ id: "ep-draft", name: "Draft report", state: "draft" });
+  const TRASHED_A = makeEndpoint({
+    id: "ep-trash-a", name: "Trashed alpha", state: "disabled", live_version_id: "v-9",
+    deleted_at: "2026-08-18T09:00:00Z",
+  } as Partial<DataApiEndpointListItemDto>);
+  const TRASHED_B = makeEndpoint({
+    id: "ep-trash-b", name: "Trashed beta", state: "draft",
+    deleted_at: "2026-08-18T10:00:00Z",
+  } as Partial<DataApiEndpointListItemDto>);
+
+  it("asks the API for the trashed LIST, rather than filtering the live one", async () => {
+    mockListByView([DRAFT_ROW], [TRASHED_A]);
+    const user = userEvent.setup();
+    renderEndpoints();
+    await screen.findByText("Draft report");
+
+    // The default view is an explicit `trashed: false`, not an absent param:
+    // the two views have to be separate cache entries or the toggle would
+    // serve one from the other.
+    expect(api.useDataApiListEndpoints).toHaveBeenCalledWith("eng", { trashed: false });
+    expect(api.useDataApiListEndpoints).not.toHaveBeenCalledWith("eng", { trashed: true });
+
+    await user.click(screen.getByRole("button", { name: "Trash" }));
+
+    expect(api.useDataApiListEndpoints).toHaveBeenCalledWith("eng", { trashed: true });
+    // …and the rows really are the other list's, not the same ones relabelled.
+    expect(await screen.findByText("Trashed alpha")).toBeInTheDocument();
+    expect(screen.queryByText("Draft report")).not.toBeInTheDocument();
+  });
+
+  it("renames the page's h1 to Trash, and the toggle reports itself pressed", async () => {
+    mockListByView([DRAFT_ROW], [TRASHED_A]);
+    const user = userEvent.setup();
+    renderEndpoints();
+    await screen.findByText("Draft report");
+    expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("Endpoints");
+
+    await user.click(screen.getByRole("button", { name: "Trash" }));
+
+    expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("Trash");
+    // `aria-pressed` is the whole reason this toggle uses `ListToolbarButton`
+    // rather than a fifth hand-written Button+Tooltip pair.
+    expect(screen.getByRole("button", { name: "Trash" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("drops the star, the bulk toggle, the folder control and + Endpoint in the trash", async () => {
+    mockListByView([DRAFT_ROW], [TRASHED_A]);
+    const user = userEvent.setup();
+    renderEndpoints();
+    // All four are present in the normal view — otherwise their absence in the
+    // trash would prove nothing about the trash.
+    expect(await screen.findByRole("button", { name: "Bookmark Draft report" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Bulk select" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "New folder" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "+ Endpoint" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Trash" }));
+    await screen.findByText("Trashed alpha");
+
+    expect(screen.queryByRole("button", { name: /^Bookmark / })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Bulk select" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "New folder" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "+ Endpoint" })).not.toBeInTheDocument();
+    // The Bookmarks FILTER goes with them; so do the two facets.
+    expect(screen.queryByRole("button", { name: "Bookmarks" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "State" })).not.toBeInTheDocument();
+  });
+
+  it("leaves the checkbox column behind even if bulk mode was on when the trash was opened", async () => {
+    mockListByView([DRAFT_ROW], [TRASHED_A]);
+    const user = userEvent.setup();
+    renderEndpoints();
+    await screen.findByText("Draft report");
+
+    await user.click(screen.getByRole("button", { name: "Bulk select" }));
+    expect(screen.getByRole("checkbox", { name: "Select all" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Trash" }));
+    await screen.findByText("Trashed alpha");
+    // A `bulkMode` left true here would strand a checkbox column whose only
+    // OFF switch is a toggle the trash does not render.
+    expect(screen.queryByRole("checkbox", { name: "Select all" })).not.toBeInTheDocument();
+  });
+
+  it("keeps the way OUT of an empty trash", async () => {
+    mockListByView([DRAFT_ROW], []);
+    const user = userEvent.setup();
+    renderEndpoints();
+    await screen.findByText("Draft report");
+
+    await user.click(screen.getByRole("button", { name: "Trash" }));
+
+    expect(await screen.findByText("Trash is empty.")).toBeInTheDocument();
+    // The toolbar is gated on `hasData` for filters — the Trash toggle is not,
+    // or it would vanish exactly when it is the only control left.
+    expect(screen.getByRole("button", { name: "Trash" })).toBeInTheDocument();
+    // And an empty trash is not a first-run workspace.
+    expect(screen.queryByText(/no endpoints yet/i)).not.toBeInTheDocument();
+  });
+
+  /**
+   * The Trash's last column, pinned two ways: the HEADER it is under, and the
+   * timestamp the CELL renders.
+   *
+   * Neither half was covered, and the gap was not theoretical — an
+   * implementation that kept rendering `updated_at` under a `Trashed` heading
+   * passed all 237 tests in the frontend suite. That is why the fixture's two
+   * timestamps must differ: `TRASHED_A` was last edited on Aug 10 and trashed on
+   * Aug 18, so a cell reading the wrong field renders a visibly different value
+   * rather than the same one by luck.
+   */
+  it("the Trash's last column is Trashed, and it renders deleted_at rather than updated_at", async () => {
+    mockListByView([DRAFT_ROW], [TRASHED_A]);
+    const user = userEvent.setup();
+    renderEndpoints();
+    await screen.findByText("Draft report");
+    // The normal view first, so the swap below is a swap rather than the only
+    // column this page has ever rendered.
+    expect(screen.getByText("Last edited")).toBeInTheDocument();
+    expect(screen.queryByText("Trashed")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Trash" }));
+    const row = (await screen.findByText("Trashed alpha")).closest("tr");
+    expect(row).not.toBeNull();
+
+    expect(screen.getByText("Trashed")).toBeInTheDocument();
+    expect(screen.queryByText("Last edited")).not.toBeInTheDocument();
+    // `deleted_at` is on screen…
+    expect(
+      within(row as HTMLElement).getByTitle(fullTimestamp("2026-08-18T09:00:00Z")),
+    ).toBeInTheDocument();
+    // …and `updated_at` is NOT. Without this half, a cell rendering both — or
+    // the wrong one under a right-looking header — still passes.
+    expect(
+      within(row as HTMLElement).queryByTitle(fullTimestamp("2026-08-10T00:00:00Z")),
+    ).not.toBeInTheDocument();
+  });
+
+  /**
+   * The Trash is ordered by the column it SHOWS.
+   *
+   * The two rows are built to disagree: alpha was edited more recently but
+   * trashed first, beta was edited long ago but trashed last. Under the old
+   * default (`updated_at`, desc, carried unchanged into the trash) the order was
+   * alpha-then-beta while the visible Trashed column read 09:00 above 10:00 —
+   * a table sorted by a column that is not on screen, and therefore an order the
+   * author cannot argue with. Any fixture where the two agree would pass either
+   * way.
+   */
+  it("sorts the Trash by when rows were trashed, not by when they were last edited", async () => {
+    const EDITED_LAST_TRASHED_FIRST = makeEndpoint({
+      id: "ep-trash-a", name: "Trashed alpha", state: "draft",
+      updated_at: "2026-08-17T00:00:00Z", deleted_at: "2026-08-18T09:00:00Z",
+    } as Partial<DataApiEndpointListItemDto>);
+    const EDITED_FIRST_TRASHED_LAST = makeEndpoint({
+      id: "ep-trash-b", name: "Trashed beta", state: "draft",
+      updated_at: "2026-07-01T00:00:00Z", deleted_at: "2026-08-18T10:00:00Z",
+    } as Partial<DataApiEndpointListItemDto>);
+    // Server order is the WRONG order, so a page that merely passes the payload
+    // through fails rather than coincidentally agreeing.
+    mockListByView([DRAFT_ROW], [EDITED_LAST_TRASHED_FIRST, EDITED_FIRST_TRASHED_LAST]);
+    const user = userEvent.setup();
+    renderEndpoints();
+    await screen.findByText("Draft report");
+
+    await user.click(screen.getByRole("button", { name: "Trash" }));
+    await screen.findByText("Trashed beta");
+
+    const names = () =>
+      screen
+        .getAllByRole("row")
+        .slice(1)
+        .map((r) => within(r).getByRole("link").textContent);
+    // Most recently trashed first — the reverse of `updated_at` desc, which is
+    // what the page used to do here.
+    expect(names()).toEqual(["Trashed beta", "Trashed alpha"]);
+    // And the header says so, rather than the order being an accident of the
+    // payload: `aria-sort` sits on the column the rows are actually ordered by.
+    expect(screen.getByText("Trashed").closest("th")).toHaveAttribute("aria-sort", "descending");
+
+    // The header drives the same key it advertises — clicking it reverses the
+    // order it claims, which a decorative `aria-sort` would not.
+    await user.click(screen.getByText("Trashed"));
+    expect(names()).toEqual(["Trashed alpha", "Trashed beta"]);
+    expect(screen.getByText("Trashed").closest("th")).toHaveAttribute("aria-sort", "ascending");
+
+    // Leaving the trash hands the sort back to the column THAT view displays —
+    // a `deleted_at` sort stranded on the normal list is the same defect
+    // mirrored, and no header there would own it.
+    await user.click(screen.getByRole("button", { name: "Trash" }));
+    await screen.findByText("Draft report");
+    expect(screen.getByText("Last edited").closest("th")).toHaveAttribute("aria-sort", "descending");
+  });
+
+  it("Restore sends the id of the row whose menu was used, not the first row's", async () => {
+    mockListByView([DRAFT_ROW], [TRASHED_A, TRASHED_B]);
+    const user = userEvent.setup();
+    renderEndpoints();
+    await user.click(screen.getByRole("button", { name: "Trash" }));
+    await screen.findByText("Trashed beta");
+
+    await user.click(screen.getByRole("button", { name: "Actions for Trashed beta" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Restore" }));
+
+    // The PAYLOAD. Two trashed rows exist precisely so a hard-coded or
+    // first-row id is a failure rather than a coincidence.
+    await waitFor(() => {
+      expect(restoreMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "ep-trash-b" });
+    });
+    expect(restoreMutateAsync).not.toHaveBeenCalledWith({ workspace: "eng", id: "ep-trash-a" });
+    // Restore returns the endpoint as `disabled`, never as whatever it was
+    // before; the toast is where the author is told so.
+    await waitFor(() => {
+      expect(vi.mocked(toast.success)).toHaveBeenCalledWith("Endpoint restored as disabled");
+    });
+  });
+
+  it("offers Restore and Delete permanently in the trash, and none of the live actions", async () => {
+    mockListByView([DRAFT_ROW], [TRASHED_A]);
+    const user = userEvent.setup();
+    renderEndpoints();
+    await user.click(screen.getByRole("button", { name: "Trash" }));
+    await screen.findByText("Trashed alpha");
+
+    await user.click(screen.getByRole("button", { name: "Actions for Trashed alpha" }));
+    expect(await screen.findByRole("menuitem", { name: "Restore" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "Delete permanently" })).toBeInTheDocument();
+    // `TRASHED_A` is `disabled` WITH a `live_version_id`, so in the normal view
+    // its menu would offer a clickable Enable — task 3 made that a 409 for a
+    // trashed endpoint, so it must not be offered here.
+    expect(screen.queryByRole("menuitem", { name: /^enable$/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: /move to trash/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: /^open$/i })).not.toBeInTheDocument();
+  });
+
+  /**
+   * Permanent delete belongs to the trash and to nowhere else — the same shape
+   * as `DatasetActionsMenu`, and the reason the whole phase exists. Offered
+   * beside Move to Trash it let an author destroy a served URL and its version
+   * history without passing through the trash at all, and since trash REFUSES
+   * a `live` endpoint it was the easier of the two paths on exactly the rows
+   * where it is most destructive.
+   *
+   * BOTH halves are in one test on purpose. "Delete permanently is in the trash
+   * menu" is satisfied by an implementation that puts it in every menu, so the
+   * absence assertions are what carry the claim — and they run over a `live`
+   * row AND a `draft` row, because an item removed for only one state would
+   * otherwise pass.
+   */
+  it("offers permanent delete ONLY from the trash — not from a live row, not from a draft one", async () => {
+    mockListByView([LIVE_ROW, DRAFT_ROW], [TRASHED_A]);
+    const user = userEvent.setup();
+    renderEndpoints();
+    await screen.findByText("Live report");
+
+    await user.click(screen.getByRole("button", { name: "Actions for Live report" }));
+    // `/delete/i`, deliberately loose: it also catches a "Delete permanently"
+    // leaking into the live menu, which an anchored `/^delete$/` would miss.
+    expect(await screen.findByRole("menuitem", { name: /move to trash/i })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: /delete/i })).not.toBeInTheDocument();
+
+    await user.keyboard("{Escape}");
+    await user.click(screen.getByRole("button", { name: "Actions for Draft report" }));
+    expect(await screen.findByRole("menuitem", { name: /move to trash/i })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: /delete/i })).not.toBeInTheDocument();
+
+    await user.keyboard("{Escape}");
+    await user.click(screen.getByRole("button", { name: "Trash" }));
+    await screen.findByText("Trashed alpha");
+    await user.click(screen.getByRole("button", { name: "Actions for Trashed alpha" }));
+    expect(await screen.findByRole("menuitem", { name: "Delete permanently" })).toBeInTheDocument();
+  });
+
+  it("disables Move to Trash for a live row and says why, while the draft beside it can be trashed", async () => {
+    // ONE fixture, BOTH states. With only the live row, an implementation that
+    // disables Move to Trash unconditionally renders identically.
+    mockListByView([LIVE_ROW, DRAFT_ROW], []);
+    const user = userEvent.setup();
+    renderEndpoints();
+    await screen.findByText("Live report");
+
+    await user.click(screen.getByRole("button", { name: "Actions for Live report" }));
+    const blocked = await screen.findByRole("menuitem", { name: /move to trash/i });
+    expect(blocked).toHaveAttribute("aria-disabled", "true");
+    // Visible, not a `title` — the rule is only taught if it is on screen.
+    expect(screen.getByText("Disable it first")).toBeInTheDocument();
+    // Disabled, so nothing is sent even in jsdom, where the CSS that blocks
+    // the click does not apply.
+    await user.click(blocked);
+    expect(trashMutateAsync).not.toHaveBeenCalled();
+
+    await user.keyboard("{Escape}");
+    await user.click(screen.getByRole("button", { name: "Actions for Draft report" }));
+    const allowed = await screen.findByRole("menuitem", { name: /move to trash/i });
+    expect(allowed).not.toHaveAttribute("aria-disabled", "true");
+    expect(screen.queryByText("Disable it first")).not.toBeInTheDocument();
+
+    await user.click(allowed);
+    await waitFor(() => {
+      expect(trashMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "ep-draft" });
+    });
+    expect(trashMutateAsync).not.toHaveBeenCalledWith({ workspace: "eng", id: "ep-live" });
+  });
+
+  it("disables bulk Move to Trash while a live row is selected, and says how many", async () => {
+    mockListByView([LIVE_ROW, DRAFT_ROW], []);
+    const user = userEvent.setup();
+    renderEndpoints();
+    await screen.findByText("Live report");
+
+    await user.click(screen.getByRole("button", { name: "Bulk select" }));
+    await user.click(screen.getByRole("checkbox", { name: "Select Draft report" }));
+    // Draft only: the action is live, which is what makes the next assertion
+    // about the live row mean something.
+    expect(screen.getByRole("button", { name: /move 1 to trash/i })).toBeEnabled();
+
+    await user.click(screen.getByRole("checkbox", { name: "Select Live report" }));
+    expect(screen.getByRole("button", { name: /move 2 to trash/i })).toBeDisabled();
+    // The COUNT, so the author knows how much of the selection to go and disable.
+    expect(screen.getByText("1 live — disable it first")).toBeInTheDocument();
+
+    // Un-select the live row and the action comes back — a guard that latched
+    // would pass every assertion above.
+    await user.click(screen.getByRole("checkbox", { name: "Select Live report" }));
+    await user.click(screen.getByRole("button", { name: /move 1 to trash/i }));
+    await waitFor(() => {
+      expect(trashMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "ep-draft" });
+    });
+    expect(trashMutateAsync).not.toHaveBeenCalledWith({ workspace: "eng", id: "ep-live" });
+    expect(trashMutateAsync).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * Move to Trash is the ONLY bulk action, the same as `Datasets.tsx`,
+   * `Charts.tsx` and `Dashboards.tsx`.
+   *
+   * A bulk permanent delete used to sit beside it and undid single-row
+   * deletion's whole reason for moving behind the trash — it destroyed served
+   * URLs and their published version history in one click, `live` rows
+   * included. This pins its absence rather than trusting the edit: the strip is
+   * exactly where it would come back, and it came back once already in the form
+   * of the row menu's `Delete`.
+   *
+   * Asserted as "no destructive-delete control in the strip", not as "the
+   * button named `Delete selected` is gone" — the latter passes against a
+   * re-added button called anything else.
+   */
+  it("offers Move to Trash and no permanent delete as a bulk action", async () => {
+    mockListByView([DRAFT_ROW, makeEndpoint({ id: "ep-d2", name: "Second draft", state: "draft" })], []);
+    const user = userEvent.setup();
+    renderEndpoints();
+    await screen.findByText("Second draft");
+
+    await user.click(screen.getByRole("button", { name: "Bulk select" }));
+    await user.click(screen.getByRole("checkbox", { name: "Select all" }));
+
+    expect(screen.getByText("2 selected")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /move 2 to trash/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /delete/i })).not.toBeInTheDocument();
+    // And no confirmation dialog is waiting behind one either.
+    expect(screen.queryByPlaceholderText("delete")).not.toBeInTheDocument();
+  });
+
+  it("bulk Move to Trash trashes every selected row and reports the number", async () => {
+    const D2 = makeEndpoint({ id: "ep-draft-2", name: "Second draft", state: "draft" });
+    mockListByView([DRAFT_ROW, D2], []);
+    const user = userEvent.setup();
+    renderEndpoints();
+    await screen.findByText("Second draft");
+
+    await user.click(screen.getByRole("button", { name: "Bulk select" }));
+    await user.click(screen.getByRole("checkbox", { name: "Select all" }));
+    await user.click(screen.getByRole("button", { name: /move 2 to trash/i }));
+
+    await waitFor(() => {
+      expect(trashMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "ep-draft" });
+    });
+    expect(trashMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "ep-draft-2" });
+    await waitFor(() => {
+      expect(vi.mocked(toast.success)).toHaveBeenCalledWith("Moved 2 endpoints to Trash");
+    });
+  });
+
+  /**
+   * Invalidation, driven through the `onSuccess` `src/api/dataApi.ts` attaches
+   * — the same way the `cache invalidation` block above pins the others.
+   *
+   * The key asserted is the bare PREFIX, with no params object. That is the
+   * load-bearing part: react-query matches by prefix, so `["…", ws]` reaches
+   * BOTH `["…", ws]` (the normal list) and `["…", ws, {trashed: true}]` (the
+   * trash), while the parameterised key would reach only one of them. A
+   * restore that refreshed only the trash would leave the restored endpoint
+   * invisible in the list it was restored INTO until a full reload.
+   */
+  const INVALIDATION_RESULT = { status: 200, data: {}, headers: new Headers() } as never;
+  async function fireSuccessOn(hook: { mock: { calls: unknown[][] } }, variables: Record<string, unknown>) {
+    const opts = hook.mock.calls.at(-1)?.[0] as
+      | { mutation?: { onSuccess?: (...a: never[]) => unknown } }
+      | undefined;
+    await opts?.mutation?.onSuccess?.(
+      INVALIDATION_RESULT, variables as never, undefined as never, undefined as never,
+    );
+  }
+
+  it("Trash invalidates BOTH lists, so the row leaves one view and appears in the other", async () => {
+    mockListByView([DRAFT_ROW], []);
+    const { qc } = renderEndpoints();
+    await screen.findByText("Draft report");
+    const spy = vi.spyOn(qc, "invalidateQueries");
+    await fireSuccessOn(vi.mocked(api.useDataApiTrashEndpoint), { workspace: "eng", id: "ep-draft" });
+    expect(spy).toHaveBeenCalledWith(
+      expect.objectContaining({ queryKey: ["dataApiListEndpoints", "eng"] }),
+    );
+    // The endpoint RECORD too: a detail tab open on it must not keep claiming
+    // the endpoint is present and editable.
+    expect(spy).toHaveBeenCalledWith(
+      expect.objectContaining({ queryKey: ["dataApiGetEndpoint", "eng", "ep-draft"] }),
+    );
+  });
+
+  it("Restore invalidates BOTH lists, so the restored row is not stuck in the trash", async () => {
+    mockListByView([], [TRASHED_A]);
+    const user = userEvent.setup();
+    const { qc } = renderEndpoints();
+    // The restore mutation is constructed per rendered ROW, so the row has to
+    // be on screen or `fireSuccessOn` fires nothing and the test passes empty.
+    await user.click(screen.getByRole("button", { name: "Trash" }));
+    await screen.findByText("Trashed alpha");
+
+    const spy = vi.spyOn(qc, "invalidateQueries");
+    await fireSuccessOn(vi.mocked(api.useDataApiRestoreEndpoint), { workspace: "eng", id: "ep-trash-a" });
+    expect(spy).toHaveBeenCalledWith(
+      expect.objectContaining({ queryKey: ["dataApiListEndpoints", "eng"] }),
+    );
+    expect(spy).toHaveBeenCalledWith(
+      expect.objectContaining({ queryKey: ["dataApiGetEndpoint", "eng", "ep-trash-a"] }),
+    );
   });
 });

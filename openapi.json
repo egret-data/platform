@@ -14553,6 +14553,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "trashed",
+            "in": "query",
+            "description": "List only trashed endpoints when true; only untrashed ones when absent or false",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
           }
         ],
         "responses": {
@@ -14972,7 +14981,7 @@
             }
           },
           "409": {
-            "description": "Another endpoint already serves that method and path",
+            "description": "Another endpoint already serves that method and path, or the endpoint is in the trash — restore it before editing it",
             "content": {
               "application/json": {
                 "schema": {
@@ -15246,6 +15255,16 @@
               }
             }
           },
+          "409": {
+            "description": "The endpoint is in the trash — restore it first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal error",
             "content": {
@@ -15337,7 +15356,7 @@
             }
           },
           "409": {
-            "description": "The endpoint has never been published, so there is nothing to serve",
+            "description": "The endpoint has never been published, so there is nothing to serve, or it is in the trash — restore it first",
             "content": {
               "application/json": {
                 "schema": {
@@ -15853,7 +15872,108 @@
             }
           },
           "409": {
-            "description": "The draft was edited while it was being published",
+            "description": "The draft was edited while it was being published, or the endpoint is in the trash — restore it first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/data-api/endpoints/{id}/restore": {
+      "post": {
+        "tags": [
+          "data-api"
+        ],
+        "summary": "The other half of `trash`, and the reason trash keeps the invoke grants and the\nlive version pointer: without this route that promise is unfalsifiable.",
+        "description": "Comes back `disabled`, never `live`. See [`EndpointStore::restore`].",
+        "operationId": "restore_endpoint",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Endpoint id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Endpoint restored from the trash, `disabled` — never straight back to serving",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataApiEndpointDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing data_api_endpoint:manage permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such endpoint in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The endpoint is not in the trash",
             "content": {
               "application/json": {
                 "schema": {
@@ -15963,6 +16083,115 @@
           },
           "404": {
             "description": "No such endpoint here, or no such version OF THIS ENDPOINT",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The endpoint is in the trash — restore it before changing which version it serves",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/data-api/endpoints/{id}/trash": {
+      "post": {
+        "tags": [
+          "data-api"
+        ],
+        "operationId": "trash_endpoint",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Endpoint id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Endpoint moved to the trash. Reversible: the row, its published versions and its invoke grants are all kept.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataApiEndpointDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing data_api_endpoint:manage permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such endpoint in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The endpoint is live — disable it first, so trashing can never take a served URL off the internet by surprise",
             "content": {
               "application/json": {
                 "schema": {
@@ -28434,6 +28663,14 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "deleted_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When this endpoint was moved to the trash, or `null` if it is live in the\nauthoring sense — present, listed, editable.\n\nOn the DTO rather than a bare `trashed: bool` because WHEN it was trashed\nis what a \"Trash\" screen sorts and ages by, and because the column itself\nis the timestamp — a boolean projection here would be a second\nrepresentation of the same fact for the frontend to disagree with. The\nschema's `CHECK (deleted_at IS NULL OR state <> 'live')` (migration 0126)\nmeans a non-null value here can never coexist with `state = \"live\"`."
           }
         }
       },

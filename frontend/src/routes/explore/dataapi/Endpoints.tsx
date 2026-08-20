@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { Search, Webhook } from "lucide-react";
+import { Search, Trash2, Webhook } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -18,6 +18,7 @@ import { ListStates } from "@/components/explore/ListStates";
 import { EmptyState } from "@/components/explore/EmptyState";
 import { BulkToggle, BulkBar } from "@/components/explore/BulkBar";
 import { BookmarkToggle, BookmarkStar } from "@/components/explore/BookmarkToggle";
+import { ListToolbarButton } from "@/components/explore/ListToolbarButton";
 import { FacetSelect, FACET_ALL } from "@/components/explore/FacetSelect";
 import { useBulkSelect } from "@/hooks/useBulkSelect";
 import { groupByFolder, useCollapsed } from "@/components/explore/folders";
@@ -29,7 +30,7 @@ import { useDataApiListEndpoints } from "@/api/generated/data-api/data-api";
 // the wrapper is what owns the cache invalidation (see `src/api/dataApi.ts`).
 // Wired to the generated hook directly, "Endpoint disabled" toasts over a row
 // whose badge still reads Live for the next 30 seconds.
-import { useBookmarkEndpoint, useDeleteEndpoint, useUnbookmarkEndpoint, useUpdateEndpoint } from "@/api/dataApi";
+import { useBookmarkEndpoint, useDeleteEndpoint, useTrashEndpoint, useUnbookmarkEndpoint, useUpdateEndpoint } from "@/api/dataApi";
 import type { DataApiEndpointDto, DataApiEndpointListItemDto } from "@/api/generated/model";
 import { DownloadOpenApiDialog } from "./DownloadOpenApiDialog";
 import { EndpointActionsMenu } from "./EndpointActionsMenu";
@@ -42,7 +43,23 @@ const FOLDER_KIND = "data_api_endpoints";
 /** `useCollapsed`'s key for the folderless group (`groupByFolder`'s `folder: null`). */
 const UNCATEGORIZED_KEY = "__uncat__";
 
-type SortKey = "name" | "state" | "updated_at";
+/**
+ * `deleted_at` is a sort key and not merely a column because the Trash is sorted
+ * by the timestamp it SHOWS. The two views render different last columns —
+ * `updated_at` (Last edited) in the normal list, `deleted_at` (Trashed) in the
+ * trash — and leaving the trash on `updated_at` produced a table whose visible
+ * timestamps disagreed with its own row order: trash A (edited Aug 1) at 10:00,
+ * then B (edited Jul 1) at 11:00, and A sorted above B while the column said
+ * the opposite. An invisible sort key is unarguable-with, which is worse than a
+ * wrong one you can click.
+ */
+type SortKey = "name" | "state" | "updated_at" | "deleted_at";
+
+/** The default sort for each view — the column that view actually displays. */
+const DEFAULT_SORT: Record<"list" | "trash", SortState<SortKey>> = {
+  list: { key: "updated_at", dir: "desc" },
+  trash: { key: "deleted_at", dir: "desc" },
+};
 
 // live is the only state that earns emphasis (--highlight is reserved for a
 // page's single primary accent, not a state chip) — draft and disabled both
@@ -83,7 +100,15 @@ function stateBadgeLabel(e: DataApiEndpointDto): string {
 export default function Endpoints() {
   const ws = useParams().workspace!;
 
-  const { data: envelope, isLoading, isError, error } = useDataApiListEndpoints(ws);
+  /**
+   * Which of the TWO lists this page is showing. Not a filter over one list:
+   * `GET /endpoints` excludes trashed rows by default and returns only trashed
+   * ones under `?trashed=true`, so the two views are different server queries
+   * with different cache entries.
+   */
+  const [showTrash, setShowTrash] = useState(false);
+
+  const { data: envelope, isLoading, isError, error } = useDataApiListEndpoints(ws, { trashed: showTrash });
   // useMemo (not a plain ternary) so a falsy envelope doesn't hand `rows`'
   // useMemo a fresh `[]` identity on every render.
   const endpoints = useMemo(() => (envelope?.status === 200 ? envelope.data : []), [envelope]);
@@ -94,6 +119,10 @@ export default function Endpoints() {
   const { data: databases } = useDatabases(ws);
 
   const deleteMutation = useDeleteEndpoint();
+  // The page's own trash mutation, used ONLY by the bulk action — a row's own
+  // Move to Trash is fired by `EndpointActionsMenu`'s instance, so `isPending`
+  // there stays scoped to the row that was clicked.
+  const trashMutation = useTrashEndpoint();
   // Two mutations, one control: which of them a star fires is decided per row
   // from that row's own `bookmarked`, never from a page-level "mode".
   const bookmarkMutation = useBookmarkEndpoint();
@@ -143,10 +172,9 @@ export default function Endpoints() {
    * to its old state until the list lands.
    */
   const [bookmarkOverride, setBookmarkOverride] = useState<Record<string, boolean>>({});
-  const [sort, setSort] = useState<SortState<SortKey>>({ key: "updated_at", dir: "desc" });
+  const [sort, setSort] = useState<SortState<SortKey>>(DEFAULT_SORT.list);
   const [downloadOpen, setDownloadOpen] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<DataApiEndpointDto | null>(null);
-  const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
   /**
    * The folder-name dialog, in one of two modes.
    *
@@ -186,6 +214,11 @@ export default function Endpoints() {
       let cmp: number;
       if (sort.key === "name") cmp = a.name.localeCompare(b.name);
       else if (sort.key === "state") cmp = a.state.localeCompare(b.state);
+      // `?? ""` and not a non-null assertion: `deleted_at` is nullable on the
+      // DTO, and the cell above already renders "—" for a trash row that
+      // somehow arrived without one. Sorting must not throw where the table
+      // renders.
+      else if (sort.key === "deleted_at") cmp = (a.deleted_at ?? "").localeCompare(b.deleted_at ?? "");
       else cmp = a.updated_at.localeCompare(b.updated_at);
       return sort.dir === "asc" ? cmp : -cmp;
     });
@@ -206,8 +239,13 @@ export default function Endpoints() {
    * be reading.
    */
   const visibleRows = useMemo(
-    () => groups.flatMap((g) => (collapse.isCollapsed(g.folder?.id ?? UNCATEGORIZED_KEY) ? [] : g.rows)),
-    [groups, collapse],
+    () =>
+      // The trash is a flat table — no folder headers, so nothing is collapsed
+      // and `rows` IS what is on screen.
+      showTrash
+        ? rows
+        : groups.flatMap((g) => (collapse.isCollapsed(g.folder?.id ?? UNCATEGORIZED_KEY) ? [] : g.rows)),
+    [showTrash, rows, groups, collapse],
   );
 
   // One list behind both the count and the delete: `bulk.selectedIds` is
@@ -220,6 +258,34 @@ export default function Endpoints() {
   }
   function toggleStateFilter(s: string) {
     setStateFilter((f) => (f === s ? null : s));
+  }
+
+  /**
+   * Enter or leave the trash, clearing every control the trash view does not
+   * render.
+   *
+   * A filter left engaged behind a control that is no longer on screen is the
+   * worst kind: the trash would render "No endpoints match the current
+   * filters" over rows that are genuinely there, with nothing visible to
+   * un-set. Bulk mode is dropped for the same reason — its toggle is gone, so
+   * a `bulkMode` left true would strand a checkbox column the user cannot
+   * dismiss (the same failure the `hasData` effect below exists to prevent).
+   */
+  function toggleTrash() {
+    const next = !showTrash;
+    setShowTrash(next);
+    // Both directions, unconditionally. The sort has to follow the view because
+    // the two views do not render the same last column — see `DEFAULT_SORT`.
+    // Resetting only on the way IN would strand a trash sort (`deleted_at`) on
+    // the normal list, where no header claims it, which is the same defect
+    // mirrored.
+    setSort(next ? DEFAULT_SORT.trash : DEFAULT_SORT.list);
+    if (next) {
+      setOnlyBookmarked(false);
+      setStateFilter(null);
+      setEngineFilter(null);
+      bulk.setBulkMode(false);
+    }
   }
 
   const hasData = endpoints.length > 0;
@@ -252,29 +318,53 @@ export default function Endpoints() {
     );
   }, [databases]);
 
-  async function doBulkDelete() {
+  /**
+   * The selected rows that are `live`, and therefore cannot be trashed.
+   *
+   * Bulk Move to Trash is offered only when this is empty. Trashing the rest
+   * and leaving the author to work out which ones silently failed is the
+   * behaviour this replaces: a run over a mixed selection would half-succeed,
+   * and the toast could only report a number.
+   */
+  const liveSelected = useMemo(
+    () => visibleRows.filter((e) => bulk.selected.has(e.id) && e.state === "live"),
+    [visibleRows, bulk.selected],
+  );
+
+  async function doBulkTrash() {
     // The same `selectedIds` the BulkBar counted — this closure holds THIS
     // render's `bulk`, so the array cannot change under the loop.
     const ids = bulk.selectedIds;
-    // The dialog is open across renders, and `selectedIds` is re-derived from
-    // the visible rows on each one — a refetch that drops the selected rows (or
-    // a folder collapsed behind the dialog) can empty it between "Delete
-    // selected" and the confirm click. Without this the run does nothing and
-    // then claims "Deleted 0 endpoints".
-    if (ids.length === 0) {
+    // Both guards are defence, not decoration. `selectedIds` is re-derived from
+    // the visible rows every render, so it can empty out under a refetch; and
+    // the liveness re-check is not redundant with the disabled button, because
+    // a refetch can move a row into `live` while the selection stands. A run
+    // that does nothing and then toasts "Moved 0 endpoints to Trash" would be
+    // worse than one that fails.
+    if (ids.length === 0 || liveSelected.length > 0) {
+      // Saying nothing here was the bug. From the author's side the button was
+      // enabled, they clicked it, and N rows silently stayed put — no toast, no
+      // selection, nothing to act on. Not claiming a false "Moved 0 to Trash"
+      // was right; being silent about it was not, so each of the two re-checks
+      // reports the reason it tripped and what to do about it.
+      toast.error(
+        liveSelected.length > 0
+          ? `Nothing moved — ${liveSelected.length} of the selected endpoint${liveSelected.length === 1 ? " is" : "s are"} now live. Disable ${liveSelected.length === 1 ? "it" : "them"} first.`
+          : "Nothing moved — the selected endpoints are no longer on this page. Select them again.",
+      );
       bulk.clear();
       return;
     }
     let failed = 0;
     for (const id of ids) {
       try {
-        await deleteMutation.mutateAsync({ workspace: ws, id });
+        await trashMutation.mutateAsync({ workspace: ws, id });
       } catch (err) {
         failed += 1;
         toast.error(String(err));
       }
     }
-    if (failed === 0) toast.success(`Deleted ${ids.length} endpoint${ids.length === 1 ? "" : "s"}`);
+    if (failed === 0) toast.success(`Moved ${ids.length} endpoint${ids.length === 1 ? "" : "s"} to Trash`);
     bulk.clear();
   }
 
@@ -335,7 +425,7 @@ export default function Endpoints() {
 
   const renderRow = (e: DataApiEndpointListItemDto) => (
     <tr key={e.id} className="border-t hover:bg-accent">
-      {bulk.bulkMode && (
+      {bulk.bulkMode && !showTrash && (
         <td className="py-1">
           <Checkbox
             checked={bulk.selected.has(e.id)}
@@ -346,7 +436,12 @@ export default function Endpoints() {
       )}
       <td className="py-1 pl-6">
         <span className="inline-flex items-center gap-1">
-          <BookmarkStar bookmarked={isBookmarked(e)} name={e.name} onToggle={() => void toggleBookmark(e)} />
+          {/* No star in the trash: `bookmarked` is a shortcut back to a row the
+              author works with, and a trashed endpoint is not one. The POST
+              would also 404 against a filtered-out row. */}
+          {!showTrash && (
+            <BookmarkStar bookmarked={isBookmarked(e)} name={e.name} onToggle={() => void toggleBookmark(e)} />
+          )}
           <Link className="font-medium hover:underline" to={`/explore/${ws}/data-api/endpoints/${e.id}`}>
             {e.name}
           </Link>
@@ -362,11 +457,19 @@ export default function Endpoints() {
         </Badge>
       </td>
       <td className="text-muted-foreground">{engineLabel(e.database_id)}</td>
-      <td className="text-muted-foreground"><RelativeTime iso={e.updated_at} className="block" /></td>
+      {/* The trash ages by when it was TRASHED, not when it was last edited —
+          that is the column a Trash screen is read down, and it is why
+          `deleted_at` is a timestamp on the DTO rather than a bare boolean. */}
+      <td className="text-muted-foreground">
+        {showTrash
+          ? (e.deleted_at ? <RelativeTime iso={e.deleted_at} className="block" /> : "—")
+          : <RelativeTime iso={e.updated_at} className="block" />}
+      </td>
       <td>
         <EndpointActionsMenu
           ws={ws}
           endpoint={e}
+          trashed={showTrash}
           folders={folders}
           onNewFolder={() => setFolderDialog({ mode: "move", endpoint: e })}
           onDelete={() => setPendingDelete(e)}
@@ -383,22 +486,34 @@ export default function Endpoints() {
   // padding still belong to this route — they just come from the shared shell.
   return (
     <ListPageShell
-      title="Endpoints"
+      title={showTrash ? "Trash" : "Endpoints"}
       toolbar={
-        hasData ? (
-          <>
-            <BookmarkToggle active={onlyBookmarked} onToggle={() => setOnlyBookmarked((v) => !v)} />
-            <BulkToggle active={bulk.bulkMode} onToggle={() => bulk.setBulkMode(!bulk.bulkMode)} />
-            <FolderToolbar onNewFolder={() => setFolderDialog({ mode: "new" })} />
-          </>
-        ) : undefined
+        <>
+          {/* Filters and bulk mode still render only on `hasData` — controls
+              over zero rows can do nothing (§1.2 of docs/en/ui-conventions.md)
+              — and never in the trash, which offers none of them. */}
+          {!showTrash && hasData && (
+            <>
+              <BookmarkToggle active={onlyBookmarked} onToggle={() => setOnlyBookmarked((v) => !v)} />
+              <BulkToggle active={bulk.bulkMode} onToggle={() => bulk.setBulkMode(!bulk.bulkMode)} />
+              <FolderToolbar onNewFolder={() => setFolderDialog({ mode: "new" })} />
+            </>
+          )}
+          {/* The one toolbar control that is NOT gated on `hasData`. It does not
+              filter the rows in front of the user, it switches to a different
+              server query — and an empty endpoint list says nothing about
+              whether the trash is empty. Gated, it would also be the way OUT of
+              an empty trash, removed exactly when it is needed. */}
+          <ListToolbarButton icon={Trash2} label="Trash" active={showTrash} filled onClick={toggleTrash} />
+        </>
       }
       action={
         <>
           <Button variant="outline" onClick={() => setDownloadOpen(true)}>Download OpenAPI</Button>
           {/* A link, not a dialog trigger: creating an endpoint is its own page
-              (`endpoints/new`), so it can be opened in a new tab and reloaded. */}
-          <Button asChild><Link to={`/explore/${ws}/data-api/endpoints/new`}>+ Endpoint</Link></Button>
+              (`endpoints/new`), so it can be opened in a new tab and reloaded.
+              Absent in the trash: the trash is where authoring is undone. */}
+          {!showTrash && <Button asChild><Link to={`/explore/${ws}/data-api/endpoints/new`}>+ Endpoint</Link></Button>}
         </>
       }
     >
@@ -414,13 +529,20 @@ export default function Endpoints() {
         hasData={hasData}
         skeletonCols={5}
         empty={
-          <EmptyState
-            variant="dashed"
-            icon={Webhook}
-            title="No endpoints yet"
-            description="Publish a query as a REST endpoint."
-            action={<Button asChild><Link to={`/explore/${ws}/data-api/endpoints/new`}>Create your first endpoint</Link></Button>}
-          />
+          showTrash ? (
+            // Not the dashed first-run card: an empty trash is a normal, good
+            // state, and offering "Create your first endpoint" from inside the
+            // trash would answer a question nobody asked.
+            <p className="text-muted-foreground">Trash is empty.</p>
+          ) : (
+            <EmptyState
+              variant="dashed"
+              icon={Webhook}
+              title="No endpoints yet"
+              description="Publish a query as a REST endpoint."
+              action={<Button asChild><Link to={`/explore/${ws}/data-api/endpoints/new`}>Create your first endpoint</Link></Button>}
+            />
+          )
         }
       >
         <div className="mb-3 flex flex-wrap items-center gap-2">
@@ -428,22 +550,26 @@ export default function Endpoints() {
             <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <Input className="pl-8" placeholder="Search endpoints…" value={query} onChange={(e) => setQuery(e.target.value)} />
           </div>
-          <FacetSelect
-            label="State"
-            value={stateFilter ?? FACET_ALL}
-            onChange={(v) => setStateFilter(v === FACET_ALL ? null : v)}
-            options={[
-              { value: "live", label: "live" },
-              { value: "draft", label: "draft" },
-              { value: "disabled", label: "disabled" },
-            ]}
-          />
-          <FacetSelect
-            label="Engine"
-            value={engineFilter ?? FACET_ALL}
-            onChange={(v) => setEngineFilter(v === FACET_ALL ? null : v)}
-            options={engineOptions}
-          />
+          {!showTrash && (
+            <>
+              <FacetSelect
+                label="State"
+                value={stateFilter ?? FACET_ALL}
+                onChange={(v) => setStateFilter(v === FACET_ALL ? null : v)}
+                options={[
+                  { value: "live", label: "live" },
+                  { value: "draft", label: "draft" },
+                  { value: "disabled", label: "disabled" },
+                ]}
+              />
+              <FacetSelect
+                label="Engine"
+                value={engineFilter ?? FACET_ALL}
+                onChange={(v) => setEngineFilter(v === FACET_ALL ? null : v)}
+                options={engineOptions}
+              />
+            </>
+          )}
         </div>
 
         <div className="mb-3">
@@ -458,22 +584,53 @@ export default function Endpoints() {
               clicked is worse than a total. The filtered count is not lost —
               the table below is the filtered set, with its own empty line. */}
           <SummaryStrip
-            items={[
-              { label: "endpoints total", value: endpoints.length },
-              { label: "live", value: live.length, onClick: () => toggleStateFilter("live"), active: stateFilter === "live" },
-              { label: "draft", value: draft.length, onClick: () => toggleStateFilter("draft"), active: stateFilter === "draft" },
-              { label: "disabled", value: disabled.length, onClick: () => toggleStateFilter("disabled"), active: stateFilter === "disabled" },
-            ]}
+            items={
+              // In the trash the three state chips are also the state FILTER's
+              // controls, and that filter is not offered here — a chip that
+              // cannot be clicked into anything is a dead control, and a "0
+              // live" chip over a list the API guarantees holds no live rows
+              // (the schema's own CHECK) states a constraint as if it were a
+              // measurement.
+              showTrash
+                ? [{ label: "in Trash", value: endpoints.length }]
+                : [
+                    { label: "endpoints total", value: endpoints.length },
+                    { label: "live", value: live.length, onClick: () => toggleStateFilter("live"), active: stateFilter === "live" },
+                    { label: "draft", value: draft.length, onClick: () => toggleStateFilter("draft"), active: stateFilter === "draft" },
+                    { label: "disabled", value: disabled.length, onClick: () => toggleStateFilter("disabled"), active: stateFilter === "disabled" },
+                  ]
+            }
           />
         </div>
 
-        {/* Delete is the only bulk action this page offers. A per-row move now
-            exists (the row menu's folder items), but a BULK move is not wired
-            yet, and bulk trash needs the soft-delete migration, which does not
-            exist. A disabled button for either would be worse than its
+        {/* Move to Trash is the ONLY bulk action, exactly as in `Datasets.tsx`,
+            `Charts.tsx` and `Dashboards.tsx`. A bulk permanent delete used to
+            sit here, and it undid single-row deletion's whole reason for moving
+            behind the trash: it destroyed served URLs and their published
+            version history in one click, `live` rows included, which is the
+            same act the row menu now charges three deliberate steps for and
+            strictly more dangerous for being N at a time. The replacement path
+            exists — bulk trash, then delete from the trash — so nothing became
+            impossible, only deliberate. A BULK move between folders is still
+            not wired; a disabled button for it would be worse than its
             absence. */}
         <BulkBar count={bulk.selectedIds.length}>
-          <Button variant="destructive" size="sm" onClick={() => setBulkDeleteOpen(true)}>Delete selected</Button>
+          <Button
+            variant="outline"
+            size="sm"
+            // All-or-nothing, not best-effort: see `liveSelected`.
+            disabled={liveSelected.length > 0}
+            onClick={() => void doBulkTrash()}
+          >
+            Move {bulk.selectedIds.length} to Trash
+          </Button>
+          {liveSelected.length > 0 && (
+            // The COUNT, not just "some are live": the author has to know how
+            // much of the selection to go and disable.
+            <span className="text-xs text-muted-foreground">
+              {liveSelected.length} live — disable {liveSelected.length === 1 ? "it" : "them"} first
+            </span>
+          )}
         </BulkBar>
 
         {rows.length > 0 ? (
@@ -481,7 +638,7 @@ export default function Endpoints() {
             <table className="w-full text-sm">
               <thead className="text-left text-muted-foreground">
                 <tr>
-                  {bulk.bulkMode && (
+                  {bulk.bulkMode && !showTrash && (
                     <th className="w-8 py-1">
                       <Checkbox checked={bulk.allSelected} onCheckedChange={bulk.toggleAll} aria-label="Select all" />
                     </th>
@@ -490,26 +647,39 @@ export default function Endpoints() {
                   <th className="px-2 font-medium">Method &amp; path</th>
                   <SortableHeader sortKey="state" label="State" current={sort} onSort={onSort} />
                   <th className="px-2 font-medium">Engine</th>
-                  <SortableHeader sortKey="updated_at" label="Last edited" current={sort} onSort={onSort} />
+                  {showTrash ? (
+                    <SortableHeader sortKey="deleted_at" label="Trashed" current={sort} onSort={onSort} />
+                  ) : (
+                    <SortableHeader sortKey="updated_at" label="Last edited" current={sort} onSort={onSort} />
+                  )}
                   <th className="w-8" />
                 </tr>
               </thead>
-              {groups.map((group) => {
-                const key = group.folder?.id ?? UNCATEGORIZED_KEY;
-                const isCollapsed = collapse.isCollapsed(key);
-                return (
-                  <tbody key={key}>
-                    <FolderHeaderRow
-                      name={group.folder?.name ?? "Uncategorized"}
-                      count={group.rows.length}
-                      colSpan={bulk.bulkMode ? 7 : 6}
-                      collapsed={isCollapsed}
-                      onToggle={() => collapse.toggle(key)}
-                    />
-                    {!isCollapsed && group.rows.map(renderRow)}
-                  </tbody>
-                );
-              })}
+              {/* Flat in the trash. Folders organise work in progress; a
+                  trashed row's folder is what it will go BACK to, not where it
+                  is now, and grouping the trash by it would hide rows behind
+                  collapsible headers in the one view whose whole job is to let
+                  the author find something they deleted. */}
+              {showTrash ? (
+                <tbody>{rows.map(renderRow)}</tbody>
+              ) : (
+                groups.map((group) => {
+                  const key = group.folder?.id ?? UNCATEGORIZED_KEY;
+                  const isCollapsed = collapse.isCollapsed(key);
+                  return (
+                    <tbody key={key}>
+                      <FolderHeaderRow
+                        name={group.folder?.name ?? "Uncategorized"}
+                        count={group.rows.length}
+                        colSpan={bulk.bulkMode ? 7 : 6}
+                        collapsed={isCollapsed}
+                        onToggle={() => collapse.toggle(key)}
+                      />
+                      {!isCollapsed && group.rows.map(renderRow)}
+                    </tbody>
+                  );
+                })
+              )}
             </table>
           </div>
         ) : (
@@ -532,8 +702,12 @@ export default function Endpoints() {
       <ConfirmDeleteDialog
         open={pendingDelete !== null}
         onOpenChange={(o) => { if (!o) setPendingDelete(null); }}
-        title="Delete endpoint"
-        description={`Delete "${pendingDelete?.name ?? ""}"? Any deployed client calling its URL will start getting 404s. This cannot be undone.`}
+        // Unconditional, not a `showTrash` ternary: the row menu offers
+        // permanent delete ONLY in the trash, so this dialog has exactly one
+        // caller and a second branch would be dead copy claiming to describe a
+        // path that no longer exists.
+        title="Delete permanently"
+        description={`Permanently delete "${pendingDelete?.name ?? ""}"? This cannot be undone.`}
         onConfirm={async () => {
           if (!pendingDelete) return;
           try {
@@ -544,14 +718,6 @@ export default function Endpoints() {
           }
           setPendingDelete(null);
         }}
-      />
-
-      <ConfirmDeleteDialog
-        open={bulkDeleteOpen}
-        onOpenChange={setBulkDeleteOpen}
-        title="Delete endpoints"
-        description={`Delete ${bulk.selectedIds.length} endpoint${bulk.selectedIds.length === 1 ? "" : "s"}? Any deployed client calling their URLs will start getting 404s. This cannot be undone.`}
-        onConfirm={doBulkDelete}
       />
     </ListPageShell>
   );

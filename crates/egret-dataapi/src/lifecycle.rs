@@ -1798,18 +1798,37 @@ impl EndpointStore {
         .await
         .map_err(db_err)?;
 
-        let state: String = sqlx::query_scalar(
+        // `deleted_at IS NULL` guards a `CASE` that fails two different ways, and
+        // both were measured. On a trashed DRAFT the `ELSE 'live'` branch violates
+        // migration 0126's CHECK, so this arrived as a 500 naming
+        // `dataapi_endpoints_trashed_not_live`. On a trashed DISABLED endpoint the
+        // `CASE` leaves the state alone, the CHECK stays satisfied, and this
+        // SUCCEEDED — freezing a new immutable version into the trash and reporting
+        // it as published. The second is the worse of the two, and no constraint
+        // could have caught it.
+        //
+        // `fetch_optional`, and the no-row path is a conflict rather than a 404
+        // because `locked` above already matched this `id` in this `workspace` and
+        // still holds `FOR UPDATE` on the row: the ONLY predicate that can have
+        // stopped it matching is the one added here. The version row inserted just
+        // above goes away with the transaction, which is why nothing has to undo it.
+        let state: Option<String> = sqlx::query_scalar(
             "UPDATE dataapi.endpoints SET live_version_id = $1, \
                state = CASE WHEN state = 'disabled' THEN 'disabled' ELSE 'live' END, \
                updated_at = now() \
-             WHERE id = $2 AND workspace_id = $3 RETURNING state",
+             WHERE id = $2 AND workspace_id = $3 AND deleted_at IS NULL RETURNING state",
         )
         .bind(version_id)
         .bind(id)
         .bind(workspace)
-        .fetch_one(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(db_err)?;
+        let Some(state) = state else {
+            return Err(Error::Conflict(
+                "endpoint is in the trash; restore it before publishing a new version".into(),
+            ));
+        };
 
         tx.commit().await.map_err(db_err)?;
         Ok(DataApiPublishedDto {
@@ -1832,6 +1851,13 @@ impl EndpointStore {
     /// served, not about whether the endpoint is serving; a disabled endpoint that
     /// silently came back to life because someone corrected its version would be a
     /// surprise with no route that asked for it.
+    ///
+    /// **`e.deleted_at IS NULL` is in the same `WHERE`, and leaving `state` alone is
+    /// exactly why it had to be.** Because this writes only `live_version_id`,
+    /// migration 0126's CHECK never fires, so before this predicate a rollback of a
+    /// TRASHED endpoint succeeded: it silently repointed which frozen SQL the
+    /// endpoint would serve the moment anything enabled it. A guarantee that lives
+    /// in a constraint on `state` cannot cover a writer that does not touch `state`.
     pub async fn rollback(
         &self,
         workspace: Uuid,
@@ -1846,6 +1872,7 @@ impl EndpointStore {
             "UPDATE dataapi.endpoints e SET live_version_id = v.id, updated_at = now() \
                FROM dataapi.endpoint_versions v \
               WHERE e.id = $1 AND e.workspace_id = $2 \
+                AND e.deleted_at IS NULL \
                 AND v.endpoint_id = e.id \
                 AND (v.version = $3 OR v.id = $4) \
              RETURNING v.id, v.version, e.state",
@@ -1857,8 +1884,21 @@ impl EndpointStore {
         .fetch_optional(&self.db.pool)
         .await
         .map_err(db_err)?;
-        let (version_id, version, state) =
-            row.ok_or_else(|| Error::NotFound("endpoint version".into()))?;
+        // Three reasons for no row and only two answers: an absent endpoint, an
+        // absent-or-foreign VERSION and a trashed endpoint. The first two stay the
+        // 404 they were — a version of somebody else's endpoint must not be
+        // distinguishable from one that does not exist — and only the trash becomes
+        // a 409, which is what `trashed_conflict_or`'s `otherwise` is carrying here.
+        let Some((version_id, version, state)) = row else {
+            return Err(self
+                .trashed_conflict_or(
+                    workspace,
+                    id,
+                    "changing which version it serves",
+                    Error::NotFound("endpoint version".into()),
+                )
+                .await);
+        };
         Ok(DataApiPublishedDto {
             version_id,
             version,

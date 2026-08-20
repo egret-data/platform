@@ -36,7 +36,7 @@ export default function VersionsSection() {
   // the SAVED draft, not the one on screen. Definition already guards the far
   // cheaper Validate this way; Publish changes what every deployed consumer
   // receives and has more reason to.
-  const { ws, id, dirty, refetch } = useEndpointDetail();
+  const { ws, id, dirty, trashed, refetch } = useEndpointDetail();
 
   // `created_by` on a version is a raw user id, not a name — the same
   // problem `ActivityCallList.tsx` solves for its trial-actor column
@@ -86,14 +86,25 @@ export default function VersionsSection() {
             marked Live — never the draft sitting in Definition.
           </p>
         </div>
-        <Button
-          type="button"
-          onClick={() => setPublishOpen(true)}
-          disabled={dirty}
-          title={dirty ? "Save your changes before publishing — Publish freezes the saved draft." : undefined}
-        >
-          Publish saved draft
-        </Button>
+        {/* `trashed` beside `dirty`, and stated on screen rather than only in a
+            `title`. Publishing a trashed endpoint is a 409 naming restore
+            (`lifecycle.rs`'s guard), so an enabled button here can only spend a
+            round trip to produce a red toast — and for a trashed DISABLED
+            endpoint the pre-guard behaviour was worse than that: the publish
+            SUCCEEDED and froze a new version into the trash. The shell's
+            `fieldset` would disable this button on its own; the explicit check
+            is what puts the reason next to it. */}
+        <div className="text-right">
+          <Button
+            type="button"
+            onClick={() => setPublishOpen(true)}
+            disabled={dirty || trashed}
+            title={dirty && !trashed ? "Save your changes before publishing — Publish freezes the saved draft." : undefined}
+          >
+            Publish saved draft
+          </Button>
+          {trashed && <p className="mt-1 text-xs text-muted-foreground">Restore it first</p>}
+        </div>
       </div>
 
       <Card>
@@ -150,11 +161,18 @@ export default function VersionsSection() {
                       <RelativeTime iso={v.created_at} />
                     </td>
                     <td className="py-2 text-right">
+                      {/* Same argument as Publish above: rollback writes
+                          `live_version_id` and `state`, which a trashed row
+                          refuses with a 409. Shown-but-disabled rather than
+                          hidden, so the history stays readable and the reason
+                          for the missing action is the banner at the top of the
+                          page rather than a blank cell. */}
                       {!v.is_live && (
                         <Button
                           type="button"
                           size="sm"
                           variant="outline"
+                          disabled={trashed}
                           onClick={() => setRollbackTarget(v)}
                         >
                           Roll back

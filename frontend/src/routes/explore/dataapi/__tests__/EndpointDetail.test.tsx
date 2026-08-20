@@ -55,6 +55,7 @@ function makeEndpoint(overrides: Partial<DataApiEndpointDto> = {}): DataApiEndpo
 
 const updateMutateAsync = vi.fn();
 const validateMutateAsync = vi.fn();
+const restoreMutateAsync = vi.fn();
 
 // Mounts Config at its real route (`/config`), not at the index — Query
 // (Task 3) owns the index route and its own test file mounts it there. A
@@ -94,6 +95,12 @@ beforeEach(() => {
   vi.mocked(api.useDataApiValidateEndpoint).mockReturnValue(
     { mutateAsync: validateMutateAsync, isPending: false } as unknown as ReturnType<typeof api.useDataApiValidateEndpoint>,
   );
+  // The shell constructs this on EVERY render, trashed or not (hooks cannot be
+  // conditional), so without it the automock's `undefined` breaks every test in
+  // this file rather than only the trash ones.
+  vi.mocked(api.useDataApiRestoreEndpoint).mockReturnValue(
+    { mutateAsync: restoreMutateAsync, isPending: false } as unknown as ReturnType<typeof api.useDataApiRestoreEndpoint>,
+  );
 
   // Automocking `vi.mock("@/api/generated/data-api/data-api")` turns these
   // plain query-key builders into `vi.fn()`s that return `undefined` — give
@@ -110,6 +117,11 @@ beforeEach(() => {
   updateMutateAsync.mockImplementation(({ data }: { workspace: string; id: string; data: Partial<DataApiEndpointDto> }) =>
     Promise.resolve({ status: 200, data: { ...makeEndpoint(), ...data }, headers: new Headers() }));
   validateMutateAsync.mockResolvedValue({ status: 200, data: { columns: [] }, headers: new Headers() });
+  restoreMutateAsync.mockResolvedValue({
+    status: 200,
+    data: makeEndpoint({ state: "disabled", deleted_at: null }),
+    headers: new Headers(),
+  });
 });
 
 describe("Config", () => {
@@ -597,6 +609,98 @@ describe("ResponseSection", () => {
   });
 });
 
+/**
+ * The detail page for an endpoint that is IN THE TRASH.
+ *
+ * The Trash view links a row into this page by name — deliberately, and unlike
+ * the row menu beside it, which drops its Open item because every action on a
+ * trashed endpoint is a server-side 409. Before this block existed, that link
+ * landed on the full six-section editor with an enabled Save, no banner and no
+ * Restore; the way an author discovered the rule was `toast.error("Error:
+ * endpoint is in the trash; restore it before editing it")` after typing.
+ *
+ * Every test here renders the SAME section with a trashed and a non-trashed
+ * endpoint. That is the falsifiability requirement: "Save is absent" and "the
+ * Name field is disabled" are both satisfied by a page that never renders Save
+ * and disables everything always, and those two implementations are
+ * indistinguishable from a one-state fixture.
+ */
+describe("EndpointDetail — a trashed endpoint", () => {
+  const TRASHED = makeEndpoint({ state: "disabled", deleted_at: "2026-08-18T09:00:00Z" });
+
+  it("says it is in the trash and offers Restore where Save would be", async () => {
+    renderConfig(TRASHED);
+    await screen.findByLabelText("Name");
+
+    expect(screen.getByText("This endpoint is in the trash")).toBeInTheDocument();
+    // Restore is named as the way forward, and the sentence says where it
+    // lands — never straight back to serving.
+    expect(screen.getByText(/never straight back to serving/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Restore" })).toBeInTheDocument();
+    // Not disabled-Save: a greyed Save still claims this page edits things.
+    expect(screen.queryByRole("button", { name: /^Sav/ })).not.toBeInTheDocument();
+  });
+
+  it("shows Save and no trash banner for an endpoint that is not trashed", async () => {
+    // The other half of the test above. Without it, a shell that ALWAYS hid
+    // Save and always rendered the banner would pass everything here.
+    renderConfig(makeEndpoint());
+    await screen.findByLabelText("Name");
+
+    expect(screen.getByRole("button", { name: "Save" })).toBeInTheDocument();
+    expect(screen.queryByText("This endpoint is in the trash")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Restore" })).not.toBeInTheDocument();
+  });
+
+  it("Restore sends this endpoint's id, and it is not inside the disabled region", async () => {
+    const user = userEvent.setup();
+    renderConfig(makeEndpoint({ id: "ep-77", state: "disabled", deleted_at: "2026-08-18T09:00:00Z" }));
+    await screen.findByLabelText("Name");
+
+    const restore = screen.getByRole("button", { name: "Restore" });
+    // The `fieldset` that disables the editor must not swallow the one control
+    // that gets the author out — a Restore button inside it would render
+    // greyed and do nothing, which is the exact failure this whole block is
+    // about, moved one level up.
+    expect(restore).toBeEnabled();
+    await user.click(restore);
+
+    // The PAYLOAD, and an id that is not the fixture default, so a hardcoded
+    // "ep-1" fails rather than coincidentally matching.
+    await waitFor(() => {
+      expect(restoreMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "ep-77" });
+    });
+  });
+
+  it("makes the editor read-only, and typing into it changes nothing", async () => {
+    const user = userEvent.setup();
+    renderConfig(TRASHED);
+    const name = await screen.findByLabelText("Name");
+
+    // Disabled through the shell's `fieldset`, which is what covers the
+    // controls no section remembered to check.
+    expect(name).toBeDisabled();
+    expect(screen.getByLabelText("Path")).toBeDisabled();
+    await user.type(name, "edited");
+    expect(name).toHaveValue("Daily report");
+    expect(updateMutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("leaves the editor editable when the endpoint is not in the trash", async () => {
+    const user = userEvent.setup();
+    renderConfig(makeEndpoint());
+    const name = await screen.findByLabelText("Name");
+
+    expect(name).toBeEnabled();
+    await user.clear(name);
+    await user.type(name, "Renamed");
+    expect(name).toHaveValue("Renamed");
+    // And the edit is real: Save wakes up, which is what "editing works" means
+    // on this page.
+    expect(screen.getByRole("button", { name: "Save" })).toBeEnabled();
+  });
+});
+
 function renderVersions(
   endpoint: DataApiEndpointDto = makeEndpoint({ live_version_id: "v-2", state: "live" }),
   refetch: () => void = vi.fn(),
@@ -839,6 +943,50 @@ describe("VersionsSection", () => {
     await waitFor(() => expect(versionsRefetchSpy).toHaveBeenCalled());
   });
 
+  /**
+   * Publish and Roll back on a TRASHED endpoint. Both are 409s server-side
+   * (`lifecycle.rs`'s trash guards), and publish on a trashed `disabled`
+   * endpoint was worse than a refusal before those guards: it succeeded and
+   * froze a new version into the trash.
+   *
+   * Both states in one test, because "Publish is disabled" is also true of a
+   * page that disables Publish unconditionally — and the version list is
+   * rendered non-live so Roll back exists at all.
+   */
+  it("disables Publish and Roll back for a trashed endpoint, and says to restore it first", async () => {
+    vi.mocked(api.useDataApiListEndpointVersions).mockReturnValue(
+      {
+        data: {
+          status: 200,
+          data: [
+            makeVersion({ id: "v-1", version: 1, is_live: false }),
+            makeVersion({ id: "v-2", version: 2, is_live: true }),
+          ],
+        },
+        isLoading: false,
+        isError: false,
+      } as unknown as ReturnType<typeof api.useDataApiListEndpointVersions>,
+    );
+
+    // Not trashed first: both controls are live, so their state below is a
+    // consequence of `deleted_at` and not of this section's own layout.
+    renderVersions(makeEndpoint({ live_version_id: "v-2", state: "live" }));
+    expect(await screen.findByRole("button", { name: /publish saved draft/i })).toBeEnabled();
+    expect(screen.getByRole("button", { name: /^roll back$/i })).toBeEnabled();
+    expect(screen.queryByText("Restore it first")).not.toBeInTheDocument();
+
+    renderVersions(
+      makeEndpoint({ live_version_id: "v-2", state: "disabled", deleted_at: "2026-08-18T09:00:00Z" }),
+    );
+    const publishes = await screen.findAllByRole("button", { name: /publish saved draft/i });
+    // `renderVersions` mounts a SECOND tree into the same document rather than
+    // replacing the first, so the trashed render is the last of each pair.
+    expect(publishes.at(-1)).toBeDisabled();
+    expect(screen.getAllByRole("button", { name: /^roll back$/i }).at(-1)).toBeDisabled();
+    // Visible, not a `title`: the rule is only taught if it is on screen.
+    expect(screen.getByText("Restore it first")).toBeInTheDocument();
+  });
+
   // Same class of bug ResponseSection was fixed for: react-query clears
   // `isLoading` on any settle, error included, so a fetch failure must not
   // fall into the same branch as "nothing published yet".
@@ -961,8 +1109,13 @@ describe("EndpointDetail — width", () => {
     // The section root is whichever ancestor of the heading the route renders
     // directly — found by walking, not by counting `parentElement`s, so an
     // extra wrapper inside Versions does not quietly re-point this assertion.
+    // The route renders its `Outlet` inside a `fieldset` (disabled only for a
+    // trashed endpoint — see `EndpointDetail.tsx`), so THAT is the element the
+    // section root is a direct child of. Resolved rather than assumed, so this
+    // walk keeps finding the section root whether or not the wrapper is there.
+    const host = routeRoot!.querySelector("fieldset") ?? routeRoot;
     let sectionRoot = heading.parentElement;
-    while (sectionRoot && sectionRoot.parentElement !== routeRoot) sectionRoot = sectionRoot.parentElement;
+    while (sectionRoot && sectionRoot.parentElement !== host) sectionRoot = sectionRoot.parentElement;
     expect(sectionRoot).not.toBeNull();
     expect(sectionRoot!.className).toMatch(/(?:^|\s)max-w-/);
   });
@@ -978,8 +1131,13 @@ describe("EndpointDetail — width", () => {
     const heading = await screen.findByRole("heading", { name: "Response", level: 2 });
     const routeRoot = container.querySelector(".p-4");
     expect(routeRoot).not.toBeNull();
+    // The route renders its `Outlet` inside a `fieldset` (disabled only for a
+    // trashed endpoint — see `EndpointDetail.tsx`), so THAT is the element the
+    // section root is a direct child of. Resolved rather than assumed, so this
+    // walk keeps finding the section root whether or not the wrapper is there.
+    const host = routeRoot!.querySelector("fieldset") ?? routeRoot;
     let sectionRoot = heading.parentElement;
-    while (sectionRoot && sectionRoot.parentElement !== routeRoot) sectionRoot = sectionRoot.parentElement;
+    while (sectionRoot && sectionRoot.parentElement !== host) sectionRoot = sectionRoot.parentElement;
     expect(sectionRoot).not.toBeNull();
     expect(sectionRoot!.className).toMatch(/(?:^|\s)max-w-/);
   });
@@ -998,10 +1156,15 @@ describe("EndpointDetail — width", () => {
     const routeRoot = container.querySelector(".p-4");
     expect(routeRoot).not.toBeNull();
     // Walked, not counted, for the same reason as the Versions guard: an extra
-    // wrapper inside Config must not quietly re-point the assertion.
+    // wrapper inside Config must not quietly re-point the assertion. The
+    // `fieldset` the route wraps its `Outlet` in is that wrapper today, and
+    // this is a NEGATIVE assertion — walking past Config's root onto the
+    // fieldset would satisfy it whatever Config does to itself.
+    const host = routeRoot!.querySelector("fieldset") ?? routeRoot;
     let sectionRoot = heading.parentElement;
-    while (sectionRoot && sectionRoot.parentElement !== routeRoot) sectionRoot = sectionRoot.parentElement;
+    while (sectionRoot && sectionRoot.parentElement !== host) sectionRoot = sectionRoot.parentElement;
     expect(sectionRoot).not.toBeNull();
+    expect(sectionRoot!.tagName).not.toBe("FIELDSET");
     // Responsive prefixes included: `lg:max-w-3xl` would waste the page on
     // exactly the wide viewports the pass was measured on.
     expect(sectionRoot!.className).not.toMatch(/(?:^|\s)(?:[a-z0-9]+:)*max-w-/);
