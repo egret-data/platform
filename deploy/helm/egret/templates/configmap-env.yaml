@@ -24,3 +24,12 @@ data:
   # which is the in-cluster address the renderer resolves — a mail linking
   # there is a dead end in the recipient's inbox.
   EGRET_AUTOMATION__BROWSER_URL: "{{ include "egret.externalUrl" . }}"
+{{- if .Values.ingress.enabled }}
+  # What an OUTSIDE CONSUMER of the Data API calls: the base for servers[0].url
+  # and tokenUrl in a generated OpenAPI document. Deliberately NOT
+  # EGRET_CATALOG__PUBLIC_URL above — that one is the in-cluster Service DNS the
+  # ENGINE pods resolve, and it is also the machine-IdP `iss`, byte-compared by
+  # StarRocks. Only set when there is an edge to reach; otherwise the backend
+  # falls back to the issuer and behaviour is unchanged.
+  EGRET_DATA_API__PUBLIC_URL: "{{ include "egret.externalUrl" . }}"
+{{- end }}
