@@ -17,7 +17,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Form, Json, Router};
 use egret_core::http::ErrorBody;
-use egret_core::ratelimit::RateLimiter;
+use egret_core::ratelimit::{client_ip, RateLimiter};
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -203,6 +203,11 @@ async fn token_endpoint(
     // `client_id` is not a secret, so keying on it alone would let anyone lock a
     // legitimate client out by spamming its id. Keyed on the pair, a flooder
     // only exhausts their own bucket.
+    //
+    // `client_id` is unauthenticated attacker-supplied input and the limiter's
+    // map is never pruned, so the key MUST NOT be stored raw — see the note on
+    // `RateLimiter`, which hashes it. How much the `ip:` half is worth depends
+    // on the edge; `client_ip` documents which deployments can be trusted.
     let ip = client_ip(&headers);
     if !st.rate_limiter.check(&format!("{ip}:{}", f.client_id)) {
         return Err(IdpError::RateLimited);
@@ -258,22 +263,6 @@ async fn token_endpoint(
         token_type: "Bearer".into(),
         expires_in: vc.ttl_secs,
     }))
-}
-
-/// The caller's IP as the edge reports it — the first hop in `X-Forwarded-For`.
-/// Same derivation as local login (`egret_auth::routes::login`), so both
-/// limiters agree on what "one caller" means behind the same proxy. Empty when
-/// the header is absent, which collapses direct in-cluster callers into one
-/// bucket per `client_id`; that is the safe direction, since the internet-facing
-/// path always traverses the ingress and is always labelled.
-fn client_ip(headers: &HeaderMap) -> String {
-    headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.split(',').next())
-        .unwrap_or("")
-        .trim()
-        .to_string()
 }
 
 impl IntoResponse for IdpError {

@@ -18,7 +18,10 @@ chrono.workspace = true
 # the `http`/axum stack.
 utoipa.workspace = true
 axum = { workspace = true, optional = true }
-sha2 = { workspace = true, optional = true }
+# Unconditional: the shared `ratelimit` module keys its map by a SHA-256 of the
+# caller-supplied key so an attacker cannot buy unbounded permanent memory with
+# a long one. That module is not behind a feature, so neither is this.
+sha2.workspace = true
 rand = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
 hex = { workspace = true, optional = true }
@@ -29,7 +32,7 @@ hex = { workspace = true, optional = true }
 http = ["dep:axum"]
 # Opt-in opaque-token primitives (mint + sha256 hash). Shared by the session /
 # kernel token schemes so the at-rest hashing is defined once.
-token = ["dep:sha2", "dep:rand", "dep:base64", "dep:hex"]
+token = ["dep:rand", "dep:base64", "dep:hex"]
 
 [dev-dependencies]
 axum.workspace = true
