@@ -5,6 +5,14 @@ export type { EntityKind, Folder };
 
 export interface FolderGroup<T> { folder: Folder | null; rows: T[] }
 
+/** Key for the folderless bucket, whose `FolderGroup.folder` is `null` and so
+ *  has no id of its own to key collapse state by. Exported rather than retyped
+ *  at each call site: a page that spells it one way in its render loop and
+ *  another in its visible-rows derivation would collapse the section on screen
+ *  while still treating its rows as selectable — silently, and only for the
+ *  folderless bucket. */
+export const UNCATEGORIZED_KEY = "__uncat__";
+
 /** Bucket rows by folder_id; folders A→Z, Uncategorized (null) last.
  *  hideEmpty drops empty named folders (used while a search/filter is active). */
 export function groupByFolder<T extends { folder_id?: string | null }>(

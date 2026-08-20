@@ -14,7 +14,7 @@ import {
   type SavedQuery, type DatabaseListItem,
 } from "@/api/sqllab";
 import { useFolders, useFolderMutations, useSetFolder } from "@/api/folders";
-import { groupByFolder, useCollapsed } from "@/components/explore/folders";
+import { groupByFolder, useCollapsed, UNCATEGORIZED_KEY } from "@/components/explore/folders";
 import { FolderNameDialog } from "@/components/explore/FolderNameDialog";
 import { MoveToFolderItems } from "@/components/explore/MoveToFolderSub";
 import { RowActionsMenu } from "@/components/explore/RowActionsMenu";
@@ -135,7 +135,7 @@ export function SavedTab({ ws, databases, onOpen }: {
         <div className="divide-y">{items.map(renderRow)}</div>
       ) : (
         groups.map((group) => {
-          const key = group.folder?.id ?? "__uncat__";
+          const key = group.folder?.id ?? UNCATEGORIZED_KEY;
           const isCollapsed = collapse.isCollapsed(key);
           return (
             <div key={key}>

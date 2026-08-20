@@ -21,7 +21,7 @@ import { BookmarkToggle, BookmarkStar } from "@/components/explore/BookmarkToggl
 import { ListToolbarButton } from "@/components/explore/ListToolbarButton";
 import { FacetSelect, FACET_ALL } from "@/components/explore/FacetSelect";
 import { useBulkSelect } from "@/hooks/useBulkSelect";
-import { groupByFolder, useCollapsed } from "@/components/explore/folders";
+import { groupByFolder, useCollapsed, UNCATEGORIZED_KEY } from "@/components/explore/folders";
 import { useFoldersFoldersList } from "@/api/generated/folders/folders";
 import { useFolderMutations } from "@/api/folders";
 import { useDatabases } from "@/api/databases";
@@ -40,8 +40,6 @@ import { EndpointActionsMenu } from "./EndpointActionsMenu";
 // `crates/egret-bi/src/routes.rs`'s `kind_perms("data_api_endpoints")`.
 const FOLDER_KIND = "data_api_endpoints";
 
-/** `useCollapsed`'s key for the folderless group (`groupByFolder`'s `folder: null`). */
-const UNCATEGORIZED_KEY = "__uncat__";
 
 /**
  * `deleted_at` is a sort key and not merely a column because the Trash is sorted

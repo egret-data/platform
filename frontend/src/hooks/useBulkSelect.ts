@@ -16,9 +16,10 @@ import { useCallback, useMemo, useState } from "react";
  * - `toggleAll` ("Select all") writes the ids of rows the user was never shown
  *   into the selection, and `allSelected`/`someSelected` answer about them too;
  * - `selectedIds` then reports them, so the "{n} selected" strip claims rows
- *   that are not in front of the user and a bulk action acts on them. On a page
- *   whose bulk action is a hard delete (`Endpoints.tsx`), that destroys a row
- *   the user never saw.
+ *   that are not in front of the user and a bulk action acts on them. On the
+ *   grouped lists that is a Move to Trash, so the cost is recoverable — but on
+ *   `UsersPage` it is Disable and Assign role, which are platform-wide account
+ *   actions with no trash to fish them back out of.
  *
  * `selectedIds` re-derives from `rows` on every render rather than just handing
  * back `selected`, which is what covers the other order of events: a row picked
@@ -26,8 +27,24 @@ import { useCallback, useMemo, useState } from "react";
  * out of the count and out of the action, instead of staying selected
  * invisibly. Do not "simplify" it to `Array.from(selected)`.
  *
- * Five pages (`Charts`, `Datasets`, `Dashboards`, `Alerts`, `Notebooks`) still
- * pass their pre-grouping `rows`; migrating them is its own task.
+ * Every grouped list — `Charts`, `Datasets`, `Dashboards`, `Alerts`,
+ * `Notebooks` and `Endpoints` — now derives a `visibleRows` from its groups,
+ * dropping the collapsed ones, and passes that. Copy one of them rather than
+ * reaching for `rows`.
+ *
+ * The two remaining callers, `MembersPanel` and `UsersPage`, are KNOWN TO BE
+ * WRONG — read this as an outstanding bug, not an exemption. They do not group,
+ * so they look compliant, but they hand their whole filtered list to
+ * `FilterableTable`, which owns the search box and (on `UsersPage`) a
+ * `pageSize={25}` pager, and draws only its own page of rows. Worse, that
+ * table's own header "Select all" toggles over its POST-SEARCH set rather than
+ * the page it drew, so one click with 25 rows on screen selects every filtered
+ * user across every page. Both pages then act on `bulk.selected` filtered
+ * against the FULL list rather than on `selectedIds`, so passing a different
+ * argument here would fix their counts and leave their actions untouched: the
+ * fix has to make `FilterableTable` report the rows it rendered.
+ *
+ * Do not copy those two.
  */
 export function useBulkSelect<T extends { id: string }>(rows: T[]) {
   const [bulkMode, setBulkModeRaw] = useState(false);
