@@ -27,22 +27,53 @@ struct Entry {
     locked_until: Option<Instant>,
 }
 
+impl Entry {
+    /// Whether this entry is still tracking something a later check needs.
+    ///
+    /// **An active lockout keeps the entry alive** even with no attempts left
+    /// in the window, and that is the entire reason this is a predicate rather
+    /// than `attempts.is_empty()`. The lockout is deliberately the longer of
+    /// the two durations; dropping a locked-out entry once its *window* passed
+    /// would let a locked-out caller come back by waiting out the shorter of
+    /// the two clocks — precisely the reset the lockout exists to deny.
+    fn holds_information(&self, now: Instant, window: Duration) -> bool {
+        if let Some(until) = self.locked_until {
+            if now < until {
+                return true;
+            }
+        }
+        self.attempts
+            .iter()
+            .any(|t| now.duration_since(*t) < window)
+    }
+}
+
+/// Everything the limiter mutates, behind the one lock: the buckets, plus when
+/// the next sweep over them is due. See [`RateLimiter::check_at`].
+#[derive(Default)]
+struct State {
+    buckets: HashMap<KeyDigest, Entry>,
+    /// `None` until the first check, which arms it rather than sweeping an
+    /// empty map.
+    next_sweep_at: Option<Instant>,
+}
+
 /// Sliding-window limiter with lockout.
 ///
 /// # Why the key is hashed rather than stored
 ///
-/// The map is keyed by the SHA-256 of the caller's key, not by the key itself,
-/// and an entry is never removed. Storing the raw string would make the
-/// per-request memory cost equal to the length of an **attacker-supplied**
-/// value: `egret-machine-idp` keys on `ip:client_id`, and `client_id` comes
-/// straight off the wire of a public, unauthenticated `POST /oauth/token`. A
-/// 50 KB `client_id` is accepted (it simply fails to match any client and
-/// returns 401) and, keyed raw, would install a 50 KB entry that nothing ever
-/// evicts. With the ingress body cap at 1 MB that is up to ~1 MB of permanent
-/// process memory per request, and the limiter cannot bound it: every distinct
-/// `client_id` is a fresh bucket, so flooding does not even trip the limit it
-/// is supposed to trip. An unbounded key is therefore not acceptable on any
-/// endpoint reachable from the internet.
+/// The map is keyed by the SHA-256 of the caller's key, not by the key itself.
+/// Storing the raw string would make the per-request memory cost equal to the
+/// length of an **attacker-supplied** value: `egret-machine-idp` keys on
+/// `ip:client_id`, and `client_id` comes straight off the wire of a public,
+/// unauthenticated `POST /oauth/token`. A 50 KB `client_id` is accepted (it
+/// simply fails to match any client and returns 401) and, keyed raw, would
+/// install a 50 KB entry per distinct value. With the ingress body cap at 1 MB
+/// that is up to ~1 MB of process memory per request held for a window, and
+/// the limiter cannot bound it: every distinct `client_id` is a fresh bucket,
+/// so flooding does not even trip the limit it is supposed to trip. An
+/// unbounded key is therefore not acceptable on any endpoint reachable from
+/// the internet.
 ///
 /// Hashing bounds the cost at 32 bytes per bucket regardless of input length,
 /// while keeping every distinct key in its own bucket — the property a length
@@ -50,9 +81,12 @@ struct Entry {
 /// into one bucket and would then rate-limit unrelated callers together. The
 /// digest must be collision-resistant for the same reason, so it is SHA-256 and
 /// not a fast non-cryptographic hash.
+///
+/// Hashing bounds what one bucket **costs**; the sweep in [`Self::check_at`]
+/// bounds **how many** of them there are.
 #[derive(Clone)]
 pub struct RateLimiter {
-    inner: Arc<Mutex<HashMap<KeyDigest, Entry>>>,
+    inner: Arc<Mutex<State>>,
     max: u32,
     window: Duration,
     lockout: Duration,
@@ -61,7 +95,7 @@ pub struct RateLimiter {
 impl RateLimiter {
     pub fn new(max: u32, window_secs: u64, lockout_secs: u64) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(HashMap::new())),
+            inner: Arc::new(Mutex::new(State::default())),
             max,
             window: Duration::from_secs(window_secs),
             lockout: Duration::from_secs(lockout_secs),
@@ -75,9 +109,41 @@ impl RateLimiter {
     }
 
     /// Record an attempt at `now`. Returns true if allowed, false if rate-limited.
+    ///
+    /// # Why this also sweeps
+    ///
+    /// An entry with no attempts left in the window and no active lockout is
+    /// tracking nothing, and keeping it means the map grows with every distinct
+    /// key the process has ever seen. The keys are attacker-chosen —
+    /// `egret-machine-idp` keys on `ip:client_id`, straight off a public,
+    /// unauthenticated `POST /oauth/token` — so "ever seen" has no ceiling.
+    ///
+    /// **Cost, and why this shape.** One sweep is `O(n)` over the map with the
+    /// lock held, and it runs at most once per `window`, so it is amortised
+    /// over every request in that window: a flood of `n` distinct keys pays one
+    /// `O(n)` pass, not `n` of them. Sweeping on *every* check was rejected
+    /// because it makes the same flood quadratic while holding a lock that is
+    /// on the login path; a background task was rejected because it adds a
+    /// thread and a second contender for the lock to a type that is otherwise
+    /// one `Mutex` around one `HashMap`.
+    ///
+    /// **What it leaves behind.** Between sweeps the map holds at most the
+    /// distinct keys seen since the last sweep plus everything still locked
+    /// out — one window of lag on an already-bounded set, not open growth.
     pub fn check_at(&self, key: &str, now: Instant) -> bool {
-        let mut map = self.inner.lock().unwrap();
-        let e = map.entry(Self::digest(key)).or_default();
+        let mut st = self.inner.lock().unwrap();
+        match st.next_sweep_at {
+            Some(due) if now >= due => {
+                st.next_sweep_at = Some(now + self.window);
+                let window = self.window;
+                st.buckets.retain(|_, e| e.holds_information(now, window));
+            }
+            // First check: arm the timer rather than sweep an empty map.
+            None => st.next_sweep_at = Some(now + self.window),
+            _ => {}
+        }
+
+        let e = st.buckets.entry(Self::digest(key)).or_default();
         if let Some(until) = e.locked_until {
             if now < until {
                 return false;
@@ -103,7 +169,26 @@ impl RateLimiter {
     /// keys are ever stored raw again.
     #[cfg(test)]
     fn stored_key_bytes(&self) -> usize {
-        self.inner.lock().unwrap().keys().map(|k| k.len()).sum()
+        self.inner
+            .lock()
+            .unwrap()
+            .buckets
+            .keys()
+            .map(|k| k.len())
+            .sum()
+    }
+
+    /// How many buckets the map is holding.
+    ///
+    /// Test-only, and it exists because eviction is **otherwise unobservable**:
+    /// dropping an entry that holds no information changes nothing a caller can
+    /// see — `check` answers identically whether the stale entry was kept or
+    /// removed — so the leak and the fix are behaviourally identical from
+    /// outside. The only way to test the sweep at all is to look at the map,
+    /// and this is the smallest thing that allows it.
+    #[cfg(test)]
+    fn tracked_keys(&self) -> usize {
+        self.inner.lock().unwrap().buckets.len()
     }
 }
 
@@ -190,6 +275,95 @@ mod tests {
         );
         assert!(!rl.check_at(&a, t0), "first caller is now out of budget");
         assert!(!rl.check_at(&b, t0), "second caller is now out of budget");
+    }
+
+    /// An entry with no attempts left in the window and no lockout is tracking
+    /// nothing. It must not still be there after a later check.
+    #[test]
+    fn an_entry_that_tracks_nothing_is_dropped() {
+        let rl = RateLimiter::new(5, 300, 600);
+        let t0 = Instant::now();
+
+        assert!(rl.check_at("one-and-done", t0));
+        assert_eq!(rl.tracked_keys(), 1, "the caller is being tracked");
+
+        // Past the window: that single attempt no longer counts, and this
+        // caller was never locked out. A later check by someone else sweeps.
+        assert!(rl.check_at("someone-else", t0 + Duration::from_secs(301)));
+        assert_eq!(
+            rl.tracked_keys(),
+            1,
+            "only the caller still being tracked should remain; the entry that \
+             held nothing must be gone, not sitting next to it"
+        );
+    }
+
+    /// The map must not grow with every distinct key the process has ever seen.
+    /// The keys are attacker-chosen (`ip:client_id` off a public
+    /// `POST /oauth/token`), so unbounded growth here is reachable from the
+    /// internet by anyone willing to vary one form field.
+    #[test]
+    fn the_map_does_not_grow_without_bound_across_distinct_keys() {
+        let rl = RateLimiter::new(5, 300, 600);
+        let t0 = Instant::now();
+
+        for i in 0..10_000 {
+            rl.check_at(&format!("198.51.100.1:client-{i}"), t0);
+        }
+        assert_eq!(
+            rl.tracked_keys(),
+            10_000,
+            "every caller is tracked at first"
+        );
+
+        // Two windows later, none of them has come back.
+        rl.check_at("a-later-caller", t0 + Duration::from_secs(601));
+        assert_eq!(
+            rl.tracked_keys(),
+            1,
+            "10,000 windows-expired callers must not still be held; without \
+             eviction this is 10,001 and climbs with every new key forever"
+        );
+    }
+
+    /// THE ONE THAT BITES. An entry under an ACTIVE LOCKOUT has no attempts
+    /// left in the window — the lockout is the longer of the two clocks by
+    /// design — so an eviction that looks only at `attempts` drops it and hands
+    /// the locked-out caller a fresh budget after the SHORTER wait. That is the
+    /// exact reset the lockout exists to deny, and a test that only checked
+    /// "the map shrinks" would pass against it.
+    #[test]
+    fn an_entry_under_an_active_lockout_survives_the_sweep() {
+        // Lockout (900s) deliberately longer than the window (300s).
+        let rl = RateLimiter::new(2, 300, 900);
+        let t0 = Instant::now();
+
+        assert!(rl.check_at("attacker", t0));
+        assert!(rl.check_at("attacker", t0));
+        assert!(
+            !rl.check_at("attacker", t0),
+            "the third attempt locks them out"
+        );
+
+        // Past the window, well inside the lockout: the attacker's attempts
+        // have all aged out of the window, which is the moment a naive sweep
+        // would decide this entry holds nothing.
+        let t1 = t0 + Duration::from_secs(400);
+        rl.check_at("an-unrelated-caller", t1);
+
+        assert_eq!(
+            rl.tracked_keys(),
+            2,
+            "the locked-out entry must survive the sweep"
+        );
+        assert!(
+            !rl.check_at("attacker", t1),
+            "still locked out — evicting the entry would have answered true here"
+        );
+
+        // And the lockout runs its full length, not the window's.
+        assert!(!rl.check_at("attacker", t0 + Duration::from_secs(899)));
+        assert!(rl.check_at("attacker", t0 + Duration::from_secs(901)));
     }
 
     /// An attacker-supplied key must not buy attacker-chosen permanent memory:
