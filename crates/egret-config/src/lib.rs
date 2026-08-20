@@ -227,7 +227,10 @@ impl DataApiConfig {
     pub fn consumer_base_url(&self, fallback: &str) -> String {
         self.public_url
             .as_deref()
-            .map(str::trim)
+            // Trim BEFORE the emptiness check, not after: `/` survives an
+            // is-empty filter and only then trims to nothing, which would leave
+            // the guard reading as present while the origin is empty.
+            .map(|u| u.trim().trim_end_matches('/'))
             .filter(|u| !u.is_empty())
             .unwrap_or(fallback)
             .trim_end_matches('/')
@@ -621,6 +624,27 @@ mod tests {
     fn a_blank_consumer_base_url_reads_as_unset() {
         figment::Jail::expect_with(|jail| {
             jail.set_env("EGRET_DATA_API__PUBLIC_URL", "");
+            let cfg: Config = Config::figment().extract()?;
+            assert_eq!(
+                cfg.data_api.consumer_base_url("http://egret.svc:8080"),
+                "http://egret.svc:8080"
+            );
+            Ok(())
+        });
+    }
+
+    /// A value of `/` must read as unset too, for the same reason `""` does.
+    ///
+    /// It survives an emptiness check that runs before the slash is trimmed,
+    /// and then trims to nothing — so the guard reads as present while the
+    /// origin is empty, and `servers[0].url` renders as the bare path
+    /// `/data-api/v1/<slug>`. That is the exact "looks generated, is
+    /// uncallable" document the blank case exists to prevent, reached by the
+    /// one input that walks past its filter.
+    #[test]
+    fn a_slash_only_consumer_base_url_reads_as_unset() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("EGRET_DATA_API__PUBLIC_URL", "/");
             let cfg: Config = Config::figment().extract()?;
             assert_eq!(
                 cfg.data_api.consumer_base_url("http://egret.svc:8080"),
