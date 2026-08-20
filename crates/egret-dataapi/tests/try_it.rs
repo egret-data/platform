@@ -141,6 +141,42 @@ async fn the_token_never_reaches_the_caller() {
     );
 }
 
+/// The URL and `curl` line Try-it echoes are shown to a HUMAN, so they must name
+/// a host that human can reach.
+///
+/// With `data_api.public_url` set, the echo follows it. It used to print the
+/// issuer, which in-cluster is `http://egret.<ns>.svc.cluster.local:8080` — a
+/// copyable reproduction that resolves nowhere outside the cluster.
+///
+/// The fixture gives the consumer base and the issuer DIFFERENT hosts on
+/// purpose: equal (the key unset) an echo still built from `issuer` would print
+/// the same string and pass. `the_token_never_reaches_the_caller` above pins the
+/// unset case, byte for byte.
+#[tokio::test]
+async fn the_echoed_url_names_the_host_the_author_can_reach() {
+    let Some(f) = fixture().await else { return };
+    const CONSUMER: &str = "https://api.egret.example";
+    let f = f.with_consumer_base_url(CONSUMER);
+    let sa = f.create_service_account("echo-origin").await;
+
+    let (status, body) = try_it(&f, sa).await;
+    assert_eq!(status, 200, "body: {body}");
+
+    let url = body["request"]["url"].as_str().expect("url");
+    assert_eq!(url, format!("{CONSUMER}/data-api/v1/{}/probe", f.ws_slug));
+    // The `curl` line is a second rendering of the same URL and has its own
+    // format string, so it can drift from the field above on its own.
+    let curl = body["request"]["curl"].as_str().expect("curl");
+    assert!(
+        curl.contains(&format!("'{url}'")),
+        "the pasteable reproduction must carry the same reachable URL: {curl}"
+    );
+    assert!(
+        !curl.contains("egret.test"),
+        "no trace of the in-cluster issuer may reach the author: {curl}"
+    );
+}
+
 #[tokio::test]
 async fn an_id_that_is_not_a_service_account_is_not_found() {
     let Some(f) = fixture().await else { return };

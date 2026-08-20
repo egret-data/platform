@@ -182,6 +182,57 @@ pub struct DataApiConfig {
     /// to look. **If you add a third retention knob, route it through the same
     /// function** — the danger is not this field, it is the shape.
     pub access_log_retention_days: i64,
+    /// Base URL a CONSUMER OUTSIDE the cluster uses to reach this deployment's
+    /// Data API — the origin stamped into the generated OpenAPI document's
+    /// `servers[0].url` and `tokenUrl`, into the `token_endpoint` handed back
+    /// with a new client, and into the URL and `curl` line Try-it shows the
+    /// author.
+    ///
+    /// Deliberately separate from `catalog.public_url`, and NOT a replacement
+    /// for it. That one is what an ENGINE POD resolves in-cluster to fetch the
+    /// catalog and the JWKS, so a chart sets it to a Service DNS name
+    /// (`http://egret.<ns>.svc.cluster.local:8080`) on purpose; it is also the
+    /// machine-IdP `iss`, byte-compared by StarRocks' `required_issuer` and
+    /// baked into every already-provisioned engine's catalog ConfigMap. Handing
+    /// that address to a consumer outside the cluster advertises a name they
+    /// cannot resolve — which is the defect this key exists to close — and
+    /// repointing it at the ingress instead would break the engines. Both
+    /// audiences are legitimate and simultaneous, so they get two keys.
+    ///
+    /// Falls back to `catalog.public_url` when unset (see
+    /// [`DataApiConfig::consumer_base_url`]), which is correct in local dev
+    /// where the two really are the same address. The token a consumer fetches
+    /// from this origin is still minted by this same backend and still carries
+    /// the internal `iss`, and the serving path still validates it — the two
+    /// audiences need a reachable origin each, not a shared one.
+    #[serde(default)]
+    pub public_url: Option<String>,
+}
+
+impl DataApiConfig {
+    /// The consumer-facing origin, resolved once, with `fallback` (the
+    /// machine-IdP issuer derived from `catalog.public_url`) when this key is
+    /// unset. A widening: absent, every output is what it was before this key
+    /// existed.
+    ///
+    /// Blank counts as absent. `EGRET_DATA_API__PUBLIC_URL=` in a half-written
+    /// env file deserialises to `Some("")`, and an empty origin would render
+    /// `servers[0].url` as a bare path — a document that looks generated and is
+    /// uncallable. The neighbouring retention knob carries the same trap for
+    /// the same reason.
+    ///
+    /// The trailing slash is trimmed HERE, at the source, exactly as the
+    /// issuer's own derivation trims it: a `//` in the middle of a token URL is
+    /// the kind of thing an HTTP client forgives and a byte comparison does not.
+    pub fn consumer_base_url(&self, fallback: &str) -> String {
+        self.public_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|u| !u.is_empty())
+            .unwrap_or(fallback)
+            .trim_end_matches('/')
+            .to_string()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -216,6 +267,9 @@ pub struct Config {
 fn default_data_api() -> DataApiConfig {
     DataApiConfig {
         access_log_retention_days: 90,
+        // Unset: fall back to `catalog.public_url`. See
+        // `DataApiConfig::public_url` for why this is a separate key at all.
+        public_url: None,
     }
 }
 
@@ -514,6 +568,64 @@ mod tests {
             jail.set_env("EGRET_DATA_API__ACCESS_LOG_RETENTION_DAYS", "7");
             let cfg: Config = Config::figment().extract()?;
             assert_eq!(cfg.data_api.access_log_retention_days, 7);
+            Ok(())
+        });
+    }
+
+    /// Absent, the consumer-facing origin IS the issuer — this key is a
+    /// widening, so an existing deployment's generated document must not move.
+    #[test]
+    fn the_consumer_base_url_falls_back_to_the_issuer() {
+        figment::Jail::expect_with(|_jail| {
+            let cfg: Config = Config::figment().extract()?;
+            assert_eq!(cfg.data_api.public_url, None);
+            assert_eq!(
+                cfg.data_api
+                    .consumer_base_url("http://egret.egret-system.svc.cluster.local:8080"),
+                "http://egret.egret-system.svc.cluster.local:8080",
+                "unset must leave every advertised URL exactly where it was"
+            );
+            Ok(())
+        });
+    }
+
+    /// Set, it wins — and it is reachable under the name the operator docs and
+    /// the chart will use. A section whose env path is wrong is a knob that
+    /// silently cannot be turned.
+    #[test]
+    fn the_consumer_base_url_is_settable_from_the_environment() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("EGRET_DATA_API__PUBLIC_URL", "http://egret.localtest.me/");
+            let cfg: Config = Config::figment().extract()?;
+            assert_eq!(
+                cfg.data_api.public_url.as_deref(),
+                Some("http://egret.localtest.me/")
+            );
+            // Trimmed AT THE SOURCE, like the issuer's own derivation: the
+            // trailing slash never reaches a call site to be forgotten there.
+            assert_eq!(
+                cfg.data_api.consumer_base_url("http://egret.svc:8080"),
+                "http://egret.localtest.me"
+            );
+            Ok(())
+        });
+    }
+
+    /// Blank is absent, not an empty origin.
+    ///
+    /// `EGRET_DATA_API__PUBLIC_URL=` is what a half-written env file produces,
+    /// and it deserialises to `Some("")`. Taken literally it would render
+    /// `servers[0].url` as a bare `/data-api/v1/<slug>` — a document that looks
+    /// generated and is uncallable.
+    #[test]
+    fn a_blank_consumer_base_url_reads_as_unset() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("EGRET_DATA_API__PUBLIC_URL", "");
+            let cfg: Config = Config::figment().extract()?;
+            assert_eq!(
+                cfg.data_api.consumer_base_url("http://egret.svc:8080"),
+                "http://egret.svc:8080"
+            );
             Ok(())
         });
     }

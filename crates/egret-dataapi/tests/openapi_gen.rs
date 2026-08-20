@@ -150,6 +150,105 @@ async fn the_documented_url_is_the_url_try_it_calls() {
     );
 }
 
+/// **The two audiences, told apart.**
+///
+/// `data_api.public_url` set: every URL a CONSUMER is handed carries it, while
+/// the token `iss` — a claim, not an address — stays on the machine-IdP issuer.
+/// Measured on kind 2026-08-20, the whole document advertised
+/// `http://egret.egret-system.svc.cluster.local:8080`, which is the Service DNS
+/// name engine pods resolve and nothing outside the cluster can.
+///
+/// The fixture gives the two DIFFERENT hosts on purpose: with them equal (the
+/// default, i.e. the key unset) a generator that still read `issuer` would emit
+/// `https://egret.test` and pass every assertion below.
+///
+/// Three separate assertions, because they can fail separately:
+/// * `servers[0].url` — where the call goes.
+/// * `tokenUrl` — where the credential is exchanged. A test checking only the
+///   first passes against a change that moves one and not the other, which is
+///   the exact split `openapi_gen.rs`'s own comment warns about: one file
+///   sending a consumer to fetch a token from one host and call another.
+/// * `token_endpoint`, from the REAL issue-client route in another module,
+///   which is the same promise made at a different moment and must not drift
+///   from `tokenUrl`.
+///
+/// And the `iss` of a token this deployment actually mints (`try_it`'s
+/// `mint_trial_token`, through the test shim, since a trial token is never
+/// echoed to anyone). It must NOT follow: StarRocks byte-compares
+/// `required_issuer`, and every already-provisioned engine has the old value
+/// baked into its catalog ConfigMap.
+#[tokio::test]
+async fn consumer_facing_urls_move_to_the_public_url_and_the_iss_claim_does_not() {
+    let Some(f) = fixture().await else { return };
+    const CONSUMER: &str = "https://api.egret.example";
+    let f = f.with_consumer_base_url(CONSUMER);
+    let sa = f.create_service_account("consumer-origin-sa").await;
+
+    let (status, doc) = f
+        .mgmt_get(&format!(
+            "/api/ws/{}/data-api/openapi?service_account_id={sa}",
+            f.ws_slug
+        ))
+        .await;
+    assert_eq!(status, 200, "doc: {doc}");
+
+    let server = doc["servers"][0]["url"].as_str().expect("servers url");
+    let token_url = doc["components"]["securitySchemes"]["egret_oauth2"]["flows"]
+        ["clientCredentials"]["tokenUrl"]
+        .as_str()
+        .expect("tokenUrl");
+    assert_eq!(
+        server,
+        format!("{CONSUMER}/data-api/v1/{}", f.ws_slug),
+        "the documented call URL must be reachable by the consumer reading it"
+    );
+    assert_eq!(
+        token_url,
+        format!("{CONSUMER}/oauth/token"),
+        "both halves of the origin come from one value, or the document sends a \
+         consumer to two different hosts"
+    );
+
+    // The same promise, made when the credential is issued rather than when the
+    // document is generated.
+    let (issued, client) = f
+        .mgmt_post(
+            &format!(
+                "/api/ws/{}/data-api/service-accounts/{sa}/clients",
+                f.ws_slug
+            ),
+            Some(serde_json::json!({ "name": "consumer-origin-client" })),
+        )
+        .await;
+    assert_eq!(issued, 201, "issue client failed: {client}");
+    assert_eq!(
+        client["token_endpoint"], token_url,
+        "the endpoint handed out with a credential must be the one the document \
+         documents: {client}"
+    );
+
+    // The claim, which is a different kind of thing and must not have moved.
+    let token = egret_dataapi::mint_trial_token_for_test(&f.state, f.ws_id, sa)
+        .await
+        .expect("mint trial token");
+    let claims = claims_of(&token);
+    assert_eq!(
+        claims["iss"], "https://egret.test",
+        "`iss` is byte-compared by StarRocks and baked into provisioned engines; \
+         it stays on the machine-IdP issuer: {claims}"
+    );
+}
+
+/// The payload of a JWT, unverified — the signature is not what is under test.
+fn claims_of(token: &str) -> serde_json::Value {
+    use base64::Engine as _;
+    let payload = token.split('.').nth(1).expect("a JWT has three parts");
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .expect("base64url payload");
+    serde_json::from_slice(&raw).expect("claims are JSON")
+}
+
 /// The bound on how many endpoints one document may describe is an ERROR, never
 /// a short document — a consumer cannot tell a truncated file from a complete
 /// one, and `?endpoint_id=` is the documented way through.

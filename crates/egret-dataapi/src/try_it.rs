@@ -220,7 +220,7 @@ fn trial_client_id(service_account_id: Uuid) -> String {
 ///
 /// Signed with `keys.active()`, the same key `verify_serving_token` verifies
 /// against and the same one `POST /oauth/token` mints with.
-async fn mint_trial_token(
+pub(crate) async fn mint_trial_token(
     st: &DataApiState,
     workspace_id: Uuid,
     service_account_id: Uuid,
@@ -233,6 +233,11 @@ async fn mint_trial_token(
     egret_machine_idp::sign_claims(
         &km,
         &serde_json::json!({
+            // The ISSUER, deliberately — a claim, not an address. It must stay
+            // byte-equal to what every other token this deployment signs
+            // carries; `consumer_base_url` (used for the echoed URL below) is a
+            // different audience and would make this token's `iss` disagree
+            // with the rest of the system the moment the two differ.
             "iss": st.issuer.trim_end_matches('/'),
             "sub": trial_client_id(service_account_id),
             "aud": crate::serving::DATA_API_AUDIENCE,
@@ -383,7 +388,13 @@ pub async fn try_endpoint(
     let parsed: serde_json::Value =
         serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
 
-    let origin = st.issuer.trim_end_matches('/');
+    // The CONSUMER-facing origin, not the issuer: this URL and the `curl` line
+    // below are shown to the AUTHOR in the browser, and an in-cluster Service
+    // DNS name is a line they cannot paste into a terminal and run. (The trial
+    // itself never goes over the network — it drives the serving router
+    // in-process — so this string is documentation, and documentation that
+    // names an unreachable host is worse than none.)
+    let origin = st.consumer_base_url.trim_end_matches('/');
     Ok(Json(TryResponse {
         status: status.as_u16(),
         body: parsed,

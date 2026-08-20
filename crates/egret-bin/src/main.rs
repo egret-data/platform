@@ -1361,6 +1361,16 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         .trim_end_matches('/')
         .to_string();
 
+    // The OTHER audience of the same question, resolved here so the two
+    // derivations sit together and neither can drift: the base URL a Data API
+    // CONSUMER outside the cluster uses. `egret_public_url` above is what an
+    // ENGINE POD resolves in-cluster (a Service DNS name, deliberately) and is
+    // the token `iss`; handing that to a consumer advertises a host they cannot
+    // reach. Falls back to it when `data_api.public_url` is unset, so a
+    // deployment that sets nothing keeps exactly today's URLs, and is trimmed of
+    // a trailing slash at the SOURCE for the same reason the issuer is.
+    let dataapi_consumer_url = config.data_api.consumer_base_url(&egret_public_url);
+
     // Task 4 (STS cutover): the machine-IdP mints the short-lived per-user
     // engine JWT carried in the notebook-runtime manifest — replacing the old
     // Keycloak refresh-grant broker (deleted; couldn't mint for local users or
@@ -1884,8 +1894,10 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     });
 
     // Data API management surface (P2 Task 5). `issuer` is the SAME public root
-    // URL the machine-IdP signs with, so the `token_endpoint` handed back with a
-    // new client points at the endpoint that will actually accept it.
+    // URL the machine-IdP signs with, so a trial token's `iss` matches every
+    // other token this deployment signs; `consumer_base_url` is the address a
+    // caller outside the cluster uses, so the `token_endpoint` handed back with
+    // a new client points somewhere they can actually reach.
     let dataapi = Some(egret_dataapi::DataApiState {
         db: db.clone(),
         clients: egret_dataapi::ClientStore::new(db.clone()),
@@ -1903,7 +1915,12 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         // The SAME store the machine-IdP above signs with (P4 Task 2), so the
         // serving path verifies a token against the key that actually signed it.
         keys: signing_keys.clone(),
+        // A token CLAIM (the trial token's `iss`), which is why it is not the
+        // value the URLs below are built from.
         issuer: egret_public_url.clone(),
+        // Every URL handed to a consumer or shown to the author. Equal to
+        // `issuer` unless `data_api.public_url` is set.
+        consumer_base_url: dataapi_consumer_url,
         // The SAME sink `CpState` and every other seam receives (P3 Task 5), so
         // publishing an endpoint or minting a client lands in the one `audit_log`
         // an operator already queries, not in a Data-API-local trail.

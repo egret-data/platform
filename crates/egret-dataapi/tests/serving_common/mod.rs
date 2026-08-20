@@ -700,6 +700,13 @@ pub async fn fixture() -> Option<Fixture> {
         query: port.clone(),
         keys: Arc::new(FakeKeys),
         issuer: "https://egret.test".into(),
+        // Deliberately the SAME string as `issuer` — this is the state a
+        // deployment with `data_api.public_url` UNSET boots into, so every
+        // assertion in these suites that names `https://egret.test` is
+        // pinning today's output. A test that wants the two to differ
+        // rebuilds the routers through `Fixture::with_consumer_base_url`;
+        // moving this line instead would silently retarget every suite.
+        consumer_base_url: "https://egret.test".into(),
         audit: egret_audit::AuditSink::new(1).0,
         // ONE cache and ONE set of buckets for the whole fixture — built per
         // request they would be a cache that never hits and a limit nobody
@@ -787,6 +794,27 @@ impl Res {
 }
 
 impl Fixture {
+    /// Rebuild both routers with a DIFFERENT consumer-facing base URL, leaving
+    /// `issuer` where it is.
+    ///
+    /// The two must be able to disagree for any assertion about them to mean
+    /// anything: with the fixture's default (the two equal, i.e. the key unset)
+    /// a change that ignored `consumer_base_url` entirely would still produce
+    /// `https://egret.test` everywhere and pass. It rebuilds rather than mutates
+    /// because `.with_state` has already consumed the state the live routers
+    /// hold — assigning to `self.state` alone would change nothing a request
+    /// can see, and the test would pass for the wrong reason.
+    pub fn with_consumer_base_url(mut self, url: &str) -> Self {
+        self.state.consumer_base_url = url.to_string();
+        self.serving = axum::Router::new()
+            .nest("/data-api/v1", serving_router())
+            .with_state(self.state.clone());
+        self.mgmt = axum::Router::new()
+            .nest("/api", management_router())
+            .with_state(self.state.clone());
+        self
+    }
+
     /// A call as `principal`, with a client id derived from it.
     pub async fn call_as(&self, principal: UserId, path: &str) -> Res {
         self.call_as_client(principal, &format!("client-{}", principal.0.simple()), path)

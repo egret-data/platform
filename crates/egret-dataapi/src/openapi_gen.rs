@@ -218,7 +218,11 @@ pub async fn build(
         });
     }
 
-    let base = st.issuer.trim_end_matches('/');
+    // The CONSUMER-facing origin (`data_api.public_url`), NOT `st.issuer`: this
+    // document is read by a client outside the cluster, and the issuer is an
+    // in-cluster Service DNS name it cannot resolve. Falls back to the issuer
+    // when unset, so a deployment that sets nothing keeps today's document.
+    let base = st.consumer_base_url.trim_end_matches('/');
     // The workspace SLUG, resolved exactly as `try_it` resolves it
     // (`try_it.rs`'s `try_endpoint`) — from `ws`, which the handler already
     // authorized against, never from a second read of the `{workspace}` path
@@ -309,9 +313,9 @@ pub async fn build(
         // 3.0.3, not 3.1 — see the module comment.
         "openapi": "3.0.3",
         "info": { "title": "Data API", "version": "1.0.0" },
-        // Both halves of the origin come from `issuer`. See spec §5.3: if these
-        // could disagree, one file would send a consumer to fetch a token from
-        // one host and call another.
+        // Both halves of the origin come from `base` — the ONE consumer-facing
+        // value. See spec §5.3: if these could disagree, one file would send a
+        // consumer to fetch a token from one host and call another.
         //
         // The WORKSPACE SLUG is part of the base URL because it is part of the
         // serving route, not of the mount — see the `slug` binding above.

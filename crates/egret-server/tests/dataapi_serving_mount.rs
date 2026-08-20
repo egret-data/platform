@@ -145,6 +145,9 @@ fn composed_app_with_dataapi() -> axum::Router {
         query: Arc::new(UnreachablePort),
         keys: Arc::new(FakeKeys),
         issuer: "https://egret.test".into(),
+        // Same as `issuer`: the fallback, i.e. `data_api.public_url` unset,
+        // which is what every deployment produces today.
+        consumer_base_url: "https://egret.test".into(),
         audit: egret_audit::AuditSink::new(1).0,
         cache: egret_dataapi::serving::ResponseCache::new(),
         rate_limits: std::sync::Arc::new(egret_dataapi::serving::TokenBucket::new()),
