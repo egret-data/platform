@@ -113,25 +113,27 @@ impl RateLimiter {
 /// when the header is absent, which collapses unlabelled callers into one
 /// bucket per subject.
 ///
-/// # How far this can be trusted differs by deployment
+/// # This is only as trustworthy as the edge in front of it
 ///
-/// - **Behind the shipped Helm ingress it is not spoofable.** ingress-nginx
-///   runs with `use-forwarded-headers=false` and emits
-///   `proxy_set_header X-Forwarded-For $remote_addr`, which *overwrites*
-///   whatever the client sent, so the first hop is the real peer address.
-/// - **On the SPA-fronted path it is trivially spoofable.**
-///   `frontend/nginx-prod.conf` proxies with `$proxy_add_x_forwarded_for`,
-///   which *appends* to the client's header, so a client-supplied
-///   `X-Forwarded-For` becomes the first hop. Measured through the frontend
-///   pod: 60 requests with a fixed `X-Forwarded-For` reach a 429, then one
-///   request with a different `X-Forwarded-For` and the same subject is
-///   allowed again — a full fresh budget on demand.
+/// Reading hop one is sound only where the edge **overwrites** the header
+/// rather than appending to it. Both edges this repo ships do:
 ///
-/// So on the SPA-fronted path the `ip:` component is a partition, not a
-/// security boundary: the limiter still bounds a naive or accidental flood and
-/// still keeps callers from locking each other out, but it does not bound a
-/// deliberate one. Widening that is an edge-configuration change (make the SPA
-/// server overwrite the header the way the ingress does), not a limiter change.
+/// - **The Helm ingress.** ingress-nginx runs with
+///   `use-forwarded-headers=false` and emits
+///   `proxy_set_header X-Forwarded-For $remote_addr`.
+/// - **The SPA server.** `frontend/nginx-prod.conf` sets `$remote_addr` in
+///   every one of its seven proxy blocks. It used to append with
+///   `$proxy_add_x_forwarded_for`, which made hop one the *client's own*
+///   value and the limiter resettable on demand: measured through the frontend
+///   pod, 60 `POST /oauth/token` with a fixed spoofed `X-Forwarded-For`
+///   reached 429, then one header edit with the same `client_id` was allowed
+///   again — a full fresh budget. `location /api/` carried the same line, so
+///   the login limiter went the same way. Fixed at the edge, not here.
+///
+/// Any **new** edge placed in front of the backend has to take the same
+/// posture. This function cannot enforce it: from in here an appended header is
+/// indistinguishable from a genuine multi-proxy chain, which is why the rule
+/// lives in the edge config and is written down there.
 #[cfg(feature = "http")]
 pub fn client_ip(headers: &HeaderMap) -> String {
     headers
