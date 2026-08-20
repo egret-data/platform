@@ -32,17 +32,25 @@ import { useCallback, useMemo, useState } from "react";
  * dropping the collapsed ones, and passes that. Copy one of them rather than
  * reaching for `rows`.
  *
- * The two remaining callers, `MembersPanel` and `UsersPage`, are KNOWN TO BE
- * WRONG — read this as an outstanding bug, not an exemption. They do not group,
+ * The two remaining callers, `MembersPanel` and `UsersPage`, are PARTLY WRONG
+ * still — read this as an outstanding bug, not an exemption. They do not group,
  * so they look compliant, but they hand their whole filtered list to
  * `FilterableTable`, which owns the search box and (on `UsersPage`) a
- * `pageSize={25}` pager, and draws only its own page of rows. Worse, that
- * table's own header "Select all" toggles over its POST-SEARCH set rather than
- * the page it drew, so one click with 25 rows on screen selects every filtered
- * user across every page. Both pages then act on `bulk.selected` filtered
- * against the FULL list rather than on `selectedIds`, so passing a different
- * argument here would fix their counts and leave their actions untouched: the
- * fix has to make `FilterableTable` report the rows it rendered.
+ * `pageSize={25}` pager, and draws only its own page.
+ *
+ * The worst of it is fixed: that table's header "Select all" used to toggle
+ * over its post-search set rather than the page it drew, so one click with 25
+ * rows on screen selected every filtered user and bulk Disable turned all of
+ * them off. It now toggles only the rows it rendered.
+ *
+ * What remains is the other order of events. Both pages derive their targets
+ * from `bulk.selected` filtered against the FULL list (`MembersPanel:110`,
+ * `UsersPage:312`) rather than from `selectedIds`, so a row picked while
+ * visible and then hidden — by the table's own search box, or by paging away —
+ * stays selected and is still acted on. Note what that means for this file:
+ * passing those pages a different `rows` argument would correct their counts
+ * and leave their actions untouched. The fix has to make `FilterableTable`
+ * report the rows it drew, and the pages read their targets from that.
  *
  * Do not copy those two.
  */
