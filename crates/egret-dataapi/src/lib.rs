@@ -88,6 +88,26 @@ pub use try_it::{
     TrialActor, TrialResultTooLarge, TryItError, TryRequest, TryRequestEcho, TryResponse,
 };
 
+/// Test-only access to the trial-token minter.
+///
+/// The trial token is minted, used in-process against the serving router, and
+/// discarded — `tests/try_it.rs`'s `the_token_never_reaches_the_caller` pins
+/// that it is never echoed to the author. So the ONLY way an integration test
+/// can assert what claims it carries is a shim like this one. The claim that
+/// matters is `iss`: it is the machine-IdP issuer and must NOT follow the
+/// consumer-facing base URL when a deployment sets the two apart.
+///
+/// Same shape as [`can_invoke_for_test`] below: the real function stays
+/// crate-private, so no production caller can drift onto a second copy.
+#[doc(hidden)]
+pub async fn mint_trial_token_for_test(
+    st: &crate::routes::DataApiState,
+    workspace_id: uuid::Uuid,
+    service_account_id: uuid::Uuid,
+) -> Result<String, crate::routes::DataApiError> {
+    crate::try_it::mint_trial_token(st, workspace_id, service_account_id).await
+}
+
 /// Test-only access to the shared invoke expression (P5 §5.2). Integration
 /// tests live outside the crate and cannot see `pub(crate)`; exposing it through
 /// a named shim keeps the real function crate-private, so no production caller

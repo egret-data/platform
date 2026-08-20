@@ -172,10 +172,30 @@ pub struct DataApiState {
     /// key's public JWK. The management routes above authenticate a HUMAN
     /// through `WsContext`/`SessionService` and never touch this.
     pub keys: Arc<dyn egret_machine_idp::SigningKeyStore>,
-    /// egret's public root URL — the machine-IdP's `iss`. The `token_endpoint`
-    /// handed back with a new client is derived from it so a caller never has to
-    /// guess where to exchange the credential.
+    /// The machine-IdP's `iss` — a TOKEN CLAIM, not an address anyone fetches.
+    ///
+    /// Stamped into the tokens this deployment signs and byte-compared by
+    /// StarRocks' `required_issuer`, so it must stay exactly what
+    /// `catalog.public_url` derives (in-cluster, that is a Service DNS name).
+    /// **The URLs handed to a consumer come from [`Self::consumer_base_url`]
+    /// instead** — the defect this pair exists to prevent was one value serving
+    /// both audiences, which advertised a cluster-internal hostname to callers
+    /// outside the cluster. Only [`crate::try_it`]'s trial-token minter reads
+    /// this field.
     pub issuer: String,
+    /// The base URL a CONSUMER uses to reach this deployment — an ADDRESS
+    /// someone fetches, not a claim.
+    ///
+    /// Every URL that leaves the seam for a human or a client generator is built
+    /// from it: the `token_endpoint` returned with a new client, the generated
+    /// document's `servers[0].url` and `tokenUrl` (both from this one value —
+    /// see `openapi_gen`), and the URL and `curl` line Try-it shows the author.
+    ///
+    /// Configured as `data_api.public_url` and resolved in `egret-bin` beside
+    /// the issuer it falls back to, already trimmed of a trailing slash. Equal
+    /// to [`Self::issuer`] unless a deployment sets that key, which is what
+    /// makes this a widening.
+    pub consumer_base_url: String,
     /// The append-only audit trail. The SAME sink `CpState` receives, so a Data
     /// API mutation lands in the one `audit_log` an operator already reads
     /// rather than in a second, seam-local trail nobody queries.
@@ -785,7 +805,10 @@ async fn issue_client(
             id: c.id,
             client_id: c.client_id,
             client_secret: c.client_secret,
-            token_endpoint: format!("{}/oauth/token", st.issuer.trim_end_matches('/')),
+            // The CONSUMER-facing origin, never `issuer`: this URL is handed
+            // to whoever holds the credential, and in-cluster the issuer is a
+            // Service DNS name they cannot resolve.
+            token_endpoint: format!("{}/oauth/token", st.consumer_base_url.trim_end_matches('/')),
         }),
     ))
 }

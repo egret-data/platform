@@ -22,6 +22,23 @@ spec:
               service:
                 name: keycloak
                 port: { number: 8080 }
+          # Machine traffic for the Data API: consumers outside the cluster fetch a
+          # token at /oauth/token and call the published endpoint at
+          # /data-api/v1/{ws}/{path}. Straight to the backend, not via the SPA's
+          # nginx — there is no browser in this path. Listed before the `/`
+          # catch-all so it cannot be shadowed, exactly as /auth is.
+          - path: /data-api
+            pathType: Prefix
+            backend:
+              service:
+                name: egret
+                port: { number: 8080 }
+          - path: /oauth
+            pathType: Prefix
+            backend:
+              service:
+                name: egret
+                port: { number: 8080 }
           - path: /
             pathType: Prefix
             backend:

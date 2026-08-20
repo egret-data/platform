@@ -80,6 +80,9 @@ fn build_state(db: Db, pdp: Arc<dyn egret_core::authz::Pdp>) -> DataApiState {
         // machine token, so `active()` is never called and no key is generated.
         keys: Arc::new(egret_machine_idp::PgSigningKeyStore::new(db.clone())),
         issuer: "https://egret.test".into(),
+        // Same as `issuer`: the fallback, i.e. `data_api.public_url` unset,
+        // which is what every deployment produces today.
+        consumer_base_url: "https://egret.test".into(),
         // A sink whose receiver is dropped immediately: `emit` is best-effort
         // and logs rather than failing when the channel is closed, so nothing in
         // this file depends on it. What the audited routes emit is asserted in
