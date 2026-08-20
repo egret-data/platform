@@ -30,6 +30,7 @@ use std::sync::Arc;
 pub struct EgretIdentity {
     issuer: String,
     in_cluster_base_url: String,
+    consumer_base_url: String,
 }
 
 impl EgretIdentity {
@@ -51,9 +52,22 @@ impl EgretIdentity {
             .trim_end_matches('/')
             .to_string();
         let issuer = config.idp.issuer_url(&in_cluster_base_url);
+        // The Data API's consumer origin falls back to the ISSUER, not to the
+        // in-cluster address. Both are "somewhere outside the cluster reaches
+        // us", and the document a consumer receives puts them side by side: its
+        // `iss`/`tokenUrl` come from the issuer and its `servers[0].url` and
+        // `token_endpoint` come from here. Falling back to the Service DNS name
+        // would let a deployment that sets `EGRET_IDP__ISSUER` and nothing else
+        // hand out an externally-valid `iss` next to a `token_endpoint` on a
+        // host the consumer cannot resolve — a document that is internally
+        // contradictory and simply cannot be used. `data_api.public_url` still
+        // wins when set, for the deployment that really does serve its Data API
+        // on a third origin.
+        let consumer_base_url = config.data_api.consumer_base_url(&issuer);
         Self {
             issuer,
             in_cluster_base_url,
+            consumer_base_url,
         }
     }
 
@@ -70,6 +84,20 @@ impl EgretIdentity {
     /// do not put this in a token or a discovery document.
     pub fn in_cluster_base_url(&self) -> &str {
         &self.in_cluster_base_url
+    }
+
+    /// The origin a Data API CONSUMER outside the cluster dials: the generated
+    /// OpenAPI document's `servers[0].url`, the `token_endpoint` handed back
+    /// with a new client, and the URL and `curl` line Try-it shows the author.
+    ///
+    /// An ADDRESS, like [`Self::in_cluster_base_url`] — but an external one, so
+    /// its default is [`Self::issuer`] rather than the Service DNS name. It is a
+    /// separate key because the two audiences (a consumer, and this deployment's
+    /// own identity) are allowed to differ; it is not a separate DEFAULT,
+    /// because when only one of them is configured the other has no business
+    /// pointing somewhere unreachable.
+    pub fn consumer_base_url(&self) -> &str {
+        &self.consumer_base_url
     }
 
     /// The JWKS URL an engine is configured to fetch keys from — an ADDRESS, so

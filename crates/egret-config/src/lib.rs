@@ -279,22 +279,26 @@ pub struct DataApiConfig {
     /// repointing it at the ingress instead would break the engines. Both
     /// audiences are legitimate and simultaneous, so they get two keys.
     ///
-    /// Falls back to `catalog.public_url` when unset (see
-    /// [`DataApiConfig::consumer_base_url`]), which is correct in local dev
-    /// where the two really are the same address. The token a consumer fetches
-    /// from this origin is still minted by this same backend and still carries
-    /// the internal `iss`, and the serving path still validates it — the two
-    /// audiences need a reachable origin each, not a shared one.
+    /// Falls back to the machine-IdP ISSUER when unset (see
+    /// [`DataApiConfig::consumer_base_url`]), which is `catalog.public_url` in
+    /// local dev where all three really are the same address. Deliberately NOT
+    /// `catalog.public_url` directly: a deployment that sets `[idp].issuer` and
+    /// leaves this one alone would otherwise hand a consumer a document whose
+    /// `tokenUrl` (from the issuer) is externally valid while its
+    /// `servers[0].url` and `token_endpoint` (from here) name a Service DNS
+    /// name — internally contradictory, and uncallable. Two audiences may
+    /// legitimately differ, but when only one is configured the other has no
+    /// business pointing somewhere unreachable.
     #[serde(default)]
     pub public_url: Option<String>,
 }
 
 impl DataApiConfig {
-    /// The consumer-facing origin, resolved once, with `fallback`
-    /// (`catalog.public_url`, the in-cluster address — which is also the
-    /// machine-IdP issuer unless [`IdpConfig::issuer`] is set) when this key is
-    /// unset. A widening: absent, every output is what it was before this key
-    /// existed.
+    /// The consumer-facing origin, resolved once, with `fallback` — the
+    /// machine-IdP issuer ([`IdpConfig::issuer_url`], which is itself
+    /// `catalog.public_url` when `[idp].issuer` is unset) — when this key is
+    /// unset. A widening: with neither key set, every output is what it was
+    /// before either existed.
     ///
     /// Blank counts as absent. `EGRET_DATA_API__PUBLIC_URL=` in a half-written
     /// env file deserialises to `Some("")`, and an empty origin would render

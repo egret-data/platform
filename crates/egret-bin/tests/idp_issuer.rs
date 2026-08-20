@@ -77,6 +77,63 @@ fn config(idp_issuer: Option<&str>) -> Config {
     cfg
 }
 
+/// The Data API's consumer origin defaults to the ISSUER, not to the in-cluster
+/// address.
+///
+/// The two land side by side in one document a consumer receives: `tokenUrl`
+/// and the token's `iss` come from the issuer, `servers[0].url` and
+/// `token_endpoint` come from the consumer origin. Defaulting the second to the
+/// Service DNS name means a deployment that sets `EGRET_IDP__ISSUER` and
+/// nothing else — the exact deployment the new key exists for — advertises an
+/// externally-valid issuer beside a `token_endpoint` on a host the consumer
+/// cannot resolve. Not a URL that merely looks odd: a document that cannot be
+/// used, because fetching the token is the first thing it asks for.
+///
+/// The fixture's issuer and in-cluster address are different hosts on purpose;
+/// equal, this test would pass with the fallback pointing either way.
+#[tokio::test]
+async fn the_consumer_origin_defaults_to_the_issuer_not_the_in_cluster_address() {
+    let identity = EgretIdentity::from_config(&config(Some(EXTERNAL)));
+
+    assert_eq!(
+        identity.consumer_base_url(),
+        EXTERNAL,
+        "a consumer must be sent to the same origin the issuer names"
+    );
+    assert_ne!(
+        identity.consumer_base_url(),
+        identity.in_cluster_base_url(),
+        "the consumer origin must not fall back to the address engines dial"
+    );
+}
+
+/// With `data_api.public_url` set it still wins, over the issuer as it used to
+/// over the in-cluster address. The two audiences are allowed to differ; only
+/// the DEFAULT moved.
+#[tokio::test]
+async fn an_explicit_consumer_origin_still_beats_the_issuer() {
+    let mut cfg = config(Some(EXTERNAL));
+    cfg.data_api.public_url = Some("https://api.example.test/".into());
+    let identity = EgretIdentity::from_config(&cfg);
+
+    assert_eq!(identity.consumer_base_url(), "https://api.example.test");
+    assert_eq!(
+        identity.issuer(),
+        EXTERNAL,
+        "the issuer is not dragged along"
+    );
+}
+
+/// With neither key set every value is what it was before either existed —
+/// including the consumer origin, which is where an existing deployment's
+/// generated OpenAPI documents and issued `token_endpoint`s already point.
+#[tokio::test]
+async fn without_either_key_the_consumer_origin_is_the_in_cluster_address() {
+    let identity = EgretIdentity::from_config(&config(None));
+
+    assert_eq!(identity.consumer_base_url(), IN_CLUSTER);
+}
+
 fn idp_state(identity: &EgretIdentity) -> IdpState {
     let km = generate_rsa_key("kid-t").expect("generate signing key");
     identity.idp_state(

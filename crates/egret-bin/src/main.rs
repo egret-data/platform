@@ -1344,26 +1344,26 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         workspace_secrets: workspace_secrets.clone(),
     });
 
-    // Who egret IS, and where engines DIAL it — two questions, two answers,
-    // derived together in `EgretIdentity` (which carries the reasoning and the
-    // tests). `identity.issuer()` is the `iss` of every token this deployment
-    // signs and the `issuer` of its discovery document, so it must be a name a
-    // client outside the cluster can resolve; `egret_public_url` below is the
-    // in-cluster Service address an engine pod resolves, and stays that even
-    // when the two differ. Bound once here — before the minter below, its first
-    // consumer — so every consumer in this fn shares one derivation.
+    // Who egret IS, and where it is DIALLED from — three answers derived
+    // together in `EgretIdentity` (which carries the reasoning and the tests),
+    // so none of them can drift from the others:
+    //
+    // * `issuer()` — the `iss` of every token this deployment signs and the
+    //   `issuer` of its discovery document, so it must be a name a client
+    //   outside the cluster can resolve.
+    // * `in_cluster_base_url()` — the Service address an ENGINE POD resolves for
+    //   the JWKS and the catalog. Stays in-cluster even when the issuer is an
+    //   ingress hostname: the keys are identical either way, and hairpinning the
+    //   data plane's key fetches out through the ingress and back would make
+    //   every query depend on the ingress being healthy.
+    // * `consumer_base_url()` — where an outside Data API consumer is sent.
+    //   Defaults to the ISSUER, not the in-cluster address, so a deployment that
+    //   sets only `EGRET_IDP__ISSUER` cannot advertise an externally-valid `iss`
+    //   beside an in-cluster `token_endpoint` — a document that cannot be used.
+    //
+    // Bound once here, before the minter below (its first consumer).
     let identity = egret_bin::identity::EgretIdentity::from_config(&config);
-    let egret_public_url = identity.in_cluster_base_url().to_string();
-
-    // The OTHER audience of the same question, resolved here so the two
-    // derivations sit together and neither can drift: the base URL a Data API
-    // CONSUMER outside the cluster uses. `egret_public_url` above is what an
-    // ENGINE POD resolves in-cluster (a Service DNS name, deliberately); handing
-    // that to a consumer advertises a host they cannot reach. Falls back to it
-    // when `data_api.public_url` is unset, so a deployment that sets nothing
-    // keeps exactly today's URLs, and is trimmed of a trailing slash at the
-    // SOURCE for the same reason the issuer is.
-    let dataapi_consumer_url = config.data_api.consumer_base_url(&egret_public_url);
+    let dataapi_consumer_url = identity.consumer_base_url().to_string();
 
     // Task 4 (STS cutover): the machine-IdP mints the short-lived per-user
     // engine JWT carried in the notebook-runtime manifest — replacing the old
