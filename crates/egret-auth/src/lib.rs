@@ -14,7 +14,6 @@ pub mod oidc_routes;
 pub mod password;
 pub mod pdp;
 pub mod principal;
-pub mod ratelimit;
 pub mod roles;
 pub mod routes;
 pub mod session;

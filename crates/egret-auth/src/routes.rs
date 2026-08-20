@@ -10,6 +10,7 @@ use axum::{Json, Router};
 use axum_extra::extract::cookie::{CookieJar, PrivateCookieJar};
 use egret_config::Config;
 use egret_core::http::ErrorBody;
+use egret_core::ratelimit::{client_ip, RateLimiter};
 use egret_core::{Ack, Error};
 use serde::{Deserialize, Serialize};
 
@@ -18,7 +19,6 @@ use crate::impersonation::{validate_impersonation_target, ImpersonationRepo, New
 use crate::oidc_cookie::{build_state_cookie, ImpersonateIntent, OidcStateCookie};
 use crate::password::verify_password;
 use crate::principal::{Auth, AuthError};
-use crate::ratelimit::RateLimiter;
 use crate::session::SessionService;
 use crate::token::generate_token;
 use crate::users::UserRepo;
@@ -161,13 +161,7 @@ async fn login(
     jar: CookieJar,
     Json(body): Json<LoginRequest>,
 ) -> Result<impl IntoResponse, AuthError> {
-    let ip = headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.split(',').next())
-        .unwrap_or("")
-        .trim()
-        .to_string();
+    let ip = client_ip(&headers);
     let rl_key = format!("{ip}:{}", body.email.to_lowercase());
     if !st.rate_limiter.check(&rl_key) {
         return Err(AuthError(Error::TooManyRequests));

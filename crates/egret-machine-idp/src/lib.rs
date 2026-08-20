@@ -12,10 +12,12 @@ pub use keys::{generate_rsa_key, KeyMaterial};
 pub use token::{sign_claims, verify_with_jwk};
 
 use axum::extract::State;
+use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Form, Json, Router};
 use egret_core::http::ErrorBody;
+use egret_core::ratelimit::{client_ip, RateLimiter};
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -75,6 +77,10 @@ pub struct IdpState {
     /// Tried in order until one recognises the `client_id`. Each owns its own
     /// audience; a client belongs to exactly one registry.
     pub verifiers: Vec<Arc<dyn ClientVerifier>>,
+    /// Guards `POST /oauth/token`, which is reachable from the internet and runs
+    /// one Argon2 verify per request with a known `client_id`. Keyed on
+    /// `ip:client_id` — see [`token_endpoint`].
+    pub rate_limiter: RateLimiter,
 }
 
 /// The mini-IdP router: discovery + JWKS + the client_credentials token endpoint.
@@ -182,13 +188,30 @@ struct JwksDoc {
         (status = 200, description = "A signed access token (client_credentials grant)", body = TokenResp),
         (status = 400, description = "Unsupported grant_type (OAuth `{ \"error\": ... }` body)", body = ErrorBody),
         (status = 401, description = "Invalid client credentials (OAuth `{ \"error\": ... }` body)", body = ErrorBody),
+        (status = 429, description = "Too many token requests from this ip+client_id (OAuth `{ \"error\": ... }` body)", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
 async fn token_endpoint(
     State(st): State<IdpState>,
+    headers: HeaderMap,
     Form(f): Form<TokenForm>,
 ) -> Result<Json<TokenResp>, IdpError> {
+    // Rate-limit FIRST — ahead of the verifiers, because verifying a known
+    // `client_id` costs an Argon2 hash and this endpoint is published at the
+    // edge. Keyed on the PAIR `ip:client_id`, mirroring login's `ip:email`: a
+    // `client_id` is not a secret, so keying on it alone would let anyone lock a
+    // legitimate client out by spamming its id. Keyed on the pair, a flooder
+    // only exhausts their own bucket.
+    //
+    // `client_id` is unauthenticated attacker-supplied input and the limiter's
+    // map is never pruned, so the key MUST NOT be stored raw — see the note on
+    // `RateLimiter`, which hashes it. How much the `ip:` half is worth depends
+    // on the edge; `client_ip` documents which deployments can be trusted.
+    let ip = client_ip(&headers);
+    if !st.rate_limiter.check(&format!("{ip}:{}", f.client_id)) {
+        return Err(IdpError::RateLimited);
+    }
     if f.grant_type != "client_credentials" {
         return Err(IdpError::UnsupportedGrant);
     }
@@ -248,6 +271,11 @@ impl IntoResponse for IdpError {
         let (status, err) = match self {
             IdpError::InvalidClient => (StatusCode::UNAUTHORIZED, "invalid_client"),
             IdpError::UnsupportedGrant => (StatusCode::BAD_REQUEST, "unsupported_grant_type"),
+            // `slow_down` is the registered OAuth error code for "you are asking
+            // too often" (RFC 8628 §3.5); RFC 6749 defines none of its own. The
+            // body shape is the same `{ "error": ... }` every other rejection
+            // here returns, so an existing client parses it unchanged.
+            IdpError::RateLimited => (StatusCode::TOO_MANY_REQUESTS, "slow_down"),
             _ => (StatusCode::INTERNAL_SERVER_ERROR, "server_error"),
         };
         (status, Json(serde_json::json!({ "error": err }))).into_response()
@@ -318,6 +346,7 @@ impl SigningKeyStore for PgSigningKeyStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct FakeKeys(KeyMaterial);
     #[async_trait::async_trait]
@@ -412,7 +441,15 @@ mod tests {
             keys: Arc::new(FakeKeys(km)),
             issuer: "http://localhost:8080".into(),
             verifiers: vec![Arc::new(FakeVerifier::new())],
+            rate_limiter: permissive_limiter(),
         }
+    }
+
+    /// A limiter that never fires, for the tests that are about token SHAPE
+    /// rather than about rate limiting. The window is long enough that a whole
+    /// test file's worth of requests cannot age out of it.
+    fn permissive_limiter() -> RateLimiter {
+        RateLimiter::new(1_000, 3_600, 3_600)
     }
 
     /// Stands in for `egret-catalog-engine`'s `ClientVerifier` impl. That crate
@@ -451,6 +488,7 @@ mod tests {
             keys: Arc::new(FakeKeys(km)),
             issuer: "http://localhost:8080".into(),
             verifiers,
+            rate_limiter: permissive_limiter(),
         }
     }
 
@@ -495,10 +533,14 @@ mod tests {
 
     /// Drive `POST /oauth/token` with a form body; panics if the IdP rejects it.
     async fn post_token(st: &IdpState, body: &str) -> TokenResp {
-        token_endpoint(State(st.clone()), Form(parse_token_form(body)))
-            .await
-            .expect("token endpoint rejected the request")
-            .0
+        token_endpoint(
+            State(st.clone()),
+            HeaderMap::new(),
+            Form(parse_token_form(body)),
+        )
+        .await
+        .expect("token endpoint rejected the request")
+        .0
     }
 
     struct TokenErr {
@@ -509,9 +551,13 @@ mod tests {
     /// Drive `POST /oauth/token` expecting a rejection, rendered through
     /// `IntoResponse` so the test sees the real HTTP status + OAuth error body.
     async fn post_token_expecting_error(st: &IdpState, body: &str) -> TokenErr {
-        let err = token_endpoint(State(st.clone()), Form(parse_token_form(body)))
-            .await
-            .expect_err("token endpoint unexpectedly succeeded");
+        let err = token_endpoint(
+            State(st.clone()),
+            HeaderMap::new(),
+            Form(parse_token_form(body)),
+        )
+        .await
+        .expect_err("token endpoint unexpectedly succeeded");
         let resp = err.into_response();
         let status = resp.status().as_u16();
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
@@ -681,6 +727,7 @@ mod tests {
         let st = state();
         let resp = token_endpoint(
             State(st.clone()),
+            HeaderMap::new(),
             Form(TokenForm {
                 grant_type: "client_credentials".into(),
                 client_id: "cid".into(),
@@ -698,11 +745,187 @@ mod tests {
         assert_eq!(claims["roles"][0], "engine");
     }
 
+    /// A `ClientVerifier` that counts how many times it was consulted. The real
+    /// registries run one Argon2 verify per call with a known `client_id`
+    /// (`egret_dataapi::ClientStore::verify` / `CatalogStore::verify`), which is
+    /// the cost the limiter exists to bound — this counter stands in for it, so
+    /// a test can assert the limiter answered BEFORE that cost was paid rather
+    /// than merely that it answered.
+    struct CountingVerifier {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl ClientVerifier for CountingVerifier {
+        async fn verify(
+            &self,
+            client_id: &str,
+            client_secret: &str,
+        ) -> Result<Option<VerifiedClient>, IdpError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if client_id == "cid" && client_secret == "sec" {
+                Ok(Some(VerifiedClient {
+                    client_id: client_id.to_string(),
+                    audience: "data-api".into(),
+                    extra_claims: serde_json::Map::new(),
+                    ttl_secs: 600,
+                }))
+            } else {
+                Ok(None)
+            }
+        }
+    }
+
+    /// An `IdpState` whose token endpoint allows `max` requests per key, over a
+    /// window long enough that no test can outrun it — so these tests never
+    /// sleep and never race the clock.
+    fn rate_limited_state(max: u32) -> (IdpState, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let km = generate_rsa_key("kid-t").unwrap();
+        let st = IdpState {
+            keys: Arc::new(FakeKeys(km)),
+            issuer: "http://localhost:8080".into(),
+            verifiers: vec![Arc::new(CountingVerifier {
+                calls: calls.clone(),
+            })],
+            rate_limiter: RateLimiter::new(max, 3_600, 3_600),
+        };
+        (st, calls)
+    }
+
+    struct RawResp {
+        status: u16,
+        body: serde_json::Value,
+    }
+
+    /// Drive `POST /oauth/token` as if it arrived through the ingress from
+    /// `ip`, rendering whichever way it goes through `IntoResponse` so the test
+    /// reads the real HTTP status and body.
+    async fn post_token_from(st: &IdpState, ip: &str, client_id: &str, secret: &str) -> RawResp {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", ip.parse().unwrap());
+        let form = TokenForm {
+            grant_type: "client_credentials".into(),
+            client_id: client_id.into(),
+            client_secret: secret.into(),
+        };
+        let resp = match token_endpoint(State(st.clone()), headers, Form(form)).await {
+            Ok(ok) => ok.into_response(),
+            Err(e) => e.into_response(),
+        };
+        let status = resp.status().as_u16();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        RawResp {
+            status,
+            body: serde_json::from_slice(&bytes).unwrap(),
+        }
+    }
+
+    /// Under the limit nothing changes: a bad secret still reaches the verifier
+    /// and comes back as the normal OAuth rejection. Guards against a limiter
+    /// that "works" by rejecting everything.
+    #[tokio::test]
+    async fn under_the_limit_a_bad_secret_still_reaches_the_verifier() {
+        let (st, calls) = rate_limited_state(3);
+
+        let r = post_token_from(&st, "203.0.113.7", "cid", "WRONG").await;
+
+        assert_eq!(r.status, 401);
+        assert_eq!(r.body["error"], "invalid_client");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "a request under the limit must still be verified"
+        );
+    }
+
+    /// Over the limit the endpoint answers 429 **without consulting the
+    /// verifier** — the whole point, since the verify is the Argon2 hash this
+    /// bounds. The counter is what makes that observable; the status alone
+    /// would not distinguish it from a limiter placed after the verify.
+    #[tokio::test]
+    async fn over_the_limit_the_request_is_rejected_before_the_verifier_runs() {
+        let (st, calls) = rate_limited_state(2);
+
+        for _ in 0..2 {
+            assert_eq!(
+                post_token_from(&st, "203.0.113.7", "cid", "WRONG")
+                    .await
+                    .status,
+                401
+            );
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        let r = post_token_from(&st, "203.0.113.7", "cid", "WRONG").await;
+
+        assert_eq!(r.status, 429);
+        assert_eq!(
+            r.body["error"], "slow_down",
+            "the 429 body must be the same OAuth `{{ \"error\": ... }}` shape as every other rejection"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "the rejected request must not have reached the verifier"
+        );
+    }
+
+    /// **The test that pins the KEY.** The two above pass for any limiter that
+    /// limits *something* — one keyed on the whole request, or on `client_id`
+    /// alone, satisfies both. This one fails for either.
+    ///
+    /// A `client_id` is not a secret. Keyed on `client_id` alone, anyone could
+    /// lock a legitimate machine client out of minting tokens by spamming its
+    /// id from anywhere; keyed on `ip` alone, one noisy client would take out
+    /// every other client sharing an ingress or a NAT. Keyed on the pair — as
+    /// local login keys on `ip:email` — a flooder only exhausts their own
+    /// bucket.
+    #[tokio::test]
+    async fn the_limit_is_keyed_on_ip_and_client_id_together() {
+        let (st, _calls) = rate_limited_state(1);
+
+        // Exhaust exactly one ip+client_id pair.
+        assert_eq!(
+            post_token_from(&st, "203.0.113.7", "cid", "WRONG")
+                .await
+                .status,
+            401
+        );
+        assert_eq!(
+            post_token_from(&st, "203.0.113.7", "cid", "WRONG")
+                .await
+                .status,
+            429
+        );
+
+        // Same client_id, different IP → unaffected. Fails if keyed on client_id.
+        assert_eq!(
+            post_token_from(&st, "198.51.100.9", "cid", "WRONG")
+                .await
+                .status,
+            401,
+            "a different IP must not inherit another caller\'s lockout for the same client_id"
+        );
+
+        // Same IP, different client_id → unaffected. Fails if keyed on IP.
+        assert_eq!(
+            post_token_from(&st, "203.0.113.7", "other", "WRONG")
+                .await
+                .status,
+            401,
+            "a different client_id from the same IP must have its own budget"
+        );
+    }
+
     #[tokio::test]
     async fn token_endpoint_rejects_bad_secret() {
         let st = state();
         let err = token_endpoint(
             State(st),
+            HeaderMap::new(),
             Form(TokenForm {
                 grant_type: "client_credentials".into(),
                 client_id: "cid".into(),

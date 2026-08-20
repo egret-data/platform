@@ -10,11 +10,11 @@ use clap::Parser;
 use cli::{Cli, Command, WorkspaceAction};
 use egret_auth::groups::GroupRepo;
 use egret_auth::password::hash_password;
-use egret_auth::ratelimit::RateLimiter;
 use egret_auth::routes::AuthState;
 use egret_auth::session::SessionService;
 use egret_auth::users::UserRepo;
 use egret_config::Config;
+use egret_core::ratelimit::RateLimiter;
 use egret_metastore::Db;
 use egret_server::{build_router, AppState};
 use egret_workspace::members::MemberRepo;
@@ -1884,6 +1884,14 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     let idp = Some(egret_machine_idp::IdpState {
         keys: signing_keys.clone(),
         issuer: egret_public_url.clone(),
+        // Its own limiter, not the login one: a shared instance would let
+        // machine token traffic evict human login attempts from the same map,
+        // and the two limits are deliberately different (see `RateLimitConfig`).
+        rate_limiter: RateLimiter::new(
+            config.rate_limit.token_max_attempts,
+            config.rate_limit.token_window_secs,
+            config.rate_limit.token_lockout_secs,
+        ),
         verifiers: vec![
             std::sync::Arc::new(egret_catalog_engine::CatalogStore::new(db.clone())),
             // Data API (P2 Task 4): a second, independent audience on the same

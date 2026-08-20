@@ -25817,6 +25817,16 @@
               }
             }
           },
+          "429": {
+            "description": "Too many token requests from this ip+client_id (OAuth `{ \"error\": ... }` body)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal error",
             "content": {

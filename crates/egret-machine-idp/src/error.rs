@@ -8,6 +8,9 @@ pub enum IdpError {
     /// grant_type other than `client_credentials`.
     #[error("unsupported grant type")]
     UnsupportedGrant,
+    /// Too many token requests from one `ip:client_id` pair.
+    #[error("too many token requests")]
+    RateLimited,
     /// No signing key could be produced.
     #[error("no signing key")]
     NoKey,

@@ -183,7 +183,7 @@ Rules come from `egret-config` (`[[idp_role_mapping]]`, already specced in §12 
 
 ## 9. Hardening (folded in from 1a-1)
 
-- **Login rate-limit (in-memory):** a `RateLimiter` in `egret-auth` keyed by `ip:email`, sliding window. On exceeding `login_max_attempts` within `login_window_secs`, reject with `429 Too Many Requests` for `login_lockout_secs`. Stored in `AuthState`. Backed by `Mutex<HashMap<String, Vec<Instant>>>` (std `Instant`); pruned on access. Resets on restart (acceptable for MVP; Redis-backed when multi-instance).
+- **Login rate-limit (in-memory):** a `RateLimiter` in `egret-core` (`egret_core::ratelimit`; it lived in `egret-auth` until the machine-IdP token endpoint needed it too) keyed by `ip:email`, sliding window. On exceeding `login_max_attempts` within `login_window_secs`, reject with `429 Too Many Requests` for `login_lockout_secs`. Stored in `AuthState`. Backed by `Mutex<HashMap<String, Vec<Instant>>>` (std `Instant`); pruned on access. Resets on restart (acceptable for MVP; Redis-backed when multi-instance).
 - **Dummy verify (anti-timing):** when no user is found (or the user has no password hash), still run `verify_password` against a fixed precomputed argon2 hash before returning `Unauthorized`, equalizing response time.
 - **`egret init --force`:** `Command::Init { force: bool }`; with `--force`, create an additional `platform_admin` even if one exists (without `--force`, the existing idempotent refuse-only behaviour is kept).
 - **Dead-code cleanup:** remove the unused `model::Session` struct; keep `model::Provider` (consumed by 1a-3 OIDC provisioning).
