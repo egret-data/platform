@@ -6,7 +6,8 @@
  *
  *  An iframe card embeds a third party inside an authenticated app, and this module is the only
  *  thing standing between a stored string and a live frame. egret does serve security headers
- *  (`frontend/nginx-prod.conf:58-59`), but they are `X-Frame-Options` and `X-Content-Type-Options`
+ *  (`frontend/nginx-prod.conf`, in the SPA `location /`), but they are `X-Frame-Options` and
+ *  `X-Content-Type-Options`
  *  — the first governs who may frame EGRET, not what egret may frame. The header that would back
  *  this module up is `Content-Security-Policy: frame-src`, and egret sends no CSP at all.
  *

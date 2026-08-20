@@ -39,6 +39,46 @@ spec:
               service:
                 name: egret
                 port: { number: 8080 }
+          # Embedded lakekeeper Iceberg REST catalog, nested at /catalog/v1 by
+          # egret-server. The warehouse detail page tells the user to paste
+          # `{origin}/catalog` into Spark and Trino, so this path has to reach the
+          # backend or that instruction is wrong. Machine traffic with its own
+          # bearer auth, already CSRF-exempt.
+          - path: /catalog
+            pathType: Prefix
+            backend:
+              service:
+                name: egret
+                port: { number: 8080 }
+          # The machine-IdP's two discovery documents. EXACT paths, not the
+          # /.well-known/ prefix: ACME http-01 challenges, security.txt and
+          # anything else under /.well-known belong to the SPA and must keep
+          # falling through to it.
+          #
+          # LIMITATION — this does NOT make external OIDC discovery work. The
+          # document's `issuer`, `token_endpoint` and `jwks_uri` are built from
+          # the in-cluster issuer (egret-machine-idp `discovery()`), and OIDC
+          # requires the document's `issuer` to equal both the `iss` of the
+          # minted tokens and the URL the document was fetched from. A client
+          # discovering against the external host now gets JSON it correctly
+          # rejects instead of HTML it cannot parse — honesty, not a working
+          # flow. Closing that needs the issuer itself to be externally
+          # reachable, which is deliberately out of scope.
+          #
+          # /.well-known/jwks.json is the one that is genuinely correct served
+          # externally: a key set carries no issuer semantics.
+          - path: /.well-known/openid-configuration
+            pathType: Exact
+            backend:
+              service:
+                name: egret
+                port: { number: 8080 }
+          - path: /.well-known/jwks.json
+            pathType: Exact
+            backend:
+              service:
+                name: egret
+                port: { number: 8080 }
           - path: /
             pathType: Prefix
             backend:
