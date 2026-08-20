@@ -180,7 +180,7 @@ Rule từ `egret-config` (`[[idp_role_mapping]]`, đã spec ở §12 identity �
 
 ## 9. Hardening (gộp từ 1a-1)
 
-- **Rate-limit login (in-memory):** `RateLimiter` ở `egret-auth` keyed `ip:email`, sliding window. Vượt `login_max_attempts` trong `login_window_secs` → `429 Too Many Requests` trong `login_lockout_secs`. Lưu trong `AuthState`. Backed bởi `Mutex<HashMap<String, Vec<Instant>>>` (std `Instant`); prune khi truy cập. Reset khi restart (chấp nhận cho MVP; Redis khi multi-instance).
+- **Rate-limit login (in-memory):** `RateLimiter` ở `egret-core` (`egret_core::ratelimit`; trước đây nằm ở `egret-auth`, chuyển sang khi endpoint token của machine-IdP cũng cần) keyed `ip:email`, sliding window. Vượt `login_max_attempts` trong `login_window_secs` → `429 Too Many Requests` trong `login_lockout_secs`. Lưu trong `AuthState`. Backed bởi `Mutex<HashMap<String, Vec<Instant>>>` (std `Instant`); prune khi truy cập. Reset khi restart (chấp nhận cho MVP; Redis khi multi-instance).
 - **Dummy verify (chống timing):** khi không tìm thấy user (hoặc user không có password hash), vẫn chạy `verify_password` với một argon2 hash cố định trước khi trả `Unauthorized`, cân bằng thời gian.
 - **`egret init --force`:** `Command::Init { force: bool }`; với `--force`, tạo thêm `platform_admin` dù đã có (không `--force` thì giữ hành vi idempotent refuse-only).
 - **Dọn dead-code:** bỏ `model::Session` (chưa dùng); giữ `model::Provider` (dùng bởi 1a-3 OIDC).
