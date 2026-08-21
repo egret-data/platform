@@ -1,6 +1,7 @@
 //! Library surface of the `egret` binary crate: composition-root helpers that
 //! need their own unit/integration tests (e.g. the machine-IdP engine-token minter).
 pub mod engine_minter;
+pub mod identity;
 
 use anyhow::Context;
 use egret_auth::groups::GroupRepo;

@@ -67,3 +67,9 @@ hex.workspace = true
 # Not in [workspace.dependencies]; only kernel_launcher_k8s (pod-name hashing) needs it.
 sha1 = "0.10"
 axum-extra = { workspace = true }
+
+[dev-dependencies]
+# Drives the real IdP router in `tests/idp_issuer.rs` (`oneshot`), so the
+# discovery document and the minted token come from the same wiring the binary
+# builds rather than from a hand-made copy of it.
+tower.workspace = true

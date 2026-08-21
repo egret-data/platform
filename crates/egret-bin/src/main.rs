@@ -1344,32 +1344,26 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         workspace_secrets: workspace_secrets.clone(),
     });
 
-    // egret's own machine-IdP public root URL: the SAME value used as the
-    // catalog-token issuer (`idp_issuer` / `IdpState.issuer` below) and, per
-    // Task 3, as the issuer/JWKS engines are configured to trust (STS). Bound
-    // once here — before the minter below, which is its first consumer — so
-    // every consumer in this fn shares one derivation. Trailing slash is trimmed
-    // AT THE SOURCE so the token `iss` (also trimmed in `engine_claims`) is
-    // byte-equal to StarRocks' `required_issuer` (which uses this value raw) —
-    // else a `catalog.public_url` set with a trailing slash silently breaks
-    // StarRocks JWT auth while Trino keeps working (a confusing partial failure).
-    let egret_public_url = config
-        .catalog
-        .public_url
-        .clone()
-        .unwrap_or_else(|| "http://localhost:8080".to_string())
-        .trim_end_matches('/')
-        .to_string();
-
-    // The OTHER audience of the same question, resolved here so the two
-    // derivations sit together and neither can drift: the base URL a Data API
-    // CONSUMER outside the cluster uses. `egret_public_url` above is what an
-    // ENGINE POD resolves in-cluster (a Service DNS name, deliberately) and is
-    // the token `iss`; handing that to a consumer advertises a host they cannot
-    // reach. Falls back to it when `data_api.public_url` is unset, so a
-    // deployment that sets nothing keeps exactly today's URLs, and is trimmed of
-    // a trailing slash at the SOURCE for the same reason the issuer is.
-    let dataapi_consumer_url = config.data_api.consumer_base_url(&egret_public_url);
+    // Who egret IS, and where it is DIALLED from — three answers derived
+    // together in `EgretIdentity` (which carries the reasoning and the tests),
+    // so none of them can drift from the others:
+    //
+    // * `issuer()` — the `iss` of every token this deployment signs and the
+    //   `issuer` of its discovery document, so it must be a name a client
+    //   outside the cluster can resolve.
+    // * `in_cluster_base_url()` — the Service address an ENGINE POD resolves for
+    //   the JWKS and the catalog. Stays in-cluster even when the issuer is an
+    //   ingress hostname: the keys are identical either way, and hairpinning the
+    //   data plane's key fetches out through the ingress and back would make
+    //   every query depend on the ingress being healthy.
+    // * `consumer_base_url()` — where an outside Data API consumer is sent.
+    //   Defaults to the ISSUER, not the in-cluster address, so a deployment that
+    //   sets only `EGRET_IDP__ISSUER` cannot advertise an externally-valid `iss`
+    //   beside an in-cluster `token_endpoint` — a document that cannot be used.
+    //
+    // Bound once here, before the minter below (its first consumer).
+    let identity = egret_bin::identity::EgretIdentity::from_config(&config);
+    let dataapi_consumer_url = identity.consumer_base_url().to_string();
 
     // Task 4 (STS cutover): the machine-IdP mints the short-lived per-user
     // engine JWT carried in the notebook-runtime manifest — replacing the old
@@ -1382,7 +1376,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             egret_machine_idp::PgSigningKeyStore::new(db.clone()),
             egret_auth::users::UserRepo::new(db.clone()),
             egret_auth::groups::GroupRepo::new(db.clone()),
-            egret_public_url.clone(),
+            // The `iss` of every engine token — identity, not address.
+            identity.issuer().to_string(),
             900, // 15-min engine-token TTL (revocation granularity — see spec §7)
         ));
 
@@ -1557,7 +1552,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         keys: egret_machine_idp::PgSigningKeyStore::new(db.clone()),
         // Same value the machine-IdP (`IdpState.issuer`) uses below, so a
         // notebook-minted catalog JWT carries the same `iss` as OAuth-minted ones.
-        idp_issuer: egret_public_url.clone(),
+        idp_issuer: identity.issuer().to_string(),
     };
     let notebook = Some(notebook_state.clone());
 
@@ -1854,15 +1849,20 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         // configured. This replaces the old Keycloak-realm-derived JWKS/issuer
         // (which went empty whenever `oidc.enabled` was false, breaking
         // jwt-delegation) now that egret itself is the single token issuer.
-        engine_jwks_uri: format!(
-            "{}/.well-known/jwks.json",
-            egret_public_url.trim_end_matches('/')
-        ),
+        // An ADDRESS an engine pod dials, so it stays in-cluster even when the
+        // issuer is an ingress hostname: keys are identical either way, and
+        // hairpinning the data plane's key fetches through the ingress would
+        // make every query depend on the ingress being healthy. The discovery
+        // document's own `jwks_uri` follows the issuer instead — that one is
+        // dialled by an external client. They are deliberately different values.
+        engine_jwks_uri: identity.engine_jwks_uri(),
         // Raw issuer, for StarRocks' `CREATE SECURITY INTEGRATION
         // ... required_issuer=<issuer>` (Trino instead reads its own
         // `trinoConfig.auth.jwt.requiredAudience`/JWKS default per-engine, so
-        // it has no equivalent need for the raw issuer here).
-        engine_oidc_issuer: egret_public_url.clone(),
+        // it has no equivalent need for the raw issuer here). Byte-compared
+        // against the `iss` the minter above stamps, so it MUST be the same
+        // value — hence identity, not address.
+        engine_oidc_issuer: identity.issuer().to_string(),
         // Gates the Ranger auto-bind on Trino engine create. Disabled by default,
         // so new engines stay unbound (allow-all) and delegated impersonation
         // queries work; an admin who explicitly picks an `authz_service_id` still
@@ -1881,25 +1881,29 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // see `DataApiState::keys` for what closing that would actually take.
     let signing_keys: std::sync::Arc<dyn egret_machine_idp::SigningKeyStore> =
         std::sync::Arc::new(egret_machine_idp::PgSigningKeyStore::new(db.clone()));
-    let idp = Some(egret_machine_idp::IdpState {
-        keys: signing_keys.clone(),
-        issuer: egret_public_url.clone(),
-        // Its own limiter, not the login one: a shared instance would let
-        // machine token traffic evict human login attempts from the same map,
-        // and the two limits are deliberately different (see `RateLimitConfig`).
-        rate_limiter: RateLimiter::new(
-            config.rate_limit.token_max_attempts,
-            config.rate_limit.token_window_secs,
-            config.rate_limit.token_lockout_secs,
-        ),
-        verifiers: vec![
+    // Built through `EgretIdentity::idp_state` rather than as a struct literal
+    // so that "the IdP's `issuer` is egret's identity" is a line a test
+    // executes: it is the `iss` of every minted token AND the `issuer` of the
+    // discovery document, and those two disagreeing is precisely the defect
+    // this seam exists to prevent.
+    let idp = Some(identity.idp_state(
+        signing_keys.clone(),
+        vec![
             std::sync::Arc::new(egret_catalog_engine::CatalogStore::new(db.clone())),
             // Data API (P2 Task 4): a second, independent audience on the same
             // IdP — a service account's client_id/client_secret exchanges here
             // for an `aud: "data-api"` token instead of `aud: "catalog"`.
             std::sync::Arc::new(egret_dataapi::ClientStore::new(db.clone())),
         ],
-    });
+        // Its own limiter, not the login one: a shared instance would let
+        // machine token traffic evict human login attempts from the same map,
+        // and the two limits are deliberately different (see `RateLimitConfig`).
+        RateLimiter::new(
+            config.rate_limit.token_max_attempts,
+            config.rate_limit.token_window_secs,
+            config.rate_limit.token_lockout_secs,
+        ),
+    ));
 
     // Data API management surface (P2 Task 5). `issuer` is the SAME public root
     // URL the machine-IdP signs with, so a trial token's `iss` matches every
@@ -1924,8 +1928,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         // serving path verifies a token against the key that actually signed it.
         keys: signing_keys.clone(),
         // A token CLAIM (the trial token's `iss`), which is why it is not the
-        // value the URLs below are built from.
-        issuer: egret_public_url.clone(),
+        // value the URLs below are built from — and why it is egret's identity
+        // rather than the in-cluster address.
+        issuer: identity.issuer().to_string(),
         // Every URL handed to a consumer or shown to the author. Equal to
         // `issuer` unless `data_api.public_url` is set.
         consumer_base_url: dataapi_consumer_url,

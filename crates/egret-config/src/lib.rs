@@ -42,6 +42,73 @@ pub struct OidcConfig {
     pub catalog_audience: String,
 }
 
+/// egret's OWN machine-IdP — the issuer this deployment *is*.
+///
+/// Deliberately NOT a field on [`OidcConfig`]. That section describes the
+/// EXTERNAL IdP (Keycloak) egret delegates human login to; this one describes
+/// the identity egret signs machine tokens with. They are two different
+/// issuers that happen to share a word, and folding one into the other would
+/// make `oidc.issuer_url` mean "them" in one line and "us" in the next.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IdpConfig {
+    /// The `iss` of every token egret mints, the `issuer` of
+    /// `/.well-known/openid-configuration`, and the `required_issuer` a
+    /// StarRocks security integration byte-compares against.
+    ///
+    /// OIDC Discovery requires all three to be the SAME value, and requires it
+    /// to equal the URL the discovery document was fetched from — so it must be
+    /// a name a client OUTSIDE the cluster can resolve. Falls back to
+    /// `catalog.public_url` (see [`IdpConfig::issuer_url`]) when unset, which is
+    /// correct in local dev where the two really are the same address.
+    ///
+    /// It is NOT the address an engine dials. `engine_jwks_uri` and the catalog
+    /// URI baked into engine ConfigMaps stay on `catalog.public_url`, a Service
+    /// DNS name, on purpose: routing the data plane's key fetches out through
+    /// the ingress and back would make every query depend on the ingress being
+    /// healthy, for keys that are identical either way. Identity and address are
+    /// two questions; this key exists so they can have two answers.
+    ///
+    /// **Changing it on a cluster with existing StarRocks engines strands them.**
+    /// `CREATE SECURITY INTEGRATION` runs once, in the delegation bootstrap on
+    /// engine creation (`egret-engine-mgmt/src/engines.rs`), and is not a
+    /// replace — an engine provisioned under the old issuer keeps comparing
+    /// against it and will reject every new token, with no automatic repair.
+    /// Re-provision such engines, or drop and recreate the integration by hand.
+    #[serde(default)]
+    pub issuer: Option<String>,
+}
+
+impl IdpConfig {
+    /// The issuer, resolved once, with `fallback` (`catalog.public_url`, the
+    /// in-cluster address) when this key is unset. A widening: absent, every
+    /// `iss` and every discovery field is byte-identical to what it was before
+    /// this key existed.
+    ///
+    /// Blank counts as absent, and so does `/` — `EGRET_IDP__ISSUER=` in a
+    /// half-written env file deserialises to `Some("")`, and an empty issuer
+    /// would mint tokens whose `iss` is the empty string, which StarRocks would
+    /// compare against and reject. Same trap, same guard, as
+    /// [`DataApiConfig::consumer_base_url`].
+    ///
+    /// The trailing slash is trimmed HERE, at the source, for the reason
+    /// `main.rs` spells out where the fallback is derived: StarRocks compares
+    /// `required_issuer` RAW, so a value set with a trailing slash silently
+    /// breaks StarRocks JWT auth while Trino — which never looks at the issuer —
+    /// keeps working. A confusing partial failure is worth one `trim_end_matches`.
+    pub fn issuer_url(&self, fallback: &str) -> String {
+        self.issuer
+            .as_deref()
+            // Trim BEFORE the emptiness check, not after: `/` survives an
+            // is-empty filter and only then trims to nothing, which would leave
+            // the guard reading as present while the issuer is empty.
+            .map(|u| u.trim().trim_end_matches('/'))
+            .filter(|u| !u.is_empty())
+            .unwrap_or(fallback)
+            .trim_end_matches('/')
+            .to_string()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecurityConfig {
     /// base64-encoded key (≥64 bytes) for encrypting the OIDC state cookie.
@@ -212,21 +279,26 @@ pub struct DataApiConfig {
     /// repointing it at the ingress instead would break the engines. Both
     /// audiences are legitimate and simultaneous, so they get two keys.
     ///
-    /// Falls back to `catalog.public_url` when unset (see
-    /// [`DataApiConfig::consumer_base_url`]), which is correct in local dev
-    /// where the two really are the same address. The token a consumer fetches
-    /// from this origin is still minted by this same backend and still carries
-    /// the internal `iss`, and the serving path still validates it — the two
-    /// audiences need a reachable origin each, not a shared one.
+    /// Falls back to the machine-IdP ISSUER when unset (see
+    /// [`DataApiConfig::consumer_base_url`]), which is `catalog.public_url` in
+    /// local dev where all three really are the same address. Deliberately NOT
+    /// `catalog.public_url` directly: a deployment that sets `[idp].issuer` and
+    /// leaves this one alone would otherwise hand a consumer a document whose
+    /// `tokenUrl` (from the issuer) is externally valid while its
+    /// `servers[0].url` and `token_endpoint` (from here) name a Service DNS
+    /// name — internally contradictory, and uncallable. Two audiences may
+    /// legitimately differ, but when only one is configured the other has no
+    /// business pointing somewhere unreachable.
     #[serde(default)]
     pub public_url: Option<String>,
 }
 
 impl DataApiConfig {
-    /// The consumer-facing origin, resolved once, with `fallback` (the
-    /// machine-IdP issuer derived from `catalog.public_url`) when this key is
-    /// unset. A widening: absent, every output is what it was before this key
-    /// existed.
+    /// The consumer-facing origin, resolved once, with `fallback` — the
+    /// machine-IdP issuer ([`IdpConfig::issuer_url`], which is itself
+    /// `catalog.public_url` when `[idp].issuer` is unset) — when this key is
+    /// unset. A widening: with neither key set, every output is what it was
+    /// before either existed.
     ///
     /// Blank counts as absent. `EGRET_DATA_API__PUBLIC_URL=` in a half-written
     /// env file deserialises to `Some("")`, and an empty origin would render
@@ -260,6 +332,10 @@ pub struct Config {
     pub csrf: CsrfConfig,
     pub rate_limit: RateLimitConfig,
     pub oidc: OidcConfig,
+    /// egret's own machine-IdP identity. `oidc` above is the external IdP it
+    /// delegates login to — a different issuer entirely.
+    #[serde(default = "default_idp")]
+    pub idp: IdpConfig,
     pub security: SecurityConfig,
     pub catalog: CatalogSettings,
     pub storage: StorageSettings,
@@ -287,6 +363,13 @@ fn default_data_api() -> DataApiConfig {
         // `DataApiConfig::public_url` for why this is a separate key at all.
         public_url: None,
     }
+}
+
+/// Serde's fallback for an `[idp]` section a deployment's TOML predates —
+/// the same reason [`default_data_api`] exists, and the reason this key is a
+/// widening: absent, the issuer is `catalog.public_url`, exactly as before.
+fn default_idp() -> IdpConfig {
+    IdpConfig { issuer: None }
 }
 
 /// Alerts & Reports (P2). The scheduler is on by default: a schedule the user
@@ -409,6 +492,7 @@ impl Default for Config {
                 post_login_redirect: "/".into(),
                 catalog_audience: "egret-catalog".into(),
             },
+            idp: default_idp(),
             security: SecurityConfig {
                 secret_key: String::new(),
             },
@@ -664,6 +748,82 @@ mod tests {
             let cfg: Config = Config::figment().extract()?;
             assert_eq!(
                 cfg.data_api.consumer_base_url("http://egret.svc:8080"),
+                "http://egret.svc:8080"
+            );
+            Ok(())
+        });
+    }
+
+    /// Absent, egret's identity IS the in-cluster address it has always been.
+    /// This key is a widening: an existing deployment's `iss`, its discovery
+    /// document and every StarRocks `required_issuer` already provisioned must
+    /// not move a byte.
+    #[test]
+    fn the_idp_issuer_falls_back_to_the_in_cluster_public_url() {
+        figment::Jail::expect_with(|_jail| {
+            let cfg: Config = Config::figment().extract()?;
+            assert_eq!(cfg.idp.issuer, None);
+            assert_eq!(
+                cfg.idp
+                    .issuer_url("http://egret.egret-system.svc.cluster.local:8080"),
+                "http://egret.egret-system.svc.cluster.local:8080",
+                "unset must leave every `iss` exactly where it was"
+            );
+            Ok(())
+        });
+    }
+
+    /// Set, it wins — under the name the chart and the operator docs use. A
+    /// section whose env path is wrong is a knob that silently cannot be turned,
+    /// and this one is the whole point of the key.
+    #[test]
+    fn the_idp_issuer_is_settable_from_the_environment() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("EGRET_IDP__ISSUER", "http://egret.localtest.me/");
+            let cfg: Config = Config::figment().extract()?;
+            assert_eq!(
+                cfg.idp.issuer.as_deref(),
+                Some("http://egret.localtest.me/")
+            );
+            // Trimmed AT THE SOURCE: StarRocks byte-compares `required_issuer`,
+            // so a trailing slash here would break StarRocks JWT auth while
+            // Trino (which never reads the issuer) kept working.
+            assert_eq!(
+                cfg.idp.issuer_url("http://egret.svc:8080"),
+                "http://egret.localtest.me"
+            );
+            Ok(())
+        });
+    }
+
+    /// Blank is absent, not an empty issuer. `EGRET_IDP__ISSUER=` in a
+    /// half-written env file deserialises to `Some("")`; taken literally it
+    /// would mint tokens whose `iss` is `""` and advertise a discovery document
+    /// with an empty issuer — rejected by every conforming client, and by
+    /// StarRocks' byte comparison.
+    #[test]
+    fn a_blank_idp_issuer_reads_as_unset() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("EGRET_IDP__ISSUER", "");
+            let cfg: Config = Config::figment().extract()?;
+            assert_eq!(
+                cfg.idp.issuer_url("http://egret.svc:8080"),
+                "http://egret.svc:8080"
+            );
+            Ok(())
+        });
+    }
+
+    /// `/` must read as unset too, for the same reason `""` does — it is the one
+    /// input that walks past an emptiness check placed after the trim, leaving
+    /// the guard reading as present while the issuer is empty.
+    #[test]
+    fn a_slash_only_idp_issuer_reads_as_unset() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("EGRET_IDP__ISSUER", "/");
+            let cfg: Config = Config::figment().extract()?;
+            assert_eq!(
+                cfg.idp.issuer_url("http://egret.svc:8080"),
                 "http://egret.svc:8080"
             );
             Ok(())

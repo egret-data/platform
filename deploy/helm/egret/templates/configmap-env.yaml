@@ -25,11 +25,32 @@ data:
   # there is a dead end in the recipient's inbox.
   EGRET_AUTOMATION__BROWSER_URL: "{{ include "egret.externalUrl" . }}"
 {{- if .Values.ingress.enabled }}
-  # What an OUTSIDE CONSUMER of the Data API calls: the base for servers[0].url
-  # and tokenUrl in a generated OpenAPI document. Deliberately NOT
-  # EGRET_CATALOG__PUBLIC_URL above — that one is the in-cluster Service DNS the
-  # ENGINE pods resolve, and it is also the machine-IdP `iss`, byte-compared by
-  # StarRocks. Only set when there is an edge to reach; otherwise the backend
-  # falls back to the issuer and behaviour is unchanged.
+  # WHO EGRET IS: the `iss` of every token it mints and the `issuer` of
+  # /.well-known/openid-configuration. OIDC Discovery requires that value to
+  # equal the URL the document was fetched from, so it must be a name a client
+  # OUTSIDE the cluster resolves — which EGRET_CATALOG__PUBLIC_URL above is not.
+  # That one stays put: it is the ADDRESS an engine pod dials for the JWKS and
+  # the catalog, and routing the data plane's key fetches out through this
+  # ingress and back would make every query depend on the ingress being healthy.
+  # Identity and address are two questions; unset (no ingress) the backend
+  # answers both with the Service DNS name, exactly as before.
+  #
+  # ⚠️ CHANGING THIS STRANDS EXISTING STARROCKS ENGINES. StarRocks byte-compares
+  # `required_issuer` in its security integration, and egret runs
+  # `CREATE SECURITY INTEGRATION` — not a replace — ONCE, in the delegation
+  # bootstrap at engine creation (egret-engine-mgmt/src/engines.rs). An engine
+  # provisioned under the old issuer keeps comparing against it, rejects every
+  # new token, and there is no automatic repair. Re-provision such engines, or
+  # drop and recreate the integration by hand. (Trino is unaffected: it never
+  # reads the issuer — its config sets only jwt.key-file, jwt.principal-field
+  # and jwt.required-audience.)
+  EGRET_IDP__ISSUER: "{{ include "egret.externalUrl" . }}"
+  # What an OUTSIDE CONSUMER of the Data API calls: the base for servers[0].url,
+  # tokenUrl and the token_endpoint handed back with a new client. Deliberately
+  # NOT EGRET_CATALOG__PUBLIC_URL above — that one is the in-cluster Service DNS
+  # the ENGINE pods resolve. A separate key from EGRET_IDP__ISSUER because a
+  # deployment may serve its Data API on a third origin; unset, the backend
+  # falls back to the issuer, so the `tokenUrl` and the `token_endpoint` beside
+  # it in the same document can never name two different hosts by default.
   EGRET_DATA_API__PUBLIC_URL: "{{ include "egret.externalUrl" . }}"
 {{- end }}
