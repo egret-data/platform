@@ -182,7 +182,12 @@ describe("ChartExplore mounts", () => {
   // Regression guard: the run hook sits above the helpers it calls, so any of them written
   // as a `const` arrow puts the shell in a temporal dead zone and the whole route white-
   // screens. Cartesian never noticed (its descriptor answers instead) — a bridge viz did.
-  it("renders a bridge viz (pie) saved in the v1 shape", async () => {
+  // 15s, not the 5s default. Measured: this file's 14 tests take ~8.2s of test time
+  // UNLOADED, so this one sits on the limit before any parallel load — it failed 2 of 5
+  // full-suite runs at 5008ms, 5088ms and 5334ms while passing alone every time. The fix
+  // is the budget, not the test: a red CI for a reason unrelated to the change under
+  // review is worse than the flake, because it teaches people to skip past red.
+  it("renders a bridge viz (pie) saved in the v1 shape", { timeout: 15_000 }, async () => {
     await mountChart("c-pie");
     expect(await screen.findByDisplayValue("Pie v1")).toBeInTheDocument();
     // "Dimensions" plural since chart 05 — a pie takes up to three, drawn as nested rings.
