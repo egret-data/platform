@@ -401,17 +401,63 @@ Two things that came out of converting `Versions` and `Access`:
   the `Name`/`Type` `columnheader`s and the `colSpan` in each of the three non-list states in
   one loop, deliberately: the regression is somebody re-writing *one* branch as a replacement,
   and a test covering only the empty state passes while the loading branch does it.
-- **A column whose every cell is identical can still be right.** `Access`'s Data column
-  repeats the same sentence on every row because the *constancy is the fact*: egret never
-  knows whether an account may read the tables, and the per-row part is the `Run Try it` link,
-  preselected to that account. `AccessSection.test.tsx` pins that identity byte-for-byte —
-  any code that let the line vary with something egret does know (invoke status, the grant
-  list, the SQL) is the half-right Ranger answer the section exists to refuse.
+- **A column whose every cell is identical is section-level copy in disguise.** This
+  document said the opposite for one commit, and the browser disproved it. `Access`'s `Data`
+  column held the same 143-character sentence in every cell, and the argument for it was that
+  *the constancy is the fact* — egret never knows whether an account may read the tables. The
+  reasoning is sound and the conclusion was wrong: a sentence true of every row is a
+  statement about the **section**, and repeating it costs a column. Measured at a 786px
+  content box, the two rows came to 89px and 293px — ~382px for two accounts, with 288px of
+  width spent saying one thing N times.
 
-**What the labels buy.** `Access`'s two conditions used to be a `<dl>` inside each `<li>`,
-which repeated the words "Invoke" and "Data" on every row and left each row's answer at a
-different vertical offset from the one above it. As columns the labels are written once and
-the answers line up down the page — and comparing accounts is the whole job of that screen.
+  **The test for it:** ask what is left of the column once the constant sentence is hoisted.
+  For `Access` it was one thing, the `Try it` link carrying `?service_account=<id>` — and
+  that is an *action*, so it joined the actions column and the `Data` column went. **Do not
+  keep a column empty for symmetry.** Say once, above the table, that the condition is not a
+  column and why; a reader who expects it is then told where it went instead of assuming it
+  was dropped.
+
+**What the labels buy.** `Access`'s Invoke condition used to be a `<dt>` inside each row's
+`<dl>`, which repeated the word on every row and left each row's answer at a different
+vertical offset from the one above it. As a column the label is written once and the answers
+line up down the page — and comparing accounts is the whole job of that screen.
+
+### 4.4 A row-scoped caveat: the consequence in the summary, the reason behind it
+
+`src/routes/explore/dataapi/detail/AccessSection.tsx` — `Caveat`.
+
+Some per-row prose genuinely *is* per-row. `Access`'s "this account also reaches invoke
+through the workspace, so revoking here removes the grant but not the access" is the
+difference between "revoking works" and "revoking looks like it worked", and it must stay
+reachable. But as 155 characters of running text in a cell it made that row 293px against an
+89px neighbour — **rows disagreeing visually for a reason that is not about importance.**
+
+The form that fixes it without hiding anything is a native `<details>` whose **`<summary>`
+carries the consequence** and whose body carries the explanation:
+
+> ▸ Revoking will not remove access
+> *(open)* This account also reaches invoke through the workspace, so revoking here removes
+> the grant but not the access. [Workspace membership]
+
+**Why this is not the drawer mistake.** §11.2 records the opposite ruling for `TryIt`'s
+warning: a reader who must open something to learn a call is real has already pressed the
+button. That rule holds here, and the split is what satisfies it — the load-bearing fact is
+the summary and is on screen with nothing clicked. What is collapsed is the *why* and the
+*where to go instead*, which is what a reader goes looking for once the headline has stopped
+them. **Collapsing the headline would be the mistake; collapsing the paragraph under it is
+the point.**
+
+Three constraints on the form, all load-bearing:
+
+- **Native `<details>`, never `ui/collapsible`** — §11.2's rule, and here the stakes are
+  highest: the shell's `<fieldset disabled={trashed}>` disables a Radix trigger, so the
+  caveat would be unopenable on exactly the endpoint where an admin is deciding whether to
+  restore it.
+- **Not hover-only.** `<summary>` is focusable and toggles on Enter/Space, so keyboard and
+  touch reach it the way a pointer does. A `title` tooltip is cheaper and hides it from both.
+- **Collapse a caveat because it is big, not because its neighbour is.** `Access`'s transient
+  "Checking workspace-inherited invoke…" stays plain text: six words, no explanation to hold,
+  so a disclosure costs a click to reveal nothing.
 
 **An action column's header is `sr-only`.** A visible "Actions" heading over one small
 button is louder than what it labels; an unnamed column is worse for anyone not reading it
@@ -824,7 +870,18 @@ none).
 **Native `<details>`/`<summary>`, never `ui/collapsible`.** The shell disables the whole
 section for a trashed endpoint, and a Radix trigger is a `<button>` — so a trashed endpoint
 could not collapse the strip. `<summary>` is not a form control and the `fieldset` does not
-touch it.
+touch it. §4.4 applies the same rule to a per-row caveat, where the consequence of getting it
+wrong is larger: a strip that will not collapse is an annoyance, a caveat that will not open
+is a warning the reader cannot reach.
+
+**`userEvent` will not click it inside a trashed section, and the product is fine.**
+`userEvent.click` refuses to open a `<details>` under `<fieldset disabled>`; `fireEvent.click`
+opens it, and jsdom's own summary activation behaviour runs. That is userEvent being stricter
+than the platform — `fieldset[disabled]` disables *form-associated* descendants, and
+`<summary>` is not one, so every browser opens it. Measured in `AccessSection.test.tsx`'s
+trashed-caveat test, whose only difference from the passing untrashed test is `deleted_at`.
+**The failure mode is a false negative**, so a test of any non-form affordance inside a
+trashed section must use `fireEvent`, or it reports the product broken when it is not.
 
 **`TryIt` deliberately has no strip**, and the reason generalises: its setup is one picker and
 a short row per parameter, and the prose that would have gone in the drawer is a *warning* —
@@ -885,6 +942,10 @@ not exist yet:
     each. The plan inherited the same arithmetic ("8 `<Card>`… convert the rest"), and there
     was no rest. A symbol-family count is not a block count — the same trap §7.2 records for
     consumer counts, one level down.
+- The `Caveat` disclosure of §4.4 — **1** file (`AccessSection`), 3 call sites. New, and
+  deliberately narrow: it earns its place where a row-scoped explanation is big enough to set
+  the row height, which so far is one screen. The same file's short transient states stay
+  plain text, which is the rule working rather than an inconsistency.
 - The split of §11 — **2** sections, both Data API endpoint detail (`Query`, `TryIt`); `react-resizable-panels` itself is also used by `components/sqllab/SqlTab.tsx`, which is
   where the idiom came from. `Versions` and `Access` are deliberately not splits: neither is
   "configure, run, read the result" — there is nothing to run.
