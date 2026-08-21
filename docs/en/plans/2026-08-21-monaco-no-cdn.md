@@ -85,17 +85,17 @@ Report `dist` size before and after, and the largest new chunk. The estimate tha
 
 **Files:** `frontend/nginx-prod.conf`, and wherever the CSP lives
 
-- [ ] **Step 1: Add a `script-src` policy**
+- [x] **Step 1: Add a `script-src` policy**
 
 The current CSP (`nginx-prod.conf:218`) sets only `frame-src`, so nothing prevents a future dependency from fetching executable code from anywhere. Add a `script-src` that permits egret's own origin and whatever the app genuinely needs.
 
 **Measure what the app actually loads before writing the policy** — a CSP written from assumption either blocks something real or permits everything. Load every major page with the network panel open and enumerate the script origins.
 
-- [ ] **Step 2: Verify nothing broke**
+- [x] **Step 2: Verify nothing broke**
 
 CSP failures are silent in the sense that the page still renders while one feature stops working. Check the editors, the notebook, charts, and the report renderer specifically.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ---
 
