@@ -9,7 +9,10 @@
  *  (`frontend/nginx-prod.conf`, in the SPA `location /`), but they are `X-Frame-Options` and
  *  `X-Content-Type-Options`
  *  — the first governs who may frame EGRET, not what egret may frame. The header that would back
- *  this module up is `Content-Security-Policy: frame-src`, and egret sends no CSP at all.
+ *  this module up is `Content-Security-Policy: frame-src`, and egret DOES send one: the same
+ *  `location /` carries a CSP whose `frame-src` names the embed hosts this module allows. Treat
+ *  that as a second lock, not a reason to relax here — the list is maintained in two places and
+ *  a browser too old for CSP enforces nothing at all.
  *
  *  So every path here fails CLOSED: anything this module cannot positively prove safe returns
  *  `ok: false`, and the caller renders a stated reason rather than an <iframe>. */

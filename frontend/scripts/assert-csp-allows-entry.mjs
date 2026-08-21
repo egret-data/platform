@@ -63,12 +63,27 @@ if (inline.length > 0) {
 // beginning with a single `/` is same-origin under `'self'`.
 const SAME_ORIGIN = (url) => url.startsWith("/") && !url.startsWith("//");
 
-const srcs = tags
-  .filter(EXECUTABLE)
-  .map((a) => /\bsrc\s*=\s*"([^"]*)"/i.exec(a)?.[1])
-  .filter(Boolean);
-const preloads = [...html.matchAll(/<link\b[^>]*\brel\s*=\s*"modulepreload"[^>]*>/gi)]
-  .map((m) => /\bhref\s*=\s*"([^"]*)"/i.exec(m[0])?.[1])
+// Single OR double quotes, and unquoted. Matching only `src="…"` silently DROPPED a
+// single-quoted cross-origin src from `srcs` while the loose inline test also let it past,
+// so it counted as neither foreign nor inline. Vite emits double quotes, so that was latent
+// rather than live — but a guard that depends on the emitter's quoting style is pinned to
+// the emitter, not to the property.
+const ATTR = (name) => new RegExp(`\\b${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`, "i");
+const attr = (tag, name) => {
+  const m = ATTR(name).exec(tag);
+  return m ? (m[1] ?? m[2] ?? m[3]) : undefined;
+};
+
+const srcs = tags.filter(EXECUTABLE).map((a) => attr(a, "src")).filter(Boolean);
+// `prefetch`/`preload as=script` fetch executable code too, and `script-src` governs them.
+const preloads = [...html.matchAll(/<link\b[^>]*>/gi)]
+  .map((m) => m[0])
+  .filter((tag) => {
+    const rel = (attr(tag, "rel") || "").toLowerCase();
+    if (rel === "modulepreload") return true;
+    return (rel === "preload" || rel === "prefetch") && (attr(tag, "as") || "").toLowerCase() === "script";
+  })
+  .map((tag) => attr(tag, "href"))
   .filter(Boolean);
 
 const foreign = [...srcs, ...preloads].filter((u) => !SAME_ORIGIN(u));
