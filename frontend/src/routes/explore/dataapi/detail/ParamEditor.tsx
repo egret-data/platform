@@ -2,10 +2,9 @@ import { useRef, useState } from "react";
 import { Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ParamLocation, ParamType, type ParamSpec } from "@/api/generated/model";
 
 const PARAM_TYPES: ParamType[] = [
@@ -54,10 +53,14 @@ function newParam(): ParamSpec {
  */
 function AllowedValuesField({
   id,
+  label,
   allowed,
   onChange,
 }: {
   id: string;
+  /** Accessible name. Carries the row's number, like every other cell's — the
+   *  visible column header cannot say WHICH row a control belongs to. */
+  label: string;
   allowed: string[];
   onChange: (allowed: string[]) => void;
 }) {
@@ -83,7 +86,9 @@ function AllowedValuesField({
   return (
     <Input
       id={id}
+      aria-label={label}
       placeholder="comma-separated"
+      className="mt-1.5"
       value={text}
       onChange={(e) => setDraft(e.target.value)}
       onBlur={commit}
@@ -92,7 +97,28 @@ function AllowedValuesField({
 }
 
 /**
- * The `:name` parameters a caller supplies on the query string.
+ * The `:name` parameters a caller supplies on the query string — **one table
+ * row per declaration**, not one card per declaration.
+ *
+ * The card-per-parameter stack this replaced put a `grid grid-cols-2` inside a
+ * bordered box for every row: five fields read as five separate forms, and two
+ * parameters could not be compared without scrolling past the box between them.
+ * `docs/en/ui-conventions.md` §4 records the same complaint about the detail
+ * sections generally, and the same answer — a group of like things is a table.
+ * `Setting | Details | Value` (`components/config/ConfigTable.tsx`) is the
+ * shape for a list of *settings*, each with its own help text; a parameter is
+ * not a setting but a record with five fields, so this is a plain
+ * `components/ui/table` with one column per field, following that file's
+ * conventions (`table-fixed` so the sized columns hold and the surplus goes to
+ * one chosen column, `align-top` cells, the shadcn `Table`'s own
+ * `overflow-x-auto` wrapper for narrow viewports) rather than its component.
+ *
+ * **Column identity is what makes a row editable.** A visible `<th>` labels a
+ * column, never a particular row's control, so every control carries an
+ * `aria-label` naming its row — `Parameter 2 default`. Without it, five inputs
+ * per row would be five unnamed text boxes to anything not reading the table
+ * visually, and a test could not tell an edit to the right row from an edit to
+ * the wrong one.
  *
  * **Deliberately no `location` control** (spec §2.6). Every parameter this API
  * can serve is `query`: `ParamLocation::Body` is refused at publish time, and
@@ -100,6 +126,20 @@ function AllowedValuesField({
  * picker that offers `body` and then has publish reject it is a control that
  * can drift out of sync with the refusal it's describing — omitting the
  * control keeps the two impossible to disagree.
+ *
+ * **`allowed` lives under Type, not in a column of its own.** It exists only
+ * for `enum` — a sixth column would be empty on every other row, and under
+ * `table-fixed` it would cost that width whether or not any row is an enum.
+ * It sits in the Type cell because that is what it qualifies: it is the list
+ * the type is drawn from, and reading down the Type column shows
+ * `enum` with its members directly beneath, still inside the row it belongs
+ * to. That row anchoring is the same reason it is not lifted out to a
+ * per-table area below.
+ *
+ * **No test value here, and this is the one field the table must NOT gain.**
+ * `PreviewBlock` holds a test value per declared parameter; it is component
+ * state and is never saved. A test value in a declaration row invites the
+ * reader to think it is stored with the endpoint (see `Query.tsx`'s comment).
  *
  * Rows are keyed by a stable, locally-generated id — never the array index.
  * `ParamSpec` has no server-assigned id to key on, but an index breaks the
@@ -142,34 +182,61 @@ export function ParamEditor({
   }
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-base">Parameters</CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        {params.length === 0 && (
-          <p className="text-sm text-muted-foreground">
-            No parameters yet. Every parameter is read from the query string — write it into the SQL
-            as <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">:name</code>.
-          </p>
-        )}
-        {params.map((p, i) => {
-          const rowId = rowIds[i] ?? i;
-          return (
-            <div key={rowId} className="space-y-3 rounded-md border border-border p-3">
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1.5">
-                  <Label htmlFor={`param-name-${rowId}`}>Name</Label>
+    <div className="space-y-3">
+      <h3 className="text-sm font-medium">Parameters</h3>
+      {/* `table-fixed` for the same reason `ConfigTable` uses it: under auto
+          layout every column sizes to the intrinsic width of the input inside
+          it, so the five columns fight each other and the table can outgrow the
+          page. Sized here except Description, which is therefore the column
+          that absorbs whatever width is left — the right choice on a section
+          with no width cap, since a description is the one field that reads
+          better long. */}
+      <Table className="table-fixed">
+        <TableHeader>
+          <TableRow>
+            <TableHead className="w-1/5">Name</TableHead>
+            <TableHead className="w-44">Type</TableHead>
+            <TableHead className="w-24">Required</TableHead>
+            <TableHead className="w-1/6">Default</TableHead>
+            <TableHead>Description</TableHead>
+            {/* A header the column still needs — an empty `<th>` leaves the
+                remove buttons in a column with no accessible name at all. */}
+            <TableHead className="w-12">
+              <span className="sr-only">Actions</span>
+            </TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {params.length === 0 && (
+            <TableRow className="hover:bg-transparent">
+              {/* Spanning every column, so the sentence reads as the state of
+                  the whole table rather than as a value in the Name column. */}
+              <TableCell colSpan={6} className="text-sm text-muted-foreground">
+                No parameters yet. Every parameter is read from the query string — write it into the
+                SQL as <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">:name</code>.
+              </TableCell>
+            </TableRow>
+          )}
+          {params.map((p, i) => {
+            const rowId = rowIds[i] ?? i;
+            // Numbered by POSITION, not by `p.name`: a name is blank on a
+            // freshly-added row and is not unique while the author is editing,
+            // so it cannot name a control. Same reason `PreviewBlock` keys its
+            // test values by index.
+            const row = `Parameter ${i + 1}`;
+            return (
+              <TableRow key={rowId}>
+                <TableCell className="align-top">
                   <Input
                     id={`param-name-${rowId}`}
+                    aria-label={`${row} name`}
                     value={p.name}
                     onChange={(e) => update(i, { name: e.target.value })}
                   />
-                </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor={`param-type-${rowId}`}>Type</Label>
+                </TableCell>
+                <TableCell className="align-top">
                   <Select value={p.type} onValueChange={(v) => update(i, { type: v as ParamType })}>
-                    <SelectTrigger id={`param-type-${rowId}`} aria-label={`Parameter ${i + 1} type`}>
+                    <SelectTrigger id={`param-type-${rowId}`} className="w-full" aria-label={`${row} type`}>
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -180,59 +247,69 @@ export function ParamEditor({
                       ))}
                     </SelectContent>
                   </Select>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1.5">
-                  <Label htmlFor={`param-default-${rowId}`}>Default</Label>
-                  <Input
-                    id={`param-default-${rowId}`}
-                    value={p.default ?? ""}
-                    onChange={(e) => update(i, { default: e.target.value === "" ? null : e.target.value })}
-                  />
-                </div>
-                {p.type === ParamType.enum && (
-                  <div className="space-y-1.5">
-                    <Label htmlFor={`param-allowed-${rowId}`}>Allowed values</Label>
+                  {/* Only for `enum`, and only inside the row whose type it
+                      qualifies — see the module doc for why it is here rather
+                      than in a column of its own. */}
+                  {p.type === ParamType.enum && (
                     <AllowedValuesField
                       id={`param-allowed-${rowId}`}
+                      label={`${row} allowed values`}
                       allowed={p.allowed ?? []}
                       onChange={(allowed) => update(i, { allowed })}
                     />
-                  </div>
-                )}
-              </div>
-
-              <div className="space-y-1.5">
-                <Label htmlFor={`param-desc-${rowId}`}>Description</Label>
-                <Input
-                  id={`param-desc-${rowId}`}
-                  value={p.description ?? ""}
-                  onChange={(e) => update(i, { description: e.target.value })}
-                />
-              </div>
-
-              <div className="flex items-center justify-between">
-                <label htmlFor={`param-required-${rowId}`} className="flex cursor-pointer items-center gap-2 text-sm">
+                  )}
+                </TableCell>
+                <TableCell className="align-top">
+                  {/* `mt-2.5` rather than centred: the row's height is set by
+                      the inputs beside it, and a box that centres itself in a
+                      row an enum has made two controls tall floats away from
+                      the header it answers to. */}
                   <Checkbox
                     id={`param-required-${rowId}`}
+                    className="mt-2.5"
+                    aria-label={`${row} required`}
                     checked={!!p.required}
                     onCheckedChange={(v) => update(i, { required: v === true })}
                   />
-                  Required
-                </label>
-                <Button type="button" variant="ghost" size="sm" onClick={() => remove(i)}>
-                  <Trash2 className="h-4 w-4" /> Remove
-                </Button>
-              </div>
-            </div>
-          );
-        })}
-        <Button type="button" variant="outline" size="sm" onClick={add}>
-          <Plus className="h-4 w-4" /> Add parameter
-        </Button>
-      </CardContent>
-    </Card>
+                </TableCell>
+                <TableCell className="align-top">
+                  <Input
+                    id={`param-default-${rowId}`}
+                    aria-label={`${row} default`}
+                    value={p.default ?? ""}
+                    onChange={(e) => update(i, { default: e.target.value === "" ? null : e.target.value })}
+                  />
+                </TableCell>
+                <TableCell className="align-top">
+                  <Input
+                    id={`param-desc-${rowId}`}
+                    aria-label={`${row} description`}
+                    value={p.description ?? ""}
+                    onChange={(e) => update(i, { description: e.target.value })}
+                  />
+                </TableCell>
+                <TableCell className="align-top">
+                  {/* Named for the row, not "Remove": six identical buttons in a
+                      column are six identical announcements otherwise, and the
+                      icon carries no text of its own. */}
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    aria-label={`Remove ${row.toLowerCase()}`}
+                    onClick={() => remove(i)}
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                </TableCell>
+              </TableRow>
+            );
+          })}
+        </TableBody>
+      </Table>
+      <Button type="button" variant="outline" size="sm" onClick={add}>
+        <Plus className="h-4 w-4" /> Add parameter
+      </Button>
+    </div>
   );
 }

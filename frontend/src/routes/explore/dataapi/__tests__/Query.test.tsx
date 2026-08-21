@@ -1,8 +1,136 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type React from "react";
+import { useEffect, useRef } from "react";
 import { Link, MemoryRouter, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+
+/**
+ * A minimal fake Monaco, following `components/notebook/__tests__/CellEditor.test.tsx`.
+ * Real Monaco cannot load in jsdom (it needs workers, a layout engine and a
+ * measurable font), so the alternative to a stub is not testing the editor at all.
+ *
+ * **The stub is built so the wiring is still what is under test, not the stub.**
+ * The `<textarea>` takes its accessible name and its read-only state from the
+ * `options` `SqlEditor` actually computes, so a `Query` that forgets
+ * `ariaLabel` loses every `findByLabelText("SQL")` in this file and a `Query`
+ * that forgets `readOnly` fails the trashed test. And `onMount` runs
+ * `SqlEditor`'s REAL `handleMount`, so the ⌘↵ command below is the one the
+ * product registers, reached through the keybinding the product computes.
+ */
+const monacoStub = vi.hoisted(() => {
+  const KeyMod = { CtrlCmd: 1 << 11 };
+  const KeyCode = { Enter: 3 };
+  return {
+    KeyMod,
+    KeyCode,
+    commands: {} as Record<number, () => void>,
+    reset() {
+      this.commands = {};
+    },
+    /** The callback registered for ⌘/Ctrl+↵, or `undefined` if none was. */
+    runCommand(): (() => void) | undefined {
+      return this.commands[KeyMod.CtrlCmd | KeyCode.Enter];
+    },
+  };
+});
+
+/**
+ * `react-resizable-panels`, stubbed to the three props `Query` passes.
+ *
+ * **Not for convenience — the real one is unusable here.** With no layout
+ * engine every rect in jsdom is 0×0, so the library's `Separator` wins the
+ * hit-test for a click anywhere in the group and takes focus
+ * (`data-separator="focus"`). Every `userEvent.type` in this file then goes to
+ * the drag handle instead of the field, and the whole section silently reads
+ * as if nothing can be typed into it. That is an artifact of the environment,
+ * not of the product — the browser pass in the plan is what checks the drag.
+ *
+ * The stub echoes the SIZES back as attributes rather than swallowing them,
+ * because those are exactly what a reader cannot verify by eye: in v4 a bare
+ * number means PIXELS and a string means percent, so `defaultSize={55}` is a
+ * 55-pixel editor that still looks right in the source.
+ */
+vi.mock("react-resizable-panels", () => ({
+  Group: ({ children, className, orientation }: { children?: React.ReactNode; className?: string; orientation?: string }) => (
+    <div data-testid="panel-group" data-orientation={orientation} className={className}>
+      {children}
+    </div>
+  ),
+  Panel: ({ children, className, defaultSize, minSize }: { children?: React.ReactNode; className?: string; defaultSize?: number | string; minSize?: number | string }) => (
+    <div
+      data-testid="panel"
+      data-default-size={String(defaultSize)}
+      data-default-size-type={typeof defaultSize}
+      data-min-size={String(minSize)}
+      data-min-size-type={typeof minSize}
+      className={className}
+    >
+      {children}
+    </div>
+  ),
+  Separator: ({ className }: { className?: string }) => (
+    <div data-testid="panel-separator" role="separator" className={className} />
+  ),
+}));
+
+vi.mock("@monaco-editor/react", () => ({
+  // A NAMED, capitalised function: this stub calls hooks, and an anonymous
+  // arrow assigned to `default` is not a component as far as
+  // `react-hooks/rules-of-hooks` can tell.
+  default: function MonacoStub({
+    value,
+    onChange,
+    onMount,
+    beforeMount,
+    options,
+  }: {
+    value: string;
+    onChange?: (v?: string) => void;
+    onMount?: (editor: unknown, monaco: unknown) => void;
+    beforeMount?: (monaco: unknown) => void;
+    options?: { ariaLabel?: string; readOnly?: boolean };
+  }) {
+    // The mount effect runs once, but the command it registers must read the
+    // CURRENT text — exactly like real Monaco's `editor.getValue()`.
+    const latest = useRef(value);
+    latest.current = value;
+    useEffect(() => {
+      const monaco = {
+        KeyMod: monacoStub.KeyMod,
+        KeyCode: monacoStub.KeyCode,
+        editor: { defineTheme: () => {} },
+        languages: {
+          CompletionItemKind: {},
+          registerCompletionItemProvider: () => ({ dispose: () => {} }),
+        },
+      };
+      beforeMount?.(monaco);
+      onMount?.(
+        {
+          getValue: () => latest.current,
+          getSelection: () => null,
+          getModel: () => null,
+          addCommand: (binding: number, cb: () => void) => {
+            monacoStub.commands[binding] = cb;
+          },
+          onDidChangeCursorSelection: () => ({ dispose: () => {} }),
+        },
+        monaco,
+      );
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+    return (
+      <textarea
+        aria-label={options?.ariaLabel}
+        readOnly={!!options?.readOnly}
+        value={value}
+        onChange={(e) => onChange?.(e.target.value)}
+      />
+    );
+  },
+}));
 
 // No msw in this repo — mock the API module directly. `@/api/access` is
 // needed only by the Publish/shared-dirty-flag block below (`Versions`
@@ -26,7 +154,7 @@ import * as api from "@/api/generated/data-api/data-api";
 import * as databasesApi from "@/api/databases";
 import * as dataApi from "@/api/dataApi";
 import * as accessApi from "@/api/access";
-import { ParamLocation, ParamType, type DataApiEndpointDto } from "@/api/generated/model";
+import { ParamLocation, ParamType, type DataApiEndpointDto, type ParamSpec } from "@/api/generated/model";
 import EndpointDetail from "@/routes/explore/dataapi/EndpointDetail";
 import Query from "@/routes/explore/dataapi/detail/Query";
 import Config from "@/routes/explore/dataapi/detail/Config";
@@ -786,6 +914,178 @@ describe("Query section — ParamEditor", () => {
     expect(screen.queryByText(/location/i)).not.toBeInTheDocument();
   });
 
+  /**
+   * The declarations are a TABLE — one row per parameter — replacing the
+   * card-per-parameter stack (a bordered box with a `grid grid-cols-2` inside,
+   * per parameter) that `docs/en/ui-conventions.md` §4 records the complaint
+   * about.
+   *
+   * **Every fixture here has TWO parameters, and that is the point.** With one
+   * row, "wrote the edit to the row it was made in" and "wrote the edit to
+   * whichever row it felt like" are the same observation — `update(0, …)`
+   * hard-coded would pass every single-row test in this file. Two rows with
+   * different values in every field is the smallest fixture that can tell them
+   * apart.
+   *
+   * They assert the params the shell PATCHes, which is exactly what
+   * `ParamEditor`'s `onChange` wrote into the shared form — not that `onChange`
+   * fired, which an editor that wrote `[]` on every keystroke would also
+   * satisfy.
+   */
+  describe("the parameters table", () => {
+    const TWO: ParamSpec[] = [
+      {
+        name: "region",
+        type: ParamType.string,
+        location: ParamLocation.query,
+        required: false,
+        default: null,
+        description: "Sales region",
+      },
+      {
+        name: "limit",
+        type: ParamType.number,
+        location: ParamLocation.query,
+        required: false,
+        default: null,
+        description: "Row cap",
+      },
+    ];
+
+    function renderParams(params: ParamSpec[]) {
+      const endpoint = makeEndpoint({ params } as Partial<DataApiEndpointDto>);
+      vi.mocked(api.useDataApiGetEndpoint).mockReturnValue({
+        data: { status: 200, data: endpoint },
+        isLoading: false,
+        isError: false,
+        refetch: vi.fn(),
+      } as never);
+      // Echoes the PATCH back, the way the server does — the shell re-seeds
+      // the whole form from this response. A mock that resolved with the
+      // ORIGINAL record instead would hand the editor back a params array
+      // LONGER than the one it just shortened, which is a state the server
+      // cannot produce (it stores what it was sent) but which does make this
+      // editor's `rowIds[i] ?? i` fallback emit two rows with the same React
+      // key. Worth writing down: it is why this mock is an implementation and
+      // not a `mockResolvedValue`.
+      const updateMutateAsync = vi.fn().mockImplementation(({ data }: { data: Partial<DataApiEndpointDto> }) =>
+        Promise.resolve({ status: 200, data: { ...endpoint, ...data }, headers: new Headers() }),
+      );
+      vi.mocked(dataApi.useUpdateEndpoint).mockReturnValue({
+        mutateAsync: updateMutateAsync,
+        isPending: false,
+      } as never);
+      return { ...renderQuery(endpoint), updateMutateAsync };
+    }
+
+    /** The declaration array as the shell sends it — what `onChange` produced. */
+    async function saveAndReadParams(updateMutateAsync: ReturnType<typeof vi.fn>): Promise<ParamSpec[]> {
+      await userEvent.click(screen.getByRole("button", { name: "Save" }));
+      await waitFor(() => expect(updateMutateAsync).toHaveBeenCalled());
+      const body = updateMutateAsync.mock.calls[0][0] as { data: { params: ParamSpec[] } };
+      return body.data.params;
+    }
+
+    /** The parameters table, found through a header it owns rather than by
+     *  position — Query gains other tables in the sections around this one. */
+    function paramRows() {
+      const table = screen.getByRole("columnheader", { name: "Required" }).closest("table") as HTMLElement;
+      return within(table).getAllByRole("row");
+    }
+
+    it("gives each declaration one row, with a column per field", async () => {
+      renderParams(TWO);
+      await screen.findByRole("combobox", { name: "Parameter 1 type" });
+
+      for (const col of ["Name", "Type", "Required", "Default", "Description"]) {
+        expect(screen.getByRole("columnheader", { name: col })).toBeInTheDocument();
+      }
+
+      // Header + one row each. Not "at least two": a card-per-parameter stack
+      // wrapped in a table would also produce rows.
+      const rows = paramRows();
+      expect(rows).toHaveLength(3);
+      // Row order follows declaration order, and each row holds ITS OWN
+      // parameter — the fields are read from inside the row element, so a
+      // layout that renders every field of both parameters into one row fails.
+      expect(within(rows[1]).getByLabelText("Parameter 1 name")).toHaveValue("region");
+      expect(within(rows[1]).getByLabelText("Parameter 1 description")).toHaveValue("Sales region");
+      expect(within(rows[2]).getByLabelText("Parameter 2 name")).toHaveValue("limit");
+      expect(within(rows[2]).getByLabelText("Parameter 2 description")).toHaveValue("Row cap");
+    });
+
+    it("writes a typed value to the row it was typed in", async () => {
+      const { updateMutateAsync } = renderParams(TWO);
+      const secondDefault = await screen.findByLabelText("Parameter 2 default");
+      await userEvent.type(secondDefault, "50");
+
+      // The whole array, not just the row that was touched: `update(1, …)`
+      // that also clears its neighbour is as wrong as writing to row 0.
+      expect(await saveAndReadParams(updateMutateAsync)).toEqual([
+        { ...TWO[0], default: null },
+        { ...TWO[1], default: "50" },
+      ]);
+    });
+
+    it("toggles Required on one row without touching the other", async () => {
+      const { updateMutateAsync } = renderParams(TWO);
+      // Both start `false`, so "set them all" is distinguishable from "set the
+      // one that was clicked" — with one already `true` it would not be.
+      await userEvent.click(await screen.findByRole("checkbox", { name: "Parameter 2 required" }));
+
+      expect((await saveAndReadParams(updateMutateAsync)).map((p) => !!p.required)).toEqual([false, true]);
+    });
+
+    // The SECOND row, deliberately. Removing the first is the one click a
+    // hard-coded `remove(0)` also gets right — written that way first, and the
+    // mutation survived: 35/35 green with the index thrown away.
+    it("removes the row whose control was used, not the first one", async () => {
+      const { updateMutateAsync } = renderParams(TWO);
+      await userEvent.click(await screen.findByRole("button", { name: "Remove parameter 2" }));
+
+      // The whole surviving declaration, not just its name: a row-shifting bug
+      // (the `rowIds` bookkeeping this editor exists to get right) can leave
+      // the correct count with fields from two declarations mixed into one row.
+      expect(await saveAndReadParams(updateMutateAsync)).toEqual([TWO[0]]);
+    });
+
+    it("appends a blank declaration and renumbers nothing above it", async () => {
+      const { updateMutateAsync } = renderParams(TWO);
+      await userEvent.click(await screen.findByRole("button", { name: /add parameter/i }));
+
+      expect(paramRows()).toHaveLength(4);
+      expect(screen.getByLabelText("Parameter 3 name")).toHaveValue("");
+      expect(screen.getByLabelText("Parameter 1 name")).toHaveValue("region");
+      expect(await saveAndReadParams(updateMutateAsync)).toEqual([
+        ...TWO,
+        { name: "", type: ParamType.string, location: ParamLocation.query, required: false },
+      ]);
+    });
+
+    // The one per-row conditional the cards had, and the thing a table most
+    // easily loses: `allowed` belongs to the enum row, and to no other.
+    it("shows allowed values inside the enum's own row and nowhere else", async () => {
+      renderParams([{ ...TWO[0], type: ParamType.enum, allowed: ["eu", "us"] }, TWO[1]]);
+      const allowed = await screen.findByLabelText("Parameter 1 allowed values");
+
+      const rows = paramRows();
+      expect(rows[1].contains(allowed)).toBe(true);
+      expect(allowed).toHaveValue("eu, us");
+      // Not a table-wide field, and not a column every row pays for.
+      expect(screen.queryByLabelText("Parameter 2 allowed values")).not.toBeInTheDocument();
+    });
+
+    it("keeps the empty state, and the sentence that says where a parameter comes from", async () => {
+      renderParams([]);
+      expect(await screen.findByText(/No parameters yet/i)).toBeInTheDocument();
+      expect(screen.getByText(":name")).toBeInTheDocument();
+      // The columns stay on screen with no rows: they are what tells an author
+      // what a parameter is made of before they add one.
+      expect(screen.getByRole("columnheader", { name: "Name" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /add parameter/i })).toBeInTheDocument();
+    });
+  });
+
   // Reviewer finding (Critical #2): the field used to be fully controlled —
   // `value={allowed.join(", ")}` with an `onChange` that immediately
   // re-split/trimmed/filtered — which silently ate a trailing comma on every
@@ -811,7 +1111,7 @@ describe("Query section — ParamEditor", () => {
     vi.mocked(dataApi.useUpdateEndpoint).mockReturnValue({ mutateAsync: updateMutateAsync, isPending: false } as never);
 
     renderQuery(endpoint);
-    const allowed = await screen.findByLabelText("Allowed values");
+    const allowed = await screen.findByLabelText("Parameter 1 allowed values");
 
     await userEvent.type(allowed, "a,b");
     expect(allowed).toHaveValue("a,b");
@@ -860,7 +1160,7 @@ describe("Query section — ParamEditor", () => {
       vi.mocked(dataApi.useUpdateEndpoint).mockReturnValue({ mutateAsync: updateMutateAsync, isPending: false } as never);
       renderQuery(endpoint);
 
-      const allowed = await screen.findByLabelText("Allowed values");
+      const allowed = await screen.findByLabelText("Parameter 1 allowed values");
       await userEvent.clear(allowed);
       await userEvent.type(allowed, "EU, US, APAC");
       await userEvent.tab();
@@ -869,7 +1169,7 @@ describe("Query section — ParamEditor", () => {
       await waitFor(() => expect(updateMutateAsync).toHaveBeenCalled());
 
       // What the server returned, not what was typed.
-      await waitFor(() => expect(screen.getByLabelText("Allowed values")).toHaveValue("eu, us, apac"));
+      await waitFor(() => expect(screen.getByLabelText("Parameter 1 allowed values")).toHaveValue("eu, us, apac"));
     });
 
     // The other half of the same defect: a focus/blur that typed nothing
@@ -884,11 +1184,11 @@ describe("Query section — ParamEditor", () => {
       } as never);
       renderQuery(endpoint);
 
-      const allowed = await screen.findByLabelText("Allowed values");
+      const allowed = await screen.findByLabelText("Parameter 1 allowed values");
       await userEvent.click(allowed);
       await userEvent.tab();
 
-      expect(screen.getByLabelText("Allowed values")).toHaveValue("eu, us");
+      expect(screen.getByLabelText("Parameter 1 allowed values")).toHaveValue("eu, us");
       // Touching a field without changing it is not an edit.
       expect(screen.queryByText("Unsaved changes")).not.toBeInTheDocument();
     });
@@ -997,5 +1297,219 @@ describe("Query section — Publish and the shared dirty flag", () => {
     await userEvent.click(screen.getByRole("link", { name: "Versions" }));
     await userEvent.click(await screen.findByRole("button", { name: "Publish saved draft" }));
     expect(await screen.findByText(/freezes the saved draft/i)).toBeInTheDocument();
+  });
+});
+
+/**
+ * The Query section as a full-height editing surface: a collapsible strip of
+ * tables, then the SQL editor above the preview with a drag handle between
+ * them (`components/sqllab/SqlTab.tsx`'s shape, deliberately reused).
+ *
+ * **What these can and cannot see.** jsdom does no layout, so no test here
+ * observes that the editor fills the height or that the handle drags — and
+ * `react-resizable-panels` is stubbed above precisely because its real
+ * implementation is meaningless without rects. What IS checkable, and is where
+ * the regressions live, is the wiring: which panel each half is in, that the
+ * sizes are percentages rather than pixels, that ⌘↵ reaches the preview, and
+ * that a trashed endpoint's editor refuses edits. The drag itself is the
+ * browser pass in the plan.
+ */
+describe("Query section — the editor, the split and the preview", () => {
+  const previewMutateAsync = vi.fn();
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    monacoStub.reset();
+    vi.mocked(databasesApi.useDatabases).mockReturnValue({
+      data: [{ id: "db-1", name: "warehouse" }],
+    } as never);
+    vi.mocked(dataApi.useUpdateEndpoint).mockReturnValue({ mutateAsync: vi.fn(), isPending: false } as never);
+    // The shell builds this on every render, trashed or not — hooks cannot be
+    // conditional — so the automock's `undefined` breaks every test here
+    // without it, not only the trashed ones.
+    vi.mocked(dataApi.useRestoreEndpoint).mockReturnValue({ mutateAsync: vi.fn(), isPending: false } as never);
+    previewMutateAsync.mockResolvedValue({
+      status: 200,
+      data: { columns: [], rows: [], row_count: 0, truncated: false },
+    });
+    vi.mocked(api.useDataApiPreviewEndpoint).mockReturnValue({
+      mutateAsync: previewMutateAsync,
+      isPending: false,
+    } as never);
+  });
+
+  function show(endpoint: DataApiEndpointDto) {
+    vi.mocked(api.useDataApiGetEndpoint).mockReturnValue({
+      data: { status: 200, data: endpoint },
+      isLoading: false,
+      isError: false,
+      refetch: vi.fn(),
+    } as never);
+    return renderQuery(endpoint);
+  }
+
+  it("splits the section vertically — editor above, preview below — and sizes it in PERCENT", async () => {
+    show(makeEndpoint());
+    await screen.findByLabelText("SQL");
+
+    const group = screen.getByTestId("panel-group");
+    expect(group).toHaveAttribute("data-orientation", "vertical");
+    // `min-h-0` is the half that regresses silently: a flex item's default
+    // `min-height: auto` refuses to shrink below its content, and this
+    // panel's content is an editor that will happily claim the whole page.
+    expect(group).toHaveClass("min-h-0", "flex-1");
+
+    // The section's own root is the full-height column the split lives in,
+    // walked from the group rather than picked out by selector.
+    const root = group.parentElement!;
+    expect(root).toHaveClass("flex", "h-full", "flex-col");
+    expect(root.parentElement?.tagName).toBe("FIELDSET");
+
+    const panels = screen.getAllByTestId("panel");
+    expect(panels).toHaveLength(2);
+    // The editor is in the FIRST panel and the preview in the SECOND — the
+    // whole point of the change is that the preview stopped being below the
+    // parameter editor, so which panel holds what is the assertion.
+    expect(within(panels[0]).getByLabelText("SQL")).toBeInTheDocument();
+    expect(
+      within(panels[1]).getByRole("button", { name: /preview unsaved draft/i }),
+    ).toBeInTheDocument();
+
+    // …with the drag handle between them, not before or after both.
+    const handle = screen.getByTestId("panel-separator");
+    expect(panels[0].compareDocumentPosition(handle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(panels[1].compareDocumentPosition(handle) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
+
+    // STRINGS, and percentages. In react-resizable-panels v4 a bare number is
+    // PIXELS: `defaultSize={55}` compiles, type-checks, reads correctly in a
+    // diff, and gives a 55-pixel editor. Both halves of this are needed — a
+    // string `"55"` is also percent, so the type alone is not enough, and a
+    // `%` suffix cannot be written on a number at all.
+    for (const panel of panels) {
+      expect(panel).toHaveAttribute("data-default-size-type", "string");
+      expect(panel).toHaveAttribute("data-min-size-type", "string");
+      expect(panel.getAttribute("data-default-size")).toMatch(/^\d+%$/);
+      expect(panel.getAttribute("data-min-size")).toMatch(/^\d+%$/);
+    }
+    // The editor gets the larger share — the plan's approved layout.
+    expect(panels[0]).toHaveAttribute("data-default-size", "55%");
+    expect(panels[1]).toHaveAttribute("data-default-size", "45%");
+  });
+
+  it("runs the preview from the editor's ⌘↵, on the SQL that is on screen", async () => {
+    show(makeEndpoint({ sql: "SELECT 1" }));
+    const sql = await screen.findByLabelText("SQL");
+    await userEvent.type(sql, " -- edited");
+
+    // The command the PRODUCT registered, at the keybinding the product
+    // computed (`SqlEditor`'s real `handleMount` ran — see the Monaco stub).
+    const run = monacoStub.runCommand();
+    expect(run).toBeTypeOf("function");
+    await act(async () => {
+      run!();
+    });
+
+    await waitFor(() => expect(previewMutateAsync).toHaveBeenCalled());
+    // Not merely "a preview ran": the unsaved edit is in the body, which is
+    // what makes this the same run the button does.
+    expect(previewMutateAsync.mock.calls[0][0].data.sql).toBe("SELECT 1 -- edited");
+  });
+
+  it("keeps the preview's note in the panel with the button it describes", async () => {
+    show(makeEndpoint());
+    await screen.findByLabelText("SQL");
+
+    const previewPanel = screen.getAllByTestId("panel")[1];
+    // The note is the only place that says a preview saves nothing and leaves
+    // no trace. Beside the button, or a reader has already pressed it.
+    expect(
+      within(previewPanel).getByText(/does not save, publish, spend a rate limit/i),
+    ).toBeInTheDocument();
+    // …and the shortcut is written down where it can be discovered.
+    expect(within(previewPanel).getByText("⌘↵")).toBeInTheDocument();
+  });
+
+  it("makes the SQL editor read-only for a trashed endpoint, and ⌘↵ runs nothing", async () => {
+    const user = userEvent.setup();
+    show(makeEndpoint({ state: "disabled", deleted_at: "2026-08-18T09:00:00Z" }));
+    const sql = await screen.findByLabelText("SQL");
+
+    // Not through the shell's `<fieldset disabled>`: a fieldset disables form
+    // controls, and Monaco is not one. Without an explicit `readOnly` this is
+    // a fully editable editor on a page whose banner says everything below is
+    // read-only.
+    expect(sql).toHaveAttribute("readonly");
+    await user.type(sql, "DROP");
+    expect(sql).toHaveValue("SELECT 1");
+
+    // And the shortcut bypasses BOTH guards — a read-only Monaco still fires
+    // its commands, and the fieldset never sees a keystroke — so it needs one
+    // of its own.
+    const run = monacoStub.runCommand();
+    if (run) {
+      await act(async () => {
+        run();
+      });
+    }
+    expect(previewMutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("leaves the SQL editor writable, and ⌘↵ live, when the endpoint is not in the trash", async () => {
+    // The other half of the test above: an editor that is ALWAYS read-only and
+    // a ⌘↵ that never fires would pass everything there.
+    show(makeEndpoint());
+    const sql = await screen.findByLabelText("SQL");
+
+    expect(sql).not.toHaveAttribute("readonly");
+    await userEvent.type(sql, " -- x");
+    expect(sql).toHaveValue("SELECT 1 -- x");
+
+    await act(async () => {
+      monacoStub.runCommand()!();
+    });
+    await waitFor(() => expect(previewMutateAsync).toHaveBeenCalled());
+  });
+
+  it("puts the database picker in a config table row rather than loose above the editor", async () => {
+    show(makeEndpoint());
+    const picker = await screen.findByLabelText("Database");
+
+    // "Everything except the SQL becomes a table" — the picker is a
+    // `Setting | Details | Value` row, so it is inside a table with the
+    // parameters, not a labelled control floating over the editor.
+    const cell = picker.closest("td");
+    expect(cell).not.toBeNull();
+    const row = cell!.closest("tr")!;
+    expect(within(row).getByText("Database")).toBeInTheDocument();
+    // And it is in the strip, above the split, not inside either panel.
+    for (const panel of screen.getAllByTestId("panel")) {
+      expect(panel.contains(picker)).toBe(false);
+    }
+  });
+
+  /**
+   * Measured in a browser at a 900px viewport, where this section gets 615px:
+   * with the strip open it took 370 of them and left the SQL editor **107px**,
+   * about four lines — the exact problem this redesign exists to fix. Collapsed,
+   * the editor gets 295px and the preview 241px.
+   *
+   * Asserted on the `open` ATTRIBUTE, not on visibility: jsdom does not hide a
+   * closed `<details>`'s contents from queries, so `toBeVisible` would pass
+   * whether or not the strip were collapsed — which is why the other 41 tests
+   * in this file went on passing unchanged when the default flipped.
+   */
+  it("starts with the strip collapsed, and says what is inside it", async () => {
+    show(makeEndpoint({
+      params: [
+        { name: "region", type: ParamType.string, location: ParamLocation.query, required: true },
+      ],
+    }));
+    const summary = await screen.findByText(/Database and parameters/);
+    const details = summary.closest("details")!;
+
+    expect(details.open).toBe(false);
+    // The count is what makes a collapsed strip honest — the reader can see
+    // there is one declaration in there without opening it.
+    expect(summary).toHaveTextContent("Database and parameters (1)");
   });
 });

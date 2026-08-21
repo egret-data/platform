@@ -338,9 +338,25 @@ function EndpointDetailInner({ ws, id }: { ws: string; id: string }) {
     // nav), so this route supplies its own padding like its siblings.
     // The header and nav were never capped by the shell either — and as of the
     // width pass below, neither is the section content.
-    <div className="p-4">
+    //
+    // **`flex h-full flex-col` — a bounded column, not a growing block.** One
+    // section (Query) is a full-height editing surface: an SQL editor above a
+    // preview, split by a drag handle, which can only work if it is handed a
+    // height rather than growing to whatever its content needs. The height is
+    // already there and needs no viewport constant: `AppShell` renders
+    // `<main className="min-w-0 flex-1 overflow-auto p-6">` inside an
+    // `h-screen` flex column, so `h-full` here resolves against a definite
+    // height — the same chain `routes/explore/SqlLab.tsx` uses.
+    //
+    // The five other sections are unchanged in what they render; what changed
+    // is WHICH element scrolls. Before, the page grew and `main` scrolled;
+    // now the `fieldset` below scrolls and `main` has nothing to scroll. The
+    // header, the trash banner and the section nav are `shrink-0` so a long
+    // section cannot squeeze them (flex items shrink by default), which is
+    // also what keeps them on screen while a section scrolls under them.
+    <div className="flex h-full flex-col p-4">
       <h1 className="sr-only">{headingName}</h1>
-      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+      <div className="mb-4 flex shrink-0 flex-wrap items-center justify-between gap-3">
         <div className="min-w-0">
           <Link
             className="text-sm text-muted-foreground hover:underline"
@@ -373,7 +389,7 @@ function EndpointDetailInner({ ws, id }: { ws: string; id: string }) {
           dropped its Open item for exactly that reason — the link beside it had
           not. */}
       {trashed && (
-        <Alert className="mb-5 border-destructive/50">
+        <Alert className="mb-5 shrink-0 border-destructive/50">
           <AlertTitle>This endpoint is in the trash</AlertTitle>
           <AlertDescription className="mt-1 flex flex-wrap items-center justify-between gap-3">
             <span className="max-w-prose">
@@ -390,7 +406,7 @@ function EndpointDetailInner({ ws, id }: { ws: string; id: string }) {
       )}
 
       <nav
-        className="-mx-1 mb-5 flex gap-1 overflow-x-auto border-b border-border px-1"
+        className="-mx-1 mb-5 flex shrink-0 gap-1 overflow-x-auto border-b border-border px-1"
         aria-label="Endpoint sections"
       >
         {SECTIONS.map((s) => (
@@ -435,7 +451,25 @@ function EndpointDetailInner({ ws, id }: { ws: string; id: string }) {
           `min-w-0` because a `fieldset`'s UA `min-inline-size: min-content` is
           not part of Tailwind's preflight reset and would otherwise refuse to
           shrink below its widest child. */}
-      <fieldset disabled={trashed} className="min-w-0">
+      {/* The flexible remainder of the column above, and the page's ONE scroll
+          region.
+
+          `flex-1` takes every pixel the fixed-size header/banner/nav leave, and
+          `min-h-0` is what lets it also give pixels BACK: a flex item's default
+          `min-height: auto` refuses to shrink below its content, so without it
+          a tall section pushes this box past the bottom of `main` and the whole
+          page scrolls again — exactly the growing block this replaced, plus a
+          Query tab whose `h-full` now resolves against a box taller than the
+          viewport. `SqlLab.tsx`'s body carries the same pair for the same
+          reason.
+
+          `overflow-auto` rather than `overflow-hidden`: SQL Lab's body hosts
+          one full-height child and nothing else, but five of the six sections
+          here are ordinary documents that are legitimately taller than the
+          viewport, and hiding their overflow would clip them with no way to
+          reach the rest. `auto` scrolls those five and leaves the sixth — which
+          fits itself to `h-full` — with nothing to scroll. */}
+      <fieldset disabled={trashed} className="min-h-0 min-w-0 flex-1 overflow-auto">
         <Outlet key={id} context={ctx} />
       </fieldset>
     </div>

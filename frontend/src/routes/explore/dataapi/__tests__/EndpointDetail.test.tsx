@@ -1187,3 +1187,88 @@ describe("EndpointDetail — width", () => {
     expect(valueHead).toHaveClass("w-52");
   });
 });
+
+/**
+ * The shell is a bounded flex column so ONE section (Query) can be a
+ * full-height editing surface — an SQL editor above a preview, split by a drag
+ * handle — without the other five losing anything.
+ *
+ * **What these tests are, stated plainly: assertions about the class chain, not
+ * about layout.** jsdom implements no CSS layout — every box is 0×0, nothing
+ * overflows, and nothing scrolls — so no test in this file can observe that a
+ * long section actually scrolls, that the nav actually stays put, or that the
+ * editor actually fills the height. What it CAN observe is the chain of
+ * elements that produces those things, and that chain is where the regression
+ * lives: dropping `min-h-0` (a flex item's default `min-height: auto` refuses
+ * to shrink below its content) is the classic way this shape silently reverts
+ * to a growing page, and it is invisible to every other test in this file
+ * because every one of them still passes.
+ *
+ * So these walk UP from a rendered section — never `querySelector` on
+ * hand-picked nodes — which is what makes them depend on the real structure: an
+ * extra wrapper interposed between the section and the scroll box breaks the
+ * walk instead of being silently walked past. The real check is a browser, and
+ * it is written down in the plan's post-implementation pass.
+ */
+describe("EndpointDetail — one bounded scroll region", () => {
+  /** The `<div className="p-4">` this route renders as its own root. */
+  function routeRootOf(container: HTMLElement) {
+    const root = container.querySelector<HTMLElement>(".p-4");
+    expect(root).not.toBeNull();
+    return root!;
+  }
+
+  it("makes the section area the flexible, scrollable remainder of a full-height column", async () => {
+    const { container } = renderConfig();
+    const heading = await screen.findByRole("heading", { name: "Config", level: 2 });
+
+    // Walked from the section's own heading, so this is the element the
+    // section is REALLY inside of, whatever wrappers exist today.
+    const scrollBox = heading.closest("fieldset");
+    expect(scrollBox).not.toBeNull();
+
+    // `flex-1` takes the space the fixed-size header and nav leave; `min-h-0`
+    // is what lets it hand space back, which is the half that regresses
+    // silently; `overflow-auto` is what makes the overflow reachable rather
+    // than clipped; `min-w-0` is the pre-existing fieldset guard (a UA
+    // `min-inline-size: min-content` that Tailwind's preflight does not reset).
+    expect(scrollBox).toHaveClass("flex-1", "min-h-0", "overflow-auto", "min-w-0");
+
+    // Its parent is the route root, and the root is the full-height column —
+    // `h-full` and not a viewport constant, because `AppShell`'s `main` is
+    // already a sized flex child of an `h-screen` column.
+    const root = routeRootOf(container);
+    expect(scrollBox!.parentElement).toBe(root);
+    expect(root).toHaveClass("flex", "h-full", "flex-col");
+
+    // Exactly one scroll region on the vertical axis. A second `overflow-auto`
+    // on the root gives the page two scrollbars, and the inner one stops at
+    // whatever height the outer one has already grown to.
+    expect(root.className).not.toMatch(/(?:^|\s)(?:[a-z0-9]+:)*overflow(?:-y)?-(?:auto|scroll)(?:\s|$)/);
+  });
+
+  it("keeps the header and the section nav outside the scrolling area", async () => {
+    const { container } = renderConfig();
+    const heading = await screen.findByRole("heading", { name: "Config", level: 2 });
+    const scrollBox = heading.closest("fieldset")!;
+    const root = routeRootOf(container);
+
+    const nav = screen.getByRole("navigation", { name: "Endpoint sections" });
+    const save = screen.getByRole("button", { name: "Save" });
+
+    // Not merely present — present OUTSIDE the box that scrolls, which is what
+    // makes them stay put while a long section scrolls under them. Both would
+    // still be `getBy`-findable if they had been moved inside it.
+    expect(scrollBox.contains(nav)).toBe(false);
+    expect(scrollBox.contains(save)).toBe(false);
+
+    // …and siblings of it in the same column, sized by their content. Flex
+    // items shrink by default, so without `shrink-0` a tall section squeezes
+    // the nav — and the nav is how the other five sections are reached at all.
+    expect(nav.parentElement).toBe(root);
+    expect(nav).toHaveClass("shrink-0");
+    const headerRow = save.closest("div")!.parentElement!;
+    expect(headerRow.parentElement).toBe(root);
+    expect(headerRow).toHaveClass("shrink-0");
+  });
+});
