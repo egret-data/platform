@@ -656,6 +656,85 @@ Practical rules that fall out of this:
 
 ---
 
+## 11. "Configure, run, read the result" is a split, not a stack
+
+`src/routes/explore/dataapi/detail/Query.tsx` (the first), `detail/TryIt.tsx` (the second).
+
+Two sections of the endpoint editor have the same shape — set something up, run it, read what
+came back — and both are now a vertical `Group` from `react-resizable-panels` with a drag
+handle between the halves, rather than a page that scrolls.
+
+**The defect.** Stacked, the result sits below the setup and off-screen: run it, scroll down,
+read, scroll back up to change a value, scroll down again. `Query`'s preview was below
+`ParamEditor`, and `TryIt`'s result below a `Run as` card. In a browser `Query`'s first
+version of the split was worse still — the strip of tables took 370px of a 615px section and
+left the SQL editor 107px, about four lines, which no test could see.
+
+The parts, all four load-bearing:
+
+- **The setup is tables** (§4) — a `ConfigTable` row for a setting, a plain `Table` for a list.
+  `TryIt`'s service-account picker is one `ConfigTableRow`; its per-parameter trial *values*
+  are a plain table, one row each.
+- **The result is the lower panel, and it owns the run control.** The button and the shortcut
+  live in the *result* panel's header, not with the setup: `PreviewBlock` and `TryIt` both put
+  `Run` there, and the header stays put while the body scrolls.
+- **The shortcut is named beside the button it fires.** `⌘↵`, in the header. An affordance
+  nobody can see is not an affordance. `Query` registers it as a Monaco command (`SqlEditor`'s
+  `onRun`); `TryIt` has no editor, so it uses a `window` `keydown` listener, the idiom
+  `components/sqllab/SqlTab.tsx` already uses for `⌘K`.
+- **Sizes are percent STRINGS.** In `react-resizable-panels` v4 a bare number means *pixels*,
+  so `defaultSize={55}` is a 55-pixel editor that reads as correct in the source. Both sections
+  are tested for the string *type*, not only the value.
+
+### 11.1 The shortcut is not covered by any of the guards the button has
+
+A `window` key handler is not a form control, so it walks straight past the shell's
+`<fieldset disabled={trashed}>`, past the button's own `disabled`, and past a pending
+mutation. Every guard the button expresses declaratively has to be re-checked at the top of
+the run function — `PreviewBlock` re-checks `isPending`, and `TryIt` re-checks account,
+`isPending` and `trashed` in one `canRun`. Before it had a shortcut, `TryIt` did not read
+`trashed` at all; adding one without the guard would have made a trashed endpoint runnable by
+keyboard only. `Query` solves the same problem one level up, by passing
+`onRun={trashed ? undefined : …}` so the command is never registered.
+
+The listener must also reach the *current* form. A `[]`-dependency listener closes over the
+first render's callback and posts an empty body; re-subscribing every keystroke churns a
+window listener per character. Both sections refresh a ref after every render instead
+(`PreviewBlock`'s `useImperativeHandle` carries no dependency array, `TryIt` an effect with
+none).
+
+### 11.2 A `<details>` strip, and when *not* to use one
+
+`Query` puts its tables in a native `<details>` above the split, collapsed by default, because
+`ParamEditor` is 370px of the section (the measurement above).
+
+**Native `<details>`/`<summary>`, never `ui/collapsible`.** The shell disables the whole
+section for a trashed endpoint, and a Radix trigger is a `<button>` — so a trashed endpoint
+could not collapse the strip. `<summary>` is not a form control and the `fieldset` does not
+touch it.
+
+**`TryIt` deliberately has no strip**, and the reason generalises: its setup is one picker and
+a short row per parameter, and the prose that would have gone in the drawer is a *warning* —
+a trial spends the rate limit, writes the access log and fills the cache for real.
+`PreviewBlock` already records why that class of copy travels with the button ("a reader who
+has to scroll to find that has already pressed the button"), and a drawer closed by default is
+worse than a scroll. **Collapse a strip because it is big, not because the other section has
+one.**
+
+### 11.3 What a test can say about any of this
+
+jsdom does no layout (§10), so the drag, the heights and the widths are a browser check. What
+is testable is the wiring, and it is where the regressions were: which panel each half is in
+(`within(panels[0])` / `within(panels[1])`), that the handle is *between* them
+(`compareDocumentPosition`), that the sizes are strings, that the shortcut fires the mutation
+with the on-screen values, and that it fires nothing when a guard in §11.1 should stop it.
+
+**jsdom does not hide a closed `<details>`** — it has no layout to hide it with, and Testing
+Library does not exclude its contents. Assert the `open` **attribute**; `toBeVisible` passes
+either way and says nothing.
+
+---
+
 ## Adoption status
 
 Honest scope, measured on the current tree, so nobody reads this as describing code that does
@@ -668,6 +747,8 @@ not exist yet:
 - `EmptyState` — 10 files (2 Data API, 8 control-plane).
 - `ConfigTable` — 13 production files; `ConfigTableGroup` is used by Data API's `Config` and
   `ResponseSection`.
+- The split of §11 — **2** sections, both Data API endpoint detail (`Query`, `TryIt`); `react-resizable-panels` itself is also used by `components/sqllab/SqlTab.tsx`, which is
+  where the idiom came from.
 - `ConfigSection` — 13 files, down from **15** at the merge base. This is the fifth count of
   this number in the programme and the first measured at both ends:
   `grep -rl 'from "@/components/form/ConfigSection"' src` gives 15 at `63a4fb90` and 13 at

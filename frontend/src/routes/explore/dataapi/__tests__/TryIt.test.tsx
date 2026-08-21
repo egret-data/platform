@@ -1,8 +1,48 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type React from "react";
 import { MemoryRouter, Outlet, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+
+/**
+ * `react-resizable-panels`, stubbed to the three props `TryIt` passes — the
+ * same stub, and for the same reason, as `Query.test.tsx`.
+ *
+ * **Not for convenience: the real one is unusable here.** With no layout engine
+ * every rect in jsdom is 0×0, so the library's `Separator` wins the hit-test for
+ * a click anywhere in the group and takes focus. Every `userEvent.type` in this
+ * file would then go to the drag handle instead of the field, and the section
+ * would silently read as if nothing could be typed into it. That is an artifact
+ * of the environment, not of the product — the drag itself is a browser check.
+ *
+ * The stub echoes the SIZES back as attributes rather than swallowing them,
+ * because those are exactly what a reader cannot verify by eye: in v4 a bare
+ * number means PIXELS and a string means percent, so `defaultSize={40}` is a
+ * 40-pixel setup pane that still looks right in the source.
+ */
+vi.mock("react-resizable-panels", () => ({
+  Group: ({ children, className, orientation }: { children?: React.ReactNode; className?: string; orientation?: string }) => (
+    <div data-testid="panel-group" data-orientation={orientation} className={className}>
+      {children}
+    </div>
+  ),
+  Panel: ({ children, className, defaultSize, minSize }: { children?: React.ReactNode; className?: string; defaultSize?: number | string; minSize?: number | string }) => (
+    <div
+      data-testid="panel"
+      data-default-size={String(defaultSize)}
+      data-default-size-type={typeof defaultSize}
+      data-min-size={String(minSize)}
+      data-min-size-type={typeof minSize}
+      className={className}
+    >
+      {children}
+    </div>
+  ),
+  Separator: ({ className }: { className?: string }) => (
+    <div data-testid="panel-separator" role="separator" className={className} />
+  ),
+}));
 
 // No msw in this repo — tests mock the API module directly (see
 // AccessSection.test.tsx / EndpointDetail.test.tsx).
@@ -100,10 +140,15 @@ function ContextProvider({ ctx }: { ctx: Partial<EndpointDetailContext> }) {
   return <Outlet context={ctx} />;
 }
 
-function renderTryIt(opts: { endpoint?: DataApiEndpointDto; search?: string } = {}) {
+function renderTryIt(opts: { endpoint?: DataApiEndpointDto; search?: string; trashed?: boolean } = {}) {
   const endpoint = opts.endpoint ?? makeEndpoint();
   const search = opts.search ?? `?service_account=${SA_1.id}`;
-  const ctx: Partial<EndpointDetailContext> = { ws: "eng", id: endpoint.id, endpoint };
+  const ctx: Partial<EndpointDetailContext> = {
+    ws: "eng",
+    id: endpoint.id,
+    endpoint,
+    trashed: opts.trashed ?? false,
+  };
 
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const utils = render(
@@ -279,5 +324,239 @@ describe("TryIt — says which version a trial runs", () => {
   it("states that draft edits are not part of what runs", () => {
     renderTryIt();
     expect(screen.getByText(/a trial runs the published version/i)).toBeInTheDocument();
+  });
+});
+
+/** Two parameters, always. One row cannot tell "wrote the row it was typed in"
+ *  apart from "wrote row 0" — see `docs/en/ui-conventions.md` §8. */
+const TWO_PARAMS = [
+  { name: "region", type: ParamType.string, location: ParamLocation.query, required: true },
+  { name: "limit", type: ParamType.number, location: ParamLocation.query, required: false },
+];
+
+/**
+ * What the trial actually POSTs, not merely that something was POSTed.
+ *
+ * The pre-existing assertions were `expect.objectContaining`, which pins the
+ * one field named and frees every other: `service_account_id` was unpinned in
+ * the parameter tests and `params` unpinned in the account test, so a body that
+ * dropped either would have passed. These deep-equal the WHOLE call.
+ */
+describe("TryIt — the payload a trial carries", () => {
+  it("puts a typed value under the parameter whose row it was typed in", async () => {
+    const mutateAsync = mockTry(OK);
+    renderTryIt({ endpoint: makeEndpoint({ params: TWO_PARAMS }) });
+
+    // The SECOND row only. An implementation that writes `params[params[0].name]`
+    // — or that reads the first input regardless of which one changed — sends
+    // `{ region: ["10"] }` here and dies on the deep equality below. With a
+    // one-parameter fixture those two implementations are indistinguishable.
+    await userEvent.type(screen.getByLabelText(/^limit$/), "10");
+    await userEvent.click(screen.getByRole("button", { name: /^run$/i }));
+
+    await waitFor(() => expect(mutateAsync).toHaveBeenCalled());
+    expect(mutateAsync).toHaveBeenCalledTimes(1);
+    expect(mutateAsync.mock.calls[0][0]).toEqual({
+      workspace: "eng",
+      id: "ep-1",
+      // The untouched `region` is OMITTED, not sent as `[""]` — an unfilled
+      // optional parameter must behave like it was never supplied.
+      data: { service_account_id: SA_1.id, params: { limit: ["10"] } },
+    });
+  });
+
+  it("keeps two filled parameters on their own keys rather than crossing them", async () => {
+    const mutateAsync = mockTry(OK);
+    renderTryIt({ endpoint: makeEndpoint({ params: TWO_PARAMS }) });
+
+    // Distinct values, so a swap is visible. Neither is a placeholder of the
+    // field it is typed into (neither parameter declares a default), so no
+    // constant in the component can satisfy this.
+    await userEvent.type(screen.getByLabelText(/^region/), "EU");
+    await userEvent.type(screen.getByLabelText(/^limit$/), "10");
+    await userEvent.click(screen.getByRole("button", { name: /^run$/i }));
+
+    await waitFor(() => expect(mutateAsync).toHaveBeenCalled());
+    expect(mutateAsync.mock.calls[0][0].data).toEqual({
+      service_account_id: SA_1.id,
+      params: { region: ["EU"], limit: ["10"] },
+    });
+  });
+});
+
+/**
+ * `react-resizable-panels` is stubbed at the top of this file precisely because
+ * its real behaviour cannot be exercised in jsdom. What IS testable, and where
+ * the regressions live, is the wiring: which panel each half is in, that the
+ * sizes are percent STRINGS rather than v4's pixel numbers, and that the
+ * shortcut named in the header actually runs the trial.
+ */
+describe("TryIt — the split, and the shortcut named in the result header", () => {
+  it("splits the section vertically — setup above, result below — and sizes it in PERCENT", () => {
+    mockTry(OK);
+    renderTryIt();
+
+    const group = screen.getByTestId("panel-group");
+    // `orientation`, not `direction` — v4 renamed it, and a wrong prop name is
+    // silently accepted and silently horizontal.
+    expect(group).toHaveAttribute("data-orientation", "vertical");
+    // `min-h-0` is what lets the group give height back; without it the flex
+    // item refuses to shrink below its content and the panels grow the page.
+    expect(group.className).toMatch(/min-h-0/);
+
+    const panels = screen.getAllByTestId("panel");
+    expect(panels).toHaveLength(2);
+    // The setup is in the FIRST panel and the result in the SECOND. The Run
+    // button lives with the RESULT, as Query's Preview button does.
+    expect(within(panels[0]).getByLabelText("Service account")).toBeInTheDocument();
+    expect(within(panels[1]).getByRole("button", { name: /^run$/i })).toBeInTheDocument();
+    expect(within(panels[0]).queryByRole("button", { name: /^run$/i })).toBeNull();
+
+    // And the handle is between them, not before or after both.
+    const handle = screen.getByTestId("panel-separator");
+    expect(panels[0].compareDocumentPosition(handle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(panels[1].compareDocumentPosition(handle) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
+
+    // STRINGS, and percentages. In react-resizable-panels v4 a bare number is
+    // PIXELS — `defaultSize={40}` is a 40-pixel setup pane that reads as
+    // correct in the source. The type assertion is the load-bearing half.
+    for (const panel of panels) {
+      expect(panel).toHaveAttribute("data-default-size-type", "string");
+      expect(panel).toHaveAttribute("data-min-size-type", "string");
+      expect(panel.getAttribute("data-default-size")).toMatch(/^\d+%$/);
+      expect(panel.getAttribute("data-min-size")).toMatch(/^\d+%$/);
+    }
+    expect(panels[0]).toHaveAttribute("data-default-size", "40%");
+    expect(panels[1]).toHaveAttribute("data-default-size", "60%");
+  });
+
+  it("names the shortcut in the result panel's header, beside the button it fires", () => {
+    mockTry(OK);
+    renderTryIt();
+    const panels = screen.getAllByTestId("panel");
+    // An affordance nobody can see is not an affordance, and the only place a
+    // reader looks for it is next to Run.
+    expect(within(panels[1]).getByText("⌘↵")).toBeInTheDocument();
+  });
+
+  it("runs the trial from ⌘↵, carrying the values on screen", async () => {
+    const mutateAsync = mockTry(OK);
+    renderTryIt({ endpoint: makeEndpoint({ params: TWO_PARAMS }) });
+
+    await userEvent.type(screen.getByLabelText(/^region/), "EU");
+    // The listener is on `window`, so this is the event the product receives —
+    // no button is clicked here.
+    fireEvent.keyDown(window, { key: "Enter", metaKey: true });
+
+    await waitFor(() => expect(mutateAsync).toHaveBeenCalled());
+    // The CURRENT form, not the first render's: a `[]`-dep listener closes over
+    // the initial `onRun` and posts an empty `params` with an empty account id.
+    expect(mutateAsync.mock.calls[0][0].data).toEqual({
+      service_account_id: SA_1.id,
+      params: { region: ["EU"] },
+    });
+  });
+
+  it("does not run from ⌘↵ when no service account is chosen", async () => {
+    const mutateAsync = mockTry(OK);
+    renderTryIt({ search: "" });
+    expect(screen.getByRole("button", { name: /^run$/i })).toBeDisabled();
+
+    fireEvent.keyDown(window, { key: "Enter", metaKey: true });
+
+    // The shortcut bypasses the button, so the button's `disabled` is not the
+    // guard — without the check in `onRun` this posts `service_account_id: ""`
+    // and the serving path answers a bare 422.
+    await waitFor(() => expect(mutateAsync).not.toHaveBeenCalled());
+  });
+
+  /**
+   * The shell wraps every section in `<fieldset disabled={trashed}>`, which
+   * greys the Run button — and a window key handler is not a form control, so
+   * it walks straight past it. Before this section had a shortcut, `trashed`
+   * did not need reading here at all; adding one without this guard would have
+   * made a trashed endpoint runnable by keyboard only.
+   */
+  it("runs nothing for a trashed endpoint, by shortcut or by button", async () => {
+    const mutateAsync = mockTry(OK);
+    renderTryIt({ trashed: true });
+
+    expect(screen.getByRole("button", { name: /^run$/i })).toBeDisabled();
+    fireEvent.keyDown(window, { key: "Enter", metaKey: true });
+    await waitFor(() => expect(mutateAsync).not.toHaveBeenCalled());
+  });
+
+  it("keeps what a trial costs in the panel with the button that spends it", () => {
+    mockTry(OK);
+    renderTryIt();
+    const panels = screen.getAllByTestId("panel");
+    // `PreviewBlock`'s rule: a reader who has to scroll to find out that this
+    // spends a rate limit and writes an access-log row has already pressed the
+    // button. jsdom cannot judge that the note is on screen — it can judge that
+    // it is in the same panel as Run, which is the wiring the rule reduces to.
+    expect(within(panels[1]).getByRole("note")).toHaveTextContent(/rate-limit bucket/i);
+    expect(within(panels[0]).queryByRole("note")).toBeNull();
+  });
+});
+
+/** §4: settings are `Setting | Details | Value` rows; list-shaped content is a
+ *  plain table. This section was eight stacked `Card`s and is now neither. */
+describe("TryIt — the setup reads as tables, not as cards", () => {
+  it("puts the service-account picker in a config table row rather than loose above the form", () => {
+    mockTry(OK);
+    renderTryIt();
+
+    const trigger = screen.getByLabelText("Service account");
+    const cell = trigger.closest("td");
+    expect(cell).not.toBeNull();
+    const row = cell!.closest("tr")!;
+    // The label is the row's Setting cell, not a `<Label>` floating above a card.
+    expect(within(row).getByText("Service account")).toBeInTheDocument();
+  });
+
+  it("gives each declared parameter one row of a plain table, with its type", () => {
+    mockTry(OK);
+    renderTryIt({ endpoint: makeEndpoint({ params: TWO_PARAMS }) });
+
+    const regionRow = screen.getByLabelText(/^region/).closest("tr")!;
+    const limitRow = screen.getByLabelText(/^limit$/).closest("tr")!;
+    // Two rows, and DIFFERENT ones — one row cannot tell a per-row renderer
+    // apart from one that renders row 0 twice.
+    expect(regionRow).not.toBe(limitRow);
+    expect(within(regionRow).getByText("string")).toBeInTheDocument();
+    expect(within(limitRow).getByText("number")).toBeInTheDocument();
+    // The required marker belongs to the required one, and only to it.
+    expect(within(regionRow).getByText("*")).toBeInTheDocument();
+    expect(within(limitRow).queryByText("*")).toBeNull();
+  });
+
+  it("says so inside the table when the endpoint declares no parameters", () => {
+    mockTry(OK);
+    renderTryIt();
+    const empty = screen.getByText(/declares no parameters/i);
+    // In the table's own body, spanning it, rather than a sentence that reads as
+    // a value in the Parameter column.
+    expect(empty.closest("td")).toHaveAttribute("colspan", "3");
+  });
+});
+
+/**
+ * The one thing this section exists to say. A trial runs as the chosen SERVICE
+ * ACCOUNT; `Query`'s preview runs as the AUTHOR. Measured live on kind: the same
+ * endpoint and the same SQL answered `who=svc-kind-smoke-bot` from a trial and
+ * `who=admin` from a preview. `PreviewBlock` carries the claim from the other
+ * side; these are the three places on this side.
+ */
+describe("TryIt — says whose identity a trial runs as", () => {
+  it("says it in the section description, in the picker's help, and beside Run", () => {
+    mockTry(OK);
+    renderTryIt();
+
+    expect(screen.getByText(/as a chosen service account/i)).toBeInTheDocument();
+    // `ConfigTableRow` renders its help twice — the Details cell at `lg`, and
+    // inline under the label below it — so this is `getAllByText` by
+    // construction, not by hedging.
+    expect(screen.getAllByText(/Preview in Query runs as you/i).length).toBeGreaterThan(0);
+    expect(screen.getByRole("note")).toHaveTextContent(/runs as the service account above rather than as you/i);
   });
 });
