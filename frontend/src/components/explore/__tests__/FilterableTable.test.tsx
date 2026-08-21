@@ -214,7 +214,8 @@ it("reports the ids it drew, and re-reports them when the page changes", async (
       columns={columns}
       getId={(r) => r.id}
       pageSize={2}
-      selection={{ selected: new Set<string>(), onToggle: vi.fn(), onDrawnChange }}
+      selection={{ selected: new Set<string>(), onToggle: vi.fn() }}
+      onDrawnChange={onDrawnChange}
     />,
   );
 
@@ -236,7 +237,8 @@ it("re-reports when a search narrows what is on screen", async () => {
       rows={rowsIn}
       columns={columns}
       getId={(r) => r.id}
-      selection={{ selected: new Set(["a", "b"]), onToggle: vi.fn(), onDrawnChange }}
+      selection={{ selected: new Set(["a", "b"]), onToggle: vi.fn() }}
+      onDrawnChange={onDrawnChange}
     />,
   );
   expect(onDrawnChange).toHaveBeenLastCalledWith(["a", "b"]);

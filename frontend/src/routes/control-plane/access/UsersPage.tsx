@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -307,9 +307,25 @@ export default function UsersPage() {
   const total = rows.length;
   const active = rows.filter((u) => u.status === "active").length;
 
-  const bulk = useBulkSelect(filtered);
+  // What the TABLE drew, which is not `filtered`: the search box and the
+  // `pageSize={25}` pager live inside `FilterableTable`, so `filtered` is a
+  // superset of what is on screen. Feeding that superset to `useBulkSelect`
+  // broke the contract its own doc comment states — a row picked while visible
+  // and then searched away stayed selected, and Disable still reached it.
+  const [drawnIds, setDrawnIds] = useState<string[]>([]);
+  const drawnRows = useMemo(() => {
+    const drawn = new Set(drawnIds);
+    return filtered.filter((u) => drawn.has(u.id));
+  }, [filtered, drawnIds]);
+
+  const bulk = useBulkSelect(drawnRows);
   const refreshUsers = () => qc.invalidateQueries({ queryKey: usersQueryKey });
-  const selectedUsers = () => filtered.filter((u) => bulk.selected.has(u.id));
+  // From `selectedIds`, which re-derives from the rows above — not from
+  // `selected` over the full list, which is what reached invisible rows.
+  const selectedUsers = () => {
+    const chosen = new Set(bulk.selectedIds);
+    return drawnRows.filter((u) => chosen.has(u.id));
+  };
   const [bulkRoleOpen, setBulkRoleOpen] = useState(false);
 
   async function bulkSetStatus(status: "active" | "disabled") {
@@ -403,6 +419,7 @@ export default function UsersPage() {
               getId={(u) => u.id}
               searchPlaceholder="Search users…"
               initialSort={{ key: "user", dir: "asc" }}
+              onDrawnChange={setDrawnIds}
               pageSize={25}
               bordered
               emptyText={

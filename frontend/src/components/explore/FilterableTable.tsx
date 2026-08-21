@@ -34,6 +34,7 @@ export function FilterableTable<T>({
   emptyText = "No results.",
   noMatchText = "No matches.",
   selection,
+  onDrawnChange,
   pageSize,
   bordered,
   hideSearch,
@@ -52,20 +53,23 @@ export function FilterableTable<T>({
   selection?: {
     selected: Set<string>;
     onToggle: (id: string) => void;
-    /**
-     * The ids this table actually DREW, reported whenever they change.
-     *
-     * A consumer cannot compute this: the search box and the pager live in
-     * here, so `rows` going in is a superset of what comes out on screen.
-     * Without it, a page derives its bulk targets from its own list and acts
-     * on rows the user searched away or left on another page — which for
-     * `UsersPage` means Disable, and for `MembersPanel` means removing someone
-     * from a workspace.
-     *
-     * Optional and inert when omitted; the tables that do not select ignore it.
-     */
-    onDrawnChange?: (ids: string[]) => void;
   };
+  /**
+   * The ids this table actually DREW, reported whenever they change.
+   *
+   * A consumer cannot compute this: the search box and the pager live in here,
+   * so `rows` going in is a superset of what comes out on screen. Without it a
+   * page derives its bulk targets from its own list and acts on rows the user
+   * searched away or left on another page — which on `UsersPage` means Disable
+   * and on `MembersPanel` means removing someone from a workspace.
+   *
+   * Deliberately NOT nested inside `selection`: both call sites pass `selection`
+   * only while bulk mode is on, so reporting would switch off with it and the
+   * drawn set would be a render behind whenever it switched back.
+   *
+   * Optional and inert when omitted.
+   */
+  onDrawnChange?: (ids: string[]) => void;
   /**
    * When set, only this many rows render at a time and a pager is shown once
    * the filtered set exceeds it. Opt-in — omitting it keeps the table
@@ -146,7 +150,6 @@ export function FilterableTable<T>({
   // every render, so an effect depending on its identity would fire forever and
   // — since the callback sets state in the parent — never settle.
   const drawnKey = pageRows.map(getId).join("\u0000");
-  const onDrawnChange = selection?.onDrawnChange;
   useEffect(() => {
     if (!onDrawnChange) return;
     onDrawnChange(drawnKey === "" ? [] : drawnKey.split("\u0000"));

@@ -264,6 +264,52 @@ describe("UsersPage", () => {
     );
   });
 
+  /**
+   * The search box and the `pageSize={25}` pager live INSIDE `FilterableTable`,
+   * so the list this page hands it is a superset of what is on screen. Targets
+   * used to be derived from that superset, which meant a user selected while
+   * visible and then searched away was still Disabled — a platform-wide account
+   * action, applied to someone the operator could no longer see.
+   *
+   * Two users and a search term that separates them, so "acted on the right
+   * row" and "acted on row 0" are different claims.
+   */
+  test("does not disable a user who was selected and then searched away", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.updateUser).mockResolvedValue(USERS[0]);
+
+    renderPage();
+    await screen.findByText("alice@example.com");
+
+    await user.click(screen.getByRole("button", { name: /Bulk select/i }));
+    const aliceRow = screen.getByText("alice@example.com").closest("tr") as HTMLElement;
+    const bobRow = screen.getByText("bob@example.com").closest("tr") as HTMLElement;
+    await user.click(within(aliceRow).getByRole("checkbox", { name: "Select row" }));
+    await user.click(within(bobRow).getByRole("checkbox", { name: "Select row" }));
+    expect(screen.getByText("2 selected")).toBeInTheDocument();
+
+    // Narrow the table's own search until Bob is no longer drawn.
+    await user.type(screen.getByPlaceholderText(/Search users/i), "alice");
+    await waitFor(() => expect(screen.queryByText("bob@example.com")).toBeNull());
+
+    // The count must follow the screen, not the page's unfiltered list.
+    expect(screen.getByText("1 selected")).toBeInTheDocument();
+
+    // This file has no `clearAllMocks`, and an earlier test legitimately calls
+    // updateUser("u2"). Without this the negative assertion below would fail on
+    // THAT call and pass in isolation — a test that reports the bug is still
+    // present when it is not. Clearing here scopes both assertions to this click.
+    vi.mocked(api.updateUser).mockClear();
+
+    await user.click(screen.getByRole("button", { name: /^Disable$/ }));
+
+    await waitFor(() =>
+      expect(api.updateUser).toHaveBeenCalledWith("u1", { status: "disabled" }),
+    );
+    // The half that matters: Bob is off screen, so Bob is not touched.
+    expect(api.updateUser).not.toHaveBeenCalledWith("u2", { status: "disabled" });
+  });
+
   test("shows a loading skeleton while the user list is pending", () => {
     // Never-resolving fetch keeps the query in its loading state.
     vi.mocked(api.listUsers).mockReturnValue(new Promise(() => {}));
