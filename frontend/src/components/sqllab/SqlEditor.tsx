@@ -87,13 +87,21 @@ function completionsFor(
   return { suggestions };
 }
 
-export function SqlEditor({ value, onChange, schemaWords, schema, onRun, onSelectionChange }: {
+export function SqlEditor({ value, onChange, schemaWords, schema, onRun, onSelectionChange, readOnly, ariaLabel }: {
   value: string;
   onChange: (v: string) => void;
   schemaWords: string[];
   schema?: SchemaIndex;
   onRun?: (sql: string) => void;
   onSelectionChange?: (selectedText: string) => void;
+  /** Refuse edits. A surrounding `<fieldset disabled>` cannot do this — a
+   *  fieldset disables form controls, and Monaco is a contenteditable-driven
+   *  widget rather than one, so a read-only surface has to say so here. */
+  readOnly?: boolean;
+  /** Accessible name for the editor's text surface. Monaco's default is a
+   *  generic "Editor content…", which cannot distinguish two editors on a page
+   *  — a caller embedding this in a form should name the field it stands for. */
+  ariaLabel?: string;
 }) {
   const isDark = useIsDark();
   const wordsRef = useRef(schemaWords);
@@ -134,5 +142,11 @@ export function SqlEditor({ value, onChange, schemaWords, schema, onRun, onSelec
     theme={isDark ? DARK_THEME : LIGHT_THEME}
     beforeMount={defineThemes}
     onMount={handleMount}
-    options={{ minimap: { enabled: false }, fontSize: 13, scrollBeyondLastLine: false, padding: { top: 10, bottom: 10 }, renderLineHighlight: "line", smoothScrolling: true }} />;
+    options={{ minimap: { enabled: false }, fontSize: 13, scrollBeyondLastLine: false, padding: { top: 10, bottom: 10 }, renderLineHighlight: "line", smoothScrolling: true,
+      readOnly: !!readOnly,
+      // Without this the underlying textarea stays writable: `readOnly` alone
+      // only makes Monaco discard the edit, so the DOM node still reports
+      // itself as editable to assistive tech and to a test.
+      domReadOnly: !!readOnly,
+      ariaLabel }} />;
 }

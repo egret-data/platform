@@ -1,8 +1,136 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type React from "react";
+import { useEffect, useRef } from "react";
 import { Link, MemoryRouter, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+
+/**
+ * A minimal fake Monaco, following `components/notebook/__tests__/CellEditor.test.tsx`.
+ * Real Monaco cannot load in jsdom (it needs workers, a layout engine and a
+ * measurable font), so the alternative to a stub is not testing the editor at all.
+ *
+ * **The stub is built so the wiring is still what is under test, not the stub.**
+ * The `<textarea>` takes its accessible name and its read-only state from the
+ * `options` `SqlEditor` actually computes, so a `Query` that forgets
+ * `ariaLabel` loses every `findByLabelText("SQL")` in this file and a `Query`
+ * that forgets `readOnly` fails the trashed test. And `onMount` runs
+ * `SqlEditor`'s REAL `handleMount`, so the ⌘↵ command below is the one the
+ * product registers, reached through the keybinding the product computes.
+ */
+const monacoStub = vi.hoisted(() => {
+  const KeyMod = { CtrlCmd: 1 << 11 };
+  const KeyCode = { Enter: 3 };
+  return {
+    KeyMod,
+    KeyCode,
+    commands: {} as Record<number, () => void>,
+    reset() {
+      this.commands = {};
+    },
+    /** The callback registered for ⌘/Ctrl+↵, or `undefined` if none was. */
+    runCommand(): (() => void) | undefined {
+      return this.commands[KeyMod.CtrlCmd | KeyCode.Enter];
+    },
+  };
+});
+
+/**
+ * `react-resizable-panels`, stubbed to the three props `Query` passes.
+ *
+ * **Not for convenience — the real one is unusable here.** With no layout
+ * engine every rect in jsdom is 0×0, so the library's `Separator` wins the
+ * hit-test for a click anywhere in the group and takes focus
+ * (`data-separator="focus"`). Every `userEvent.type` in this file then goes to
+ * the drag handle instead of the field, and the whole section silently reads
+ * as if nothing can be typed into it. That is an artifact of the environment,
+ * not of the product — the browser pass in the plan is what checks the drag.
+ *
+ * The stub echoes the SIZES back as attributes rather than swallowing them,
+ * because those are exactly what a reader cannot verify by eye: in v4 a bare
+ * number means PIXELS and a string means percent, so `defaultSize={55}` is a
+ * 55-pixel editor that still looks right in the source.
+ */
+vi.mock("react-resizable-panels", () => ({
+  Group: ({ children, className, orientation }: { children?: React.ReactNode; className?: string; orientation?: string }) => (
+    <div data-testid="panel-group" data-orientation={orientation} className={className}>
+      {children}
+    </div>
+  ),
+  Panel: ({ children, className, defaultSize, minSize }: { children?: React.ReactNode; className?: string; defaultSize?: number | string; minSize?: number | string }) => (
+    <div
+      data-testid="panel"
+      data-default-size={String(defaultSize)}
+      data-default-size-type={typeof defaultSize}
+      data-min-size={String(minSize)}
+      data-min-size-type={typeof minSize}
+      className={className}
+    >
+      {children}
+    </div>
+  ),
+  Separator: ({ className }: { className?: string }) => (
+    <div data-testid="panel-separator" role="separator" className={className} />
+  ),
+}));
+
+vi.mock("@monaco-editor/react", () => ({
+  // A NAMED, capitalised function: this stub calls hooks, and an anonymous
+  // arrow assigned to `default` is not a component as far as
+  // `react-hooks/rules-of-hooks` can tell.
+  default: function MonacoStub({
+    value,
+    onChange,
+    onMount,
+    beforeMount,
+    options,
+  }: {
+    value: string;
+    onChange?: (v?: string) => void;
+    onMount?: (editor: unknown, monaco: unknown) => void;
+    beforeMount?: (monaco: unknown) => void;
+    options?: { ariaLabel?: string; readOnly?: boolean };
+  }) {
+    // The mount effect runs once, but the command it registers must read the
+    // CURRENT text — exactly like real Monaco's `editor.getValue()`.
+    const latest = useRef(value);
+    latest.current = value;
+    useEffect(() => {
+      const monaco = {
+        KeyMod: monacoStub.KeyMod,
+        KeyCode: monacoStub.KeyCode,
+        editor: { defineTheme: () => {} },
+        languages: {
+          CompletionItemKind: {},
+          registerCompletionItemProvider: () => ({ dispose: () => {} }),
+        },
+      };
+      beforeMount?.(monaco);
+      onMount?.(
+        {
+          getValue: () => latest.current,
+          getSelection: () => null,
+          getModel: () => null,
+          addCommand: (binding: number, cb: () => void) => {
+            monacoStub.commands[binding] = cb;
+          },
+          onDidChangeCursorSelection: () => ({ dispose: () => {} }),
+        },
+        monaco,
+      );
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+    return (
+      <textarea
+        aria-label={options?.ariaLabel}
+        readOnly={!!options?.readOnly}
+        value={value}
+        onChange={(e) => onChange?.(e.target.value)}
+      />
+    );
+  },
+}));
 
 // No msw in this repo — mock the API module directly. `@/api/access` is
 // needed only by the Publish/shared-dirty-flag block below (`Versions`
@@ -1169,5 +1297,193 @@ describe("Query section — Publish and the shared dirty flag", () => {
     await userEvent.click(screen.getByRole("link", { name: "Versions" }));
     await userEvent.click(await screen.findByRole("button", { name: "Publish saved draft" }));
     expect(await screen.findByText(/freezes the saved draft/i)).toBeInTheDocument();
+  });
+});
+
+/**
+ * The Query section as a full-height editing surface: a collapsible strip of
+ * tables, then the SQL editor above the preview with a drag handle between
+ * them (`components/sqllab/SqlTab.tsx`'s shape, deliberately reused).
+ *
+ * **What these can and cannot see.** jsdom does no layout, so no test here
+ * observes that the editor fills the height or that the handle drags — and
+ * `react-resizable-panels` is stubbed above precisely because its real
+ * implementation is meaningless without rects. What IS checkable, and is where
+ * the regressions live, is the wiring: which panel each half is in, that the
+ * sizes are percentages rather than pixels, that ⌘↵ reaches the preview, and
+ * that a trashed endpoint's editor refuses edits. The drag itself is the
+ * browser pass in the plan.
+ */
+describe("Query section — the editor, the split and the preview", () => {
+  const previewMutateAsync = vi.fn();
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    monacoStub.reset();
+    vi.mocked(databasesApi.useDatabases).mockReturnValue({
+      data: [{ id: "db-1", name: "warehouse" }],
+    } as never);
+    vi.mocked(dataApi.useUpdateEndpoint).mockReturnValue({ mutateAsync: vi.fn(), isPending: false } as never);
+    // The shell builds this on every render, trashed or not — hooks cannot be
+    // conditional — so the automock's `undefined` breaks every test here
+    // without it, not only the trashed ones.
+    vi.mocked(dataApi.useRestoreEndpoint).mockReturnValue({ mutateAsync: vi.fn(), isPending: false } as never);
+    previewMutateAsync.mockResolvedValue({
+      status: 200,
+      data: { columns: [], rows: [], row_count: 0, truncated: false },
+    });
+    vi.mocked(api.useDataApiPreviewEndpoint).mockReturnValue({
+      mutateAsync: previewMutateAsync,
+      isPending: false,
+    } as never);
+  });
+
+  function show(endpoint: DataApiEndpointDto) {
+    vi.mocked(api.useDataApiGetEndpoint).mockReturnValue({
+      data: { status: 200, data: endpoint },
+      isLoading: false,
+      isError: false,
+      refetch: vi.fn(),
+    } as never);
+    return renderQuery(endpoint);
+  }
+
+  it("splits the section vertically — editor above, preview below — and sizes it in PERCENT", async () => {
+    show(makeEndpoint());
+    await screen.findByLabelText("SQL");
+
+    const group = screen.getByTestId("panel-group");
+    expect(group).toHaveAttribute("data-orientation", "vertical");
+    // `min-h-0` is the half that regresses silently: a flex item's default
+    // `min-height: auto` refuses to shrink below its content, and this
+    // panel's content is an editor that will happily claim the whole page.
+    expect(group).toHaveClass("min-h-0", "flex-1");
+
+    // The section's own root is the full-height column the split lives in,
+    // walked from the group rather than picked out by selector.
+    const root = group.parentElement!;
+    expect(root).toHaveClass("flex", "h-full", "flex-col");
+    expect(root.parentElement?.tagName).toBe("FIELDSET");
+
+    const panels = screen.getAllByTestId("panel");
+    expect(panels).toHaveLength(2);
+    // The editor is in the FIRST panel and the preview in the SECOND — the
+    // whole point of the change is that the preview stopped being below the
+    // parameter editor, so which panel holds what is the assertion.
+    expect(within(panels[0]).getByLabelText("SQL")).toBeInTheDocument();
+    expect(
+      within(panels[1]).getByRole("button", { name: /preview unsaved draft/i }),
+    ).toBeInTheDocument();
+
+    // …with the drag handle between them, not before or after both.
+    const handle = screen.getByTestId("panel-separator");
+    expect(panels[0].compareDocumentPosition(handle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(panels[1].compareDocumentPosition(handle) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
+
+    // STRINGS, and percentages. In react-resizable-panels v4 a bare number is
+    // PIXELS: `defaultSize={55}` compiles, type-checks, reads correctly in a
+    // diff, and gives a 55-pixel editor. Both halves of this are needed — a
+    // string `"55"` is also percent, so the type alone is not enough, and a
+    // `%` suffix cannot be written on a number at all.
+    for (const panel of panels) {
+      expect(panel).toHaveAttribute("data-default-size-type", "string");
+      expect(panel).toHaveAttribute("data-min-size-type", "string");
+      expect(panel.getAttribute("data-default-size")).toMatch(/^\d+%$/);
+      expect(panel.getAttribute("data-min-size")).toMatch(/^\d+%$/);
+    }
+    // The editor gets the larger share — the plan's approved layout.
+    expect(panels[0]).toHaveAttribute("data-default-size", "55%");
+    expect(panels[1]).toHaveAttribute("data-default-size", "45%");
+  });
+
+  it("runs the preview from the editor's ⌘↵, on the SQL that is on screen", async () => {
+    show(makeEndpoint({ sql: "SELECT 1" }));
+    const sql = await screen.findByLabelText("SQL");
+    await userEvent.type(sql, " -- edited");
+
+    // The command the PRODUCT registered, at the keybinding the product
+    // computed (`SqlEditor`'s real `handleMount` ran — see the Monaco stub).
+    const run = monacoStub.runCommand();
+    expect(run).toBeTypeOf("function");
+    await act(async () => {
+      run!();
+    });
+
+    await waitFor(() => expect(previewMutateAsync).toHaveBeenCalled());
+    // Not merely "a preview ran": the unsaved edit is in the body, which is
+    // what makes this the same run the button does.
+    expect(previewMutateAsync.mock.calls[0][0].data.sql).toBe("SELECT 1 -- edited");
+  });
+
+  it("keeps the preview's note in the panel with the button it describes", async () => {
+    show(makeEndpoint());
+    await screen.findByLabelText("SQL");
+
+    const previewPanel = screen.getAllByTestId("panel")[1];
+    // The note is the only place that says a preview saves nothing and leaves
+    // no trace. Beside the button, or a reader has already pressed it.
+    expect(
+      within(previewPanel).getByText(/does not save, publish, spend a rate limit/i),
+    ).toBeInTheDocument();
+    // …and the shortcut is written down where it can be discovered.
+    expect(within(previewPanel).getByText("⌘↵")).toBeInTheDocument();
+  });
+
+  it("makes the SQL editor read-only for a trashed endpoint, and ⌘↵ runs nothing", async () => {
+    const user = userEvent.setup();
+    show(makeEndpoint({ state: "disabled", deleted_at: "2026-08-18T09:00:00Z" }));
+    const sql = await screen.findByLabelText("SQL");
+
+    // Not through the shell's `<fieldset disabled>`: a fieldset disables form
+    // controls, and Monaco is not one. Without an explicit `readOnly` this is
+    // a fully editable editor on a page whose banner says everything below is
+    // read-only.
+    expect(sql).toHaveAttribute("readonly");
+    await user.type(sql, "DROP");
+    expect(sql).toHaveValue("SELECT 1");
+
+    // And the shortcut bypasses BOTH guards — a read-only Monaco still fires
+    // its commands, and the fieldset never sees a keystroke — so it needs one
+    // of its own.
+    const run = monacoStub.runCommand();
+    if (run) {
+      await act(async () => {
+        run();
+      });
+    }
+    expect(previewMutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("leaves the SQL editor writable, and ⌘↵ live, when the endpoint is not in the trash", async () => {
+    // The other half of the test above: an editor that is ALWAYS read-only and
+    // a ⌘↵ that never fires would pass everything there.
+    show(makeEndpoint());
+    const sql = await screen.findByLabelText("SQL");
+
+    expect(sql).not.toHaveAttribute("readonly");
+    await userEvent.type(sql, " -- x");
+    expect(sql).toHaveValue("SELECT 1 -- x");
+
+    await act(async () => {
+      monacoStub.runCommand()!();
+    });
+    await waitFor(() => expect(previewMutateAsync).toHaveBeenCalled());
+  });
+
+  it("puts the database picker in a config table row rather than loose above the editor", async () => {
+    show(makeEndpoint());
+    const picker = await screen.findByLabelText("Database");
+
+    // "Everything except the SQL becomes a table" — the picker is a
+    // `Setting | Details | Value` row, so it is inside a table with the
+    // parameters, not a labelled control floating over the editor.
+    const cell = picker.closest("td");
+    expect(cell).not.toBeNull();
+    const row = cell!.closest("tr")!;
+    expect(within(row).getByText("Database")).toBeInTheDocument();
+    // And it is in the strip, above the split, not inside either panel.
+    for (const panel of screen.getAllByTestId("panel")) {
+      expect(panel.contains(picker)).toBe(false);
+    }
   });
 });

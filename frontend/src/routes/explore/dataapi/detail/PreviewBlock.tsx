@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { forwardRef, useImperativeHandle, useState } from "react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -25,7 +25,16 @@ const PREVIEW_MAX_ROWS = 100;
  * are never on screen together and they run as DIFFERENT principals — preview as
  * the author, a trial as a service account.
  */
-export function PreviewBlock() {
+/** What `Query` can drive from outside: run the preview. The SQL editor's
+ *  ⌘↵ command calls this, so the affordance that makes the split pane worth
+ *  having reaches the button without lifting this component's state (the test
+ *  values, the result and the error all stay private — see the doc above for
+ *  why that matters). */
+export interface PreviewHandle {
+  run: () => void;
+}
+
+export const PreviewBlock = forwardRef<PreviewHandle>(function PreviewBlock(_props, ref) {
   const { ws, id, form } = useEndpointDetail();
   const previewMutation = useDataApiPreviewEndpoint();
   // Keyed by the declaration's POSITION, not by its name — a name is not unique
@@ -35,6 +44,10 @@ export function PreviewBlock() {
   const [error, setError] = useState<string | null>(null);
 
   async function onPreview() {
+    // ⌘↵ reaches this without passing the button, so the button's own
+    // `disabled` is not the guard — re-check here or a held shortcut fires a
+    // second run over the first.
+    if (previewMutation.isPending) return;
     // Clear BOTH outcomes, not just the one this run is about to set —
     // otherwise a failing second run leaves the first run's table on screen
     // beside the error, showing two answers to "what happened" at once.
@@ -93,11 +106,25 @@ export function PreviewBlock() {
     }
   }
 
+  // No dependency array on purpose: the handle must close over the CURRENT
+  // form and test values, and this component re-renders on every keystroke in
+  // either. A frozen array here would run yesterday's draft.
+  useImperativeHandle(ref, () => ({ run: () => void onPreview() }));
+
   return (
-    <div className="space-y-3 border-t border-border pt-4">
-      <div className="flex flex-wrap items-center gap-2">
+    // A panel, not a block appended to a scrolling page: the header (the button
+    // and the shortcut that reaches it) stays put while the note, the test
+    // values and the rows scroll underneath.
+    <div className="flex h-full flex-col">
+      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border px-1 pb-2">
         <h3 className="text-sm font-medium">Preview</h3>
-        <Button type="button" size="sm" onClick={onPreview} disabled={previewMutation.isPending}>
+        <Button
+          type="button"
+          size="sm"
+          onClick={onPreview}
+          disabled={previewMutation.isPending}
+          title="Run the preview (⌘/Ctrl + ↵ in the editor)"
+        >
           {/* Names the VERSION it runs, like its two siblings do. Beside
               "Validate saved draft" and "Publish saved draft", a bare "draft"
               reads as the same saved thing those two mean by it — and spec §3.4's
@@ -105,113 +132,126 @@ export function PreviewBlock() {
               publish, get something else. */}
           {previewMutation.isPending ? "Running…" : "Preview unsaved draft"}
         </Button>
+        {/* The shortcut is the whole reason the editor and the results are on
+            screen together; unwritten, it is a feature only its author knows
+            about. Named beside the button it fires, not in a help dialog. */}
+        <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+          <kbd className="rounded border border-border bg-muted px-1.5 py-0.5 font-mono">⌘↵</kbd>
+          in the editor
+        </span>
       </div>
 
-      <SettingsNote>
-        Preview runs the SQL and parameters as they are on screen right now — including edits you
-        have not saved — as you, against the database above, and returns up to {PREVIEW_MAX_ROWS}{" "}
-        rows. It does not save, publish, spend a rate limit, fill the cache, or appear in Activity.
-        Column names come from the engine, not from the published contract — see Response for the names a
-        consumer receives. And because it runs as you rather than as a service account, a green
-        preview does not prove a consumer can call this endpoint; Try it answers that.
-      </SettingsNote>
+      <div className="min-h-0 flex-1 space-y-3 overflow-auto px-1 pt-3">
+        {/* The note travels WITH the button: it is the only place that says a
+            preview saves nothing, spends no rate limit and leaves no trace in
+            Activity, and a reader who has to scroll to find that has already
+            pressed the button. */}
+        <SettingsNote>
+          Preview runs the SQL and parameters as they are on screen right now — including edits you
+          have not saved — as you, against the database above, and returns up to {PREVIEW_MAX_ROWS}{" "}
+          rows. It does not save, publish, spend a rate limit, fill the cache, or appear in Activity.
+          Column names come from the engine, not from the published contract — see Response for the names a
+          consumer receives. And because it runs as you rather than as a service account, a green
+          preview does not prove a consumer can call this endpoint; Try it answers that.
+        </SettingsNote>
 
-      {form.params.length > 0 && (
-        <div className="grid grid-cols-2 gap-3">
-          {/* Keyed and id'd by INDEX, not by `p.name`. A name is not unique while
-              the author is editing: two freshly-added rows are both blank, and a
-              typo can duplicate an existing name — which with a name key gave
-              duplicate React keys, duplicate DOM ids, and one input visibly
-              driving both rows. Index is safe here because this list is not
-              reorderable and each input is fully controlled from `values` (see
-              `ParamEditor`, which DOES need generated row ids: its rows can be
-              removed from the middle and hold uncontrolled Radix/local state).
+        {form.params.length > 0 && (
+          <div className="grid grid-cols-2 gap-3">
+            {/* Keyed and id'd by INDEX, not by `p.name`. A name is not unique while
+                the author is editing: two freshly-added rows are both blank, and a
+                typo can duplicate an existing name — which with a name key gave
+                duplicate React keys, duplicate DOM ids, and one input visibly
+                driving both rows. Index is safe here because this list is not
+                reorderable and each input is fully controlled from `values` (see
+                `ParamEditor`, which DOES need generated row ids: its rows can be
+                removed from the middle and hold uncontrolled Radix/local state).
 
-              `values` is keyed by index for the same reason. Keying the STATE by
-              name was the same collision one level down, and rendering by index
-              did not fix it: two rows sharing a name still read and wrote one
-              entry, so the second field echoed the first keystroke by keystroke
-              — including the ordinary case of two freshly-added rows, which are
-              both blank. A row id generated the way `ParamEditor` does it would
-              also work, but this component does not OWN `form.params` (it reads
-              them from context, and they change under it as the author edits the
-              declarations), so keeping such ids in step would take the
-              `useEffect`-that-calls-`setState` shape this feature avoids.
+                `values` is keyed by index for the same reason. Keying the STATE by
+                name was the same collision one level down, and rendering by index
+                did not fix it: two rows sharing a name still read and wrote one
+                entry, so the second field echoed the first keystroke by keystroke
+                — including the ordinary case of two freshly-added rows, which are
+                both blank. A row id generated the way `ParamEditor` does it would
+                also work, but this component does not OWN `form.params` (it reads
+                them from context, and they change under it as the author edits the
+                declarations), so keeping such ids in step would take the
+                `useEffect`-that-calls-`setState` shape this feature avoids.
 
-              Considered and deliberately left, in the shape index keying gives
-              it: a test value belongs to a SLOT, not to a declaration, so
-              removing or reordering a declaration leaves each surviving value
-              where it was and it now sits beside whichever declaration slid into
-              that position. (Keying by name instead traded this for a value that
-              outlives its declaration and reappears when a new one reuses the
-              name — and cost the collision above.) Cosmetic either way: the
-              value is on screen, is never saved, and is one keystroke to
-              clear. */}
-          {form.params.map((p, i) => (
-            <div key={i} className="space-y-1.5">
-              <Label htmlFor={`preview-param-${i}`}>
-                {p.name}
-                {p.required && <span className="text-destructive"> *</span>}
-              </Label>
-              <Input
-                id={`preview-param-${i}`}
-                value={values[i] ?? ""}
-                placeholder={p.default ?? undefined}
-                onChange={(e) => setValues((prev) => ({ ...prev, [i]: e.target.value }))}
-              />
-            </div>
-          ))}
-        </div>
-      )}
+                Considered and deliberately left, in the shape index keying gives
+                it: a test value belongs to a SLOT, not to a declaration, so
+                removing or reordering a declaration leaves each surviving value
+                where it was and it now sits beside whichever declaration slid into
+                that position. (Keying by name instead traded this for a value that
+                outlives its declaration and reappears when a new one reuses the
+                name — and cost the collision above.) Cosmetic either way: the
+                value is on screen, is never saved, and is one keystroke to
+                clear. */}
+            {form.params.map((p, i) => (
+              <div key={i} className="space-y-1.5">
+                <Label htmlFor={`preview-param-${i}`}>
+                  {p.name}
+                  {p.required && <span className="text-destructive"> *</span>}
+                </Label>
+                <Input
+                  id={`preview-param-${i}`}
+                  value={values[i] ?? ""}
+                  placeholder={p.default ?? undefined}
+                  onChange={(e) => setValues((prev) => ({ ...prev, [i]: e.target.value }))}
+                />
+              </div>
+            ))}
+          </div>
+        )}
 
-      {/* Inline, not a toast — an author mid-edit needs the message to stay on
-          screen while they fix the SQL it is about. */}
-      {error && (
-        <Alert variant="destructive">
-          <AlertDescription className="font-mono text-xs">{error}</AlertDescription>
-        </Alert>
-      )}
+        {/* Inline, not a toast — an author mid-edit needs the message to stay on
+            screen while they fix the SQL it is about. */}
+        {error && (
+          <Alert variant="destructive">
+            <AlertDescription className="font-mono text-xs">{error}</AlertDescription>
+          </Alert>
+        )}
 
-      {result && (
-        <div className="space-y-2">
-          <p className="text-xs text-muted-foreground">
-            {result.truncated
-              ? `Showing the first ${PREVIEW_MAX_ROWS} rows — there are more.`
-              : `${result.row_count} row${result.row_count === 1 ? "" : "s"}.`}
-          </p>
-          {/* Wide results scroll inside their own container; the page body must
-              never scroll horizontally. */}
-          <div className="max-h-72 overflow-auto rounded-md border border-border">
-            <table className="w-full text-xs">
-              <thead className="sticky top-0 bg-muted/60">
-                <tr>
-                  {result.columns.map((c) => (
-                    <th key={c.name} className="px-2 py-1.5 text-left font-medium">
-                      {c.name}
-                      <span className="ml-1 font-normal text-muted-foreground">{c.type}</span>
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {result.rows.map((row, ri) => (
-                  <tr key={ri} className="border-t border-border">
-                    {row.map((cell, ci) => (
-                      <td key={ci} className="px-2 py-1 font-mono">
-                        {cell === null ? (
-                          <span className="text-muted-foreground">null</span>
-                        ) : (
-                          String(cell)
-                        )}
-                      </td>
+        {result && (
+          <div className="space-y-2">
+            <p className="text-xs text-muted-foreground">
+              {result.truncated
+                ? `Showing the first ${PREVIEW_MAX_ROWS} rows — there are more.`
+                : `${result.row_count} row${result.row_count === 1 ? "" : "s"}.`}
+            </p>
+            {/* Wide results scroll inside their own container; the page body must
+                never scroll horizontally. */}
+            <div className="overflow-x-auto rounded-md border border-border">
+              <table className="w-full text-xs">
+                <thead className="sticky top-0 bg-muted/60">
+                  <tr>
+                    {result.columns.map((c) => (
+                      <th key={c.name} className="px-2 py-1.5 text-left font-medium">
+                        {c.name}
+                        <span className="ml-1 font-normal text-muted-foreground">{c.type}</span>
+                      </th>
                     ))}
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {result.rows.map((row, ri) => (
+                    <tr key={ri} className="border-t border-border">
+                      {row.map((cell, ci) => (
+                        <td key={ci} className="px-2 py-1 font-mono">
+                          {cell === null ? (
+                            <span className="text-muted-foreground">null</span>
+                          ) : (
+                            String(cell)
+                          )}
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
-        </div>
-      )}
+        )}
+      </div>
     </div>
   );
-}
+});
