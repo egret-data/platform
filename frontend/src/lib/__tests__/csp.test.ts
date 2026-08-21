@@ -19,14 +19,47 @@ import { resolve } from "node:path";
  */
 const NGINX = resolve(__dirname, "../../../nginx-prod.conf");
 
+/**
+ * The body of the SPA's `location / { … }`, brace-matched.
+ *
+ * The header has to be found HERE and nowhere else, because nginx's `add_header`
+ * inheritance is REPLACE, not merge: a level that declares any `add_header` drops
+ * every one it would otherwise inherit. So "tidying the security headers up to the
+ * `server` level" — leaving `X-Frame-Options` and `X-Content-Type-Options` behind in
+ * `location /` — silently deletes the CSP from every SPA response while `nginx -t`
+ * stays happy. Measured: real nginx serving the real `dist` then returns
+ * `X-Frame-Options` and `X-Content-Type-Options` and NO `Content-Security-Policy`.
+ *
+ * A file-wide regex cannot see that, which is the point. This guard was written to
+ * stop the policy being widened; scoping it is what also makes it notice the policy
+ * being deleted.
+ */
+function spaLocationBlock(): string {
+  const conf = readFileSync(NGINX, "utf8");
+  const open = conf.search(/^\s*location\s+\/\s*\{/m);
+  expect(open, "expected a `location / {` block in nginx-prod.conf").toBeGreaterThan(-1);
+  let depth = 0;
+  for (let i = conf.indexOf("{", open); i < conf.length; i++) {
+    if (conf[i] === "{") depth++;
+    else if (conf[i] === "}" && --depth === 0) return conf.slice(open, i);
+  }
+  throw new Error("unterminated `location / {` block in nginx-prod.conf");
+}
+
 /** The value of the single `Content-Security-Policy` header the SPA server sends. */
 function policy(): string {
-  const conf = readFileSync(NGINX, "utf8");
-  const headers = [...conf.matchAll(/^\s*add_header\s+Content-Security-Policy\s+"([^"]*)"/gm)].map((m) => m[1]);
+  const block = spaLocationBlock();
+  const matches = [...block.matchAll(/^\s*add_header\s+Content-Security-Policy\s+"([^"]*)"\s*(always)?\s*;/gm)];
   // More than one is not "the last one wins" — nginx sends both and the browser enforces the
   // INTERSECTION, which is a different and much more surprising policy than either line reads as.
-  expect(headers, "expected exactly one Content-Security-Policy add_header in nginx-prod.conf").toHaveLength(1);
-  return headers[0];
+  expect(
+    matches,
+    "expected exactly one Content-Security-Policy add_header inside the SPA `location / {}` block",
+  ).toHaveLength(1);
+  // Without `always`, nginx omits the header on error responses — including the 4xx/5xx
+  // pages an attacker is most interested in getting a script onto.
+  expect(matches[0][2], "the Content-Security-Policy add_header must carry `always`").toBe("always");
+  return matches[0][1];
 }
 
 /** `{ "script-src": ["'self'"], … }` — parsed, so reordering the directives cannot fail this. */
