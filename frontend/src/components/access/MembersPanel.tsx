@@ -106,8 +106,24 @@ export function MembersPanel({ workspaceId }: { workspaceId: string }) {
   const qc = useQueryClient();
   const mid = (m: WorkspaceMember) => `${m.principal_type}:${m.principal_id}`;
   const bulkRows = useMemo(() => members.map((m) => ({ ...m, id: mid(m) })), [members]);
-  const bulk = useBulkSelect(bulkRows);
-  const selectedMembers = () => bulkRows.filter((m) => bulk.selected.has(m.id));
+  // What the TABLE drew, which is not `bulkRows`: `FilterableTable` owns the
+  // search box, so `bulkRows` is a superset of what is on screen. Feeding that
+  // superset to `useBulkSelect` broke the contract its own doc comment states —
+  // a member picked while visible and then searched away stayed selected, and
+  // Remove-from-workspace still reached them.
+  const [drawnIds, setDrawnIds] = useState<string[]>([]);
+  const drawnRows = useMemo(() => {
+    const drawn = new Set(drawnIds);
+    return bulkRows.filter((m) => drawn.has(m.id));
+  }, [bulkRows, drawnIds]);
+
+  const bulk = useBulkSelect(drawnRows);
+  // From `selectedIds`, which re-derives from the rows above — not from
+  // `selected` over the full list, which is what reached invisible rows.
+  const selectedMembers = () => {
+    const chosen = new Set(bulk.selectedIds);
+    return drawnRows.filter((m) => chosen.has(m.id));
+  };
   const refreshMembers = () => qc.invalidateQueries({ queryKey: membersKey(ws) });
 
   const adminCount = useMemo(
@@ -358,6 +374,7 @@ export function MembersPanel({ workspaceId }: { workspaceId: string }) {
             getId={(m) => `${m.principal_type}:${m.principal_id}`}
             searchPlaceholder="Search members…"
             initialSort={{ key: "member", dir: "asc" }}
+            onDrawnChange={setDrawnIds}
             emptyText="No members yet."
             selection={
               bulk.bulkMode ? { selected: bulk.selected, onToggle: bulk.toggle } : undefined
