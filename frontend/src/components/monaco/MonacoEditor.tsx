@@ -1,4 +1,4 @@
-import { Suspense, lazy } from "react";
+import React, { Suspense, lazy } from "react";
 import type { EditorProps } from "@monaco-editor/react";
 
 /**
@@ -23,12 +23,59 @@ import type { EditorProps } from "@monaco-editor/react";
  */
 const Editor = lazy(() => import("@/lib/monaco"));
 
+/**
+ * Catches a failed chunk fetch so it costs the editor, not the page.
+ *
+ * A rejected `lazy()` import throws during render, and with no boundary the
+ * whole React tree unmounts — `#root` goes empty and the user gets a blank
+ * white page, not a broken editor pane. Measured that way before this existed.
+ *
+ * The trigger is routine, not exotic: a deploy replaces the content-hashed
+ * `monaco-*.js` while someone still has the SPA open, and their next visit to
+ * an editor page asks for a filename that no longer exists.
+ *
+ * This is also a behaviour the branch would otherwise have LOST. Monaco used to
+ * arrive through `loader.init()`, whose rejection `@monaco-editor/react`
+ * handles internally — so even a CDN outage left the surrounding page alive.
+ * Moving the fetch to a `lazy()` boundary moved that responsibility here.
+ *
+ * Modelled on `OutputErrorBoundary` in `CellOutputRenderer.tsx`, the codebase's
+ * only other `React.lazy` guard.
+ */
+class MonacoErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { error: Error | null }
+> {
+  state = { error: null as Error | null };
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+  componentDidCatch(error: Error, info: React.ErrorInfo) {
+    console.error("Monaco failed to load:", error, info.componentStack);
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <div
+          role="alert"
+          className="flex h-full w-full items-center justify-center p-4 text-center text-sm text-muted-foreground"
+        >
+          The code editor could not be loaded. Reload the page to try again.
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 export default function MonacoEditor(props: EditorProps) {
   // The fallback fills the slot the editor is about to occupy, so the
   // surrounding layout does not jump when the chunk lands.
   return (
-    <Suspense fallback={<div className="h-full w-full" aria-hidden="true" />}>
-      <Editor {...props} />
-    </Suspense>
+    <MonacoErrorBoundary>
+      <Suspense fallback={<div className="h-full w-full" aria-hidden="true" />}>
+        <Editor {...props} />
+      </Suspense>
+    </MonacoErrorBoundary>
   );
 }
