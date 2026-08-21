@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { SettingsNote } from "@/routes/explore/settings/SettingsNote";
 import {
   getDataApiGetOpenapiQueryKey,
@@ -72,6 +72,30 @@ type InvokeStatus =
 
 /**
  * `Access` — one row per service account, two conditions each (spec §6.2).
+ *
+ * # The shape: a plain `Table`, not cards and not a `ConfigTable`
+ *
+ * `docs/en/ui-conventions.md` §4. This is LIST-shaped — one row per principal,
+ * an unbounded list read down rather than a fixed set of settings read across —
+ * so `ConfigTable`'s `Setting | Details | Value` is the wrong frame: there is
+ * no Value to edit, only a per-row action.
+ *
+ * The two conditions used to be a `<dl>` inside each `<li>`, which put the
+ * words "Invoke" and "Data" on every row and left each row's answer at a
+ * different vertical offset from the one above it. As columns those labels are
+ * written once, in the header, and the two answers line up down the page —
+ * which is the whole point of a checklist whose value is the COMPARISON between
+ * accounts. The `Card` around the list went for §4.1's reason: on a workspace
+ * with no service accounts it framed a single sentence.
+ *
+ * The Data column repeats the same sentence on every row, deliberately. It is
+ * not decoration: the question ("may THIS account read the tables?") is
+ * per-account and so is its answer's only route (`Run Try it`, preselected to
+ * that account). That the sentence is identical is a fact about egret — it
+ * never knows — and `AccessSection.test.tsx` pins the identity byte-for-byte,
+ * because any code that let this line vary with something egret does know
+ * (invoke status, the grant list, the SQL) would be the half-right Ranger
+ * answer this section exists to refuse.
  *
  * # Where "can this account invoke?" is read from, and why
  *
@@ -194,12 +218,16 @@ export default function AccessSection() {
     [revokeMutation, ws, id, invalidate],
   );
 
+  const loading = accountsQuery.isLoading || grantsQuery.isLoading;
+  const failed = accountsQuery.isError || grantsQuery.isError;
+  const empty = accounts.length === 0 && orphanGrants.length === 0;
+
   return (
-    // Capped here, not by the route — this tab is a note, a short account list
-    // and two badges per row. Uncapped, every row's name and its Grant button
-    // end up at opposite ends of a wide monitor with nothing between them, and
-    // the explanatory note above sets as one very long line. `max-w-5xl` is
-    // still well past the `max-w-3xl` the whole route used to sit under.
+    // Capped here, not by the route (§5.1) — this tab is a note, a short account
+    // list and two conditions per row. Uncapped, the explanatory note above sets
+    // as one very long line and each row's action ends up a monitor's width from
+    // the account it acts on. `max-w-5xl` is still well past the `max-w-3xl` the
+    // whole route used to sit under.
     <div className="max-w-5xl space-y-6">
       <div>
         <h2 className="text-lg font-semibold">Access</h2>
@@ -216,75 +244,117 @@ export default function AccessSection() {
         and only the first one is on this page.
       </SettingsNote>
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Service accounts</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          {!isLive && (
-            <p className="text-sm text-muted-foreground">
-              {wasDisabled
-                ? "This endpoint is disabled, so it is serving nothing and egret cannot check workspace-inherited invoke rights against it. Grants recorded here are real and apply again when it is re-enabled."
-                : "This endpoint is not live, so nothing is being served yet and egret cannot check workspace-inherited invoke rights against it. Grants recorded here are real and take effect when it is published."}
-            </p>
-          )}
+      <div className="space-y-2">
+        <h3 className="text-sm font-medium">Service accounts</h3>
 
-          {accountsQuery.isLoading || grantsQuery.isLoading ? (
-            <p className="text-sm text-muted-foreground">Loading…</p>
-          ) : accountsQuery.isError || grantsQuery.isError ? (
-            <Alert variant="destructive">
-              <AlertDescription>
-                {(accountsQuery.error as unknown as Error)?.message ??
-                  (grantsQuery.error as unknown as Error)?.message ??
-                  "Could not load who can call this endpoint."}
-              </AlertDescription>
-            </Alert>
-          ) : accounts.length === 0 && orphanGrants.length === 0 ? (
-            <p className="text-sm text-muted-foreground">
-              This workspace has no service accounts yet. A consumer needs one — with an OAuth2 client —
-              before it can call anything.
-            </p>
-          ) : (
-            <ul className="divide-y divide-border">
-              {accounts.map((account) => (
-                <AccessRow
-                  key={account.id}
-                  ws={ws}
-                  endpointId={id}
-                  account={account}
-                  grantedHere={grantedIds.has(account.id)}
-                  probeEnabled={isLive}
-                  busy={busyId === account.id}
-                  onGrant={onGrant}
-                  onRevoke={onRevoke}
-                />
-              ))}
-              {orphanGrants.map((g) => (
-                <AccessRow
-                  key={g.service_account_id}
-                  ws={ws}
-                  endpointId={id}
-                  account={{
-                    id: g.service_account_id,
-                    name: g.service_account_name ?? g.service_account_id,
-                    description: "",
-                    email: "",
-                    created_at: g.created_at,
-                  }}
-                  grantedHere
-                  orphaned
-                  // Nothing to probe: the account is not one this workspace
-                  // lists, so the document route answers 404 for it by design.
-                  probeEnabled={false}
-                  busy={busyId === g.service_account_id}
-                  onGrant={onGrant}
-                  onRevoke={onRevoke}
-                />
-              ))}
-            </ul>
-          )}
-        </CardContent>
-      </Card>
+        {/* Above the table, not in it: this is a statement about the whole
+            section — every row's Invoke answer is qualified by it — and it is
+            the only place that distinguishes a draft from a disabled endpoint.
+            The rows deliberately stay state-neutral (see `AccessRow`). */}
+        {!isLive && (
+          <p className="text-sm text-muted-foreground">
+            {wasDisabled
+              ? "This endpoint is disabled, so it is serving nothing and egret cannot check workspace-inherited invoke rights against it. Grants recorded here are real and apply again when it is re-enabled."
+              : "This endpoint is not live, so nothing is being served yet and egret cannot check workspace-inherited invoke rights against it. Grants recorded here are real and take effect when it is published."}
+          </p>
+        )}
+
+        {/* `table-fixed` so the two prose columns keep a fixed measure instead of
+            fighting each other for width as the longest caveat changes from row
+            to row (§5.2's rule, applied to a plain table). Invoke is the unsized
+            column — it is the one this section is about, and it carries the
+            longest caveats; Data's sentence is a constant. */}
+        <Table className="table-fixed">
+          <TableHeader>
+            <TableRow>
+              <TableHead className="w-48">Service account</TableHead>
+              <TableHead>Invoke</TableHead>
+              <TableHead className="w-72">Data</TableHead>
+              {/* Named for a screen reader, invisible on screen: a visible
+                  heading over a column of one small button reads as louder than
+                  what it labels. */}
+              <TableHead className="w-36 text-right">
+                <span className="sr-only">Actions</span>
+              </TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {/* Three states as spanning rows rather than a branch that replaces
+                the table, so the header survives and the two conditions are
+                named even before there is a row to answer them for.
+                `whitespace-normal` because the shared `TableCell` is
+                `whitespace-nowrap` and these are sentences. */}
+            {loading ? (
+              <TableRow className="hover:bg-transparent">
+                <TableCell colSpan={4} className="whitespace-normal text-sm text-muted-foreground">
+                  Loading…
+                </TableCell>
+              </TableRow>
+            ) : failed ? (
+              // Checked BEFORE the empty branch (§2.1): react-query clears
+              // `isLoading` on any settle, so a failed fetch falling into the
+              // empty branch would tell an admin their workspace has no service
+              // accounts and send them off to create one that already exists.
+              <TableRow className="hover:bg-transparent">
+                <TableCell colSpan={4} className="whitespace-normal">
+                  <Alert variant="destructive">
+                    <AlertDescription>
+                      {(accountsQuery.error as unknown as Error)?.message ??
+                        (grantsQuery.error as unknown as Error)?.message ??
+                        "Could not load who can call this endpoint."}
+                    </AlertDescription>
+                  </Alert>
+                </TableCell>
+              </TableRow>
+            ) : empty ? (
+              <TableRow className="hover:bg-transparent">
+                <TableCell colSpan={4} className="whitespace-normal text-sm text-muted-foreground">
+                  This workspace has no service accounts yet. A consumer needs one — with an OAuth2
+                  client — before it can call anything.
+                </TableCell>
+              </TableRow>
+            ) : (
+              <>
+                {accounts.map((account) => (
+                  <AccessRow
+                    key={account.id}
+                    ws={ws}
+                    endpointId={id}
+                    account={account}
+                    grantedHere={grantedIds.has(account.id)}
+                    probeEnabled={isLive}
+                    busy={busyId === account.id}
+                    onGrant={onGrant}
+                    onRevoke={onRevoke}
+                  />
+                ))}
+                {orphanGrants.map((g) => (
+                  <AccessRow
+                    key={g.service_account_id}
+                    ws={ws}
+                    endpointId={id}
+                    account={{
+                      id: g.service_account_id,
+                      name: g.service_account_name ?? g.service_account_id,
+                      description: "",
+                      email: "",
+                      created_at: g.created_at,
+                    }}
+                    grantedHere
+                    orphaned
+                    // Nothing to probe: the account is not one this workspace
+                    // lists, so the document route answers 404 for it by design.
+                    probeEnabled={false}
+                    busy={busyId === g.service_account_id}
+                    onGrant={onGrant}
+                    onRevoke={onRevoke}
+                  />
+                ))}
+              </>
+            )}
+          </TableBody>
+        </Table>
+      </div>
     </div>
   );
 }
@@ -356,140 +426,136 @@ function AccessRow({
       : { kind: "unchecked", reason: check.reason };
 
   const membershipHref = `/explore/${ws}/settings/members`;
-  // Task 7 (`Try it`) reads `service_account` to preselect the account this row
-  // is about, so the author lands on the one question this row could not answer
+  // `Try it` reads `service_account` to preselect the account this row is
+  // about, so the author lands on the one question this row could not answer
   // with that account already chosen.
   const tryItHref = `/explore/${ws}/data-api/endpoints/${endpointId}/try?service_account=${encodeURIComponent(account.id)}`;
 
   return (
-    <li className="py-3" data-testid={`access-row-${account.id}`}>
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="truncate text-sm font-medium">{account.name}</div>
-          <div className="truncate font-mono text-xs text-muted-foreground">
-            {orphaned ? "no longer a service account in this workspace" : account.email}
-          </div>
+    <TableRow className="align-top" data-testid={`access-row-${account.id}`}>
+      <TableCell className="py-3 whitespace-normal">
+        <div className="truncate text-sm font-medium">{account.name}</div>
+        <div className="truncate font-mono text-xs text-muted-foreground">
+          {orphaned ? "no longer a service account in this workspace" : account.email}
         </div>
-        <div className="flex items-center gap-2">
-          {status.kind === "granted" && (
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              disabled={busy}
-              onClick={() => onRevoke(account.id)}
-            >
-              {busy ? "Revoking…" : "Revoke"}
-            </Button>
-          )}
-          {/* No action while the check is still in flight: offering Grant to an
-              account that turns out to already be granted, one render later, is
-              a button that appears and then changes meaning under the cursor. */}
-          {(status.kind === "none" ||
-            (status.kind === "unchecked" && status.reason !== "loading")) && (
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              disabled={busy}
-              onClick={() => onGrant(account.id)}
-            >
-              {busy ? "Granting…" : "Grant invoke"}
-            </Button>
-          )}
-        </div>
-      </div>
+      </TableCell>
 
-      <dl className="mt-2 space-y-1.5 text-xs">
-        <div className="flex flex-wrap items-center gap-2">
-          <dt className="w-16 shrink-0 text-muted-foreground">Invoke</dt>
-          <dd className="flex flex-wrap items-center gap-2">
-            {/* Deliberately NOT `success` (green). A green tick on the invoke
-                line reads as "this call will work", and the line directly below
-                it is the one egret cannot answer at all — the whole reason this
-                section is a two-condition checklist rather than one ✓. The
-                wording carries the state; the colour does not overstate it. */}
+      <TableCell className="py-3 whitespace-normal text-xs">
+        <div className="space-y-1.5">
+          {/* Deliberately NOT `success` (green). A green tick on the invoke
+              line reads as "this call will work", and the column directly
+              beside it is the one egret cannot answer at all — the whole reason
+              this section is a two-condition checklist rather than one ✓. The
+              wording carries the state; the colour does not overstate it. */}
+          <div>
             {status.kind === "granted" && <Badge variant="secondary">Granted on this endpoint</Badge>}
             {status.kind === "inherited" && <Badge variant="outline">Inherited from the workspace</Badge>}
             {status.kind === "none" && <Badge variant="outline">Not granted</Badge>}
             {status.kind === "unchecked" && <Badge variant="outline">No grant on this endpoint</Badge>}
-
-            {status.kind === "granted" && status.also.known && status.also.inherited && (
-              <span className="text-muted-foreground">
-                This account also reaches invoke through the workspace, so revoking here removes the
-                grant but not the access.{" "}
-                <Link className="underline" to={membershipHref}>
-                  Workspace membership
-                </Link>
-              </span>
-            )}
-            {/* The caveat that used to be missing. A granted row whose check did
-                not land must not present Revoke as if it were known to be the
-                only thing holding the access up.
-
-                Skipped for an orphaned grant: there the probe was never going to
-                run (the principal is not a listed account, so the document route
-                404s for it by design), and "revoking may not remove access" would
-                imply a workspace membership for a principal this workspace does
-                not list. That row carries its own explanation instead. */}
-            {status.kind === "granted" && !status.also.known && !orphaned && (
-              <span className="text-muted-foreground">
-                {status.also.reason === "loading"
-                  ? "Checking workspace-inherited invoke…"
-                  : status.also.reason === "error"
-                    ? "egret could not check whether this account also reaches invoke through the workspace, so revoking here may not remove access."
-                    : "egret cannot check whether this account also reaches invoke through the workspace until this endpoint is live, so revoking here may not remove access once it is."}
-              </span>
-            )}
-            {status.kind === "inherited" && (
-              <span className="text-muted-foreground">
-                There is no grant on this endpoint to revoke — this account reaches invoke through its
-                workspace role, which applies to every endpoint here. Change it in{" "}
-                <Link className="underline" to={membershipHref}>
-                  Workspace membership
-                </Link>
-              </span>
-            )}
-            {status.kind === "unchecked" && status.reason === "not-live" && (
-              <span className="text-muted-foreground">
-                {/* State-neutral on purpose: the row does not know whether the
-                    endpoint is a draft or a disabled one, and "until it is
-                    published" is false for the second. The section-level
-                    sentence above carries that distinction. */}
-                Workspace-inherited invoke is unchecked while this endpoint is not live.
-              </span>
-            )}
-            {status.kind === "unchecked" && status.reason === "loading" && (
-              <span className="text-muted-foreground">Checking workspace-inherited invoke…</span>
-            )}
-            {status.kind === "unchecked" && status.reason === "error" && (
-              <span className="text-muted-foreground">
-                egret could not check whether this account inherits invoke from the workspace.
-              </span>
-            )}
-          </dd>
-        </div>
-
-        {/* No Ranger line for an orphaned grant: there is no account left to
-            run Try-it as, so a "run it and see" prompt would send the reader to
-            a screen that cannot answer. The grant itself is still real, and the
-            Revoke button above is the useful action. */}
-        {!orphaned && (
-          <div className="flex flex-wrap items-center gap-2">
-            <dt className="w-16 shrink-0 text-muted-foreground">Data</dt>
-            <dd>
-              <span className="text-muted-foreground">
-                egret cannot check whether this account may read the underlying tables — that is
-                Ranger&apos;s answer, not egret&apos;s.{" "}
-                <Link className="underline" to={tryItHref}>
-                  Run Try it
-                </Link>{" "}
-                to find out for real.
-              </span>
-            </dd>
           </div>
+
+          {status.kind === "granted" && status.also.known && status.also.inherited && (
+            <span className="block text-muted-foreground">
+              This account also reaches invoke through the workspace, so revoking here removes the grant
+              but not the access.{" "}
+              <Link className="underline" to={membershipHref}>
+                Workspace membership
+              </Link>
+            </span>
+          )}
+          {/* The caveat that used to be missing. A granted row whose check did
+              not land must not present Revoke as if it were known to be the
+              only thing holding the access up.
+
+              Skipped for an orphaned grant: there the probe was never going to
+              run (the principal is not a listed account, so the document route
+              404s for it by design), and "revoking may not remove access" would
+              imply a workspace membership for a principal this workspace does
+              not list. That row carries its own explanation instead. */}
+          {status.kind === "granted" && !status.also.known && !orphaned && (
+            <span className="block text-muted-foreground">
+              {status.also.reason === "loading"
+                ? "Checking workspace-inherited invoke…"
+                : status.also.reason === "error"
+                  ? "egret could not check whether this account also reaches invoke through the workspace, so revoking here may not remove access."
+                  : "egret cannot check whether this account also reaches invoke through the workspace until this endpoint is live, so revoking here may not remove access once it is."}
+            </span>
+          )}
+          {status.kind === "inherited" && (
+            <span className="block text-muted-foreground">
+              There is no grant on this endpoint to revoke — this account reaches invoke through its
+              workspace role, which applies to every endpoint here. Change it in{" "}
+              <Link className="underline" to={membershipHref}>
+                Workspace membership
+              </Link>
+            </span>
+          )}
+          {status.kind === "unchecked" && status.reason === "not-live" && (
+            <span className="block text-muted-foreground">
+              {/* State-neutral on purpose: the row does not know whether the
+                  endpoint is a draft or a disabled one, and "until it is
+                  published" is false for the second. The section-level
+                  sentence above the table carries that distinction. */}
+              Workspace-inherited invoke is unchecked while this endpoint is not live.
+            </span>
+          )}
+          {status.kind === "unchecked" && status.reason === "loading" && (
+            <span className="block text-muted-foreground">Checking workspace-inherited invoke…</span>
+          )}
+          {status.kind === "unchecked" && status.reason === "error" && (
+            <span className="block text-muted-foreground">
+              egret could not check whether this account inherits invoke from the workspace.
+            </span>
+          )}
+        </div>
+      </TableCell>
+
+      {/* No Ranger sentence for an orphaned grant: there is no account left to
+          run Try-it as, so a "run it and see" prompt would send the reader to a
+          screen that cannot answer. The grant itself is still real, and the
+          Revoke button beside it is the useful action. */}
+      <TableCell className="py-3 whitespace-normal text-xs">
+        {orphaned ? (
+          <span className="text-muted-foreground">—</span>
+        ) : (
+          <span className="text-muted-foreground">
+            egret cannot check whether this account may read the underlying tables — that is
+            Ranger&apos;s answer, not egret&apos;s.{" "}
+            <Link className="underline" to={tryItHref}>
+              Run Try it
+            </Link>{" "}
+            to find out for real.
+          </span>
         )}
-      </dl>
-    </li>
+      </TableCell>
+
+      <TableCell className="py-3 text-right">
+        {status.kind === "granted" && (
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={busy}
+            onClick={() => onRevoke(account.id)}
+          >
+            {busy ? "Revoking…" : "Revoke"}
+          </Button>
+        )}
+        {/* No action while the check is still in flight: offering Grant to an
+            account that turns out to already be granted, one render later, is a
+            button that appears and then changes meaning under the cursor. */}
+        {(status.kind === "none" || (status.kind === "unchecked" && status.reason !== "loading")) && (
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={busy}
+            onClick={() => onGrant(account.id)}
+          >
+            {busy ? "Granting…" : "Grant invoke"}
+          </Button>
+        )}
+      </TableCell>
+    </TableRow>
   );
 }

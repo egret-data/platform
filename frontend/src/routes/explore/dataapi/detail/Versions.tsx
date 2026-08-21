@@ -5,10 +5,10 @@ import { listUsers } from "@/api/access";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
 import { RelativeTime } from "@/components/explore/RelativeTime";
 import { SettingsNote } from "@/routes/explore/settings/SettingsNote";
@@ -27,6 +27,15 @@ import { useEndpointDetail } from "../EndpointDetail";
  * be undone (Rollback), so it is also the moment egret can put the §5.3
  * warning in front of an author who may never open Access: publishing makes
  * a contract callable, it does not make the underlying data readable.
+ *
+ * **A plain `Table`, not a `Card` and not a `ConfigTable`**
+ * (`docs/en/ui-conventions.md` §4). The history is LIST-shaped — one row per
+ * frozen snapshot, no Setting/Value pair anywhere in it — so `ConfigTable`
+ * would have to fabricate a Value column for a read-only listing, which §4.2
+ * records as the reason `ResponseSection`'s frozen columns stayed out of one.
+ * The `Card` that used to frame it went for the reason §4.1 gives: a card
+ * around a table of one or two rows is a mostly-empty box, and this table is
+ * empty on every endpoint that has never been published.
  */
 export default function VersionsSection() {
   // `dirty` is read here, not just in Definition: the five sections share ONE
@@ -73,10 +82,10 @@ export default function VersionsSection() {
   const [rollbackTarget, setRollbackTarget] = useState<DataApiEndpointVersionDto | null>(null);
 
   return (
-    // Capped here, not by the route. The history table is five short columns —
-    // `v3`, a truncated note, an email, a relative time, one button. Uncapped
-    // it is a mostly-empty band the width of the monitor with the Roll back
-    // button marooned at the far right of the row it belongs to.
+    // Capped here, not by the route (§5.1). The history table is five short
+    // columns — `v3`, a truncated note, an email, a relative time, one button.
+    // Uncapped it is a mostly-empty band the width of the monitor with the Roll
+    // back button marooned at the far right of the row it belongs to.
     <div className="max-w-5xl space-y-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
@@ -107,85 +116,120 @@ export default function VersionsSection() {
         </div>
       </div>
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">History</CardTitle>
-        </CardHeader>
-        <CardContent>
-          {versionsQuery.isLoading ? (
-            <p className="text-sm text-muted-foreground">Loading…</p>
-          ) : versionsQuery.isError ? (
-            <Alert variant="destructive">
-              <AlertDescription>
-                Could not load versions.{" "}
-                {(versionsQuery.error as unknown as Error)?.message ?? "Try again in a moment."}
-              </AlertDescription>
-            </Alert>
-          ) : sorted.length === 0 ? (
-            <p className="text-sm text-muted-foreground">
-              This endpoint has never been published. Publish it to freeze the current draft as version 1
-              — that is what a consumer will start receiving.
-            </p>
-          ) : (
-            <table className="w-full text-sm">
-              <thead className="text-left text-muted-foreground">
-                <tr>
-                  <th className="pb-1 font-medium">Version</th>
-                  <th className="pb-1 font-medium">Note</th>
-                  <th className="pb-1 font-medium">Who</th>
-                  <th className="pb-1 font-medium">When</th>
-                  <th className="pb-1 font-medium" />
-                </tr>
-              </thead>
-              <tbody>
-                {sorted.map((v) => (
-                  <tr key={v.id} className="border-t border-border align-top">
-                    <td className="py-2 pr-2">
-                      <span className="inline-flex items-center gap-1.5">
-                        <span className="font-mono text-xs">v{v.version}</span>
-                        {/* Same token-based className `Endpoints.tsx` uses for the
-                            live state badge — `variant="success"` on `Badge`
-                            resolves to a hardcoded `bg-green-600`, not the OKLCH
-                            `--success` token, so it would be a different green
-                            from the one this row sits one click away from. */}
-                        {v.is_live && <Badge className="bg-success/15 text-success">Live</Badge>}
-                      </span>
-                    </td>
-                    <td className="max-w-[16rem] truncate py-2 pr-2 text-muted-foreground">{v.note || "—"}</td>
-                    <td className="py-2 pr-2 text-muted-foreground">
-                      {(v.created_by && userEmailById.get(v.created_by)) ??
-                        v.created_by?.slice(0, 8) ??
-                        "—"}
-                    </td>
-                    <td className="py-2 pr-2 text-muted-foreground">
-                      <RelativeTime iso={v.created_at} />
-                    </td>
-                    <td className="py-2 text-right">
-                      {/* Same argument as Publish above: rollback writes
-                          `live_version_id` and `state`, which a trashed row
-                          refuses with a 409. Shown-but-disabled rather than
-                          hidden, so the history stays readable and the reason
-                          for the missing action is the banner at the top of the
-                          page rather than a blank cell. */}
-                      {!v.is_live && (
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          disabled={trashed}
-                          onClick={() => setRollbackTarget(v)}
-                        >
-                          Roll back
-                        </Button>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </CardContent>
-      </Card>
+      <div className="space-y-2">
+        <h3 className="text-sm font-medium">History</h3>
+        {/* `table-fixed`, so the Note column's `truncate` is real: under the
+            default auto layout a `max-w` on a cell is advisory and a long note
+            simply widens the table instead of ellipsing. The sized columns do
+            not shrink below their widths on a narrow screen — the shared
+            `Table` wrapper scrolls instead (§5.3), which is the accepted
+            trade the `ConfigTable` columns already make. */}
+        <Table className="table-fixed">
+          <TableHeader>
+            <TableRow>
+              {/* Version and its Live badge share one column rather than the
+                  badge getting a Status column of its own. `v{n}` is monospace
+                  and at most three characters, so the badge sits at a constant
+                  x anyway — and a Status column would be empty on every row but
+                  one, which is §4.1's complaint about mostly-empty boxes
+                  applied to a column instead of a card. */}
+              <TableHead className="w-32">Version</TableHead>
+              <TableHead>Note</TableHead>
+              <TableHead className="w-56">Who</TableHead>
+              <TableHead className="w-32">When</TableHead>
+              {/* Named for a screen reader, invisible on screen: a visible
+                  "Actions" heading over a column of one small button reads as
+                  louder than what it labels. */}
+              <TableHead className="w-32 text-right">
+                <span className="sr-only">Actions</span>
+              </TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {/* The three states are rows spanning the table rather than a
+                branch that replaces it, so the header stays put and the shape
+                of the list is legible before the first publish. `ParamEditor`
+                and `TryIt`'s parameter table use the same idiom.
+                `whitespace-normal` because the shared `TableCell` is
+                `whitespace-nowrap` and these are sentences, not values. */}
+            {versionsQuery.isLoading ? (
+              <TableRow className="hover:bg-transparent">
+                <TableCell colSpan={5} className="whitespace-normal text-sm text-muted-foreground">
+                  Loading…
+                </TableCell>
+              </TableRow>
+            ) : versionsQuery.isError ? (
+              // Checked BEFORE the empty branch: react-query clears
+              // `isLoading` on any settle, error included, so a failed fetch
+              // reaching the empty branch would report a network failure as
+              // "never published" (§2.1/§2.2).
+              <TableRow className="hover:bg-transparent">
+                <TableCell colSpan={5} className="whitespace-normal">
+                  <Alert variant="destructive">
+                    <AlertDescription>
+                      Could not load versions.{" "}
+                      {(versionsQuery.error as unknown as Error)?.message ?? "Try again in a moment."}
+                    </AlertDescription>
+                  </Alert>
+                </TableCell>
+              </TableRow>
+            ) : sorted.length === 0 ? (
+              <TableRow className="hover:bg-transparent">
+                <TableCell colSpan={5} className="whitespace-normal text-sm text-muted-foreground">
+                  This endpoint has never been published. Publish it to freeze the current draft as
+                  version 1 — that is what a consumer will start receiving.
+                </TableCell>
+              </TableRow>
+            ) : (
+              sorted.map((v) => (
+                <TableRow key={v.id} className="align-top" data-testid={`version-row-${v.id}`}>
+                  <TableCell className="py-2">
+                    <span className="inline-flex items-center gap-1.5">
+                      <span className="font-mono text-xs">v{v.version}</span>
+                      {/* Same token-based className `Endpoints.tsx` uses for the
+                          live state badge — `variant="success"` on `Badge`
+                          resolves to a hardcoded `bg-green-600`, not the OKLCH
+                          `--success` token, so it would be a different green
+                          from the one this row sits one click away from. */}
+                      {v.is_live && <Badge className="bg-success/15 text-success">Live</Badge>}
+                    </span>
+                  </TableCell>
+                  <TableCell className="truncate py-2 text-muted-foreground" title={v.note || undefined}>
+                    {v.note || "—"}
+                  </TableCell>
+                  <TableCell className="truncate py-2 text-muted-foreground">
+                    {(v.created_by && userEmailById.get(v.created_by)) ??
+                      v.created_by?.slice(0, 8) ??
+                      "—"}
+                  </TableCell>
+                  <TableCell className="py-2 text-muted-foreground">
+                    <RelativeTime iso={v.created_at} />
+                  </TableCell>
+                  <TableCell className="py-2 text-right">
+                    {/* Same argument as Publish above: rollback writes
+                        `live_version_id` and `state`, which a trashed row
+                        refuses with a 409. Shown-but-disabled rather than
+                        hidden, so the history stays readable and the reason
+                        for the missing action is the banner at the top of the
+                        page rather than a blank cell. */}
+                    {!v.is_live && (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        disabled={trashed}
+                        onClick={() => setRollbackTarget(v)}
+                      >
+                        Roll back
+                      </Button>
+                    )}
+                  </TableCell>
+                </TableRow>
+              ))
+            )}
+          </TableBody>
+        </Table>
+      </div>
 
       <PublishDialog
         ws={ws}
@@ -238,6 +282,10 @@ export default function VersionsSection() {
  * and the one place the warning reaches an author who never opens Access. It
  * has to sit here, not as a toast fired after `mutateAsync` resolves: a toast
  * arrives after the fact, once the endpoint may already be live.
+ *
+ * The note stays a `<Textarea rows={2}>`. It is PROSE — "what changed" for the
+ * next reader of the history table — not code, so none of `Query`'s editor
+ * treatment applies to it.
  */
 function PublishDialog({
   ws,

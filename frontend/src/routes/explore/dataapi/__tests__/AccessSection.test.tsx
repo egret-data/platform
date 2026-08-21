@@ -16,6 +16,7 @@ import type {
 } from "@/api/generated/model";
 import EndpointDetail from "@/routes/explore/dataapi/EndpointDetail";
 import AccessSection from "@/routes/explore/dataapi/detail/AccessSection";
+import { expectSectionCapsItsOwnWidth } from "./sectionWidth";
 
 function makeEndpoint(overrides: Partial<DataApiEndpointDto> = {}): DataApiEndpointDto {
   return {
@@ -63,6 +64,16 @@ function makeGrant(serviceAccountId: string, name: string): DataApiEndpointGrant
 const SA_GRANTED = makeAccount("sa-granted", "reporting-bot");
 const SA_INHERITED = makeAccount("sa-inherited", "admin-bot");
 const SA_NONE = makeAccount("sa-none", "stranger-bot");
+/**
+ * Second accounts for the two "acted on the row that was clicked" tests below.
+ *
+ * A fixture with one actionable row cannot tell "used this row's account id"
+ * apart from "used `accounts[0].id`" — the trap that let a pre-existing test
+ * survive writing every value to index 0, and that let a hard-coded
+ * `remove(0)` pass a removal test in #529. Both tests act on the SECOND row.
+ */
+const SA_GRANTED_2 = makeAccount("sa-granted-2", "billing-bot");
+const SA_NONE_2 = makeAccount("sa-none-2", "loading-bot");
 
 /** A generated document with one path — i.e. this account MAY invoke this endpoint. */
 const DOC_CAN_INVOKE = {
@@ -227,6 +238,52 @@ describe("AccessSection — condition 1, invoke", () => {
       workspace: "eng",
       id: "ep-1",
       serviceAccountId: SA_GRANTED.id,
+    });
+  });
+
+  it("revokes the SECOND of two granted rows when it is the second one that is clicked", async () => {
+    setup({
+      accounts: [SA_GRANTED, SA_GRANTED_2],
+      grants: [makeGrant(SA_GRANTED.id, SA_GRANTED.name), makeGrant(SA_GRANTED_2.id, SA_GRANTED_2.name)],
+      canInvoke: {},
+    });
+    renderAccess();
+
+    // Both rows offer Revoke, so "clicked the right one" is a real claim here
+    // in a way it is not in the test above (where only one row had a button and
+    // that row was also `accounts[0]`).
+    const revokes = await screen.findAllByRole("button", { name: /revoke/i });
+    expect(revokes).toHaveLength(2);
+
+    const second = screen.getByTestId(`access-row-${SA_GRANTED_2.id}`);
+    await userEvent.click(within(second).getByRole("button", { name: /revoke/i }));
+
+    // The WHOLE call, deep-equalled: a mutant that also sent the endpoint's own
+    // id as the principal, or dropped `workspace`, fails here rather than
+    // slipping past a partial match.
+    await waitFor(() => expect(revokeMutateAsync).toHaveBeenCalledTimes(1));
+    expect(revokeMutateAsync).toHaveBeenCalledWith({
+      workspace: "eng",
+      id: "ep-1",
+      serviceAccountId: SA_GRANTED_2.id,
+    });
+  });
+
+  it("grants the SECOND of two ungranted rows when it is the second one that is clicked", async () => {
+    setup({ accounts: [SA_NONE, SA_NONE_2], grants: [], canInvoke: {} });
+    renderAccess();
+
+    const grants = await screen.findAllByRole("button", { name: /grant invoke/i });
+    expect(grants).toHaveLength(2);
+
+    const second = screen.getByTestId(`access-row-${SA_NONE_2.id}`);
+    await userEvent.click(within(second).getByRole("button", { name: /grant invoke/i }));
+
+    await waitFor(() => expect(grantMutateAsync).toHaveBeenCalledTimes(1));
+    expect(grantMutateAsync).toHaveBeenCalledWith({
+      workspace: "eng",
+      id: "ep-1",
+      data: { service_account_id: SA_NONE_2.id },
     });
   });
 
@@ -427,5 +484,72 @@ describe("AccessSection — the §5.3 warning", () => {
     // page's single primary emphasis, and a standing passive note is not that.
     expect(note.className).toContain("bg-muted/40");
     expect(note.className).not.toContain("highlight");
+  });
+});
+
+/**
+ * The re-presentation itself (`docs/en/ui-conventions.md` §4). The account list
+ * is list-shaped — one row per principal, unbounded — so it is a plain `Table`,
+ * not the `Card` that framed it and not a `ConfigTable` (there is no Value to
+ * edit, only a per-row action).
+ *
+ * What the columns buy: "Invoke" and "Data" used to be a `<dt>` repeated on
+ * every row, which put each row's answer at a different vertical offset from
+ * the one above it. Written once in the header, the answers line up down the
+ * page — and comparing accounts is the entire job of this screen.
+ */
+describe("AccessSection — the shape", () => {
+  it("names the two conditions once, as columns, with one row per account", async () => {
+    setup({
+      accounts: [SA_GRANTED, SA_NONE],
+      grants: [makeGrant(SA_GRANTED.id, SA_GRANTED.name)],
+      canInvoke: {},
+    });
+    renderAccess();
+
+    expect((await screen.findAllByRole("columnheader")).map((h) => h.textContent)).toEqual([
+      "Service account",
+      "Invoke",
+      "Data",
+      // Named for a screen reader and hidden on screen — a visible heading over
+      // one small button is louder than what it labels.
+      "Actions",
+    ]);
+
+    // Positions, not merely presence: a header row that says "Data" over the
+    // Invoke answer is a table that reads as wrong while every text assertion
+    // in this file still passes.
+    const cells = within(screen.getByTestId(`access-row-${SA_GRANTED.id}`)).getAllByRole("cell");
+    expect(cells).toHaveLength(4);
+    expect(cells[0]).toHaveTextContent(SA_GRANTED.name);
+    expect(cells[1]).toHaveTextContent("Granted on this endpoint");
+    expect(cells[2]).toHaveTextContent(/egret cannot check whether this account may read/i);
+    expect(within(cells[3]).getByRole("button", { name: /revoke/i })).toBeInTheDocument();
+  });
+
+  // Every state is a row spanning the table now, so the columns are named
+  // before there is an account to put under them. This is also the branch that
+  // must never be reached by a FAILED fetch (§2.2) — an admin told their
+  // workspace has no service accounts goes off to create one that exists.
+  it("keeps the empty state inside the table, under the named columns", async () => {
+    setup({ accounts: [], grants: [] });
+    renderAccess();
+
+    expect(await screen.findByText(/no service accounts yet/i)).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Invoke" })).toBeInTheDocument();
+  });
+
+  /**
+   * Access had no width guard at all, and neither did `Try it` — which is how
+   * `Try it` shipped a `max-w-5xl` that nothing was holding in place.
+   * `docs/en/ui-conventions.md` §5.1 lists this section among the four that cap
+   * themselves; the assertion lives in `sectionWidth.ts` so all five sections
+   * make it the same way.
+   */
+  it("caps its own width, as §5.1 says this section does", async () => {
+    setup({ accounts: [SA_GRANTED], grants: [] });
+    const { container } = renderAccess();
+    const heading = await screen.findByRole("heading", { name: "Access", level: 2 });
+    expectSectionCapsItsOwnWidth(container, heading);
   });
 });

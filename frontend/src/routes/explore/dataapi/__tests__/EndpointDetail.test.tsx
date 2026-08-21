@@ -26,6 +26,10 @@ import EndpointDetail from "@/routes/explore/dataapi/EndpointDetail";
 import Config from "@/routes/explore/dataapi/detail/Config";
 import ResponseSection from "@/routes/explore/dataapi/detail/ResponseSection";
 import VersionsSection from "@/routes/explore/dataapi/detail/Versions";
+import {
+  expectSectionCapsItsOwnWidth,
+  expectSectionLeavesWidthToThePage,
+} from "./sectionWidth";
 
 function makeEndpoint(overrides: Partial<DataApiEndpointDto> = {}): DataApiEndpointDto {
   return {
@@ -1008,6 +1012,149 @@ describe("VersionsSection", () => {
     renderVersions();
     expect(await screen.findByText(/never been published/i)).toBeInTheDocument();
   });
+
+  /**
+   * Three snapshots with the LIVE one in the MIDDLE — the state a rollback
+   * leaves behind, and the only arrangement in which "badged the live version"
+   * and "badged the first row" are different claims.
+   *
+   * The pre-existing coverage is a count (`getAllByText("Live")` has length 1)
+   * on a two-row fixture whose live version also sorted first, so an
+   * implementation that badged `sorted[0]` passed it. Same trap `#529` hit with
+   * a removal test that clicked row 1: a fixture where the right row IS row 0
+   * proves nothing about which row was read.
+   */
+  function threeVersionsWithV2Live() {
+    vi.mocked(api.useDataApiListEndpointVersions).mockReturnValue(
+      {
+        data: {
+          status: 200,
+          data: [
+            makeVersion({ id: "v-1", version: 1, is_live: false, note: "first cut", created_by: "user-1" }),
+            makeVersion({ id: "v-2", version: 2, is_live: true, note: "the served one", created_by: "user-2" }),
+            makeVersion({ id: "v-3", version: 3, is_live: false, note: "rolled back off", created_by: "user-3" }),
+          ],
+        },
+        isLoading: false,
+        isError: false,
+      } as unknown as ReturnType<typeof api.useDataApiListEndpointVersions>,
+    );
+  }
+
+  it("puts the Live badge on the version live_version_id points at, even when a newer one exists", async () => {
+    threeVersionsWithV2Live();
+    renderVersions(makeEndpoint({ live_version_id: "v-2", state: "live" }));
+
+    const live = await screen.findByTestId("version-row-v-2");
+    expect(within(live).getByText("Live")).toBeInTheDocument();
+    expect(within(screen.getByTestId("version-row-v-3")).queryByText("Live")).not.toBeInTheDocument();
+    expect(within(screen.getByTestId("version-row-v-1")).queryByText("Live")).not.toBeInTheDocument();
+
+    // The premise of the three assertions above: newest-first is still the
+    // display order, so the badged row is the SECOND on screen. Without this
+    // the fixture could drift back to one where live and first coincide and
+    // the test would keep passing while proving nothing.
+    expect(screen.getAllByTestId(/^version-row-/).map((r) => r.dataset.testid)).toEqual([
+      "version-row-v-3",
+      "version-row-v-2",
+      "version-row-v-1",
+    ]);
+  });
+
+  // The re-presentation itself (`docs/en/ui-conventions.md` §4): the history is
+  // list-shaped, so it is a plain `Table` — not the `Card` that used to frame
+  // it, and not `ConfigTable`, which would have to fabricate a Value column for
+  // a read-only listing. Column positions, not merely presence: a header row
+  // that says "Note" over the Who column is a table that reads as wrong.
+  it("lays the history out as one table row per snapshot, each fact under its own column", async () => {
+    threeVersionsWithV2Live();
+    renderVersions(makeEndpoint({ live_version_id: "v-2", state: "live" }));
+
+    expect((await screen.findAllByRole("columnheader")).map((h) => h.textContent)).toEqual([
+      "Version",
+      "Note",
+      "Who",
+      "When",
+      // Named for a screen reader and hidden on screen — an "Actions" heading
+      // over one small button is louder than what it labels.
+      "Actions",
+    ]);
+
+    const cells = within(screen.getByTestId("version-row-v-2")).getAllByRole("cell");
+    expect(cells).toHaveLength(5);
+    expect(cells[0]).toHaveTextContent("v2");
+    expect(cells[1]).toHaveTextContent("the served one");
+    expect(cells[2]).toHaveTextContent("user-2");
+  });
+
+  /**
+   * Roll back has to name the row it was clicked on. With the live version
+   * FIRST in display order and two rollbackable rows behind it, "the version
+   * this button belongs to" and "the first rollbackable version" are different
+   * answers — and this clicks the second of the two.
+   *
+   * Asserted as a whole-call deep equal rather than `objectContaining`, so a
+   * mutant that also attached, dropped or renamed a field fails here rather
+   * than passing a partial match.
+   */
+  it("rolls back the version whose own row's button was clicked, not the first rollbackable one", async () => {
+    vi.mocked(api.useDataApiListEndpointVersions).mockReturnValue(
+      {
+        data: {
+          status: 200,
+          data: [
+            makeVersion({ id: "v-1", version: 1, is_live: false, note: "first cut" }),
+            makeVersion({ id: "v-2", version: 2, is_live: false, note: "middle" }),
+            makeVersion({ id: "v-3", version: 3, is_live: true, note: "the served one" }),
+          ],
+        },
+        isLoading: false,
+        isError: false,
+      } as unknown as ReturnType<typeof api.useDataApiListEndpointVersions>,
+    );
+    renderVersions(makeEndpoint({ live_version_id: "v-3", state: "live" }), versionsRefetchSpy);
+
+    const target = await screen.findByTestId("version-row-v-1");
+    // The live row offers nothing to roll back to — rolling back to what is
+    // already served is a no-op the row should not advertise.
+    expect(
+      within(screen.getByTestId("version-row-v-3")).queryByRole("button", { name: /roll back/i }),
+    ).not.toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: /^roll back$/i })).toHaveLength(2);
+
+    await userEvent.click(within(target).getByRole("button", { name: /^roll back$/i }));
+    // The confirmation names the version too — a dialog that said v2 while the
+    // mutation carried v-1 would be a worse defect than either alone.
+    expect(await screen.findByText("Roll back to v1?")).toBeInTheDocument();
+
+    await userEvent.type(screen.getByPlaceholderText("rollback"), "rollback");
+    await userEvent.click(screen.getByRole("button", { name: "Roll back" }));
+
+    await waitFor(() => expect(rollbackMutateAsync).toHaveBeenCalledTimes(1));
+    expect(rollbackMutateAsync).toHaveBeenCalledWith({
+      workspace: "eng",
+      id: "ep-1",
+      data: { version_id: "v-1" },
+    });
+  });
+
+  // The loading state moved INSIDE the table when the card went, so the columns
+  // are named before there is a row to put under them. It is also the third of
+  // the three states §2 requires and the only one this suite never had.
+  it("renders the loading state inside the history table, with the columns already named", async () => {
+    vi.mocked(api.useDataApiListEndpointVersions).mockReturnValue(
+      { data: undefined, isLoading: true, isError: false } as unknown as
+        ReturnType<typeof api.useDataApiListEndpointVersions>,
+    );
+    renderVersions();
+
+    expect(await screen.findByText("Loading…")).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Version" })).toBeInTheDocument();
+    // Not the empty state, and not an error: react-query clears `isLoading` on
+    // any settle, so these three must stay three branches.
+    expect(screen.queryByText(/never been published/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/could not load/i)).not.toBeInTheDocument();
+  });
 });
 
 /**
@@ -1096,28 +1243,19 @@ describe("EndpointDetail — width", () => {
   });
 
   it("leaves Versions constraining its own width, now that the route does not", async () => {
-    const { container } = renderVersions();
-    const heading = await screen.findByRole("heading", { name: "Versions", level: 2 });
-    const routeRoot = container.querySelector(".p-4");
     // Removing the route cap moved responsibility for width into the sections,
     // and this is the one where full width was worst: five short columns
     // (`v3`, a truncated note, an email, a relative time, one button) spread
     // across a wide monitor, with Roll back marooned at the far right of the
-    // row it acts on. One guard, on the section that most needs it — the point
-    // is that a section owning its own cap cannot lose it silently, not that
-    // any particular number is correct.
-    // The section root is whichever ancestor of the heading the route renders
-    // directly — found by walking, not by counting `parentElement`s, so an
-    // extra wrapper inside Versions does not quietly re-point this assertion.
-    // The route renders its `Outlet` inside a `fieldset` (disabled only for a
-    // trashed endpoint — see `EndpointDetail.tsx`), so THAT is the element the
-    // section root is a direct child of. Resolved rather than assumed, so this
-    // walk keeps finding the section root whether or not the wrapper is there.
-    const host = routeRoot!.querySelector("fieldset") ?? routeRoot;
-    let sectionRoot = heading.parentElement;
-    while (sectionRoot && sectionRoot.parentElement !== host) sectionRoot = sectionRoot.parentElement;
-    expect(sectionRoot).not.toBeNull();
-    expect(sectionRoot!.className).toMatch(/(?:^|\s)max-w-/);
+    // row it acts on. The point is that a section owning its own cap cannot
+    // lose it silently, not that any particular number is correct.
+    //
+    // The walk that finds the section root — and the reason it is a walk and
+    // not a count — now lives in `sectionWidth.ts`, because five sections need
+    // this assertion and only three had it.
+    const { container } = renderVersions();
+    const heading = await screen.findByRole("heading", { name: "Versions", level: 2 });
+    expectSectionCapsItsOwnWidth(container, heading);
   });
 
   it("caps Response on its own root, like its three sibling sections", async () => {
@@ -1129,17 +1267,7 @@ describe("EndpointDetail — width", () => {
     // judge the geometry (§5.5), the browser measurement is in the report.
     const { container } = renderResponse();
     const heading = await screen.findByRole("heading", { name: "Response", level: 2 });
-    const routeRoot = container.querySelector(".p-4");
-    expect(routeRoot).not.toBeNull();
-    // The route renders its `Outlet` inside a `fieldset` (disabled only for a
-    // trashed endpoint — see `EndpointDetail.tsx`), so THAT is the element the
-    // section root is a direct child of. Resolved rather than assumed, so this
-    // walk keeps finding the section root whether or not the wrapper is there.
-    const host = routeRoot!.querySelector("fieldset") ?? routeRoot;
-    let sectionRoot = heading.parentElement;
-    while (sectionRoot && sectionRoot.parentElement !== host) sectionRoot = sectionRoot.parentElement;
-    expect(sectionRoot).not.toBeNull();
-    expect(sectionRoot!.className).toMatch(/(?:^|\s)max-w-/);
+    expectSectionCapsItsOwnWidth(container, heading);
   });
 
   it("leaves Config's own root uncapped, which is where the width was meant to go", async () => {
@@ -1153,21 +1281,7 @@ describe("EndpointDetail — width", () => {
     // its cap; this is the inverse, on the tab the width pass was motivated by.
     const { container } = renderConfig();
     const heading = await screen.findByRole("heading", { name: "Config", level: 2 });
-    const routeRoot = container.querySelector(".p-4");
-    expect(routeRoot).not.toBeNull();
-    // Walked, not counted, for the same reason as the Versions guard: an extra
-    // wrapper inside Config must not quietly re-point the assertion. The
-    // `fieldset` the route wraps its `Outlet` in is that wrapper today, and
-    // this is a NEGATIVE assertion — walking past Config's root onto the
-    // fieldset would satisfy it whatever Config does to itself.
-    const host = routeRoot!.querySelector("fieldset") ?? routeRoot;
-    let sectionRoot = heading.parentElement;
-    while (sectionRoot && sectionRoot.parentElement !== host) sectionRoot = sectionRoot.parentElement;
-    expect(sectionRoot).not.toBeNull();
-    expect(sectionRoot!.tagName).not.toBe("FIELDSET");
-    // Responsive prefixes included: `lg:max-w-3xl` would waste the page on
-    // exactly the wide viewports the pass was measured on.
-    expect(sectionRoot!.className).not.toMatch(/(?:^|\s)(?:[a-z0-9]+:)*max-w-/);
+    expectSectionLeavesWidthToThePage(container, heading);
   });
 
   it("gives Config's Value column more than the shared default", async () => {

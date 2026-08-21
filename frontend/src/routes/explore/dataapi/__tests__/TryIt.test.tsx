@@ -53,6 +53,7 @@ import { ApiError } from "@/api/client";
 import { ParamLocation, ParamType, type DataApiEndpointDto, type DataApiServiceAccountDto } from "@/api/generated/model";
 import type { EndpointDetailContext } from "@/routes/explore/dataapi/EndpointDetail";
 import TryIt from "@/routes/explore/dataapi/detail/TryIt";
+import { expectSectionCapsItsOwnWidth } from "./sectionWidth";
 
 function makeEndpoint(overrides: Partial<DataApiEndpointDto> = {}): DataApiEndpointDto {
   return {
@@ -558,5 +559,32 @@ describe("TryIt — says whose identity a trial runs as", () => {
     // construction, not by hedging.
     expect(screen.getAllByText(/Preview in Query runs as you/i).length).toBeGreaterThan(0);
     expect(screen.getByRole("note")).toHaveTextContent(/runs as the service account above rather than as you/i);
+  });
+});
+
+/**
+ * `Try it` carries `max-w-5xl` and, until this test, nothing held it there.
+ * `Versions` and `Response` each had a guard saying they cap themselves and
+ * `Config` had the inverse, so this section and `Access` were the two that
+ * could lose (or grow) a cap in silence — the same hole
+ * `docs/en/ui-conventions.md` §5.5 records for `Config`, where restoring
+ * `max-w-3xl` to the section's own root passed 230/230.
+ *
+ * The walk lives in `sectionWidth.ts` rather than being written a fourth time.
+ * It resolves the host, so it works both under the real `EndpointDetail` shell
+ * (`AccessSection.test.tsx`, `EndpointDetail.test.tsx`) and under this file's
+ * stubbed-context harness, where the section's root is a child of the render
+ * container itself.
+ *
+ * A class name, not a layout: jsdom has no CSS (§10). Whether the split reads
+ * well at that width is the browser pass's question — and in #529 the browser
+ * was what caught an editor squeezed to 107px that every test had passed.
+ */
+describe("TryIt — width", () => {
+  it("caps its own width, as §5.1 says this section does", () => {
+    mockTry(OK);
+    const { container } = renderTryIt();
+    const heading = screen.getByRole("heading", { name: "Try it", level: 2 });
+    expectSectionCapsItsOwnWidth(container, heading);
   });
 });

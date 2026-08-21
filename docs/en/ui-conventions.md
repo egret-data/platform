@@ -337,6 +337,44 @@ Only `Output shape` was config-shaped, and only it became a `ConfigTableGroup` +
 near-empty tables, not about cards. A read-only listing is not a setting, and an action is
 not a setting.
 
+### 4.3 A list is a plain `Table`, and its three states are rows inside it
+
+`src/routes/explore/dataapi/detail/Versions.tsx` (the publish history),
+`detail/AccessSection.tsx` (one row per service account), `detail/TryIt.tsx` (parameter
+values), `detail/ParamEditor.tsx`.
+
+`ConfigTable` is `Setting | Details | Value` for a **fixed set of settings read across**. A
+**list read down** — one row per snapshot, per principal, per parameter — takes a plain
+`Table` instead: there is no Value to edit, only a per-row action, and forcing one in would
+fabricate the empty third cell §4.1 records as the confusion the cards were replaced to
+remove.
+
+Two things that came out of converting `Versions` and `Access`:
+
+- **The loading / error / empty states are rows spanning the table, not a branch that
+  replaces it.** With a card, the states sat *inside the frame* and the frame carried the
+  section's name. Without one, a branch that replaces the table takes the column headers with
+  it — so before the first publish, `Versions` would say "never published" with nothing on
+  screen to say what a version even records. As spanning rows, the columns are named in every
+  state. The shared `TableCell` is `whitespace-nowrap`, so a cell holding a sentence needs
+  `whitespace-normal` or it scrolls the table sideways.
+- **A column whose every cell is identical can still be right.** `Access`'s Data column
+  repeats the same sentence on every row because the *constancy is the fact*: egret never
+  knows whether an account may read the tables, and the per-row part is the `Run Try it` link,
+  preselected to that account. `AccessSection.test.tsx` pins that identity byte-for-byte —
+  any code that let the line vary with something egret does know (invoke status, the grant
+  list, the SQL) is the half-right Ranger answer the section exists to refuse.
+
+**What the labels buy.** `Access`'s two conditions used to be a `<dl>` inside each `<li>`,
+which repeated the words "Invoke" and "Data" on every row and left each row's answer at a
+different vertical offset from the one above it. As columns the labels are written once and
+the answers line up down the page — and comparing accounts is the whole job of that screen.
+
+**An action column's header is `sr-only`.** A visible "Actions" heading over one small
+button is louder than what it labels; an unnamed column is worse for anyone not reading it
+visually. `getAllByRole("columnheader")` still sees the name, which is what the shape tests
+assert on.
+
 ---
 
 ## 5. Width
@@ -464,6 +502,27 @@ test and only that one. `Response`'s new cap is pinned the same way as `Versions
 The test's own comment is honest about its limits: the class-name assertions are weak and are
 meant to be — they exist only so a cap cannot come back, or vanish, silently. **Whether the
 width is well spent is a question only a browser can answer.** See §10.
+
+### 5.6 The section guard is one helper, not one copy per section
+
+`src/routes/explore/dataapi/__tests__/sectionWidth.ts` —
+`expectSectionCapsItsOwnWidth` / `expectSectionLeavesWidthToThePage`.
+
+Three sections had the walk in §5.5 copy-pasted and **two had no guard at all**: `Try it` and
+`Access`. That is how `Try it` shipped a `max-w-5xl` nothing was holding in place — §5.1
+lists it among the four sections that cap themselves, and nothing said so in code. The walk,
+the host resolution and the two regexes now live in one module and all five sections call it.
+
+Two details are load-bearing and were preserved from the copies:
+
+- **The two regexes differ, on purpose.** The positive form is unprefixed
+  (`/(?:^|\s)max-w-/`), because a section capped only at `lg:` is uncapped on exactly the
+  narrow viewports nobody measured. The negative form includes responsive prefixes, because
+  `lg:max-w-3xl` wastes the page on exactly the wide ones the pass *did* measure.
+- **The host is resolved, not assumed**, so the same helper works under the real
+  `EndpointDetail` shell (walk stops at the `fieldset`) and under a harness that stubs the
+  context and renders the section under a bare `Outlet` (`TryIt.test.tsx`), where the section
+  root is a child of the render container.
 
 ---
 
@@ -745,10 +804,23 @@ not exist yet:
   hand-write their headers.
 - `ListStates` — 2 route files (`Endpoints`, `Clients`).
 - `EmptyState` — 10 files (2 Data API, 8 control-plane).
-- `ConfigTable` — 13 production files; `ConfigTableGroup` is used by Data API's `Config` and
-  `ResponseSection`.
+- `ConfigTable` — **15** production files; `ConfigTableGroup` is used by Data API's `Config`
+  and `ResponseSection`. Measured with
+  `git grep -l 'from "@/components/config/ConfigTable"' <rev> -- frontend/src`, minus
+  `__tests__`, at three revisions: **13** at the merge base `63a4fb90`, 14 after `Query`
+  (#529), 15 after `Try it`. The two sections after it (`Versions`, `Access`) added none, and
+  that is the expected result rather than a gap — both are lists (§4.3), and a list does not
+  want a `Setting | Details | Value` table.
+- The plain-`Table` list of §4.3 — 4 files, all Data API endpoint detail (`ParamEditor`,
+  `TryIt`, `Versions`, `AccessSection`).
+- `Card` inside the endpoint detail sections — **1** file (`ResponseSection`, 8 occurrences),
+  down from 4 files at the merge base. Two of those eight are the deliberate keeps of §4.2;
+  the other six are the open question Task 3 of the plan exists to answer.
 - The split of §11 — **2** sections, both Data API endpoint detail (`Query`, `TryIt`); `react-resizable-panels` itself is also used by `components/sqllab/SqlTab.tsx`, which is
-  where the idiom came from.
+  where the idiom came from. `Versions` and `Access` are deliberately not splits: neither is
+  "configure, run, read the result" — there is nothing to run.
+- The section-width guard of §5.6 — **5** sections (`Config`, `Response`, `Versions`,
+  `Try it`, `Access`), one helper. It was 3 copies and 2 absences before this phase.
 - `ConfigSection` — 13 files, down from **15** at the merge base. This is the fifth count of
   this number in the programme and the first measured at both ends:
   `grep -rl 'from "@/components/form/ConfigSection"' src` gives 15 at `63a4fb90` and 13 at
