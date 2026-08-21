@@ -149,7 +149,11 @@ describe("the Monaco loader setup module", () => {
 
   it("is reachable only through one dynamic import, so it stays out of the eager chunk", () => {
     const referrers = tsFiles(SRC_DIR)
-      .filter((f) => f !== SRC && !f.startsWith(resolve(__dirname)))
+      // Any `__tests__` directory, not just this one: a test elsewhere that stubs the module
+      // (`vi.mock("@/lib/monaco")`) is a referrer in the text but not in the bundle, and
+      // excluding only `resolve(__dirname)` made this guard fail on a test added under
+      // `components/monaco/__tests__` — a false positive that says nothing about laziness.
+      .filter((f) => f !== SRC && !f.includes("__tests__"))
       .filter((f) => /["']@\/lib\/monaco["']|["']\.\.?\/(?:lib\/)?monaco["']/.test(readFileSync(f, "utf8")))
       .map((f) => f.slice(SRC_DIR.length + 1));
 
