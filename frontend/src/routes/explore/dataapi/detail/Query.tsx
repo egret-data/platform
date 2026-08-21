@@ -69,10 +69,17 @@ export default function Query() {
           BUTTON under it — a Radix trigger included. Collapsing the strip is
           reading, not editing, so a trashed endpoint must keep it. `<summary>`
           is not a form control and is untouched by the fieldset. */}
-      <details open className="group shrink-0">
+      {/* Collapsed by default, and that is a measured choice rather than a
+          preference. On a 900px-tall viewport this section gets 615px: open,
+          the strip took 370 of them and left the SQL editor 107px — about four
+          lines, i.e. the exact problem this redesign exists to fix. Collapsed,
+          the editor gets 295px and the preview 241px. The summary still names
+          what is inside, including how many parameters, so nothing is hidden —
+          it is one click, and the tab's purpose is writing SQL. */}
+      <details className="group shrink-0">
         <summary className="flex cursor-pointer list-none items-center gap-2 py-1 text-sm text-muted-foreground hover:text-foreground">
           <ChevronRight className="h-4 w-4 transition-transform group-open:rotate-90" aria-hidden="true" />
-          Database and parameters
+          Database and parameters ({form.params.length})
         </summary>
         {/* Capped and scrollable: an endpoint with a dozen declarations would
             otherwise push the editor and the preview out of the viewport,

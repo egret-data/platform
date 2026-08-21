@@ -1486,4 +1486,26 @@ describe("Query section — the editor, the split and the preview", () => {
       expect(panel.contains(picker)).toBe(false);
     }
   });
+
+  /**
+   * Measured in a browser at a 900px viewport, where this section gets 615px:
+   * with the strip open it took 370 of them and left the SQL editor **107px**,
+   * about four lines — the exact problem this redesign exists to fix. Collapsed,
+   * the editor gets 295px and the preview 241px.
+   *
+   * Asserted on the `open` ATTRIBUTE, not on visibility: jsdom does not hide a
+   * closed `<details>`'s contents from queries, so `toBeVisible` would pass
+   * whether or not the strip were collapsed — which is why the other 41 tests
+   * in this file went on passing unchanged when the default flipped.
+   */
+  it("starts with the strip collapsed, and says what is inside it", async () => {
+    show(makeEndpoint({ params: [{ name: "region", ty: "string", required: true }] }));
+    const summary = await screen.findByText(/Database and parameters/);
+    const details = summary.closest("details")!;
+
+    expect(details.open).toBe(false);
+    // The count is what makes a collapsed strip honest — the reader can see
+    // there is one declaration in there without opening it.
+    expect(summary).toHaveTextContent("Database and parameters (1)");
+  });
 });
