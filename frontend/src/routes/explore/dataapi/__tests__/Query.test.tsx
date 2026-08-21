@@ -908,14 +908,17 @@ describe("Query section — ParamEditor", () => {
       expect((await saveAndReadParams(updateMutateAsync)).map((p) => !!p.required)).toEqual([false, true]);
     });
 
+    // The SECOND row, deliberately. Removing the first is the one click a
+    // hard-coded `remove(0)` also gets right — written that way first, and the
+    // mutation survived: 35/35 green with the index thrown away.
     it("removes the row whose control was used, not the first one", async () => {
       const { updateMutateAsync } = renderParams(TWO);
-      await userEvent.click(await screen.findByRole("button", { name: "Remove parameter 1" }));
+      await userEvent.click(await screen.findByRole("button", { name: "Remove parameter 2" }));
 
-      // Name AND description, because a row-shifting bug (the `rowIds`
-      // bookkeeping this editor exists to get right) can leave the correct
-      // count with fields from two different declarations mixed into one row.
-      expect(await saveAndReadParams(updateMutateAsync)).toEqual([TWO[1]]);
+      // The whole surviving declaration, not just its name: a row-shifting bug
+      // (the `rowIds` bookkeeping this editor exists to get right) can leave
+      // the correct count with fields from two declarations mixed into one row.
+      expect(await saveAndReadParams(updateMutateAsync)).toEqual([TWO[0]]);
     });
 
     it("appends a blank declaration and renumbers nothing above it", async () => {
