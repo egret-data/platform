@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Link, MemoryRouter, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -26,7 +26,7 @@ import * as api from "@/api/generated/data-api/data-api";
 import * as databasesApi from "@/api/databases";
 import * as dataApi from "@/api/dataApi";
 import * as accessApi from "@/api/access";
-import { ParamLocation, ParamType, type DataApiEndpointDto } from "@/api/generated/model";
+import { ParamLocation, ParamType, type DataApiEndpointDto, type ParamSpec } from "@/api/generated/model";
 import EndpointDetail from "@/routes/explore/dataapi/EndpointDetail";
 import Query from "@/routes/explore/dataapi/detail/Query";
 import Config from "@/routes/explore/dataapi/detail/Config";
@@ -786,6 +786,175 @@ describe("Query section — ParamEditor", () => {
     expect(screen.queryByText(/location/i)).not.toBeInTheDocument();
   });
 
+  /**
+   * The declarations are a TABLE — one row per parameter — replacing the
+   * card-per-parameter stack (a bordered box with a `grid grid-cols-2` inside,
+   * per parameter) that `docs/en/ui-conventions.md` §4 records the complaint
+   * about.
+   *
+   * **Every fixture here has TWO parameters, and that is the point.** With one
+   * row, "wrote the edit to the row it was made in" and "wrote the edit to
+   * whichever row it felt like" are the same observation — `update(0, …)`
+   * hard-coded would pass every single-row test in this file. Two rows with
+   * different values in every field is the smallest fixture that can tell them
+   * apart.
+   *
+   * They assert the params the shell PATCHes, which is exactly what
+   * `ParamEditor`'s `onChange` wrote into the shared form — not that `onChange`
+   * fired, which an editor that wrote `[]` on every keystroke would also
+   * satisfy.
+   */
+  describe("the parameters table", () => {
+    const TWO: ParamSpec[] = [
+      {
+        name: "region",
+        type: ParamType.string,
+        location: ParamLocation.query,
+        required: false,
+        default: null,
+        description: "Sales region",
+      },
+      {
+        name: "limit",
+        type: ParamType.number,
+        location: ParamLocation.query,
+        required: false,
+        default: null,
+        description: "Row cap",
+      },
+    ];
+
+    function renderParams(params: ParamSpec[]) {
+      const endpoint = makeEndpoint({ params } as Partial<DataApiEndpointDto>);
+      vi.mocked(api.useDataApiGetEndpoint).mockReturnValue({
+        data: { status: 200, data: endpoint },
+        isLoading: false,
+        isError: false,
+        refetch: vi.fn(),
+      } as never);
+      // Echoes the PATCH back, the way the server does — the shell re-seeds
+      // the whole form from this response. A mock that resolved with the
+      // ORIGINAL record instead would hand the editor back a params array
+      // LONGER than the one it just shortened, which is a state the server
+      // cannot produce (it stores what it was sent) but which does make this
+      // editor's `rowIds[i] ?? i` fallback emit two rows with the same React
+      // key. Worth writing down: it is why this mock is an implementation and
+      // not a `mockResolvedValue`.
+      const updateMutateAsync = vi.fn().mockImplementation(({ data }: { data: Partial<DataApiEndpointDto> }) =>
+        Promise.resolve({ status: 200, data: { ...endpoint, ...data }, headers: new Headers() }),
+      );
+      vi.mocked(dataApi.useUpdateEndpoint).mockReturnValue({
+        mutateAsync: updateMutateAsync,
+        isPending: false,
+      } as never);
+      return { ...renderQuery(endpoint), updateMutateAsync };
+    }
+
+    /** The declaration array as the shell sends it — what `onChange` produced. */
+    async function saveAndReadParams(updateMutateAsync: ReturnType<typeof vi.fn>): Promise<ParamSpec[]> {
+      await userEvent.click(screen.getByRole("button", { name: "Save" }));
+      await waitFor(() => expect(updateMutateAsync).toHaveBeenCalled());
+      const body = updateMutateAsync.mock.calls[0][0] as { data: { params: ParamSpec[] } };
+      return body.data.params;
+    }
+
+    /** The parameters table, found through a header it owns rather than by
+     *  position — Query gains other tables in the sections around this one. */
+    function paramRows() {
+      const table = screen.getByRole("columnheader", { name: "Required" }).closest("table") as HTMLElement;
+      return within(table).getAllByRole("row");
+    }
+
+    it("gives each declaration one row, with a column per field", async () => {
+      renderParams(TWO);
+      await screen.findByRole("combobox", { name: "Parameter 1 type" });
+
+      for (const col of ["Name", "Type", "Required", "Default", "Description"]) {
+        expect(screen.getByRole("columnheader", { name: col })).toBeInTheDocument();
+      }
+
+      // Header + one row each. Not "at least two": a card-per-parameter stack
+      // wrapped in a table would also produce rows.
+      const rows = paramRows();
+      expect(rows).toHaveLength(3);
+      // Row order follows declaration order, and each row holds ITS OWN
+      // parameter — the fields are read from inside the row element, so a
+      // layout that renders every field of both parameters into one row fails.
+      expect(within(rows[1]).getByLabelText("Parameter 1 name")).toHaveValue("region");
+      expect(within(rows[1]).getByLabelText("Parameter 1 description")).toHaveValue("Sales region");
+      expect(within(rows[2]).getByLabelText("Parameter 2 name")).toHaveValue("limit");
+      expect(within(rows[2]).getByLabelText("Parameter 2 description")).toHaveValue("Row cap");
+    });
+
+    it("writes a typed value to the row it was typed in", async () => {
+      const { updateMutateAsync } = renderParams(TWO);
+      const secondDefault = await screen.findByLabelText("Parameter 2 default");
+      await userEvent.type(secondDefault, "50");
+
+      // The whole array, not just the row that was touched: `update(1, …)`
+      // that also clears its neighbour is as wrong as writing to row 0.
+      expect(await saveAndReadParams(updateMutateAsync)).toEqual([
+        { ...TWO[0], default: null },
+        { ...TWO[1], default: "50" },
+      ]);
+    });
+
+    it("toggles Required on one row without touching the other", async () => {
+      const { updateMutateAsync } = renderParams(TWO);
+      // Both start `false`, so "set them all" is distinguishable from "set the
+      // one that was clicked" — with one already `true` it would not be.
+      await userEvent.click(await screen.findByRole("checkbox", { name: "Parameter 2 required" }));
+
+      expect((await saveAndReadParams(updateMutateAsync)).map((p) => !!p.required)).toEqual([false, true]);
+    });
+
+    it("removes the row whose control was used, not the first one", async () => {
+      const { updateMutateAsync } = renderParams(TWO);
+      await userEvent.click(await screen.findByRole("button", { name: "Remove parameter 1" }));
+
+      // Name AND description, because a row-shifting bug (the `rowIds`
+      // bookkeeping this editor exists to get right) can leave the correct
+      // count with fields from two different declarations mixed into one row.
+      expect(await saveAndReadParams(updateMutateAsync)).toEqual([TWO[1]]);
+    });
+
+    it("appends a blank declaration and renumbers nothing above it", async () => {
+      const { updateMutateAsync } = renderParams(TWO);
+      await userEvent.click(await screen.findByRole("button", { name: /add parameter/i }));
+
+      expect(paramRows()).toHaveLength(4);
+      expect(screen.getByLabelText("Parameter 3 name")).toHaveValue("");
+      expect(screen.getByLabelText("Parameter 1 name")).toHaveValue("region");
+      expect(await saveAndReadParams(updateMutateAsync)).toEqual([
+        ...TWO,
+        { name: "", type: ParamType.string, location: ParamLocation.query, required: false },
+      ]);
+    });
+
+    // The one per-row conditional the cards had, and the thing a table most
+    // easily loses: `allowed` belongs to the enum row, and to no other.
+    it("shows allowed values inside the enum's own row and nowhere else", async () => {
+      renderParams([{ ...TWO[0], type: ParamType.enum, allowed: ["eu", "us"] }, TWO[1]]);
+      const allowed = await screen.findByLabelText("Parameter 1 allowed values");
+
+      const rows = paramRows();
+      expect(rows[1].contains(allowed)).toBe(true);
+      expect(allowed).toHaveValue("eu, us");
+      // Not a table-wide field, and not a column every row pays for.
+      expect(screen.queryByLabelText("Parameter 2 allowed values")).not.toBeInTheDocument();
+    });
+
+    it("keeps the empty state, and the sentence that says where a parameter comes from", async () => {
+      renderParams([]);
+      expect(await screen.findByText(/No parameters yet/i)).toBeInTheDocument();
+      expect(screen.getByText(":name")).toBeInTheDocument();
+      // The columns stay on screen with no rows: they are what tells an author
+      // what a parameter is made of before they add one.
+      expect(screen.getByRole("columnheader", { name: "Name" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /add parameter/i })).toBeInTheDocument();
+    });
+  });
+
   // Reviewer finding (Critical #2): the field used to be fully controlled —
   // `value={allowed.join(", ")}` with an `onChange` that immediately
   // re-split/trimmed/filtered — which silently ate a trailing comma on every
@@ -811,7 +980,7 @@ describe("Query section — ParamEditor", () => {
     vi.mocked(dataApi.useUpdateEndpoint).mockReturnValue({ mutateAsync: updateMutateAsync, isPending: false } as never);
 
     renderQuery(endpoint);
-    const allowed = await screen.findByLabelText("Allowed values");
+    const allowed = await screen.findByLabelText("Parameter 1 allowed values");
 
     await userEvent.type(allowed, "a,b");
     expect(allowed).toHaveValue("a,b");
@@ -860,7 +1029,7 @@ describe("Query section — ParamEditor", () => {
       vi.mocked(dataApi.useUpdateEndpoint).mockReturnValue({ mutateAsync: updateMutateAsync, isPending: false } as never);
       renderQuery(endpoint);
 
-      const allowed = await screen.findByLabelText("Allowed values");
+      const allowed = await screen.findByLabelText("Parameter 1 allowed values");
       await userEvent.clear(allowed);
       await userEvent.type(allowed, "EU, US, APAC");
       await userEvent.tab();
@@ -869,7 +1038,7 @@ describe("Query section — ParamEditor", () => {
       await waitFor(() => expect(updateMutateAsync).toHaveBeenCalled());
 
       // What the server returned, not what was typed.
-      await waitFor(() => expect(screen.getByLabelText("Allowed values")).toHaveValue("eu, us, apac"));
+      await waitFor(() => expect(screen.getByLabelText("Parameter 1 allowed values")).toHaveValue("eu, us, apac"));
     });
 
     // The other half of the same defect: a focus/blur that typed nothing
@@ -884,11 +1053,11 @@ describe("Query section — ParamEditor", () => {
       } as never);
       renderQuery(endpoint);
 
-      const allowed = await screen.findByLabelText("Allowed values");
+      const allowed = await screen.findByLabelText("Parameter 1 allowed values");
       await userEvent.click(allowed);
       await userEvent.tab();
 
-      expect(screen.getByLabelText("Allowed values")).toHaveValue("eu, us");
+      expect(screen.getByLabelText("Parameter 1 allowed values")).toHaveValue("eu, us");
       // Touching a field without changing it is not an edit.
       expect(screen.queryByText("Unsaved changes")).not.toBeInTheDocument();
     });
