@@ -57,27 +57,27 @@ Three consequences, in order of severity:
 - Modify: `frontend/src/main.tsx`
 - Test: a new test asserting the loader is configured
 
-- [ ] **Step 1: Write the setup module**
+- [x] **Step 1: Write the setup module**
 
 It must do three things: register a worker factory on `self.MonacoEnvironment`, import the language contributions for **sql** and **python**, and hand the resulting namespace to `loader.config({ monaco })`.
 
 **Choose the entry point by measurement, not by recall.** Import it, build, then open both editors in a browser and check the parity list above. Report which entry you chose and what you verified — "it rendered" is not parity.
 
-- [ ] **Step 2: Import it for its side effect in `main.tsx`**
+- [x] **Step 2: Import it for its side effect in `main.tsx`**
 
 One line, above `App`. Say in a comment why it is here and not in the editor components — a future reader will otherwise "tidy" it into `SqlEditor.tsx` and pull Monaco into every component test.
 
-- [ ] **Step 3: Prove the CDN is gone**
+- [x] **Step 3: Prove the CDN is gone**
 
 A unit test cannot see a network fetch. Assert what a unit test *can*: that the module calls `loader.config` with a `monaco` instance. **Then verify the real property in a browser** — reload with the network panel and confirm **zero requests to any host other than egret's own origin**.
 
 State honestly in your report which half each check covers. A test asserting `loader.config` was called does not prove the CDN is unused; only the network measurement does.
 
-- [ ] **Step 4: Run the suite and measure the bundle**
+- [x] **Step 4: Run the suite and measure the bundle**
 
 Report `dist` size before and after, and the largest new chunk. The estimate that justified this approach was ~3MB versus 24MB for self-hosting; if the real number is far off, say so rather than letting the estimate stand.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ---
 
