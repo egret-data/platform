@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -164,6 +164,13 @@ beforeEach(() => {
 
   vi.mocked(api.useDataApiUpdateEndpoint).mockReturnValue(
     { mutateAsync: vi.fn(), isPending: false } as unknown as ReturnType<typeof api.useDataApiUpdateEndpoint>,
+  );
+  // The shell renders a Restore button in its trashed banner, so a TRASHED
+  // fixture — which the caveat tests need, to prove the `<fieldset disabled>`
+  // is really in play — crashes the whole tree without this. Automocking
+  // returns `undefined`, not a stub.
+  vi.mocked(api.useDataApiRestoreEndpoint).mockReturnValue(
+    { mutateAsync: vi.fn(), isPending: false } as unknown as ReturnType<typeof api.useDataApiRestoreEndpoint>,
   );
   vi.mocked(api.useDataApiRevokeEndpointInvoke).mockReturnValue(
     { mutateAsync: revokeMutateAsync, isPending: false } as unknown as ReturnType<typeof api.useDataApiRevokeEndpointInvoke>,
@@ -440,16 +447,23 @@ describe("AccessSection — condition 2, Ranger", () => {
     );
   });
 
-  // The one thing this section must never do: read the SQL and project Ranger
-  // policy onto it. A half-right answer here is worse than none.
-  //
-  // Asserting the ABSENCE of some invented verdict string would pass against an
-  // empty component and against any wording change — it is unfalsifiable. What
-  // is falsifiable: the Ranger line must be BYTE-IDENTICAL for two accounts
-  // whose invoke status is opposite. Any code that let this line vary with
-  // something egret knows — invoke status, the grant list, the SQL — breaks
-  // this equality, and nothing else about the section does.
-  it("says exactly the same thing about data access for accounts with opposite invoke status", async () => {
+  /**
+   * The one thing this section must never do: read the SQL and project Ranger
+   * policy onto it. A half-right answer here is worse than none.
+   *
+   * The previous guard asserted the Ranger line was BYTE-IDENTICAL across two
+   * rows with opposite invoke status. That was the right property and the wrong
+   * shape — it accepted the sentence being repeated per row, which the browser
+   * pass then measured as 288px of column spent saying one thing N times (two
+   * accounts filled ~382px of a 786px box).
+   *
+   * Said ONCE, outside the row loop, the property is not merely asserted but
+   * unrepresentable: there is no per-row render left that could vary with
+   * invoke status, the grant list, or the SQL. This test is what pins the
+   * "once" — and it is falsifiable in the direction that matters, because
+   * putting the sentence back in the row makes the count N.
+   */
+  it("says the Ranger unknown exactly once, not once per account", async () => {
     setup({
       accounts: [SA_GRANTED, SA_NONE],
       grants: [makeGrant(SA_GRANTED.id, SA_GRANTED.name)],
@@ -457,19 +471,45 @@ describe("AccessSection — condition 2, Ranger", () => {
     });
     renderAccess();
 
-    const grantedRow = await screen.findByTestId(`access-row-${SA_GRANTED.id}`);
-    const noneRow = screen.getByTestId(`access-row-${SA_NONE.id}`);
+    // Guard the premise: two accounts, and their invoke status is OPPOSITE. A
+    // one-account fixture would make "once" true for the wrong reason, and two
+    // rows in the same state would not exercise the thing the old test was
+    // written to catch.
+    expect(await screen.findByText("Granted on this endpoint")).toBeInTheDocument();
+    expect(screen.getByText("Not granted")).toBeInTheDocument();
+    expect(screen.getAllByTestId(/^access-row-/)).toHaveLength(2);
 
-    // Guard the premise: if both rows had the same invoke status the equality
-    // below would hold trivially.
-    expect(within(grantedRow).getByText("Granted on this endpoint")).toBeInTheDocument();
-    expect(within(noneRow).getByText("Not granted")).toBeInTheDocument();
+    expect(screen.getAllByText(/egret cannot check whether these accounts may read/i)).toHaveLength(1);
 
-    const dataText = (row: HTMLElement) =>
-      within(row).getByText(/egret cannot check/i).parentElement?.textContent;
+    // …and it is above the table, not inside any row — which is what makes the
+    // count independent of how many accounts there are.
+    const sentence = screen.getByText(/egret cannot check whether these accounts may read/i);
+    expect(sentence.closest("table")).toBeNull();
+    expect(sentence.closest("[data-testid^=\"access-row-\"]")).toBeNull();
+  });
 
-    expect(dataText(grantedRow)).toBe(dataText(noneRow));
-    expect(dataText(grantedRow)).toMatch(/egret cannot check whether this account may read/i);
+  // The per-row half of condition 2 is the only part that was ever per-row: the
+  // trial has to run as THIS account or it answers a different question.
+  it("still offers a per-row Try it, preselected to that row's account", async () => {
+    setup({
+      accounts: [SA_GRANTED, SA_NONE],
+      grants: [makeGrant(SA_GRANTED.id, SA_GRANTED.name)],
+      canInvoke: {},
+    });
+    renderAccess();
+
+    const first = await screen.findByTestId(`access-row-${SA_GRANTED.id}`);
+    const second = screen.getByTestId(`access-row-${SA_NONE.id}`);
+    // Two rows, two DIFFERENT hrefs — a link hard-coded to `accounts[0]` reads
+    // identically on the page and answers the wrong account's question.
+    expect(within(first).getByRole("link", { name: /try it/i })).toHaveAttribute(
+      "href",
+      `/explore/eng/data-api/endpoints/ep-1/try?service_account=${SA_GRANTED.id}`,
+    );
+    expect(within(second).getByRole("link", { name: /try it/i })).toHaveAttribute(
+      "href",
+      `/explore/eng/data-api/endpoints/ep-1/try?service_account=${SA_NONE.id}`,
+    );
   });
 });
 
@@ -499,7 +539,7 @@ describe("AccessSection — the §5.3 warning", () => {
  * page — and comparing accounts is the entire job of this screen.
  */
 describe("AccessSection — the shape", () => {
-  it("names the two conditions once, as columns, with one row per account", async () => {
+  it("names the one per-row condition as a column, with one row per account", async () => {
     setup({
       accounts: [SA_GRANTED, SA_NONE],
       grants: [makeGrant(SA_GRANTED.id, SA_GRANTED.name)],
@@ -507,24 +547,28 @@ describe("AccessSection — the shape", () => {
     });
     renderAccess();
 
+    // THREE columns, not four. `Data` was one and every cell in it held the
+    // same sentence; the browser pass measured what that cost (see the
+    // component's doc) and it is section-level copy now.
     expect((await screen.findAllByRole("columnheader")).map((h) => h.textContent)).toEqual([
       "Service account",
       "Invoke",
-      "Data",
       // Named for a screen reader and hidden on screen — a visible heading over
       // one small button is louder than what it labels.
       "Actions",
     ]);
 
-    // Positions, not merely presence: a header row that says "Data" over the
-    // Invoke answer is a table that reads as wrong while every text assertion
-    // in this file still passes.
+    // Positions, not merely presence: a header row that says "Invoke" over the
+    // account name is a table that reads as wrong while every text assertion in
+    // this file still passes.
     const cells = within(screen.getByTestId(`access-row-${SA_GRANTED.id}`)).getAllByRole("cell");
-    expect(cells).toHaveLength(4);
+    expect(cells).toHaveLength(3);
     expect(cells[0]).toHaveTextContent(SA_GRANTED.name);
     expect(cells[1]).toHaveTextContent("Granted on this endpoint");
-    expect(cells[2]).toHaveTextContent(/egret cannot check whether this account may read/i);
-    expect(within(cells[3]).getByRole("button", { name: /revoke/i })).toBeInTheDocument();
+    // Both per-row actions share the last cell — the mutation and the link that
+    // answers the condition that is no longer a column.
+    expect(within(cells[2]).getByRole("button", { name: /revoke/i })).toBeInTheDocument();
+    expect(within(cells[2]).getByRole("link", { name: /try it/i })).toBeInTheDocument();
   });
 
   // Every state is a row spanning the table now, so the columns are named
@@ -551,5 +595,126 @@ describe("AccessSection — the shape", () => {
     const { container } = renderAccess();
     const heading = await screen.findByRole("heading", { name: "Access", level: 2 });
     expectSectionCapsItsOwnWidth(container, heading);
+  });
+});
+
+/**
+ * The caveat that must not set the row height.
+ *
+ * It is the difference between "revoking works" and "revoking looks like it
+ * worked", so it must stay reachable — but as a wall of text in a cell it made
+ * one row 293px against an 89px neighbour (measured in the browser at a 786px
+ * content box), and the rows then disagreed visually for a reason that was not
+ * about importance.
+ *
+ * The split these tests pin: **the consequence is the summary and is on screen
+ * with nothing clicked; the reason is behind the disclosure.** Collapsing the
+ * headline itself would be the mistake `TryIt`'s doc records against drawers —
+ * collapsing the paragraph under it is the point.
+ */
+describe("AccessSection — the row-scoped caveat", () => {
+  function renderGrantedAndAlsoInherited(endpoint?: DataApiEndpointDto) {
+    setup({
+      accounts: [SA_GRANTED],
+      grants: [makeGrant(SA_GRANTED.id, SA_GRANTED.name)],
+      canInvoke: { [SA_GRANTED.id]: true },
+    });
+    return renderAccess(endpoint);
+  }
+
+  it("puts the consequence on screen unclicked and the reason behind the disclosure", async () => {
+    renderGrantedAndAlsoInherited();
+    const row = await screen.findByTestId(`access-row-${SA_GRANTED.id}`);
+
+    // The load-bearing half, with nothing interacted with. This is the
+    // assertion that would fail if the caveat were collapsed WHOLE — which is
+    // the failure mode that matters, because an admin who never opens it would
+    // click Revoke believing it removes the access.
+    const summary = within(row).getByText("Revoking will not remove access");
+    const details = summary.closest("details");
+    expect(details).not.toBeNull();
+
+    // jsdom does not hide a closed `<details>` — it has no layout to hide it
+    // with, and Testing Library does not exclude its contents (§11.3). So
+    // `toBeVisible` passes either way and says nothing; the `open` ATTRIBUTE is
+    // the only observable, and it is what changes.
+    expect(details).not.toHaveAttribute("open");
+
+    // The reason is INSIDE the disclosure, not beside it — otherwise nothing
+    // has been taken out of the row's height.
+    const body = within(details!).getByText(/also reaches invoke through the workspace/i);
+    expect(body.closest("summary")).toBeNull();
+    expect(within(details!).getByRole("link", { name: /membership/i })).toBeInTheDocument();
+
+    await userEvent.click(summary);
+    expect(details).toHaveAttribute("open");
+  });
+
+  /**
+   * §11.2, and the trap it was written for. The shell wraps every section in
+   * `<fieldset disabled={trashed}>`, which disables every BUTTON under it — a
+   * Radix `Collapsible` trigger included. Swapping `ui/collapsible` in here
+   * would make the caveat unopenable on exactly the endpoint where an admin is
+   * deciding whether to restore it, and every text assertion above would still
+   * pass because jsdom does not hide a closed disclosure either way.
+   *
+   * A `<summary>` is not a form control. That is the whole reason it is one.
+   */
+  it("keeps the caveat openable on a trashed endpoint, where a Radix trigger could not be", async () => {
+    // Trashing an endpoint disables it, so the probe cannot run and this row's
+    // caveat is the "may not" one rather than the "will not" one. Same
+    // `Caveat`, which is what this test is about — and it is the caveat that
+    // matters most here, because the reader is deciding whether to restore.
+    renderGrantedAndAlsoInherited(
+      makeEndpoint({ state: "disabled", deleted_at: "2026-08-18T09:00:00Z" } as Partial<DataApiEndpointDto>),
+    );
+    const row = await screen.findByTestId(`access-row-${SA_GRANTED.id}`);
+    const headline = within(row).getByText("Revoking may not remove access");
+    const summary = headline.closest("summary");
+    expect(summary).not.toBeNull();
+
+    // Guard the premise: the fieldset really is disabled here, so this is a
+    // test about surviving it rather than a test that happens to pass because
+    // nothing was disabled in the first place.
+    const fieldset = summary!.closest("fieldset");
+    expect(fieldset).not.toBeNull();
+    expect(fieldset).toBeDisabled();
+
+    // …and the disclosure contains no form control that the fieldset could
+    // reach. A `ui/collapsible` renders a `<button>` here.
+    const details = summary!.closest("details")!;
+    expect(within(details).queryByRole("button")).not.toBeInTheDocument();
+
+    /**
+     * `fireEvent`, not `userEvent`, and the difference is the finding.
+     *
+     * `userEvent.click` REFUSES this click — the identical gesture in the test
+     * above works, and the only difference between the two renders is
+     * `deleted_at`, so it is the disabled `fieldset` that stops it. That is
+     * userEvent being stricter than the platform: `fieldset[disabled]` disables
+     * *form-associated* descendants, and `<summary>` is not one, so every
+     * browser opens this. `fireEvent` dispatches the event and jsdom's own
+     * summary activation behaviour runs it — which is the evidence that the
+     * element is genuinely activatable here rather than an assertion that it
+     * ought to be.
+     *
+     * Recorded because the failure mode is a FALSE NEGATIVE: a later test of
+     * any non-form affordance inside a trashed section, written with
+     * `userEvent` out of habit, will report the product broken when it is not.
+     */
+    fireEvent.click(headline);
+    expect(details).toHaveAttribute("open");
+  });
+
+  // A six-word transient status has no explanation to hold, so collapsing it
+  // would cost a click to reveal nothing — §11.2's rule applied per caveat
+  // rather than per section: collapse a thing because it is big.
+  it("leaves the short transient states as plain text, not as an empty disclosure", async () => {
+    setup({ accounts: [SA_NONE], grants: [] });
+    renderAccess(makeEndpoint({ state: "draft", live_version_id: null }));
+
+    const row = await screen.findByTestId(`access-row-${SA_NONE.id}`);
+    const line = within(row).getByText(/Workspace-inherited invoke is unchecked/i);
+    expect(line.closest("details")).toBeNull();
   });
 });
