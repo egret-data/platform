@@ -1499,7 +1499,11 @@ describe("Query section — the editor, the split and the preview", () => {
    * in this file went on passing unchanged when the default flipped.
    */
   it("starts with the strip collapsed, and says what is inside it", async () => {
-    show(makeEndpoint({ params: [{ name: "region", ty: "string", required: true }] }));
+    show(makeEndpoint({
+      params: [
+        { name: "region", type: ParamType.string, location: ParamLocation.query, required: true },
+      ],
+    }));
     const summary = await screen.findByText(/Database and parameters/);
     const details = summary.closest("details")!;
 
