@@ -320,10 +320,11 @@ One column, deliberately. A two-column grid pads the short groups to the height 
 one beside them, and CSS `columns` fights the flex container the page sits in and clips the
 form at the fold. Both were tried on this editor and both were wrong.
 
-### 4.2 When a card is still right
+### 4.2 A read-only listing is not a setting, and an action is not a setting
 
-`src/routes/explore/dataapi/detail/ResponseSection.tsx` keeps two cards deliberately, and its
-doc comment records why:
+`src/routes/explore/dataapi/detail/ResponseSection.tsx`. Only `Output shape` was
+config-shaped, and only it became a `ConfigTableGroup` + rows. The other two blocks are not
+rows of that table, and the reason is the durable part of this section:
 
 - **Frozen columns** — a read-only `Name | Type` listing of the *published* contract. There
   is no Value to edit. Forcing it into the shared table would either fabricate a Value column
@@ -331,11 +332,137 @@ doc comment records why:
 - **OpenAPI document** — a paragraph, a download button, and a derived base URL. An action,
   not a setting.
 
-Only `Output shape` was config-shaped, and only it became a `ConfigTableGroup` + rows.
-
 **The rule:** the complaint that removed the `ConfigSection`s was about cards framing
-near-empty tables, not about cards. A read-only listing is not a setting, and an action is
-not a setting.
+near-empty tables (§4.1), not about cards.
+
+#### The part of this section that was reversed, and why
+
+Until the final task of the phase this section was titled *"When a card is still right"*, and
+those same two blocks were `Card`s — kept deliberately in #521, on the argument above. **The
+argument was right and the conclusion did not follow**, which is the useful thing to record:
+"not a `ConfigTable` row" was being read as "therefore a `Card`", because at the time those
+were the only two options anyone had written down.
+
+§4.3 then supplied the third — a heading plus a plain `Table`, or plain prose, in the
+section's `space-y-6` rhythm — and against it both blocks moved:
+
+- **Frozen columns is the textbook §4.3 shape**: `Name | Type`, one row per column, read
+  down. It is structurally identical to the publish history `Versions` converted, whose own
+  doc comment cites this section as its precedent while doing the opposite thing to the same
+  shape. Dropping the card is also what *forces* §4.3's second rule — the states became rows
+  spanning the table, and before that the branch replaced the table and took `Name` and `Type`
+  with it, so an author who had never published saw a sentence with nothing on screen naming
+  what a frozen column is. The card title had been carrying that alone. It was, additionally,
+  the section's third table idiom: a hand-written `<table>` beside a `ConfigTable`, in a tab
+  set that otherwise uses the shared `Table`.
+- **The OpenAPI block is not a list, so §4.3 does not reach it** — it moved on the narrower
+  point that "an action is not a setting" argues against `ConfigTable` and not for a frame.
+  `Versions` already renders that exact shape (prose, then a button that opens a dialog) under
+  an `h3` with no card, and the one thing in the block that wants a visual boundary is the 409
+  `Alert`, which brings its own.
+
+What settled it was neither consistency on its own nor the recorded decision on its own.
+**A recorded rationale binds its argument, not its conclusion**: re-read it against the
+options that exist now, and if the conclusion no longer follows, say which premise stopped
+carrying it. Here nothing in #521's reasoning became false — an option appeared that it had
+never weighed.
+
+`ResponseSection.tsx`'s doc comment carries this so it does not have to be re-litigated from
+the git history, and `EndpointDetail.test.tsx`'s "Output shape as a group row" test pins all
+three claims at once: `Output shape` is a `rowheader`, the other two are headings and not
+rowheaders, and neither is inside a `.bg-card`.
+
+### 4.3 A list is a plain `Table`, and its three states are rows inside it
+
+`src/routes/explore/dataapi/detail/Versions.tsx` (the publish history),
+`detail/AccessSection.tsx` (one row per service account), `detail/TryIt.tsx` (parameter
+values), `detail/ParamEditor.tsx`, `detail/ResponseSection.tsx` (the frozen `Name | Type`
+contract — the last one, and the one that made §4.2 reverse itself).
+
+`ConfigTable` is `Setting | Details | Value` for a **fixed set of settings read across**. A
+**list read down** — one row per snapshot, per principal, per parameter — takes a plain
+`Table` instead: there is no Value to edit, only a per-row action, and forcing one in would
+fabricate the empty third cell §4.1 records as the confusion the cards were replaced to
+remove.
+
+Two things that came out of converting `Versions` and `Access`:
+
+- **The loading / error / empty states are rows spanning the table, not a branch that
+  replaces it.** With a card, the states sat *inside the frame* and the frame carried the
+  section's name. Without one, a branch that replaces the table takes the column headers with
+  it — so before the first publish, `Versions` would say "never published" with nothing on
+  screen to say what a version even records. As spanning rows, the columns are named in every
+  state. The shared `TableCell` is `whitespace-nowrap`, so a cell holding a sentence needs
+  `whitespace-normal` or it scrolls the table sideways.
+
+  `ResponseSection`'s frozen-column list is the third case and has **four** states, not three
+  — "loading", "the fetch failed", "never published" and the list itself — because the first
+  two are gated on `endpoint.live_version_id` (§2.1/§2.2 inside one section). Its test asserts
+  the `Name`/`Type` `columnheader`s and the `colSpan` in each of the three non-list states in
+  one loop, deliberately: the regression is somebody re-writing *one* branch as a replacement,
+  and a test covering only the empty state passes while the loading branch does it.
+- **A column whose every cell is identical is section-level copy in disguise.** This
+  document said the opposite for one commit, and the browser disproved it. `Access`'s `Data`
+  column held the same 143-character sentence in every cell, and the argument for it was that
+  *the constancy is the fact* — egret never knows whether an account may read the tables. The
+  reasoning is sound and the conclusion was wrong: a sentence true of every row is a
+  statement about the **section**, and repeating it costs a column. Measured at a 786px
+  content box, the two rows came to 89px and 293px — ~382px for two accounts, with 288px of
+  width spent saying one thing N times.
+
+  **The test for it:** ask what is left of the column once the constant sentence is hoisted.
+  For `Access` it was one thing, the `Try it` link carrying `?service_account=<id>` — and
+  that is an *action*, so it joined the actions column and the `Data` column went. **Do not
+  keep a column empty for symmetry.** Say once, above the table, that the condition is not a
+  column and why; a reader who expects it is then told where it went instead of assuming it
+  was dropped.
+
+**What the labels buy.** `Access`'s Invoke condition used to be a `<dt>` inside each row's
+`<dl>`, which repeated the word on every row and left each row's answer at a different
+vertical offset from the one above it. As a column the label is written once and the answers
+line up down the page — and comparing accounts is the whole job of that screen.
+
+### 4.4 A row-scoped caveat: the consequence in the summary, the reason behind it
+
+`src/routes/explore/dataapi/detail/AccessSection.tsx` — `Caveat`.
+
+Some per-row prose genuinely *is* per-row. `Access`'s "this account also reaches invoke
+through the workspace, so revoking here removes the grant but not the access" is the
+difference between "revoking works" and "revoking looks like it worked", and it must stay
+reachable. But as 155 characters of running text in a cell it made that row 293px against an
+89px neighbour — **rows disagreeing visually for a reason that is not about importance.**
+
+The form that fixes it without hiding anything is a native `<details>` whose **`<summary>`
+carries the consequence** and whose body carries the explanation:
+
+> ▸ Revoking will not remove access
+> *(open)* This account also reaches invoke through the workspace, so revoking here removes
+> the grant but not the access. [Workspace membership]
+
+**Why this is not the drawer mistake.** §11.2 records the opposite ruling for `TryIt`'s
+warning: a reader who must open something to learn a call is real has already pressed the
+button. That rule holds here, and the split is what satisfies it — the load-bearing fact is
+the summary and is on screen with nothing clicked. What is collapsed is the *why* and the
+*where to go instead*, which is what a reader goes looking for once the headline has stopped
+them. **Collapsing the headline would be the mistake; collapsing the paragraph under it is
+the point.**
+
+Three constraints on the form, all load-bearing:
+
+- **Native `<details>`, never `ui/collapsible`** — §11.2's rule, and here the stakes are
+  highest: the shell's `<fieldset disabled={trashed}>` disables a Radix trigger, so the
+  caveat would be unopenable on exactly the endpoint where an admin is deciding whether to
+  restore it.
+- **Not hover-only.** `<summary>` is focusable and toggles on Enter/Space, so keyboard and
+  touch reach it the way a pointer does. A `title` tooltip is cheaper and hides it from both.
+- **Collapse a caveat because it is big, not because its neighbour is.** `Access`'s transient
+  "Checking workspace-inherited invoke…" stays plain text: six words, no explanation to hold,
+  so a disclosure costs a click to reveal nothing.
+
+**An action column's header is `sr-only`.** A visible "Actions" heading over one small
+button is louder than what it labels; an unnamed column is worse for anyone not reading it
+visually. `getAllByRole("columnheader")` still sees the name, which is what the shape tests
+assert on.
 
 ---
 
@@ -355,7 +482,9 @@ that read worse stretched across a wide monitor.
 
 **So sections own their own caps**, on their own root element, visible next to the layout they
 constrain: `AccessSection.tsx`, `TryIt.tsx`, `Versions.tsx` and `ResponseSection.tsx` all use
-`max-w-5xl`, and `ResponseSection.tsx`'s frozen-column table adds `max-w-xl`. Query needs none
+`max-w-5xl`, and `ResponseSection.tsx`'s frozen-column table adds `max-w-xl` (it kept that cap
+across the §4.2 conversion — the class moved from a hand-written `<table>` onto the shared
+`Table`, which is where the `w-full` it caps comes from). Query needs none
 and gained the most —
 its SQL editor went from 768px to 1424px (measured during the width pass, not by this
 document; the same applies to the figures in §5.4 and §5.5).
@@ -426,8 +555,10 @@ at a ~1470px content box: Setting 288 / Value 208 / Details ~975, with `max-w-pr
 sentence near 585px — ~390px of empty column, and the Shape and Key-naming Selects ~1260px right
 of the labels they answer to, where the old route cap put them at ~560px. That is the same
 complaint that earned `Versions` its cap, so the fix wave gave Response the same `max-w-5xl` root
-(~816px), which also reins in the `Frozen columns` and `OpenAPI document` Cards — the frozen
-*table* had `max-w-xl`, its Card did not.
+(~816px), which also reined in the `Frozen columns` and `OpenAPI document` Cards — the frozen
+*table* had `max-w-xl`, its Card did not. (Those two Cards are gone as of §4.2's reversal. The
+measurement is kept: it is why the section root is capped, which is still true, and "the frame
+stretched further than the content it framed" was one input to removing them.)
 
 The general rule: **a task that rebuilds a surface and a task that measures widths must agree on
 the same list of surfaces**, or the difference between the two lists ships.
@@ -464,6 +595,27 @@ test and only that one. `Response`'s new cap is pinned the same way as `Versions
 The test's own comment is honest about its limits: the class-name assertions are weak and are
 meant to be — they exist only so a cap cannot come back, or vanish, silently. **Whether the
 width is well spent is a question only a browser can answer.** See §10.
+
+### 5.6 The section guard is one helper, not one copy per section
+
+`src/routes/explore/dataapi/__tests__/sectionWidth.ts` —
+`expectSectionCapsItsOwnWidth` / `expectSectionLeavesWidthToThePage`.
+
+Three sections had the walk in §5.5 copy-pasted and **two had no guard at all**: `Try it` and
+`Access`. That is how `Try it` shipped a `max-w-5xl` nothing was holding in place — §5.1
+lists it among the four sections that cap themselves, and nothing said so in code. The walk,
+the host resolution and the two regexes now live in one module and all five sections call it.
+
+Two details are load-bearing and were preserved from the copies:
+
+- **The two regexes differ, on purpose.** The positive form is unprefixed
+  (`/(?:^|\s)max-w-/`), because a section capped only at `lg:` is uncapped on exactly the
+  narrow viewports nobody measured. The negative form includes responsive prefixes, because
+  `lg:max-w-3xl` wastes the page on exactly the wide ones the pass *did* measure.
+- **The host is resolved, not assumed**, so the same helper works under the real
+  `EndpointDetail` shell (walk stops at the `fieldset`) and under a harness that stubs the
+  context and renders the section under a bare `Outlet` (`TryIt.test.tsx`), where the section
+  root is a child of the render container.
 
 ---
 
@@ -606,6 +758,13 @@ caught only downstream.
   **months earlier**: `kind_perms` at `crates/egret-bi/src/routes.rs`, dated by `git log -S`,
   with migration `0122` seeding `data_api_endpoint:read` and `:manage` onto `ws_admin`.
 - A consumer count was guessed, then mismeasured, then quietly rounded — §7.2.
+- A `Card` count in this document's own [Adoption status](#adoption-status) read "8
+  occurrences … two are the deliberate keeps of §4.2; the other six are the open question".
+  The eight were `<Card>`/`<CardHeader>`/`<CardTitle>`/`<CardContent>` on each of the two
+  keeps — **there was no third block**, and the plan written from that line inherited the
+  arithmetic and asked an implementer to "convert the rest". A **symbol-family** count is not
+  a **block** count. The same line's "down from 4 files" was 4 sections; the measured answer
+  under `detail/` is 5, because `ParamEditor` imported `Card` too.
 
 The false belief was also **written into the codebase**, in three doc comments asserting
 endpoint folders were not creatable. Two were fixed and a third was found later — the one a
@@ -656,6 +815,96 @@ Practical rules that fall out of this:
 
 ---
 
+## 11. "Configure, run, read the result" is a split, not a stack
+
+`src/routes/explore/dataapi/detail/Query.tsx` (the first), `detail/TryIt.tsx` (the second).
+
+Two sections of the endpoint editor have the same shape — set something up, run it, read what
+came back — and both are now a vertical `Group` from `react-resizable-panels` with a drag
+handle between the halves, rather than a page that scrolls.
+
+**The defect.** Stacked, the result sits below the setup and off-screen: run it, scroll down,
+read, scroll back up to change a value, scroll down again. `Query`'s preview was below
+`ParamEditor`, and `TryIt`'s result below a `Run as` card. In a browser `Query`'s first
+version of the split was worse still — the strip of tables took 370px of a 615px section and
+left the SQL editor 107px, about four lines, which no test could see.
+
+The parts, all four load-bearing:
+
+- **The setup is tables** (§4) — a `ConfigTable` row for a setting, a plain `Table` for a list.
+  `TryIt`'s service-account picker is one `ConfigTableRow`; its per-parameter trial *values*
+  are a plain table, one row each.
+- **The result is the lower panel, and it owns the run control.** The button and the shortcut
+  live in the *result* panel's header, not with the setup: `PreviewBlock` and `TryIt` both put
+  `Run` there, and the header stays put while the body scrolls.
+- **The shortcut is named beside the button it fires.** `⌘↵`, in the header. An affordance
+  nobody can see is not an affordance. `Query` registers it as a Monaco command (`SqlEditor`'s
+  `onRun`); `TryIt` has no editor, so it uses a `window` `keydown` listener, the idiom
+  `components/sqllab/SqlTab.tsx` already uses for `⌘K`.
+- **Sizes are percent STRINGS.** In `react-resizable-panels` v4 a bare number means *pixels*,
+  so `defaultSize={55}` is a 55-pixel editor that reads as correct in the source. Both sections
+  are tested for the string *type*, not only the value.
+
+### 11.1 The shortcut is not covered by any of the guards the button has
+
+A `window` key handler is not a form control, so it walks straight past the shell's
+`<fieldset disabled={trashed}>`, past the button's own `disabled`, and past a pending
+mutation. Every guard the button expresses declaratively has to be re-checked at the top of
+the run function — `PreviewBlock` re-checks `isPending`, and `TryIt` re-checks account,
+`isPending` and `trashed` in one `canRun`. Before it had a shortcut, `TryIt` did not read
+`trashed` at all; adding one without the guard would have made a trashed endpoint runnable by
+keyboard only. `Query` solves the same problem one level up, by passing
+`onRun={trashed ? undefined : …}` so the command is never registered.
+
+The listener must also reach the *current* form. A `[]`-dependency listener closes over the
+first render's callback and posts an empty body; re-subscribing every keystroke churns a
+window listener per character. Both sections refresh a ref after every render instead
+(`PreviewBlock`'s `useImperativeHandle` carries no dependency array, `TryIt` an effect with
+none).
+
+### 11.2 A `<details>` strip, and when *not* to use one
+
+`Query` puts its tables in a native `<details>` above the split, collapsed by default, because
+`ParamEditor` is 370px of the section (the measurement above).
+
+**Native `<details>`/`<summary>`, never `ui/collapsible`.** The shell disables the whole
+section for a trashed endpoint, and a Radix trigger is a `<button>` — so a trashed endpoint
+could not collapse the strip. `<summary>` is not a form control and the `fieldset` does not
+touch it. §4.4 applies the same rule to a per-row caveat, where the consequence of getting it
+wrong is larger: a strip that will not collapse is an annoyance, a caveat that will not open
+is a warning the reader cannot reach.
+
+**`userEvent` will not click it inside a trashed section, and the product is fine.**
+`userEvent.click` refuses to open a `<details>` under `<fieldset disabled>`; `fireEvent.click`
+opens it, and jsdom's own summary activation behaviour runs. That is userEvent being stricter
+than the platform — `fieldset[disabled]` disables *form-associated* descendants, and
+`<summary>` is not one, so every browser opens it. Measured in `AccessSection.test.tsx`'s
+trashed-caveat test, whose only difference from the passing untrashed test is `deleted_at`.
+**The failure mode is a false negative**, so a test of any non-form affordance inside a
+trashed section must use `fireEvent`, or it reports the product broken when it is not.
+
+**`TryIt` deliberately has no strip**, and the reason generalises: its setup is one picker and
+a short row per parameter, and the prose that would have gone in the drawer is a *warning* —
+a trial spends the rate limit, writes the access log and fills the cache for real.
+`PreviewBlock` already records why that class of copy travels with the button ("a reader who
+has to scroll to find that has already pressed the button"), and a drawer closed by default is
+worse than a scroll. **Collapse a strip because it is big, not because the other section has
+one.**
+
+### 11.3 What a test can say about any of this
+
+jsdom does no layout (§10), so the drag, the heights and the widths are a browser check. What
+is testable is the wiring, and it is where the regressions were: which panel each half is in
+(`within(panels[0])` / `within(panels[1])`), that the handle is *between* them
+(`compareDocumentPosition`), that the sizes are strings, that the shortcut fires the mutation
+with the on-screen values, and that it fires nothing when a guard in §11.1 should stop it.
+
+**jsdom does not hide a closed `<details>`** — it has no layout to hide it with, and Testing
+Library does not exclude its contents. Assert the `open` **attribute**; `toBeVisible` passes
+either way and says nothing.
+
+---
+
 ## Adoption status
 
 Honest scope, measured on the current tree, so nobody reads this as describing code that does
@@ -666,8 +915,42 @@ not exist yet:
   hand-write their headers.
 - `ListStates` — 2 route files (`Endpoints`, `Clients`).
 - `EmptyState` — 10 files (2 Data API, 8 control-plane).
-- `ConfigTable` — 13 production files; `ConfigTableGroup` is used by Data API's `Config` and
-  `ResponseSection`.
+- `ConfigTable` — **15** production files; `ConfigTableGroup` is used by Data API's `Config`
+  and `ResponseSection`. Measured with
+  `git grep -l 'from "@/components/config/ConfigTable"' <rev> -- frontend/src`, minus
+  `__tests__`, at three revisions: **13** at the merge base `63a4fb90`, 14 after `Query`
+  (#529), 15 after `Try it`. The three sections after it (`Versions`, `Access`, `Response`)
+  added none, and that is the expected result rather than a gap — all three converted *lists*
+  (§4.3), and a list does not want a `Setting | Details | Value` table. Re-measured at the end
+  of the phase: still 15.
+- The plain-`Table` list of §4.3 — **5** files, all Data API endpoint detail (`ParamEditor`,
+  `TryIt`, `Versions`, `AccessSection`, `ResponseSection`). Measured with
+  `grep -rl 'from "@/components/ui/table"' src/routes/explore/dataapi/`, which also returns
+  `Activity.tsx` and `ActivityCallList.tsx` — list pages, not detail sections, and not counted
+  here.
+- `Card` under `routes/explore/dataapi/` — **0** files, down from **5** at the merge base
+  (`git grep -l 'from "@/components/ui/card"' 63a4fb90 -- frontend/src/routes/explore/dataapi/`
+  gives `AccessSection`, `ParamEditor`, `ResponseSection`, `TryIt`, `Versions`). Two numbers in
+  the previous revision of this list were wrong and are corrected rather than carried forward,
+  which is §9 happening to this document again:
+  - "down from **4** files" — that was the four *sections*; `ParamEditor` also imported `Card`
+    and is under `detail/`. Five files, by the command above.
+  - "8 occurrences … two of those eight are the deliberate keeps of §4.2; the other six are
+    the open question". There was no third card block: `grep -o '<Card[A-Za-z]*'` on
+    `ResponseSection` at that revision gives `<Card` ×2, `<CardHeader` ×2, `<CardTitle` ×2,
+    `<CardContent` ×2 — **the eight occurrences *are* the two deliberate keeps**, four JSX tags
+    each. The plan inherited the same arithmetic ("8 `<Card>`… convert the rest"), and there
+    was no rest. A symbol-family count is not a block count — the same trap §7.2 records for
+    consumer counts, one level down.
+- The `Caveat` disclosure of §4.4 — **1** file (`AccessSection`), 3 call sites. New, and
+  deliberately narrow: it earns its place where a row-scoped explanation is big enough to set
+  the row height, which so far is one screen. The same file's short transient states stay
+  plain text, which is the rule working rather than an inconsistency.
+- The split of §11 — **2** sections, both Data API endpoint detail (`Query`, `TryIt`); `react-resizable-panels` itself is also used by `components/sqllab/SqlTab.tsx`, which is
+  where the idiom came from. `Versions` and `Access` are deliberately not splits: neither is
+  "configure, run, read the result" — there is nothing to run.
+- The section-width guard of §5.6 — **5** sections (`Config`, `Response`, `Versions`,
+  `Try it`, `Access`), one helper. It was 3 copies and 2 absences before this phase.
 - `ConfigSection` — 13 files, down from **15** at the merge base. This is the fifth count of
   this number in the programme and the first measured at both ends:
   `grep -rl 'from "@/components/form/ConfigSection"' src` gives 15 at `63a4fb90` and 13 at

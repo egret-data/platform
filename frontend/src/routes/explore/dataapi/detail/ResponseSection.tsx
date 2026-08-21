@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ConfigTable, ConfigTableGroup, ConfigTableRow } from "@/components/config/ConfigTable";
 import {
   useDataApiGetOpenapi,
@@ -31,17 +31,52 @@ interface OpenApiDocPreview {
  * columns are keyed in the response body, and the served base URL plus the
  * per-service-account OpenAPI download.
  *
- * The `output` controls are a `Setting | Details | Value` table whose "Output
- * shape" heading is a `ConfigTableGroup` row, replacing the `ConfigSection`
- * card that used to frame those two rows.
+ * # Why there are no `Card`s here any more, having deliberately kept two
  *
- * The other two blocks keep their cards, deliberately. A frozen column list is
- * a `Name | Type` table of the PUBLISHED contract — data, not settings, with no
- * Value to edit — and the OpenAPI block is a paragraph, a download button and
- * a base URL. Neither is `Setting | Details | Value` shaped, and folding them
- * into the config table would make read-only output look editable. The
- * complaint that removed the `ConfigSection`s was about cards framing
- * near-empty tables, not about cards.
+ * #521 kept `Frozen columns` and `OpenAPI document` as cards on a recorded
+ * argument (`docs/en/ui-conventions.md` §4.2): neither is
+ * `Setting | Details | Value` shaped, so folding either into the shared
+ * `ConfigTable` would fabricate a Value column for read-only output and make
+ * it look editable. **That half of the argument is still correct and neither
+ * block has become a `ConfigTable` row.** What changed is that it was a
+ * choice between two options and there are now three.
+ *
+ * §4.3 — written after #521, converting `Versions` and `Access` — established
+ * the third: a heading plus a plain `Table` in the section's `space-y-6`
+ * rhythm, with loading / error / empty as rows *spanning* the table. Measured
+ * against that:
+ *
+ * - **Frozen columns is the textbook §4.3 shape.** `Name | Type`, one row per
+ *   column, read down, no Value anywhere in it — structurally identical to the
+ *   publish history `Versions` converted, whose own doc comment cites §4.2 as
+ *   its precedent while doing the opposite thing. It was also the section's
+ *   third table idiom: a hand-written `<table>` beside a `ConfigTable` and,
+ *   elsewhere in the tab set, the shared `Table`.
+ *
+ *   Dropping the card is what *forces* the states into the table, and that is
+ *   the reader-visible part. Before, the branch replaced the table and the
+ *   `Name`/`Type` headers went with it — so an author who had never published
+ *   got a sentence with nothing on screen saying what a frozen column even is,
+ *   and the card's title was carrying that alone. As spanning rows the columns
+ *   are named in all four states.
+ *
+ * - **The OpenAPI block is not a list, so §4.3 does not reach it** — but "an
+ *   action is not a setting" is an argument against `ConfigTable`, not an
+ *   argument for a frame. `Versions` already renders exactly this shape
+ *   (prose, then a button that opens a dialog) with an `h3` and no card, and
+ *   the one thing here that wants a visual boundary — the 409 — is an `Alert`,
+ *   which brings its own. Keeping it would have left the endpoint editor with
+ *   a single card in one section out of six, which reads as an oversight
+ *   rather than as a distinction, and the next reader would re-open the
+ *   question this comment exists to close.
+ *
+ * The complaint that removed the `ConfigSection`s (§4.1) was about cards
+ * framing near-empty tables, not about cards — that remains true, and it is
+ * not the reason either of these went. The reason is that both blocks read as
+ * the same *kind* of thing as their four sibling sections, and now look it.
+ *
+ * The `output` controls are unchanged: a `Setting | Details | Value` table
+ * whose "Output shape" heading is a `ConfigTableGroup` row.
  */
 export default function ResponseSection() {
   const { ws, id, endpoint, form, setForm } = useEndpointDetail();
@@ -100,8 +135,6 @@ export default function ResponseSection() {
     // 585px — ~390px of empty column, with the two Selects sitting ~1260px
     // right of the labels they answer to. `max-w-5xl` puts them back at
     // ~816px, and it is the same cap the three sibling sections already use.
-    // It also reins in the two Cards below, which were stretching the full
-    // viewport (the frozen-columns TABLE got `max-w-xl`; its Card did not).
     <div className="max-w-5xl space-y-6">
       <div>
         <h2 className="text-lg font-semibold">Response</h2>
@@ -110,48 +143,63 @@ export default function ResponseSection() {
         </p>
       </div>
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Frozen columns</CardTitle>
-        </CardHeader>
-        <CardContent>
-          {columnsLoading ? (
-            <p className="text-sm text-muted-foreground">Loading…</p>
-          ) : columnsErrored ? (
-            <Alert variant="destructive">
-              <AlertDescription>
-                Could not load the published contract.{" "}
-                {(versionsQuery.error as unknown as Error)?.message ?? "Try again in a moment."}
-              </AlertDescription>
-            </Alert>
-          ) : !endpoint.live_version_id || !liveVersion ? (
-            <p className="text-sm text-muted-foreground">
-              This endpoint has no live version yet. Publish it to see the columns a consumer will receive
-              — these come from the published contract, not the draft.
-            </p>
-          ) : (
-            // Two short columns — a column name and a type. Left at `w-full`
-            // with the page cap gone, `bigint` sat a screen-width away from the
-            // column it describes.
-            <table className="w-full max-w-xl text-sm">
-              <thead className="text-left text-muted-foreground">
-                <tr>
-                  <th className="pb-1 font-medium">Name</th>
-                  <th className="pb-1 font-medium">Type</th>
-                </tr>
-              </thead>
-              <tbody>
-                {liveVersion.snapshot.columns.map((c) => (
-                  <tr key={c.name} className="border-t border-border">
-                    <td className="py-1 font-mono text-xs">{c.name}</td>
-                    <td className="py-1 text-muted-foreground">{c.ty}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </CardContent>
-      </Card>
+      <div className="space-y-2">
+        <h3 className="text-sm font-medium">Frozen columns</h3>
+        {/* Two short columns — a column name and a type. Left at the shared
+            `Table`'s `w-full`, `bigint` sat a screen-width away from the column
+            it describes even inside the section cap, so the table keeps the
+            `max-w-xl` it was given in the width pass (§5.1). Auto layout, not
+            `table-fixed`: nothing here truncates, and the state rows below are
+            sentences that want to wrap rather than scroll. */}
+        <Table className="max-w-xl">
+          <TableHeader>
+            <TableRow>
+              <TableHead>Name</TableHead>
+              <TableHead>Type</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {/* The four states are rows spanning the table rather than a branch
+                that replaces it (§4.3), so `Name`/`Type` are on screen in every
+                one of them — with the card gone there is otherwise nothing left
+                to say what this list even records. `whitespace-normal` because
+                the shared `TableCell` is `whitespace-nowrap` and these are
+                sentences. */}
+            {columnsLoading ? (
+              <TableRow className="hover:bg-transparent">
+                <TableCell colSpan={2} className="whitespace-normal text-sm text-muted-foreground">
+                  Loading…
+                </TableCell>
+              </TableRow>
+            ) : columnsErrored ? (
+              <TableRow className="hover:bg-transparent">
+                <TableCell colSpan={2} className="whitespace-normal">
+                  <Alert variant="destructive">
+                    <AlertDescription>
+                      Could not load the published contract.{" "}
+                      {(versionsQuery.error as unknown as Error)?.message ?? "Try again in a moment."}
+                    </AlertDescription>
+                  </Alert>
+                </TableCell>
+              </TableRow>
+            ) : !endpoint.live_version_id || !liveVersion ? (
+              <TableRow className="hover:bg-transparent">
+                <TableCell colSpan={2} className="whitespace-normal text-sm text-muted-foreground">
+                  This endpoint has no live version yet. Publish it to see the columns a consumer will
+                  receive — these come from the published contract, not the draft.
+                </TableCell>
+              </TableRow>
+            ) : (
+              liveVersion.snapshot.columns.map((c) => (
+                <TableRow key={c.name}>
+                  <TableCell className="py-2 font-mono text-xs">{c.name}</TableCell>
+                  <TableCell className="py-2 text-muted-foreground">{c.ty}</TableCell>
+                </TableRow>
+              ))
+            )}
+          </TableBody>
+        </Table>
+      </div>
 
       <ConfigTable detailsClassName="max-w-prose">
         <ConfigTableGroup label="Output shape" />
@@ -194,32 +242,39 @@ export default function ResponseSection() {
         </ConfigTableRow>
       </ConfigTable>
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">OpenAPI document</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <p className="text-sm text-muted-foreground">
-            Generated per service account — the document lists exactly the endpoints that account may
-            invoke. Choose one to download this endpoint&apos;s contract.
-          </p>
-          <div className="flex flex-wrap items-center gap-3">
-            <Button type="button" variant="outline" onClick={() => setDownloadOpen(true)}>
-              Download OpenAPI
-            </Button>
-            {baseUrl && <span className="font-mono text-xs text-muted-foreground">{baseUrl}</span>}
-          </div>
-          {oaQuery.isError && (
-            <Alert variant="destructive">
-              <AlertDescription>
-                {oaError?.status === 409
-                  ? oaError.message
-                  : "Could not generate a preview of the served request."}
-              </AlertDescription>
-            </Alert>
-          )}
-        </CardContent>
-      </Card>
+      <div className="space-y-2">
+        <h3 className="text-sm font-medium">OpenAPI document</h3>
+        {/* `max-w-prose` is the one class this conversion ADDED, and it
+            replaces something the card was doing rather than changing the
+            block: the `CardContent`'s `p-6` inside a card inside the section
+            cap was what stopped this sentence short of ~816px. Free of the
+            frame it would run the full `max-w-5xl`, wider than the Details
+            column two blocks up — which caps at exactly this measure
+            (`detailsClassName="max-w-prose"`) for the same reason. */}
+        <p className="max-w-prose text-sm text-muted-foreground">
+          Generated per service account — the document lists exactly the endpoints that account may
+          invoke. Choose one to download this endpoint&apos;s contract.
+        </p>
+        <div className="flex flex-wrap items-center gap-3">
+          {/* The only control in this block, and a plain `<button>`, so the
+              shell's `<fieldset disabled={trashed}>` reaches it — unlike the
+              `window` keydown listener §11.1 records. It opens a dialog and
+              writes nothing, so it needs no `trashed` check of its own. */}
+          <Button type="button" variant="outline" onClick={() => setDownloadOpen(true)}>
+            Download OpenAPI
+          </Button>
+          {baseUrl && <span className="font-mono text-xs text-muted-foreground">{baseUrl}</span>}
+        </div>
+        {oaQuery.isError && (
+          <Alert variant="destructive">
+            <AlertDescription>
+              {oaError?.status === 409
+                ? oaError.message
+                : "Could not generate a preview of the served request."}
+            </AlertDescription>
+          </Alert>
+        )}
+      </div>
 
       <DownloadOpenApiDialog ws={ws} open={downloadOpen} onOpenChange={setDownloadOpen} endpointId={id} />
     </div>
