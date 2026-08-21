@@ -75,7 +75,7 @@ vi.mock("react-resizable-panels", () => ({
   ),
 }));
 
-vi.mock("@monaco-editor/react", () => ({
+vi.mock("@/components/monaco/MonacoEditor", () => ({
   // A NAMED, capitalised function: this stub calls hooks, and an anonymous
   // arrow assigned to `default` is not a component as far as
   // `react-hooks/rules-of-hooks` can tell.

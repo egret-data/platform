@@ -27,7 +27,7 @@ const monacoStub = vi.hoisted(() => {
   };
 });
 
-vi.mock("@monaco-editor/react", () => ({
+vi.mock("@/components/monaco/MonacoEditor", () => ({
   default: ({
     value,
     onChange,

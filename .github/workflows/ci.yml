@@ -87,3 +87,15 @@ jobs:
       # the step above: vitest does not code-split, so this can only fail for the right reason
       # against the artefact `npm run build` just produced.
       - run: npm run test:bundle:xlsx
+      # Asserts the built `index.html` is still loadable under the `script-src 'self'` that
+      # `nginx-prod.conf` sends: no inline <script>, no cross-origin src. Same reason again —
+      # neither vitest nor `vite dev` serves the CSP, so a build that the policy would blank out
+      # in production is green everywhere else. `src/lib/__tests__/csp.test.ts` pins the header
+      # itself; this pins the artefact against it.
+      - run: npm run test:bundle:csp
+      # Asserts Monaco is still OUT of the entry chunk. The source-level guards in
+      # lib/__tests__/monaco.test.ts match import specifiers, so they miss the one-token
+      # regression that matters: `import type * as MonacoNS from "monaco-editor"` losing its
+      # `type` is tsc-clean, lint-clean, and puts ~3.8MB back on every page including login.
+      # Only a production build can be asked, because neither vitest nor `vite dev` splits.
+      - run: npm run test:bundle:monaco

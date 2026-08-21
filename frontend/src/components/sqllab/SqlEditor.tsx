@@ -1,4 +1,5 @@
-import Editor, { type Monaco } from "@monaco-editor/react";
+import type { Monaco } from "@monaco-editor/react";
+import Editor from "@/components/monaco/MonacoEditor";
 import type * as MonacoNS from "monaco-editor";
 import { useEffect, useRef } from "react";
 import { useIsDark } from "@/hooks/useIsDark";
