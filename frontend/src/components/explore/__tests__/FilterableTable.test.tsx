@@ -193,3 +193,56 @@ it("its checked state follows the drawn page, not the whole result set", () => {
   // Ticked, even though r2-r4 are unselected: they were not drawn.
   expect(screen.getByLabelText("Select all")).toBeChecked();
 });
+
+/**
+ * The table owns the search box and the pager, so `rows` going in is a superset
+ * of what comes out on screen. A consumer cannot compute the difference, which
+ * is why the table has to report it — `UsersPage` and `MembersPanel` derived
+ * their bulk targets from their own list and so acted on rows the user had
+ * searched away, with Disable and Remove-from-workspace as the actions.
+ *
+ * Five rows over two pages: "reported the page it drew" and "reported every row
+ * the search left" are then different lists. With a single page they are the
+ * same list and this test would pass either way.
+ */
+it("reports the ids it drew, and re-reports them when the page changes", async () => {
+  const many: Row[] = Array.from({ length: 5 }, (_, i) => ({ id: `r${i}`, name: `Row ${i}` }));
+  const onDrawnChange = vi.fn();
+  render(
+    <FilterableTable
+      rows={many}
+      columns={columns}
+      getId={(r) => r.id}
+      pageSize={2}
+      selection={{ selected: new Set<string>(), onToggle: vi.fn(), onDrawnChange }}
+    />,
+  );
+
+  // The drawn page, not the five rows the table was handed.
+  expect(onDrawnChange).toHaveBeenLastCalledWith(["r0", "r1"]);
+
+  fireEvent.click(screen.getByRole("button", { name: /next/i }));
+  expect(onDrawnChange).toHaveBeenLastCalledWith(["r2", "r3"]);
+});
+
+it("re-reports when a search narrows what is on screen", async () => {
+  const rowsIn: Row[] = [
+    { id: "a", name: "Alice" },
+    { id: "b", name: "Bob" },
+  ];
+  const onDrawnChange = vi.fn();
+  render(
+    <FilterableTable
+      rows={rowsIn}
+      columns={columns}
+      getId={(r) => r.id}
+      selection={{ selected: new Set(["a", "b"]), onToggle: vi.fn(), onDrawnChange }}
+    />,
+  );
+  expect(onDrawnChange).toHaveBeenLastCalledWith(["a", "b"]);
+
+  // Searching Bob away must drop him from the report — this is the exact moment
+  // a stale selection would otherwise keep him in a bulk action.
+  fireEvent.change(screen.getByPlaceholderText(/search/i), { target: { value: "Alice" } });
+  expect(onDrawnChange).toHaveBeenLastCalledWith(["a"]);
+});

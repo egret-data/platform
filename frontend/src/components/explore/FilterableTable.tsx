@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { ChevronLeft, ChevronRight, Search } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -52,6 +52,19 @@ export function FilterableTable<T>({
   selection?: {
     selected: Set<string>;
     onToggle: (id: string) => void;
+    /**
+     * The ids this table actually DREW, reported whenever they change.
+     *
+     * A consumer cannot compute this: the search box and the pager live in
+     * here, so `rows` going in is a superset of what comes out on screen.
+     * Without it, a page derives its bulk targets from its own list and acts
+     * on rows the user searched away or left on another page — which for
+     * `UsersPage` means Disable, and for `MembersPanel` means removing someone
+     * from a workspace.
+     *
+     * Optional and inert when omitted; the tables that do not select ignore it.
+     */
+    onDrawnChange?: (ids: string[]) => void;
   };
   /**
    * When set, only this many rows render at a time and a pager is shown once
@@ -128,6 +141,17 @@ export function FilterableTable<T>({
     : shown;
   const rangeStart = shown.length === 0 ? 0 : clampedPage * size + 1;
   const rangeEnd = paginated ? clampedPage * size + pageRows.length : shown.length;
+
+  // Keyed on the ids' CONTENTS, not on the array. `pageRows` is derived fresh
+  // every render, so an effect depending on its identity would fire forever and
+  // — since the callback sets state in the parent — never settle.
+  const drawnKey = pageRows.map(getId).join("\u0000");
+  const onDrawnChange = selection?.onDrawnChange;
+  useEffect(() => {
+    if (!onDrawnChange) return;
+    onDrawnChange(drawnKey === "" ? [] : drawnKey.split("\u0000"));
+    // `drawnKey` is the value; `pageRows` deliberately is not a dependency.
+  }, [drawnKey, onDrawnChange]);
 
   return (
     <div className="space-y-3">
