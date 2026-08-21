@@ -364,7 +364,16 @@ const OPENAPI_FIXTURE = {
   paths: {},
 };
 
-function makeVersion(overrides: Partial<DataApiEndpointVersionDto> = {}): DataApiEndpointVersionDto {
+// `columns` is a second parameter rather than something a caller has to
+// reconstruct the whole `snapshot` to change: the frozen-column table is a
+// LIST, and a one-row fixture cannot tell "rendered the row it was given" apart
+// from "rendered row 0" (§8) — the trap this branch has now paid for three
+// times. Default kept at the single column the pre-existing tests were written
+// against so none of them change meaning.
+function makeVersion(
+  overrides: Partial<DataApiEndpointVersionDto> = {},
+  columns: { name: string; ty: string }[] = [{ name: "total_revenue", ty: "bigint" }],
+): DataApiEndpointVersionDto {
   return {
     id: "v-1",
     version: 1,
@@ -383,7 +392,7 @@ function makeVersion(overrides: Partial<DataApiEndpointVersionDto> = {}): DataAp
       limits: {},
       rate_limit: {},
       delegated: false,
-      columns: [{ name: "total_revenue", ty: "bigint" }],
+      columns,
     },
     ...overrides,
   } as unknown as DataApiEndpointVersionDto;
@@ -564,11 +573,21 @@ describe("ResponseSection", () => {
   // its title as an `<h3>`; `ConfigTableGroup` renders it as a `rowheader`
   // cell. So "Output shape" must be a rowheader and NOT a heading (a leftover
   // card fails), while "Frozen columns" and "OpenAPI document" must stay
-  // headings and NOT be rowheaders (a later cleanup that swallows those two
-  // real cards into the table fails). A group row that rendered nothing fails
-  // the `getByRole("rowheader")` lookup, which is also the precondition the
+  // headings of their own and NOT be rowheaders (a cleanup that swallows either
+  // into the config table fails). A group row that rendered nothing fails the
+  // `getByRole("rowheader")` lookup, which is also the precondition the
   // row-order assertions below are computed from — they cannot pass without it.
-  it("renders Output shape as a group row while the columns and document stay cards", async () => {
+  //
+  // The third assertion is this task's, and is the one that changed: those two
+  // blocks are no longer `Card`s either. #521 kept them on the argument that
+  // neither is `Setting | Details | Value` shaped — still true, and still why
+  // neither is a rowheader — but §4.3 later supplied the option that argument
+  // did not have: a heading plus a plain `Table` (or plain prose) in the
+  // section rhythm. `bg-card` is the probe because it is the one class the
+  // `Card` primitive contributes that nothing else on this section renders
+  // (`ConfigTable`, `Table`, `Alert`, `Select` and the download dialog were all
+  // grepped for it, and none carry it).
+  it("renders Output shape as a group row while the columns and document stay their own, cardless blocks", async () => {
     vi.mocked(api.useDataApiGetOpenapi).mockReturnValue(
       { data: { status: 200, data: OPENAPI_FIXTURE }, isError: false } as unknown as
         ReturnType<typeof api.useDataApiGetOpenapi>,
@@ -604,12 +623,123 @@ describe("ResponseSection", () => {
     }
 
     // These two are NOT `Setting | Details | Value` shaped — a frozen column
-    // list and a download button — so they keep their cards.
-    for (const card of ["Frozen columns", "OpenAPI document"]) {
-      const title = screen.getByRole("heading", { name: card });
+    // list and a download button — so neither is a row of the table above…
+    for (const block of ["Frozen columns", "OpenAPI document"]) {
+      const title = screen.getByRole("heading", { name: block });
       expect(title.closest("table")).toBeNull();
-      expect(screen.queryByRole("rowheader", { name: card })).not.toBeInTheDocument();
+      expect(screen.queryByRole("rowheader", { name: block })).not.toBeInTheDocument();
+      // …and neither is framed by a `Card` any more.
+      expect(title.closest(".bg-card")).toBeNull();
     }
+  });
+
+  // The frozen column list is a LIST (§4.3), so it is the shared `Table`, and
+  // its states are rows INSIDE it rather than a branch that replaces it. That
+  // is not a cosmetic difference: with the card gone, a branch that replaced
+  // the table would take `Name` and `Type` with it, and an author who has never
+  // published would get a sentence with nothing on screen saying what a frozen
+  // column even is — the job the card title used to do alone.
+  //
+  // All three states are checked in one test on purpose: the regression is
+  // "someone re-writes ONE branch as a replacement", and a test covering only
+  // the empty state would pass while the loading branch did it.
+  it("names the Name and Type columns in every state of the frozen column list", async () => {
+    vi.mocked(api.useDataApiGetOpenapi).mockReturnValue(
+      { data: undefined, isError: false } as unknown as ReturnType<typeof api.useDataApiGetOpenapi>,
+    );
+
+    const states: [string, () => void, RegExp][] = [
+      [
+        "never published",
+        () =>
+          vi.mocked(api.useDataApiListEndpointVersions).mockReturnValue(
+            { data: { status: 200, data: [] }, isLoading: false, isError: false } as unknown as
+              ReturnType<typeof api.useDataApiListEndpointVersions>,
+          ),
+        /no live version/i,
+      ],
+      [
+        "loading",
+        () =>
+          vi.mocked(api.useDataApiListEndpointVersions).mockReturnValue(
+            { data: undefined, isLoading: true, isError: false } as unknown as
+              ReturnType<typeof api.useDataApiListEndpointVersions>,
+          ),
+        /Loading…/,
+      ],
+      [
+        "errored",
+        () =>
+          vi.mocked(api.useDataApiListEndpointVersions).mockReturnValue(
+            { data: undefined, isLoading: false, isError: true, error: new Error("network error") } as unknown as
+              ReturnType<typeof api.useDataApiListEndpointVersions>,
+          ),
+        /could not load the published contract/i,
+      ],
+    ];
+
+    for (const [name, arrange, message] of states) {
+      arrange();
+      // A live endpoint for the loading/error states (both are gated on
+      // `live_version_id`); the empty state's own mock returns no versions, so
+      // it lands on the "no live version" branch either way.
+      const { unmount } = renderResponse(makeEndpoint({ live_version_id: "v-1" }));
+
+      const message_el = await screen.findByText(message);
+      const table = message_el.closest("table") as HTMLElement;
+      // The state is a row of the list, not something rendered instead of it.
+      expect(table, name).not.toBeNull();
+      expect(
+        within(table)
+          .getAllByRole("columnheader")
+          .map((th) => th.textContent),
+        name,
+      ).toEqual(["Name", "Type"]);
+      // Spanning the whole list — a sentence in the Name column with an empty
+      // Type cell beside it is the shape §4.1 records as the confusion the
+      // cards were removed to fix, applied to a row.
+      expect(message_el.closest("td"), name).toHaveAttribute("colspan", "2");
+
+      unmount();
+    }
+  });
+
+  // Two columns, and the assertion is a deep-equal of the WHOLE grid. A
+  // one-row fixture makes "put the type beside its own name" and "put row 0's
+  // type beside row 0's name" the same claim, which is why this branch keeps
+  // re-learning it (§8). With two, transposing the cells, dropping a row, or
+  // reading `columns[0].ty` for every row each produce a different array.
+  it("puts each frozen column's type in its own row", async () => {
+    vi.mocked(api.useDataApiGetOpenapi).mockReturnValue(
+      { data: undefined, isError: false } as unknown as ReturnType<typeof api.useDataApiGetOpenapi>,
+    );
+    vi.mocked(api.useDataApiListEndpointVersions).mockReturnValue(
+      {
+        data: {
+          status: 200,
+          data: [
+            makeVersion({ id: "v-1", version: 2, is_live: true }, [
+              { name: "order_id", ty: "varchar" },
+              { name: "total_revenue", ty: "bigint" },
+            ]),
+          ],
+        },
+        isLoading: false,
+        isError: false,
+      } as unknown as ReturnType<typeof api.useDataApiListEndpointVersions>,
+    );
+    renderResponse(makeEndpoint({ live_version_id: "v-1" }));
+
+    const first = await screen.findByText("order_id");
+    const body = (first.closest("table") as HTMLElement).querySelector(
+      "tbody",
+    ) as HTMLTableSectionElement;
+    expect(
+      Array.from(body.rows).map((r) => Array.from(r.cells).map((c) => c.textContent)),
+    ).toEqual([
+      ["order_id", "varchar"],
+      ["total_revenue", "bigint"],
+    ]);
   });
 });
 

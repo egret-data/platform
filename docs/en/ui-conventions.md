@@ -320,10 +320,11 @@ One column, deliberately. A two-column grid pads the short groups to the height 
 one beside them, and CSS `columns` fights the flex container the page sits in and clips the
 form at the fold. Both were tried on this editor and both were wrong.
 
-### 4.2 When a card is still right
+### 4.2 A read-only listing is not a setting, and an action is not a setting
 
-`src/routes/explore/dataapi/detail/ResponseSection.tsx` keeps two cards deliberately, and its
-doc comment records why:
+`src/routes/explore/dataapi/detail/ResponseSection.tsx`. Only `Output shape` was
+config-shaped, and only it became a `ConfigTableGroup` + rows. The other two blocks are not
+rows of that table, and the reason is the durable part of this section:
 
 - **Frozen columns** — a read-only `Name | Type` listing of the *published* contract. There
   is no Value to edit. Forcing it into the shared table would either fabricate a Value column
@@ -331,17 +332,52 @@ doc comment records why:
 - **OpenAPI document** — a paragraph, a download button, and a derived base URL. An action,
   not a setting.
 
-Only `Output shape` was config-shaped, and only it became a `ConfigTableGroup` + rows.
-
 **The rule:** the complaint that removed the `ConfigSection`s was about cards framing
-near-empty tables, not about cards. A read-only listing is not a setting, and an action is
-not a setting.
+near-empty tables (§4.1), not about cards.
+
+#### The part of this section that was reversed, and why
+
+Until the final task of the phase this section was titled *"When a card is still right"*, and
+those same two blocks were `Card`s — kept deliberately in #521, on the argument above. **The
+argument was right and the conclusion did not follow**, which is the useful thing to record:
+"not a `ConfigTable` row" was being read as "therefore a `Card`", because at the time those
+were the only two options anyone had written down.
+
+§4.3 then supplied the third — a heading plus a plain `Table`, or plain prose, in the
+section's `space-y-6` rhythm — and against it both blocks moved:
+
+- **Frozen columns is the textbook §4.3 shape**: `Name | Type`, one row per column, read
+  down. It is structurally identical to the publish history `Versions` converted, whose own
+  doc comment cites this section as its precedent while doing the opposite thing to the same
+  shape. Dropping the card is also what *forces* §4.3's second rule — the states became rows
+  spanning the table, and before that the branch replaced the table and took `Name` and `Type`
+  with it, so an author who had never published saw a sentence with nothing on screen naming
+  what a frozen column is. The card title had been carrying that alone. It was, additionally,
+  the section's third table idiom: a hand-written `<table>` beside a `ConfigTable`, in a tab
+  set that otherwise uses the shared `Table`.
+- **The OpenAPI block is not a list, so §4.3 does not reach it** — it moved on the narrower
+  point that "an action is not a setting" argues against `ConfigTable` and not for a frame.
+  `Versions` already renders that exact shape (prose, then a button that opens a dialog) under
+  an `h3` with no card, and the one thing in the block that wants a visual boundary is the 409
+  `Alert`, which brings its own.
+
+What settled it was neither consistency on its own nor the recorded decision on its own.
+**A recorded rationale binds its argument, not its conclusion**: re-read it against the
+options that exist now, and if the conclusion no longer follows, say which premise stopped
+carrying it. Here nothing in #521's reasoning became false — an option appeared that it had
+never weighed.
+
+`ResponseSection.tsx`'s doc comment carries this so it does not have to be re-litigated from
+the git history, and `EndpointDetail.test.tsx`'s "Output shape as a group row" test pins all
+three claims at once: `Output shape` is a `rowheader`, the other two are headings and not
+rowheaders, and neither is inside a `.bg-card`.
 
 ### 4.3 A list is a plain `Table`, and its three states are rows inside it
 
 `src/routes/explore/dataapi/detail/Versions.tsx` (the publish history),
 `detail/AccessSection.tsx` (one row per service account), `detail/TryIt.tsx` (parameter
-values), `detail/ParamEditor.tsx`.
+values), `detail/ParamEditor.tsx`, `detail/ResponseSection.tsx` (the frozen `Name | Type`
+contract — the last one, and the one that made §4.2 reverse itself).
 
 `ConfigTable` is `Setting | Details | Value` for a **fixed set of settings read across**. A
 **list read down** — one row per snapshot, per principal, per parameter — takes a plain
@@ -358,6 +394,13 @@ Two things that came out of converting `Versions` and `Access`:
   screen to say what a version even records. As spanning rows, the columns are named in every
   state. The shared `TableCell` is `whitespace-nowrap`, so a cell holding a sentence needs
   `whitespace-normal` or it scrolls the table sideways.
+
+  `ResponseSection`'s frozen-column list is the third case and has **four** states, not three
+  — "loading", "the fetch failed", "never published" and the list itself — because the first
+  two are gated on `endpoint.live_version_id` (§2.1/§2.2 inside one section). Its test asserts
+  the `Name`/`Type` `columnheader`s and the `colSpan` in each of the three non-list states in
+  one loop, deliberately: the regression is somebody re-writing *one* branch as a replacement,
+  and a test covering only the empty state passes while the loading branch does it.
 - **A column whose every cell is identical can still be right.** `Access`'s Data column
   repeats the same sentence on every row because the *constancy is the fact*: egret never
   knows whether an account may read the tables, and the per-row part is the `Run Try it` link,
@@ -393,7 +436,9 @@ that read worse stretched across a wide monitor.
 
 **So sections own their own caps**, on their own root element, visible next to the layout they
 constrain: `AccessSection.tsx`, `TryIt.tsx`, `Versions.tsx` and `ResponseSection.tsx` all use
-`max-w-5xl`, and `ResponseSection.tsx`'s frozen-column table adds `max-w-xl`. Query needs none
+`max-w-5xl`, and `ResponseSection.tsx`'s frozen-column table adds `max-w-xl` (it kept that cap
+across the §4.2 conversion — the class moved from a hand-written `<table>` onto the shared
+`Table`, which is where the `w-full` it caps comes from). Query needs none
 and gained the most —
 its SQL editor went from 768px to 1424px (measured during the width pass, not by this
 document; the same applies to the figures in §5.4 and §5.5).
@@ -464,8 +509,10 @@ at a ~1470px content box: Setting 288 / Value 208 / Details ~975, with `max-w-pr
 sentence near 585px — ~390px of empty column, and the Shape and Key-naming Selects ~1260px right
 of the labels they answer to, where the old route cap put them at ~560px. That is the same
 complaint that earned `Versions` its cap, so the fix wave gave Response the same `max-w-5xl` root
-(~816px), which also reins in the `Frozen columns` and `OpenAPI document` Cards — the frozen
-*table* had `max-w-xl`, its Card did not.
+(~816px), which also reined in the `Frozen columns` and `OpenAPI document` Cards — the frozen
+*table* had `max-w-xl`, its Card did not. (Those two Cards are gone as of §4.2's reversal. The
+measurement is kept: it is why the section root is capped, which is still true, and "the frame
+stretched further than the content it framed" was one input to removing them.)
 
 The general rule: **a task that rebuilds a surface and a task that measures widths must agree on
 the same list of surfaces**, or the difference between the two lists ships.
@@ -665,6 +712,13 @@ caught only downstream.
   **months earlier**: `kind_perms` at `crates/egret-bi/src/routes.rs`, dated by `git log -S`,
   with migration `0122` seeding `data_api_endpoint:read` and `:manage` onto `ws_admin`.
 - A consumer count was guessed, then mismeasured, then quietly rounded — §7.2.
+- A `Card` count in this document's own [Adoption status](#adoption-status) read "8
+  occurrences … two are the deliberate keeps of §4.2; the other six are the open question".
+  The eight were `<Card>`/`<CardHeader>`/`<CardTitle>`/`<CardContent>` on each of the two
+  keeps — **there was no third block**, and the plan written from that line inherited the
+  arithmetic and asked an implementer to "convert the rest". A **symbol-family** count is not
+  a **block** count. The same line's "down from 4 files" was 4 sections; the measured answer
+  under `detail/` is 5, because `ParamEditor` imported `Card` too.
 
 The false belief was also **written into the codebase**, in three doc comments asserting
 endpoint folders were not creatable. Two were fixed and a third was found later — the one a
@@ -808,14 +862,29 @@ not exist yet:
   and `ResponseSection`. Measured with
   `git grep -l 'from "@/components/config/ConfigTable"' <rev> -- frontend/src`, minus
   `__tests__`, at three revisions: **13** at the merge base `63a4fb90`, 14 after `Query`
-  (#529), 15 after `Try it`. The two sections after it (`Versions`, `Access`) added none, and
-  that is the expected result rather than a gap — both are lists (§4.3), and a list does not
-  want a `Setting | Details | Value` table.
-- The plain-`Table` list of §4.3 — 4 files, all Data API endpoint detail (`ParamEditor`,
-  `TryIt`, `Versions`, `AccessSection`).
-- `Card` inside the endpoint detail sections — **1** file (`ResponseSection`, 8 occurrences),
-  down from 4 files at the merge base. Two of those eight are the deliberate keeps of §4.2;
-  the other six are the open question Task 3 of the plan exists to answer.
+  (#529), 15 after `Try it`. The three sections after it (`Versions`, `Access`, `Response`)
+  added none, and that is the expected result rather than a gap — all three converted *lists*
+  (§4.3), and a list does not want a `Setting | Details | Value` table. Re-measured at the end
+  of the phase: still 15.
+- The plain-`Table` list of §4.3 — **5** files, all Data API endpoint detail (`ParamEditor`,
+  `TryIt`, `Versions`, `AccessSection`, `ResponseSection`). Measured with
+  `grep -rl 'from "@/components/ui/table"' src/routes/explore/dataapi/`, which also returns
+  `Activity.tsx` and `ActivityCallList.tsx` — list pages, not detail sections, and not counted
+  here.
+- `Card` under `routes/explore/dataapi/` — **0** files, down from **5** at the merge base
+  (`git grep -l 'from "@/components/ui/card"' 63a4fb90 -- frontend/src/routes/explore/dataapi/`
+  gives `AccessSection`, `ParamEditor`, `ResponseSection`, `TryIt`, `Versions`). Two numbers in
+  the previous revision of this list were wrong and are corrected rather than carried forward,
+  which is §9 happening to this document again:
+  - "down from **4** files" — that was the four *sections*; `ParamEditor` also imported `Card`
+    and is under `detail/`. Five files, by the command above.
+  - "8 occurrences … two of those eight are the deliberate keeps of §4.2; the other six are
+    the open question". There was no third card block: `grep -o '<Card[A-Za-z]*'` on
+    `ResponseSection` at that revision gives `<Card` ×2, `<CardHeader` ×2, `<CardTitle` ×2,
+    `<CardContent` ×2 — **the eight occurrences *are* the two deliberate keeps**, four JSX tags
+    each. The plan inherited the same arithmetic ("8 `<Card>`… convert the rest"), and there
+    was no rest. A symbol-family count is not a block count — the same trap §7.2 records for
+    consumer counts, one level down.
 - The split of §11 — **2** sections, both Data API endpoint detail (`Query`, `TryIt`); `react-resizable-panels` itself is also used by `components/sqllab/SqlTab.tsx`, which is
   where the idiom came from. `Versions` and `Access` are deliberately not splits: neither is
   "configure, run, read the result" — there is nothing to run.
