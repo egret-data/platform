@@ -79,6 +79,52 @@ describe("the Monaco loader setup module", () => {
     expect(src).toContain('import "monaco-editor/languages/definitions/python/register";');
   });
 
+  it("carries every editor contribution the full monaco entry has", () => {
+    // The silent failure mode of picking a lean entry point: the editor still renders, but
+    // folding or the suggest *widget* is quietly gone. `monaco-editor/features/register.all`
+    // looks like the whole feature set and is not — at 0.56.0 it omits nine contributions
+    // that `esm/vs/index.js` also imports, `suggestController` among them.
+    //
+    // So compare the two lists mechanically rather than trusting the name. Languages are
+    // excluded on purpose: registering only sql and python is the whole point (see above).
+    // `.css` imports are excluded because monaco's exports map (`"./*": "./esm/vs/*.js"`)
+    // cannot resolve a stylesheet by package subpath at all — the one entry this skips,
+    // `codicon-modifiers.css`, was observed loading transitively in the browser anyway.
+    const MONACO = resolve(__dirname, "../../../node_modules/monaco-editor/esm/vs");
+    const sideEffectImports = (file: string) =>
+      [...readFileSync(file, "utf8").matchAll(/^import\s+(['"])(.+?)\1;$/gm)].map((m) => m[2]);
+    const normalise = (spec: string, base: string) => {
+      const out: string[] = [];
+      for (const seg of `${base}/${spec}`.split("/")) {
+        if (seg === "." || seg === "") continue;
+        if (seg === "..") out.pop();
+        else out.push(seg);
+      }
+      return out.join("/");
+    };
+
+    const full = sideEffectImports(`${MONACO}/index.js`).map((s) => normalise(s, "."));
+    const viaRegisterAll = sideEffectImports(`${MONACO}/features/register.all.js`)
+      .map((s) => normalise(s, "features"));
+    const explicit = [...readFileSync(SRC, "utf8").matchAll(/^import "monaco-editor\/(.+?)";$/gm)]
+      .map((m) => `${m[1]}.js`);
+    const covered = new Set([...viaRegisterAll, ...explicit]);
+
+    const missing = full.filter(
+      (p) => !p.startsWith("languages/") && !p.endsWith(".css") && !covered.has(p),
+    );
+    expect(
+      missing,
+      `src/lib/monaco.ts is missing contributions that monaco's own entry point loads.\n` +
+        `Add an explicit import for each, then re-read the parity list in the task report:\n` +
+        missing.map((p) => `  import "monaco-editor/${p.replace(/\.js$/, "")}";`).join("\n"),
+    ).toEqual([]);
+    // Guard the guard: if the parse ever silently matches nothing, the assertion above
+    // passes for the wrong reason.
+    expect(full.length).toBeGreaterThan(100);
+    expect(viaRegisterAll.length).toBeGreaterThan(50);
+  });
+
   it("is imported by the app entry and nowhere else", () => {
     // The placement is load-bearing, not stylistic. Component tests mock
     // `@monaco-editor/react` but not `monaco-editor`, so an import from SqlEditor.tsx or
