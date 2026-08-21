@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Outlet, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 // No msw in this repo — tests mock the API module directly (see
@@ -15,6 +15,7 @@ import type {
   DataApiServiceAccountDto,
 } from "@/api/generated/model";
 import EndpointDetail from "@/routes/explore/dataapi/EndpointDetail";
+import type { EndpointDetailContext } from "@/routes/explore/dataapi/EndpointDetail";
 import AccessSection from "@/routes/explore/dataapi/detail/AccessSection";
 import { expectSectionCapsItsOwnWidth } from "./sectionWidth";
 
@@ -157,6 +158,41 @@ function renderAccess(endpoint: DataApiEndpointDto = makeEndpoint()) {
     </QueryClientProvider>,
   );
   return { ...utils, qc };
+}
+
+/**
+ * The section WITHOUT the shell around it.
+ *
+ * **Why this harness has to exist.** Every other test here mounts the real
+ * `EndpointDetail`, which wraps the `Outlet` in `<fieldset disabled={trashed}>`
+ * — and `toBeDisabled` walks up to a disabled fieldset, so under that harness a
+ * button reads as disabled whether or not the section guards it itself.
+ * Measured: removing `|| trashed` from one button, and then removing the
+ * `trashed` prop from `AccessRow` entirely, left all 25 tests green. The
+ * assertion could not tell the section's own check from the shell's floor,
+ * which is the "both green, both worthless" shape this branch keeps running
+ * into.
+ *
+ * With no fieldset in the tree there is nothing else that could be doing it.
+ * Same stubbed-context shape `TryIt.test.tsx` uses for its own reasons.
+ */
+function ContextProvider({ ctx }: { ctx: Partial<EndpointDetailContext> }) {
+  return <Outlet context={ctx} />;
+}
+
+function renderAccessWithoutTheShell(ctx: Partial<EndpointDetailContext>) {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(
+    <QueryClientProvider client={qc}>
+      <MemoryRouter initialEntries={["/access"]}>
+        <Routes>
+          <Route path="/access" element={<ContextProvider ctx={ctx} />}>
+            <Route index element={<AccessSection />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
 }
 
 beforeEach(() => {
@@ -812,5 +848,53 @@ describe("AccessSection — a trashed endpoint", () => {
     expect(details).not.toHaveAttribute("open");
     fireEvent.click(within(row).getByText("Revoking may not remove access"));
     expect(details).toHaveAttribute("open");
+  });
+
+  /**
+   * The section's OWN guard, which nothing above this can see.
+   *
+   * `Versions` records the argument for stating the rule in the section as well
+   * as leaning on the shell — but under the real shell the two are
+   * indistinguishable, and the mutation run proved it: dropping `|| trashed`
+   * from a button, and dropping the `trashed` prop altogether, both left every
+   * other test in this file green. Without the fieldset there is nothing else
+   * that could disable these, so this is the one assertion that fails when the
+   * section stops guarding itself.
+   *
+   * Both states, one test: `trashed: false` first, so "disabled because
+   * trashed" is distinguishable from "disabled always".
+   */
+  it("guards its own mutations, with no fieldset in the tree to do it for it", async () => {
+    setup({
+      accounts: [SA_GRANTED, SA_NONE],
+      grants: [makeGrant(SA_GRANTED.id, SA_GRANTED.name)],
+      canInvoke: {},
+    });
+
+    const live = renderAccessWithoutTheShell({
+      ws: "eng",
+      id: "ep-1",
+      endpoint: makeEndpoint(),
+      trashed: false,
+    });
+    // The premise, asserted rather than assumed: this harness really has no
+    // fieldset, so nothing here is inherited from the shell.
+    expect(live.container.querySelector("fieldset")).toBeNull();
+    expect(await within(live.container).findByRole("button", { name: /revoke/i })).toBeEnabled();
+    expect(within(live.container).getByRole("button", { name: /grant invoke/i })).toBeEnabled();
+
+    const trashed = renderAccessWithoutTheShell({
+      ws: "eng",
+      id: "ep-1",
+      endpoint: makeEndpoint(TRASHED),
+      trashed: true,
+    });
+    expect(trashed.container.querySelector("fieldset")).toBeNull();
+    expect(await within(trashed.container).findByRole("button", { name: /revoke/i })).toBeDisabled();
+    expect(within(trashed.container).getByRole("button", { name: /grant invoke/i })).toBeDisabled();
+    // The link is not a form control and is not the section's to disable, so it
+    // survives here too — this is where that is provable, since there is no
+    // fieldset to have spared it by accident.
+    expect(within(trashed.container).getAllByRole("link", { name: /try it/i })).toHaveLength(2);
   });
 });
