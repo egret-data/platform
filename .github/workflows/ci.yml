@@ -93,3 +93,9 @@ jobs:
       # in production is green everywhere else. `src/lib/__tests__/csp.test.ts` pins the header
       # itself; this pins the artefact against it.
       - run: npm run test:bundle:csp
+      # Asserts Monaco is still OUT of the entry chunk. The source-level guards in
+      # lib/__tests__/monaco.test.ts match import specifiers, so they miss the one-token
+      # regression that matters: `import type * as MonacoNS from "monaco-editor"` losing its
+      # `type` is tsc-clean, lint-clean, and puts ~3.8MB back on every page including login.
+      # Only a production build can be asked, because neither vitest nor `vite dev` splits.
+      - run: npm run test:bundle:monaco
