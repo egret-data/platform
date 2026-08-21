@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 
 /**
@@ -11,8 +11,14 @@ import { resolve } from "node:path";
  * fetch, so it cannot prove the CDN is unused — only a browser reload with the network panel
  * open can, and that measurement is recorded in the task report. What it CAN pin is the
  * wiring that makes the CDN unreachable: that `loader.config` is handed a real monaco
- * namespace (which short-circuits `init()` before it ever injects a script tag), that no
- * `paths.vs` URL is passed alongside it, and that the module stays wired into the app entry.
+ * namespace (which short-circuits `init()` before it ever injects a script tag) and that no
+ * `paths.vs` URL is passed alongside it.
+ *
+ * The second property this file guards is that the bundle stays LAZY. `App.tsx` has no lazy
+ * routes, so anything statically reachable from the app entry lands in the one eager chunk
+ * the login screen downloads — and Monaco is roughly the size of the rest of the app. A
+ * single stray static `import "@/lib/monaco"` silently doubles first load, and nothing about
+ * the app would look or behave any differently. So the import graph is asserted, not trusted.
  *
  * The heavy imports are mocked so this file does not drag ~7MB of Monaco ESM through the
  * jsdom transform. `?worker` is deliberately left unmocked: it is a Vite build-time
@@ -21,7 +27,12 @@ import { resolve } from "node:path";
 
 const configSpy = vi.fn();
 
-vi.mock("@monaco-editor/react", () => ({ loader: { config: configSpy } }));
+vi.mock("@monaco-editor/react", () => ({
+  default: function EditorStub() {
+    return null;
+  },
+  loader: { config: configSpy },
+}));
 vi.mock("monaco-editor/editor", () => ({ editor: {}, languages: {} }));
 vi.mock("monaco-editor/features/register.all", () => ({}));
 vi.mock("monaco-editor/editor/browser/coreCommands", () => ({}));
@@ -36,8 +47,19 @@ vi.mock("monaco-editor/editor/common/standaloneStrings", () => ({}));
 vi.mock("monaco-editor/languages/definitions/sql/register", () => ({}));
 vi.mock("monaco-editor/languages/definitions/python/register", () => ({}));
 
-const SRC = resolve(__dirname, "../monaco.ts");
-const MAIN = resolve(__dirname, "../../main.tsx");
+const SRC_DIR = resolve(__dirname, "../..");
+const SRC = resolve(SRC_DIR, "lib/monaco.ts");
+const WRAPPER = resolve(SRC_DIR, "components/monaco/MonacoEditor.tsx");
+
+/** Every .ts/.tsx under `src`, so the import-graph assertions below cannot be dodged by
+ *  putting the offending import in a directory this test did not think to look in. */
+function tsFiles(dir: string): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
+    const full = resolve(dir, e.name);
+    if (e.isDirectory()) return tsFiles(full);
+    return /\.tsx?$/.test(e.name) ? [full] : [];
+  });
+}
 
 describe("the Monaco loader setup module", () => {
   it("hands loader.config a monaco instance, so init() never injects a CDN script", async () => {
@@ -125,11 +147,35 @@ describe("the Monaco loader setup module", () => {
     expect(viaRegisterAll.length).toBeGreaterThan(50);
   });
 
-  it("is imported by the app entry and nowhere else", () => {
-    // The placement is load-bearing, not stylistic. Component tests mock
-    // `@monaco-editor/react` but not `monaco-editor`, so an import from SqlEditor.tsx or
-    // CellEditor.tsx would pull real Monaco into jsdom for every test that renders an
-    // editor. `main.tsx` is never imported by a component test.
-    expect(readFileSync(MAIN, "utf8")).toContain('import "./lib/monaco";');
+  it("is reachable only through one dynamic import, so it stays out of the eager chunk", () => {
+    const referrers = tsFiles(SRC_DIR)
+      .filter((f) => f !== SRC && !f.startsWith(resolve(__dirname)))
+      .filter((f) => /["']@\/lib\/monaco["']|["']\.\.?\/(?:lib\/)?monaco["']/.test(readFileSync(f, "utf8")))
+      .map((f) => f.slice(SRC_DIR.length + 1));
+
+    // Exactly one referrer. Two would mean the second one might be static; zero would mean
+    // the bundle is dead code and no editor can load at all.
+    expect(referrers).toEqual(["components/monaco/MonacoEditor.tsx"]);
+
+    // …and that one referrer must reach it with `import(`, not a static import. This is the
+    // whole mechanism: a static import here puts ~3.8MB into the chunk every page loads.
+    const wrapper = readFileSync(WRAPPER, "utf8");
+    expect(wrapper).toContain('lazy(() => import("@/lib/monaco"))');
+    expect(wrapper).not.toMatch(/^import .*"@\/lib\/monaco"/m);
+  });
+
+  it("is the only door to @monaco-editor/react — editor components go through the wrapper", () => {
+    // Bypassing the wrapper is the other way to lose laziness: `Editor` imported straight
+    // from `@monaco-editor/react` renders fine and pulls the loader (and then Monaco) in
+    // eagerly. Type-only imports are erased at build time and are fine.
+    const offenders = tsFiles(SRC_DIR)
+      .filter((f) => f !== SRC)
+      .filter((f) =>
+        readFileSync(f, "utf8")
+          .split("\n")
+          .some((l) => /from "@monaco-editor\/react"/.test(l) && !/^\s*import type /.test(l)),
+      )
+      .map((f) => f.slice(SRC_DIR.length + 1));
+    expect(offenders).toEqual([]);
   });
 });

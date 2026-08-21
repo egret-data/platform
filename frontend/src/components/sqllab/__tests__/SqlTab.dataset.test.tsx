@@ -3,7 +3,7 @@ import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { expect, test, vi } from "vitest";
 
-vi.mock("@monaco-editor/react", () => ({
+vi.mock("@/components/monaco/MonacoEditor", () => ({
   default: ({ value, onChange }: { value: string; onChange?: (v: string) => void }) =>
     <textarea data-testid="sql" value={value} onChange={(e) => onChange?.(e.target.value)} />,
 }));
