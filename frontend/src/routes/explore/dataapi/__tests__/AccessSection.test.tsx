@@ -718,3 +718,99 @@ describe("AccessSection — the row-scoped caveat", () => {
     expect(line.closest("details")).toBeNull();
   });
 });
+
+/**
+ * A trashed endpoint: what is dead, what is deliberately not, and the sentence
+ * that tells the two apart.
+ *
+ * `grant_invoke` / `revoke_invoke` refusing a trashed endpoint is a recorded
+ * backend decision, not a defect — they write no `state` and no
+ * `live_version_id`, so there is no resurrection path. **The defect was that
+ * the shell greyed both buttons silently and this section never explained it**,
+ * and the `Try it` link landing beside them (deliberately still live) made a
+ * greyed button next to a working one look like a bug rather than a rule.
+ */
+describe("AccessSection — a trashed endpoint", () => {
+  const TRASHED = { state: "disabled", deleted_at: "2026-08-18T09:00:00Z" } as Partial<DataApiEndpointDto>;
+
+  /**
+   * Both states in ONE test, and each assertion scoped to its own render's
+   * `container`.
+   *
+   * A trashed-only fixture cannot tell "explains the rule" from "always shows
+   * that sentence", and cannot tell "disabled because trashed" from "disabled
+   * unconditionally" — the same class of unfalsifiable fixture that let a
+   * `remove(0)` pass in #529 and that this branch has now cut out three times.
+   * The two renders differ ONLY in `deleted_at`.
+   */
+  it("says why grant and revoke are dead when trashed, and says nothing when it is not", async () => {
+    setup({
+      accounts: [SA_GRANTED, SA_NONE],
+      grants: [makeGrant(SA_GRANTED.id, SA_GRANTED.name)],
+      canInvoke: {},
+    });
+
+    const live = renderAccess(makeEndpoint());
+    const liveScope = within(live.container);
+    expect(await liveScope.findByRole("button", { name: /revoke/i })).toBeEnabled();
+    expect(liveScope.getByRole("button", { name: /grant invoke/i })).toBeEnabled();
+    expect(liveScope.queryByText(/restore it first/i)).not.toBeInTheDocument();
+
+    const trashed = renderAccess(makeEndpoint(TRASHED));
+    const trashedScope = within(trashed.container);
+    expect(await trashedScope.findByRole("button", { name: /revoke/i })).toBeDisabled();
+    expect(trashedScope.getByRole("button", { name: /grant invoke/i })).toBeDisabled();
+
+    // Visible, not a `title`: the rule is only taught if it is on screen — the
+    // same reason `Versions` puts "Restore it first" beside Publish rather than
+    // in a tooltip.
+    expect(trashedScope.getByText(/restore it first/i)).toBeInTheDocument();
+    // …and the half the shell's banner gets wrong. Its "everything below is
+    // read-only" is false of this section, so the section has to correct it.
+    expect(trashedScope.getByText(/Try it still runs/i)).toBeInTheDocument();
+    expect(trashedScope.getByText(/already recorded are untouched/i)).toBeInTheDocument();
+  });
+
+  /**
+   * The two affordances that must NOT die with the buttons.
+   *
+   * `Try it` is a `<Link>` on purpose: a trial is the only way to answer "could
+   * this account read the data" for an endpoint someone is deciding whether to
+   * restore, and the shell's `fieldset` does not reach a link. The caveat is a
+   * `<summary>` for the same class of reason (§11.2).
+   *
+   * Both are asserted the way the PLATFORM behaves, not the way the library
+   * does: `userEvent.click` refuses to activate a `<summary>` under
+   * `<fieldset disabled>` even though `fieldset[disabled]` disables only
+   * form-associated descendants, so it is a false negative here.
+   */
+  it("keeps Try it and the caveat reachable on a trashed endpoint", async () => {
+    setup({
+      accounts: [SA_GRANTED],
+      grants: [makeGrant(SA_GRANTED.id, SA_GRANTED.name)],
+      canInvoke: {},
+    });
+    renderAccess(makeEndpoint(TRASHED));
+
+    const row = await screen.findByTestId(`access-row-${SA_GRANTED.id}`);
+
+    // Guard the premise: the button beside the link really is dead, so this is
+    // a test about the link surviving rather than one where nothing was
+    // disabled to begin with.
+    expect(within(row).getByRole("button", { name: /revoke/i })).toBeDisabled();
+
+    const tryIt = within(row).getByRole("link", { name: /try it/i });
+    expect(tryIt).toHaveAttribute(
+      "href",
+      `/explore/eng/data-api/endpoints/ep-1/try?service_account=${SA_GRANTED.id}`,
+    );
+    // A `<Link>`, not a disabled control wearing a link's clothes.
+    expect(tryIt.tagName).toBe("A");
+    expect(tryIt).not.toHaveAttribute("aria-disabled");
+
+    const details = within(row).getByText("Revoking may not remove access").closest("details")!;
+    expect(details).not.toHaveAttribute("open");
+    fireEvent.click(within(row).getByText("Revoking may not remove access"));
+    expect(details).toHaveAttribute("open");
+  });
+});

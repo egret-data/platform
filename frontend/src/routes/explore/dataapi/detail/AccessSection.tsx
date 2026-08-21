@@ -148,7 +148,7 @@ type InvokeStatus =
  * thing that can answer it.
  */
 export default function AccessSection() {
-  const { ws, id, endpoint } = useEndpointDetail();
+  const { ws, id, endpoint, trashed } = useEndpointDetail();
 
   // The generated document describes LIVE endpoints only (`openapi_gen.rs`
   // filters `state = 'live'` with a live version), so on a draft it answers
@@ -272,6 +272,29 @@ export default function AccessSection() {
           </p>
         )}
 
+        {/* The reason the two mutations below are dead, said ONCE — not once per
+            row, because it is a fact about the ENDPOINT and not about any
+            account (§4.3: a sentence true of every row is section-level copy).
+            The shell's `<fieldset disabled={trashed}>` already greys the
+            buttons; what it cannot do is say why, and what the shell's BANNER
+            says is over-broad for this section in particular — "everything
+            below is read-only" is false of the `Try it` link, which is
+            deliberately still live here. Only the section knows which of its
+            own controls are dead and which are not, which is why the
+            explanation belongs here rather than one level up.
+
+            The second sentence is the part that is genuinely new information:
+            an admin deciding whether to restore is asking exactly "could this
+            account read the data", and a trial is still the only thing that
+            answers it. */}
+        {trashed && (
+          <p className="text-sm text-muted-foreground">
+            This endpoint is in the trash, so invoke cannot be granted or revoked here — restore it
+            first. Grants already recorded are untouched and still apply. Try it still runs, so an
+            account&apos;s data access can be checked before deciding whether to restore.
+          </p>
+        )}
+
         {/* Condition 2, said ONCE. It was a column, and every cell in it held
             this same sentence — 288px of width to repeat a fact about egret on
             every row (see the module doc for the measurement). It also explains
@@ -346,6 +369,7 @@ export default function AccessSection() {
                     account={account}
                     grantedHere={grantedIds.has(account.id)}
                     probeEnabled={isLive}
+                    trashed={trashed}
                     busy={busyId === account.id}
                     onGrant={onGrant}
                     onRevoke={onRevoke}
@@ -368,6 +392,7 @@ export default function AccessSection() {
                     // Nothing to probe: the account is not one this workspace
                     // lists, so the document route answers 404 for it by design.
                     probeEnabled={false}
+                    trashed={trashed}
                     busy={busyId === g.service_account_id}
                     onGrant={onGrant}
                     onRevoke={onRevoke}
@@ -401,6 +426,7 @@ function AccessRow({
   grantedHere,
   probeEnabled,
   orphaned = false,
+  trashed,
   busy,
   onGrant,
   onRevoke,
@@ -412,6 +438,14 @@ function AccessRow({
   probeEnabled: boolean;
   /** The grant names a principal this workspace no longer lists as an account. */
   orphaned?: boolean;
+  /**
+   * The endpoint is in the trash. Both mutations below are refused for one,
+   * so both say so themselves rather than leaving it to the shell's
+   * `fieldset` — which greys them identically to a pending mutation and gives
+   * the reader no way to tell the two apart. The section states the reason
+   * once, above the table.
+   */
+  trashed: boolean;
   busy: boolean;
   onGrant: (accountId: string) => void;
   onRevoke: (accountId: string) => void;
@@ -553,7 +587,7 @@ function AccessRow({
               type="button"
               size="sm"
               variant="outline"
-              disabled={busy}
+              disabled={busy || trashed}
               onClick={() => onRevoke(account.id)}
             >
               {busy ? "Revoking…" : "Revoke"}
@@ -567,7 +601,7 @@ function AccessRow({
               type="button"
               size="sm"
               variant="outline"
-              disabled={busy}
+              disabled={busy || trashed}
               onClick={() => onGrant(account.id)}
             >
               {busy ? "Granting…" : "Grant invoke"}

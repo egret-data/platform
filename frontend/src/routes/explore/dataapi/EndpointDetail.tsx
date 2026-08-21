@@ -442,10 +442,23 @@ function EndpointDetailInner({ ws, id }: { ws: string; id: string }) {
           own remount-per-id above, kept anyway as a second, independent
           guarantee that a section can never carry its own local state across
           two different endpoints. */}
-      {/* `fieldset[disabled]` is the floor, not the explanation. Every section
-          also reads `ctx.trashed` and greys its own actions with a reason
-          beside them — but a section added later will not, and the failure mode
-          of forgetting is a control that looks live and answers 409. HTML
+      {/* `fieldset[disabled]` is the floor, not the explanation — a section
+          also reads `ctx.trashed` and says WHY its own actions are dead, which
+          is the half the shell cannot supply: the banner above is over-broad
+          for any section that keeps something deliberately live (Access's
+          `Try it` link), and only the section knows which of its controls
+          those are.
+
+          Measured rather than asserted, because the sentence here used to
+          claim "every section" does this and that was never true (§9):
+          `Query`, `TryIt`, `Versions`, `Access` and `Response` read the flag;
+          `Versions` and `Access` put a reason on screen. `Config` needs
+          neither — its only mutation is Save, which the header removes
+          entirely rather than greying.
+
+          The floor is what makes forgetting safe: the failure mode of a
+          section added later would otherwise be a control that looks live and
+          answers 409. HTML
           disables every descendant input, button, select and textarea of a
           disabled fieldset, so the default for anything new here is inert.
           `min-w-0` because a `fieldset`'s UA `min-inline-size: min-content` is
