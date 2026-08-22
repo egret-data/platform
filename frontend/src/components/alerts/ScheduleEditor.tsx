@@ -8,6 +8,8 @@ import { useDatabases } from "@/api/databases";
 import { useDashboards } from "@/api/dashboards";
 import { useCharts } from "@/api/charts";
 import { useWorkspaceMembers } from "@/api/members";
+import { useDataApiListEndpoints } from "@/api/generated/data-api/data-api";
+import { DataapiMetric } from "@/api/generated/model";
 import {
   DEFAULT_SCHEDULE,
   WEEKDAYS,
@@ -44,6 +46,35 @@ import { TagCombobox } from "@/components/ui/tag-combobox";
 import { DestinationList } from "./DestinationList";
 import { toDestinations, toRecipients, type Destination } from "./destinations";
 import { SUBJECT_TOKENS, renderSubject } from "@/lib/subjectTemplate";
+
+/**
+ * What each Data API metric actually measures, including the empty-window
+ * behaviour — copied from `dataapi_metric.rs`'s own doc comments, not
+ * re-derived, for the same reason that module copies `activity.rs` rather
+ * than re-deriving it: a number that disagrees with the source it describes
+ * is a support ticket.
+ *
+ * The asymmetry (`dataapi_metric.rs`'s "empty-window asymmetry" doc): a
+ * count of zero rows IS a measurement, so `call_count`/`error_count`/
+ * `error_code_count` are a real `0`. A rate or a percentile over zero rows
+ * is undefined, not zero, so `error_rate`/`p50`/`p95` report no value at
+ * all and the run is recorded `noop` rather than firing on a false "0% / 0ms"
+ * that would read as a healthy, silent endpoint.
+ */
+const DATAAPI_METRIC_HELP: Record<string, string> = {
+  [DataapiMetric.error_rate]:
+    "Share of calls in the window with a status code of 400 or higher (real traffic only — Try-it trials are excluded). An empty window has no denominator, so the run records noop instead of a false 0%.",
+  [DataapiMetric.error_count]:
+    "Number of calls in the window with a status code of 400 or higher. An empty window is a real 0 — it does not by itself tell you the endpoint was quiet rather than healthy; error rate is what answers that.",
+  [DataapiMetric.call_count]:
+    "Total number of calls in the window, real traffic only — Try-it trials are excluded. An empty window is a real 0, so this can fire on \"too few calls\" as well as too many.",
+  [DataapiMetric.p50_duration_ms]:
+    "Median response time, in milliseconds, of successful calls only (status 200–299) — a burst of failed requests cannot drag this down. An empty window (no successful calls) has no percentile to report, so the run records noop instead of firing.",
+  [DataapiMetric.p95_duration_ms]:
+    "95th-percentile response time, in milliseconds, of successful calls only (status 200–299) — a burst of failed requests cannot drag this down. An empty window (no successful calls) has no percentile to report, so the run records noop instead of firing.",
+  [DataapiMetric.error_code_count]:
+    "Number of calls in the window whose error code matches the value entered below, exactly. An empty window is a real 0.",
+};
 
 /**
  * The create/edit form for one schedule.
@@ -90,6 +121,12 @@ export function ScheduleEditor({
   const { data: databases } = useDatabases(ws);
   const { data: dashboards } = useDashboards(ws);
   const { data: charts } = useCharts(ws);
+  // Untrashed only (the default when `params` is omitted) — the same list
+  // Activity's own endpoint filter uses. A dataapi_alert already pointed at a
+  // NOW-trashed endpoint is handled below, the same way the Schedule
+  // section's timezone picker keeps a stored-but-unlisted zone selectable.
+  const endpointsQuery = useDataApiListEndpoints(ws);
+  const endpoints = endpointsQuery.data?.status === 200 ? endpointsQuery.data.data : [];
   // Owners are USERS: an alert runs the query with an owner's permissions, and
   // a group has no identity to run as.
   const { data: members } = useWorkspaceMembers(ws);
@@ -117,6 +154,11 @@ export function ScheduleEditor({
   const [validatorType, setValidatorType] = useState<"not_null" | "operator">("not_null");
   const [op, setOp] = useState(">");
   const [threshold, setThreshold] = useState("0");
+  /** Data API alerts only. `""` means "whole workspace" — see `buildBody`. */
+  const [dataapiEndpointId, setDataapiEndpointId] = useState("");
+  const [dataapiMetric, setDataapiMetric] = useState<string>(DataapiMetric.error_rate);
+  const [dataapiErrorCode, setDataapiErrorCode] = useState("");
+  const [dataapiWindowS, setDataapiWindowS] = useState("300");
   const [targetKind, setTargetKind] = useState<"dashboard" | "chart">(
     prefill?.kind ?? "dashboard",
   );
@@ -136,7 +178,17 @@ export function ScheduleEditor({
   const [emailSubject, setEmailSubject] = useState("");
   const [messageFooter, setMessageFooter] = useState("");
   const [owners, setOwners] = useState<string[]>([]);
-  const [gracePeriod, setGracePeriod] = useState("14400");
+  // `grace_period_s`'s server default (migration 0110) is 14400s — four hours
+  // — inherited from Superset, where every alert is a business one ("orders
+  // dropped"). A dataapi_alert watches operational signals (error rate,
+  // latency) where four quiet hours after a first page is too long; 900s (15
+  // minutes) matches a typical on-call check-in cadence without re-paging on
+  // every tick of a schedule that itself might run every few minutes. Applied
+  // client-side only — the column's own default is unchanged, so a row
+  // created any other way still gets 14400.
+  const [gracePeriod, setGracePeriod] = useState(
+    type === "dataapi_alert" ? "900" : "14400",
+  );
   const [workingTimeout, setWorkingTimeout] = useState("3600");
   const [logRetention, setLogRetention] = useState("90");
   const [customWidth, setCustomWidth] = useState("");
@@ -167,6 +219,12 @@ export function ScheduleEditor({
     const cfg = (existing.validator_config ?? {}) as Record<string, unknown>;
     if (typeof cfg.op === "string") setOp(cfg.op);
     if (typeof cfg.threshold === "number") setThreshold(String(cfg.threshold));
+    setDataapiEndpointId(existing.dataapi_endpoint_id ?? "");
+    setDataapiMetric(existing.dataapi_metric ?? DataapiMetric.error_rate);
+    setDataapiErrorCode(existing.dataapi_error_code ?? "");
+    setDataapiWindowS(
+      existing.dataapi_window_s == null ? "300" : String(existing.dataapi_window_s),
+    );
     if (existing.chart_id) {
       setTargetKind("chart");
       setTargetId(existing.chart_id);
@@ -234,6 +292,7 @@ export function ScheduleEditor({
   }, [error]);
 
   const isAlert = type === "alert";
+  const isDataapiAlert = type === "dataapi_alert";
   /** A stored owner is a user id; a chip has to show the person. An id with no
    *  matching member is shown as itself rather than hidden — a former member
    *  still owns the schedule, and silently dropping them from the field would
@@ -268,12 +327,46 @@ export function ScheduleEditor({
       message: message.trim() || null,
       message_footer: messageFooter.trim() || null,
       skip_if_empty: skipIfEmpty,
-      grace_period_s: num(gracePeriod, 14400),
+      // See the `gracePeriod` state's own comment: a dataapi_alert's default
+      // is shorter than the server's 14400s. Only the DEFAULT differs — a
+      // value the user typed is sent exactly as typed either way.
+      grace_period_s: num(gracePeriod, isDataapiAlert ? 900 : 14400),
       working_timeout_s: num(workingTimeout, 3600),
       log_retention_days: num(logRetention, 90),
       custom_width: customWidth.trim() ? num(customWidth, 0) : null,
       custom_height: customHeight.trim() ? num(customHeight, 0) : null,
     };
+
+    if (isDataapiAlert) {
+      return {
+        ...shared,
+        type: "dataapi_alert" as const,
+        // ALWAYS sent, including an explicit `null` for "whole workspace" —
+        // never left out. `PUT` is a full replace, and an omitted field and a
+        // deliberate workspace-wide choice are otherwise the SAME request: the
+        // server stores a missing `dataapi_endpoint_id` as `null`, which this
+        // system defines as "watch every endpoint", and it cannot tell a
+        // client that forgot the field from one that chose that on purpose
+        // (Task 5 review). A watchdog test pins that this key is always
+        // present in the body, with either a real id or `null`.
+        dataapi_endpoint_id: dataapiEndpointId || null,
+        dataapi_metric: dataapiMetric,
+        // Only meaningful for error_code_count (schedule_dataapi_error_code
+        // _needs_metric / _metric_needs_error_code, migration 0127) — sent as
+        // `null`, not an empty string, for every other metric so a stale value
+        // left over from switching away can never reach the server.
+        dataapi_error_code:
+          dataapiMetric === DataapiMetric.error_code_count
+            ? dataapiErrorCode.trim() || null
+            : null,
+        dataapi_window_s: num(dataapiWindowS, 300),
+        // schedule_dataapi_needs_source pins this to 'operator' — there is no
+        // not_null choice for a dataapi_alert, so the picker itself is not
+        // shown; only its operator/threshold half is reused.
+        validator_type: "operator" as const,
+        validator_config: { op, threshold: Number(threshold) },
+      };
+    }
 
     // Only the type's own block is sent. The server drops the other one anyway,
     // but sending a chart_id on an alert would make the request say something
@@ -575,6 +668,131 @@ export function ScheduleEditor({
               </div>
             </ConfigTableRow>
           </ConfigTable>
+        </ConfigSection>
+      ) : isDataapiAlert ? (
+        <ConfigSection
+          level={2}
+          title="Alert condition"
+          description="Which Data API traffic this watches, and what about it makes this fire."
+        >
+          <ConfigTable valueClassName="w-52 lg:w-80">
+            <ConfigTableRow
+              label="Endpoint"
+              htmlFor="sched-dataapi-endpoint"
+              details="Which endpoint's traffic this watches. Whole workspace combines every endpoint's traffic into one measurement — choose it deliberately, not by leaving this blank; every save sends this field either way."
+            >
+              <select
+                id="sched-dataapi-endpoint"
+                className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                value={dataapiEndpointId}
+                onChange={(e) => setDataapiEndpointId(e.target.value)}
+              >
+                <option value="">Whole workspace</option>
+                {/* The stored endpoint may no longer be in the (untrashed-only)
+                    list — trashed, or a workspace the caller can no longer
+                    read. Injected as its own option so the picker keeps
+                    showing the REAL stored value rather than silently falling
+                    back to "Whole workspace" and having an untouched Save
+                    widen the watch to the entire workspace. Same precedent as
+                    the Schedule section's timezone picker below. */}
+                {dataapiEndpointId && !endpoints.some((e) => e.id === dataapiEndpointId) && (
+                  <option value={dataapiEndpointId}>
+                    {dataapiEndpointId} (not visible — trashed or inaccessible)
+                  </option>
+                )}
+                {endpoints.map((e) => (
+                  <option key={e.id} value={e.id}>
+                    {e.name}
+                  </option>
+                ))}
+              </select>
+            </ConfigTableRow>
+
+            <ConfigTableRow
+              label="Metric"
+              htmlFor="sched-dataapi-metric"
+              details={DATAAPI_METRIC_HELP[dataapiMetric]}
+            >
+              <select
+                id="sched-dataapi-metric"
+                className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                value={dataapiMetric}
+                onChange={(e) => setDataapiMetric(e.target.value)}
+              >
+                <option value={DataapiMetric.error_rate}>Error rate</option>
+                <option value={DataapiMetric.error_count}>Error count</option>
+                <option value={DataapiMetric.call_count}>Call count</option>
+                <option value={DataapiMetric.p50_duration_ms}>p50 latency</option>
+                <option value={DataapiMetric.p95_duration_ms}>p95 latency</option>
+                <option value={DataapiMetric.error_code_count}>Count of a specific error code</option>
+              </select>
+            </ConfigTableRow>
+
+            {dataapiMetric === DataapiMetric.error_code_count && (
+              <ConfigTableRow
+                label="Error code"
+                htmlFor="sched-dataapi-error-code"
+                details="Matched exactly against the error_code recorded on each call — for example rate_limited. Required for this metric; the schema rejects it set on any other."
+              >
+                <Input
+                  id="sched-dataapi-error-code"
+                  value={dataapiErrorCode}
+                  onChange={(e) => setDataapiErrorCode(e.target.value)}
+                  placeholder="e.g. rate_limited"
+                />
+              </ConfigTableRow>
+            )}
+
+            <ConfigTableRow
+              label="Window (seconds)"
+              htmlFor="sched-dataapi-window"
+              details="How far back from now each run measures — the same kind of trailing window as the Activity page's own range picker."
+            >
+              <Input
+                id="sched-dataapi-window"
+                value={dataapiWindowS}
+                onChange={(e) => setDataapiWindowS(e.target.value)}
+                inputMode="numeric"
+              />
+            </ConfigTableRow>
+
+            {/* Reused from the engine alert's own Condition row above: same
+                operator list, same aria-label on Threshold. There is no
+                not_null/operator picker here — schedule_dataapi_needs_source
+                (migration 0127) pins validator_type to 'operator' for every
+                dataapi_alert, so only that half of the pattern applies. */}
+            <ConfigTableRow
+              label="Condition"
+              htmlFor="sched-dataapi-op"
+              details="What about the measured value makes this fire."
+            >
+              <div className="flex gap-2">
+                <select
+                  id="sched-dataapi-op"
+                  className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                  value={op}
+                  onChange={(e) => setOp(e.target.value)}
+                >
+                  {["<", "<=", ">", ">=", "==", "!="].map((o) => (
+                    <option key={o} value={o}>
+                      {o}
+                    </option>
+                  ))}
+                </select>
+                <Input
+                  aria-label="Threshold"
+                  value={threshold}
+                  onChange={(e) => setThreshold(e.target.value)}
+                />
+              </div>
+            </ConfigTableRow>
+          </ConfigTable>
+
+          <p className="text-xs text-muted-foreground">
+            Try-it trials are never counted — every metric here excludes them, the same as the
+            Activity page. If the endpoint is trashed, or the alert's owner can no longer read it,
+            the run records noop with a reason rather than a value.
+          </p>
         </ConfigSection>
       ) : (
         <ConfigSection
@@ -1007,7 +1225,9 @@ export function ScheduleEditor({
                 value={emailSubject}
                 onChange={(e) => setEmailSubject(e.target.value)}
                 placeholder={
-                  isAlert ? `[egret] ${name || "name"} triggered` : `[egret] ${name || "name"}`
+                  isAlert || isDataapiAlert
+                    ? `[egret] ${name || "name"} triggered`
+                    : `[egret] ${name || "name"}`
                 }
               />
               <p className="text-xs text-muted-foreground">
@@ -1170,7 +1390,7 @@ export function ScheduleEditor({
           <ConfigTableRow
             label="Don't send when there are no rows"
             htmlFor="sched-skip-empty"
-            details="The run still happens and is recorded as noop — only the notification is skipped. Reports don't read this setting."
+            details="The run still happens and is recorded as noop — only the notification is skipped. Reports and Data API alerts don't read this setting; a Data API alert with nothing to report already records noop on its own, from the measured value alone."
           >
             <Checkbox
               id="sched-skip-empty"
@@ -1193,13 +1413,25 @@ export function ScheduleEditor({
           </p>
         )}
 
+        {/* A dataapi_alert has no query result set to attach — the measured
+            value IS the whole answer (runner.rs's evaluate_and_deliver_dataapi
+            _alert doc comment) — so it gets neither the CSV note above nor
+            the report preview below, both of which describe things it does
+            not have. */}
+        {isDataapiAlert && (
+          <p className="text-xs text-muted-foreground">
+            There are no query rows to attach — the measured value is the whole result, shown
+            in the message itself.
+          </p>
+        )}
+
         {/* A report's own preview text, not a field — it has no value to
             edit, so it cannot be a row. It used to sit between the two notes,
             which the table's grouping (Message, then Attachment) no longer
             has room for; it moves below the table for the same reason the
             "+ Add another" button did in the Contents section: a bare,
             non-field element is illegal inside a table body. */}
-        {!isAlert && (
+        {!isAlert && !isDataapiAlert && (
           <p className="rounded-md border border-dashed px-3 py-3 text-center text-xs text-muted-foreground">
             {reportFormat === "png"
               ? "The rendered image goes here, inside the message."

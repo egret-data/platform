@@ -5,6 +5,7 @@
  * egret unified data portal HTTP API.
  * OpenAPI spec version: 0.1.0
  */
+import type { DataapiMetric } from './dataapiMetric';
 import type { OwnerDto } from './ownerDto';
 import type { RecipientDto } from './recipientDto';
 import type { ReportFormat } from './reportFormat';
@@ -47,6 +48,13 @@ export interface ScheduleDetailDto {
   custom_width?: number | null;
   /** @nullable */
   custom_height?: number | null;
+  /** @nullable */
+  dataapi_endpoint_id?: string | null;
+  dataapi_metric?: null | DataapiMetric;
+  /** @nullable */
+  dataapi_error_code?: string | null;
+  /** @nullable */
+  dataapi_window_s?: number | null;
   grace_period_s: number;
   working_timeout_s: number;
   log_retention_days: number;
