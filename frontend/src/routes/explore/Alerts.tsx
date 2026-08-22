@@ -14,15 +14,16 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
-import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { RelativeTime } from "@/components/explore/RelativeTime";
 import { SummaryStrip } from "@/components/explore/SummaryStrip";
 import { FacetSelect, FACET_ALL } from "@/components/explore/FacetSelect";
 import { SortableHeader, type SortState } from "@/components/explore/SortableHeader";
 import { FolderHeaderRow } from "@/components/explore/FolderHeaderRow";
 import { FolderNameDialog } from "@/components/explore/FolderNameDialog";
+import { ListPageShell } from "@/components/explore/ListPageShell";
+import { ListStates } from "@/components/explore/ListStates";
+import { ListToolbarButton } from "@/components/explore/ListToolbarButton";
+import { EmptyState } from "@/components/explore/EmptyState";
 import { groupByFolder, useCollapsed, UNCATEGORIZED_KEY } from "@/components/explore/folders";
 import { useBulkSelect } from "@/hooks/useBulkSelect";
 import { useFolders, useFolderMutations, useSetFolder } from "@/api/folders";
@@ -369,81 +370,58 @@ export default function Alerts() {
   const colSpan = bulk.bulkMode && !showTrash ? 8 : 7;
 
   return (
-    <div className="p-4">
-      <div className="mb-4 flex items-center justify-between gap-2">
-        <h1 className="text-lg font-semibold">
-          {showTrash ? "Trash" : "Alerts & Reports"}
-        </h1>
-        <div className="flex items-center gap-2">
+    <ListPageShell
+      title={showTrash ? "Trash" : "Alerts & Reports"}
+      toolbar={
+        <>
           {!showTrash && (
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  size="icon"
-                  variant={onlyBookmarked ? "secondary" : "outline"}
-                  aria-label="Bookmarks"
-                  onClick={() => setOnlyBookmarked((v) => !v)}
-                >
-                  <Star className={`h-4 w-4 ${onlyBookmarked ? "fill-current" : ""}`} />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="bottom">Bookmarks</TooltipContent>
-            </Tooltip>
+            <ListToolbarButton
+              icon={Star}
+              label="Bookmarks"
+              active={onlyBookmarked}
+              filled
+              onClick={() => setOnlyBookmarked((v) => !v)}
+            />
           )}
           {!showTrash && hasData && canManage && (
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  size="icon"
-                  variant={bulk.bulkMode ? "secondary" : "outline"}
-                  aria-label="Bulk select"
-                  onClick={() => bulk.setBulkMode(!bulk.bulkMode)}
-                >
-                  <ListChecks className="h-4 w-4" />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="bottom">Bulk select</TooltipContent>
-            </Tooltip>
+            <ListToolbarButton
+              icon={ListChecks}
+              label="Bulk select"
+              active={bulk.bulkMode}
+              onClick={() => bulk.setBulkMode(!bulk.bulkMode)}
+            />
           )}
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                size="icon"
-                variant={showTrash ? "secondary" : "outline"}
-                aria-label="Trash"
-                onClick={() => {
-                  const next = !showTrash;
-                  setShowTrash(next);
-                  if (next) {
-                    setOnlyBookmarked(false);
-                    bulk.setBulkMode(false);
-                  }
-                }}
-              >
-                <Trash2 className={`h-4 w-4 ${showTrash ? "fill-current" : ""}`} />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent side="bottom">Trash</TooltipContent>
-          </Tooltip>
+          {/* NOT gated on `hasData`: a view switch, not a filter. Gated, it
+              would be the only way OUT of an empty trash and would vanish
+              exactly when it is the only control left. */}
+          <ListToolbarButton
+            icon={Trash2}
+            label="Trash"
+            active={showTrash}
+            filled
+            onClick={() => {
+              const next = !showTrash;
+              setShowTrash(next);
+              if (next) {
+                setOnlyBookmarked(false);
+                bulk.setBulkMode(false);
+              }
+            }}
+          />
           {!showTrash && canManage && (
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  size="icon"
-                  variant="outline"
-                  aria-label="New folder"
-                  onClick={() => setFolderDialog({ mode: "new" })}
-                >
-                  <FolderPlus className="h-4 w-4" />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="bottom">New folder</TooltipContent>
-            </Tooltip>
+            <ListToolbarButton
+              icon={FolderPlus}
+              label="New folder"
+              onClick={() => setFolderDialog({ mode: "new" })}
+            />
           )}
-          {!showTrash && newButton}
-        </div>
-      </div>
-
+        </>
+      }
+      action={!showTrash ? newButton : null}
+    >
+      {/* A page-level view switch, not a shell slot: it selects which kind of
+          schedule the list shows and belongs above the table, where the page
+          has always drawn it. */}
       <Tabs
         value={tab}
         onValueChange={(v) => {
@@ -458,16 +436,37 @@ export default function Alerts() {
         </TabsList>
       </Tabs>
 
-      {isError ? (
-        <Alert variant="destructive">
-          <AlertDescription>
-            {(error as Error)?.message ?? "Failed to load schedules."}
-          </AlertDescription>
-        </Alert>
-      ) : isLoading ? (
-        <ListSkeleton rows={6} cols={6} />
-      ) : hasData ? (
-        <>
+      <ListStates
+        isLoading={isLoading}
+        isError={isError}
+        error={error}
+        errorText="Failed to load schedules."
+        hasData={hasData}
+        skeletonCols={6}
+        empty={
+          showTrash ? (
+            <p className="text-muted-foreground">Trash is empty.</p>
+          ) : (
+            <EmptyState
+              variant="dashed"
+              icon={Bell}
+              title={`No ${typeLabel}s yet.`}
+              description={
+                tab === "alert"
+                  ? "An alert runs SQL on a schedule and notifies you when the result meets your condition."
+                  : "A report delivers a chart or dashboard on a schedule."
+              }
+              action={
+                canManage ? (
+                  <Button asChild>
+                    <Link to={newHref}>Create your first {typeLabel}</Link>
+                  </Button>
+                ) : null
+              }
+            />
+          )
+        }
+      >
           <div className="mb-3 flex flex-wrap items-center gap-2">
             <div className="relative max-w-xs flex-1">
               <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
@@ -609,25 +608,7 @@ export default function Alerts() {
                 : `No ${typeLabel}s match the current filters.`}
             </p>
           )}
-        </>
-      ) : showTrash ? (
-        <p className="text-muted-foreground">Trash is empty.</p>
-      ) : (
-        <div className="rounded border border-dashed p-8 text-center text-muted-foreground">
-          <Bell className="mx-auto mb-2 h-8 w-8" />
-          <p>
-            No {typeLabel}s yet.{" "}
-            {tab === "alert"
-              ? "An alert runs SQL on a schedule and notifies you when the result meets your condition."
-              : "A report delivers a chart or dashboard on a schedule."}
-          </p>
-          {canManage && (
-            <Button asChild className="mt-3">
-              <Link to={newHref}>Create your first {typeLabel}</Link>
-            </Button>
-          )}
-        </div>
-      )}
+      </ListStates>
 
       <FolderNameDialog
         open={!!folderDialog}
@@ -679,7 +660,7 @@ export default function Alerts() {
           setPendingDelete(null);
         }}
       />
-    </div>
+    </ListPageShell>
   );
 }
 

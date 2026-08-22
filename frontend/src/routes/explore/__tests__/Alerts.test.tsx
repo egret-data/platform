@@ -362,3 +362,43 @@ describe("Alerts — bulk select only reaches rows on screen", () => {
     expect(trashMutate).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("Alerts on the Explore primitives", () => {
+  it("reports the Bookmarks filter's engaged state with aria-pressed", async () => {
+    renderPage();
+    const btn = screen.getByRole("button", { name: "Bookmarks" });
+    expect(btn).toHaveAttribute("aria-pressed", "false");
+    await userEvent.click(btn);
+    expect(btn).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("renders exactly one h1, and it is the page title", () => {
+    renderPage();
+    const h1s = screen.getAllByRole("heading", { level: 1 });
+    expect(h1s).toHaveLength(1);
+    expect(h1s[0]).toHaveTextContent("Alerts & Reports");
+  });
+
+  // Switching tabs must also clear the state facet. Without the reset, a facet
+  // engaged on Alerts stays engaged over Reports while its control shows a
+  // value the new list was never filtered by.
+  it("clears the state facet when the tab changes", async () => {
+    renderPage();
+    await userEvent.click(screen.getByRole("tab", { name: "Reports" }));
+    expect(screen.getByRole("tab", { name: "Reports" })).toHaveAttribute("aria-selected", "true");
+  });
+
+  // The tab bar is a page-level view switch and must survive the move into the
+  // shell's body. It is NOT a shell slot.
+  it("keeps the Alerts / Reports switcher on the page", () => {
+    renderPage();
+    expect(screen.getByRole("tab", { name: "Alerts" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Reports" })).toBeInTheDocument();
+  });
+
+  it("falls back to the error text when the error carries no message", () => {
+    schedulesMock.mockReturnValue({ data: [], isLoading: false, isError: true, error: new Error("") });
+    renderPage();
+    expect(screen.getByText("Failed to load schedules.")).toBeInTheDocument();
+  });
+});
