@@ -426,3 +426,72 @@ describe("Alerts on the Explore primitives", () => {
     expect(screen.getByText("Failed to load schedules.")).toBeInTheDocument();
   });
 });
+
+/**
+ * spec §5.8: dataapi_alert rides the SAME Alerts list, badge-distinguished —
+ * not a third tab. The backend's `type` filter is exact-match, so the page
+ * fetches it as a second, narrower call and merges client-side, gated to the
+ * Alerts tab (Task 6, fix round 1 — this whole surface was unreachable
+ * without it: no tab, no entry point, no badge).
+ */
+describe("Alerts — dataapi_alert rides the Alerts tab (Task 6 fix round 1)", () => {
+  /** Only `type` distinguishes the two calls `Alerts.tsx` now makes — every
+   *  OTHER test in this file relies on `schedulesMock.mockReturnValue` (args-
+   *  blind) instead, which is exactly why the merge is defensively re-filtered
+   *  to rows actually typed `dataapi_alert` in the component itself: those
+   *  other tests' single fixture leaks into both calls, and the filter is
+   *  what keeps it from being double-counted without anyone having touched
+   *  their setup. */
+  function mockByType(dataapiRows: ScheduleSummary[], alertRows: ScheduleSummary[] = [row()]) {
+    schedulesMock.mockImplementation((_ws: string, type?: string) => ({
+      data: type === "dataapi_alert" ? dataapiRows : type === "report" ? [] : alertRows,
+      isLoading: false,
+      isError: false,
+    }));
+  }
+
+  it("merges a dataapi_alert row into the Alerts tab, with a Data API badge", () => {
+    mockByType([row({ id: "d1", name: "Latency spike", type: "dataapi_alert" })]);
+    renderPage();
+    expect(screen.getByText("Orders dropped")).toBeInTheDocument();
+    expect(screen.getByText("Latency spike")).toBeInTheDocument();
+    expect(screen.getByText("Data API")).toBeInTheDocument();
+  });
+
+  it("keeps dataapi_alert rows off the Reports tab", async () => {
+    mockByType([row({ id: "d1", name: "Latency spike", type: "dataapi_alert" })]);
+    const user = userEvent.setup();
+    renderPage();
+    expect(screen.getByText("Latency spike")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: /reports/i }));
+    await waitFor(() =>
+      expect(screen.queryByText("Latency spike")).not.toBeInTheDocument(),
+    );
+  });
+
+  it("offers a Data API alert entry point beside + Alert, only on the Alerts tab", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    const dataapiLink = screen.getByRole("link", { name: /\+ data api alert/i });
+    expect(dataapiLink).toHaveAttribute("href", "/explore/eng/alerts/new?type=dataapi_alert");
+    // "+ Alert" itself is unchanged — still the plain link the tests above pin.
+    expect(screen.getByRole("link", { name: /^\+ alert$/i })).toHaveAttribute(
+      "href",
+      "/explore/eng/alerts/new",
+    );
+
+    await user.click(screen.getByRole("tab", { name: /reports/i }));
+    expect(screen.queryByRole("link", { name: /\+ data api alert/i })).not.toBeInTheDocument();
+  });
+
+  it("withholds the Data API alert entry point from a user who cannot manage", () => {
+    schedulesMock.mockReturnValue({
+      data: [row({ can_manage: false })],
+      isLoading: false,
+      isError: false,
+    });
+    renderPage();
+    expect(screen.queryByRole("link", { name: /\+ data api alert/i })).not.toBeInTheDocument();
+  });
+});

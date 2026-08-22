@@ -972,3 +972,53 @@ describe("Data API alert condition (Task 6)", () => {
     expect(body.validator_config).toEqual({ op: ">=", threshold: 500 });
   });
 });
+
+/**
+ * The page-chrome half of reachability (Task 6, fix round 1): `ScheduleDetail`
+ * itself, not the direct-mount `ScheduleEditor` harness above. Before this
+ * round, `type` had no `dataapi_alert` arm for a NEW schedule, and the header
+ * (`Icon`/Type fact) and the `what` tab's own label were driven by a bare
+ * `isAlert` boolean, which read a dataapi_alert as a report ("Contents",
+ * "Report") rather than what it is.
+ */
+describe("ScheduleDetail — dataapi_alert reachability (Task 6 fix round 1)", () => {
+  function dataapiExisting(over: Record<string, unknown> = {}) {
+    return {
+      ...row({ type: "dataapi_alert" }),
+      dataapi_endpoint_id: null,
+      dataapi_metric: "error_rate",
+      dataapi_error_code: null,
+      dataapi_window_s: 300,
+      validator_type: "operator",
+      validator_config: { op: ">", threshold: 0.1 },
+      recipients: [],
+      targets: [],
+      ...over,
+    };
+  }
+
+  it("reads the what-tab Condition, not Contents, for an existing dataapi_alert", async () => {
+    scheduleMock.mockReturnValue({ data: dataapiExisting(), isLoading: false });
+    renderEditor("/explore/eng/alerts/s1");
+
+    expect(await screen.findByRole("tab", { name: /^condition$/i })).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: /^contents$/i })).not.toBeInTheDocument();
+  });
+
+  it("labels the header Type fact 'Data API alert', not 'Report'", async () => {
+    scheduleMock.mockReturnValue({ data: dataapiExisting(), isLoading: false });
+    renderEditor("/explore/eng/alerts/s1");
+
+    expect(await screen.findByText("Data API alert")).toBeInTheDocument();
+    expect(screen.queryByText(/^report$/i)).not.toBeInTheDocument();
+  });
+
+  it("opens a new schedule as a Data API alert from ?type=dataapi_alert, with the Condition tab", async () => {
+    renderEditor("/explore/eng/alerts/new?type=dataapi_alert");
+
+    expect(
+      await screen.findByRole("heading", { name: /new data api alert/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /^condition$/i })).toBeInTheDocument();
+  });
+});

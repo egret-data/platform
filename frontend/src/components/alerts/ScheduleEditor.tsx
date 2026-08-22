@@ -34,9 +34,16 @@ export const FORM_ID = "schedule-editor";
 /** The sections the editor is split across, in nav order. */
 export type SectionKey = "general" | "what" | "schedule" | "notification";
 
-export const SECTIONS: { key: SectionKey; label: (isAlert: boolean) => string }[] = [
+// Keyed on the schedule's own `type`, not a bare `isAlert` boolean: a
+// `dataapi_alert` is not an `alert` (`type === "alert"` is false for it,
+// same reason `model.rs`'s `to_new` keeps `is_engine_alert`/`is_dataapi_alert`
+// as two separate flags), but it DOES have a condition, so it reads
+// "Condition" too — the boolean version of this label read "Contents" for a
+// dataapi_alert, borrowing the report tab's wording for a schedule that has
+// no report contents at all (Task 6, fix round 1).
+export const SECTIONS: { key: SectionKey; label: (type: ScheduleType) => string }[] = [
   { key: "general", label: () => "General" },
-  { key: "what", label: (a) => (a ? "Condition" : "Contents") },
+  { key: "what", label: (t) => (t === "report" ? "Contents" : "Condition") },
   { key: "schedule", label: () => "Schedule" },
   { key: "notification", label: () => "Notification" },
 ];
