@@ -178,6 +178,9 @@ xem tình huống quy tắc đó sinh ra để giải có phải tình huống �
 
 ### 4.1 Cái thật sự sai, và chỉ có một
 
+*(Đã giải quyết bởi package E — xem plan. Mục này mô tả code TRƯỚC package đó; các chồng
+viết tay và grid hai cột nó nhắc đến không còn tồn tại.)*
+
 Bên trong mỗi section của `ScheduleEditor.tsx`, mọi trường đều là một chồng viết tay: một
 `<Label>`, một control, và thường có `<p class="text-xs text-muted-foreground">` chèn phía
 dưới. Quy tắc **thuận** của §4.1 áp dụng — một nhóm setting là bảng `Setting | Details |
@@ -207,7 +210,7 @@ form dùng chung một mép. Bỏ cap là kéo cả ba quá khổ đọc — đ�
 
 **`DestinationList` giữ nguyên.** Câu "một listing chỉ đọc không phải setting" của §4.2
 không mô tả nó: mỗi dòng là một *form* có trường khác nhau theo kind — email nhận danh sách
-địa chỉ, Slack nhận channel và token, webhook nhận URL và secret. Đó là một tập do người
+địa chỉ, Slack nhận channel, webhook nhận URL và secret. Đó là một tập do người
 dùng soạn ra, không phải một danh sách bản ghi, và ép form-theo-kind vào hàng bảng sẽ tệ
 hơn thứ đang có.
 
@@ -215,7 +218,7 @@ hơn thứ đang có.
 
 Chỉ `ScheduleEditor.tsx`. Hai thứ trong file đó đã đúng, có comment tự giải thích, và không
 được động vào: dirtiness tính bằng **so sánh snapshot** chứ không phải nghe sự kiện change
-(`ScheduleEditor.tsx:365-390`), và form là **một cột không tự giữ width** để trang đặt khổ.
+(`ScheduleEditor.tsx:367-391`), và form là **một cột không tự giữ width** để trang đặt khổ.
 
 ## 5. Z2 — cảnh báo endpoint Data API
 

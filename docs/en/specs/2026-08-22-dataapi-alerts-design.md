@@ -182,6 +182,9 @@ the situation it was written for is the situation here.
 
 ### 4.1 What is actually wrong, and it is one thing
 
+*(Resolved by package E — see the plan. This section describes the code as it stood before
+that package; the hand-written stacks and two-up grid it names no longer exist.)*
+
 Inside each of `ScheduleEditor.tsx`'s four sections, every field is a
 hand-written stack: a `<Label>`, a control, and often a `<p class="text-xs
 text-muted-foreground">` helper wedged underneath. §4.1's **positive** rule
@@ -216,7 +219,7 @@ measure, which is the thing the comment already refused.
 
 **`DestinationList` stays as it is.** §4.2's "a read-only listing is not a
 setting" does not describe it: each row is a *form* whose fields differ by kind
-— email takes addresses, Slack takes a channel and a token, webhook takes a URL
+— email takes addresses, Slack takes a channel, webhook takes a URL
 and a secret. It is a composed set, not a listing of records, and pressing
 per-kind forms into table rows would be worse than what is there.
 
@@ -225,7 +228,7 @@ per-kind forms into table rows would be worse than what is there.
 `ScheduleEditor.tsx` only. Two things in that file are already correct, carry
 comments explaining themselves, and must not be touched: dirtiness computed by
 **comparing a snapshot** rather than by listening for change events
-(`ScheduleEditor.tsx:365-390`), and the form being **one column with no width of
+(`ScheduleEditor.tsx:367-391`), and the form being **one column with no width of
 its own** so the page sets the measure.
 
 ## 5. Z2 — Data API endpoint alerts

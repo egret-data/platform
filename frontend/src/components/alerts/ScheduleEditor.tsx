@@ -420,7 +420,7 @@ export function ScheduleEditor({
           <ConfigTableRow
             label="Name"
             htmlFor="sched-name"
-            details="Shown in the list and used as the default email subject."
+            details="Shown in the list, and interpolated into the default email subject."
           >
             <Input id="sched-name" value={name} onChange={(e) => setName(e.target.value)} />
           </ConfigTableRow>
@@ -494,7 +494,7 @@ export function ScheduleEditor({
           title="Alert condition"
           description="The query to run, and what about its result makes this fire."
         >
-          <ConfigTable valueClassName="w-96">
+          <ConfigTable valueClassName="w-52 lg:w-80">
             <ConfigTableRow
               label="Database"
               htmlFor="sched-db"
@@ -693,11 +693,6 @@ export function ScheduleEditor({
             >
               + Add another
             </Button>
-            {extraTargets.length > 0 && (
-              <span className="ml-2 text-xs text-muted-foreground">
-                Delivered as one PDF, one page each, in this order.
-              </span>
-            )}
           </div>
         </ConfigSection>
       ))}
@@ -895,7 +890,7 @@ export function ScheduleEditor({
             <ConfigTableRow
               label="Timezone"
               htmlFor="sched-tz"
-              details="Runs are scheduled in this zone, and dates in the message are rendered in it."
+              details="Runs are scheduled in this zone. It also renders the {{date}}/{{time}} placeholders in the subject — the message body itself has no dates in it."
             >
               <select
                 id="sched-tz"
@@ -919,7 +914,7 @@ export function ScheduleEditor({
           <ConfigTableRow
             label="Grace period (seconds)"
             htmlFor="sched-grace"
-            details="How long to wait before firing again for the same condition."
+            details="After it fires, stays quiet for this long so a condition that stays true doesn't mail every tick. Any earlier firing counts, not only a repeat of this one — the run still happens, only delivery is skipped. Reports ignore this."
           >
             <Input
               id="sched-grace"
@@ -992,7 +987,7 @@ export function ScheduleEditor({
             destination produces. */}
         <DestinationList value={destinations} onChange={setDestinations} />
 
-        <ConfigTable valueClassName="w-96">
+        <ConfigTable valueClassName="w-52 lg:w-80">
           <ConfigTableGroup label="Message" />
 
           <ConfigTableRow
@@ -1086,7 +1081,7 @@ export function ScheduleEditor({
               <ConfigTableRow
                 label="Also show a chart or dashboard"
                 htmlFor="sched-attach"
-                details="The triggering rows go here, always attached as CSV."
+                details="Renders the chart or dashboard picked below and attaches it alongside the numbers."
               >
                 <div className="flex flex-col gap-2">
                   <Checkbox
@@ -1142,7 +1137,7 @@ export function ScheduleEditor({
                   <ConfigTableRow
                     label="Image width (px)"
                     htmlFor="sched-width"
-                    details="Overrides the rendered image's default width."
+                    details="Overrides the rendered image's default width — only takes effect if height is set too; leave either blank and both fall back to the default size."
                   >
                     <Input
                       id="sched-width"
@@ -1155,7 +1150,7 @@ export function ScheduleEditor({
                   <ConfigTableRow
                     label="Image height (px)"
                     htmlFor="sched-height"
-                    details="Overrides the rendered image's default height."
+                    details="Overrides the rendered image's default height — only takes effect if width is set too; leave either blank and both fall back to the default size."
                   >
                     <Input
                       id="sched-height"
@@ -1175,7 +1170,7 @@ export function ScheduleEditor({
           <ConfigTableRow
             label="Don't send when there are no rows"
             htmlFor="sched-skip-empty"
-            details="Skips this run rather than delivering an empty result."
+            details="The run still happens and is recorded as noop — only the notification is skipped. Reports don't read this setting."
           >
             <Checkbox
               id="sched-skip-empty"
@@ -1184,6 +1179,19 @@ export function ScheduleEditor({
             />
           </ConfigTableRow>
         </ConfigTable>
+
+        {/* What the message always carries, not a field itself — it has no
+            control of its own, so (like the report preview below) it cannot
+            be a row and sits outside the table instead. This used to be a
+            centred paragraph above the attachment checkbox; it described the
+            message body, not the checkbox, so it did not belong as that
+            row's Details. */}
+        {isAlert && (
+          <p className="text-xs text-muted-foreground">
+            The triggering rows are always attached — as a CSV file to email. A webhook receives
+            them as JSON in the payload instead; Slack does not receive them at all.
+          </p>
+        )}
 
         {/* A report's own preview text, not a field — it has no value to
             edit, so it cannot be a row. It used to sit between the two notes,

@@ -939,9 +939,12 @@ not exist yet:
   The three sections after it (`Versions`, `Access`, `Response`) added none, and that is the
   expected result rather than a gap — all three converted *lists* (§4.3), and a list does not
   want a `Setting | Details | Value` table. The sixteenth is `ScheduleEditor.tsx` (alerts),
-  converted to `ConfigTable` rows section by section; it is the first `ConfigTable` consumer
-  that keeps its `ConfigSection` frame, because the frame is not §4.1's stacking defect when
-  the page renders only one section at a time.
+  converted to `ConfigTable` rows section by section. Ten earlier consumers already nest
+  `ConfigTable` inside a `ConfigSection` — `EngineSecurity`, `ImageSection`,
+  `EngineAutoscaling`, `EngineConfigReliability`, `EngineRoleConfig`, `StarRocksConfigTab`,
+  `ContainersMountsSection`, `PodSection`, and Data API's `Config` and `ResponseSection` — so
+  keeping the frame here is not new; it is not §4.1's stacking defect when the page renders
+  only one section at a time.
 - The plain-`Table` list of §4.3 — **5** files, all Data API endpoint detail (`ParamEditor`,
   `TryIt`, `Versions`, `AccessSection`, `ResponseSection`). Measured with
   `grep -rl 'from "@/components/ui/table"' src/routes/explore/dataapi/`, which also returns
