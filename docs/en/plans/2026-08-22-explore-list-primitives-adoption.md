@@ -815,14 +815,24 @@ The Adoption status section states its own counts and the commands that produced
 
 ```bash
 cd frontend
-grep -rl 'from "@/components/explore/ListPageShell"' src --include=*.tsx | grep -v __tests__ | wc -l
-grep -rl 'from "@/components/explore/ListStates"' src --include=*.tsx | grep -v __tests__ | wc -l
-grep -rl 'from "@/components/explore/ListToolbarButton"' src --include=*.tsx | grep -v __tests__ | wc -l
-grep -rl 'from "@/components/explore/EmptyState"' src --include=*.tsx | grep -v __tests__ | wc -l
-grep -rc 'aria-pressed' src/routes/explore/Alerts.tsx src/routes/explore/Datasets.tsx \
-                        src/routes/explore/Charts.tsx src/routes/explore/Dashboards.tsx \
-                        src/routes/explore/Notebooks.tsx
+for p in ListPageShell ListStates ListToolbarButton EmptyState; do
+  printf "%-18s %s\n" "$p" \
+    "$(grep -rl "from \"@/components/explore/$p\"" src --include='*.tsx' | grep -v __tests__ | wc -l | tr -d ' ')"
+done
+
+# Which Explore list pages still hand-roll the toolbar cluster.
+for f in Alerts Datasets Charts Dashboards Notebooks; do
+  printf "%-12s ListToolbarButton=%s rawTooltip=%s\n" "$f" \
+    "$(grep -c ListToolbarButton src/routes/explore/$f.tsx)" \
+    "$(grep -c TooltipTrigger src/routes/explore/$f.tsx)"
+done
 ```
+
+**Two corrections to an earlier revision of this step, both found by dry-running the commands rather than trusting them.**
+
+`--include=*.tsx` is unquoted glob syntax and fails under zsh with `no matches found`. It must be `--include='*.tsx'`.
+
+More importantly, the earlier revision counted `aria-pressed` **in the page files**. After the conversion that count is `0` on all four pages *by design* — the attribute now lives inside `ListToolbarButton`, which is the entire point of the change. Anyone re-running that command would read `0` and conclude the defect was never fixed. The `ListToolbarButton` / `TooltipTrigger` pair above is the measurement that actually distinguishes a converted page from an unconverted one.
 
 - [ ] **Step 2: Update the section with the measured numbers**
 
