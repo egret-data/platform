@@ -174,6 +174,11 @@ export default function Charts() {
               onClick={() => bulk.setBulkMode(!bulk.bulkMode)}
             />
           )}
+          {/* NOT gated on `hasData`: this is a view switch, not a filter. It
+              selects a different server query, and an empty dataset list says
+              nothing about whether the trash is empty. Gated, it would be the
+              only way OUT of an empty trash and would vanish exactly when it is
+              the only control left. */}
           <ListToolbarButton
             icon={Trash2}
             label="Trash"
@@ -197,7 +202,7 @@ export default function Charts() {
           )}
         </>
       }
-      action={!showTrash ? <Button asChild><Link to={`/explore/${ws}/charts/new`}>+ Chart</Link></Button> : null}
+      action={<Button asChild><Link to={`/explore/${ws}/charts/new`}>+ Chart</Link></Button>}
     >
       <ListStates
         isLoading={isLoading}

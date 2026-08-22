@@ -381,11 +381,35 @@ describe("Alerts on the Explore primitives", () => {
 
   // Switching tabs must also clear the state facet. Without the reset, a facet
   // engaged on Alerts stays engaged over Reports while its control shows a
-  // value the new list was never filtered by.
+  // value the new list was never filtered by. This guards `setStateFilter(FACET_ALL)`
+  // in Alerts.tsx's Tabs `onValueChange` — it must actually engage the facet
+  // and read its control back, not merely click the tab and check the tab's
+  // own `aria-selected`, which is Radix's behaviour and proves nothing about
+  // the page.
   it("clears the state facet when the tab changes", async () => {
+    const user = userEvent.setup();
     renderPage();
-    await userEvent.click(screen.getByRole("tab", { name: "Reports" }));
-    expect(screen.getByRole("tab", { name: "Reports" })).toHaveAttribute("aria-selected", "true");
+
+    // Engage the facet on the Alerts tab first, so the later assertion is a
+    // genuine reset rather than a facet that was never set.
+    await user.click(screen.getByLabelText("Last run"));
+    await user.click(await screen.findByRole("option", { name: "Success" }));
+    await user.click(screen.getByLabelText("Last run"));
+    expect(await screen.findByRole("option", { name: "Success" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    await user.keyboard("{Escape}");
+
+    await user.click(screen.getByRole("tab", { name: "Reports" }));
+
+    // The facet control must have returned to FACET_ALL ("All"), not merely
+    // whatever Radix's own tab state reports.
+    await user.click(screen.getByLabelText("Last run"));
+    expect(await screen.findByRole("option", { name: "All" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
   });
 
   // The tab bar is a page-level view switch and must survive the move into the

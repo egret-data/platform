@@ -28,6 +28,9 @@ describe("FolderToolbar", () => {
         <FolderToolbar onNewFolder={vi.fn()} />
       </TooltipProvider>,
     );
-    expect(screen.getByRole("button", { name: "New folder" })).toHaveAttribute("aria-pressed", "false");
+    // `aria-pressed` must be ABSENT, not `"false"`: `"false"` still announces
+    // "toggle button, not pressed" to a screen reader for a control that has
+    // no engaged state at all.
+    expect(screen.getByRole("button", { name: "New folder" })).not.toHaveAttribute("aria-pressed");
   });
 });

@@ -4,13 +4,14 @@ import { ListToolbarButton } from "@/components/explore/ListToolbarButton";
 /**
  * The header filter: show only bookmarked rows.
  *
- * The shared implementation, extracted here so the later migration phase has
- * something to adopt. It is NOT yet the one the older pages use: measured on
- * this branch, five pages (Alerts, Charts, Dashboards, Datasets, Notebooks)
- * still own an inline copy of this button alongside their `onlyBookmarked`
- * state, and none of them imports this file — `Endpoints.tsx` is its only
- * consumer. So today this is a sixth copy that the other five are meant to
- * collapse into, not a deduplication that has already happened.
+ * The shared implementation, extracted here so a later migration phase has
+ * something to adopt. It is NOT yet the one every page uses: `Alerts`,
+ * `Charts`, `Dashboards` and `Datasets` were converted onto `ListToolbarButton`
+ * directly (package U, 2026-08-22), not onto this wrapper, so the dedup this
+ * component exists for has not happened for them. `Notebooks.tsx` still owns
+ * an inline copy outright and was not touched by that conversion. `Endpoints.tsx`
+ * remains this file's only consumer. Adopting this wrapper in the other five
+ * pages is still outstanding — a later package, not this one.
  *
  * It holds no state of its own — the page owns the filter, because the page is
  * what applies it to its rows.

@@ -26,7 +26,9 @@ describe("ListToolbarButton", () => {
 
   it("reads as pressed when active, so the toolbar shows which filters are on", () => {
     const { rerender } = renderButton(<ListToolbarButton icon={Star} label="Bookmarks" onClick={() => {}} />);
-    expect(screen.getByRole("button", { name: "Bookmarks" })).toHaveAttribute("aria-pressed", "false");
+    // No `active` prop at all: the attribute must be absent, not `"false"` — a
+    // momentary action button (no `active` passed) must not read as a toggle.
+    expect(screen.getByRole("button", { name: "Bookmarks" })).not.toHaveAttribute("aria-pressed");
     rerender(
       <TooltipProvider>
         <ListToolbarButton icon={Star} label="Bookmarks" active onClick={() => {}} />

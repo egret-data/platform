@@ -13,6 +13,8 @@
 ## Global Constraints
 
 - **The four primitives must end every task byte-identical.** `ListPageShell.tsx`, `ListStates.tsx`, `ListToolbarButton.tsx` and `EmptyState.tsx` are not modified by this plan. The mutation checks in Task 1 Step 7 and Task 3 Step 6 edit them *temporarily* and restore them, and `git diff --exit-code frontend/src/components/explore/` in each task's gate is what holds that. They change only additively and only with a reason (§7.1 of `docs/en/ui-conventions.md`); a slot added for one consumer is the prop-per-capability shell that §1.1 rejects.
+
+  **Relaxed by explicit decision after the final whole-branch review (finding 3), 2026-08-22:** `ListToolbarButton.tsx` was modified — its destructured default `active = false,` became `active,` — so a momentary action button rendered without an `active` prop (e.g. `FolderToolbar`'s "New folder") omits `aria-pressed` entirely instead of emitting `aria-pressed="false"`. `aria-pressed="false"` announces a plain action button to a screen reader as "toggle button, not pressed", which is a state the control does not have; only presence/absence of the attribute correctly distinguishes a toggle from a command. This is a deliberate, additive, review-driven fix taken with reason, in the spirit §7.1 already carves out — not a re-litigation of the byte-identical rule for its own sake. `FolderToolbar.test.tsx` and `ListToolbarButton.test.tsx` were updated to assert the attribute's absence rather than `"false"`.
 - **The eslint baseline is 0 errors / 177 warnings**, measured with `npx eslint .` on 2026-08-22. The previous plan recorded 178; that number is stale and must not be carried forward. A new warning is a regression.
 - **No msw.** Tests `vi.mock` the API module and read mutable fixtures inside the mock factory's closure, never at module scope.
 - **Every page keeps exactly one `h1`.** `ListPageShell` owns it. Assert the **count** is one, not that one exists.
@@ -390,10 +392,10 @@ Apply the same four conversions as Task 1, with these page-specific values:
 - `title={showTrash ? "Trash" : "Charts"}`
 - `skeletonCols={4}`
 - `errorText="Failed to load charts."`
-- action: copy whatever the current header renders as its primary button **verbatim from the file**; do not retype it from memory. At the time of writing it is:
+- action: copy whatever the current header renders as its primary button **verbatim from the file**; do not retype it from memory. `main` renders it unconditionally — no `showTrash` gate — and the conversion must preserve that. At the time of writing it is:
 
 ```tsx
-      action={!showTrash ? <Button asChild><Link to={`/explore/${ws}/charts/new`}>Create</Link></Button> : null}
+      action={<Button asChild><Link to={`/explore/${ws}/charts/new`}>+ Chart</Link></Button>}
 ```
 - empty:
 
@@ -416,7 +418,9 @@ Apply the same four conversions as Task 1, with these page-specific values:
           }
 ```
 
-`Charts.tsx` already branches `isLoading → isError → hasData`, the documented order, so this is a pure structural change with no behaviour fix.
+`Charts.tsx` already branches `isLoading → isError → hasData`, the documented order, so the state-branch conversion is structural with no behaviour fix.
+
+**Correction, added after the final whole-branch review (finding 1):** an earlier revision of this step's illustrative `action={…}` snippet wrapped the primary button in `!showTrash ? … : null`. The live file never had that wrapper — `main` renders "+ Chart" unconditionally, even in the Trash view — so an implementer following the earlier snippet literally would have introduced a real behaviour change (hiding the primary action in Trash) while believing this task was a pure refactor. The review caught it before merge; the snippet above is now copied verbatim from `main`, and the primary action renders unconditionally on this page, matching `main`.
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
