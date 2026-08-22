@@ -2770,17 +2770,24 @@ async fn updating_a_dataapi_alert_needs_data_api_endpoint_read() {
         StatusCode::FORBIDDEN,
         "data_api_endpoint:read must get the caller PAST the new gate: {body}"
     );
-    // `AutomationError::Internal`'s message is redacted from the response
-    // (`error.rs`) — an internal-error body says only `{"error":"internal
-    // error"}` — so 500 (not the body text) is what proves this specific
-    // request reached `ScheduleType::parse`'s pre-existing gap rather than,
-    // say, a coincidental 200 that would say nothing about which code path
-    // ran.
+    // Task 5 gave `ScheduleType` its `DataapiAlert` variant, so
+    // `ScheduleType::parse(&stored.r#type)` — which runs strictly AFTER this
+    // task's check — no longer fails closed with the internal-error gap this
+    // test used to land on (that gap is gone, not merely hidden: see the
+    // model.rs test suite for the replacement coverage). It now reaches
+    // `to_new`'s own validation instead, which 400s naming a field
+    // `minimal_update_body()` never set — still proof the request got PAST
+    // this gate, just via a different, now-real code path rather than a
+    // placeholder one.
     assert_eq!(
         status,
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "expected the caller to reach the pre-existing ScheduleType::parse gap \
+        StatusCode::BAD_REQUEST,
+        "expected the caller to reach Task 5's dataapi_alert validation \
          (proving it passed THIS check), got {status}: {body}"
+    );
+    assert!(
+        body.contains("dataapi_metric"),
+        "expected the 400 to name the missing field: {body}"
     );
 }
 
@@ -2876,15 +2883,171 @@ async fn updating_an_endpoint_scoped_dataapi_alert_needs_data_api_endpoint_read(
         StatusCode::FORBIDDEN,
         "an object-scoped data_api_endpoint:read grant on THIS endpoint must be enough: {body}"
     );
-    // Same pre-existing gap as the workspace-scoped test: `ScheduleType`
-    // cannot parse `dataapi_alert` yet, so the caller who gets PAST this
-    // gate still lands on a 500, not a 200.
+    // Same as the workspace-scoped test above: `ScheduleType::parse` now
+    // recognises `dataapi_alert` (Task 5), so the caller who gets PAST this
+    // gate lands on `to_new`'s 400, not the old internal-error gap.
     assert_eq!(
         status,
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "expected the object-scoped reader to reach the pre-existing ScheduleType::parse gap \
+        StatusCode::BAD_REQUEST,
+        "expected the object-scoped reader to reach Task 5's dataapi_alert validation \
          (proving it passed THIS check), got {status}: {body}"
     );
+}
+
+/// A well-formed `dataapi_alert` create body — workspace-scoped
+/// (`dataapi_endpoint_id` omitted).
+fn dataapi_alert_json(name: &str) -> String {
+    serde_json::json!({
+        "type": "dataapi_alert",
+        "name": name,
+        "active": true,
+        "crontab": "*/5 * * * *",
+        "timezone": "UTC",
+        "validator_type": "operator",
+        "validator_config": {"op": ">", "threshold": 0},
+        "dataapi_metric": "call_count",
+        "dataapi_window_s": 300,
+    })
+    .to_string()
+}
+
+/// The hand-off from Task 4: `create()` could not gate `dataapi_alert`
+/// because `CreateSchedule`/`ScheduleType` could not express one. Task 5 just
+/// gave them that ability, which turns the comment `create()` carried
+/// ("nothing this handler can write today names an endpoint") into a hole
+/// unless the same `require_dataapi_endpoint_read` call `update` already uses
+/// is wired in at create time too — this is that test.
+///
+/// `fx.editor_tok` (`ws_editor`) holds `alert:manage` but, unlike `ws_admin`,
+/// was never granted `data_api_endpoint:read` (migration 0122 stops at
+/// `ws_admin` on purpose). An admin alone would pass both checks and prove
+/// nothing, which is why the FIRST assertion is the one that carries the
+/// test.
+#[tokio::test]
+async fn creating_a_dataapi_alert_needs_data_api_endpoint_read() {
+    let fx = fixture!();
+
+    // `ws_editor`: `alert:manage`, no `data_api_endpoint:read`. Refused
+    // before a row is ever written.
+    let (status, body) = req_raw(
+        &fx,
+        &fx.editor_tok,
+        "POST",
+        &format!("/ws/{}/alerts", fx.slug),
+        Some(dataapi_alert_json("z2-create-authz-denied")),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "alert:manage without data_api_endpoint:read must be refused at create time: {body}"
+    );
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM automation.schedules WHERE workspace_id = $1 AND name = $2",
+    )
+    .bind(fx.ws)
+    .bind("z2-create-authz-denied")
+    .fetch_one(&fx.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        count, 0,
+        "a refused create must never write a row, not even one the caller cannot see"
+    );
+
+    // `ws_admin`: the same `alert:manage`, PLUS workspace-level
+    // `data_api_endpoint:read` — gets past this gate AND all the way to a
+    // real, well-formed row: this also proves the Task 5 write path
+    // (`NewSchedule`'s four new fields, threaded through `create`/`update`'s
+    // INSERT/UPDATE) actually persists a `dataapi_alert`, not merely that the
+    // gate lets the request through.
+    let admin = admin_member(&fx.db, fx.ws).await;
+    let admin_tok = fx.token_for(admin).await;
+    let (status, body) = req(
+        &fx,
+        &admin_tok,
+        "POST",
+        &format!("/ws/{}/alerts", fx.slug),
+        Some(dataapi_alert_json("z2-create-authz-allowed")),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "data_api_endpoint:read must get the caller past the gate and all the way to 200: {body}"
+    );
+    assert_eq!(body["type"], "dataapi_alert");
+    assert_eq!(body["dataapi_metric"], "call_count");
+    assert_eq!(body["dataapi_window_s"], 300);
+    assert!(
+        body["dataapi_endpoint_id"].is_null(),
+        "an omitted dataapi_endpoint_id is workspace-scoped, not an error: {body}"
+    );
+}
+
+/// The object-scoped half of the create-time gate: a `dataapi_alert` create
+/// body naming ONE `dataapi_endpoint_id` is checked against OBJECT-scoped
+/// `data_api_endpoint:read` on THAT endpoint, not merely workspace-level
+/// read — the same distinction `updating_an_endpoint_scoped_dataapi_alert_
+/// needs_data_api_endpoint_read` proves for the update path.
+#[tokio::test]
+async fn creating_an_endpoint_scoped_dataapi_alert_needs_data_api_endpoint_read() {
+    let fx = fixture!();
+    let owner = mk_user(&fx.db, "z2_create_object_owner").await;
+    let endpoint_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO dataapi.endpoints (workspace_id, name, path, sql, database_id, created_by) \
+         VALUES ($1,'z2 create authz test','/z2-create-authz-test','SELECT 1',$2,$3) \
+         RETURNING id",
+    )
+    .bind(fx.ws)
+    .bind(fx.database)
+    .bind(owner)
+    .fetch_one(&fx.db.pool)
+    .await
+    .expect("insert dataapi.endpoints row");
+
+    let mut body: serde_json::Value =
+        serde_json::from_str(&dataapi_alert_json("z2-create-authz-object")).unwrap();
+    body["dataapi_endpoint_id"] = serde_json::Value::String(endpoint_id.to_string());
+    let body = body.to_string();
+
+    // `ws_editor`: `alert:manage`, no `data_api_endpoint:read` on this
+    // endpoint (nor at workspace level).
+    let (status, resp) = req_raw(
+        &fx,
+        &fx.editor_tok,
+        "POST",
+        &format!("/ws/{}/alerts", fx.slug),
+        Some(body.clone()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "alert:manage without data_api_endpoint:read on THIS endpoint must be refused: {resp}"
+    );
+
+    // An OBJECT-scoped grant on THIS endpoint, and nothing at workspace
+    // level, still gets past the gate — the positive control that pins
+    // `OBJECT_KIND` the same way the update test's does.
+    let object_reader = mk_user(&fx.db, "z2_create_object_reader").await;
+    grant_ws_role(&fx.db, object_reader, fx.ws, "ws_editor").await;
+    grant_object_scoped_data_api_read(&fx.db, object_reader, endpoint_id).await;
+    let object_reader_tok = fx.token_for(object_reader).await;
+    let (status, resp) = req(
+        &fx,
+        &object_reader_tok,
+        "POST",
+        &format!("/ws/{}/alerts", fx.slug),
+        Some(body),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an object-scoped data_api_endpoint:read grant on THIS endpoint must be enough: {resp}"
+    );
+    assert_eq!(resp["dataapi_endpoint_id"], endpoint_id.to_string());
 }
 
 /// Reading a `dataapi_alert`'s RUN-DERIVED state needs `data_api_endpoint:read`
@@ -2899,11 +3062,13 @@ async fn updating_an_endpoint_scoped_dataapi_alert_needs_data_api_endpoint_read(
 /// whole request or hiding the row (ordinary alert-management visibility,
 /// name/owners/id, is untouched).
 ///
-/// Unlike `detail`/`runs`, `ScheduleType::parse` is not on this path
-/// (`detail_dto`/`summary_dto` both fall back to `Alert` on an unparseable
-/// type rather than erroring, and the tick's own dispatch in `runner.rs`
-/// matches the raw `type` string), so the ALLOWED assertions below reach a
-/// real `200`, not the `update`/`create` tests' pre-existing 500.
+/// `detail`/`runs` never depended on `ScheduleType::parse` recognising
+/// `dataapi_alert` (`detail_dto`/`summary_dto` both fall back to `Alert` on an
+/// unparseable type rather than erroring, and the tick's own dispatch in
+/// `runner.rs` matches the raw `type` string), so the ALLOWED assertions below
+/// reach a real `200` both before and after Task 5 — unlike `update`'s tests,
+/// which used to land on an internal-error gap here and now land on a real
+/// 400 from `to_new`'s validation instead.
 #[tokio::test]
 async fn reading_a_dataapi_alerts_run_state_needs_data_api_endpoint_read() {
     let fx = fixture!();

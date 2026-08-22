@@ -27928,6 +27928,38 @@
             ],
             "format": "int32"
           },
+          "dataapi_endpoint_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "`None` is workspace-scoped: watch every endpoint rather than one."
+          },
+          "dataapi_metric": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DataapiMetric"
+              }
+            ]
+          },
+          "dataapi_error_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Required, and only meaningful, when `dataapi_metric` is\n`error_code_count` — `schedule_dataapi_error_code_needs_metric` /\n`schedule_dataapi_metric_needs_error_code` (migration 0127)."
+          },
+          "dataapi_window_s": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
           "grace_period_s": {
             "type": [
               "integer",
@@ -28911,6 +28943,18 @@
             "description": "The output schema `describe` resolved. This is what `publish` would\nfreeze, so an author sees the contract before committing to it."
           }
         }
+      },
+      "DataapiMetric": {
+        "type": "string",
+        "description": "The Data API metric a `dataapi_alert` watches — the closed vocabulary of\nmigration 0127's `schedule_dataapi_metric_valid` CHECK.\n\nA typed enum here, unlike the raw `&str` `egret-automation::dataapi_metric`\nmatches on internally: an unknown metric then fails to DESERIALIZE — a 4xx\nthe JSON layer names before `to_new`'s validation ever runs — rather than\nreaching Rust as an unchecked string.",
+        "enum": [
+          "error_rate",
+          "error_count",
+          "p50_duration_ms",
+          "p95_duration_ms",
+          "call_count",
+          "error_code_count"
+        ]
       },
       "Database": {
         "type": "object",
@@ -32708,6 +32752,35 @@
             ],
             "format": "int32"
           },
+          "dataapi_endpoint_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "dataapi_metric": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DataapiMetric"
+              }
+            ]
+          },
+          "dataapi_error_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "dataapi_window_s": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
           "grace_period_s": {
             "type": "integer",
             "format": "int32"
@@ -32874,10 +32947,11 @@
       },
       "ScheduleType": {
         "type": "string",
-        "description": "What a schedule does: evaluate a query (`alert`) or deliver a rendering of a\nsaved object (`report`).",
+        "description": "What a schedule does: evaluate a query (`alert`), deliver a rendering of a\nsaved object (`report`), or watch a Data API endpoint's traffic\n(`dataapi_alert`, migration 0127).",
         "enum": [
           "alert",
-          "report"
+          "report",
+          "dataapi_alert"
         ]
       },
       "SchemaColumn": {
@@ -34703,6 +34777,38 @@
             "format": "int32"
           },
           "custom_height": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "dataapi_endpoint_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "`None` is workspace-scoped: watch every endpoint rather than one."
+          },
+          "dataapi_metric": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DataapiMetric"
+              }
+            ]
+          },
+          "dataapi_error_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Required, and only meaningful, when `dataapi_metric` is\n`error_code_count` — `schedule_dataapi_error_code_needs_metric` /\n`schedule_dataapi_metric_needs_error_code` (migration 0127)."
+          },
+          "dataapi_window_s": {
             "type": [
               "integer",
               "null"

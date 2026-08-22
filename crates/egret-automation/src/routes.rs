@@ -204,6 +204,7 @@ pub fn automation_router() -> Router<AutomationState> {
         egret_automation_api::ScheduleType,
         egret_automation_api::ValidatorType,
         egret_automation_api::ReportFormat,
+        egret_automation_api::DataapiMetric,
         crate::deliver::smtp_config::SmtpConfigDto,
         crate::deliver::smtp_config::SmtpConfigBody,
         crate::deliver::smtp_config::TlsMode,
@@ -512,15 +513,17 @@ async fn create(
         .await
         .map_err(AutomationApiError::from)?;
 
-    // No `dataapi_endpoint_id`/`data_api_endpoint:read` gate is needed here
-    // YET: `CreateSchedule` has no `dataapi_endpoint_id` field and
-    // `ScheduleType` has no `DataapiAlert` variant (both land in Task 5, "the
-    // API surface"), so `body.ty` is always `Alert` or `Report`. Migration
-    // 0127's `schedule_alert_no_dataapi_columns` CHECK already guarantees
-    // `dataapi_endpoint_id IS NULL` for both — nothing this handler can write
-    // today names an endpoint. When Task 5 adds the field, call
-    // `require_dataapi_endpoint_read` here the same way `update` does below,
-    // keyed on the new field instead of a stored row.
+    // Task 5's carry-forward from Task 4: `CreateSchedule` can now express a
+    // `dataapi_alert` (`ScheduleType::DataapiAlert` + `dataapi_endpoint_id`),
+    // so `alert:manage` alone is no longer enough — the same reasoning
+    // `update` below documents. Checked against the BODY's
+    // `dataapi_endpoint_id` (there is no stored row yet to read one from),
+    // and before `to_new` validates the rest of the shape: a caller who
+    // cannot read the endpoint must be refused before any other field of the
+    // body is even considered.
+    if body.ty == ScheduleType::DataapiAlert {
+        require_dataapi_endpoint_read(&st, &ctx, body.dataapi_endpoint_id).await?;
+    }
 
     let new = crate::model::to_new(&WriteBody::from(&body), Some(ctx.principal.user_id.0))
         .map_err(AutomationApiError::from)?;
