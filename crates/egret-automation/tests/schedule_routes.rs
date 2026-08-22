@@ -2629,6 +2629,41 @@ async fn admin_member(db: &Db, ws: Uuid) -> Uuid {
     user
 }
 
+/// An OBJECT-scoped `data_api_endpoint:read` grant on exactly `endpoint_id`
+/// — no workspace-level Data API permission at all. Links the SEEDED
+/// `ws_admin` role's template (same PDP-staleness reasoning as
+/// `admin_member` above: the ROLE must already be known, only the GRANT is
+/// new) but binds it to the OBJECT, not the workspace: `templates.rs`
+/// compiles every workspace-scope ROLE's template as `resource in
+/// ?resource` regardless of what scope_type a later GRANT uses it at, and an
+/// `?resource` bound to the endpoint's own entity makes `in` match only that
+/// entity (an endpoint has no descendants) — an object-scoped-only grant in
+/// every practical sense, using a role Cedar already has a template for.
+///
+/// This is what makes `an_endpoint_scoped_grant_with_no_workspace_read_is_
+/// enough` below a REAL positive control for `OBJECT_KIND`: the grant's
+/// `object_type` is the literal the review asked to pin, and the only way
+/// this user's PUT succeeds is if the CHECK builds the exact same string
+/// into the resource it asks the PDP about.
+async fn grant_object_scoped_data_api_read(db: &Db, user: Uuid, endpoint_id: Uuid) {
+    let ws_admin_role: Uuid =
+        sqlx::query_scalar("SELECT id FROM roles WHERE scope = 'workspace' AND name = 'ws_admin'")
+            .fetch_one(&db.pool)
+            .await
+            .expect("ws_admin role must be seeded");
+    sqlx::query(
+        "INSERT INTO access_grants \
+           (principal_type, principal_id, role_id, scope_type, scope_id, object_type) \
+         VALUES ('user', $1, $2, 'object', $3, 'data_api_endpoint')",
+    )
+    .bind(user)
+    .bind(ws_admin_role)
+    .bind(endpoint_id)
+    .execute(&db.pool)
+    .await
+    .expect("grant object-scoped data_api_endpoint:read");
+}
+
 /// A WORKSPACE-scoped `dataapi_alert` (`dataapi_endpoint_id IS NULL` — it
 /// watches every endpoint) — inserted directly, the same way
 /// `dataapi_alert_tick.rs`'s fixture does, since `CreateSchedule` cannot
@@ -2809,5 +2844,192 @@ async fn updating_an_endpoint_scoped_dataapi_alert_needs_data_api_endpoint_read(
         status,
         StatusCode::FORBIDDEN,
         "alert:manage without data_api_endpoint:read on THIS endpoint must be refused: {body}"
+    );
+
+    // The positive control Finding 3 asked for: a caller whose ONLY Data API
+    // permission is an OBJECT-scoped `data_api_endpoint:read` grant on THIS
+    // endpoint — no `ws_admin`, no workspace-level grant at all — still gets
+    // past the gate. Every prior test in this file (and the workspace-scoped
+    // test above) passes `data_api_endpoint:read` in only at WORKSPACE scope,
+    // where Cedar's own `resource in ?resource` cascade means an object check
+    // would be satisfied even if `OBJECT_KIND` were built wrong (a mismatched
+    // kind never gets compared — the workspace ancestor already matches).
+    // This is the one case that actually exercises the kind string: if
+    // `require_dataapi_endpoint_read`'s object branch built ANY kind other
+    // than the literal this grant was made under, the object entity it asks
+    // the PDP about would not be the one this grant names, and the request
+    // would come back 403 same as `ws_editor` above.
+    let object_reader = mk_user(&fx.db, "z2_authz_object_reader").await;
+    grant_ws_role(&fx.db, object_reader, fx.ws, "ws_editor").await; // alert:manage only
+    grant_object_scoped_data_api_read(&fx.db, object_reader, endpoint_id).await;
+    let object_reader_tok = fx.token_for(object_reader).await;
+    let (status, body) = req_raw(
+        &fx,
+        &object_reader_tok,
+        "PUT",
+        &format!("/ws/{}/alerts/{schedule}", fx.slug),
+        Some(minimal_update_body()),
+    )
+    .await;
+    assert_ne!(
+        status,
+        StatusCode::FORBIDDEN,
+        "an object-scoped data_api_endpoint:read grant on THIS endpoint must be enough: {body}"
+    );
+    // Same pre-existing gap as the workspace-scoped test: `ScheduleType`
+    // cannot parse `dataapi_alert` yet, so the caller who gets PAST this
+    // gate still lands on a 500, not a 200.
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "expected the object-scoped reader to reach the pre-existing ScheduleType::parse gap \
+         (proving it passed THIS check), got {status}: {body}"
+    );
+}
+
+/// Reading a `dataapi_alert`'s RUN-DERIVED state needs `data_api_endpoint:read`
+/// too — Task 4 review, Finding 1. `alert:read`/`alert:manage` only ever said
+/// something about the SCHEDULE; `RunDto::value` (`runs`) and
+/// `ScheduleDetailDto::last_value` (`detail`) ARE the endpoint's measured
+/// metric, and `run_now` is worse than either: it forces a FRESH measurement
+/// before handing the result back, so a refusal has to land before the
+/// runner ever runs, not merely before the response is built. `list` cannot
+/// use the same all-or-nothing gate — a page mixes schedules of every kind —
+/// so it redacts `last_state`/`last_eval_at` per row instead of failing the
+/// whole request or hiding the row (ordinary alert-management visibility,
+/// name/owners/id, is untouched).
+///
+/// Unlike `detail`/`runs`, `ScheduleType::parse` is not on this path
+/// (`detail_dto`/`summary_dto` both fall back to `Alert` on an unparseable
+/// type rather than erroring, and the tick's own dispatch in `runner.rs`
+/// matches the raw `type` string), so the ALLOWED assertions below reach a
+/// real `200`, not the `update`/`create` tests' pre-existing 500.
+#[tokio::test]
+async fn reading_a_dataapi_alerts_run_state_needs_data_api_endpoint_read() {
+    let fx = fixture!();
+    let owner = mk_user(&fx.db, "z2_authz_read_owner").await;
+    let id = insert_workspace_scoped_dataapi_alert(&fx.db, fx.ws, owner, "z2-authz-read").await;
+    // A schedule that has already run once, so `list`'s redaction has
+    // something real to redact — an untouched row's `last_state` is NULL
+    // regardless of the gate, which would make that assertion pass for the
+    // wrong reason.
+    sqlx::query(
+        "UPDATE automation.schedules SET last_state = 'success', last_eval_at = now() \
+         WHERE id = $1",
+    )
+    .bind(id)
+    .execute(&fx.db.pool)
+    .await
+    .unwrap();
+    let runs_before: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM automation.schedule_runs WHERE schedule_id = $1")
+            .bind(id)
+            .fetch_one(&fx.db.pool)
+            .await
+            .unwrap();
+
+    // `ws_editor`: `alert:read`/`alert:manage`, no `data_api_endpoint:read`.
+    for (method, path) in [
+        ("GET", format!("/ws/{}/alerts/{id}", fx.slug)),
+        ("GET", format!("/ws/{}/alerts/{id}/runs", fx.slug)),
+    ] {
+        let (status, body) = req_raw(&fx, &fx.editor_tok, method, &path, None).await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "{method} {path} must be refused: {body}"
+        );
+    }
+    let (status, body) = req_raw(
+        &fx,
+        &fx.editor_tok,
+        "POST",
+        &format!("/ws/{}/alerts/{id}/run", fx.slug),
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "run_now must be refused: {body}"
+    );
+    let runs_after_denied: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM automation.schedule_runs WHERE schedule_id = $1")
+            .bind(id)
+            .fetch_one(&fx.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        runs_after_denied, runs_before,
+        "a refused run_now must never re-measure — no run-log row should be written"
+    );
+
+    // `list`: the row is still visible (`alert:read` covers that), but its
+    // run-derived state is blanked, not the request failing.
+    let (status, list_body) = req(
+        &fx,
+        &fx.editor_tok,
+        "GET",
+        &format!("/ws/{}/alerts", fx.slug),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let row = list_body
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == id.to_string())
+        .expect("the schedule is still listed");
+    assert!(
+        row["last_state"].is_null() && row["last_eval_at"].is_null(),
+        "list must redact last_state/last_eval_at for an endpoint the caller cannot read: {row}"
+    );
+
+    // `ws_admin`: the same `alert:manage`, PLUS `data_api_endpoint:read`.
+    let admin = admin_member(&fx.db, fx.ws).await;
+    let admin_tok = fx.token_for(admin).await;
+    for (method, path) in [
+        ("GET", format!("/ws/{}/alerts/{id}", fx.slug)),
+        ("GET", format!("/ws/{}/alerts/{id}/runs", fx.slug)),
+    ] {
+        let (status, body) = req_raw(&fx, &admin_tok, method, &path, None).await;
+        assert_ne!(
+            status,
+            StatusCode::FORBIDDEN,
+            "{method} {path} must NOT be refused for a caller who can read the endpoint: {body}"
+        );
+    }
+    let (status, admin_list_body) = req(
+        &fx,
+        &admin_tok,
+        "GET",
+        &format!("/ws/{}/alerts", fx.slug),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let admin_row = admin_list_body
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == id.to_string())
+        .expect("the schedule is still listed");
+    assert_eq!(
+        admin_row["last_state"], "success",
+        "an admin who CAN read the endpoint must see the real last_state: {admin_row}"
+    );
+    let (status, body) = req_raw(
+        &fx,
+        &admin_tok,
+        "POST",
+        &format!("/ws/{}/alerts/{id}/run", fx.slug),
+        None,
+    )
+    .await;
+    assert_ne!(
+        status,
+        StatusCode::FORBIDDEN,
+        "run_now must NOT be refused for a caller who can read the endpoint: {body}"
     );
 }

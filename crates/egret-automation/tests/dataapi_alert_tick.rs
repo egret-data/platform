@@ -89,23 +89,57 @@ impl Resolver for PublicDns {
     }
 }
 
+/// A `Resource`'s decision-relevant fields, comparable and ownable — unlike
+/// `egret_core::authz::Resource` itself, which derives neither `PartialEq`
+/// nor anything that would let a test assert what it was.
+#[derive(Debug, Clone, PartialEq)]
+enum SeenResource {
+    Workspace(Uuid),
+    Object { kind: String, id: Uuid },
+    Platform,
+}
+impl From<&egret_core::authz::Resource> for SeenResource {
+    fn from(r: &egret_core::authz::Resource) -> Self {
+        match r {
+            egret_core::authz::Resource::Workspace(w) => SeenResource::Workspace(w.0),
+            egret_core::authz::Resource::Object(o) => SeenResource::Object {
+                kind: o.kind.clone(),
+                id: o.id,
+            },
+            egret_core::authz::Resource::Platform => SeenResource::Platform,
+        }
+    }
+}
+
 /// Task 4's run-time re-check, without a real CedarPdp or `access_grants`
-/// rows: every decision is `allow`, fixed at construction. Good enough for
-/// this file's purpose — a single yes/no lets `a_dataapi_alert_whose_owner_
-/// lost_endpoint_read_errors_and_sends_nothing` below flip the SAME fixture
-/// from `success` to `error` by changing one bool, which is what proves the
-/// gate is actually consulted rather than bypassed.
+/// rows: every decision is `allow`, fixed at construction — but every call is
+/// RECORDED (subject, action, resource), so a test can assert not just "was
+/// the PDP consulted" but "was it asked the right question". A `FakePdp` that
+/// only ever returned a bool (this file's earlier version) said `ok` for a
+/// runner that asked about the wrong action, the wrong resource kind, or —
+/// the one that matters — the wrong SUBJECT (`s.created_by`, say, instead of
+/// the resolved owner, or the tick's own service identity); recording all
+/// three and asserting on them in the tests below closes that. A single
+/// yes/no answer still lets `a_dataapi_alert_whose_owner_lost_endpoint_read_
+/// errors_and_sends_nothing` below flip the SAME fixture from `success` to
+/// `error` by changing one bool.
 struct FakePdp {
     allow: bool,
+    calls: Mutex<Vec<(Uuid, String, SeenResource)>>,
 }
 #[async_trait::async_trait]
 impl egret_core::authz::Pdp for FakePdp {
     async fn authorize(
         &self,
-        _subject: &egret_core::authz::Subject,
-        _action: &str,
-        _resource: &egret_core::authz::Resource,
+        subject: &egret_core::authz::Subject,
+        action: &str,
+        resource: &egret_core::authz::Resource,
     ) -> egret_core::Result<egret_core::authz::Decision> {
+        self.calls.lock().unwrap().push((
+            subject.user_id.0,
+            action.to_string(),
+            SeenResource::from(resource),
+        ));
         Ok(egret_core::authz::Decision {
             allow: self.allow,
             reasons: vec![],
@@ -121,6 +155,16 @@ struct Fx {
     ws: Uuid,
     schedule: Uuid,
     engine: Arc<NeverEngine>,
+    /// The schedule's OWNER — the identity `owner_can_read_dataapi_endpoint`
+    /// must ask the PDP about. Exposed so a test can assert `fx.pdp.calls`
+    /// named THIS user, not `s.created_by` (left `NULL` by this fixture's own
+    /// `INSERT`, so a subject mix-up would show up as `Uuid::nil()`, never as
+    /// a coincidental match) and not some other identity entirely.
+    owner: Uuid,
+    /// The same `Arc` `runner.pdp` holds, kept as the concrete type so a test
+    /// can read `.calls` — `AutomationRunner::pdp` is `Arc<dyn Pdp>`, which
+    /// erases that.
+    pdp: Arc<FakePdp>,
 }
 
 /// One `dataapi_alert` schedule, due now, plus its owner. `metric` and
@@ -177,6 +221,10 @@ async fn setup(
     let engine = Arc::new(NeverEngine {
         seen: Mutex::new(vec![]),
     });
+    let pdp = Arc::new(FakePdp {
+        allow: endpoint_read,
+        calls: Mutex::new(vec![]),
+    });
     let secrets = egret_secrets::SecretStore::new(db.clone(), None);
     let ws_secrets = egret_secrets::WorkspaceSecretStore::new(db.clone(), secrets.clone());
     Fx {
@@ -193,9 +241,7 @@ async fn setup(
             users: egret_auth::users::UserRepo::new(db.clone()),
             minter: Arc::new(NoMinter),
             query: engine.clone(),
-            pdp: Arc::new(FakePdp {
-                allow: endpoint_read,
-            }),
+            pdp: pdp.clone(),
             resolver: Arc::new(PublicDns),
             policy: SsrfPolicy::default(),
             smtp: egret_automation::deliver::smtp_config::SmtpConfigRepo::new(
@@ -217,6 +263,8 @@ async fn setup(
         ws,
         schedule,
         engine,
+        owner: user,
+        pdp,
     }
 }
 
@@ -280,6 +328,25 @@ async fn a_firing_dataapi_alert_dispatches_to_the_metric_evaluator(pool: sqlx::P
     assert!(
         fx.engine.seen.lock().unwrap().is_empty(),
         "a dataapi_alert must never reach the SQL engine"
+    );
+
+    // The run-time re-check (Task 4) asked the PDP about the right question:
+    // the schedule's OWNER (not `s.created_by`, left `NULL` by this fixture,
+    // and not some other identity), `data_api_endpoint:read` (not, say,
+    // `alert:manage` — the permission `run_now`/`update` check, a plausible
+    // copy-paste), against the WORKSPACE resource (this fixture's row has no
+    // `dataapi_endpoint_id`, so `None` means every-endpoint-in-the-workspace,
+    // never an object resource with a made-up kind).
+    let calls = fx.pdp.calls.lock().unwrap();
+    assert_eq!(calls.len(), 1, "expected exactly one PDP call: {calls:?}");
+    assert_eq!(
+        calls[0],
+        (
+            fx.owner,
+            "data_api_endpoint:read".to_string(),
+            SeenResource::Workspace(fx.ws),
+        ),
+        "the PDP was asked about the wrong subject, action, or resource"
     );
 }
 
@@ -393,5 +460,20 @@ async fn a_dataapi_alert_whose_owner_lost_endpoint_read_errors_and_sends_nothing
     assert!(
         fx.engine.seen.lock().unwrap().is_empty(),
         "still must never reach the SQL engine"
+    );
+
+    // Same pinning as the firing test above: the refusal must be an answer
+    // to the RIGHT question, not a fixed `allow: false` that would refuse
+    // regardless of what (or who) was asked.
+    let calls = fx.pdp.calls.lock().unwrap();
+    assert_eq!(calls.len(), 1, "expected exactly one PDP call: {calls:?}");
+    assert_eq!(
+        calls[0],
+        (
+            fx.owner,
+            "data_api_endpoint:read".to_string(),
+            SeenResource::Workspace(fx.ws),
+        ),
+        "the PDP was asked about the wrong subject, action, or resource"
     );
 }
