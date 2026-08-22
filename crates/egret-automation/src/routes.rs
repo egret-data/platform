@@ -83,6 +83,14 @@ pub struct AutomationState {
     pub databases: egret_query::DatabaseRepo,
     pub users: egret_auth::users::UserRepo,
     pub engine_minter: std::sync::Arc<dyn egret_analytics_api::engine_token::EngineTokenMinter>,
+    /// The Data API seam as a PORT (fix-round-2), so this crate never names
+    /// `egret-dataapi` — same shape `query`/`engine_minter` already use for
+    /// their own seams. `require_dataapi_endpoint_read` uses this to resolve
+    /// an endpoint id's ACTUAL workspace before ever asking the PDP about it;
+    /// without it, a foreign or fictional id was authorized by any
+    /// workspace-cascaded grant, because nothing checked which workspace the
+    /// id actually belonged to.
+    pub dataapi_endpoints: std::sync::Arc<dyn egret_dataapi_api::DataApiEndpointPort>,
     /// The same execution seam `AutomationRunner` (the tick engine) uses —
     /// `crate::evaluator::QueryRunner` — so a rendered chart card runs through
     /// code a test can fake an engine behind, exactly like `tick_end_to_end.rs`
@@ -472,23 +480,56 @@ async fn require_dataapi_endpoint_read(
     endpoint_id: Option<Uuid>,
 ) -> Result<(), AutomationApiError> {
     match endpoint_id {
-        Some(id) => egret_core::authz::require_object(
-            &*st.pdp,
-            ctx,
-            egret_dataapi_api::EP_READ,
-            egret_core::authz::ObjectRef {
-                kind: egret_dataapi_api::OBJECT_KIND.to_string(),
-                id,
-                // A folder-scoped grant does not cascade to this check,
-                // matching `egret-dataapi::invoke::can_invoke`'s own
-                // precedent (see that function's doc comment): conservative
-                // rather than widening access nobody asked for.
-                folder_id: None,
-                workspace_id: ctx.workspace_id,
-            },
-        )
-        .await
-        .map_err(AutomationApiError::from),
+        Some(id) => {
+            // Fix-round-2, Critical 2: `dataapi_endpoint_id` is a plain FK —
+            // existence only, no workspace predicate (migration 0127) — and
+            // `ObjectRef.workspace_id` below is the CALLER's workspace, never
+            // the object's: Cedar resolves `resource in workspace` from that
+            // stamped ancestry and never loads the row, so a
+            // workspace-cascaded grant (e.g. `ws_admin`) authorized ANY uuid,
+            // foreign or fictional, before this check existed. Resolved
+            // through the `DataApiEndpointPort` seam — mirrors
+            // `egret-dataapi::EndpointStore::scoped`'s own "confirm id names
+            // a row in workspace, or NotFound" precedent — rather than a raw
+            // SQL query against `dataapi.endpoints` from this crate, which
+            // this task's own brief says not to invent.
+            //
+            // A mismatch is refused as `NotFound` (404), not `Forbidden`
+            // (403) — the same status `egret-dataapi` itself answers a
+            // foreign id with (`EndpointStore::get`/`scoped`, both
+            // `Error::NotFound`). A 403 here would be an ORACLE: it would
+            // tell this workspace that the uuid names a LIVE endpoint
+            // somewhere, just not here. `None` (no such row at all) takes the
+            // identical path below, so the two cases are indistinguishable
+            // from the response — which is the whole point.
+            let owner_ws = st
+                .dataapi_endpoints
+                .workspace_of(id)
+                .await
+                .map_err(AutomationApiError::from)?;
+            if owner_ws != Some(ctx.workspace_id.0) {
+                return Err(AutomationApiError::from(AutomationError::NotFound(
+                    "endpoint".into(),
+                )));
+            }
+            egret_core::authz::require_object(
+                &*st.pdp,
+                ctx,
+                egret_dataapi_api::EP_READ,
+                egret_core::authz::ObjectRef {
+                    kind: egret_dataapi_api::OBJECT_KIND.to_string(),
+                    id,
+                    // A folder-scoped grant does not cascade to this check,
+                    // matching `egret-dataapi::invoke::can_invoke`'s own
+                    // precedent (see that function's doc comment): conservative
+                    // rather than widening access nobody asked for.
+                    folder_id: None,
+                    workspace_id: ctx.workspace_id,
+                },
+            )
+            .await
+            .map_err(AutomationApiError::from)
+        }
         None => egret_core::authz::require(&*st.pdp, ctx, egret_dataapi_api::EP_READ)
             .await
             .map_err(AutomationApiError::from),

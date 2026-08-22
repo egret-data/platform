@@ -264,6 +264,7 @@ async fn setup() -> Option<Fx> {
         databases: databases.clone(),
         users: egret_auth::users::UserRepo::new(db.clone()),
         engine_minter: Arc::new(NoMinter),
+        dataapi_endpoints: Arc::new(egret_dataapi::EndpointStore::new(db.clone())),
         // Not exercised by this file's tests; wired for the struct to
         // construct at all.
         query: Arc::new(egret_automation::evaluator::EngineRunner {
@@ -3249,6 +3250,183 @@ async fn creating_an_endpoint_scoped_dataapi_alert_needs_data_api_endpoint_read(
         "an object-scoped data_api_endpoint:read grant on THIS endpoint must be enough: {resp}"
     );
     assert_eq!(resp["dataapi_endpoint_id"], endpoint_id.to_string());
+}
+
+/// A second, unrelated workspace holding one real `dataapi.endpoints` row —
+/// for the two fix-round-2 tests below, which both need a REAL endpoint
+/// outside `fx.ws` entirely (not merely one `fx`'s editor happens not to be
+/// able to read, which `other_slug` already covers elsewhere in this file).
+async fn a_foreign_workspace_endpoint(fx: &Fx, tag: &str) -> Uuid {
+    let owner = mk_user(&fx.db, &format!("z2_{tag}_owner")).await;
+    let ws = mk_ws(
+        &fx.db,
+        owner,
+        &format!("z2-{tag}-{}", Uuid::new_v4().simple()),
+    )
+    .await;
+    let database: Uuid = sqlx::query_scalar(
+        "INSERT INTO query.databases (name, engine, host, port, workspace_id) \
+         VALUES ($1,'trino','localhost',8080,$2) RETURNING id",
+    )
+    .bind(format!("db-{}", Uuid::new_v4().simple()))
+    .bind(ws)
+    .fetch_one(&fx.db.pool)
+    .await
+    .unwrap();
+    sqlx::query_scalar(
+        "INSERT INTO dataapi.endpoints (workspace_id, name, path, sql, database_id, created_by) \
+         VALUES ($1,$2,$3,'SELECT 1',$4,$5) RETURNING id",
+    )
+    .bind(ws)
+    .bind(format!("z2 {tag}"))
+    .bind(format!("/z2-{tag}"))
+    .bind(database)
+    .bind(owner)
+    .fetch_one(&fx.db.pool)
+    .await
+    .unwrap()
+}
+
+/// Fix-round-2, Critical 2: `dataapi_endpoint_id` naming a REAL endpoint that
+/// belongs to a DIFFERENT workspace must be refused — the FK
+/// (`schedules_dataapi_endpoint_id_fkey`) checks existence only, and the PDP
+/// object check was told the CALLER's workspace, never the endpoint's, so a
+/// workspace-cascaded grant (`ws_admin`) authorized ANY uuid before this fix.
+///
+/// Both corners the review asked for, on ONE caller: a REAL foreign endpoint
+/// and a FICTIONAL uuid must refuse IDENTICALLY — same status, same body — or
+/// the response is an oracle for "does this uuid name a live endpoint
+/// anywhere in the deployment". The caller is `ws_admin` of `fx.ws`, not
+/// `ws_editor`: an admin's workspace-cascaded `data_api_endpoint:read` is
+/// EXACTLY the grant that used to satisfy the PDP for any uuid, so this is
+/// the caller that actually exercises the new check — an editor with no
+/// grant at all would be refused by the OLD code too and would prove
+/// nothing.
+#[tokio::test]
+async fn creating_a_dataapi_alert_naming_a_foreign_or_nonexistent_endpoint_is_refused_identically()
+{
+    let fx = fixture!();
+    let admin = admin_member(&fx.db, fx.ws).await;
+    let admin_tok = fx.token_for(admin).await;
+    let foreign_endpoint = a_foreign_workspace_endpoint(&fx, "create-foreign").await;
+
+    let mut foreign_body: serde_json::Value =
+        serde_json::from_str(&dataapi_alert_json("z2-create-foreign")).unwrap();
+    foreign_body["dataapi_endpoint_id"] = serde_json::Value::String(foreign_endpoint.to_string());
+    let (foreign_status, foreign_resp) = req_raw(
+        &fx,
+        &admin_tok,
+        "POST",
+        &format!("/ws/{}/alerts", fx.slug),
+        Some(foreign_body.to_string()),
+    )
+    .await;
+    assert_eq!(
+        foreign_status,
+        StatusCode::NOT_FOUND,
+        "a workspace-cascaded grant must not authorize a REAL endpoint in a \
+         different workspace: {foreign_resp}"
+    );
+
+    let mut nonexistent_body: serde_json::Value =
+        serde_json::from_str(&dataapi_alert_json("z2-create-nonexistent")).unwrap();
+    nonexistent_body["dataapi_endpoint_id"] = serde_json::Value::String(Uuid::new_v4().to_string());
+    let (nonexistent_status, nonexistent_resp) = req_raw(
+        &fx,
+        &admin_tok,
+        "POST",
+        &format!("/ws/{}/alerts", fx.slug),
+        Some(nonexistent_body.to_string()),
+    )
+    .await;
+    assert_eq!(
+        nonexistent_status,
+        StatusCode::NOT_FOUND,
+        "{nonexistent_resp}"
+    );
+
+    assert_eq!(
+        foreign_status, nonexistent_status,
+        "a foreign endpoint and a nonexistent one must refuse with the SAME status"
+    );
+    assert_eq!(
+        foreign_resp, nonexistent_resp,
+        "and the SAME body, or the response is still an oracle for existence: \
+         foreign={foreign_resp}, nonexistent={nonexistent_resp}"
+    );
+
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM automation.schedules \
+         WHERE workspace_id = $1 AND name LIKE 'z2-create-%'",
+    )
+    .bind(fx.ws)
+    .fetch_one(&fx.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 0, "a refused create must never write a row");
+}
+
+/// The update-path half of Critical 2's fix: repointing an EXISTING
+/// `dataapi_alert` at a foreign or nonexistent endpoint must be refused the
+/// same way create is, and the two must still be indistinguishable from each
+/// other. Same `ws_admin` reasoning as the create test above — the whole
+/// point is that this caller's grant used to be enough.
+#[tokio::test]
+async fn updating_a_dataapi_alert_to_a_foreign_or_nonexistent_endpoint_is_refused_identically() {
+    let fx = fixture!();
+    let owner = mk_user(&fx.db, "z2_update_foreign_owner").await;
+    let id = insert_workspace_scoped_dataapi_alert(&fx.db, fx.ws, owner, "z2-update-foreign").await;
+    let admin = admin_member(&fx.db, fx.ws).await;
+    let admin_tok = fx.token_for(admin).await;
+    let foreign_endpoint = a_foreign_workspace_endpoint(&fx, "update-foreign").await;
+
+    let (foreign_status, foreign_resp) = req_raw(
+        &fx,
+        &admin_tok,
+        "PUT",
+        &format!("/ws/{}/alerts/{id}", fx.slug),
+        Some(minimal_update_body_with_endpoint(foreign_endpoint)),
+    )
+    .await;
+    assert_eq!(
+        foreign_status,
+        StatusCode::NOT_FOUND,
+        "repointing at a REAL foreign endpoint must be refused: {foreign_resp}"
+    );
+
+    let (nonexistent_status, nonexistent_resp) = req_raw(
+        &fx,
+        &admin_tok,
+        "PUT",
+        &format!("/ws/{}/alerts/{id}", fx.slug),
+        Some(minimal_update_body_with_endpoint(Uuid::new_v4())),
+    )
+    .await;
+    assert_eq!(
+        nonexistent_status,
+        StatusCode::NOT_FOUND,
+        "{nonexistent_resp}"
+    );
+
+    assert_eq!(
+        foreign_status, nonexistent_status,
+        "a foreign endpoint and a nonexistent one must refuse with the SAME status"
+    );
+    assert_eq!(
+        foreign_resp, nonexistent_resp,
+        "and the SAME body: foreign={foreign_resp}, nonexistent={nonexistent_resp}"
+    );
+
+    let still_workspace_scoped: Option<Uuid> =
+        sqlx::query_scalar("SELECT dataapi_endpoint_id FROM automation.schedules WHERE id = $1")
+            .bind(id)
+            .fetch_one(&fx.db.pool)
+            .await
+            .unwrap();
+    assert!(
+        still_workspace_scoped.is_none(),
+        "a refused repoint must not have moved the stored endpoint"
+    );
 }
 
 /// Reading a `dataapi_alert`'s RUN-DERIVED state needs `data_api_endpoint:read`

@@ -14,6 +14,9 @@ egret-core.workspace = true
 serde.workspace = true
 uuid.workspace = true
 utoipa.workspace = true
+# Fix-round-2 (Task 5): the DataApiEndpointPort trait -- mirrors
+# egret-analytics-api's NotebookDocsPort seam.
+async-trait.workspace = true
 
 [dev-dependencies]
 # Unit-test only: proves `OutputSpec::default()` cannot diverge from

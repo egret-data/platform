@@ -57,3 +57,9 @@ async-trait.workspace = true
 egret-query.workspace = true
 egret-bi.workspace = true
 egret-secrets.workspace = true
+# Fix-round-2 (Task 5): the REAL `EndpointStore` (not a fake) for
+# `AutomationState.dataapi_endpoints` in route tests, so a test proves the
+# exact production `DataApiEndpointPort` impl, not a hand-rolled stand-in that
+# could quietly drift from it. No cycle: egret-dataapi depends on none of
+# egret-automation/-automation-api (verified in the fix-round-2 report).
+egret-dataapi.workspace = true

@@ -332,6 +332,7 @@ async fn setup(pool: sqlx::PgPool) -> Fx {
         databases,
         users: egret_auth::users::UserRepo::new(db.clone()),
         engine_minter: Arc::new(NoMinter),
+        dataapi_endpoints: Arc::new(egret_dataapi::EndpointStore::new(db.clone())),
         query: Arc::new(fake_engine(seen_sql.clone())),
         runner,
     };

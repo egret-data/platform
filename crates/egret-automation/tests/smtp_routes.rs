@@ -180,6 +180,7 @@ async fn setup(pool: sqlx::PgPool) -> Fx {
         databases: databases.clone(),
         users: egret_auth::users::UserRepo::new(db.clone()),
         engine_minter: Arc::new(NoMinter),
+        dataapi_endpoints: Arc::new(egret_dataapi::EndpointStore::new(db.clone())),
         // Not exercised by this file's tests; wired for the struct to
         // construct at all.
         query: Arc::new(egret_automation::evaluator::EngineRunner {

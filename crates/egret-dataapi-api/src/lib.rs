@@ -12,6 +12,9 @@
 
 use serde::{Deserialize, Serialize};
 
+mod port;
+pub use port::DataApiEndpointPort;
+
 /// The Cedar object KIND a Data API endpoint appears as in an authorization
 /// decision, and the `access_grants.object_type` of an invoke grant (spec §5,
 /// §6.2 step 4).

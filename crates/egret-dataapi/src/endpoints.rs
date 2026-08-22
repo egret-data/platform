@@ -632,6 +632,27 @@ impl EndpointStore {
             .ok_or_else(|| Error::NotFound("endpoint".into()))
     }
 
+    /// The workspace `id` belongs to, or `Ok(None)` if no such row exists at
+    /// all — trashed or live, both answer with their real workspace, since
+    /// `deleted_at` plays no part in this query.
+    ///
+    /// UNSCOPED by design, unlike [`Self::scoped`]/[`Self::get`]/every other
+    /// read in this module: those all take a `workspace` the CALLER already
+    /// claims to be in and filter by it, refusing anything outside it as
+    /// `NotFound`. This one exists for the opposite direction — a caller
+    /// (`egret-automation`, via the `egret_dataapi_api::DataApiEndpointPort`
+    /// seam this implements) that does NOT yet know whether `id` belongs to
+    /// its own workspace, and needs to find out before deciding what to do
+    /// with the answer. See that trait's own doc comment for why the caller,
+    /// not this function, is responsible for refusing a mismatch.
+    pub async fn workspace_of(&self, id: Uuid) -> Result<Option<Uuid>> {
+        sqlx::query_scalar("SELECT workspace_id FROM dataapi.endpoints WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.db.pool)
+            .await
+            .map_err(db_err)
+    }
+
     /// Star `endpoint` for `user`.
     ///
     /// Idempotent: a second call is a no-op rather than an error, because the
