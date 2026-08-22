@@ -238,6 +238,12 @@ metric Data API cũng là scalar. **Cái mới là NGUỒN của scalar đó, kh
 nó.**
 
 Đúng hai thứ mới: một evaluator đọc `dataapi.access_log`, và một section nguồn trong editor.
+**Một chi phí spec này nói nhẹ đi, đo được sau khi viết.** `evaluate_and_deliver`
+(`runner.rs:185-190`) KHÔNG phải `match` theo `type` — nó là `if s.r#type == "report"
+{ … }` rồi rơi thẳng xuống nhánh alert, nên một type thứ ba tự động rơi vào nhánh alert.
+Có cơ chế chặn (`NotRunnable("alert is missing its query")` ở `:194-200`), nên hỏng ồn ào
+chứ không chạy sai — nhưng làm dispatch tường minh là việc phải làm, không miễn phí.
+
 Runner rẽ nhánh theo `type` — `alert` đi `EngineRunner` (SQL qua `QueryExecPort` dưới danh
 tính owner), `dataapi_alert` đi metric evaluator (pool metastore, không dính danh tính engine
 nào).
@@ -364,7 +370,11 @@ tra này thì `alert:manage` trở thành đường vòng để quan sát một 
 
 Kiểm lúc lưu **và** kiểm lại lúc chạy dưới danh tính owner — owner có thể mất quyền sau khi
 schedule đã ghi. Mất quyền thì ghi `error` kèm lý do và không gửi gì. Tiền lệ đã có: một
-schedule mà mọi owner đều bị vô hiệu hoá thì ngừng chạy. Một alert phạm vi workspace
+schedule mà mọi owner đều bị vô hiệu hoá thì ngừng chạy.
+
+**Một chi phí thứ hai bị nói nhẹ.** State của *route* trong `egret-automation` có PDP
+(`routes.rs:61`), nên nửa kiểm-lúc-lưu không cần thêm gì — nhưng `runner.rs` thì không có.
+Kiểm lại lúc chạy đòi phải luồn một PDP vào runner. Một alert phạm vi workspace
 (`dataapi_endpoint_id IS NULL`) đòi quyền đọc Data API cấp workspace.
 
 ### 5.8 Giao diện

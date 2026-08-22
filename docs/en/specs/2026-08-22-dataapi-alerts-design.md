@@ -250,7 +250,16 @@ scalar against a threshold. A Data API metric is a scalar. **What is new is the 
 of that scalar, not the evaluation of it.**
 
 Exactly two things are new: an evaluator that reads `dataapi.access_log`, and a source
-section in the editor. The runner branches on `type` — `alert` goes to `EngineRunner`
+section in the editor.
+
+**One cost this understates, measured after the fact.** `evaluate_and_deliver`
+(`runner.rs:185-190`) is not a match on `type` — it is `if s.r#type == "report" { … }`
+followed by a fall-through to the alert path, so a third type routes itself into the
+alert branch by default. There is a fail-safe (`NotRunnable("alert is missing its
+query")` at `:194-200`), so the failure is a loud run-log error rather than a wrong run
+— but making the dispatch explicit is work, not a no-op.
+
+The runner branches on `type` — `alert` goes to `EngineRunner`
 (SQL through `QueryExecPort` under an owner's identity), `dataapi_alert` goes to the
 metric evaluator (metastore pool, no engine identity involved).
 
@@ -383,7 +392,11 @@ endpoint one cannot see.
 Checked at save **and** re-checked at run under an owner's identity — an owner can lose
 access after the schedule is written. Losing it records `error` with the reason and
 sends nothing. The precedent already exists: a schedule whose owners are all
-deactivated stops running. A workspace-scoped alert (`dataapi_endpoint_id IS NULL`)
+deactivated stops running.
+
+**A second cost this understates.** `egret-automation`'s *route* state holds a PDP
+(`routes.rs:61`), so the save-time half needs no new plumbing — but `runner.rs` has
+none. The run-time re-check requires threading a PDP into the runner. A workspace-scoped alert (`dataapi_endpoint_id IS NULL`)
 requires workspace-level Data API read.
 
 ### 5.8 UI
