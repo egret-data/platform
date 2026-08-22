@@ -304,9 +304,11 @@ CREATE INDEX access_log_ws_ep_ts_idx
 ```
 
 **A new `type` rather than a `subject` column on `type = 'alert'`.**
-`schedule_alert_needs_query` and `schedule_report_needs_target` are both written as
+`schedule_alert_needs_query` and the report-shape CHECK are both written as
 `type <> 'x' OR (…)`, so a new type excludes itself from both and **neither is
-touched**. A `subject` discriminator would instead require relaxing a constraint that
+touched**. (The report one is `schedule_report_has_format`, not the
+`schedule_report_needs_target` an earlier revision of this section named — `0115` renamed
+it. Verifying against `0110` alone misses that, and did.) A `subject` discriminator would instead require relaxing a constraint that
 is currently protecting live rows, which is exactly where a malformed row gets in.
 
 Four constraints, each making a wrong state unrepresentable rather than merely

@@ -71,7 +71,7 @@ Every architectural claim below was read out of the code, not assumed. Two of th
 
 The four constraints are in spec §5.4. Copy them from there — they are stated in full and each has its reason. Two things the spec's text calls out and this step must not lose:
 
-- `schedule_type_valid` is the **only existing CHECK that changes**. `schedule_alert_needs_query` and `schedule_report_needs_target` are both written `type <> 'x' OR (…)`, so a new type excludes itself from both. Confirm that by reading `0110_automation_schedules.sql` before you write anything.
+- `schedule_type_valid` is the **only existing CHECK that changes**. `schedule_alert_needs_query` and the report-shape CHECK are both written `type <> 'x' OR (…)`, so a new type excludes itself from both. **Confirm that against the live schema (`\d automation.schedules`), not against `0110` alone** — the report CHECK was renamed to `schedule_report_has_format` in `0115`, so reading only the original migration names a constraint that no longer exists.
 - The load-bearing half of the new shape CHECK is `database_id IS NULL AND sql IS NULL`. It makes "a row both evaluators claim as theirs" impossible to write, which is what Task 3's dispatch bug would otherwise depend on being caught at runtime.
 
 Add the index the spec names: `CREATE INDEX access_log_ws_ep_ts_idx ON dataapi.access_log (workspace_id, endpoint_id, ts DESC);`

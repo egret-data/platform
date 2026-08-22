@@ -288,8 +288,10 @@ CREATE INDEX access_log_ws_ep_ts_idx
 ```
 
 **Dùng `type` mới chứ không thêm cột `subject` vào `type = 'alert'`.**
-`schedule_alert_needs_query` và `schedule_report_needs_target` đều viết dạng
-`type <> 'x' OR (…)`, nên một type mới tự loại trừ khỏi cả hai và **không cái nào bị đụng**.
+`schedule_alert_needs_query` và CHECK hình dạng của report đều viết dạng
+`type <> 'x' OR (…)`, nên một type mới tự loại trừ khỏi cả hai và **không cái nào bị đụng**. (CHECK của report tên là
+`schedule_report_has_format`, không phải `schedule_report_needs_target` như bản trước của mục
+này ghi — `0115` đã đổi tên nó. Kiểm chứng chỉ dựa vào `0110` sẽ bỏ sót điều đó, và đã bỏ sót.)
 Một discriminator `subject` thì ngược lại, buộc phải nới một constraint đang bảo vệ dữ liệu
 thật — đúng chỗ một hàng hỏng lọt vào.
 
