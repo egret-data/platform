@@ -3033,3 +3033,77 @@ async fn reading_a_dataapi_alerts_run_state_needs_data_api_endpoint_read() {
         "run_now must NOT be refused for a caller who can read the endpoint: {body}"
     );
 }
+
+/// `set_active` leaks exactly what `list` redacts (Task 4 review, Finding 4).
+/// `PUT .../active` requires only `alert:manage` and returns
+/// `summary_dto(&row, ...)` built straight from the `UPDATE ... RETURNING`
+/// row — `last_state`/`last_eval_at`, unredacted, would tell a caller who
+/// cannot read the endpoint whether it last fired and when, AND the same
+/// request re-enables the schedule, so it is poll-able as an oracle rather
+/// than a one-off leak.
+///
+/// The other MANAGE-gated mutations were checked too, not assumed clean:
+/// `trash`/`restore`/`set_folder`/`remove` all return `egret_core::Ack`
+/// (`{"ok":true}`) or nothing — no `summary_dto`, no `RETURNING` row reaches
+/// the response, so there is no field for this leak to ride on and nothing
+/// to redact.
+#[tokio::test]
+async fn toggling_active_on_a_dataapi_alert_redacts_run_state_for_a_caller_who_cannot_read_it() {
+    let fx = fixture!();
+    let owner = mk_user(&fx.db, "z2_authz_active_owner").await;
+    let id = insert_workspace_scoped_dataapi_alert(&fx.db, fx.ws, owner, "z2-authz-active").await;
+    // A schedule that has already run once, so redaction has something real
+    // to redact — an untouched row's `last_state` is NULL regardless of the
+    // gate, which would pass for the wrong reason.
+    sqlx::query(
+        "UPDATE automation.schedules SET last_state = 'success', last_eval_at = now() \
+         WHERE id = $1",
+    )
+    .bind(id)
+    .execute(&fx.db.pool)
+    .await
+    .unwrap();
+
+    // `ws_editor`: `alert:manage`, no `data_api_endpoint:read`. The toggle
+    // itself must still work (that is `alert:manage`'s job) — only the
+    // run-derived fields in the RESPONSE are at stake.
+    let (status, body) = req(
+        &fx,
+        &fx.editor_tok,
+        "PUT",
+        &format!("/ws/{}/alerts/{id}/active", fx.slug),
+        Some(serde_json::json!({"active": false}).to_string()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the toggle itself must succeed: {body}"
+    );
+    assert_eq!(
+        body["active"], false,
+        "the field being toggled must still work: {body}"
+    );
+    assert!(
+        body["last_state"].is_null() && body["last_eval_at"].is_null(),
+        "set_active must redact last_state/last_eval_at for an endpoint the caller cannot read: {body}"
+    );
+
+    // `ws_admin`: the same `alert:manage`, PLUS `data_api_endpoint:read` —
+    // sees the real value.
+    let admin = admin_member(&fx.db, fx.ws).await;
+    let admin_tok = fx.token_for(admin).await;
+    let (status, body) = req(
+        &fx,
+        &admin_tok,
+        "PUT",
+        &format!("/ws/{}/alerts/{id}/active", fx.slug),
+        Some(serde_json::json!({"active": true}).to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["last_state"], "success",
+        "an admin who CAN read the endpoint must see the real last_state: {body}"
+    );
+}

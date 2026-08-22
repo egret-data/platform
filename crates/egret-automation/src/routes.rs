@@ -827,7 +827,7 @@ async fn set_active(
         .await
         .map_err(AutomationApiError::from)?;
 
-    let row = st
+    let mut row = st
         .schedules
         .set_active(ctx.workspace_id.0, id, body.active)
         .await
@@ -838,6 +838,21 @@ async fn set_active(
         .owners_for(&[id])
         .await
         .map_err(AutomationApiError::from)?;
+
+    // Same leak `list` redacts (Task 4 review, Finding 4): `ScheduleSummaryDto`
+    // built from the `RETURNING` row carries `last_state`/`last_eval_at`, and
+    // `alert:manage` says nothing about the ENDPOINT those fields describe for
+    // a `dataapi_alert`. A caller who can flip `active` but cannot read the
+    // endpoint must still not learn whether it last fired.
+    if row.r#type == "dataapi_alert"
+        && require_dataapi_endpoint_read(&st, &ctx, row.dataapi_endpoint_id)
+            .await
+            .is_err()
+    {
+        row.last_state = None;
+        row.last_eval_at = None;
+    }
+
     // The caller just passed `alert:manage` above, so `can_manage` is `true`
     // for this response — same reasoning `list` uses for every row.
     Ok(Json(summary_dto(&row, &owners, true, false)))

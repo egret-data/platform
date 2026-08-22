@@ -165,6 +165,10 @@ struct Fx {
     /// can read `.calls` — `AutomationRunner::pdp` is `Arc<dyn Pdp>`, which
     /// erases that.
     pdp: Arc<FakePdp>,
+    /// `Some` for `setup_endpoint_scoped` (Task 4 review, Finding 5); `None`
+    /// for the plain `setup` above, whose schedule watches the whole
+    /// workspace.
+    endpoint_id: Option<Uuid>,
 }
 
 /// One `dataapi_alert` schedule, due now, plus its owner. `metric` and
@@ -265,6 +269,130 @@ async fn setup(
         engine,
         owner: user,
         pdp,
+        endpoint_id: None,
+    }
+}
+
+/// Like [`setup`], but the schedule watches ONE endpoint
+/// (`dataapi_endpoint_id`), not the whole workspace — the OBJECT-scoped
+/// branch of `owner_can_read_dataapi_endpoint`'s re-check (Task 4 review,
+/// Finding 5). Migration 0121's NOT NULL columns (`name`/`path`/`sql`/
+/// `database_id`) need a real `query.databases` row, which `setup`'s
+/// schedule deliberately has none of (a `dataapi_alert` carries no
+/// `database_id`/`sql` itself — `schedule_dataapi_needs_source` — but the
+/// ENDPOINT it watches is a normal endpoint row and needs one).
+async fn setup_endpoint_scoped(
+    pool: sqlx::PgPool,
+    metric: &str,
+    validator_config: serde_json::Value,
+    grace_period_s: i32,
+    endpoint_read: bool,
+) -> Fx {
+    let db = Db { pool };
+    let user: Uuid =
+        sqlx::query_scalar("INSERT INTO users (email, provider) VALUES ($1,'local') RETURNING id")
+            .bind(format!("o_{}@t.local", Uuid::new_v4().simple()))
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    let ws: Uuid = sqlx::query_scalar(
+        "INSERT INTO workspaces (slug,name,created_by) VALUES ($1,'t',$2) RETURNING id",
+    )
+    .bind(format!("w-{}", Uuid::new_v4().simple()))
+    .bind(user)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    let database_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO query.databases (name, engine, host, port, workspace_id) \
+         VALUES ($1,'trino','localhost',8080,$2) RETURNING id",
+    )
+    .bind(format!("db-{}", Uuid::new_v4().simple()))
+    .bind(ws)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    let endpoint_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO dataapi.endpoints (workspace_id, name, path, sql, database_id, created_by) \
+         VALUES ($1,'z2 tick test','/z2-tick-test','SELECT 1',$2,$3) RETURNING id",
+    )
+    .bind(ws)
+    .bind(database_id)
+    .bind(user)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+
+    let schedule: Uuid = sqlx::query_scalar(
+        "INSERT INTO automation.schedules \
+           (workspace_id, type, name, crontab, next_run_at, validator_type, validator_config, \
+            dataapi_metric, dataapi_window_s, grace_period_s, dataapi_endpoint_id) \
+         VALUES ($1,'dataapi_alert','dataapi tick test (endpoint-scoped)','* * * * *', \
+                 now() - interval '1 minute', 'operator', $2, $3, 3600, $4, $5) RETURNING id",
+    )
+    .bind(ws)
+    .bind(validator_config)
+    .bind(metric)
+    .bind(grace_period_s)
+    .bind(endpoint_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO automation.schedule_owners (schedule_id, user_id) VALUES ($1,$2)")
+        .bind(schedule)
+        .bind(user)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+    let engine = Arc::new(NeverEngine {
+        seen: Mutex::new(vec![]),
+    });
+    let pdp = Arc::new(FakePdp {
+        allow: endpoint_read,
+        calls: Mutex::new(vec![]),
+    });
+    let secrets = egret_secrets::SecretStore::new(db.clone(), None);
+    let ws_secrets = egret_secrets::WorkspaceSecretStore::new(db.clone(), secrets.clone());
+    Fx {
+        runner: AutomationRunner {
+            db: db.clone(),
+            schedules: ScheduleRepo::new(
+                db.clone(),
+                egret_secrets::SecretStore::new(
+                    db.clone(),
+                    Some(egret_secrets::Crypto::new(&[9u8; 32]).unwrap()),
+                ),
+            ),
+            databases: egret_query::DatabaseRepo::new(db.clone(), secrets, ws_secrets),
+            users: egret_auth::users::UserRepo::new(db.clone()),
+            minter: Arc::new(NoMinter),
+            query: engine.clone(),
+            pdp: pdp.clone(),
+            resolver: Arc::new(PublicDns),
+            policy: SsrfPolicy::default(),
+            smtp: egret_automation::deliver::smtp_config::SmtpConfigRepo::new(
+                db.clone(),
+                egret_secrets::SecretStore::new(db.clone(), None),
+            ),
+            slack_config: egret_automation::deliver::slack_config::SlackConfigRepo::new(
+                db.clone(),
+                egret_secrets::SecretStore::new(db.clone(), None),
+            ),
+            charts: egret_bi::ChartRepo::new(db.clone()),
+            datasets: egret_bi::DatasetRepo::new(db.clone()),
+            render_tokens: egret_automation::render::token::RenderTokenRepo::new(db.clone()),
+            renderer: Arc::new(NeverRenderer),
+            public_url: "https://egret.internal".into(),
+            browser_url: "https://egret.internal".into(),
+        },
+        db,
+        ws,
+        schedule,
+        engine,
+        owner: user,
+        pdp,
+        endpoint_id: Some(endpoint_id),
     }
 }
 
@@ -473,6 +601,46 @@ async fn a_dataapi_alert_whose_owner_lost_endpoint_read_errors_and_sends_nothing
             fx.owner,
             "data_api_endpoint:read".to_string(),
             SeenResource::Workspace(fx.ws),
+        ),
+        "the PDP was asked about the wrong subject, action, or resource"
+    );
+}
+
+/// The OBJECT-scoped half of the same pinning (Task 4 review, Finding 5):
+/// every fixture above sets `dataapi_endpoint_id IS NULL`, so
+/// `owner_can_read_dataapi_endpoint`'s `Resource::Object` branch — the one
+/// that builds `kind: egret_dataapi_api::OBJECT_KIND` — was never reached by
+/// a single tick test. A wrong kind there would ship green exactly the way a
+/// wrong kind in the ROUTE's object branch did before Finding 3's positive
+/// control. `setup_endpoint_scoped` gives the schedule a real
+/// `dataapi_endpoint_id`; this test asserts the PDP was asked about THAT
+/// object, with THAT kind — the literal `"data_api_endpoint"`, not the
+/// constant the code under test also reads, so a typo in either place shows
+/// up as a mismatch here.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_endpoint_scoped_re_check_asks_about_the_pinned_object_kind(pool: sqlx::PgPool) {
+    let fx = setup_endpoint_scoped(
+        pool,
+        "call_count",
+        serde_json::json!({"op": ">", "threshold": 0}),
+        0,
+        true,
+    )
+    .await;
+
+    assert_eq!(fx.runner.tick_once().await, 1, "one schedule was due");
+
+    let calls = fx.pdp.calls.lock().unwrap();
+    assert_eq!(calls.len(), 1, "expected exactly one PDP call: {calls:?}");
+    assert_eq!(
+        calls[0],
+        (
+            fx.owner,
+            "data_api_endpoint:read".to_string(),
+            SeenResource::Object {
+                kind: "data_api_endpoint".to_string(),
+                id: fx.endpoint_id.expect("setup_endpoint_scoped sets this"),
+            },
         ),
         "the PDP was asked about the wrong subject, action, or resource"
     );
