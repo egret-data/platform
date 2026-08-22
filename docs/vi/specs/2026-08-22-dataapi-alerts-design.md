@@ -124,10 +124,28 @@ và rẽ nhánh trạng thái theo thứ tự khác thứ tự đã ghi
 (`isError ? … : isLoading ? … : hasData ? …`, trong khi §2 quy định
 `isLoading → isError → !hasData → rows`).
 
-**Chỗ lệch thứ tự này KHÔNG được khẳng định là bug.** Với TanStack Query hai cờ hiếm khi
-cùng đúng, và không ca hỏng nào được tái hiện. Nó được ghi là một chỗ lệch quy ước mà
-việc chuyển sang `ListStates` làm thành vô nghĩa — ghi lại để người đọc sau không nhầm
-"không có báo cáo lỗi" với "không ai kiểm".
+**Chỗ lệch thứ tự của Alerts KHÔNG được khẳng định là bug.** Với TanStack Query hai cờ
+hiếm khi cùng đúng, và không ca hỏng nào được tái hiện. Nó được ghi là một chỗ lệch quy
+ước mà việc chuyển sang `ListStates` làm thành vô nghĩa — ghi lại để người đọc sau không
+nhầm "không có báo cáo lỗi" với "không ai kiểm".
+
+**`Dashboards.tsx` thì khác, và đó là một lỗi thật.** Nó rẽ
+`isLoading ? … : hasData ? … : isError ? …` — kiểm `hasData` **trước** `isError` — đúng
+bằng chỗ trôi mà §2.1 của tài liệu quy ước đã ghi:
+
+> `Dashboards.tsx` checked `hasData` before `isError`, so a failed refetch that still
+> held cached rows rendered the table and swallowed the error, while the other five
+> rendered the alert.
+
+Lỗi đó vẫn còn. `Datasets.tsx` và `Charts.tsx` đều dùng đúng thứ tự đã ghi, nên đây là
+một trang chứ không phải bốn. **Vì vậy U không thuần tuý là refactor: nó sửa một lỗi bị
+nuốt.**
+
+**Một sửa lỗi thứ hai cả bốn trang được miễn phí.** Trang nào cũng render
+`(error as Error)?.message ?? "Failed to load X."`. Một error không có message — một
+`UnauthorizedError`, hoặc một `ApiError` dựng từ `statusText` rỗng — cho ra `""`, và `??`
+render nó thành một alert destructive trắng trơn. `ListStates` dùng `|| errorText` chính
+vì lý do đó.
 
 ### 3.4 Rủi ro cấu trúc duy nhất: thanh tab của Alerts
 

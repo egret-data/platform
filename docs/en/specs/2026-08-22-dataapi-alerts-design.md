@@ -127,10 +127,28 @@ and branches its states in a different order from the documented one
 (`isError ? … : isLoading ? … : hasData ? …`, where §2 specifies
 `isLoading → isError → !hasData → rows`).
 
-**The ordering divergence is not claimed as a bug.** Under TanStack Query the two
+**Alerts' ordering divergence is not claimed as a bug.** Under TanStack Query the two
 flags rarely hold together, and no failing case was reproduced. It is recorded as a
 divergence that consolidating on `ListStates` makes moot, so that a later reader does
 not mistake the absence of a bug report for the absence of a check.
+
+**`Dashboards.tsx` is a different matter, and it is a real defect.** It branches
+`isLoading ? … : hasData ? … : isError ? …` — `hasData` **before** `isError` — which
+is precisely the drift §2.1 of the conventions document records:
+
+> `Dashboards.tsx` checked `hasData` before `isError`, so a failed refetch that still
+> held cached rows rendered the table and swallowed the error, while the other five
+> rendered the alert.
+
+It is still present. `Datasets.tsx` and `Charts.tsx` both use the documented order, so
+this is one page, not four. **U is therefore not purely a refactor: it fixes a
+swallowed error.**
+
+**A second fix all four pages get for free.** Every one of them renders
+`(error as Error)?.message ?? "Failed to load X."`. A message-less error — an
+`UnauthorizedError`, or an `ApiError` built from an empty `statusText` — produces `""`,
+and `??` renders that as a blank destructive alert. `ListStates` uses `|| errorText`
+for exactly this reason.
 
 ### 3.4 The one structural risk: the Alerts tab bar
 
