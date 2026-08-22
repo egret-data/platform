@@ -372,3 +372,32 @@ async fn a_row_from_another_workspace_never_counts() {
         "the other workspace's row must not be visible"
     );
 }
+
+/// The test that dies if `measure` ignores its `now` parameter and reads
+/// `Utc::now()` internally instead. Every other test in this file calls
+/// `measure` with a `now` within about a second of the real wall clock, so a
+/// mutant that swapped the parameter for `Utc::now()` internally would pass
+/// every one of them — the injected clock would be decoration nobody
+/// actually exercises. This test displaces `now` ten days from the seeded
+/// row's real timestamp and gives the window only five seconds of width, so
+/// the row lands inside the window if and only if `measure` used the PASSED
+/// `now` — the real wall clock, ten days later, would put the row nowhere
+/// near a 5-second window ending "now".
+#[tokio::test]
+async fn now_is_the_parameter_not_the_wall_clock() {
+    let f = fixture!();
+    let seed_time = Utc::now() - Duration::days(10);
+    seed(&f, Row::at(seed_time)).await;
+
+    let now = seed_time + Duration::seconds(1);
+    let v = measure(&f.db, f.ws, None, "call_count", None, 5, now)
+        .await
+        .unwrap();
+    assert_eq!(
+        v,
+        Some(1.0),
+        "the row is inside a 5s window anchored at the PASSED `now`, ten \
+         days from the real clock; a `measure` reading Utc::now() internally \
+         would see an empty window and report Some(0.0) here"
+    );
+}

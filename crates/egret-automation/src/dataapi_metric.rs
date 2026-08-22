@@ -27,8 +27,11 @@ use egret_metastore::Db;
 use uuid::Uuid;
 
 /// Every query here shares one shape, bound the same way every time:
-/// `workspace_id = $1 AND ($2::uuid IS NULL OR endpoint_id = $2) AND ts > $3
-/// AND actor_user_id IS NULL`. `$2` narrows to one endpoint when given, or
+/// `workspace_id = $1 AND ($2::uuid IS NULL OR endpoint_id = $2) AND ts >= $3
+/// AND actor_user_id IS NULL`. `>=`, matching `activity.rs`'s own `ts >= $2` —
+/// the two statements must agree at the boundary, not just on the common
+/// case, or a reviewer comparing them has to work out whether a `>` here was
+/// deliberate. `$2` narrows to one endpoint when given, or
 /// aggregates the whole workspace when `None`; `$3` is the window's start,
 /// computed from the caller's `now` rather than read from a second call to
 /// `now()` inside the statement — two clock readings that can coincide is a
@@ -84,7 +87,7 @@ async fn call_count(
         "SELECT count(*) \
          FROM dataapi.access_log \
          WHERE workspace_id = $1 AND ($2::uuid IS NULL OR endpoint_id = $2) \
-           AND ts > $3 AND actor_user_id IS NULL",
+           AND ts >= $3 AND actor_user_id IS NULL",
     )
     .bind(ws)
     .bind(endpoint_id)
@@ -104,7 +107,7 @@ async fn error_count(
         "SELECT count(*) FILTER (WHERE status_code >= 400) \
          FROM dataapi.access_log \
          WHERE workspace_id = $1 AND ($2::uuid IS NULL OR endpoint_id = $2) \
-           AND ts > $3 AND actor_user_id IS NULL",
+           AND ts >= $3 AND actor_user_id IS NULL",
     )
     .bind(ws)
     .bind(endpoint_id)
@@ -129,7 +132,7 @@ async fn error_rate(
         "SELECT count(*), count(*) FILTER (WHERE status_code >= 400) \
          FROM dataapi.access_log \
          WHERE workspace_id = $1 AND ($2::uuid IS NULL OR endpoint_id = $2) \
-           AND ts > $3 AND actor_user_id IS NULL",
+           AND ts >= $3 AND actor_user_id IS NULL",
     )
     .bind(ws)
     .bind(endpoint_id)
@@ -160,7 +163,7 @@ async fn percentile(
            FILTER (WHERE status_code BETWEEN 200 AND 299) \
          FROM dataapi.access_log \
          WHERE workspace_id = $1 AND ($2::uuid IS NULL OR endpoint_id = $2) \
-           AND ts > $3 AND actor_user_id IS NULL",
+           AND ts >= $3 AND actor_user_id IS NULL",
     )
     .bind(ws)
     .bind(endpoint_id)
@@ -181,7 +184,7 @@ async fn error_code_count(
         "SELECT count(*) FILTER (WHERE error_code = $4) \
          FROM dataapi.access_log \
          WHERE workspace_id = $1 AND ($2::uuid IS NULL OR endpoint_id = $2) \
-           AND ts > $3 AND actor_user_id IS NULL",
+           AND ts >= $3 AND actor_user_id IS NULL",
     )
     .bind(ws)
     .bind(endpoint_id)
