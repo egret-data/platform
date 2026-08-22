@@ -27,6 +27,7 @@ use crate::repo::Schedule;
 const COLS: &str = "id, workspace_id, type, name, description, active, crontab, timezone, \
      next_run_at, database_id, sql, validator_type, validator_config, last_eval_at, last_state, \
      last_value, chart_id, dashboard_id, report_format, custom_width, custom_height, \
+     dataapi_endpoint_id, dataapi_metric, dataapi_error_code, dataapi_window_s, \
      grace_period_s, working_timeout_s, log_retention_days, email_subject, message, message_footer, \
      skip_if_empty, folder_id, deleted_at, created_by, updated_at";
 

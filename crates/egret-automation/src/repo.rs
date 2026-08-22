@@ -58,6 +58,14 @@ pub struct Schedule {
     pub custom_width: Option<i32>,
     pub custom_height: Option<i32>,
 
+    // Data API alert only (migration 0127). Which of `database_id`/`sql` vs.
+    // these four is populated is pinned by `schedule_dataapi_needs_source` /
+    // `schedule_alert_no_dataapi_columns`.
+    pub dataapi_endpoint_id: Option<Uuid>,
+    pub dataapi_metric: Option<String>,
+    pub dataapi_error_code: Option<String>,
+    pub dataapi_window_s: Option<i32>,
+
     pub grace_period_s: i32,
     pub working_timeout_s: i32,
     pub log_retention_days: i32,
@@ -166,6 +174,7 @@ pub struct NewSchedule {
 const COLS: &str = "id, workspace_id, type, name, description, active, crontab, timezone, \
      next_run_at, database_id, sql, validator_type, validator_config, last_eval_at, last_state, \
      last_value, chart_id, dashboard_id, report_format, custom_width, custom_height, \
+     dataapi_endpoint_id, dataapi_metric, dataapi_error_code, dataapi_window_s, \
      grace_period_s, working_timeout_s, log_retention_days, email_subject, message, message_footer, \
      skip_if_empty, folder_id, deleted_at, created_by, updated_at";
 
