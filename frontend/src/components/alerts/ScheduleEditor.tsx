@@ -932,7 +932,7 @@ export function ScheduleEditor({
           <ConfigTableRow
             label="Working timeout (seconds)"
             htmlFor="sched-timeout"
-            details="A run still working after this is marked failed."
+            details="How long a run can go quiet before it's reclaimed, in case the worker running it died mid-run."
           >
             <Input
               id="sched-timeout"
