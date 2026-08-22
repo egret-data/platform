@@ -39,7 +39,7 @@ export const SECTIONS: { key: SectionKey; label: (isAlert: boolean) => string }[
   { key: "notification", label: () => "Notification" },
 ];
 import { ConfigSection } from "@/components/form/ConfigSection";
-import { ConfigTable, ConfigTableRow } from "@/components/config/ConfigTable";
+import { ConfigTable, ConfigTableGroup, ConfigTableRow } from "@/components/config/ConfigTable";
 import { TagCombobox } from "@/components/ui/tag-combobox";
 import { DestinationList } from "./DestinationList";
 import { toDestinations, toRecipients, type Destination } from "./destinations";
@@ -954,180 +954,212 @@ export function ScheduleEditor({
             destination produces. */}
         <DestinationList value={destinations} onChange={setDestinations} />
 
-        <div className="flex flex-col gap-1.5">
-          <Label htmlFor="sched-subject">Email subject</Label>
-          <Input
-            id="sched-subject"
-            ref={subjectRef}
-            value={emailSubject}
-            onChange={(e) => setEmailSubject(e.target.value)}
-            placeholder={
-              isAlert ? `[egret] ${name || "name"} triggered` : `[egret] ${name || "name"}`
-            }
-          />
-          {/* A subject fixed for every edition collapses thirty mails into
-              one thread and nobody can find yesterday's, which is why the
-              placeholders exist and why the preview is here rather than in a
-              tooltip. */}
-          <p className="text-xs text-muted-foreground">
-            Leave blank to use the default shown above. Placeholders:{" "}
-            {SUBJECT_TOKENS.map((t, i) => (
-              <span key={t.token}>
-                {i > 0 && ", "}
-                <button
-                  type="button"
-                  className="font-mono underline hover:text-foreground"
-                  onClick={() => insertToken(t.token)}
-                  title={`Insert ${t.hint}`}
-                >{`{{${t.token}}}`}</button>
-              </span>
-            ))}
-            .
-          </p>
-          {emailSubject.includes("{{") && (
-            <p className="text-xs text-muted-foreground">
-              Sends as{" "}
-              <span className="font-medium text-foreground">
-                {renderSubject(emailSubject, name || "name")}
-              </span>
-            </p>
-          )}
-        </div>
+        <ConfigTable valueClassName="w-96">
+          <ConfigTableGroup label="Message" />
 
-        <div className="flex flex-col gap-1.5">
-          <Label htmlFor="sched-message">Opening note</Label>
-          <Textarea
-            id="sched-message"
-            rows={2}
-            value={message}
-            onChange={(e) => setMessage(e.target.value)}
-            placeholder="Anything the recipient should know — why this exists, who to ask."
-          />
-          <p className="text-xs text-muted-foreground">
-            Above the result, at the top of the notification. Plain text.
-          </p>
-        </div>
-
-        {/* Between the two notes, because that is where the delivered object
-            physically lands in the mail — "opening note / closing note" reads
-            as two adjacent boxes otherwise.
-
-            For an alert this is also WHERE THE CONTROL BELONGS. It used to sit
-            at the foot of the Condition section, which is about the query and
-            the firing rule; a user looking for "can I send the chart too?"
-            never looked there and concluded the feature did not exist. */}
-        <div className="rounded-md border border-dashed px-3 py-3">
-          {isAlert ? (
-            <>
-              <p className="text-center text-xs text-muted-foreground">
-                The triggering rows go here, always attached as CSV.
+          <ConfigTableRow
+            label="Email subject"
+            htmlFor="sched-subject"
+            details="Leave blank to use the default subject."
+          >
+            {/* A subject fixed for every edition collapses thirty mails into
+                one thread and nobody can find yesterday's, which is why the
+                placeholders exist and why the preview is here rather than in a
+                tooltip. The insert buttons stay beside the input rather than
+                in Details: they act on the field, so they belong with it. */}
+            <div className="space-y-1.5">
+              <Input
+                id="sched-subject"
+                ref={subjectRef}
+                value={emailSubject}
+                onChange={(e) => setEmailSubject(e.target.value)}
+                placeholder={
+                  isAlert ? `[egret] ${name || "name"} triggered` : `[egret] ${name || "name"}`
+                }
+              />
+              <p className="text-xs text-muted-foreground">
+                Placeholders:{" "}
+                {SUBJECT_TOKENS.map((t, i) => (
+                  <span key={t.token}>
+                    {i > 0 && ", "}
+                    <button
+                      type="button"
+                      className="font-mono underline hover:text-foreground"
+                      onClick={() => insertToken(t.token)}
+                      title={`Insert ${t.hint}`}
+                    >{`{{${t.token}}}`}</button>
+                  </span>
+                ))}
+                .
               </p>
-              <div className="mt-2 flex items-center gap-2">
-                <Checkbox
-                  id="sched-attach"
-                  checked={attachTarget}
-                  onCheckedChange={(v) => setAttachTarget(v === true)}
-                />
-                <Label htmlFor="sched-attach" className="text-sm font-normal">
-                  Also show a chart or dashboard
-                </Label>
-              </div>
-              {attachTarget && (
-                <div className="mt-2 flex flex-col gap-2 pl-6">
-                  <select
-                    aria-label="Attachment object type"
-                    className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-                    value={targetKind}
-                    onChange={(e) => {
-                      setTargetKind(e.target.value as "dashboard" | "chart");
-                      setTargetId("");
-                    }}
-                  >
-                    <option value="dashboard">A dashboard</option>
-                    <option value="chart">A chart</option>
-                  </select>
-                  <select
-                    aria-label="Attachment object"
-                    className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-                    value={defaultTarget}
-                    onChange={(e) => setTargetId(e.target.value)}
-                  >
-                    {((targetKind === "dashboard" ? dashboards : charts) ?? []).map((o) => (
-                      <option key={o.id} value={o.id}>
-                        {o.name}
-                      </option>
-                    ))}
-                  </select>
-                  <select
-                    aria-label="Attachment format"
-                    className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-                    value={reportFormat}
-                    onChange={(e) => setReportFormat(e.target.value)}
-                  >
-                    <option value="png">PNG image, shown here in the message</option>
-                    <option value="pdf">PDF, as a file</option>
-                  </select>
-                  <p className="text-xs text-muted-foreground">
-                    If it cannot be rendered the alert still sends, with the rows alone.
-                  </p>
-                  <div className="flex gap-2">
-                    <div className="flex flex-1 flex-col gap-1.5">
-                      <Label htmlFor="sched-width">Image width (px)</Label>
-                      <Input
-                        id="sched-width"
-                        value={customWidth}
-                        onChange={(e) => setCustomWidth(e.target.value)}
-                        placeholder="default"
-                        inputMode="numeric"
-                      />
+              {emailSubject.includes("{{") && (
+                <p className="text-xs text-muted-foreground">
+                  Sends as{" "}
+                  <span className="font-medium text-foreground">
+                    {renderSubject(emailSubject, name || "name")}
+                  </span>
+                </p>
+              )}
+            </div>
+          </ConfigTableRow>
+
+          <ConfigTableRow
+            label="Opening note"
+            htmlFor="sched-message"
+            details="Above the result, at the top of the notification. Plain text."
+          >
+            <Textarea
+              id="sched-message"
+              rows={2}
+              value={message}
+              onChange={(e) => setMessage(e.target.value)}
+              placeholder="Anything the recipient should know — why this exists, who to ask."
+            />
+          </ConfigTableRow>
+
+          <ConfigTableRow
+            label="Closing note"
+            htmlFor="sched-message-footer"
+            details="Below the result, before the link back to egret. Plain text."
+          >
+            <Textarea
+              id="sched-message-footer"
+              rows={2}
+              value={messageFooter}
+              onChange={(e) => setMessageFooter(e.target.value)}
+              placeholder="What to do about it — who to contact, where to look next."
+            />
+          </ConfigTableRow>
+
+          {/* The group only exists for an alert: a report's attachment is
+              already chosen in Contents, so there is nothing here to edit and
+              no row to head. Guarding the group row on the same condition as
+              the row beneath it (rather than on `attachTarget`) keeps it from
+              ever heading zero rows — "Also show a chart or dashboard" is
+              unconditional once `isAlert` is true. */}
+          {isAlert && (
+            <>
+              <ConfigTableGroup label="Attachment" />
+
+              {/* This control used to sit at the foot of the Condition
+                  section, which is about the query and the firing rule; a
+                  user looking for "can I send the chart too?" never looked
+                  there and concluded the feature did not exist. */}
+              <ConfigTableRow
+                label="Also show a chart or dashboard"
+                htmlFor="sched-attach"
+                details="The triggering rows go here, always attached as CSV."
+              >
+                <div className="flex flex-col gap-2">
+                  <Checkbox
+                    id="sched-attach"
+                    checked={attachTarget}
+                    onCheckedChange={(v) => setAttachTarget(v === true)}
+                  />
+                  {attachTarget && (
+                    <div className="flex flex-col gap-2">
+                      <select
+                        aria-label="Attachment object type"
+                        className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                        value={targetKind}
+                        onChange={(e) => {
+                          setTargetKind(e.target.value as "dashboard" | "chart");
+                          setTargetId("");
+                        }}
+                      >
+                        <option value="dashboard">A dashboard</option>
+                        <option value="chart">A chart</option>
+                      </select>
+                      <select
+                        aria-label="Attachment object"
+                        className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                        value={defaultTarget}
+                        onChange={(e) => setTargetId(e.target.value)}
+                      >
+                        {((targetKind === "dashboard" ? dashboards : charts) ?? []).map((o) => (
+                          <option key={o.id} value={o.id}>
+                            {o.name}
+                          </option>
+                        ))}
+                      </select>
+                      <select
+                        aria-label="Attachment format"
+                        className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                        value={reportFormat}
+                        onChange={(e) => setReportFormat(e.target.value)}
+                      >
+                        <option value="png">PNG image, shown here in the message</option>
+                        <option value="pdf">PDF, as a file</option>
+                      </select>
+                      <p className="text-xs text-muted-foreground">
+                        If it cannot be rendered the alert still sends, with the rows alone.
+                      </p>
                     </div>
-                    <div className="flex flex-1 flex-col gap-1.5">
-                      <Label htmlFor="sched-height">Image height (px)</Label>
-                      <Input
-                        id="sched-height"
-                        value={customHeight}
-                        onChange={(e) => setCustomHeight(e.target.value)}
-                        placeholder="default"
-                        inputMode="numeric"
-                      />
-                    </div>
-                  </div>
+                  )}
                 </div>
+              </ConfigTableRow>
+
+              {attachTarget && (
+                <>
+                  <ConfigTableRow
+                    label="Image width (px)"
+                    htmlFor="sched-width"
+                    details="Overrides the rendered image's default width."
+                  >
+                    <Input
+                      id="sched-width"
+                      value={customWidth}
+                      onChange={(e) => setCustomWidth(e.target.value)}
+                      placeholder="default"
+                      inputMode="numeric"
+                    />
+                  </ConfigTableRow>
+                  <ConfigTableRow
+                    label="Image height (px)"
+                    htmlFor="sched-height"
+                    details="Overrides the rendered image's default height."
+                  >
+                    <Input
+                      id="sched-height"
+                      value={customHeight}
+                      onChange={(e) => setCustomHeight(e.target.value)}
+                      placeholder="default"
+                      inputMode="numeric"
+                    />
+                  </ConfigTableRow>
+                </>
               )}
             </>
-          ) : (
-            <p className="text-center text-xs text-muted-foreground">
-              {reportFormat === "png"
-                ? "The rendered image goes here, inside the message."
-                : "The report goes here — csv and pdf arrive as a file, text is shown inline."}
-            </p>
           )}
-        </div>
 
-        <div className="flex flex-col gap-1.5">
-          <Label htmlFor="sched-message-footer">Closing note</Label>
-          <Textarea
-            id="sched-message-footer"
-            rows={2}
-            value={messageFooter}
-            onChange={(e) => setMessageFooter(e.target.value)}
-            placeholder="What to do about it — who to contact, where to look next."
-          />
-          <p className="text-xs text-muted-foreground">
-            Below the result, before the link back to egret. Plain text.
+          <ConfigTableGroup label="Delivery" />
+
+          <ConfigTableRow
+            label="Don't send when there are no rows"
+            htmlFor="sched-skip-empty"
+            details="Skips this run rather than delivering an empty result."
+          >
+            <Checkbox
+              id="sched-skip-empty"
+              checked={skipIfEmpty}
+              onCheckedChange={(v) => setSkipIfEmpty(v === true)}
+            />
+          </ConfigTableRow>
+        </ConfigTable>
+
+        {/* A report's own preview text, not a field — it has no value to
+            edit, so it cannot be a row. It used to sit between the two notes,
+            which the table's grouping (Message, then Attachment) no longer
+            has room for; it moves below the table for the same reason the
+            "+ Add another" button did in the Contents section: a bare,
+            non-field element is illegal inside a table body. */}
+        {!isAlert && (
+          <p className="rounded-md border border-dashed px-3 py-3 text-center text-xs text-muted-foreground">
+            {reportFormat === "png"
+              ? "The rendered image goes here, inside the message."
+              : "The report goes here — csv and pdf arrive as a file, text is shown inline."}
           </p>
-        </div>
-
-        <div className="flex items-center gap-2">
-          <Checkbox
-            id="sched-skip-empty"
-            checked={skipIfEmpty}
-            onCheckedChange={(v) => setSkipIfEmpty(v === true)}
-          />
-          <Label htmlFor="sched-skip-empty" className="text-sm font-normal">
-            Don&apos;t send when there are no rows
-          </Label>
-        </div>
+        )}
       </ConfigSection>
       )}
 
