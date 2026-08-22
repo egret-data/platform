@@ -169,35 +169,53 @@ layout.
 
 ---
 
-## 4. E — editor Alerts lên `ConfigTable`
+## 4. E — đưa các TRƯỜNG của editor Alerts lên `ConfigTable`
 
-`ScheduleEditor.tsx` (1.110 dòng) chồng năm card `ConfigSection`. §4.1 nói ngược lại: một
-nhóm setting là một hàng `ConfigTableGroup` full-width bên trong một `ConfigTable`, vì
-"một cột toàn hộp rỗng" chính là thứ các card đã tạo ra trên các tab detail của Data API.
+**Mục này được viết lại sau khi đọc chính đoạn mã nó mô tả. Bản trước khẳng định ba thay
+đổi, và hai rưỡi trong số đó sai.** Các lỗi được ghi lại chứ không lặng lẽ bỏ đi, vì cả ba
+đều đến từ việc đọc một quy tắc trong `docs/en/ui-conventions.md` rồi áp dụng mà không kiểm
+xem tình huống quy tắc đó sinh ra để giải có phải tình huống ở đây không.
 
-**Việc chuyển đổi là một phần, có chủ ý.** §4.2 — "một listing chỉ đọc không phải setting,
-một hành động không phải setting" — nghĩa là `DestinationList` thành `Table` thường theo
-§4.3, không phải một loạt hàng setting. Chuyển tất tay sẽ lặp lại đúng lỗi mà §4.2 sinh ra
-để ngăn.
+### 4.1 Cái thật sự sai, và chỉ có một
 
-`ScheduleDetail.tsx:117` mang `mx-auto max-w-4xl p-4`. §5.1 cấm đặt cap ở cấp trang cho
-route chứa settings table, vì các section không muốn cùng một bề rộng; cap chuyển xuống
-phần tử gốc của từng section. §5.2 là lý do đây không phải chuyện khẩu vị: `ConfigTable`
-là `table-fixed` và chỉ cột Details không được định cỡ, nên bỏ cap mà không định cỡ sẽ
-trao toàn bộ phần rộng mới cho chữ trợ giúp mờ.
+Bên trong mỗi section của `ScheduleEditor.tsx`, mọi trường đều là một chồng viết tay: một
+`<Label>`, một control, và thường có `<p class="text-xs text-muted-foreground">` chèn phía
+dưới. Quy tắc **thuận** của §4.1 áp dụng — một nhóm setting là bảng `Setting | Details |
+Value` — và cái được là cụ thể: helper text ra khỏi chỗ chen dưới control để vào cột
+Details, đúng nơi quy ước đặt nó.
 
-**Hai thứ đã đúng và KHÔNG được "sửa".** Cả hai đều có comment tự giải thích, và cả hai đã
-được kiểm trước khi spec này đề xuất động vào file:
+Grid hai cột `Name` + `Description` của section `General` cũng chuyển được. Comment của nó
+nói grid tồn tại vì "một hàng full-width cho mỗi trường khiến section chủ yếu là khoảng
+trắng còn field thì bị kéo dài quá mọi độ dài nó sẽ có" — và `ConfigTable` giải đúng điều
+đó, tốt hơn: cột Value có cap (`w-52` mặc định, `valueClassName` để nới), nên control không
+thể giãn, và phần rộng dôi ra thuộc về Details chứ không thuộc về khoảng trắng.
 
-- Dirtiness tính bằng **so sánh snapshot**, không phải bằng lắng nghe sự kiện change
-  (`ScheduleEditor.tsx:365-390`). Một handler `change` đánh dấu form là dirty ngay khi
-  Radix Select và Checkbox phát sự kiện lúc hydration, nên chỉ mở một schedule rồi rời đi
-  cũng dựng lời nhắc chưa lưu.
-- Form là **một cột và không tự giữ width** — trang đặt khổ. Grid hai cột đệm section ngắn
-  cho cao bằng section dài bên cạnh, còn CSS `columns` đánh nhau với flex container và cắt
-  mất nội dung. Cả hai đã được thử trên chính form này.
+### 4.2 Ba thứ được giữ, và vì sao
 
----
+**Khung `ConfigSection` được giữ.** Defect ở §4.1 là *xếp chồng* — "Cache three table rows,
+Limits two, Rate limit three. Read down the page, that was a column of mostly-empty boxes."
+`ScheduleEditor` render `{section === "general" && …}`, mỗi lúc một card, do tab bar chọn.
+Không có cột nào, nên cũng không có hộp rỗng nào trong đó.
+
+**`mx-auto max-w-4xl` ở `ScheduleDetail.tsx` được giữ.** Nó mang sẵn lý do tại
+`ScheduleDetail.tsx:114-116`: *"`4xl`, not `6xl`: with the section nav now horizontal there
+is no column beside the form to fill, and a 1150px-wide single-column form is past a
+readable measure. Everything on the page shares this one edge."* Quy tắc §5.1 tồn tại vì
+sáu section của Data API **muốn bề rộng khác nhau** — Config và Query muốn cả trang, Access
+và Try-it thì không. Ở đây cả bốn section đều là cùng một form một cột, và header, tab bar,
+form dùng chung một mép. Bỏ cap là kéo cả ba quá khổ đọc — đúng thứ comment đã từ chối.
+
+**`DestinationList` giữ nguyên.** Câu "một listing chỉ đọc không phải setting" của §4.2
+không mô tả nó: mỗi dòng là một *form* có trường khác nhau theo kind — email nhận danh sách
+địa chỉ, Slack nhận channel và token, webhook nhận URL và secret. Đó là một tập do người
+dùng soạn ra, không phải một danh sách bản ghi, và ép form-theo-kind vào hàng bảng sẽ tệ
+hơn thứ đang có.
+
+### 4.3 Phạm vi
+
+Chỉ `ScheduleEditor.tsx`. Hai thứ trong file đó đã đúng, có comment tự giải thích, và không
+được động vào: dirtiness tính bằng **so sánh snapshot** chứ không phải nghe sự kiện change
+(`ScheduleEditor.tsx:365-390`), và form là **một cột không tự giữ width** để trang đặt khổ.
 
 ## 5. Z2 — cảnh báo endpoint Data API
 
