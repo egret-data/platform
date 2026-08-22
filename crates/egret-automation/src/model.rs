@@ -156,6 +156,17 @@ pub fn to_new(body: &WriteBody<'_>, creator: Option<Uuid>) -> Result<NewSchedule
         crate::subject::validate(subject).map_err(|m| bad(&m))?;
     }
 
+    // Set only by the `DataapiAlert` arm, from a TRIMMED `dataapi_error_code`
+    // — the same value the arm's own validation below checked, not a second,
+    // untrimmed read of `body.dataapi_error_code` at construction time. A
+    // whitespace-only `dataapi_error_code` on a `call_count` alert used to
+    // pass this validation (trimmed-to-empty reads as "no error code") but
+    // then persist the ORIGINAL untrimmed string, which is non-NULL and so
+    // still trips `schedule_dataapi_error_code_needs_metric` at the database
+    // — a 400 naming the CONSTRAINT, not the field, exactly what this
+    // function exists to avoid.
+    let mut dataapi_error_code: Option<String> = None;
+
     match body.ty {
         ScheduleType::Alert => {
             if body.database_id.is_none() {
@@ -229,14 +240,19 @@ pub fn to_new(body: &WriteBody<'_>, creator: Option<Uuid>) -> Result<NewSchedule
             // `schedule_dataapi_error_code_needs_metric` /
             // `schedule_dataapi_metric_needs_error_code`: the two
             // one-directional CHECKs, mirrored as one named field each way.
-            let has_error_code = body
+            // Trimmed ONCE, here — `dataapi_error_code` (the outer binding)
+            // is what actually gets persisted below, so a whitespace-only
+            // value cannot pass this check as "absent" and then reach the
+            // database as a non-NULL string.
+            dataapi_error_code = body
                 .dataapi_error_code
                 .map(str::trim)
-                .is_some_and(|s| !s.is_empty());
-            if metric == DataapiMetric::ErrorCodeCount && !has_error_code {
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            if metric == DataapiMetric::ErrorCodeCount && dataapi_error_code.is_none() {
                 return Err(bad("error_code_count needs a dataapi_error_code"));
             }
-            if metric != DataapiMetric::ErrorCodeCount && has_error_code {
+            if metric != DataapiMetric::ErrorCodeCount && dataapi_error_code.is_some() {
                 return Err(bad("dataapi_error_code is only valid for error_code_count"));
             }
         }
@@ -333,9 +349,10 @@ pub fn to_new(body: &WriteBody<'_>, creator: Option<Uuid>) -> Result<NewSchedule
         dataapi_metric: is_dataapi_alert
             .then(|| body.dataapi_metric.map(|m| m.as_str().to_string()))
             .flatten(),
-        dataapi_error_code: is_dataapi_alert
-            .then(|| body.dataapi_error_code.map(str::to_string))
-            .flatten(),
+        // The TRIMMED value computed (and validated) in the `DataapiAlert`
+        // arm above — `None` untouched for `Alert`/`Report`, since that arm
+        // is the only place this outer binding is ever assigned.
+        dataapi_error_code,
         dataapi_window_s: is_dataapi_alert.then_some(body.dataapi_window_s).flatten(),
         grace_period_s: grace,
         working_timeout_s: working,
@@ -945,6 +962,24 @@ mod tests {
         b.dataapi_metric = Some(DataapiMetric::ErrorCodeCount);
         b.dataapi_error_code = Some("QUERY_TIMEOUT".into());
         assert!(to_new(&WriteBody::from(&b), Some(Uuid::new_v4())).is_ok());
+    }
+
+    /// Fix-round-1, Minor 3: a whitespace-only `dataapi_error_code` used to
+    /// read as "absent" for the CHECK-mirroring validation above (trimmed to
+    /// empty) but then persist the ORIGINAL, untrimmed, non-NULL string —
+    /// which still violates `schedule_dataapi_error_code_needs_metric` at
+    /// the database, surfacing as a 400 naming the CONSTRAINT rather than a
+    /// 400 naming the FIELD, which is exactly what this whole function
+    /// exists to avoid.
+    #[test]
+    fn a_whitespace_only_error_code_is_not_persisted_verbatim() {
+        let mut b = dataapi_alert_body();
+        b.dataapi_error_code = Some("   ".into());
+        let n = to_new(&WriteBody::from(&b), Some(Uuid::new_v4())).unwrap();
+        assert!(
+            n.dataapi_error_code.is_none(),
+            "a whitespace-only error_code must not reach NewSchedule verbatim: {n:?}"
+        );
     }
 
     /// Mirrors `schedule_dataapi_needs_source`'s `database_id IS NULL AND sql

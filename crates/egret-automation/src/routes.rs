@@ -614,8 +614,32 @@ async fn update(
     // the `ScheduleType::parse` below: a `dataapi_alert` row does not parse
     // there yet (`ScheduleType` gains that variant in Task 5), and this
     // authorization gate must not depend on that landing first.
+    //
+    // TWO checks, not one — this is the fix-round-1 correction. `type` is
+    // immutable, so once `stored.r#type` is `dataapi_alert` the body ALWAYS
+    // carries a `dataapi_endpoint_id` too (Task 5 gave `UpdateSchedule` that
+    // field), and checking only the STORED endpoint left the target endpoint
+    // this update would SET unauthorized entirely: a caller who could read
+    // endpoint A could repoint an A-scoped alert at endpoint B (proven live,
+    // fix-round-1 review) — or, by simply omitting the field, widen it to
+    // `dataapi_endpoint_id = NULL`, this codebase's workspace-wide "watch
+    // every endpoint" (proven live too, no malice required, just an omitted
+    // field). Both are now covered by checking `body.dataapi_endpoint_id`
+    // through the SAME `require_dataapi_endpoint_read` used for `create()`:
+    // `None` demands workspace-level `data_api_endpoint:read`, exactly the
+    // bar an intentional "watch the whole workspace" update should clear.
+    // This is a full REPLACE (`PUT`), like every other field `to_new`
+    // validates below — an omitted `dataapi_endpoint_id` is not "leave it
+    // alone" (that reading exists ONLY for `owners`, and is documented,
+    // below, as a deliberate, narrow exception for a different reason). It
+    // is "the caller is asking for `NULL`", and is authorized as such rather
+    // than specially preserved — a client that always resubmits the current
+    // value (the Task 6 editor's own plan: an endpoint picker pre-populated
+    // from `ScheduleDetailDto`) is unaffected either way, and a client that
+    // does not is refused rather than granted a silent widening.
     if stored.r#type == "dataapi_alert" {
         require_dataapi_endpoint_read(&st, &ctx, stored.dataapi_endpoint_id).await?;
+        require_dataapi_endpoint_read(&st, &ctx, body.dataapi_endpoint_id).await?;
     }
 
     let ty = ScheduleType::parse(&stored.r#type).ok_or_else(|| {

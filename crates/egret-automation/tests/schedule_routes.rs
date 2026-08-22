@@ -2707,6 +2707,24 @@ fn minimal_update_body() -> String {
     .to_string()
 }
 
+/// Same as [`minimal_update_body`], but naming a `dataapi_endpoint_id` —
+/// fix-round-1's second check on `update()` gates the BODY's target endpoint
+/// as well as the stored one, so a body that omits the field now (correctly)
+/// asks to WIDEN the alert to the whole workspace rather than "leave it
+/// alone". Tests that want to prove "an object-scoped grant on the CURRENT
+/// endpoint is enough" have to say so explicitly, or they are actually
+/// testing the widen-by-omission case instead.
+fn minimal_update_body_with_endpoint(endpoint_id: Uuid) -> String {
+    serde_json::json!({
+        "name": "renamed",
+        "active": true,
+        "crontab": "0 9 * * *",
+        "timezone": "UTC",
+        "dataapi_endpoint_id": endpoint_id,
+    })
+    .to_string()
+}
+
 /// The authorization test the brief asks for: a caller who can manage alerts
 /// but cannot read the Data API endpoint(s) a `dataapi_alert` watches must be
 /// refused — otherwise `alert:manage` is a side channel for observing an
@@ -2870,12 +2888,19 @@ async fn updating_an_endpoint_scoped_dataapi_alert_needs_data_api_endpoint_read(
     grant_ws_role(&fx.db, object_reader, fx.ws, "ws_editor").await; // alert:manage only
     grant_object_scoped_data_api_read(&fx.db, object_reader, endpoint_id).await;
     let object_reader_tok = fx.token_for(object_reader).await;
+    // The body names the SAME endpoint the row already has — fix-round-1's
+    // second check (on the body's target, not just the stored one) means an
+    // update that OMITTED `dataapi_endpoint_id` here would ask to widen to
+    // the whole workspace instead, which this object-scoped-only grant
+    // correctly cannot authorize (see the two dedicated tests below). This
+    // body keeps the test isolated to what it says it proves: read on the
+    // endpoint the row already names is enough to touch it.
     let (status, body) = req_raw(
         &fx,
         &object_reader_tok,
         "PUT",
         &format!("/ws/{}/alerts/{schedule}", fx.slug),
-        Some(minimal_update_body()),
+        Some(minimal_update_body_with_endpoint(endpoint_id)),
     )
     .await;
     assert_ne!(
@@ -2891,6 +2916,182 @@ async fn updating_an_endpoint_scoped_dataapi_alert_needs_data_api_endpoint_read(
         StatusCode::BAD_REQUEST,
         "expected the object-scoped reader to reach Task 5's dataapi_alert validation \
          (proving it passed THIS check), got {status}: {body}"
+    );
+}
+
+/// A second `dataapi.endpoints` row in the SAME workspace, distinct from
+/// `endpoint_id` — for the two fix-round-1 tests below, which both need TWO
+/// endpoints to distinguish "read on the row's CURRENT endpoint" from "read
+/// on the endpoint the update is trying to set".
+async fn a_second_endpoint(fx: &Fx, owner: Uuid, tag: &str) -> Uuid {
+    sqlx::query_scalar(
+        "INSERT INTO dataapi.endpoints (workspace_id, name, path, sql, database_id, created_by) \
+         VALUES ($1,$2,$3,'SELECT 1',$4,$5) RETURNING id",
+    )
+    .bind(fx.ws)
+    .bind(format!("z2 {tag}"))
+    .bind(format!("/z2-{tag}"))
+    .bind(fx.database)
+    .bind(owner)
+    .fetch_one(&fx.db.pool)
+    .await
+    .expect("insert second dataapi.endpoints row")
+}
+
+/// Fix-round-1, Critical 1, exploit 1 ("Repoint"): before this fix, `update()`
+/// checked only the STORED `dataapi_endpoint_id`. A caller who could read
+/// endpoint A could PUT a body naming a DIFFERENT endpoint B and the row
+/// would be repointed at B — measuring and (via the same body's `recipients`)
+/// potentially MAILING B's traffic to a caller who never held
+/// `data_api_endpoint:read` on B, object- or workspace-scoped. Proven live in
+/// review against `egret_test` before this fix; this is the permanent
+/// regression test for it.
+#[tokio::test]
+async fn updating_a_dataapi_alert_cannot_be_repointed_to_an_unreadable_endpoint() {
+    let fx = fixture!();
+    let owner = mk_user(&fx.db, "z2_repoint_owner").await;
+    let endpoint_a: Uuid = sqlx::query_scalar(
+        "INSERT INTO dataapi.endpoints (workspace_id, name, path, sql, database_id, created_by) \
+         VALUES ($1,'z2 repoint a','/z2-repoint-a','SELECT 1',$2,$3) RETURNING id",
+    )
+    .bind(fx.ws)
+    .bind(fx.database)
+    .bind(owner)
+    .fetch_one(&fx.db.pool)
+    .await
+    .expect("insert endpoint A");
+    let endpoint_b = a_second_endpoint(&fx, owner, "repoint-b").await;
+
+    let schedule: Uuid = sqlx::query_scalar(
+        "INSERT INTO automation.schedules \
+           (workspace_id, type, name, crontab, next_run_at, validator_type, validator_config, \
+            dataapi_metric, dataapi_window_s, dataapi_endpoint_id) \
+         VALUES ($1,'dataapi_alert','z2-repoint','* * * * *', \
+                 now() - interval '1 minute','operator',$2,'call_count',3600,$3) RETURNING id",
+    )
+    .bind(fx.ws)
+    .bind(serde_json::json!({"op": ">", "threshold": 0}))
+    .bind(endpoint_a)
+    .fetch_one(&fx.db.pool)
+    .await
+    .expect("insert endpoint-a-scoped dataapi_alert");
+    sqlx::query("INSERT INTO automation.schedule_owners (schedule_id, user_id) VALUES ($1,$2)")
+        .bind(schedule)
+        .bind(owner)
+        .execute(&fx.db.pool)
+        .await
+        .expect("insert owner");
+
+    // ONLY object-scoped `data_api_endpoint:read` on A — nothing on B, no
+    // workspace-level grant at all.
+    let attacker = mk_user(&fx.db, "z2_repoint_attacker").await;
+    grant_ws_role(&fx.db, attacker, fx.ws, "ws_editor").await; // alert:manage only
+    grant_object_scoped_data_api_read(&fx.db, attacker, endpoint_a).await;
+    let attacker_tok = fx.token_for(attacker).await;
+
+    let (status, body) = req_raw(
+        &fx,
+        &attacker_tok,
+        "PUT",
+        &format!("/ws/{}/alerts/{schedule}", fx.slug),
+        Some(minimal_update_body_with_endpoint(endpoint_b)),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "repointing to an endpoint the caller cannot read must be refused: {body}"
+    );
+
+    // No partial write: the row must still watch A, not B and not NULL.
+    let still_a: Option<Uuid> =
+        sqlx::query_scalar("SELECT dataapi_endpoint_id FROM automation.schedules WHERE id = $1")
+            .bind(schedule)
+            .fetch_one(&fx.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        still_a,
+        Some(endpoint_a),
+        "a refused repoint must not have moved the stored endpoint at all"
+    );
+}
+
+/// Fix-round-1, Critical 1, exploit 2 ("widen by omission"): before this fix,
+/// omitting `dataapi_endpoint_id` from the body deserialized to `None` and
+/// was written straight through — turning an endpoint-scoped alert into a
+/// workspace-wide one (this codebase's own definition of `NULL` here), with
+/// no check that the caller could read at WORKSPACE scope. No malice
+/// required: any client that simply does not send the field does this.
+/// Proven live in review; this is the permanent regression test for it.
+#[tokio::test]
+async fn updating_a_dataapi_alert_cannot_be_widened_to_the_workspace_by_omitting_the_endpoint() {
+    let fx = fixture!();
+    let owner = mk_user(&fx.db, "z2_widen_owner").await;
+    let endpoint_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO dataapi.endpoints (workspace_id, name, path, sql, database_id, created_by) \
+         VALUES ($1,'z2 widen','/z2-widen','SELECT 1',$2,$3) RETURNING id",
+    )
+    .bind(fx.ws)
+    .bind(fx.database)
+    .bind(owner)
+    .fetch_one(&fx.db.pool)
+    .await
+    .expect("insert endpoint");
+    let schedule: Uuid = sqlx::query_scalar(
+        "INSERT INTO automation.schedules \
+           (workspace_id, type, name, crontab, next_run_at, validator_type, validator_config, \
+            dataapi_metric, dataapi_window_s, dataapi_endpoint_id) \
+         VALUES ($1,'dataapi_alert','z2-widen','* * * * *', \
+                 now() - interval '1 minute','operator',$2,'call_count',3600,$3) RETURNING id",
+    )
+    .bind(fx.ws)
+    .bind(serde_json::json!({"op": ">", "threshold": 0}))
+    .bind(endpoint_id)
+    .fetch_one(&fx.db.pool)
+    .await
+    .expect("insert endpoint-scoped dataapi_alert");
+    sqlx::query("INSERT INTO automation.schedule_owners (schedule_id, user_id) VALUES ($1,$2)")
+        .bind(schedule)
+        .bind(owner)
+        .execute(&fx.db.pool)
+        .await
+        .expect("insert owner");
+
+    // ONLY object-scoped read on THIS endpoint — enough to touch the row
+    // (proven by the positive-control test above) but not enough to ask for
+    // "every endpoint in the workspace".
+    let attacker = mk_user(&fx.db, "z2_widen_attacker").await;
+    grant_ws_role(&fx.db, attacker, fx.ws, "ws_editor").await; // alert:manage only
+    grant_object_scoped_data_api_read(&fx.db, attacker, endpoint_id).await;
+    let attacker_tok = fx.token_for(attacker).await;
+
+    // `minimal_update_body()`, not `_with_endpoint` — the body under test
+    // OMITS `dataapi_endpoint_id` entirely.
+    let (status, body) = req_raw(
+        &fx,
+        &attacker_tok,
+        "PUT",
+        &format!("/ws/{}/alerts/{schedule}", fx.slug),
+        Some(minimal_update_body()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "omitting dataapi_endpoint_id must not silently widen to the whole workspace: {body}"
+    );
+
+    let still_scoped: Option<Uuid> =
+        sqlx::query_scalar("SELECT dataapi_endpoint_id FROM automation.schedules WHERE id = $1")
+            .bind(schedule)
+            .fetch_one(&fx.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        still_scoped,
+        Some(endpoint_id),
+        "a refused widen must not have nulled out the stored endpoint"
     );
 }
 

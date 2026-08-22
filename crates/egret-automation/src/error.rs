@@ -44,6 +44,18 @@ impl AutomationError {
             Some("schedule_name_uniq") => AutomationError::Conflict(
                 "a schedule of this type already has that name in this workspace".into(),
             ),
+            // Fix-round-1, Minor 4: `dataapi_endpoint_id` is a plain FK
+            // (`schedules_dataapi_endpoint_id_fkey`, migration 0127) with no
+            // Rust-side existence check — none of the four CHECKs this module
+            // otherwise mirrors cover "does this uuid name a real row", only
+            // its SHAPE. A caller authorized by a workspace-cascaded grant
+            // (a `ws_admin`'s `data_api_endpoint:read` satisfies the object
+            // check for ANY id, real or not — Cedar's `resource in ?resource`
+            // never looks the row up) can otherwise turn a typo'd uuid into a
+            // 500 instead of a 400 naming the field.
+            Some("schedules_dataapi_endpoint_id_fkey") => AutomationError::BadRequest(
+                "dataapi_endpoint_id does not name an existing endpoint".into(),
+            ),
             Some(c) if c.starts_with("schedule_") || c.starts_with("recipient_") => {
                 AutomationError::BadRequest(format!("violates {c}"))
             }
