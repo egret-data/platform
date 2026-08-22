@@ -494,73 +494,87 @@ export function ScheduleEditor({
           title="Alert condition"
           description="The query to run, and what about its result makes this fire."
         >
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="sched-db">Database</Label>
-            <select
-              id="sched-db"
-              className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-              value={databaseId || databases?.[0]?.id || ""}
-              onChange={(e) => setDatabaseId(e.target.value)}
+          <ConfigTable valueClassName="w-96">
+            <ConfigTableRow
+              label="Database"
+              htmlFor="sched-db"
+              details="Which connection the query runs against."
             >
-              {(databases ?? []).map((d) => (
-                <option key={d.id} value={d.id}>
-                  {d.name}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="sched-sql">SQL</Label>
-            <Textarea
-              id="sched-sql"
-              rows={4}
-              value={sql}
-              onChange={(e) => setSql(e.target.value)}
-              placeholder="SELECT count(*) FROM orders WHERE created_at > now() - interval '1' day"
-            />
-            <p className="text-xs text-muted-foreground">
-              The first column of the first row is the value the condition is tested against.
-            </p>
-            {(databases ?? []).length === 0 && (
-              <p className="text-xs text-destructive">
-                This workspace has no database connection yet. Add one under Workspace
-                settings &rarr; Engines before creating an alert.
-              </p>
-            )}
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="sched-validator">Condition</Label>
-            <select
-              id="sched-validator"
-              className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-              value={validatorType}
-              onChange={(e) => setValidatorType(e.target.value as "not_null" | "operator")}
-            >
-              <option value="not_null">Value is not null and not zero</option>
-              <option value="operator">Value meets a comparison</option>
-            </select>
-          </div>
-          {validatorType === "operator" && (
-            <div className="flex gap-2">
               <select
-                aria-label="Operator"
+                id="sched-db"
                 className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-                value={op}
-                onChange={(e) => setOp(e.target.value)}
+                value={databaseId || databases?.[0]?.id || ""}
+                onChange={(e) => setDatabaseId(e.target.value)}
               >
-                {["<", "<=", ">", ">=", "==", "!="].map((o) => (
-                  <option key={o} value={o}>
-                    {o}
+                {(databases ?? []).map((d) => (
+                  <option key={d.id} value={d.id}>
+                    {d.name}
                   </option>
                 ))}
               </select>
-              <Input
-                aria-label="Threshold"
-                value={threshold}
-                onChange={(e) => setThreshold(e.target.value)}
-              />
-            </div>
-          )}
+            </ConfigTableRow>
+
+            <ConfigTableRow
+              label="SQL"
+              htmlFor="sched-sql"
+              details="The first column of the first row is the value the condition is tested against."
+            >
+              <div className="space-y-1.5">
+                <Textarea
+                  id="sched-sql"
+                  rows={4}
+                  value={sql}
+                  onChange={(e) => setSql(e.target.value)}
+                  placeholder="SELECT count(*) FROM orders WHERE created_at > now() - interval '1' day"
+                />
+                {(databases ?? []).length === 0 && (
+                  <p className="text-xs text-destructive">
+                    This workspace has no database connection yet. Add one under Workspace
+                    settings &rarr; Engines before creating an alert.
+                  </p>
+                )}
+              </div>
+            </ConfigTableRow>
+
+            <ConfigTableRow
+              label="Condition"
+              htmlFor="sched-validator"
+              details="What about the result makes this fire."
+            >
+              <div className="space-y-2">
+                <select
+                  id="sched-validator"
+                  className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                  value={validatorType}
+                  onChange={(e) => setValidatorType(e.target.value as "not_null" | "operator")}
+                >
+                  <option value="not_null">Value is not null and not zero</option>
+                  <option value="operator">Value meets a comparison</option>
+                </select>
+                {validatorType === "operator" && (
+                  <div className="flex gap-2">
+                    <select
+                      aria-label="Operator"
+                      className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                      value={op}
+                      onChange={(e) => setOp(e.target.value)}
+                    >
+                      {["<", "<=", ">", ">=", "==", "!="].map((o) => (
+                        <option key={o} value={o}>
+                          {o}
+                        </option>
+                      ))}
+                    </select>
+                    <Input
+                      aria-label="Threshold"
+                      value={threshold}
+                      onChange={(e) => setThreshold(e.target.value)}
+                    />
+                  </div>
+                )}
+              </div>
+            </ConfigTableRow>
+          </ConfigTable>
         </ConfigSection>
       ) : (
         <ConfigSection
@@ -568,69 +582,102 @@ export function ScheduleEditor({
           title="Contents"
           description="Which object to deliver, and in what format."
         >
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="sched-target-kind">Deliver</Label>
-            <select
-              id="sched-target-kind"
-              className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-              value={targetKind}
-              onChange={(e) => {
-                setTargetKind(e.target.value as "dashboard" | "chart");
-                // Clear the id: a chart id in the dashboard slot is exactly the
-                // "both targets" shape the server rejects.
-                setTargetId("");
-              }}
+          <ConfigTable>
+            <ConfigTableRow
+              label="Deliver"
+              htmlFor="sched-target-kind"
+              details="Whether this delivers a dashboard or a single chart."
             >
-              <option value="dashboard">A dashboard</option>
-              <option value="chart">A chart</option>
-            </select>
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="sched-target">
-              {targetKind === "dashboard" ? "Dashboard" : "Chart"}
-            </Label>
-            <select
-              id="sched-target"
-              className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-              value={defaultTarget}
-              onChange={(e) => setTargetId(e.target.value)}
-            >
-              {((targetKind === "dashboard" ? dashboards : charts) ?? []).map((o) => (
-                <option key={o.id} value={o.id}>
-                  {o.name}
-                </option>
-              ))}
-            </select>
-          </div>
-          {extraTargets.map((id, i) => (
-            <div key={i} className="flex items-end gap-2">
-              <div className="flex flex-1 flex-col gap-1.5">
-                <Label htmlFor={`sched-extra-${i}`}>
-                  Also include {targetKind === "dashboard" ? "dashboard" : "chart"}
-                </Label>
-                <select
-                  id={`sched-extra-${i}`}
-                  className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-                  value={id}
-                  onChange={(e) =>
-                    setExtraTargets(extraTargets.map((x, j) => (j === i ? e.target.value : x)))
-                  }
-                >
-                  {((targetKind === "dashboard" ? dashboards : charts) ?? []).map((o) => (
-                    <option key={o.id} value={o.id}>{o.name}</option>
-                  ))}
-                </select>
-              </div>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                onClick={() => setExtraTargets(extraTargets.filter((_, j) => j !== i))}
+              <select
+                id="sched-target-kind"
+                className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                value={targetKind}
+                onChange={(e) => {
+                  setTargetKind(e.target.value as "dashboard" | "chart");
+                  // Clear the id: a chart id in the dashboard slot is exactly the
+                  // "both targets" shape the server rejects.
+                  setTargetId("");
+                }}
               >
-                Remove
-              </Button>
-            </div>
-          ))}
+                <option value="dashboard">A dashboard</option>
+                <option value="chart">A chart</option>
+              </select>
+            </ConfigTableRow>
+
+            <ConfigTableRow
+              label={targetKind === "dashboard" ? "Dashboard" : "Chart"}
+              htmlFor="sched-target"
+              details="The object this report delivers."
+            >
+              <select
+                id="sched-target"
+                className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                value={defaultTarget}
+                onChange={(e) => setTargetId(e.target.value)}
+              >
+                {((targetKind === "dashboard" ? dashboards : charts) ?? []).map((o) => (
+                  <option key={o.id} value={o.id}>
+                    {o.name}
+                  </option>
+                ))}
+              </select>
+            </ConfigTableRow>
+
+            {extraTargets.map((id, i) => (
+              <ConfigTableRow
+                key={i}
+                label={`Also include ${targetKind === "dashboard" ? "dashboard" : "chart"}`}
+                htmlFor={`sched-extra-${i}`}
+                details="Delivered as an additional page in the same document."
+              >
+                <div className="flex items-end gap-2">
+                  <select
+                    id={`sched-extra-${i}`}
+                    className="h-9 flex-1 rounded-md border border-input bg-background px-3 text-sm"
+                    value={id}
+                    onChange={(e) =>
+                      setExtraTargets(extraTargets.map((x, j) => (j === i ? e.target.value : x)))
+                    }
+                  >
+                    {((targetKind === "dashboard" ? dashboards : charts) ?? []).map((o) => (
+                      <option key={o.id} value={o.id}>{o.name}</option>
+                    ))}
+                  </select>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setExtraTargets(extraTargets.filter((_, j) => j !== i))}
+                  >
+                    Remove
+                  </Button>
+                </div>
+              </ConfigTableRow>
+            ))}
+
+            <ConfigTableRow
+              label="Format"
+              htmlFor="sched-format"
+              details={
+                extraTargets.length > 0
+                  ? "Several objects are always delivered as a multi-page PDF — a PNG has no second page."
+                  : "PNG and PDF are produced by the rendering service; CSV and text are read straight from the query."
+              }
+            >
+              <select
+                id="sched-format"
+                className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                value={reportFormat}
+                onChange={(e) => setReportFormat(e.target.value)}
+              >
+                <option value="png">PNG image</option>
+                <option value="pdf">PDF</option>
+                <option value="csv">CSV data</option>
+                <option value="text">Text</option>
+              </select>
+            </ConfigTableRow>
+          </ConfigTable>
+
           <div>
             <Button
               type="button"
@@ -651,26 +698,6 @@ export function ScheduleEditor({
                 Delivered as one PDF, one page each, in this order.
               </span>
             )}
-          </div>
-
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="sched-format">Format</Label>
-            <select
-              id="sched-format"
-              className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-              value={reportFormat}
-              onChange={(e) => setReportFormat(e.target.value)}
-            >
-              <option value="png">PNG image</option>
-              <option value="pdf">PDF</option>
-              <option value="csv">CSV data</option>
-              <option value="text">Text</option>
-            </select>
-            <p className="text-xs text-muted-foreground">
-              {extraTargets.length > 0
-                ? "Several objects are always delivered as a multi-page PDF — a PNG has no second page."
-                : "PNG and PDF are produced by the rendering service; CSV and text are read straight from the query."}
-            </p>
           </div>
         </ConfigSection>
       ))}
