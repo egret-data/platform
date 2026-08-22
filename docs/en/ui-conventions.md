@@ -930,14 +930,18 @@ not exist yet:
 - `EmptyState` — **14** files (2 Data API, 8 control-plane, 4 Explore list pages). Measured
   with `grep -rl 'from "@/components/explore/EmptyState"' src --include='*.tsx' | grep -v __tests__ | wc -l`
   from `frontend/`.
-- `ConfigTable` — **15** production files; `ConfigTableGroup` is used by Data API's `Config`
+- `ConfigTable` — **16** production files; `ConfigTableGroup` is used by Data API's `Config`
   and `ResponseSection`. Measured with
+  `grep -rl 'from "@/components/config/ConfigTable"' src --include='*.tsx' | grep -v __tests__ | wc -l`
+  from `frontend/`. Earlier revisions, measured with
   `git grep -l 'from "@/components/config/ConfigTable"' <rev> -- frontend/src`, minus
-  `__tests__`, at three revisions: **13** at the merge base `63a4fb90`, 14 after `Query`
-  (#529), 15 after `Try it`. The three sections after it (`Versions`, `Access`, `Response`)
-  added none, and that is the expected result rather than a gap — all three converted *lists*
-  (§4.3), and a list does not want a `Setting | Details | Value` table. Re-measured at the end
-  of the phase: still 15.
+  `__tests__`: **13** at the merge base `63a4fb90`, 14 after `Query` (#529), 15 after `Try it`.
+  The three sections after it (`Versions`, `Access`, `Response`) added none, and that is the
+  expected result rather than a gap — all three converted *lists* (§4.3), and a list does not
+  want a `Setting | Details | Value` table. The sixteenth is `ScheduleEditor.tsx` (alerts),
+  converted to `ConfigTable` rows section by section; it is the first `ConfigTable` consumer
+  that keeps its `ConfigSection` frame, because the frame is not §4.1's stacking defect when
+  the page renders only one section at a time.
 - The plain-`Table` list of §4.3 — **5** files, all Data API endpoint detail (`ParamEditor`,
   `TryIt`, `Versions`, `AccessSection`, `ResponseSection`). Measured with
   `grep -rl 'from "@/components/ui/table"' src/routes/explore/dataapi/`, which also returns
@@ -970,7 +974,10 @@ not exist yet:
   this number in the programme and the first measured at both ends:
   `grep -rl 'from "@/components/form/ConfigSection"' src` gives 15 at `63a4fb90` and 13 at
   `HEAD`. 14 was a mid-branch state, quoted as if it were the base. If further sections convert
-  to group rows, revisit whether `ConfigSection` still earns its place.
+  to group rows, revisit whether `ConfigSection` still earns its place. Still 13 after this
+  package: `ScheduleEditor.tsx` was already one of the 13, since it kept its `ConfigSection`
+  frame while its rows moved to `ConfigTable` — the frame did not change, so the count doesn't
+  either.
 
 Bringing a page onto these primitives is a change to that page. **The primitives themselves
 change additively** (§7).
