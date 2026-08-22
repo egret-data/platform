@@ -797,8 +797,8 @@ export function ScheduleEditor({
 
           <p className="text-xs text-muted-foreground">
             Try-it trials are never counted — every metric here excludes them, the same as the
-            Activity page. If the endpoint is trashed, or the alert's owner can no longer read it,
-            the run records noop with a reason rather than a value.
+            Activity page. If the alert's owner loses read access to the endpoint, the run is
+            recorded as error, not noop.
           </p>
         </ConfigSection>
       ) : (
