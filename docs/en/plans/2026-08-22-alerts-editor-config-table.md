@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- **The 25 existing tests in `src/routes/explore/__tests__/ScheduleDetail.test.tsx` must pass unchanged.** They drive this editor by accessible name. This is the binding constraint of the whole plan — see "The one way to break this" below.
+- **The 30 existing tests in `src/routes/explore/__tests__/ScheduleDetail.test.tsx` must pass unchanged.** They drive this editor by accessible name. (An earlier revision of this plan said 25; the file has 30, measured.) This is the binding constraint of the whole plan — see "The one way to break this" below.
 - **Every field keeps its current `id`,** and its `ConfigTableRow` passes that id as `htmlFor`, so `getByLabelText` keeps resolving. `ConfigTableRow` renders a `<label htmlFor>` **only** when `htmlFor` is passed; omit it and the field loses its accessible name.
 - **Owners is the deliberate exception.** It has no `htmlFor` today and must keep none: its control is a `TagCombobox` carrying its own `aria-label`, and the file's comment says why — *"A label pointing at an id that no longer exists is worse than none — it silently stops focusing anything."* Pass its label as a plain `ReactNode` with no `htmlFor`.
 - **Do not modify** `ConfigTable.tsx`, `ConfigTableRow`, `ConfigTableGroup`, `ConfigSection.tsx`, `DestinationList.tsx`, or `ScheduleDetail.tsx`. `git diff --exit-code` on each must be empty at the end of every task.
@@ -510,4 +510,4 @@ Checked against spec §4 before saving:
 - §4.1's note that the `Name`/`Description` grid converts because `ConfigTable` caps the Value column — Task 1 Step 4, with the reason inline.
 - §4.2's three keeps (`ConfigSection`, `max-w-4xl`, `DestinationList`) — stated in Global Constraints, enforced by the `git diff --exit-code` in every task's gate, and `DestinationList`'s placement is spelled out in Task 3 Step 1.
 - §4.3's two do-not-touch items (dirtiness by comparison, one column with no self-width) — neither is inside any section body, so no task reaches them; the `git diff` gate does not cover them, which is why they are named in Global Constraints.
-- The `htmlFor` constraint has no counterpart in the spec because it is an implementation consequence, not a design decision. It is stated once, in its own section, because it is the single way this plan can break 25 tests that nobody edited.
+- The `htmlFor` constraint has no counterpart in the spec because it is an implementation consequence, not a design decision. It is stated once, in its own section, because it is the single way this plan can break 30 tests that nobody edited.
