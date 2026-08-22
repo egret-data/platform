@@ -213,6 +213,7 @@ async fn setup() -> Option<Fx> {
             },
         }),
         pdp: pdp.clone(),
+        dataapi_endpoints: Arc::new(egret_dataapi::EndpointStore::new(db.clone())),
         resolver: Arc::new(egret_automation::deliver::destination::SystemResolver),
         policy: egret_automation::deliver::destination::SsrfPolicy::default(),
         smtp: smtp.clone(),
@@ -2715,12 +2716,28 @@ fn minimal_update_body() -> String {
 /// alone". Tests that want to prove "an object-scoped grant on the CURRENT
 /// endpoint is enough" have to say so explicitly, or they are actually
 /// testing the widen-by-omission case instead.
+///
+/// A FULL, otherwise-valid `dataapi_alert` body (fix-round-3) — not the
+/// bare `name`/`active`/`crontab`/`timezone` `minimal_update_body` gets away
+/// with. A body missing `dataapi_metric` fails `to_new`'s validation before
+/// ever reaching a write, which made every "no partial write" assertion
+/// built on this helper vacuous: the write was never going to happen anyway,
+/// mutated check or not. A caller sending this body would succeed if the
+/// authz check under test let them through, so a "no partial write"
+/// assertion built on it actually demonstrates the check stopped a write
+/// that would otherwise have gone through — the same standard
+/// `creating_a_dataapi_alert_needs_data_api_endpoint_read`'s ALLOWED branch
+/// holds the create path to.
 fn minimal_update_body_with_endpoint(endpoint_id: Uuid) -> String {
     serde_json::json!({
         "name": "renamed",
         "active": true,
         "crontab": "0 9 * * *",
         "timezone": "UTC",
+        "validator_type": "operator",
+        "validator_config": {"op": ">", "threshold": 0},
+        "dataapi_metric": "call_count",
+        "dataapi_window_s": 300,
         "dataapi_endpoint_id": endpoint_id,
     })
     .to_string()
@@ -2896,7 +2913,14 @@ async fn updating_an_endpoint_scoped_dataapi_alert_needs_data_api_endpoint_read(
     // correctly cannot authorize (see the two dedicated tests below). This
     // body keeps the test isolated to what it says it proves: read on the
     // endpoint the row already names is enough to touch it.
-    let (status, body) = req_raw(
+    //
+    // Fix-round-3: `minimal_update_body_with_endpoint` is now a FULL, valid
+    // `dataapi_alert` body, so this caller — having passed the gate — reaches
+    // a real `200`, not merely `to_new`'s 400. That also makes this the
+    // route-level "readable caller successfully updates a dataapi_alert"
+    // corner the re-review asked for: a `PUT` from an authorized caller with
+    // a valid body persists, and the response echoes back what was stored.
+    let (status, body) = req(
         &fx,
         &object_reader_tok,
         "PUT",
@@ -2904,19 +2928,27 @@ async fn updating_an_endpoint_scoped_dataapi_alert_needs_data_api_endpoint_read(
         Some(minimal_update_body_with_endpoint(endpoint_id)),
     )
     .await;
-    assert_ne!(
-        status,
-        StatusCode::FORBIDDEN,
-        "an object-scoped data_api_endpoint:read grant on THIS endpoint must be enough: {body}"
-    );
-    // Same as the workspace-scoped test above: `ScheduleType::parse` now
-    // recognises `dataapi_alert` (Task 5), so the caller who gets PAST this
-    // gate lands on `to_new`'s 400, not the old internal-error gap.
     assert_eq!(
         status,
-        StatusCode::BAD_REQUEST,
-        "expected the object-scoped reader to reach Task 5's dataapi_alert validation \
-         (proving it passed THIS check), got {status}: {body}"
+        StatusCode::OK,
+        "an object-scoped data_api_endpoint:read grant on THIS endpoint must be enough \
+         to reach a real update, got {status}: {body}"
+    );
+    assert_eq!(body["name"], "renamed");
+    assert_eq!(body["dataapi_endpoint_id"], endpoint_id.to_string());
+    assert_eq!(body["dataapi_metric"], "call_count");
+    assert_eq!(body["dataapi_window_s"], 300);
+
+    let stored: Option<Uuid> =
+        sqlx::query_scalar("SELECT dataapi_endpoint_id FROM automation.schedules WHERE id = $1")
+            .bind(schedule)
+            .fetch_one(&fx.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        stored,
+        Some(endpoint_id),
+        "the update must actually have persisted, not just returned 200"
     );
 }
 

@@ -246,6 +246,7 @@ async fn setup(
             minter: Arc::new(NoMinter),
             query: engine.clone(),
             pdp: pdp.clone(),
+            dataapi_endpoints: Arc::new(egret_dataapi::EndpointStore::new(db.clone())),
             resolver: Arc::new(PublicDns),
             policy: SsrfPolicy::default(),
             smtp: egret_automation::deliver::smtp_config::SmtpConfigRepo::new(
@@ -369,6 +370,7 @@ async fn setup_endpoint_scoped(
             minter: Arc::new(NoMinter),
             query: engine.clone(),
             pdp: pdp.clone(),
+            dataapi_endpoints: Arc::new(egret_dataapi::EndpointStore::new(db.clone())),
             resolver: Arc::new(PublicDns),
             policy: SsrfPolicy::default(),
             smtp: egret_automation::deliver::smtp_config::SmtpConfigRepo::new(
@@ -643,5 +645,108 @@ async fn the_endpoint_scoped_re_check_asks_about_the_pinned_object_kind(pool: sq
             },
         ),
         "the PDP was asked about the wrong subject, action, or resource"
+    );
+}
+
+/// Fix-round-3: a `dataapi_alert` whose `dataapi_endpoint_id` names an
+/// endpoint in a DIFFERENT workspace than the schedule's own — reachable only
+/// by writing the row directly, since BOTH write paths refuse this shape as
+/// of fix-round-2 — must tick to an `error` run that sends nothing, never a
+/// measurement of the foreign workspace's traffic.
+///
+/// `endpoint_read: true` in `setup_endpoint_scoped` below is the point: the
+/// PDP is set up to ALLOW anything it is asked. If `owner_can_read_dataapi_
+/// endpoint`'s new workspace check were missing (or ran after the PDP call
+/// rather than before it), this fixture would sail through the PDP and go on
+/// to measure `dataapi.access_log` — and since `seed_call` only ever writes
+/// into `fx.ws`'s log, never the foreign workspace's, that misconfiguration
+/// would surface as a wrongly-fired `noop`/`success`, not as `error`. The
+/// `fx.pdp.calls` assertion at the end is the direct proof: the PDP must
+/// never be consulted at all once the workspace mismatch is caught.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_dataapi_alert_watching_a_foreign_workspace_endpoint_errors_and_sends_nothing(
+    pool: sqlx::PgPool,
+) {
+    let fx = setup_endpoint_scoped(
+        pool,
+        "call_count",
+        serde_json::json!({"op": ">", "threshold": 0}),
+        0,
+        true, // the PDP would ALLOW -- the workspace check must refuse first
+    )
+    .await;
+
+    // A real endpoint in a DIFFERENT, unrelated workspace.
+    let foreign_owner: Uuid =
+        sqlx::query_scalar("INSERT INTO users (email, provider) VALUES ($1,'local') RETURNING id")
+            .bind(format!("fo_{}@t.local", Uuid::new_v4().simple()))
+            .fetch_one(&fx.db.pool)
+            .await
+            .unwrap();
+    let foreign_ws: Uuid = sqlx::query_scalar(
+        "INSERT INTO workspaces (slug,name,created_by) VALUES ($1,'t',$2) RETURNING id",
+    )
+    .bind(format!("w-{}", Uuid::new_v4().simple()))
+    .bind(foreign_owner)
+    .fetch_one(&fx.db.pool)
+    .await
+    .unwrap();
+    let foreign_database: Uuid = sqlx::query_scalar(
+        "INSERT INTO query.databases (name, engine, host, port, workspace_id) \
+         VALUES ($1,'trino','localhost',8080,$2) RETURNING id",
+    )
+    .bind(format!("db-{}", Uuid::new_v4().simple()))
+    .bind(foreign_ws)
+    .fetch_one(&fx.db.pool)
+    .await
+    .unwrap();
+    let foreign_endpoint: Uuid = sqlx::query_scalar(
+        "INSERT INTO dataapi.endpoints (workspace_id, name, path, sql, database_id, created_by) \
+         VALUES ($1,'foreign','/foreign','SELECT 1',$2,$3) RETURNING id",
+    )
+    .bind(foreign_ws)
+    .bind(foreign_database)
+    .bind(foreign_owner)
+    .fetch_one(&fx.db.pool)
+    .await
+    .unwrap();
+
+    // Repoint the fixture's (already valid, same-workspace) schedule at the
+    // FOREIGN endpoint by writing the row directly — the routes refuse this
+    // shape as of fix-round-2, so direct SQL is the only way it can exist.
+    sqlx::query("UPDATE automation.schedules SET dataapi_endpoint_id = $1 WHERE id = $2")
+        .bind(foreign_endpoint)
+        .bind(fx.schedule)
+        .execute(&fx.db.pool)
+        .await
+        .unwrap();
+
+    seed_call(&fx).await;
+
+    assert_eq!(fx.runner.tick_once().await, 1, "one schedule was due");
+
+    let log = run_log(&fx).await;
+    assert_eq!(log.len(), 1, "the tick must still write a run row");
+    let (state, value, error) = &log[0];
+    assert_eq!(
+        state, "error",
+        "a foreign-workspace endpoint must record error, never noop or success"
+    );
+    assert_eq!(value, &None, "no value is reported once access is refused");
+    assert!(
+        error
+            .as_deref()
+            .is_some_and(|e| e.contains("no longer read")),
+        "the run log must carry the same reason a revoked owner gets: {error:?}"
+    );
+    assert!(
+        fx.engine.seen.lock().unwrap().is_empty(),
+        "must never reach the SQL engine"
+    );
+
+    let calls = fx.pdp.calls.lock().unwrap();
+    assert!(
+        calls.is_empty(),
+        "the PDP must never be consulted once the workspace mismatch is caught: {calls:?}"
     );
 }

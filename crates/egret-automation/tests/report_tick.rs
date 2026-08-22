@@ -169,6 +169,7 @@ fn runner(
         minter: Arc::new(NoMinter),
         query,
         pdp: Arc::new(NeverPdp),
+        dataapi_endpoints: Arc::new(egret_dataapi::EndpointStore::new(db.clone())),
         resolver: Arc::new(PublicDns),
         policy: SsrfPolicy::default(),
         smtp: egret_automation::deliver::smtp_config::SmtpConfigRepo::new(

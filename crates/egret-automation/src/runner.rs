@@ -68,6 +68,19 @@ pub struct AutomationRunner {
     /// downstream of this struct would otherwise notice that the owner lost
     /// `data_api_endpoint:read` after the schedule was saved.
     pub pdp: Arc<dyn egret_core::authz::Pdp>,
+    /// Fix-round-3: the same `DataApiEndpointPort` seam
+    /// `AutomationState.dataapi_endpoints` uses (routes.rs) — resolves an
+    /// endpoint id's REAL workspace before this run-time re-check ever asks
+    /// the PDP about it. Without this, `owner_can_read_dataapi_endpoint`'s
+    /// `ObjectRef.workspace_id` below is the SCHEDULE's workspace, never the
+    /// endpoint's, so a workspace-cascaded owner grant would authorize ANY
+    /// uuid — structurally the same gap fix-round-2 closed on the routes.
+    /// Confirmed a DEAD branch as of this fix: both write paths now refuse a
+    /// foreign `dataapi_endpoint_id` before any row is ever written, so no
+    /// live schedule can carry one today. Fixed anyway, for symmetry and
+    /// because the seam already exists — see the report for the full
+    /// reachability argument.
+    pub dataapi_endpoints: Arc<dyn egret_dataapi_api::DataApiEndpointPort>,
     pub resolver: Arc<dyn Resolver>,
     pub policy: SsrfPolicy,
     pub smtp: SmtpConfigRepo,
@@ -342,6 +355,7 @@ impl AutomationRunner {
         let owner = self.resolve_owner(s.id).await?;
         if !owner_can_read_dataapi_endpoint(
             &*self.pdp,
+            &*self.dataapi_endpoints,
             owner,
             s.workspace_id,
             s.dataapi_endpoint_id,
@@ -1184,8 +1198,17 @@ impl AutomationRunner {
 /// rare case a workspace grants Data API read solely through a group, into an
 /// alert that stops firing until it is re-saved. The same conservative gap
 /// `can_invoke` already accepts.
+///
+/// Fix-round-3: `endpoint_id`'s `Some` branch first resolves the endpoint's
+/// REAL workspace through `dataapi_endpoints` and returns `Ok(false)` on a
+/// mismatch (or a nonexistent id) — folded into the same boolean the PDP
+/// path returns, not a new `EvalError` variant, because the caller already
+/// treats "not allowed" uniformly as `EndpointAccessRevoked` regardless of
+/// WHY: a schedule watching an endpoint outside its own workspace is exactly
+/// as unable to read it as one whose owner lost the grant.
 async fn owner_can_read_dataapi_endpoint(
     pdp: &dyn egret_core::authz::Pdp,
+    dataapi_endpoints: &dyn egret_dataapi_api::DataApiEndpointPort,
     owner: uuid::Uuid,
     workspace_id: uuid::Uuid,
     endpoint_id: Option<uuid::Uuid>,
@@ -1195,12 +1218,21 @@ async fn owner_can_read_dataapi_endpoint(
         group_ids: Vec::new(),
     };
     let resource = match endpoint_id {
-        Some(id) => egret_core::authz::Resource::Object(egret_core::authz::ObjectRef {
-            kind: egret_dataapi_api::OBJECT_KIND.to_string(),
-            id,
-            folder_id: None,
-            workspace_id: egret_core::WorkspaceId(workspace_id),
-        }),
+        Some(id) => {
+            let owner_ws = dataapi_endpoints
+                .workspace_of(id)
+                .await
+                .map_err(|e| EvalError::Query(e.to_string()))?;
+            if owner_ws != Some(workspace_id) {
+                return Ok(false);
+            }
+            egret_core::authz::Resource::Object(egret_core::authz::ObjectRef {
+                kind: egret_dataapi_api::OBJECT_KIND.to_string(),
+                id,
+                folder_id: None,
+                workspace_id: egret_core::WorkspaceId(workspace_id),
+            })
+        }
         None => egret_core::authz::Resource::Workspace(egret_core::WorkspaceId(workspace_id)),
     };
     pdp.authorize(&subject, egret_dataapi_api::EP_READ, &resource)

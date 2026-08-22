@@ -281,6 +281,7 @@ async fn setup(pool: sqlx::PgPool) -> Fx {
         minter: Arc::new(NoMinter),
         query: Arc::new(fake_engine(seen_sql.clone())),
         pdp: pdp.clone(),
+        dataapi_endpoints: Arc::new(egret_dataapi::EndpointStore::new(db.clone())),
         resolver: Arc::new(egret_automation::deliver::destination::SystemResolver),
         policy: egret_automation::deliver::destination::SsrfPolicy::default(),
         smtp: smtp.clone(),
