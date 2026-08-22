@@ -545,7 +545,9 @@ npx vitest run src/routes/explore/__tests__/Dashboards.bookmark.test.tsx \
 
 - [ ] **Step 6: Verify the error test pins the fix**
 
-In `ListStates.tsx`, temporarily move the `if (!hasData)` line above the `if (isError)` block. Run `npx tsc --noEmit`, confirm 0 errors, then run the Dashboards test. Expected: the swallowed-error test FAILS. Restore `ListStates.tsx` afterwards — it is read-only for this plan and must end the task byte-identical to how it started (`git diff --exit-code frontend/src/components/explore/ListStates.tsx`).
+In `ListStates.tsx`, temporarily hoist a **positive** `if (hasData) return <>{children}</>;` above the `if (isError)` block.
+
+An earlier revision of this step said to move the existing `if (!hasData)` line above `if (isError)` instead. **That mutation is a no-op for this test and proves nothing:** the fixture has rows, so `!hasData` is `false` whichever side of the `isError` check it sits on, and control reaches `isError` either way. It changes behaviour only for the untested empty-list-plus-error case. The positive form above is the one that mirrors the original defective ternary (`hasData ? children : isError ? alert : empty`), and it is what actually exercises the branch this task fixed. Run `npx tsc --noEmit`, confirm 0 errors, then run the Dashboards test. Expected: the swallowed-error test FAILS. Restore `ListStates.tsx` afterwards — it is read-only for this plan and must end the task byte-identical to how it started (`git diff --exit-code frontend/src/components/explore/ListStates.tsx`).
 
 - [ ] **Step 7: Run the whole gate**
 
