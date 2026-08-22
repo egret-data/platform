@@ -3219,6 +3219,53 @@ fn starrocks_jwt_integration_sql(jwks_url: &str, issuer: &str, audience: &str) -
     ]
 }
 
+/// The repair half of [`starrocks_jwt_integration_sql`], for an FE that already
+/// carries an `egret_oidc` integration whose properties have since drifted.
+///
+/// **Measured against StarRocks 3.x, not inferred** — the DDL surface here is
+/// narrower than it looks and every alternative was tried on a live FE:
+///
+/// | statement | exists | missing |
+/// |---|---|---|
+/// | `CREATE` | error `already exists` | ok |
+/// | `ALTER … SET` | ok, and the value really changes | error `not found` |
+/// | `DROP` | ok | error `not found` |
+/// | `CREATE IF NOT EXISTS` | **syntax error** | **syntax error** |
+/// | `DROP IF EXISTS` | **syntax error** | **syntax error** |
+///
+/// So there is no single idempotent statement to reach for: `IF [NOT] EXISTS`
+/// is not part of the grammar for this object. `CREATE`-then-`ALTER`-on-exists
+/// is the only shape that converges from either starting state.
+///
+/// This matters because the properties DO drift. `required_issuer` is egret's
+/// own machine-IdP issuer, and changing it — as #528 did — leaves every engine
+/// provisioned earlier rejecting freshly minted tokens, with nothing in the
+/// system repairing it: the bootstrap runs only at engine-create time.
+///
+/// `type` is deliberately not re-sent: it is the integration's kind, not a
+/// setting, and StarRocks has no reason to accept it changing underneath.
+/// Escaping is [`sr_escape_dq`], identical to the `CREATE` above — this runs as
+/// `root` on the FE from the same admin-controlled config.
+fn starrocks_jwt_integration_repair_sql(jwks_url: &str, issuer: &str, audience: &str) -> String {
+    let jwks_url = sr_escape_dq(jwks_url);
+    let issuer = sr_escape_dq(issuer);
+    let audience = sr_escape_dq(audience);
+    format!(
+        "ALTER SECURITY INTEGRATION egret_oidc SET (\"jwks_url\"=\"{jwks_url}\", \
+         \"principal_field\"=\"preferred_username\", \"required_issuer\"=\"{issuer}\", \
+         \"required_audience\"=\"{audience}\")"
+    )
+}
+
+/// Does this FE error mean "the object is already there", as opposed to a real
+/// failure? StarRocks answers `CREATE` on an existing integration with
+/// `Getting analyzing error. Detail message: security integration 'egret_oidc'
+/// already exists.` — matched loosely on the phrase so a reworded prefix does
+/// not turn a repairable state into a warning nobody acts on.
+fn sr_already_exists(err: &str) -> bool {
+    err.to_ascii_lowercase().contains("already exists")
+}
+
 /// Build the `CREATE USER IF NOT EXISTS` DDL for the impersonation service
 /// user (the connection's basic-auth login on the impersonate path — S3-T1's
 /// `StarRocksConnector` logs in as this user, then runs `EXECUTE AS
@@ -3385,6 +3432,58 @@ fn spawn_starrocks_catalog_wire(
             ));
             stmts.push(starrocks_impersonation_grant_sql(&d.service_user));
             let mut all_ok = true;
+
+            // The integration's `CREATE` is the one statement that is NOT
+            // idempotent, and it is the one whose inputs drift: `required_issuer`
+            // is egret's own machine-IdP issuer. Re-running the bootstrap against
+            // an FE that already has `egret_oidc` fails with `already exists` and
+            // leaves the stale issuer in place — so this engine goes on rejecting
+            // tokens egret is currently minting, and nothing in the system says so.
+            //
+            // StarRocks has no `CREATE … IF NOT EXISTS` for this object (measured:
+            // it is a syntax error, as is `DROP … IF EXISTS`), so converging from
+            // either starting state takes two statements, not one.
+            let create_integration = stmts.remove(0);
+            match run_starrocks_ddl(
+                &fe_host,
+                STARROCKS_FE_MYSQL_PORT,
+                &create_integration,
+                root_pw,
+                d.tls_cert_pem.as_deref(),
+            )
+            .await
+            {
+                Ok(()) => {}
+                Err(e) if sr_already_exists(&e) => {
+                    let repair =
+                        starrocks_jwt_integration_repair_sql(&d.jwks_url, &d.issuer, &d.audience);
+                    match run_starrocks_ddl(
+                        &fe_host,
+                        STARROCKS_FE_MYSQL_PORT,
+                        &repair,
+                        root_pw,
+                        d.tls_cert_pem.as_deref(),
+                    )
+                    .await
+                    {
+                        Ok(()) => tracing::info!(engine = %engine_name, %fe_host,
+                            "starrocks delegation bootstrap: egret_oidc already existed; \
+                             properties re-applied so a changed issuer takes effect"),
+                        Err(e) => {
+                            all_ok = false;
+                            tracing::warn!(engine = %engine_name, %fe_host, error = %e,
+                                "starrocks delegation bootstrap: egret_oidc exists but could not \
+                                 be updated; JWT logins will fail if the issuer has changed");
+                        }
+                    }
+                }
+                Err(e) => {
+                    all_ok = false;
+                    tracing::warn!(engine = %engine_name, %fe_host, error = %e,
+                        "starrocks delegation bootstrap: statement failed; admin can retry");
+                }
+            }
+
             for stmt in &stmts {
                 if let Err(e) = run_starrocks_ddl(
                     &fe_host,
@@ -7223,6 +7322,73 @@ mod tests {
             stmts[1],
             r#"ADMIN SET FRONTEND CONFIG ("authentication_chain"="native,egret_oidc")"#
         );
+    }
+
+    /// The repair statement carries every property that can drift, and carries
+    /// them under the same escaping as the `CREATE`.
+    ///
+    /// `type` is deliberately absent: it is the integration's kind, not a
+    /// setting. Asserting its absence is what stops a future "just re-send
+    /// everything" edit from turning a repair into a rejected statement.
+    #[test]
+    fn starrocks_jwt_repair_sql_sets_every_drifting_property() {
+        let sql = starrocks_jwt_integration_repair_sql(
+            "https://kc/realms/egret/protocol/openid-connect/certs",
+            "https://egret.example",
+            "engine",
+        );
+        assert!(sql.starts_with("ALTER SECURITY INTEGRATION egret_oidc SET ("));
+        assert!(
+            sql.contains(r#""jwks_url"="https://kc/realms/egret/protocol/openid-connect/certs""#)
+        );
+        assert!(sql.contains(r#""principal_field"="preferred_username""#));
+        assert!(sql.contains(r#""required_issuer"="https://egret.example""#));
+        assert!(sql.contains(r#""required_audience"="engine""#));
+        assert!(
+            !sql.contains(r#""type"="#),
+            "type is not a settable property; sql={sql}"
+        );
+    }
+
+    /// Same DDL-injection posture as the `CREATE`: this runs as `root` on the
+    /// FE, so a repair path that forgot to escape would be a hole the create
+    /// path does not have.
+    #[test]
+    fn starrocks_jwt_repair_sql_escapes_ddl_injection() {
+        let evil = r#"kc" ) ; DROP DATABASE x ; -- "#;
+        let sql = starrocks_jwt_integration_repair_sql("https://kc/jwks", evil, "aud");
+        assert!(
+            !sql.contains(r#"kc" ) ; DROP DATABASE x"#),
+            "unescaped issuer breakout present; sql={sql}"
+        );
+        assert!(
+            sql.contains(r#"required_issuer"="kc\" ) ; DROP DATABASE x ; -- ""#),
+            "issuer not escaped; sql={sql}"
+        );
+    }
+
+    /// The predicate that decides repair-vs-warn, against the message StarRocks
+    /// actually sends. Measured on a live FE 3.x:
+    ///
+    /// ```text
+    /// Getting analyzing error. Detail message: security integration 'egret_oidc' already exists.
+    /// ```
+    ///
+    /// The negative cases matter more than the positive one: treating an
+    /// unrelated failure as "already exists" would run an `ALTER` against an FE
+    /// that has no integration, which StarRocks answers with `not found` — a
+    /// second confusing error instead of the real one.
+    #[test]
+    fn sr_already_exists_matches_only_the_exists_error() {
+        assert!(sr_already_exists(
+            "Getting analyzing error. Detail message: security integration 'egret_oidc' already exists."
+        ));
+        assert!(sr_already_exists("SECURITY INTEGRATION ALREADY EXISTS"));
+        assert!(!sr_already_exists(
+            "Getting analyzing error. Detail message: security integration 'egret_oidc' not found."
+        ));
+        assert!(!sr_already_exists("Access denied for user 'root'"));
+        assert!(!sr_already_exists("Connection refused (os error 111)"));
     }
 
     /// A malicious/free-form issuer/audience/jwks_url must not break out of
