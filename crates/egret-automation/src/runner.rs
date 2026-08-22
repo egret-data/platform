@@ -15,17 +15,19 @@ use egret_metastore::Db;
 use egret_query::DatabaseRepo;
 use tokio_util::sync::CancellationToken;
 
+use crate::dataapi_metric;
 use crate::deliver::destination::{Resolver, SsrfPolicy};
 use crate::deliver::email::{self, Attachment, EmailMessage};
 use crate::deliver::slack;
 use crate::deliver::smtp_config::SmtpConfigRepo;
 use crate::deliver::webhook::{self, WebhookPayload};
-use crate::evaluator::{evaluate, owner_identity, EvalError, QueryRunner};
+use crate::evaluator::{evaluate, owner_identity, EvalError, Evaluation, QueryRunner};
 use crate::model::report_target;
 use crate::render::client::{RenderRequest, Renderer};
 use crate::render::token::RenderTokenRepo;
 use crate::repo::{Schedule, ScheduleRepo};
 use crate::scheduler::{claim_due, in_grace, prune_runs, record_run, release};
+use crate::validator::should_fire;
 use egret_automation_api::{RecipientKind, ReportFormat, ValidatorType};
 
 /// How many schedules one tick will take. A cap, not a target: it bounds how
@@ -188,11 +190,25 @@ impl AutomationRunner {
     }
 
     async fn evaluate_and_deliver(&self, s: &Schedule) -> Result<Outcome, EvalError> {
-        // Reports have no condition to evaluate — a report that renders and
-        // delivers always "fires" — so they branch off before any of the
-        // alert's query/validator machinery below.
-        if s.r#type == "report" {
-            return self.render_and_deliver(s).await;
+        // An explicit three-way branch — not `if report { .. } else { /*
+        // alert */ }` — because that shape is exactly what let a
+        // `dataapi_alert` fall through into the SQL-alert branch by default
+        // and hit `NotRunnable("alert is missing its query")` below: a
+        // `dataapi_alert` carries neither `database_id` nor `sql`
+        // (`schedule_dataapi_needs_source`, migration 0127), so it can never
+        // satisfy that branch's requirements. An unrecognised type is now its
+        // own error rather than silently taking the alert path, so a future
+        // fourth type fails loudly here instead of repeating this bug.
+        match s.r#type.as_str() {
+            "report" => {
+                // Reports have no condition to evaluate — a report that
+                // renders and delivers always "fires" — so they branch off
+                // before any of the alert's query/validator machinery below.
+                return self.render_and_deliver(s).await;
+            }
+            "dataapi_alert" => return self.evaluate_and_deliver_dataapi_alert(s).await,
+            "alert" => {}
+            _ => return Err(EvalError::NotRunnable("schedule has an unrecognised type")),
         }
 
         let (Some(database_id), Some(sql), Some(validator)) = (
@@ -248,6 +264,96 @@ impl AutomationRunner {
             value: eval.value,
             delivered,
         })
+    }
+
+    /// The `dataapi_alert` branch (Z2): the condition is MEASURED, from a
+    /// window of `dataapi.access_log` via `dataapi_metric::measure`, rather
+    /// than run as SQL — there is no engine, no owner identity, and no
+    /// `evaluate` here. Everything from `should_fire` onward is the exact
+    /// same machinery `evaluate_and_deliver`'s alert branch uses, so a
+    /// `dataapi_alert` and an engine `alert` behave identically once a value
+    /// is in hand: the same validator, the same grace suppression (§233's
+    /// `in_grace`, called below just like the alert path calls it), the same
+    /// `deliver`.
+    ///
+    /// `metric`/`window_s` are asserted `Some` rather than defaulted:
+    /// migration 0127's `schedule_dataapi_needs_source` CHECK already
+    /// requires both non-null (and `window_s > 0`) for a persisted
+    /// `dataapi_alert` row, so a `None` here means the row is corrupt, not
+    /// that the caller should guess a default — the same "unreachable but
+    /// guarded, not `unwrap`ped" stance `evaluate_and_deliver`'s own
+    /// `NotRunnable` fail-safe takes for the SQL-alert branch just above.
+    /// `validator_type` is trusted to be `"operator"` for the same reason:
+    /// the same CHECK pins it, so `ValidatorType::Operator` is used directly
+    /// rather than parsed from the row.
+    ///
+    /// NOT handled here: a `dataapi_endpoint_id` whose endpoint has been
+    /// trashed or disabled. §5.6 of the design wants that case to read as
+    /// `noop` with the reason in the run log, not `error` — moving an
+    /// endpoint to the trash is deliberate, and an error every five minutes
+    /// because of it is noise nobody asked for. But that state lives on
+    /// `dataapi.endpoints`, owned by `egret-dataapi`, and this crate does not
+    /// depend on it (see `dataapi_metric.rs`'s own module doc: the six
+    /// queries are duplicated rather than importing that crate). Reaching
+    /// into `dataapi.endpoints` with a raw query here would be exactly the
+    /// workaround the brief for this task says not to invent. Left for
+    /// whichever later task introduces a contract both crates can depend on.
+    async fn evaluate_and_deliver_dataapi_alert(&self, s: &Schedule) -> Result<Outcome, EvalError> {
+        let (Some(metric), Some(window_s)) = (s.dataapi_metric.as_deref(), s.dataapi_window_s)
+        else {
+            return Err(EvalError::NotRunnable(
+                "dataapi_alert is missing its metric or window",
+            ));
+        };
+
+        let value = dataapi_metric::measure(
+            &self.db,
+            s.workspace_id,
+            s.dataapi_endpoint_id,
+            metric,
+            s.dataapi_error_code.as_deref(),
+            window_s,
+            chrono::Utc::now(),
+        )
+        .await
+        .map_err(|e| EvalError::Query(e.to_string()))?;
+
+        // No extra guard needed for a `None` measurement (an empty window,
+        // e.g. `error_rate` with zero calls): `should_fire`'s `Operator` arm
+        // already answers `false` for every operator when `value` is `None`
+        // (validator.rs's `a_missing_value_never_fires_whatever_the_operator`
+        // — the null trap the module's own doc comment calls out), so it
+        // falls straight into the `!fired` branch below, recorded as `noop`
+        // like any other non-firing evaluation.
+        let fired = should_fire(ValidatorType::Operator, &s.validator_config, value)?;
+        if !fired {
+            return Ok(Outcome::NotFired { value });
+        }
+        // Fired — but recently enough that the user has already been told.
+        // Same call, same column, same semantics as the SQL-alert branch's
+        // grace check above: a dataapi_alert must not bypass anti-spam just
+        // because it reached `Outcome::Fired` a different way.
+        if in_grace(&self.db, s.id, s.grace_period_s)
+            .await
+            .map_err(|e| EvalError::Query(e.to_string()))?
+        {
+            return Ok(Outcome::Suppressed { value });
+        }
+
+        // A dataapi_alert has no query result set to attach — the value IS
+        // the whole answer. `rows`/`columns` are empty rather than omitted so
+        // `deliver` can stay the ONE delivery path both alert kinds share:
+        // `rows_to_csv` over `Value::Null` produces a header-only CSV, and
+        // the webhook payload's `rows` is `null` — an honest description of
+        // "there were no rows", not a fabricated one.
+        let eval = Evaluation {
+            fired: true,
+            value,
+            rows: serde_json::Value::Null,
+            columns: Vec::new(),
+        };
+        let delivered = self.deliver(s, &eval).await;
+        Ok(Outcome::Fired { value, delivered })
     }
 
     /// The identity everything downstream runs as (§5.2) — shared by the
