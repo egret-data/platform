@@ -89,6 +89,30 @@ impl Resolver for PublicDns {
     }
 }
 
+/// Task 4's run-time re-check, without a real CedarPdp or `access_grants`
+/// rows: every decision is `allow`, fixed at construction. Good enough for
+/// this file's purpose — a single yes/no lets `a_dataapi_alert_whose_owner_
+/// lost_endpoint_read_errors_and_sends_nothing` below flip the SAME fixture
+/// from `success` to `error` by changing one bool, which is what proves the
+/// gate is actually consulted rather than bypassed.
+struct FakePdp {
+    allow: bool,
+}
+#[async_trait::async_trait]
+impl egret_core::authz::Pdp for FakePdp {
+    async fn authorize(
+        &self,
+        _subject: &egret_core::authz::Subject,
+        _action: &str,
+        _resource: &egret_core::authz::Resource,
+    ) -> egret_core::Result<egret_core::authz::Decision> {
+        Ok(egret_core::authz::Decision {
+            allow: self.allow,
+            reasons: vec![],
+        })
+    }
+}
+
 // ── fixture ──────────────────────────────────────────────────────────────
 
 struct Fx {
@@ -109,6 +133,7 @@ async fn setup(
     metric: &str,
     validator_config: serde_json::Value,
     grace_period_s: i32,
+    endpoint_read: bool,
 ) -> Fx {
     let db = Db { pool };
     let user: Uuid =
@@ -168,6 +193,9 @@ async fn setup(
             users: egret_auth::users::UserRepo::new(db.clone()),
             minter: Arc::new(NoMinter),
             query: engine.clone(),
+            pdp: Arc::new(FakePdp {
+                allow: endpoint_read,
+            }),
             resolver: Arc::new(PublicDns),
             policy: SsrfPolicy::default(),
             smtp: egret_automation::deliver::smtp_config::SmtpConfigRepo::new(
@@ -235,6 +263,7 @@ async fn a_firing_dataapi_alert_dispatches_to_the_metric_evaluator(pool: sqlx::P
         "call_count",
         serde_json::json!({"op": ">", "threshold": 0}),
         0,
+        true,
     )
     .await;
     seed_call(&fx).await;
@@ -268,6 +297,7 @@ async fn a_dataapi_alert_with_no_measurement_is_noop_not_fired(pool: sqlx::PgPoo
         "error_rate",
         serde_json::json!({"op": ">", "threshold": 0}),
         0,
+        true,
     )
     .await;
     // Nothing seeded: the window is empty, so error_rate measures None.
@@ -294,6 +324,7 @@ async fn a_dataapi_alert_that_fires_twice_inside_grace_delivers_once(pool: sqlx:
         "call_count",
         serde_json::json!({"op": ">", "threshold": 0}),
         3600,
+        true,
     )
     .await;
     seed_call(&fx).await;
@@ -316,5 +347,51 @@ async fn a_dataapi_alert_that_fires_twice_inside_grace_delivers_once(pool: sqlx:
         states,
         vec!["success", "grace"],
         "the second firing inside the grace window must be suppressed and SAID SO"
+    );
+}
+
+/// Task 4's run-time re-check. The owner had `data_api_endpoint:read` when
+/// the schedule was saved and lost it afterward (a workspace admin revoking
+/// the grant, say) — nothing about the SCHEDULE changed, only the PDP's
+/// answer, which is exactly what flipping `endpoint_read` to `false` and
+/// nothing else in this fixture simulates. This is the case the brief calls
+/// out by name: an engine `alert` gets this re-check for free because the
+/// CONNECTOR enforces the owner's access on every run; a `dataapi_alert` runs
+/// no query at all, so without this check `alert:manage` would go on serving
+/// the endpoint's traffic to an owner who can no longer see the endpoint
+/// itself.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_dataapi_alert_whose_owner_lost_endpoint_read_errors_and_sends_nothing(
+    pool: sqlx::PgPool,
+) {
+    let fx = setup(
+        pool,
+        "call_count",
+        serde_json::json!({"op": ">", "threshold": 0}),
+        0,
+        false, // the PDP now refuses `data_api_endpoint:read` for the owner
+    )
+    .await;
+    seed_call(&fx).await;
+
+    assert_eq!(fx.runner.tick_once().await, 1, "one schedule was due");
+
+    let log = run_log(&fx).await;
+    assert_eq!(log.len(), 1, "the tick must still write a run row");
+    let (state, value, error) = &log[0];
+    assert_eq!(
+        state, "error",
+        "a revoked owner must record error, never noop or success"
+    );
+    assert_eq!(value, &None, "no value is reported once access is refused");
+    assert!(
+        error
+            .as_deref()
+            .is_some_and(|e| e.contains("no longer read")),
+        "the run log must carry the reason, not just \"error\": {error:?}"
+    );
+    assert!(
+        fx.engine.seen.lock().unwrap().is_empty(),
+        "still must never reach the SQL engine"
     );
 }

@@ -421,6 +421,43 @@ async fn validate_owners_in_workspace(
     Ok(())
 }
 
+/// Enforce that a `dataapi_alert` names (or, when unscoped, watches) only an
+/// endpoint the caller can already read (Task 4, Z2).
+///
+/// `endpoint_id: None` is a WORKSPACE-scoped `dataapi_alert` — it watches
+/// every endpoint in the workspace, so the bar is workspace-level
+/// `data_api_endpoint:read` rather than an object-scoped grant on one row.
+/// `Some(id)` is object-scoped, mirroring `egret-dataapi`'s own `EP_READ`
+/// gate on a single endpoint (`egret-dataapi/src/routes.rs`).
+async fn require_dataapi_endpoint_read(
+    st: &AutomationState,
+    ctx: &egret_core::WorkspaceContext,
+    endpoint_id: Option<Uuid>,
+) -> Result<(), AutomationApiError> {
+    match endpoint_id {
+        Some(id) => egret_core::authz::require_object(
+            &*st.pdp,
+            ctx,
+            egret_dataapi_api::EP_READ,
+            egret_core::authz::ObjectRef {
+                kind: egret_dataapi_api::OBJECT_KIND.to_string(),
+                id,
+                // A folder-scoped grant does not cascade to this check,
+                // matching `egret-dataapi::invoke::can_invoke`'s own
+                // precedent (see that function's doc comment): conservative
+                // rather than widening access nobody asked for.
+                folder_id: None,
+                workspace_id: ctx.workspace_id,
+            },
+        )
+        .await
+        .map_err(AutomationApiError::from),
+        None => egret_core::authz::require(&*st.pdp, ctx, egret_dataapi_api::EP_READ)
+            .await
+            .map_err(AutomationApiError::from),
+    }
+}
+
 #[utoipa::path(
     post, path = "/api/ws/{workspace}/alerts", tag = "alerts", params(WorkspacePath),
     request_body = CreateSchedule,
@@ -438,6 +475,16 @@ async fn create(
     egret_core::authz::require(&*st.pdp, &ctx, MANAGE)
         .await
         .map_err(AutomationApiError::from)?;
+
+    // No `dataapi_endpoint_id`/`data_api_endpoint:read` gate is needed here
+    // YET: `CreateSchedule` has no `dataapi_endpoint_id` field and
+    // `ScheduleType` has no `DataapiAlert` variant (both land in Task 5, "the
+    // API surface"), so `body.ty` is always `Alert` or `Report`. Migration
+    // 0127's `schedule_alert_no_dataapi_columns` CHECK already guarantees
+    // `dataapi_endpoint_id IS NULL` for both — nothing this handler can write
+    // today names an endpoint. When Task 5 adds the field, call
+    // `require_dataapi_endpoint_read` here the same way `update` does below,
+    // keyed on the new field instead of a stored row.
 
     let new = crate::model::to_new(&WriteBody::from(&body), Some(ctx.principal.user_id.0))
         .map_err(AutomationApiError::from)?;
@@ -502,6 +549,19 @@ async fn update(
         .await
         .map_err(AutomationApiError::from)?
         .ok_or_else(|| AutomationApiError::from(AutomationError::NotFound("schedule".into())))?;
+
+    // `alert:manage` alone is not enough to touch a `dataapi_alert`: the
+    // schedule names (or, unscoped, watches) a Data API endpoint, and its
+    // error rate/traffic are information ABOUT that endpoint — without this,
+    // `alert:manage` would be a side channel for observing an endpoint the
+    // caller cannot otherwise see. Checked against the raw STORED `type`, not
+    // the `ScheduleType::parse` below: a `dataapi_alert` row does not parse
+    // there yet (`ScheduleType` gains that variant in Task 5), and this
+    // authorization gate must not depend on that landing first.
+    if stored.r#type == "dataapi_alert" {
+        require_dataapi_endpoint_read(&st, &ctx, stored.dataapi_endpoint_id).await?;
+    }
+
     let ty = ScheduleType::parse(&stored.r#type).ok_or_else(|| {
         // Unreachable while `schedule_type_valid` holds; if it ever fires, the
         // row is corrupt rather than the request being wrong.

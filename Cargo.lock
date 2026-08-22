@@ -2667,6 +2667,7 @@ dependencies = [
  "egret-automation-api",
  "egret-bi",
  "egret-core",
+ "egret-dataapi-api",
  "egret-events",
  "egret-metastore",
  "egret-query",

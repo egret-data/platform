@@ -128,6 +128,7 @@ async fn setup(pool: sqlx::PgPool) -> Fx {
                 timeout: std::time::Duration::from_secs(5),
             },
         }),
+        pdp: pdp.clone(),
         resolver: Arc::new(egret_automation::deliver::destination::SystemResolver),
         policy: egret_automation::deliver::destination::SsrfPolicy::default(),
         smtp: smtp.clone(),

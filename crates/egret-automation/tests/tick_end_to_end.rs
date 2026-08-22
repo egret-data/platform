@@ -79,6 +79,24 @@ impl Renderer for NeverRenderer {
     }
 }
 
+/// Task 4's run-time re-check only runs on the `dataapi_alert` path — this
+/// file's schedules are all `type = 'alert'` — so a `panic!` here turns "the
+/// engine-alert path started calling the PDP" into a loud test failure
+/// instead of a silent one, the same way `NeverRenderer` above does for the
+/// renderer.
+struct NeverPdp;
+#[async_trait::async_trait]
+impl egret_core::authz::Pdp for NeverPdp {
+    async fn authorize(
+        &self,
+        _subject: &egret_core::authz::Subject,
+        _action: &str,
+        _resource: &egret_core::authz::Resource,
+    ) -> egret_core::Result<egret_core::authz::Decision> {
+        panic!("an engine alert must never consult the PDP");
+    }
+}
+
 /// Resolves everything to a public address so the SSRF guard admits it; the
 /// guard's own behaviour is tested in its module.
 struct PublicDns;
@@ -226,6 +244,7 @@ async fn setup(pool: sqlx::PgPool, value: serde_json::Value, fail: bool, webhook
             users: egret_auth::users::UserRepo::new(db.clone()),
             minter: Arc::new(NoMinter),
             query: engine.clone(),
+            pdp: Arc::new(NeverPdp),
             resolver: Arc::new(PublicDns),
             policy: SsrfPolicy::default(),
             smtp: egret_automation::deliver::smtp_config::SmtpConfigRepo::new(

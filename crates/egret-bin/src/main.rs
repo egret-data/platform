@@ -1461,6 +1461,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         databases: databases.clone(),
         users: UserRepo::new(db.clone()),
         minter: engine_minter.clone(),
+        pdp: pdp.clone(),
         query: std::sync::Arc::new(egret_automation::evaluator::EngineRunner {
             databases: databases.clone(),
             factory: std::sync::Arc::new(

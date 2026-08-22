@@ -15,6 +15,10 @@ egret-workspace.workspace = true
 egret-auth.workspace = true
 egret-query.workspace = true
 egret-analytics-api.workspace = true
+# Task 4 (Z2): the object-kind/read-permission constants a `dataapi_alert`
+# needs at save time and run time. A pure leaf (only egret-core) like
+# egret-analytics-api above, so this creates no cycle — verified.
+egret-dataapi-api.workspace = true
 # The render-payload endpoint (P4 Task 3) compiles a chart's saved spec with
 # egret-bi's own `compile_chart_sql`, so a report can never diverge from what
 # the interactive chart/dashboard endpoints would show. No cycle: egret-bi

@@ -58,6 +58,16 @@ pub struct AutomationRunner {
     pub users: UserRepo,
     pub minter: Arc<dyn EngineTokenMinter>,
     pub query: Arc<dyn QueryRunner>,
+    /// The single decision point (Task 4, Z2) — needed because a `dataapi_alert`
+    /// re-checks its own access at run time, the way every OTHER schedule kind
+    /// already does but by a different mechanism. An engine `alert` re-verifies
+    /// the owner's access on every run because the CONNECTOR enforces it
+    /// (`evaluator.rs`'s module doc: "authorization is settled by the engine at
+    /// RUN time, not remembered from save time"); a `dataapi_alert` runs no
+    /// query at all — it measures `dataapi.access_log` directly — so nothing
+    /// downstream of this struct would otherwise notice that the owner lost
+    /// `data_api_endpoint:read` after the schedule was saved.
+    pub pdp: Arc<dyn egret_core::authz::Pdp>,
     pub resolver: Arc<dyn Resolver>,
     pub policy: SsrfPolicy,
     pub smtp: SmtpConfigRepo,
@@ -296,8 +306,21 @@ impl AutomationRunner {
     /// depend on it (see `dataapi_metric.rs`'s own module doc: the six
     /// queries are duplicated rather than importing that crate). Reaching
     /// into `dataapi.endpoints` with a raw query here would be exactly the
-    /// workaround the brief for this task says not to invent. Left for
-    /// whichever later task introduces a contract both crates can depend on.
+    /// workaround the brief for this task says not to invent.
+    ///
+    /// Task 4 stands up the first contract seam this crate shares with
+    /// `egret-dataapi` (`egret-dataapi-api`, a pure leaf — no sqlx, no axum),
+    /// but deliberately does not extend it to endpoint STATE. Visibility of a
+    /// trashed/disabled row is a different question from "may the owner READ
+    /// this endpoint" — a trashed endpoint an owner can still read is exactly
+    /// the case this section is about, and folding both into one task risks
+    /// under-building the smaller one to close the box. Its natural shape,
+    /// for whoever picks it up: an `EndpointState { trashed: bool, enabled:
+    /// bool }` DTO in `egret-dataapi-api` plus a small port trait
+    /// (`AutomationRunner` already holds several — `QueryRunner`, `Renderer`,
+    /// `EngineTokenMinter` — this would be one more `Arc<dyn _>`), implemented
+    /// by a thin `egret-dataapi`-backed adapter and wired the same way
+    /// `pdp`/`query`/`renderer` are below. Left for that task.
     async fn evaluate_and_deliver_dataapi_alert(&self, s: &Schedule) -> Result<Outcome, EvalError> {
         let (Some(metric), Some(window_s)) = (s.dataapi_metric.as_deref(), s.dataapi_window_s)
         else {
@@ -305,6 +328,28 @@ impl AutomationRunner {
                 "dataapi_alert is missing its metric or window",
             ));
         };
+
+        // Run-time re-check (Task 4, Z2): the OWNER — the identity everything
+        // downstream answers to, same as an engine alert's `resolve_owner` —
+        // may have lost `data_api_endpoint:read` on the watched endpoint (or,
+        // unscoped, on the workspace) since the schedule was saved. An engine
+        // alert gets this for free because the CONNECTOR enforces the
+        // owner's access on every run (`evaluator.rs`'s module doc); a
+        // `dataapi_alert` runs no query at all, so nothing else on this path
+        // would notice. Checked BEFORE `measure` — a caller who has lost
+        // access to the endpoint must not have its access_log rows counted
+        // for them, even into an aggregate.
+        let owner = self.resolve_owner(s.id).await?;
+        if !owner_can_read_dataapi_endpoint(
+            &*self.pdp,
+            owner,
+            s.workspace_id,
+            s.dataapi_endpoint_id,
+        )
+        .await?
+        {
+            return Err(EvalError::EndpointAccessRevoked);
+        }
 
         let value = dataapi_metric::measure(
             &self.db,
@@ -1119,6 +1164,49 @@ impl AutomationRunner {
         .map_err(|e| e.to_string())?;
         Ok(note)
     }
+}
+
+/// Whether `owner` may still read `endpoint_id` (or, when `None`, holds
+/// workspace-level Data API read) — the run-time re-check Task 4 adds for a
+/// `dataapi_alert` (§`evaluate_and_deliver_dataapi_alert`'s own doc comment).
+///
+/// A free function, not a method, because it needs only the PDP: unlike
+/// `egret-dataapi::invoke::can_invoke` (the sibling this mirrors), it is
+/// called from a crate that does not — and, per this task's own decision
+/// above, should not — depend on `egret-dataapi` for anything beyond the two
+/// constants in `egret-dataapi-api`.
+///
+/// `group_ids: Vec::new()` — no group lookup for the owner here, following
+/// `can_invoke`'s own precedent for an owner-based re-check made outside a
+/// live session: a group-scoped grant is a possible false REFUSAL (the owner
+/// is treated as having fewer permissions than they actually do), never a
+/// false allow, so it cannot turn this into a security hole — only, in the
+/// rare case a workspace grants Data API read solely through a group, into an
+/// alert that stops firing until it is re-saved. The same conservative gap
+/// `can_invoke` already accepts.
+async fn owner_can_read_dataapi_endpoint(
+    pdp: &dyn egret_core::authz::Pdp,
+    owner: uuid::Uuid,
+    workspace_id: uuid::Uuid,
+    endpoint_id: Option<uuid::Uuid>,
+) -> Result<bool, EvalError> {
+    let subject = egret_core::authz::Subject {
+        user_id: egret_core::UserId(owner),
+        group_ids: Vec::new(),
+    };
+    let resource = match endpoint_id {
+        Some(id) => egret_core::authz::Resource::Object(egret_core::authz::ObjectRef {
+            kind: egret_dataapi_api::OBJECT_KIND.to_string(),
+            id,
+            folder_id: None,
+            workspace_id: egret_core::WorkspaceId(workspace_id),
+        }),
+        None => egret_core::authz::Resource::Workspace(egret_core::WorkspaceId(workspace_id)),
+    };
+    pdp.authorize(&subject, egret_dataapi_api::EP_READ, &resource)
+        .await
+        .map(|d| d.allow)
+        .map_err(|e| EvalError::Query(e.to_string()))
 }
 
 /// `egret_bi::compile_chart_sql`'s error has no `Display` of its own

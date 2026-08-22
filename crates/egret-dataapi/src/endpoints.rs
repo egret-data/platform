@@ -345,7 +345,11 @@ pub const FOLDER_ENTITY_TYPE: &str = "data_api_endpoint";
 /// into `access_grants`. Aliasing them would make a rename of either silently
 /// re-point every invoke grant at a kind nothing checks — grants that keep
 /// matching the schema and stop matching the decision.
-pub const OBJECT_KIND: &str = "data_api_endpoint";
+///
+/// Re-exported from `egret-dataapi-api` (Task 4) rather than defined here: it
+/// is now the ONE definition, and `egret-automation` names the same kind
+/// through that crate without depending on this one.
+pub use egret_dataapi_api::OBJECT_KIND;
 
 /// The `analytics.bookmarks.entity_type` an endpoint's bookmarks are filed
 /// under.

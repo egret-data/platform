@@ -12,6 +12,26 @@
 
 use serde::{Deserialize, Serialize};
 
+/// The Cedar object KIND a Data API endpoint appears as in an authorization
+/// decision, and the `access_grants.object_type` of an invoke grant (spec §5,
+/// §6.2 step 4).
+///
+/// Canonical definition. `egret-dataapi`'s `endpoints::OBJECT_KIND`
+/// re-exports this rather than keeping a second `"data_api_endpoint"`
+/// literal — two string literals that must agree and are not the same
+/// literal is exactly the drift a leaf contract crate exists to prevent.
+/// `egret-automation` (Z2's alert authorization, Task 4) needs to name the
+/// same kind to gate a `dataapi_alert` without depending on `egret-dataapi`
+/// itself, which is why this lives here rather than in that crate.
+pub const OBJECT_KIND: &str = "data_api_endpoint";
+
+/// Permission that lets a caller list/inspect a Data API endpoint.
+///
+/// Canonical definition — see [`OBJECT_KIND`]'s doc comment for why this
+/// lives here instead of in `egret-dataapi`, where it was previously a
+/// private `const` in `routes.rs`.
+pub const EP_READ: &str = "data_api_endpoint:read";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ParamType {
