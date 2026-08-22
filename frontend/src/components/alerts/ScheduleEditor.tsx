@@ -39,6 +39,7 @@ export const SECTIONS: { key: SectionKey; label: (isAlert: boolean) => string }[
   { key: "notification", label: () => "Notification" },
 ];
 import { ConfigSection } from "@/components/form/ConfigSection";
+import { ConfigTable, ConfigTableRow } from "@/components/config/ConfigTable";
 import { TagCombobox } from "@/components/ui/tag-combobox";
 import { DestinationList } from "./DestinationList";
 import { toDestinations, toRecipients, type Destination } from "./destinations";
@@ -415,76 +416,75 @@ export function ScheduleEditor({
         title="General"
         description="What this is called, who owns it, and whether it runs at all."
       >
-        {/* Two up. Both are single-line inputs holding a handful of words, and
-            a full-width row each left the section mostly white space with the
-            fields stretched past any length they will ever hold. The pair that
-            keeps its own row below is Owners, whose helper line is long enough
-            to unbalance a cell beside it. */}
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="sched-name">Name</Label>
-            <Input
-              id="sched-name"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-            />
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="sched-desc">Description</Label>
+        <ConfigTable>
+          <ConfigTableRow
+            label="Name"
+            htmlFor="sched-name"
+            details="Shown in the list and used as the default email subject."
+          >
+            <Input id="sched-name" value={name} onChange={(e) => setName(e.target.value)} />
+          </ConfigTableRow>
+
+          <ConfigTableRow
+            label="Description"
+            htmlFor="sched-desc"
+            details="Optional. A sentence for whoever finds this later."
+          >
             <Input
               id="sched-desc"
               value={description}
               onChange={(e) => setDescription(e.target.value)}
             />
-          </div>
-        </div>
-        <div className="flex flex-col gap-1.5">
+          </ConfigTableRow>
+
           {/* No `htmlFor`: the control is a combobox, not an element with an
               id, and it carries its own `aria-label`. A label pointing at an
               id that no longer exists is worse than none — it silently stops
               focusing anything. */}
-          <span className="text-sm font-medium">Owners</span>
-          {/* A picker, not a `<select multiple>`. The raw control was tolerable
-              while it sat in an Advanced tab nobody opened; in General it is
-              the third thing you see, and it cannot show who is selected
-              without scrolling a grey box. `creatable` is off — an owner has
-              to be a member of this workspace, so a typed string is never a
-              valid one. */}
-          <TagCombobox
-            values={owners}
-            onChange={setOwners}
-            ariaLabel="Owners"
-            placeholder={owners.length ? "Add another owner…" : "Search people…"}
-            creatable={false}
-            queryKey={["alerts", "owner-suggest", ws]}
-            labelFor={(id) => memberName(id)}
-            suggest={async (q) => {
-              const needle = q.trim().toLowerCase();
-              return userMembers
-                .filter((m) =>
-                  needle ? (m.principal_name ?? m.principal_id).toLowerCase().includes(needle) : true,
-                )
-                .map((m) => ({
-                  value: m.principal_id,
-                  label: m.principal_name ?? m.principal_id,
-                }));
-            }}
-          />
-          <p className="text-xs text-muted-foreground">
-            The query runs with an owner&apos;s permissions. Leave empty and you become the
-            owner; naming several keeps it running when one person leaves.
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <Checkbox
-            id="sched-active"
-            checked={active}
-            onCheckedChange={(v) => setActive(v === true)}
-          />
-          <Label htmlFor="sched-active" className="text-sm font-normal">
-            Active
-          </Label>
-        </div>
+          <ConfigTableRow
+            label="Owners"
+            details="The query runs with an owner's permissions. Leave empty and you become the owner; naming several keeps it running when one person leaves."
+          >
+            {/* A picker, not a `<select multiple>`. The raw control was tolerable
+                while it sat in an Advanced tab nobody opened; in General it is
+                the third thing you see, and it cannot show who is selected
+                without scrolling a grey box. `creatable` is off — an owner has
+                to be a member of this workspace, so a typed string is never a
+                valid one. */}
+            <TagCombobox
+              values={owners}
+              onChange={setOwners}
+              ariaLabel="Owners"
+              placeholder={owners.length ? "Add another owner…" : "Search people…"}
+              creatable={false}
+              queryKey={["alerts", "owner-suggest", ws]}
+              labelFor={(id) => memberName(id)}
+              suggest={async (q) => {
+                const needle = q.trim().toLowerCase();
+                return userMembers
+                  .filter((m) =>
+                    needle ? (m.principal_name ?? m.principal_id).toLowerCase().includes(needle) : true,
+                  )
+                  .map((m) => ({
+                    value: m.principal_id,
+                    label: m.principal_name ?? m.principal_id,
+                  }));
+              }}
+            />
+          </ConfigTableRow>
+
+          <ConfigTableRow
+            label="Active"
+            htmlFor="sched-active"
+            details="Uncheck to stop it running without deleting it; its history is kept."
+          >
+            <Checkbox
+              id="sched-active"
+              checked={active}
+              onCheckedChange={(v) => setActive(v === true)}
+            />
+          </ConfigTableRow>
+        </ConfigTable>
       </ConfigSection>
       )}
 
