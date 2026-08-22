@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- **The four primitives are not modified.** `ListPageShell.tsx`, `ListStates.tsx`, `ListToolbarButton.tsx` and `EmptyState.tsx` are read-only for this plan. They change only additively and only with a reason (§7.1 of `docs/en/ui-conventions.md`); a slot added for one consumer is the prop-per-capability shell that §1.1 rejects.
+- **The four primitives must end every task byte-identical.** `ListPageShell.tsx`, `ListStates.tsx`, `ListToolbarButton.tsx` and `EmptyState.tsx` are not modified by this plan. The mutation checks in Task 1 Step 7 and Task 3 Step 6 edit them *temporarily* and restore them, and `git diff --exit-code frontend/src/components/explore/` in each task's gate is what holds that. They change only additively and only with a reason (§7.1 of `docs/en/ui-conventions.md`); a slot added for one consumer is the prop-per-capability shell that §1.1 rejects.
 - **The eslint baseline is 0 errors / 177 warnings**, measured with `npx eslint .` on 2026-08-22. The previous plan recorded 178; that number is stale and must not be carried forward. A new warning is a regression.
 - **No msw.** Tests `vi.mock` the API module and read mutable fixtures inside the mock factory's closure, never at module scope.
 - **Every page keeps exactly one `h1`.** `ListPageShell` owns it. Assert the **count** is one, not that one exists.
