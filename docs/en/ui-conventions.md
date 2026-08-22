@@ -105,6 +105,9 @@ Two consequences encoded in the signature:
 - `filled` is separate from `active`. Bookmark and trash fill their glyph when engaged;
   bulk and folder do not. That is a per-icon decision, not a consequence of being active.
 
+All four pages named above were converted by package U on 2026-08-22, so `aria-pressed` is
+now set on every list toolbar toggle in Explore except `Notebooks.tsx`.
+
 ### 1.4 Search sits in a page toolbar above the table
 
 `src/routes/explore/dataapi/Clients.tsx` (`data-testid="page-toolbar"`)
@@ -140,6 +143,9 @@ otherwise  →  the rows
 Written out as a nested ternary in all six pages, they had already drifted: `Dashboards.tsx`
 checked `hasData` before `isError`, so a failed refetch that still held cached rows rendered
 the table and swallowed the error, while the other five rendered the alert.
+
+Fixed by package U on 2026-08-22 (`docs/en/plans/2026-08-22-explore-list-primitives-adoption.md`,
+Task 3); the four pages now branch through `ListStates`.
 
 ### 2.2 Error may never fold into empty
 
@@ -910,11 +916,20 @@ either way and says nothing.
 Honest scope, measured on the current tree, so nobody reads this as describing code that does
 not exist yet:
 
-- `ListPageShell` — 5 route files (`Endpoints`, `Clients`, `EndpointCreate`,
-  `ServiceAccountCreate`, `ClientCreate`), all Data API. The other Explore list pages still
-  hand-write their headers.
-- `ListStates` — 2 route files (`Endpoints`, `Clients`).
-- `EmptyState` — 10 files (2 Data API, 8 control-plane).
+- `ListPageShell` — **9** route files: 5 Data API (`Endpoints`, `Clients`, `EndpointCreate`,
+  `ServiceAccountCreate`, `ClientCreate`) and 4 Explore list pages (`Datasets`, `Charts`,
+  `Dashboards`, `Alerts`), converted by package U on 2026-08-22. Measured with
+  `grep -rl 'from "@/components/explore/ListPageShell"' src --include='*.tsx' | grep -v __tests__ | wc -l`
+  from `frontend/`. **`Notebooks.tsx` still hand-writes its header** (735 lines, `aria-pressed`
+  = 0). It was named in neither §1.3's list of four nor package U's scope, and is recorded
+  here so this section is not read as "every Explore list page is converted".
+- `ListStates` — **6** route files (`Endpoints`, `Clients`, `Datasets`, `Charts`, `Dashboards`,
+  `Alerts`). Measured with
+  `grep -rl 'from "@/components/explore/ListStates"' src --include='*.tsx' | grep -v __tests__ | wc -l`
+  from `frontend/`.
+- `EmptyState` — **14** files (2 Data API, 8 control-plane, 4 Explore list pages). Measured
+  with `grep -rl 'from "@/components/explore/EmptyState"' src --include='*.tsx' | grep -v __tests__ | wc -l`
+  from `frontend/`.
 - `ConfigTable` — **15** production files; `ConfigTableGroup` is used by Data API's `Config`
   and `ResponseSection`. Measured with
   `git grep -l 'from "@/components/config/ConfigTable"' <rev> -- frontend/src`, minus
