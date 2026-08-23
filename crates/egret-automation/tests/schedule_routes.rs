@@ -1891,3 +1891,129 @@ async fn create_refuses_an_alert_naming_another_workspaces_chart() {
         .unwrap_or_default()
         .contains("chart_id"));
 }
+
+/// Fix-round-1 gap: the six new tests above prove `schedule_targets` is
+/// checked on CREATE, but `update` rewrites `schedule_targets` too (the
+/// DELETE-then-`write_children` in `ScheduleRepo::update`), and nothing
+/// pinned that the same gate runs there. Mutating the targets check away
+/// only failed the create-side tests — a refactor that moved the check into
+/// `create` alone would have left every one of those green.
+#[tokio::test]
+async fn update_refuses_repointing_schedule_targets_at_another_workspaces_chart() {
+    let fx = fixture!();
+    let owner = mk_user(&fx.db, "target_owner").await;
+    let own_chart = mk_chart(&fx.db, fx.ws, owner).await;
+    let foreign_chart = mk_chart(&fx.db, fx.other_ws, owner).await;
+
+    // Seeded legitimately: `chart_id` is workspace 1's own, and `targets` is
+    // empty — nothing yet for the repoint to disturb.
+    let (s, made) = req(
+        &fx,
+        &fx.editor_tok,
+        "POST",
+        &format!("/ws/{}/alerts", fx.slug),
+        Some(report_json(
+            "targets repointable",
+            "png",
+            Some(own_chart),
+            None,
+            &[],
+        )),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "seed create failed: {made}");
+    let id = made["id"].as_str().unwrap();
+
+    // Same `chart_id`, but now a `targets` entry naming the OTHER
+    // workspace's chart — the door a `chart_id`-only check would miss.
+    let (s, err) = req(
+        &fx,
+        &fx.editor_tok,
+        "PUT",
+        &format!("/ws/{}/alerts/{id}", fx.slug),
+        Some(report_json(
+            "targets repointable",
+            "png",
+            Some(own_chart),
+            None,
+            &[("chart", foreign_chart)],
+        )),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "got {err}");
+    assert!(
+        err["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("targets"),
+        "refusal should name the field: {err}"
+    );
+
+    // And the rejected update did not partially apply: still no targets.
+    let (_, still) = req(
+        &fx,
+        &fx.editor_tok,
+        "GET",
+        &format!("/ws/{}/alerts/{id}", fx.slug),
+        None,
+    )
+    .await;
+    assert_eq!(
+        still["targets"].as_array().unwrap().len(),
+        0,
+        "a rejected update must not have written the foreign target: {still}"
+    );
+}
+
+/// The update-side negative control. A same-workspace `schedule_targets`
+/// entry must still save on UPDATE, not just on create.
+#[tokio::test]
+async fn update_still_saves_a_same_workspace_schedule_targets_entry() {
+    let fx = fixture!();
+    let owner = mk_user(&fx.db, "target_owner").await;
+    let own_chart = mk_chart(&fx.db, fx.ws, owner).await;
+    let own_dashboard = mk_dashboard(&fx.db, fx.ws, owner).await;
+
+    let (s, made) = req(
+        &fx,
+        &fx.editor_tok,
+        "POST",
+        &format!("/ws/{}/alerts", fx.slug),
+        Some(report_json(
+            "targets addable",
+            "png",
+            Some(own_chart),
+            None,
+            &[],
+        )),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "seed create failed: {made}");
+    let id = made["id"].as_str().unwrap();
+
+    let (s, updated) = req(
+        &fx,
+        &fx.editor_tok,
+        "PUT",
+        &format!("/ws/{}/alerts/{id}", fx.slug),
+        Some(report_json(
+            "targets addable",
+            "png",
+            Some(own_chart),
+            None,
+            &[("chart", own_chart), ("dashboard", own_dashboard)],
+        )),
+    )
+    .await;
+    assert_eq!(
+        s,
+        StatusCode::OK,
+        "a same-workspace update-side target must save: {updated}"
+    );
+    let targets = updated["targets"].as_array().unwrap();
+    assert_eq!(
+        targets.len(),
+        2,
+        "both targets should have been written: {updated}"
+    );
+}
