@@ -139,6 +139,7 @@ async fn setup(pool: sqlx::PgPool) -> Fx {
             ),
         ),
         charts: egret_bi::ChartRepo::new(db.clone()),
+        dashboards: egret_bi::DashboardRepo::new(db.clone()),
         datasets: egret_bi::DatasetRepo::new(db.clone()),
         render_tokens: RenderTokenRepo::new(db.clone()),
         renderer: Arc::new(egret_automation::render::client::HttpRenderer::new(

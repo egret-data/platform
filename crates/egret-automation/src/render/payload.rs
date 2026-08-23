@@ -226,14 +226,30 @@ async fn allowed_charts(
 ) -> Result<std::collections::HashSet<Uuid>, AutomationError> {
     match grant.kind.as_str() {
         "chart" => Ok(std::iter::once(grant.object_id).collect()),
-        "dashboard" => Ok(st
-            .dashboards
-            .cards(grant.object_id)
-            .await
-            .map_err(bi_err)?
-            .iter()
-            .filter_map(|c| c.chart_id)
-            .collect()),
+        "dashboard" => {
+            // Scoped explicitly, even though every id this returns is about
+            // to be re-checked by `charts.get(id, grant.workspace_id)` in
+            // `run_cards` — so a foreign dashboard already 404s here today
+            // via that second check. This first check is what keeps that
+            // true if `run_cards` is ever refactored to trust `allowed`
+            // without re-fetching: without it, `dashboards.cards(object_id)`
+            // reads by id alone and would enumerate a foreign dashboard's
+            // cards with no workspace predicate at all.
+            let dash = st
+                .dashboards
+                .get(grant.object_id, grant.workspace_id)
+                .await
+                .map_err(bi_err)?
+                .ok_or_else(|| AutomationError::NotFound("dashboard".into()))?;
+            Ok(st
+                .dashboards
+                .cards(dash.id)
+                .await
+                .map_err(bi_err)?
+                .iter()
+                .filter_map(|c| c.chart_id)
+                .collect())
+        }
         other => Err(AutomationError::Internal(format!(
             "render token names an unknown object kind: {other}"
         ))),

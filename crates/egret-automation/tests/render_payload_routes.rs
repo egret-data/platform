@@ -102,6 +102,7 @@ fn fake_engine(seen_sql: std::sync::Arc<std::sync::Mutex<Vec<String>>>) -> FakeE
 
 struct Fx {
     app: axum::Router,
+    db: Db,
     render_tokens: RenderTokenRepo,
     ws: Uuid,
     dashboard: Uuid,
@@ -290,6 +291,7 @@ async fn setup(pool: sqlx::PgPool) -> Fx {
             ),
         ),
         charts: charts.clone(),
+        dashboards: dashboards.clone(),
         datasets: datasets.clone(),
         render_tokens: render_tokens.clone(),
         renderer: Arc::new(egret_automation::render::client::HttpRenderer::new(
@@ -339,6 +341,7 @@ async fn setup(pool: sqlx::PgPool) -> Fx {
         app: automation_router()
             .merge(egret_automation::render_router())
             .with_state(st),
+        db: db.clone(),
         render_tokens,
         ws,
         dashboard: dashboard.id,
@@ -480,6 +483,58 @@ async fn the_payload_describes_the_object_and_the_data_call_returns_its_rows(poo
         v[0]["rows"],
         serde_json::json!([["1-URGENT"], ["2-HIGH"]]),
         "{body}"
+    );
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_token_naming_a_dashboard_from_a_different_workspace_is_refused(pool: sqlx::PgPool) {
+    // SEC-3, pinning the most security-critical line on this boundary
+    // (design §4.1: "every caller passes the SCHEDULE's workspace, never the
+    // object's"). `render_image_report`/`render_alert_attachment` always mint
+    // with the SCHEDULE's own workspace as `grant.workspace_id` — this
+    // reproduces that shape directly, for a dashboard that actually lives in
+    // a SEPARATE workspace: exactly the probe's Round-2 Surface 2
+    // (`/render/payload` returning workspace 2's title, spec and rows to a
+    // workspace-1 token).
+    let fx = setup(pool).await;
+
+    let other_owner = mk_user(&fx.db, "rp_other").await;
+    let other_ws: Uuid = sqlx::query_scalar(
+        "INSERT INTO workspaces (slug, name, created_by, status) \
+         VALUES ($1, 'Other Workspace', $2, 'active') RETURNING id",
+    )
+    .bind(format!("rp-other-{}", Uuid::new_v4().simple()))
+    .bind(other_owner)
+    .fetch_one(&fx.db.pool)
+    .await
+    .unwrap();
+    let other_dashboards = DashboardRepo::new(fx.db.clone());
+    let other_dashboard = other_dashboards
+        .create(other_ws, "workspace 2's dashboard", "", Some(other_owner))
+        .await
+        .unwrap();
+
+    // Minted exactly the way `render_image_report`/`render_alert_attachment`
+    // do: `grant.workspace_id` is fx.ws (the SCHEDULE's own workspace, ws1)
+    // — never `other_ws`, the object's own. That is what makes this the same
+    // shape a foreign row on a pre-existing schedule would produce.
+    let token = fx
+        .render_tokens
+        .mint(
+            "dashboard",
+            other_dashboard.id,
+            fx.ws,
+            fx.owner,
+            std::time::Duration::from_secs(60),
+        )
+        .await
+        .expect("mint render token");
+
+    let (status, body) = get_payload(&fx, &token).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a dashboard from a different workspace must 404, not describe it: {body}"
     );
 }
 

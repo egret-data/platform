@@ -67,6 +67,11 @@ pub struct AutomationRunner {
     /// endpoint uses (`render::payload`), so a report can never diverge from
     /// what the interactive chart would show.
     pub charts: egret_bi::ChartRepo,
+    /// `render_image_report`/`render_alert_attachment` need this too — a
+    /// dashboard target must be confirmed to belong to THIS schedule's
+    /// workspace before a token is minted for it, the same way
+    /// `build_chart_report` already confirms a chart (SEC-3).
+    pub dashboards: egret_bi::DashboardRepo,
     pub datasets: egret_bi::DatasetRepo,
     /// Per-render credentials (P4): mints the single-use token a `png`/`pdf`
     /// report's renderer call authenticates with.
@@ -328,6 +333,36 @@ impl AutomationRunner {
                 })
                 .collect()
         };
+
+        // Every target must belong to THIS schedule's workspace, confirmed
+        // BEFORE a token is minted or the renderer is ever asked to fetch it.
+        // `schedule_targets.object_id` has no foreign key and no workspace
+        // column (it can't — `kind` is polymorphic), and save-time validation
+        // (SEC-2) only guards writes going forward: a row already in the
+        // table — written before that shipped, or by anything that bypassed
+        // the API — must fail HERE, as a reported "error" run with nothing
+        // sent, rather than mint a token for an object that will only 404 at
+        // `/render/payload` and let the renderer hand back a screenshot of
+        // whatever the print page shows for that.
+        for (kind, object_id) in &targets {
+            let found = match *kind {
+                "chart" => self
+                    .charts
+                    .get(*object_id, s.workspace_id)
+                    .await
+                    .map_err(|e| EvalError::Query(e.to_string()))?
+                    .is_some(),
+                _ => self
+                    .dashboards
+                    .get(*object_id, s.workspace_id)
+                    .await
+                    .map_err(|e| EvalError::Query(e.to_string()))?
+                    .is_some(),
+            };
+            if !found {
+                return Err(EvalError::NotRunnable("report's target no longer exists"));
+            }
+        }
 
         // One token PER object: a render token is bound to a single object by
         // design, so N pages need N of them.
@@ -772,6 +807,35 @@ impl AutomationRunner {
             Some(f @ (ReportFormat::Png | ReportFormat::Pdf)) => f,
             _ => return None,
         };
+        // `model.rs`'s alert branch checks only ARITY — "not both a chart and
+        // a dashboard" — never ownership, so `chart_id`/`dashboard_id` can be
+        // a foreign object on a row written before SEC-2's save-time check
+        // existed. Confirmed here, BEFORE a token is minted: an alert's own
+        // `sql`/`value` never touched this object, so losing the render must
+        // not lose the alert (the philosophy above), but it must also never
+        // mint a token — let alone attach a picture — for something that
+        // isn't this workspace's.
+        let scoped = match kind {
+            "chart" => self
+                .charts
+                .get(object_id, s.workspace_id)
+                .await
+                .ok()?
+                .is_some(),
+            _ => self
+                .dashboards
+                .get(object_id, s.workspace_id)
+                .await
+                .ok()?
+                .is_some(),
+        };
+        if !scoped {
+            tracing::warn!(
+                schedule = %s.id, %kind, %object_id,
+                "automation: alert attachment target does not belong to this workspace"
+            );
+            return None;
+        }
         let owner = self.resolve_owner(s.id).await.ok()?;
         let token = self
             .render_tokens
@@ -1013,4 +1077,290 @@ pub fn spawn(runner: Arc<AutomationRunner>, every: Duration, cancel: Cancellatio
             }
         }
     });
+}
+
+// ── SEC-3: render_alert_attachment's scoping check, direct and in-process ──
+//
+// This one entry point cannot be reached from an integration test in
+// `tests/`: `send_email` (its only caller) needs a REAL SMTP relay
+// (`crate::deliver::email::send` builds a `lettre` transport over the
+// network), which this crate's test suite never stands up. So this calls the
+// private method directly, in-process, against a real database — the same
+// shape `evaluator.rs`'s own `#[cfg(test)] mod tests` already uses for
+// `owner_identity`.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::evaluator::RunIdentity;
+    use crate::render::client::RenderRequest;
+    use egret_bi::{ChartRepo, DashboardRepo, DatasetRepo, NewColumn, SourceSpec};
+    use std::sync::Mutex;
+    use uuid::Uuid;
+
+    /// Records every request; answers with fixed PNG bytes. If
+    /// `render_alert_attachment` calls this for a foreign chart, the test
+    /// that asserts it never does will see a non-empty `seen`.
+    struct FakeRenderer {
+        seen: Mutex<Vec<RenderRequest>>,
+    }
+    #[async_trait::async_trait]
+    impl Renderer for FakeRenderer {
+        async fn render(&self, req: RenderRequest) -> Result<Vec<u8>, String> {
+            self.seen.lock().unwrap().push(req);
+            Ok(vec![0x89, b'P', b'N', b'G'])
+        }
+    }
+
+    struct NoMinter;
+    #[async_trait::async_trait]
+    impl EngineTokenMinter for NoMinter {
+        async fn mint(
+            &self,
+            _user: Uuid,
+        ) -> Result<
+            egret_analytics_api::engine_token::EngineToken,
+            egret_analytics_api::engine_token::BrokerError,
+        > {
+            Err(egret_analytics_api::engine_token::BrokerError::NoRefreshToken)
+        }
+    }
+
+    /// `render_alert_attachment` must never reach the query engine — it only
+    /// mints a render token and asks the renderer for a picture.
+    struct NoQuery;
+    #[async_trait::async_trait]
+    impl QueryRunner for NoQuery {
+        async fn run(
+            &self,
+            _db: Uuid,
+            _sql: &str,
+            _identity: &RunIdentity,
+            _limit: Option<usize>,
+        ) -> Result<egret_core::TabularResult, String> {
+            Err("render_alert_attachment must never query an engine".into())
+        }
+    }
+
+    struct PublicDns;
+    #[async_trait::async_trait]
+    impl Resolver for PublicDns {
+        async fn resolve(
+            &self,
+            _host: &str,
+            port: u16,
+        ) -> Result<Vec<std::net::SocketAddr>, std::io::Error> {
+            Ok(vec![std::net::SocketAddr::new(
+                "93.184.216.34".parse().unwrap(),
+                port,
+            )])
+        }
+    }
+
+    async fn mk_user(db: &Db, tag: &str) -> Uuid {
+        sqlx::query_scalar("INSERT INTO users (email, provider) VALUES ($1,'local') RETURNING id")
+            .bind(format!("{tag}_{}@t.local", Uuid::new_v4().simple()))
+            .fetch_one(&db.pool)
+            .await
+            .unwrap()
+    }
+
+    async fn mk_workspace(db: &Db, owner: Uuid) -> Uuid {
+        sqlx::query_scalar(
+            "INSERT INTO workspaces (slug,name,created_by) VALUES ($1,'t',$2) RETURNING id",
+        )
+        .bind(format!("w-{}", Uuid::new_v4().simple()))
+        .bind(owner)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap()
+    }
+
+    /// A chart that exists, in `ws`, with a real (if unused here — this path
+    /// never compiles its spec) dataset behind it.
+    async fn mk_chart(db: &Db, ws: Uuid, owner: Uuid) -> Uuid {
+        let database: Uuid = sqlx::query_scalar(
+            "INSERT INTO query.databases (name, engine, host, port, workspace_id, delegated) \
+             VALUES ($1,'trino','localhost',8090,$2,false) RETURNING id",
+        )
+        .bind(format!("db-{}", Uuid::new_v4().simple()))
+        .bind(ws)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        let datasets = DatasetRepo::new(db.clone());
+        let dataset = datasets
+            .create(
+                ws,
+                database,
+                "orders",
+                "",
+                &SourceSpec::Physical {
+                    catalog: Some("tpch".into()),
+                    schema: "tiny".into(),
+                    table: "orders".into(),
+                },
+                &[NewColumn {
+                    column_name: "orderpriority".into(),
+                    data_type: "varchar".into(),
+                    type_generic: "string".into(),
+                    is_temporal: false,
+                }],
+                Some(egret_core::UserId(owner)),
+            )
+            .await
+            .unwrap();
+        let charts = ChartRepo::new(db.clone());
+        let chart = charts
+            .create(
+                ws,
+                dataset.id,
+                "chart",
+                "",
+                "table",
+                &serde_json::json!({"spec": {}}),
+                Some(owner),
+            )
+            .await
+            .unwrap();
+        chart.id
+    }
+
+    fn test_runner(db: &Db, renderer: Arc<FakeRenderer>) -> AutomationRunner {
+        let secrets = egret_secrets::SecretStore::new(db.clone(), None);
+        let ws_secrets = egret_secrets::WorkspaceSecretStore::new(db.clone(), secrets.clone());
+        AutomationRunner {
+            db: db.clone(),
+            schedules: ScheduleRepo::new(
+                db.clone(),
+                egret_secrets::SecretStore::new(
+                    db.clone(),
+                    Some(egret_secrets::Crypto::new(&[9u8; 32]).unwrap()),
+                ),
+            ),
+            databases: DatabaseRepo::new(db.clone(), secrets, ws_secrets),
+            users: UserRepo::new(db.clone()),
+            minter: Arc::new(NoMinter),
+            query: Arc::new(NoQuery),
+            resolver: Arc::new(PublicDns),
+            policy: SsrfPolicy::default(),
+            smtp: SmtpConfigRepo::new(
+                db.clone(),
+                egret_secrets::SecretStore::new(db.clone(), None),
+            ),
+            slack_config: crate::deliver::slack_config::SlackConfigRepo::new(
+                db.clone(),
+                egret_secrets::SecretStore::new(db.clone(), None),
+            ),
+            charts: ChartRepo::new(db.clone()),
+            dashboards: DashboardRepo::new(db.clone()),
+            datasets: DatasetRepo::new(db.clone()),
+            render_tokens: RenderTokenRepo::new(db.clone()),
+            renderer,
+            public_url: "https://egret.internal".into(),
+            browser_url: "https://egret.internal".into(),
+        }
+    }
+
+    /// Insert an alert directly — no route, matching the probe's method for
+    /// rows that "got in anyway" (written before SEC-2, or by anything that
+    /// bypassed the API). `chart_id` may belong to a different workspace than
+    /// `ws`; that is the whole point of the two tests below.
+    async fn mk_alert(db: &Db, ws: Uuid, owner: Uuid, chart_id: Uuid) -> Schedule {
+        // `schedule_alert_needs_query` requires database_id/sql/validator_type
+        // regardless of what this test exercises — a own-workspace database,
+        // since the CHECK does not (and cannot) also require it to match the
+        // schedule's workspace.
+        let database: Uuid = sqlx::query_scalar(
+            "INSERT INTO query.databases (name, engine, host, port, workspace_id, delegated) \
+             VALUES ($1,'trino','localhost',8090,$2,false) RETURNING id",
+        )
+        .bind(format!("db-{}", Uuid::new_v4().simple()))
+        .bind(ws)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        let id: Uuid = sqlx::query_scalar(
+            "INSERT INTO automation.schedules \
+               (workspace_id, type, name, crontab, database_id, sql, validator_type, \
+                chart_id, report_format) \
+             VALUES ($1,'alert','t','* * * * *',$2,'SELECT 1','not_null',$3,'png') \
+             RETURNING id",
+        )
+        .bind(ws)
+        .bind(database)
+        .bind(chart_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO automation.schedule_owners (schedule_id, user_id) VALUES ($1,$2)")
+            .bind(id)
+            .bind(owner)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        ScheduleRepo::new(
+            db.clone(),
+            egret_secrets::SecretStore::new(db.clone(), None),
+        )
+        .get(ws, id)
+        .await
+        .unwrap()
+        .unwrap()
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn render_alert_attachment_renders_a_same_workspace_chart(pool: sqlx::PgPool) {
+        let db = Db { pool };
+        let owner = mk_user(&db, "own").await;
+        let ws = mk_workspace(&db, owner).await;
+        let chart = mk_chart(&db, ws, owner).await;
+        let s = mk_alert(&db, ws, owner, chart).await;
+
+        let renderer = Arc::new(FakeRenderer {
+            seen: Mutex::new(vec![]),
+        });
+        let runner = test_runner(&db, renderer.clone());
+
+        let attachment = runner.render_alert_attachment(&s).await;
+        assert!(attachment.is_some(), "a same-workspace chart still renders");
+        assert_eq!(
+            renderer.seen.lock().unwrap().len(),
+            1,
+            "the renderer was asked exactly once"
+        );
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn render_alert_attachment_refuses_a_foreign_chart_without_minting_a_token(
+        pool: sqlx::PgPool,
+    ) {
+        // §5's alert case: `model.rs`'s alert branch checks only that a
+        // chart_id and a dashboard_id are not BOTH set — never that the one
+        // set belongs to the alert's own workspace. This is a row that "got
+        // in anyway" (mirrors the probe: written before SEC-2, or by
+        // anything that bypassed the route), inserted directly by SQL.
+        let db = Db { pool };
+        let owner = mk_user(&db, "own").await;
+        let ws1 = mk_workspace(&db, owner).await;
+        let ws2 = mk_workspace(&db, owner).await;
+        let foreign_chart = mk_chart(&db, ws2, owner).await;
+        let s = mk_alert(&db, ws1, owner, foreign_chart).await;
+
+        let renderer = Arc::new(FakeRenderer {
+            seen: Mutex::new(vec![]),
+        });
+        let runner = test_runner(&db, renderer.clone());
+
+        let attachment = runner.render_alert_attachment(&s).await;
+        assert!(
+            attachment.is_none(),
+            "a foreign chart must never produce an attachment"
+        );
+        assert!(
+            renderer.seen.lock().unwrap().is_empty(),
+            "the renderer must never be asked to render a foreign object — a \
+             mint-then-403 or mint-then-404 still leaks the fact that a \
+             render was ATTEMPTED, and the fix is to refuse before minting"
+        );
+    }
 }
