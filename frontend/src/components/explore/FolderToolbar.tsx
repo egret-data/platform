@@ -11,8 +11,9 @@ import { ListToolbarButton } from "@/components/explore/ListToolbarButton";
  *
  * Not `active`/`filled`: this is a command, not a filter. The bookmark and bulk
  * toggles beside it stay pressed while they are engaged; "New folder" has no
- * engaged state to report, and an `aria-pressed="true"` here would tell a
- * screen reader the list is filtered when it is not.
+ * engaged state to report, and passing `active` here — even `false` — would
+ * mark it up as a toggle (`aria-pressed`) it isn't. Omitting `active` is what
+ * keeps this a plain button rather than a toggle announcing "not pressed".
  */
 export function FolderToolbar({ onNewFolder }: { onNewFolder: () => void }) {
   return <ListToolbarButton icon={FolderPlus} label="New folder" onClick={onNewFolder} />;

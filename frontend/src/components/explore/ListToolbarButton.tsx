@@ -18,11 +18,18 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
  * `filled` is separate from `active` on purpose: the bookmark and trash buttons
  * fill their glyph when engaged, the bulk and folder buttons do not, and that is
  * a per-icon decision rather than a consequence of being active.
+ *
+ * `active` also decides whether the control reads as a toggle at all: pass it
+ * and the button carries `aria-pressed`, announcing engaged/idle to a screen
+ * reader. Omit it — as a momentary action like "New folder" does — and React
+ * drops the attribute entirely, rather than defaulting it to `false`. A
+ * `false` default would announce a plain action button as "toggle button, not
+ * pressed", which is a state the control does not have.
  */
 export function ListToolbarButton({
   icon: Icon,
   label,
-  active = false,
+  active,
   filled = false,
   onClick,
 }: {

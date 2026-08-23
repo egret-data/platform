@@ -6,15 +6,16 @@ import { useDashboards, useDashboardMutations, type DashboardSummary } from "@/a
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
-import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { FolderNameDialog } from "@/components/explore/FolderNameDialog";
 import { RelativeTime } from "@/components/explore/RelativeTime";
 import { SortableHeader, type SortState } from "@/components/explore/SortableHeader";
-import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { SummaryStrip } from "@/components/explore/SummaryStrip";
+import { ListPageShell } from "@/components/explore/ListPageShell";
+import { ListStates } from "@/components/explore/ListStates";
+import { ListToolbarButton } from "@/components/explore/ListToolbarButton";
+import { EmptyState } from "@/components/explore/EmptyState";
 import { DashboardActionsMenu } from "@/components/chart/dashboard/DashboardActionsMenu";
 import { ShareDialog } from "@/components/sharing/ShareDialog";
 import { useBulkSelect } from "@/hooks/useBulkSelect";
@@ -185,69 +186,93 @@ export default function Dashboards() {
   );
 
   return (
-    <div className="p-4">
-      <div className="mb-4 flex items-center justify-between">
-        <h1 className="text-lg font-semibold">{showTrash ? "Trash" : "Dashboards"}</h1>
-        <div className="flex items-center gap-2">
+    <ListPageShell
+      title={showTrash ? "Trash" : "Dashboards"}
+      toolbar={
+        <>
           {!showTrash && (
-            <Tooltip><TooltipTrigger asChild>
-              <Button size="icon" variant={onlyBookmarked ? "secondary" : "outline"} aria-label="Bookmarks"
-                onClick={() => setOnlyBookmarked((v) => !v)}>
-                <Star className={`h-4 w-4 ${onlyBookmarked ? "fill-current" : ""}`} />
-              </Button>
-            </TooltipTrigger><TooltipContent side="bottom">Bookmarks</TooltipContent></Tooltip>
+            <ListToolbarButton
+              icon={Star}
+              label="Bookmarks"
+              active={onlyBookmarked}
+              filled
+              onClick={() => setOnlyBookmarked((v) => !v)}
+            />
           )}
           {!showTrash && hasData && canManage && (
-            <Tooltip><TooltipTrigger asChild>
-              <Button size="icon" variant={bulk.bulkMode ? "secondary" : "outline"} aria-label="Bulk select"
-                onClick={() => bulk.setBulkMode(!bulk.bulkMode)}>
-                <ListChecks className="h-4 w-4" />
-              </Button>
-            </TooltipTrigger><TooltipContent side="bottom">Bulk select</TooltipContent></Tooltip>
+            <ListToolbarButton
+              icon={ListChecks}
+              label="Bulk select"
+              active={bulk.bulkMode}
+              onClick={() => bulk.setBulkMode(!bulk.bulkMode)}
+            />
           )}
-          <Tooltip><TooltipTrigger asChild>
-            <Button size="icon" variant={showTrash ? "secondary" : "outline"} aria-label="Trash"
-              onClick={() => { const next = !showTrash; setShowTrash(next); if (next) { setOnlyBookmarked(false); bulk.setBulkMode(false); } }}>
-              <Trash2 className={`h-4 w-4 ${showTrash ? "fill-current" : ""}`} />
-            </Button>
-          </TooltipTrigger><TooltipContent side="bottom">Trash</TooltipContent></Tooltip>
+          {/* NOT gated on `hasData`: this is a view switch, not a filter. It
+              selects a different server query, and an empty dataset list says
+              nothing about whether the trash is empty. Gated, it would be the
+              only way OUT of an empty trash and would vanish exactly when it is
+              the only control left. */}
+          <ListToolbarButton
+            icon={Trash2}
+            label="Trash"
+            active={showTrash}
+            filled
+            onClick={() => { const next = !showTrash; setShowTrash(next); if (next) { setOnlyBookmarked(false); bulk.setBulkMode(false); } }}
+          />
           {!showTrash && canManage && (
-            <Tooltip><TooltipTrigger asChild>
-              <Button size="icon" variant="outline" aria-label="New folder"
-                onClick={() => setFolderDialog({ mode: "new" })}>
-                <FolderPlus className="h-4 w-4" />
-              </Button>
-            </TooltipTrigger><TooltipContent side="bottom">New folder</TooltipContent></Tooltip>
+            <ListToolbarButton
+              icon={FolderPlus}
+              label="New folder"
+              onClick={() => setFolderDialog({ mode: "new" })}
+            />
           )}
-          <Dialog open={open && canManage} onOpenChange={setOpen}>
-            {canManage && <DialogTrigger asChild><Button>+ Dashboard</Button></DialogTrigger>}
-            <DialogContent>
-              <DialogHeader><DialogTitle>New dashboard</DialogTitle></DialogHeader>
-              <div className="flex flex-col gap-3 py-2">
-                <Input autoFocus placeholder="Name" value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") onCreate(); }} />
-                <label className="flex flex-col gap-1 text-xs text-muted-foreground">
-                  Description
-                  <textarea
-                    aria-label="Description"
-                    placeholder="It's optional but oh, so helpful"
-                    className="h-20 w-full resize-none rounded-md border bg-background px-3 py-2 text-sm text-foreground"
-                    value={description}
-                    onChange={(e) => setDescription(e.target.value)}
-                  />
-                </label>
-                <div className="flex justify-end">
-                  <Button onClick={onCreate} disabled={create.isPending}>Create</Button>
-                </div>
+        </>
+      }
+      action={
+        <Dialog open={open && canManage} onOpenChange={setOpen}>
+          {canManage && <DialogTrigger asChild><Button>+ Dashboard</Button></DialogTrigger>}
+          <DialogContent>
+            <DialogHeader><DialogTitle>New dashboard</DialogTitle></DialogHeader>
+            <div className="flex flex-col gap-3 py-2">
+              <Input autoFocus placeholder="Name" value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") onCreate(); }} />
+              <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+                Description
+                <textarea
+                  aria-label="Description"
+                  placeholder="It's optional but oh, so helpful"
+                  className="h-20 w-full resize-none rounded-md border bg-background px-3 py-2 text-sm text-foreground"
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                />
+              </label>
+              <div className="flex justify-end">
+                <Button onClick={onCreate} disabled={create.isPending}>Create</Button>
               </div>
-            </DialogContent>
-          </Dialog>
-        </div>
-      </div>
-
-      {isLoading ? (
-        <ListSkeleton cols={4} />
-      ) : hasData ? (
-        <>
+            </div>
+          </DialogContent>
+        </Dialog>
+      }
+    >
+      <ListStates
+        isLoading={isLoading}
+        isError={isError}
+        error={error}
+        errorText="Failed to load dashboards."
+        hasData={hasData}
+        skeletonCols={4}
+        empty={
+          showTrash ? (
+            <p className="text-muted-foreground">Trash is empty.</p>
+          ) : (
+            <EmptyState
+              variant="dashed"
+              title="No dashboards yet."
+              description="Compose charts into a shareable dashboard."
+              action={<Button onClick={() => setOpen(true)}>Create your first dashboard</Button>}
+            />
+          )
+        }
+      >
           <div className="mb-3 flex flex-wrap items-center gap-2">
             <div className="relative max-w-xs flex-1">
               <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
@@ -317,19 +342,7 @@ export default function Dashboards() {
           ) : (
             <p className="text-muted-foreground">{onlyBookmarked ? "No bookmarked dashboards." : "No dashboards match the current filters."}</p>
           )}
-        </>
-      ) : isError ? (
-        <Alert variant="destructive">
-          <AlertDescription>{(error as Error)?.message ?? "Failed to load dashboards."}</AlertDescription>
-        </Alert>
-      ) : showTrash ? (
-        <p className="text-muted-foreground">Trash is empty.</p>
-      ) : (
-        <div className="rounded border border-dashed p-8 text-center text-muted-foreground">
-          <p>No dashboards yet. Compose charts into a shareable dashboard.</p>
-          <Button className="mt-3" onClick={() => setOpen(true)}>Create your first dashboard</Button>
-        </div>
-      )}
+      </ListStates>
 
       <FolderNameDialog
         open={!!folderDialog}
@@ -376,6 +389,6 @@ export default function Dashboards() {
           onOpenChange={(o) => { if (!o) setFolderShare(null); }}
         />
       )}
-    </div>
+    </ListPageShell>
   );
 }

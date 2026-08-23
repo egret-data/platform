@@ -5,13 +5,15 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
-import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { FacetSelect, FACET_ALL } from "@/components/explore/FacetSelect";
 import { SummaryStrip } from "@/components/explore/SummaryStrip";
 import { FolderNameDialog } from "@/components/explore/FolderNameDialog";
+import { ListPageShell } from "@/components/explore/ListPageShell";
+import { ListStates } from "@/components/explore/ListStates";
+import { ListToolbarButton } from "@/components/explore/ListToolbarButton";
+import { EmptyState } from "@/components/explore/EmptyState";
 import { useDatabases } from "@/api/sqllab";
 import { useDatasets, useDataset, useDatasetListMutations, useDeleteDataset, type DatasetSummary } from "@/api/datasets";
 import { CreateDatasetDialog } from "@/components/dataset/CreateDatasetDialog";
@@ -20,7 +22,6 @@ import { ShareDialog } from "@/components/sharing/ShareDialog";
 import { TagDialog } from "@/components/access/TagEditor";
 import { RelativeTime } from "@/components/explore/RelativeTime";
 import { SortableHeader } from "@/components/explore/SortableHeader";
-import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { useBulkSelect } from "@/hooks/useBulkSelect";
 import { useFolders, useFolderMutations, useSetFolder } from "@/api/folders";
 import { groupByFolder, useCollapsed, UNCATEGORIZED_KEY } from "@/components/explore/folders";
@@ -167,52 +168,77 @@ export default function Datasets() {
   );
 
   return (
-    <div className="p-4">
-      <div className="mb-4 flex items-center justify-between">
-        <h1 className="text-lg font-semibold">{showTrash ? "Trash" : "Datasets"}</h1>
-        <div className="flex items-center gap-2">
+    <ListPageShell
+      title={showTrash ? "Trash" : "Datasets"}
+      toolbar={
+        <>
           {!showTrash && (
-            <Tooltip><TooltipTrigger asChild>
-              <Button size="icon" variant={onlyBookmarked ? "secondary" : "outline"} aria-label="Bookmarks"
-                onClick={() => setOnlyBookmarked((v) => !v)}>
-                <Star className={`h-4 w-4 ${onlyBookmarked ? "fill-current" : ""}`} />
-              </Button>
-            </TooltipTrigger><TooltipContent side="bottom">Bookmarks</TooltipContent></Tooltip>
+            <ListToolbarButton
+              icon={Star}
+              label="Bookmarks"
+              active={onlyBookmarked}
+              filled
+              onClick={() => setOnlyBookmarked((v) => !v)}
+            />
           )}
           {!showTrash && hasData && (
-            <Tooltip><TooltipTrigger asChild>
-              <Button size="icon" variant={bulk.bulkMode ? "secondary" : "outline"} aria-label="Bulk select"
-                onClick={() => bulk.setBulkMode(!bulk.bulkMode)}>
-                <ListChecks className="h-4 w-4" />
-              </Button>
-            </TooltipTrigger><TooltipContent side="bottom">Bulk select</TooltipContent></Tooltip>
+            <ListToolbarButton
+              icon={ListChecks}
+              label="Bulk select"
+              active={bulk.bulkMode}
+              onClick={() => bulk.setBulkMode(!bulk.bulkMode)}
+            />
           )}
-          <Tooltip><TooltipTrigger asChild>
-            <Button size="icon" variant={showTrash ? "secondary" : "outline"} aria-label="Trash"
-              onClick={() => { const next = !showTrash; setShowTrash(next); if (next) { setOnlyBookmarked(false); bulk.setBulkMode(false); } }}>
-              <Trash2 className={`h-4 w-4 ${showTrash ? "fill-current" : ""}`} />
-            </Button>
-          </TooltipTrigger><TooltipContent side="bottom">Trash</TooltipContent></Tooltip>
+          {/* NOT gated on `hasData`: this is a view switch, not a filter. It
+              selects a different server query, and an empty dataset list says
+              nothing about whether the trash is empty. Gated, it would be the
+              only way OUT of an empty trash and would vanish exactly when it is
+              the only control left. */}
+          <ListToolbarButton
+            icon={Trash2}
+            label="Trash"
+            active={showTrash}
+            filled
+            onClick={() => {
+              const next = !showTrash;
+              setShowTrash(next);
+              if (next) {
+                setOnlyBookmarked(false);
+                bulk.setBulkMode(false);
+              }
+            }}
+          />
           {!showTrash && (
-            <Tooltip><TooltipTrigger asChild>
-              <Button size="icon" variant="outline" aria-label="New folder"
-                onClick={() => setFolderDialog({ mode: "new" })}>
-                <FolderPlus className="h-4 w-4" />
-              </Button>
-            </TooltipTrigger><TooltipContent side="bottom">New folder</TooltipContent></Tooltip>
+            <ListToolbarButton
+              icon={FolderPlus}
+              label="New folder"
+              onClick={() => setFolderDialog({ mode: "new" })}
+            />
           )}
-          {!showTrash && <Button onClick={() => setCreateOpen(true)}>Create</Button>}
-        </div>
-      </div>
-
-      {isLoading ? (
-        <ListSkeleton cols={6} />
-      ) : isError ? (
-        <Alert variant="destructive">
-          <AlertDescription>{(error as Error)?.message ?? "Failed to load datasets."}</AlertDescription>
-        </Alert>
-      ) : hasData ? (
-        <>
+        </>
+      }
+      action={!showTrash ? <Button onClick={() => setCreateOpen(true)}>Create</Button> : null}
+    >
+      <ListStates
+        isLoading={isLoading}
+        isError={isError}
+        error={error}
+        errorText="Failed to load datasets."
+        hasData={hasData}
+        skeletonCols={6}
+        empty={
+          showTrash ? (
+            <p className="text-muted-foreground">Trash is empty.</p>
+          ) : (
+            <EmptyState
+              variant="dashed"
+              title="No datasets yet."
+              description="A dataset is a named, reusable source for charts."
+              action={<Button onClick={() => setCreateOpen(true)}>Create your first dataset</Button>}
+            />
+          )
+        }
+      >
           <div className="mb-3 flex flex-wrap items-center gap-2">
             <div className="relative max-w-xs flex-1">
               <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
@@ -302,15 +328,7 @@ export default function Datasets() {
           ) : (
             <p className="text-muted-foreground">{onlyBookmarked ? "No bookmarked datasets." : "No datasets match the current filters."}</p>
           )}
-        </>
-      ) : showTrash ? (
-        <p className="text-muted-foreground">Trash is empty.</p>
-      ) : (
-        <div className="rounded border border-dashed p-8 text-center text-muted-foreground">
-          <p>No datasets yet. A dataset is a named, reusable source for charts.</p>
-          <Button className="mt-3" onClick={() => setCreateOpen(true)}>Create your first dataset</Button>
-        </div>
-      )}
+      </ListStates>
 
       <FolderNameDialog
         open={!!folderDialog}
@@ -382,6 +400,6 @@ export default function Datasets() {
           onOpenChange={(o) => { if (!o) setTagsTarget(null); }}
         />
       )}
-    </div>
+    </ListPageShell>
   );
 }

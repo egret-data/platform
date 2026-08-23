@@ -18,8 +18,14 @@ const DEFAULT_CHARTS: ChartFixture[] = [
 // can swap the fixture between renders.
 let charts: ChartFixture[] = DEFAULT_CHARTS;
 let folders: { id: string; name: string }[] = [];
+let queryError: unknown = undefined;
 vi.mock("@/api/charts", () => ({
-  useCharts: () => ({ data: charts, isLoading: false }),
+  useCharts: () => ({
+    data: charts,
+    isLoading: false,
+    isError: queryError !== undefined,
+    error: queryError,
+  }),
   useChartMutations: () => ({
     remove: { mutateAsync: removeMock },
     duplicate: { mutateAsync: duplicateMock },
@@ -45,6 +51,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   charts = DEFAULT_CHARTS;
   folders = [];
+  queryError = undefined;
   // `useCollapsed` persists collapse state in localStorage under
   // `folders:eng:charts`; without this a test that collapses a folder leaks
   // that collapse into every later test in the file.
@@ -170,5 +177,28 @@ describe("Charts — bulk select only reaches rows on screen", () => {
     await vi.waitFor(() => expect(trashMock).toHaveBeenCalledWith("c-shown"));
     expect(trashMock).not.toHaveBeenCalledWith("c-hidden");
     expect(trashMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("Charts on the Explore primitives", () => {
+  it("reports the Bookmarks filter's engaged state with aria-pressed", async () => {
+    renderAt();
+    const btn = screen.getByRole("button", { name: "Bookmarks" });
+    expect(btn).toHaveAttribute("aria-pressed", "false");
+    await userEvent.click(btn);
+    expect(btn).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("renders exactly one h1, and it is the page title", () => {
+    renderAt();
+    const h1s = screen.getAllByRole("heading", { level: 1 });
+    expect(h1s).toHaveLength(1);
+    expect(h1s[0]).toHaveTextContent("Charts");
+  });
+
+  it("falls back to the error text when the error carries no message", () => {
+    queryError = new Error("");
+    renderAt();
+    expect(screen.getByText("Failed to load charts.")).toBeInTheDocument();
   });
 });

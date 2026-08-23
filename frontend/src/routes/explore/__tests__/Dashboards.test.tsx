@@ -14,10 +14,16 @@ const DEFAULT_DASHBOARDS: DashFixture[] = [
 // can swap the fixture between renders.
 let dashboards: DashFixture[] = DEFAULT_DASHBOARDS;
 let folders: { id: string; name: string }[] = [];
+let queryError: unknown = undefined;
 const trashMock = vi.fn().mockResolvedValue(undefined);
 
 vi.mock("@/api/dashboards", () => ({
-  useDashboards: () => ({ data: dashboards, isLoading: false }),
+  useDashboards: () => ({
+    data: dashboards,
+    isLoading: false,
+    isError: queryError !== undefined,
+    error: queryError,
+  }),
   useDashboardMutations: () => ({
     create: { mutateAsync: vi.fn().mockResolvedValue({ id: "x" }), isPending: false },
     remove: { mutateAsync: vi.fn().mockResolvedValue(undefined) },
@@ -55,6 +61,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   dashboards = DEFAULT_DASHBOARDS;
   folders = [];
+  queryError = undefined;
   // `useCollapsed` persists collapse state in localStorage under
   // `folders:eng:dashboards`; without this a test that collapses a folder
   // leaks that collapse into every later test in the file.
@@ -138,5 +145,33 @@ describe("Dashboards — bulk select only reaches rows on screen", () => {
     await waitFor(() => expect(trashMock).toHaveBeenCalledWith("d-shown"));
     expect(trashMock).not.toHaveBeenCalledWith("d-hidden");
     expect(trashMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("Dashboards on the Explore primitives", () => {
+  // The §2.1 defect, still present before this task: `hasData` was checked
+  // before `isError`, so a failed refetch holding cached rows rendered the
+  // table and swallowed the error. The fixture below is exactly that state —
+  // rows present AND the query in error.
+  it("shows the error, not the cached rows, when a refetch fails", () => {
+    queryError = new Error("Backend unreachable");
+    renderAt();
+    expect(screen.getByText("Backend unreachable")).toBeInTheDocument();
+    expect(screen.queryByText("Ops")).not.toBeInTheDocument();
+  });
+
+  it("reports the Bookmarks filter's engaged state with aria-pressed", async () => {
+    renderAt();
+    const btn = screen.getByRole("button", { name: "Bookmarks" });
+    expect(btn).toHaveAttribute("aria-pressed", "false");
+    await userEvent.click(btn);
+    expect(btn).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("renders exactly one h1, and it is the page title", () => {
+    renderAt();
+    const h1s = screen.getAllByRole("heading", { level: 1 });
+    expect(h1s).toHaveLength(1);
+    expect(h1s[0]).toHaveTextContent("Dashboards");
   });
 });
