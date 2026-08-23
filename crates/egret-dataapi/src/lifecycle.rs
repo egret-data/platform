@@ -368,6 +368,38 @@ pub enum ValidationError {
         first: String,
         second: String,
     },
+    /// One STATEMENT returning two same-named columns of different types.
+    ///
+    /// Separated from [`ValidationError::ColumnTypeConflict`] because the same
+    /// fold catches both and the repairs are not the same. Telling an author
+    /// their column "is `bigint` in one branch and `varchar` in another" when
+    /// their definition has no branch at all sends them hunting for one.
+    #[error(
+        "this definition returns two columns named `{name}`, of types `{first}` and `{second}`. \
+         A JSON object has one key per name, so only one of them could ever be served — alias \
+         them apart, e.g. `SELECT a.{name} AS a_{name}, b.{name} AS b_{name}`"
+    )]
+    AmbiguousColumnName {
+        name: String,
+        first: String,
+        second: String,
+    },
+    /// More structurally distinct renderings than publish will describe.
+    ///
+    /// Refusing, not truncating. Truncating drops whichever branch fell off the
+    /// end, and a branch that is not described is a column missing from the
+    /// union — which is exactly the `503 schema_drift` this whole gate exists to
+    /// remove. A loud publish is the honest failure; a quiet one is the bug.
+    #[error(
+        "this definition renders to {statements} structurally distinct statements, and publish \
+         describes every one of them against the engine so the frozen contract covers every \
+         branch a caller can reach. The limit is {limit}. Each optional parameter with no \
+         `default` adds the branch its absence takes, and each one whose value can flip an \
+         `{{% if %}}` — a boolean especially — multiplies the rest: give some of them a \
+         `default` or mark them `required` so absence is not a separate branch, or split this \
+         into two endpoints"
+    )]
+    TooManyBranches { statements: usize, limit: usize },
 }
 
 impl From<ValidationError> for Error {
@@ -1587,6 +1619,43 @@ pub(crate) struct DescribedBranches {
     pub per_statement: Vec<Vec<String>>,
 }
 
+/// How many structurally distinct statements one definition may publish.
+///
+/// # Why there is a limit at all, and why it refuses rather than truncates
+///
+/// Publish describes every branch, so its engine cost is the number of distinct
+/// renderings — and nothing else bounds that. `validate_definition` puts no cap
+/// on how many parameters a definition declares, the context set is
+/// `optional + 2`, and each context is probed up to
+/// `render::MAX_PROBES` times, so the ceiling before this constant was
+/// `64 × (optional + 2)` describes from one authenticated publish.
+///
+/// # Where the number comes from
+///
+/// Measured, by counting the describes one publish actually costs — not derived
+/// from the ceiling, which no realistic definition approaches:
+///
+/// | definition | distinct statements |
+/// |---|---|
+/// | spec §4.3's canonical endpoint (4 parameters, 3 `{% if %}`, a `{% for %}`) | 10 |
+/// | *n* optional **string** parameters, each guarding a block | *n* + 2 (22 at *n* = 20) |
+/// | *n* optional **enum** parameters, 8 `allowed` each | *n* + 2 |
+/// | *n* optional **boolean** parameters, each guarding a block | 12 at *n* = 4, 38 at *n* = 8, 57 at *n* = 10, **68 at *n* = 11**, 212 at *n* = 20 |
+///
+/// A string or enum parameter costs one statement, because its representative
+/// value is truthy and its candidate values are bound rather than branched on;
+/// only the absent context is new. A boolean has a closed two-value space, so
+/// probing it flips a block from every other context as well — that is the
+/// quadratic row, and it is the only shape that gets anywhere near the limit.
+///
+/// So `64` is 6.4× the canonical endpoint, admits every string/enum definition
+/// measured at any width the author is likely to write, and admits ten
+/// independent boolean toggles on one endpoint while refusing eleven. It is
+/// also `render::MAX_PROBES`, deliberately: that is already this
+/// crate's stated answer to "how much may one definition cost", and two
+/// different budgets would be two numbers to keep in step.
+const MAX_PUBLISHED_STATEMENTS: usize = 64;
+
 /// Every rendering of the definition publish must describe, in describe order.
 ///
 /// # Why one render is not enough
@@ -1667,6 +1736,15 @@ async fn describe_branches(
             crate::render::render(&draft.sql, &ctx).map_err(ValidationError::Render)?;
         statements.push((rendered, binds.len()));
     }
+    // Before the first describe, so an over-wide definition costs the author an
+    // error rather than costing the engine a few hundred round trips.
+    if statements.len() > MAX_PUBLISHED_STATEMENTS {
+        return Err(ValidationError::TooManyBranches {
+            statements: statements.len(),
+            limit: MAX_PUBLISHED_STATEMENTS,
+        }
+        .into());
+    }
 
     let mut union: Vec<ColumnSpec> = Vec::new();
     let mut per_statement: Vec<Vec<String>> = Vec::new();
@@ -1684,14 +1762,28 @@ async fn describe_branches(
             return Err(ValidationError::DescribeReturnedNoColumns.into());
         }
         per_statement.push(columns.iter().map(|c| c.name.clone()).collect());
-        for column in &columns {
+        for (i, column) in columns.iter().enumerate() {
             let spec = ColumnSpec::from(column);
             match union.iter().find(|u| u.name == spec.name) {
                 Some(existing) if existing.ty != spec.ty => {
-                    return Err(ValidationError::ColumnTypeConflict {
-                        name: spec.name,
-                        first: existing.ty.clone(),
-                        second: spec.ty,
+                    // WHICH conflict decides which repair. An earlier column of
+                    // this same statement carrying the name means one statement
+                    // returns the name twice — `SELECT a.id, b.id FROM a JOIN b`
+                    // — and there is no branch involved to go looking for.
+                    let same_statement = columns[..i].iter().any(|c| c.name == spec.name);
+                    let (name, first, second) = (spec.name, existing.ty.clone(), spec.ty);
+                    return Err(if same_statement {
+                        ValidationError::AmbiguousColumnName {
+                            name,
+                            first,
+                            second,
+                        }
+                    } else {
+                        ValidationError::ColumnTypeConflict {
+                            name,
+                            first,
+                            second,
+                        }
                     }
                     .into());
                 }

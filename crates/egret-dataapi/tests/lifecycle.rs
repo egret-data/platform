@@ -1270,7 +1270,8 @@ async fn the_canonical_parameterized_endpoint_publishes() {
     );
     assert!(
         described.iter().any(|s| !s.contains("region = ?")),
-        "and so must the branch a caller reaches by omitting the parameter,          which is the one a call with no query string takes: {described:?}"
+        "and so must the branch a caller reaches by omitting the parameter, which \
+         is the one a call with no query string takes: {described:?}"
     );
     assert_eq!(
         f.live_snapshot(ep).await.param_gate,
@@ -1371,7 +1372,9 @@ async fn the_branch_an_omitted_parameter_takes_is_described() {
             .expect("region is declared")
             .required,
         "a call with no query string omits `region`, takes the other branch and \
-         returns one column — that call must not be a schema_drift 503"
+         returns one column, so `region` is not in every branch. This pins the \
+         FLAG only: `shape_rows` still compares names and arity exactly, so that \
+         call is a schema_drift 503 until Task 6 makes the check a subset one"
     );
 }
 
@@ -1479,6 +1482,110 @@ async fn a_non_conditional_definition_describes_exactly_once() {
         1,
         "deduplication is the whole cost argument; `at least one` would pass with \
          it removed"
+    );
+}
+
+/// The publish fan-out is bounded, and the bound is a REFUSAL.
+///
+/// Truncating the described set would drop whichever branch fell off the end,
+/// and an undescribed branch is a column missing from the union — the exact
+/// `503 schema_drift` this gate exists to remove. So the definition is refused
+/// instead, and the author is told which knob reduces it.
+///
+/// Both sides are asserted from the same shape, one parameter apart, because a
+/// test that only proved the refusal would pass against a limit of zero.
+#[tokio::test]
+async fn a_definition_with_more_branches_than_publish_will_describe_is_refused() {
+    let f = skip_without_db!();
+    f.port.set(Describe::Columns(vec![("id", "uuid")]));
+    // Measured: n independent optional booleans render to 57 distinct statements
+    // at n = 10 and 68 at n = 11, against a limit of 64. Ten independent boolean
+    // toggles on one endpoint is already past what anyone writes; eleven is the
+    // first count that costs more than the budget.
+    let build = |n: usize| {
+        let mut sql = String::from("SELECT id FROM t WHERE 1=1");
+        let mut params = Vec::new();
+        for i in 0..n {
+            sql.push_str(&format!(
+                " {{% if p{i} %}} AND a{i} = {{{{ p{i} }}}}{{% endif %}}"
+            ));
+            params.push(serde_json::json!({
+                "name": format!("p{i}"), "type": "boolean", "location": "query"
+            }));
+        }
+        (sql, serde_json::Value::from(params))
+    };
+
+    let (sql, params) = build(10);
+    let ok = f.create_endpoint("under", "reports/under", &sql).await;
+    f.patch_endpoint(ok, serde_json::json!({ "params": params }))
+        .await;
+    let before = f.port.call_count();
+    let (status, body) = f.publish_raw(ok).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "ten optional booleans is under the limit and must still publish: {body}"
+    );
+    let described = f.port.call_count() - before;
+    assert!(
+        described > 10 && described <= 64,
+        "and it must have cost real describes, all of them within the budget: \
+         {described}"
+    );
+
+    let (sql, params) = build(11);
+    let over = f.create_endpoint("over", "reports/over", &sql).await;
+    f.patch_endpoint(over, serde_json::json!({ "params": params }))
+        .await;
+    let before = f.port.call_count();
+    let (status, body) = f.publish_raw(over).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("68") && msg.contains("64"),
+        "the author needs the measured count AND the limit, or they cannot tell \
+         how far over they are: {body}"
+    );
+    assert!(
+        msg.contains("`default`") && msg.contains("split"),
+        "and what to do about it, not just the number: {body}"
+    );
+    assert_eq!(
+        f.port.call_count(),
+        before,
+        "the refusal must come BEFORE the first describe — the point of the \
+         limit is that the engine never sees the fan-out"
+    );
+    assert!(
+        f.versions(over).await.is_empty(),
+        "nothing may be published"
+    );
+}
+
+/// Two same-named columns of different types in ONE statement is a different
+/// fault from two branches disagreeing, and the fold catches both — so it must
+/// not tell an author with no `{% if %}` in their definition to go and look at
+/// their branches.
+#[tokio::test]
+async fn two_same_named_columns_in_one_statement_are_diagnosed_as_an_alias_problem() {
+    let f = skip_without_db!();
+    f.port
+        .set(Describe::Columns(vec![("id", "bigint"), ("id", "varchar")]));
+    let ep = f
+        .create_endpoint("dup", "reports/dup", "SELECT a.id, b.id FROM a JOIN b")
+        .await;
+    let (status, body) = f.publish_raw(ep).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("two columns named") && msg.contains("alias"),
+        "the repair is an alias: {body}"
+    );
+    assert!(
+        !msg.contains("branch"),
+        "this definition has no branch, and sending the author to look for one \
+         is the misdiagnosis this arm exists to avoid: {body}"
     );
 }
 
