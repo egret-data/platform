@@ -631,6 +631,13 @@ async fn a_png_report_with_a_directly_inserted_foreign_schedule_targets_row_fail
         fx.renderer.seen.lock().unwrap().is_empty(),
         "the renderer must never be asked to fetch a foreign object's print page"
     );
+    // Fix round 1's item 2: the comment above claims no token was minted —
+    // prove it against the table, not just the (also correct) renderer seam.
+    let tokens: i64 = sqlx::query_scalar("SELECT count(*) FROM automation.render_tokens")
+        .fetch_one(&fx.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(tokens, 0, "no render token may exist for a foreign object");
 }
 
 #[sqlx::test(migrations = "../../migrations")]

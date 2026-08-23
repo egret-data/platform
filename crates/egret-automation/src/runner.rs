@@ -710,9 +710,19 @@ impl AutomationRunner {
             first_error.get_or_insert(e);
         }
         if !email_to.is_empty() {
-            if let Err(e) = self.send_email(s, eval, &email_to).await {
-                tracing::warn!(schedule = %s.id, error = %e, "automation: email failed");
-                first_error.get_or_insert(e);
+            match self.send_email(s, eval, &email_to).await {
+                Ok(None) => {}
+                // Sent, but with a note for the run log (fix round 1) — e.g.
+                // an alert's attachment was skipped because its target
+                // belongs to another workspace. `state` must stay whatever
+                // the alert's own condition produced; only `error` explains.
+                Ok(Some(note)) => {
+                    first_error.get_or_insert(note);
+                }
+                Err(e) => {
+                    tracing::warn!(schedule = %s.id, error = %e, "automation: email failed");
+                    first_error.get_or_insert(e);
+                }
             }
         }
 
@@ -799,13 +809,27 @@ impl AutomationRunner {
     /// a number moved; losing that message because a screenshot did not come
     /// back would be the worse failure, so the picture is best-effort and the
     /// reason lands in the log.
-    async fn render_alert_attachment(&self, s: &Schedule) -> Option<email::Attachment> {
-        let (kind, object_id) = report_target(s)?;
+    ///
+    /// Returns `Err` in exactly ONE case: the target exists but does not
+    /// belong to this schedule's workspace. Every other "no picture" reason
+    /// (no target set, wrong format, owner/mint/render trouble) stays
+    /// `Ok(None)` — silent, as before fix round 1 — because those are
+    /// operational, not a tenancy refusal a workspace-1 operator needs
+    /// explained. `send_email` threads the `Err` into `deliver`'s
+    /// `first_error` so it reaches `schedule_runs.error` without flipping
+    /// `state` away from whatever the alert's own condition produced.
+    async fn render_alert_attachment(
+        &self,
+        s: &Schedule,
+    ) -> Result<Option<email::Attachment>, String> {
+        let Some((kind, object_id)) = report_target(s) else {
+            return Ok(None);
+        };
         // Only the image formats make sense here; the rows already ride along
         // as CSV, so `csv`/`text` on an alert would attach them twice.
         let format = match s.report_format.as_deref().and_then(ReportFormat::parse) {
             Some(f @ (ReportFormat::Png | ReportFormat::Pdf)) => f,
-            _ => return None,
+            _ => return Ok(None),
         };
         // `model.rs`'s alert branch checks only ARITY — "not both a chart and
         // a dashboard" — never ownership, so `chart_id`/`dashboard_id` can be
@@ -816,32 +840,38 @@ impl AutomationRunner {
         // mint a token — let alone attach a picture — for something that
         // isn't this workspace's.
         let scoped = match kind {
-            "chart" => self
-                .charts
-                .get(object_id, s.workspace_id)
-                .await
-                .ok()?
-                .is_some(),
-            _ => self
-                .dashboards
-                .get(object_id, s.workspace_id)
-                .await
-                .ok()?
-                .is_some(),
+            "chart" => match self.charts.get(object_id, s.workspace_id).await {
+                Ok(v) => v.is_some(),
+                // A DB error fetching the chart is operational, not a
+                // tenancy fact — stays silent, matching every other trouble
+                // path below.
+                Err(_) => return Ok(None),
+            },
+            _ => match self.dashboards.get(object_id, s.workspace_id).await {
+                Ok(v) => v.is_some(),
+                Err(_) => return Ok(None),
+            },
         };
         if !scoped {
+            let note = format!(
+                "alert attachment skipped: {kind} {object_id} does not belong to this workspace"
+            );
             tracing::warn!(
                 schedule = %s.id, %kind, %object_id,
                 "automation: alert attachment target does not belong to this workspace"
             );
-            return None;
+            return Err(note);
         }
-        let owner = self.resolve_owner(s.id).await.ok()?;
-        let token = self
+        let Ok(owner) = self.resolve_owner(s.id).await else {
+            return Ok(None);
+        };
+        let Ok(token) = self
             .render_tokens
             .mint(kind, object_id, s.workspace_id, owner, RENDER_TOKEN_TTL)
             .await
-            .ok()?;
+        else {
+            return Ok(None);
+        };
         let url = format!(
             "{}/embed/print/{kind}/{object_id}?t={token}",
             self.public_url.trim_end_matches('/')
@@ -865,19 +895,19 @@ impl AutomationRunner {
             Ok(b) => b,
             Err(e) => {
                 tracing::warn!(schedule = %s.id, error = %e, "automation: alert attachment render failed");
-                return None;
+                return Ok(None);
             }
         };
         let (ext, content_type) = match format {
             ReportFormat::Png => ("png", "image/png"),
             _ => ("pdf", "application/pdf"),
         };
-        Some(email::Attachment {
+        Ok(Some(email::Attachment {
             filename: format!("{}.{ext}", slugify(&s.name)),
             content_type: content_type.into(),
             bytes,
             inline_cid: matches!(format, ReportFormat::Png).then(|| REPORT_IMAGE_CID.to_string()),
-        })
+        }))
     }
 
     /// One mail to all of this schedule's email recipients.
@@ -885,12 +915,16 @@ impl AutomationRunner {
     /// A workspace with no SMTP configured is a REPORTED failure, not a silent
     /// skip: the user added an email recipient, so "nothing happened and
     /// nothing said why" is the outcome to avoid.
+    /// `Ok(None)`: sent cleanly. `Ok(Some(note))`: sent, but with something
+    /// the run log's `error` column should say (fix round 1 — currently only
+    /// `render_alert_attachment`'s tenancy refusal). `Err`: the send itself
+    /// failed and nothing went out.
     async fn send_email(
         &self,
         s: &Schedule,
         eval: &crate::evaluator::Evaluation,
         to: &[String],
-    ) -> Result<(), String> {
+    ) -> Result<Option<String>, String> {
         let config = self
             .smtp
             .get(s.workspace_id)
@@ -940,8 +974,11 @@ impl AutomationRunner {
         // carries a rendering of it beside the numbers — the recipient sees
         // WHAT moved, not only that something did. A render failure must not
         // lose the alert itself, so it is logged and the mail goes without.
-        if let Some(extra) = self.render_alert_attachment(s).await {
-            attachments.push(extra);
+        let mut note = None;
+        match self.render_alert_attachment(s).await {
+            Ok(Some(extra)) => attachments.push(extra),
+            Ok(None) => {}
+            Err(reason) => note = Some(reason),
         }
 
         email::send(
@@ -963,7 +1000,8 @@ impl AutomationRunner {
             },
         )
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+        Ok(note)
     }
 }
 
@@ -1226,6 +1264,14 @@ mod tests {
     }
 
     fn test_runner(db: &Db, renderer: Arc<FakeRenderer>) -> AutomationRunner {
+        test_runner_with_query(db, renderer, Arc::new(NoQuery))
+    }
+
+    fn test_runner_with_query(
+        db: &Db,
+        renderer: Arc<FakeRenderer>,
+        query: Arc<dyn QueryRunner>,
+    ) -> AutomationRunner {
         let secrets = egret_secrets::SecretStore::new(db.clone(), None);
         let ws_secrets = egret_secrets::WorkspaceSecretStore::new(db.clone(), secrets.clone());
         AutomationRunner {
@@ -1240,7 +1286,7 @@ mod tests {
             databases: DatabaseRepo::new(db.clone(), secrets, ws_secrets),
             users: UserRepo::new(db.clone()),
             minter: Arc::new(NoMinter),
-            query: Arc::new(NoQuery),
+            query,
             resolver: Arc::new(PublicDns),
             policy: SsrfPolicy::default(),
             smtp: SmtpConfigRepo::new(
@@ -1321,13 +1367,21 @@ mod tests {
         });
         let runner = test_runner(&db, renderer.clone());
 
-        let attachment = runner.render_alert_attachment(&s).await;
+        let attachment = runner.render_alert_attachment(&s).await.unwrap();
         assert!(attachment.is_some(), "a same-workspace chart still renders");
         assert_eq!(
             renderer.seen.lock().unwrap().len(),
             1,
             "the renderer was asked exactly once"
         );
+        // Positive control for fix round 1's item 2: a legitimate render DOES
+        // mint a token, so the foreign case's "0 tokens" below is a real
+        // contrast rather than a fixture that never mints one at all.
+        let tokens: i64 = sqlx::query_scalar("SELECT count(*) FROM automation.render_tokens")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(tokens, 1, "a same-workspace render mints exactly one token");
     }
 
     #[sqlx::test(migrations = "../../migrations")]
@@ -1351,16 +1405,194 @@ mod tests {
         });
         let runner = test_runner(&db, renderer.clone());
 
-        let attachment = runner.render_alert_attachment(&s).await;
-        assert!(
-            attachment.is_none(),
-            "a foreign chart must never produce an attachment"
-        );
+        let result = runner.render_alert_attachment(&s).await;
+        let note = result.expect_err("a foreign chart must be refused, not silently skipped");
+        assert!(note.contains("does not belong to this workspace"), "{note}");
         assert!(
             renderer.seen.lock().unwrap().is_empty(),
             "the renderer must never be asked to render a foreign object — a \
              mint-then-403 or mint-then-404 still leaks the fact that a \
              render was ATTEMPTED, and the fix is to refuse before minting"
+        );
+        // Fix round 1's item 2: the test name claims no token was minted —
+        // prove it against the table, not just the renderer's own seam.
+        let tokens: i64 = sqlx::query_scalar("SELECT count(*) FROM automation.render_tokens")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(tokens, 0, "no render token may exist for a foreign object");
+    }
+
+    // ── fix round 1, item 1: the skip must reach schedule_runs.error ───────
+
+    /// Returns one truthy row for whatever alert SQL is handed to it — enough
+    /// for a `not_null` validator to fire. `render_alert_attachment` never
+    /// calls this (it only mints a token and asks the renderer), so this is
+    /// safe to share with a fixture that also exercises the attachment path.
+    struct FiresOnce;
+    #[async_trait::async_trait]
+    impl QueryRunner for FiresOnce {
+        async fn run(
+            &self,
+            _db: Uuid,
+            _sql: &str,
+            _identity: &RunIdentity,
+            _limit: Option<usize>,
+        ) -> Result<egret_core::TabularResult, String> {
+            Ok(egret_core::TabularResult {
+                columns: vec![egret_core::tabular::ColumnMeta {
+                    name: "v".into(),
+                    ty: "bigint".into(),
+                }],
+                rows: vec![vec![serde_json::json!(1)]],
+                row_count: 1,
+                bytes_scanned: None,
+                truncated: false,
+            })
+        }
+    }
+
+    /// A minimal plaintext SMTP server — enough of RFC 5321 for `lettre`'s
+    /// `AsyncSmtpTransport` (`TlsMode::None`, no auth) to consider a send
+    /// successful, not a general-purpose mail server. Accepts exactly one
+    /// connection, then exits.
+    async fn fake_smtp() -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let (r, mut w) = stream.into_split();
+            let mut lines = tokio::io::BufReader::new(r).lines();
+            let _ = w.write_all(b"220 fake.local ESMTP\r\n").await;
+            let mut in_data = false;
+            while let Ok(Some(line)) = lines.next_line().await {
+                if in_data {
+                    if line == "." {
+                        in_data = false;
+                        let _ = w.write_all(b"250 2.0.0 OK: queued\r\n").await;
+                    }
+                    continue;
+                }
+                let upper = line.to_ascii_uppercase();
+                let reply: &[u8] = if upper.starts_with("EHLO") || upper.starts_with("HELO") {
+                    b"250-fake.local\r\n250 OK\r\n"
+                } else if upper.starts_with("MAIL FROM") {
+                    b"250 2.1.0 OK\r\n"
+                } else if upper.starts_with("RCPT TO") {
+                    b"250 2.1.5 OK\r\n"
+                } else if upper == "DATA" {
+                    in_data = true;
+                    b"354 End data with <CR><LF>.<CR><LF>\r\n"
+                } else if upper.starts_with("QUIT") {
+                    let _ = w.write_all(b"221 2.0.0 Bye\r\n").await;
+                    break;
+                } else {
+                    b"250 OK\r\n"
+                };
+                let _ = w.write_all(reply).await;
+            }
+        });
+        addr
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn a_skipped_alert_attachment_lands_in_the_error_column_with_state_unchanged(
+        pool: sqlx::PgPool,
+    ) {
+        // Fix round 1, item 1: a foreign attachment target used to be a
+        // `tracing::warn!` only — invisible to a workspace-1 operator reading
+        // `schedule_runs`, the one place this codebase treats as the answer
+        // to "why didn't I get an email". This drives a REAL tick, through a
+        // REAL (if minimal) SMTP send, and reads the row back.
+        let db = Db { pool };
+        let owner = mk_user(&db, "note").await;
+        let ws1 = mk_workspace(&db, owner).await;
+        let ws2 = mk_workspace(&db, owner).await;
+        let foreign_chart = mk_chart(&db, ws2, owner).await;
+
+        let database: Uuid = sqlx::query_scalar(
+            "INSERT INTO query.databases (name, engine, host, port, workspace_id, delegated) \
+             VALUES ($1,'trino','localhost',8090,$2,false) RETURNING id",
+        )
+        .bind(format!("db-{}", Uuid::new_v4().simple()))
+        .bind(ws1)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+
+        let schedule_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO automation.schedules \
+               (workspace_id, type, name, crontab, next_run_at, database_id, sql, \
+                validator_type, chart_id, report_format, grace_period_s) \
+             VALUES ($1,'alert','note test','* * * * *', now() - interval '1 minute', \
+                     $2,'SELECT 1','not_null',$3,'png',0) RETURNING id",
+        )
+        .bind(ws1)
+        .bind(database)
+        .bind(foreign_chart)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO automation.schedule_owners (schedule_id, user_id) VALUES ($1,$2)")
+            .bind(schedule_id)
+            .bind(owner)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO automation.schedule_recipients (schedule_id, kind, config) \
+             VALUES ($1,'email',$2)",
+        )
+        .bind(schedule_id)
+        .bind(serde_json::json!({"addresses": ["victim@example.com"]}))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        let smtp_addr = fake_smtp().await;
+        sqlx::query(
+            "INSERT INTO automation.smtp_config \
+               (workspace_id, host, port, from_address, tls_mode) \
+             VALUES ($1,$2,$3,'alerts@example.com','none')",
+        )
+        .bind(ws1)
+        .bind(smtp_addr.ip().to_string())
+        .bind(smtp_addr.port() as i32)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        let renderer = Arc::new(FakeRenderer {
+            seen: Mutex::new(vec![]),
+        });
+        let runner = test_runner_with_query(&db, renderer.clone(), Arc::new(FiresOnce));
+
+        assert_eq!(runner.tick_once().await, 1);
+
+        let (state, error): (String, Option<String>) = sqlx::query_as(
+            "SELECT state, error FROM automation.schedule_runs WHERE schedule_id = $1",
+        )
+        .bind(schedule_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            state, "success",
+            "the alert itself must not be lost over its attachment"
+        );
+        let error = error.unwrap_or_default();
+        assert!(
+            error.contains("does not belong to this workspace"),
+            "the run log's error column must explain the skip: {error}"
+        );
+        // And the email genuinely sent — the attachment being skipped must
+        // not be confused with the mail failing to go out at all.
+        assert!(
+            renderer.seen.lock().unwrap().is_empty(),
+            "the foreign chart must never reach the renderer"
         );
     }
 }

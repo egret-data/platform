@@ -96,6 +96,46 @@ impl Resolver for PublicDns {
     }
 }
 
+/// Resolves EVERY host to one fixed address — the loopback port a
+/// `fake_webhook_receiver` is actually listening on. Used only together with
+/// `SsrfPolicy::allow_hosts` naming that same fake host, so this never
+/// widens what the guard itself allows; it only lets a test point a
+/// plausible-looking public hostname at a local listener.
+struct LoopbackDns(std::net::SocketAddr);
+#[async_trait::async_trait]
+impl Resolver for LoopbackDns {
+    async fn resolve(
+        &self,
+        _host: &str,
+        _port: u16,
+    ) -> Result<Vec<std::net::SocketAddr>, std::io::Error> {
+        Ok(vec![self.0])
+    }
+}
+
+/// A minimal HTTP/1.1 receiver — accepts one connection, records whatever
+/// bytes it read, replies `200`. Enough to prove a webhook POST actually
+/// arrived, not a general-purpose server.
+async fn fake_webhook_receiver() -> (std::net::SocketAddr, Arc<Mutex<Vec<u8>>>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let received = Arc::new(Mutex::new(Vec::new()));
+    let received2 = received.clone();
+    tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        if let Ok((mut stream, _)) = listener.accept().await {
+            let mut buf = vec![0u8; 65536];
+            if let Ok(n) = stream.read(&mut buf).await {
+                received2.lock().unwrap().extend_from_slice(&buf[..n]);
+            }
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await;
+        }
+    });
+    (addr, received)
+}
+
 // ── fixture ──────────────────────────────────────────────────────────────
 
 struct Fx {
@@ -384,6 +424,205 @@ async fn a_webhook_that_cannot_be_reached_still_records_the_firing(pool: sqlx::P
         log[0].1.is_some(),
         "...and the delivery failure is visible rather than swallowed"
     );
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_alert_with_a_foreign_chart_id_still_fires_and_notifies_by_webhook(pool: sqlx::PgPool) {
+    // Fix round 1, item 3: `render_alert_attachment`'s whole justification
+    // for SKIPPING rather than FAILING on a foreign target is "the alert
+    // must not be lost". That refusal is pinned in runner.rs's own unit
+    // tests; this pins the SURVIVAL half, end to end, at the tick level — a
+    // webhook recipient needs no SMTP, so it proves the alert's core
+    // evaluation and delivery are untouched by a foreign chart_id sitting on
+    // the row, independent of the attachment mechanism entirely (a webhook
+    // payload never carries the picture in the first place).
+    let db = Db { pool };
+    let owner: Uuid =
+        sqlx::query_scalar("INSERT INTO users (email, provider) VALUES ($1,'local') RETURNING id")
+            .bind(format!("o_{}@t.local", Uuid::new_v4().simple()))
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    let ws1: Uuid = sqlx::query_scalar(
+        "INSERT INTO workspaces (slug,name,created_by) VALUES ($1,'t',$2) RETURNING id",
+    )
+    .bind(format!("w-{}", Uuid::new_v4().simple()))
+    .bind(owner)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    let ws2: Uuid = sqlx::query_scalar(
+        "INSERT INTO workspaces (slug,name,created_by) VALUES ($1,'t',$2) RETURNING id",
+    )
+    .bind(format!("w-{}", Uuid::new_v4().simple()))
+    .bind(owner)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+
+    // A chart that genuinely exists — but in ws2. ws1's alert points at it.
+    let database2: Uuid = sqlx::query_scalar(
+        "INSERT INTO query.databases (name, engine, host, port, workspace_id, delegated) \
+         VALUES ($1,'trino','localhost',8090,$2,false) RETURNING id",
+    )
+    .bind(format!("db-{}", Uuid::new_v4().simple()))
+    .bind(ws2)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    let datasets = egret_bi::DatasetRepo::new(db.clone());
+    let dataset = datasets
+        .create(
+            ws2,
+            database2,
+            "orders",
+            "",
+            &egret_bi::SourceSpec::Physical {
+                catalog: Some("tpch".into()),
+                schema: "tiny".into(),
+                table: "orders".into(),
+            },
+            &[egret_bi::NewColumn {
+                column_name: "orderpriority".into(),
+                data_type: "varchar".into(),
+                type_generic: "string".into(),
+                is_temporal: false,
+            }],
+            Some(egret_core::UserId(owner)),
+        )
+        .await
+        .unwrap();
+    let charts = egret_bi::ChartRepo::new(db.clone());
+    let foreign_chart = charts
+        .create(
+            ws2,
+            dataset.id,
+            "foreign",
+            "",
+            "table",
+            &serde_json::json!({"spec": {}}),
+            Some(owner),
+        )
+        .await
+        .unwrap();
+
+    // ws1's own database, for the alert's REAL query — unrelated to ws2.
+    let database1: Uuid = sqlx::query_scalar(
+        "INSERT INTO query.databases (name, engine, host, port, workspace_id, delegated) \
+         VALUES ($1,'trino','localhost',8080,$2,false) RETURNING id",
+    )
+    .bind(format!("db-{}", Uuid::new_v4().simple()))
+    .bind(ws1)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+
+    let schedule: Uuid = sqlx::query_scalar(
+        "INSERT INTO automation.schedules \
+           (workspace_id, type, name, crontab, next_run_at, database_id, sql, \
+            validator_type, chart_id, report_format, grace_period_s) \
+         VALUES ($1,'alert','survives a foreign chart','* * * * *', \
+                 now() - interval '1 minute', $2,'SELECT count(*) FROM orders', \
+                 'not_null', $3, 'png', 0) RETURNING id",
+    )
+    .bind(ws1)
+    .bind(database1)
+    .bind(foreign_chart.id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO automation.schedule_owners (schedule_id, user_id) VALUES ($1,$2)")
+        .bind(schedule)
+        .bind(owner)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+    let (webhook_addr, received) = fake_webhook_receiver().await;
+    let webhook_host = "survives-foreign-chart.test";
+    sqlx::query(
+        "INSERT INTO automation.schedule_recipients (schedule_id, kind, config) \
+         VALUES ($1,'webhook',$2)",
+    )
+    .bind(schedule)
+    .bind(serde_json::json!({
+        "url": format!("http://{webhook_host}:{}/hook", webhook_addr.port())
+    }))
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let engine = Arc::new(FakeEngine {
+        value: Mutex::new(serde_json::json!(9)),
+        seen: Mutex::new(vec![]),
+        fail: false,
+    });
+    let secrets = egret_secrets::SecretStore::new(db.clone(), None);
+    let ws_secrets = egret_secrets::WorkspaceSecretStore::new(db.clone(), secrets.clone());
+    let runner = AutomationRunner {
+        db: db.clone(),
+        schedules: ScheduleRepo::new(
+            db.clone(),
+            egret_secrets::SecretStore::new(
+                db.clone(),
+                Some(egret_secrets::Crypto::new(&[9u8; 32]).unwrap()),
+            ),
+        ),
+        databases: egret_query::DatabaseRepo::new(db.clone(), secrets, ws_secrets),
+        users: egret_auth::users::UserRepo::new(db.clone()),
+        minter: Arc::new(NoMinter),
+        query: engine.clone(),
+        resolver: Arc::new(LoopbackDns(webhook_addr)),
+        policy: SsrfPolicy {
+            allow_hosts: vec![webhook_host.to_string()],
+        },
+        smtp: egret_automation::deliver::smtp_config::SmtpConfigRepo::new(
+            db.clone(),
+            egret_secrets::SecretStore::new(db.clone(), None),
+        ),
+        slack_config: egret_automation::deliver::slack_config::SlackConfigRepo::new(
+            db.clone(),
+            egret_secrets::SecretStore::new(db.clone(), None),
+        ),
+        charts,
+        dashboards: egret_bi::DashboardRepo::new(db.clone()),
+        datasets,
+        render_tokens: egret_automation::render::token::RenderTokenRepo::new(db.clone()),
+        // The webhook path never calls the renderer at all (a webhook
+        // payload carries rows, never a picture) — NeverRenderer would catch
+        // it if that assumption ever broke.
+        renderer: Arc::new(NeverRenderer),
+        public_url: "https://egret.internal".into(),
+        browser_url: "https://egret.internal".into(),
+    };
+
+    assert_eq!(runner.tick_once().await, 1);
+
+    let (state, error): (String, Option<String>) =
+        sqlx::query_as("SELECT state, error FROM automation.schedule_runs WHERE schedule_id = $1")
+            .bind(schedule)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        state, "success",
+        "a foreign chart_id must not stop the alert from firing"
+    );
+    assert_eq!(
+        error, None,
+        "a webhook recipient never touches the attachment path, so there is \
+         nothing here for it to explain"
+    );
+
+    // The direct proof of "notifies": the fake receiver actually got a POST,
+    // not merely that the run's own bookkeeping looks clean.
+    let body = received.lock().unwrap().clone();
+    assert!(
+        !body.is_empty(),
+        "the webhook receiver got nothing — the alert was silently lost"
+    );
+    let request = String::from_utf8_lossy(&body);
+    assert!(request.starts_with("POST "), "{request}");
 }
 
 #[sqlx::test(migrations = "../../migrations")]

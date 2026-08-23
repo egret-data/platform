@@ -235,6 +235,14 @@ async fn allowed_charts(
             // without re-fetching: without it, `dashboards.cards(object_id)`
             // reads by id alone and would enumerate a foreign dashboard's
             // cards with no workspace predicate at all.
+            //
+            // The redundancy cuts both ways — do not "clean up" EITHER
+            // fetch as the duplicate of the other. This one is what defends
+            // `run_cards`' per-chart `get` from ever being simplified away;
+            // that one is what defends THIS fetch from the same fate. Removing
+            // either leaves the hole this comment describes with no compiler
+            // error and no test failure, because today each backstops the
+            // other on every path this crate can currently drive.
             let dash = st
                 .dashboards
                 .get(grant.object_id, grant.workspace_id)
