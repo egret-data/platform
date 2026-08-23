@@ -1073,6 +1073,25 @@ git add -A && git commit -m "test(dataapi): a conditional endpoint serves its ow
 
 ---
 
+## The one claim that must be measured on a real engine before merge
+
+Task 6's type check compares the type string frozen at publish by
+`describe_as_with_params` against the type string a row arrives with from `execute_as`.
+**Nothing in the suite exercises a type other than `integer` against a real engine** — the
+test fixture types every column `integer`. If the two paths spell any type differently on
+either engine, the failure is not a subtle one: it is `503 schema_drift` on **every call to
+every already-published endpoint**, fleet-wide, the moment this ships.
+
+Reading the connectors says the risk is handled — StarRocks routes all three sites through
+one `coltype_name` (`connector/starrocks.rs:346,408,443`), and Trino normalises
+`DESCRIBE OUTPUT` types through `normalize_trino_type_spacing`
+(`connector/trino.rs:91-101`) which exists precisely because `decimal(10,2)` against
+`decimal(10, 2)` was measured to diverge. Reading is not measuring.
+
+Publish and call an endpoint returning `varchar`, `decimal(p,s)`, `date`, `timestamp`,
+`boolean` and `bigint` on **both** Trino and StarRocks, and confirm a `200` each time.
+Do this before the PR, not after.
+
 ## Before opening the PR
 
 Run it on kind and check it in the browser. On this programme every live check has found a
