@@ -172,37 +172,64 @@ not settle layout.
 
 ---
 
-## 4. E — the Alerts editor onto `ConfigTable`
+## 4. E — the Alerts editor's fields onto `ConfigTable`
 
-`ScheduleEditor.tsx` (1,110 lines) stacks five `ConfigSection` cards. §4.1 is the
-opposite: a group of settings is a full-width `ConfigTableGroup` row inside one
-`ConfigTable`, because a column of mostly-empty boxes is what the cards produced on
-the Data API detail tabs.
+**This section was rewritten after reading the code it describes. An earlier
+revision asserted three changes and two and a half of them were wrong.** The
+errors are recorded rather than quietly dropped, because each came from reading
+a rule in `docs/en/ui-conventions.md` and applying it without checking whether
+the situation it was written for is the situation here.
 
-**The conversion is partial, deliberately.** §4.2 — "a read-only listing is not a
-setting, and an action is not a setting" — means `DestinationList` becomes a plain
-`Table` under §4.3, not a run of setting rows. Converting it wholesale would repeat
-the mistake §4.2 exists to prevent.
+### 4.1 What is actually wrong, and it is one thing
 
-`ScheduleDetail.tsx:117` carries `mx-auto max-w-4xl p-4`. §5.1 forbids a page-level
-cap on a route that hosts settings tables, because the sections do not want the same
-width; the cap moves onto each section's own root element. §5.2 is the reason this is
-not taste: `ConfigTable` is `table-fixed` with only the Details column unsized, so
-removing a cap without sizing hands all the new width to muted help text.
+*(Resolved by package E — see the plan. This section describes the code as it stood before
+that package; the hand-written stacks and two-up grid it names no longer exist.)*
 
-**Two things are already correct and must not be "fixed".** Both carry comments
-explaining themselves, and both were verified before this spec proposed touching the
-file:
+Inside each of `ScheduleEditor.tsx`'s four sections, every field is a
+hand-written stack: a `<Label>`, a control, and often a `<p class="text-xs
+text-muted-foreground">` helper wedged underneath. §4.1's **positive** rule
+applies — a group of settings is a `Setting | Details | Value` table — and the
+gain is concrete: the helper text moves out from under the control and into the
+Details column, where the convention puts it.
 
-- Dirtiness is computed by **comparing a snapshot**, not by listening for change
-  events (`ScheduleEditor.tsx:365-390`). A `change` handler marked the form dirty the
-  moment Radix's Select and Checkbox dispatched during hydration, so merely opening a
-  schedule and leaving raised the unsaved-changes prompt.
-- The form is **one column with no width of its own** — the page sets the measure. A
-  two-column grid pads a short section to the height of the tall one beside it, and
-  CSS `columns` fights the flex container and clips. Both were tried on this form.
+The `General` section's `Name` + `Description` two-up grid converts too. Its
+comment says the grid exists because "a full-width row each left the section
+mostly white space with the fields stretched past any length they will ever
+hold" — and `ConfigTable` solves exactly that, better: the Value column is
+capped (`w-52` by default, `valueClassName` to widen), so the control cannot
+stretch, and the freed width goes to Details rather than to nothing.
 
----
+### 4.2 Three things that stay, and why
+
+**The `ConfigSection` frame stays.** §4.1's defect is *stacking* — "Cache three
+table rows, Limits two, Rate limit three. Read down the page, that was a column
+of mostly-empty boxes." `ScheduleEditor` renders `{section === "general" && …}`,
+one card at a time, chosen by the tab bar. There is no column, so there are no
+boxes in it.
+
+**`ScheduleDetail.tsx`'s `mx-auto max-w-4xl` stays.** It carries its own reason
+at `ScheduleDetail.tsx:114-116`: *"`4xl`, not `6xl`: with the section nav now
+horizontal there is no column beside the form to fill, and a 1150px-wide
+single-column form is past a readable measure. Everything on the page shares
+this one edge."* §5.1's rule exists because the six Data API sections **want
+different widths** — Config and Query want the page, Access and Try-it do not.
+All four sections here are the same single-column form, and the header, tab bar
+and form share one edge. Removing the cap widens all three past a readable
+measure, which is the thing the comment already refused.
+
+**`DestinationList` stays as it is.** §4.2's "a read-only listing is not a
+setting" does not describe it: each row is a *form* whose fields differ by kind
+— email takes addresses, Slack takes a channel, webhook takes a URL
+and a secret. It is a composed set, not a listing of records, and pressing
+per-kind forms into table rows would be worse than what is there.
+
+### 4.3 Scope
+
+`ScheduleEditor.tsx` only. Two things in that file are already correct, carry
+comments explaining themselves, and must not be touched: dirtiness computed by
+**comparing a snapshot** rather than by listening for change events
+(`ScheduleEditor.tsx:367-391`), and the form being **one column with no width of
+its own** so the page sets the measure.
 
 ## 5. Z2 — Data API endpoint alerts
 

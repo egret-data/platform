@@ -39,6 +39,7 @@ export const SECTIONS: { key: SectionKey; label: (isAlert: boolean) => string }[
   { key: "notification", label: () => "Notification" },
 ];
 import { ConfigSection } from "@/components/form/ConfigSection";
+import { ConfigTable, ConfigTableGroup, ConfigTableRow } from "@/components/config/ConfigTable";
 import { TagCombobox } from "@/components/ui/tag-combobox";
 import { DestinationList } from "./DestinationList";
 import { toDestinations, toRecipients, type Destination } from "./destinations";
@@ -415,76 +416,75 @@ export function ScheduleEditor({
         title="General"
         description="What this is called, who owns it, and whether it runs at all."
       >
-        {/* Two up. Both are single-line inputs holding a handful of words, and
-            a full-width row each left the section mostly white space with the
-            fields stretched past any length they will ever hold. The pair that
-            keeps its own row below is Owners, whose helper line is long enough
-            to unbalance a cell beside it. */}
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="sched-name">Name</Label>
-            <Input
-              id="sched-name"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-            />
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="sched-desc">Description</Label>
+        <ConfigTable>
+          <ConfigTableRow
+            label="Name"
+            htmlFor="sched-name"
+            details="Shown in the list, and interpolated into the default email subject."
+          >
+            <Input id="sched-name" value={name} onChange={(e) => setName(e.target.value)} />
+          </ConfigTableRow>
+
+          <ConfigTableRow
+            label="Description"
+            htmlFor="sched-desc"
+            details="Optional. A sentence for whoever finds this later."
+          >
             <Input
               id="sched-desc"
               value={description}
               onChange={(e) => setDescription(e.target.value)}
             />
-          </div>
-        </div>
-        <div className="flex flex-col gap-1.5">
+          </ConfigTableRow>
+
           {/* No `htmlFor`: the control is a combobox, not an element with an
               id, and it carries its own `aria-label`. A label pointing at an
               id that no longer exists is worse than none — it silently stops
               focusing anything. */}
-          <span className="text-sm font-medium">Owners</span>
-          {/* A picker, not a `<select multiple>`. The raw control was tolerable
-              while it sat in an Advanced tab nobody opened; in General it is
-              the third thing you see, and it cannot show who is selected
-              without scrolling a grey box. `creatable` is off — an owner has
-              to be a member of this workspace, so a typed string is never a
-              valid one. */}
-          <TagCombobox
-            values={owners}
-            onChange={setOwners}
-            ariaLabel="Owners"
-            placeholder={owners.length ? "Add another owner…" : "Search people…"}
-            creatable={false}
-            queryKey={["alerts", "owner-suggest", ws]}
-            labelFor={(id) => memberName(id)}
-            suggest={async (q) => {
-              const needle = q.trim().toLowerCase();
-              return userMembers
-                .filter((m) =>
-                  needle ? (m.principal_name ?? m.principal_id).toLowerCase().includes(needle) : true,
-                )
-                .map((m) => ({
-                  value: m.principal_id,
-                  label: m.principal_name ?? m.principal_id,
-                }));
-            }}
-          />
-          <p className="text-xs text-muted-foreground">
-            The query runs with an owner&apos;s permissions. Leave empty and you become the
-            owner; naming several keeps it running when one person leaves.
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <Checkbox
-            id="sched-active"
-            checked={active}
-            onCheckedChange={(v) => setActive(v === true)}
-          />
-          <Label htmlFor="sched-active" className="text-sm font-normal">
-            Active
-          </Label>
-        </div>
+          <ConfigTableRow
+            label="Owners"
+            details="The query runs with an owner's permissions. Leave empty and you become the owner; naming several keeps it running when one person leaves."
+          >
+            {/* A picker, not a `<select multiple>`. The raw control was tolerable
+                while it sat in an Advanced tab nobody opened; in General it is
+                the third thing you see, and it cannot show who is selected
+                without scrolling a grey box. `creatable` is off — an owner has
+                to be a member of this workspace, so a typed string is never a
+                valid one. */}
+            <TagCombobox
+              values={owners}
+              onChange={setOwners}
+              ariaLabel="Owners"
+              placeholder={owners.length ? "Add another owner…" : "Search people…"}
+              creatable={false}
+              queryKey={["alerts", "owner-suggest", ws]}
+              labelFor={(id) => memberName(id)}
+              suggest={async (q) => {
+                const needle = q.trim().toLowerCase();
+                return userMembers
+                  .filter((m) =>
+                    needle ? (m.principal_name ?? m.principal_id).toLowerCase().includes(needle) : true,
+                  )
+                  .map((m) => ({
+                    value: m.principal_id,
+                    label: m.principal_name ?? m.principal_id,
+                  }));
+              }}
+            />
+          </ConfigTableRow>
+
+          <ConfigTableRow
+            label="Active"
+            htmlFor="sched-active"
+            details="Uncheck to stop it running without deleting it; its history is kept."
+          >
+            <Checkbox
+              id="sched-active"
+              checked={active}
+              onCheckedChange={(v) => setActive(v === true)}
+            />
+          </ConfigTableRow>
+        </ConfigTable>
       </ConfigSection>
       )}
 
@@ -494,73 +494,87 @@ export function ScheduleEditor({
           title="Alert condition"
           description="The query to run, and what about its result makes this fire."
         >
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="sched-db">Database</Label>
-            <select
-              id="sched-db"
-              className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-              value={databaseId || databases?.[0]?.id || ""}
-              onChange={(e) => setDatabaseId(e.target.value)}
+          <ConfigTable valueClassName="w-52 lg:w-80">
+            <ConfigTableRow
+              label="Database"
+              htmlFor="sched-db"
+              details="Which connection the query runs against."
             >
-              {(databases ?? []).map((d) => (
-                <option key={d.id} value={d.id}>
-                  {d.name}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="sched-sql">SQL</Label>
-            <Textarea
-              id="sched-sql"
-              rows={4}
-              value={sql}
-              onChange={(e) => setSql(e.target.value)}
-              placeholder="SELECT count(*) FROM orders WHERE created_at > now() - interval '1' day"
-            />
-            <p className="text-xs text-muted-foreground">
-              The first column of the first row is the value the condition is tested against.
-            </p>
-            {(databases ?? []).length === 0 && (
-              <p className="text-xs text-destructive">
-                This workspace has no database connection yet. Add one under Workspace
-                settings &rarr; Engines before creating an alert.
-              </p>
-            )}
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="sched-validator">Condition</Label>
-            <select
-              id="sched-validator"
-              className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-              value={validatorType}
-              onChange={(e) => setValidatorType(e.target.value as "not_null" | "operator")}
-            >
-              <option value="not_null">Value is not null and not zero</option>
-              <option value="operator">Value meets a comparison</option>
-            </select>
-          </div>
-          {validatorType === "operator" && (
-            <div className="flex gap-2">
               <select
-                aria-label="Operator"
+                id="sched-db"
                 className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-                value={op}
-                onChange={(e) => setOp(e.target.value)}
+                value={databaseId || databases?.[0]?.id || ""}
+                onChange={(e) => setDatabaseId(e.target.value)}
               >
-                {["<", "<=", ">", ">=", "==", "!="].map((o) => (
-                  <option key={o} value={o}>
-                    {o}
+                {(databases ?? []).map((d) => (
+                  <option key={d.id} value={d.id}>
+                    {d.name}
                   </option>
                 ))}
               </select>
-              <Input
-                aria-label="Threshold"
-                value={threshold}
-                onChange={(e) => setThreshold(e.target.value)}
-              />
-            </div>
-          )}
+            </ConfigTableRow>
+
+            <ConfigTableRow
+              label="SQL"
+              htmlFor="sched-sql"
+              details="The first column of the first row is the value the condition is tested against."
+            >
+              <div className="space-y-1.5">
+                <Textarea
+                  id="sched-sql"
+                  rows={4}
+                  value={sql}
+                  onChange={(e) => setSql(e.target.value)}
+                  placeholder="SELECT count(*) FROM orders WHERE created_at > now() - interval '1' day"
+                />
+                {(databases ?? []).length === 0 && (
+                  <p className="text-xs text-destructive">
+                    This workspace has no database connection yet. Add one under Workspace
+                    settings &rarr; Engines before creating an alert.
+                  </p>
+                )}
+              </div>
+            </ConfigTableRow>
+
+            <ConfigTableRow
+              label="Condition"
+              htmlFor="sched-validator"
+              details="What about the result makes this fire."
+            >
+              <div className="space-y-2">
+                <select
+                  id="sched-validator"
+                  className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                  value={validatorType}
+                  onChange={(e) => setValidatorType(e.target.value as "not_null" | "operator")}
+                >
+                  <option value="not_null">Value is not null and not zero</option>
+                  <option value="operator">Value meets a comparison</option>
+                </select>
+                {validatorType === "operator" && (
+                  <div className="flex gap-2">
+                    <select
+                      aria-label="Operator"
+                      className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                      value={op}
+                      onChange={(e) => setOp(e.target.value)}
+                    >
+                      {["<", "<=", ">", ">=", "==", "!="].map((o) => (
+                        <option key={o} value={o}>
+                          {o}
+                        </option>
+                      ))}
+                    </select>
+                    <Input
+                      aria-label="Threshold"
+                      value={threshold}
+                      onChange={(e) => setThreshold(e.target.value)}
+                    />
+                  </div>
+                )}
+              </div>
+            </ConfigTableRow>
+          </ConfigTable>
         </ConfigSection>
       ) : (
         <ConfigSection
@@ -568,69 +582,102 @@ export function ScheduleEditor({
           title="Contents"
           description="Which object to deliver, and in what format."
         >
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="sched-target-kind">Deliver</Label>
-            <select
-              id="sched-target-kind"
-              className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-              value={targetKind}
-              onChange={(e) => {
-                setTargetKind(e.target.value as "dashboard" | "chart");
-                // Clear the id: a chart id in the dashboard slot is exactly the
-                // "both targets" shape the server rejects.
-                setTargetId("");
-              }}
+          <ConfigTable>
+            <ConfigTableRow
+              label="Deliver"
+              htmlFor="sched-target-kind"
+              details="Whether this delivers a dashboard or a single chart."
             >
-              <option value="dashboard">A dashboard</option>
-              <option value="chart">A chart</option>
-            </select>
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="sched-target">
-              {targetKind === "dashboard" ? "Dashboard" : "Chart"}
-            </Label>
-            <select
-              id="sched-target"
-              className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-              value={defaultTarget}
-              onChange={(e) => setTargetId(e.target.value)}
-            >
-              {((targetKind === "dashboard" ? dashboards : charts) ?? []).map((o) => (
-                <option key={o.id} value={o.id}>
-                  {o.name}
-                </option>
-              ))}
-            </select>
-          </div>
-          {extraTargets.map((id, i) => (
-            <div key={i} className="flex items-end gap-2">
-              <div className="flex flex-1 flex-col gap-1.5">
-                <Label htmlFor={`sched-extra-${i}`}>
-                  Also include {targetKind === "dashboard" ? "dashboard" : "chart"}
-                </Label>
-                <select
-                  id={`sched-extra-${i}`}
-                  className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-                  value={id}
-                  onChange={(e) =>
-                    setExtraTargets(extraTargets.map((x, j) => (j === i ? e.target.value : x)))
-                  }
-                >
-                  {((targetKind === "dashboard" ? dashboards : charts) ?? []).map((o) => (
-                    <option key={o.id} value={o.id}>{o.name}</option>
-                  ))}
-                </select>
-              </div>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                onClick={() => setExtraTargets(extraTargets.filter((_, j) => j !== i))}
+              <select
+                id="sched-target-kind"
+                className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                value={targetKind}
+                onChange={(e) => {
+                  setTargetKind(e.target.value as "dashboard" | "chart");
+                  // Clear the id: a chart id in the dashboard slot is exactly the
+                  // "both targets" shape the server rejects.
+                  setTargetId("");
+                }}
               >
-                Remove
-              </Button>
-            </div>
-          ))}
+                <option value="dashboard">A dashboard</option>
+                <option value="chart">A chart</option>
+              </select>
+            </ConfigTableRow>
+
+            <ConfigTableRow
+              label={targetKind === "dashboard" ? "Dashboard" : "Chart"}
+              htmlFor="sched-target"
+              details="The object this report delivers."
+            >
+              <select
+                id="sched-target"
+                className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                value={defaultTarget}
+                onChange={(e) => setTargetId(e.target.value)}
+              >
+                {((targetKind === "dashboard" ? dashboards : charts) ?? []).map((o) => (
+                  <option key={o.id} value={o.id}>
+                    {o.name}
+                  </option>
+                ))}
+              </select>
+            </ConfigTableRow>
+
+            {extraTargets.map((id, i) => (
+              <ConfigTableRow
+                key={i}
+                label={`Also include ${targetKind === "dashboard" ? "dashboard" : "chart"}`}
+                htmlFor={`sched-extra-${i}`}
+                details="Delivered as an additional page in the same document."
+              >
+                <div className="flex items-end gap-2">
+                  <select
+                    id={`sched-extra-${i}`}
+                    className="h-9 flex-1 rounded-md border border-input bg-background px-3 text-sm"
+                    value={id}
+                    onChange={(e) =>
+                      setExtraTargets(extraTargets.map((x, j) => (j === i ? e.target.value : x)))
+                    }
+                  >
+                    {((targetKind === "dashboard" ? dashboards : charts) ?? []).map((o) => (
+                      <option key={o.id} value={o.id}>{o.name}</option>
+                    ))}
+                  </select>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setExtraTargets(extraTargets.filter((_, j) => j !== i))}
+                  >
+                    Remove
+                  </Button>
+                </div>
+              </ConfigTableRow>
+            ))}
+
+            <ConfigTableRow
+              label="Format"
+              htmlFor="sched-format"
+              details={
+                extraTargets.length > 0
+                  ? "Several objects are always delivered as a multi-page PDF — a PNG has no second page."
+                  : "PNG and PDF are produced by the rendering service; CSV and text are read straight from the query."
+              }
+            >
+              <select
+                id="sched-format"
+                className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                value={reportFormat}
+                onChange={(e) => setReportFormat(e.target.value)}
+              >
+                <option value="png">PNG image</option>
+                <option value="pdf">PDF</option>
+                <option value="csv">CSV data</option>
+                <option value="text">Text</option>
+              </select>
+            </ConfigTableRow>
+          </ConfigTable>
+
           <div>
             <Button
               type="button"
@@ -646,31 +693,6 @@ export function ScheduleEditor({
             >
               + Add another
             </Button>
-            {extraTargets.length > 0 && (
-              <span className="ml-2 text-xs text-muted-foreground">
-                Delivered as one PDF, one page each, in this order.
-              </span>
-            )}
-          </div>
-
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="sched-format">Format</Label>
-            <select
-              id="sched-format"
-              className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-              value={reportFormat}
-              onChange={(e) => setReportFormat(e.target.value)}
-            >
-              <option value="png">PNG image</option>
-              <option value="pdf">PDF</option>
-              <option value="csv">CSV data</option>
-              <option value="text">Text</option>
-            </select>
-            <p className="text-xs text-muted-foreground">
-              {extraTargets.length > 0
-                ? "Several objects are always delivered as a multi-page PDF — a PNG has no second page."
-                : "PNG and PDF are produced by the rendering service; CSV and text are read straight from the query."}
-            </p>
           </div>
         </ConfigSection>
       ))}
@@ -681,164 +703,195 @@ export function ScheduleEditor({
         title="Schedule"
         description="When it runs, in which timezone."
       >
+        <ConfigTable>
+          <ConfigTableGroup label="When it runs" />
 
-        {rawCron ? (
-          <>
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="sched-cron">Cron expression</Label>
-              <Input
-                id="sched-cron"
-                value={crontab}
-                onChange={(e) => setCrontab(e.target.value)}
-                placeholder="0 9 * * *"
-              />
-              <p className="text-xs text-muted-foreground">
-                Five fields, as in crontab: minute hour day-of-month month day-of-week.
-              </p>
-            </div>
-            <div>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                className="h-7 px-2 text-xs"
-                onClick={() => {
-                  const parsed = fromCron(crontab);
-                  if (parsed) setSched(parsed);
-                  setRawCron(false);
-                }}
-              >
-                Use the simple picker
-              </Button>
-              {fromCron(crontab) === null && (
-                <span className="ml-1 text-xs text-muted-foreground">
-                  (this expression can&apos;t be shown in the picker — switching will change it)
-                </span>
-              )}
-            </div>
-          </>
-        ) : (
-          <>
-            <div className="flex flex-wrap items-end gap-2">
-              <div className="flex flex-col gap-1.5">
-                <Label htmlFor="sched-period">Repeat</Label>
-                <select
-                  id="sched-period"
-                  className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-                  value={sched.period}
-                  onChange={(e) =>
-                    setSched({ ...sched, period: e.target.value as StructuredSchedule["period"] })
-                  }
-                >
-                  <option value="minutes">Every N minutes</option>
-                  <option value="hourly">Hourly</option>
-                  <option value="daily">Daily</option>
-                  <option value="weekly">Weekly</option>
-                  <option value="monthly">Monthly</option>
-                </select>
+          {/* `Cron expression` and the picker (`Repeat`/`Every`/`On`/`On day`/`At`)
+              are two alternative ways to say the same thing, and `rawCron`
+              decides which one is showing — carried over unchanged from the
+              file. The picker reads as one sentence ("every 2 weeks on
+              Tuesday at 09:00") and its own controls are individually narrow,
+              so it is kept as ONE row rather than split into five: splitting
+              it would separate the `flex flex-wrap` layout from the row that
+              gives it room, and gains nothing since none of its sub-controls
+              have help text of their own. */}
+          {rawCron ? (
+            <ConfigTableRow
+              label="Cron expression"
+              htmlFor="sched-cron"
+              details="Five fields, as in crontab: minute hour day-of-month month day-of-week."
+            >
+              <div className="space-y-1.5">
+                <Input
+                  id="sched-cron"
+                  value={crontab}
+                  onChange={(e) => setCrontab(e.target.value)}
+                  placeholder="0 9 * * *"
+                />
+                <div>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 px-2 text-xs"
+                    onClick={() => {
+                      const parsed = fromCron(crontab);
+                      if (parsed) setSched(parsed);
+                      setRawCron(false);
+                    }}
+                  >
+                    Use the simple picker
+                  </Button>
+                  {fromCron(crontab) === null && (
+                    <span className="ml-1 text-xs text-muted-foreground">
+                      (this expression can&apos;t be shown in the picker — switching will
+                      change it)
+                    </span>
+                  )}
+                </div>
               </div>
-
-              {sched.period === "minutes" && (
+            </ConfigTableRow>
+          ) : (
+            <ConfigTableRow
+              label="Repeat"
+              htmlFor="sched-period"
+              details="How often this runs, and the day or time of day it runs on."
+            >
+              <div className="flex flex-wrap items-end gap-2">
                 <div className="flex flex-col gap-1.5">
-                  <Label htmlFor="sched-every">Every</Label>
                   <select
-                    id="sched-every"
+                    id="sched-period"
                     className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-                    value={sched.every}
-                    onChange={(e) => setSched({ ...sched, every: Number(e.target.value) })}
+                    value={sched.period}
+                    onChange={(e) =>
+                      setSched({
+                        ...sched,
+                        period: e.target.value as StructuredSchedule["period"],
+                      })
+                    }
                   >
-                    {[1, 2, 5, 10, 15, 20, 30].map((n) => (
-                      <option key={n} value={n}>{n} minutes</option>
-                    ))}
+                    <option value="minutes">Every N minutes</option>
+                    <option value="hourly">Hourly</option>
+                    <option value="daily">Daily</option>
+                    <option value="weekly">Weekly</option>
+                    <option value="monthly">Monthly</option>
                   </select>
                 </div>
-              )}
 
-              {sched.period === "hourly" && (
-                <div className="flex flex-col gap-1.5">
-                  <Label htmlFor="sched-every">Every</Label>
-                  <select
-                    id="sched-every"
-                    className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-                    value={sched.every}
-                    onChange={(e) => setSched({ ...sched, every: Number(e.target.value) })}
-                  >
-                    {[1, 2, 3, 4, 6, 8, 12].map((n) => (
-                      <option key={n} value={n}>{n === 1 ? "hour" : `${n} hours`}</option>
-                    ))}
-                  </select>
-                </div>
-              )}
-
-              {sched.period === "weekly" && (
-                <div className="flex flex-col gap-1.5">
-                  <Label htmlFor="sched-weekday">On</Label>
-                  <select
-                    id="sched-weekday"
-                    className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-                    value={sched.weekday}
-                    onChange={(e) => setSched({ ...sched, weekday: Number(e.target.value) })}
-                  >
-                    {WEEKDAYS.map((d, i) => (
-                      <option key={d} value={i}>{d}</option>
-                    ))}
-                  </select>
-                </div>
-              )}
-
-              {sched.period === "monthly" && (
-                <div className="flex flex-col gap-1.5">
-                  <Label htmlFor="sched-day">On day</Label>
-                  <select
-                    id="sched-day"
-                    className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-                    value={sched.day}
-                    onChange={(e) => setSched({ ...sched, day: Number(e.target.value) })}
-                  >
-                    {Array.from({ length: 28 }, (_, i) => i + 1).map((d) => (
-                      <option key={d} value={d}>{d}</option>
-                    ))}
-                  </select>
-                </div>
-              )}
-
-              {sched.period !== "minutes" && (
-                <div className="flex flex-col gap-1.5">
-                  <Label htmlFor="sched-time">At</Label>
-                  <div className="flex items-center gap-1">
-                    {sched.period !== "hourly" && (
-                      <>
-                        <select
-                          id="sched-time"
-                          aria-label="Hour"
-                          className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-                          value={sched.hour}
-                          onChange={(e) => setSched({ ...sched, hour: Number(e.target.value) })}
-                        >
-                          {Array.from({ length: 24 }, (_, h) => h).map((h) => (
-                            <option key={h} value={h}>{String(h).padStart(2, "0")}</option>
-                          ))}
-                        </select>
-                        <span className="text-sm text-muted-foreground">:</span>
-                      </>
-                    )}
+                {/* Two mutually exclusive fields share htmlFor="sched-every" —
+                    `period` can never be both "minutes" and "hourly" at once,
+                    so only one of these two ever mounts. Both keep the id and
+                    both keep their own branch unchanged from the file. */}
+                {sched.period === "minutes" && (
+                  <div className="flex flex-col gap-1.5">
+                    <Label htmlFor="sched-every">Every</Label>
                     <select
-                      aria-label="Minute"
+                      id="sched-every"
                       className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-                      value={sched.minute}
-                      onChange={(e) => setSched({ ...sched, minute: Number(e.target.value) })}
+                      value={sched.every}
+                      onChange={(e) => setSched({ ...sched, every: Number(e.target.value) })}
                     >
-                      {[0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55].map((m) => (
-                        <option key={m} value={m}>{String(m).padStart(2, "0")}</option>
+                      {[1, 2, 5, 10, 15, 20, 30].map((n) => (
+                        <option key={n} value={n}>{n} minutes</option>
                       ))}
                     </select>
                   </div>
-                </div>
-              )}
-            </div>
+                )}
 
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="sched-tz">Timezone</Label>
+                {sched.period === "hourly" && (
+                  <div className="flex flex-col gap-1.5">
+                    <Label htmlFor="sched-every">Every</Label>
+                    <select
+                      id="sched-every"
+                      className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                      value={sched.every}
+                      onChange={(e) => setSched({ ...sched, every: Number(e.target.value) })}
+                    >
+                      {[1, 2, 3, 4, 6, 8, 12].map((n) => (
+                        <option key={n} value={n}>{n === 1 ? "hour" : `${n} hours`}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
+                {sched.period === "weekly" && (
+                  <div className="flex flex-col gap-1.5">
+                    <Label htmlFor="sched-weekday">On</Label>
+                    <select
+                      id="sched-weekday"
+                      className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                      value={sched.weekday}
+                      onChange={(e) => setSched({ ...sched, weekday: Number(e.target.value) })}
+                    >
+                      {WEEKDAYS.map((d, i) => (
+                        <option key={d} value={i}>{d}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
+                {sched.period === "monthly" && (
+                  <div className="flex flex-col gap-1.5">
+                    <Label htmlFor="sched-day">On day</Label>
+                    <select
+                      id="sched-day"
+                      className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                      value={sched.day}
+                      onChange={(e) => setSched({ ...sched, day: Number(e.target.value) })}
+                    >
+                      {Array.from({ length: 28 }, (_, i) => i + 1).map((d) => (
+                        <option key={d} value={d}>{d}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
+                {sched.period !== "minutes" && (
+                  <div className="flex flex-col gap-1.5">
+                    <Label htmlFor="sched-time">At</Label>
+                    <div className="flex items-center gap-1">
+                      {sched.period !== "hourly" && (
+                        <>
+                          <select
+                            id="sched-time"
+                            aria-label="Hour"
+                            className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                            value={sched.hour}
+                            onChange={(e) => setSched({ ...sched, hour: Number(e.target.value) })}
+                          >
+                            {Array.from({ length: 24 }, (_, h) => h).map((h) => (
+                              <option key={h} value={h}>{String(h).padStart(2, "0")}</option>
+                            ))}
+                          </select>
+                          <span className="text-sm text-muted-foreground">:</span>
+                        </>
+                      )}
+                      <select
+                        aria-label="Minute"
+                        className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                        value={sched.minute}
+                        onChange={(e) => setSched({ ...sched, minute: Number(e.target.value) })}
+                      >
+                        {[0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55].map((m) => (
+                          <option key={m} value={m}>{String(m).padStart(2, "0")}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </ConfigTableRow>
+          )}
+
+          {/* Timezone was, and stays, part of the picker branch only — the raw
+              cron field has never offered a way to change it in this editor,
+              and this refactor is not the place to change that. */}
+          {!rawCron && (
+            <ConfigTableRow
+              label="Timezone"
+              htmlFor="sched-tz"
+              details="Runs are scheduled in this zone. It also renders the {{date}}/{{time}} placeholders in the subject — the message body itself has no dates in it."
+            >
               <select
                 id="sched-tz"
                 className="h-9 rounded-md border border-input bg-background px-3 text-sm"
@@ -853,65 +906,72 @@ export function ScheduleEditor({
                   <option key={z} value={z}>{z}</option>
                 ))}
               </select>
-            </div>
+            </ConfigTableRow>
+          )}
 
-            <p className="text-xs text-muted-foreground">
-              Runs <code>{toCron(sched)}</code> in {timezone}.{" "}
-              <button
-                type="button"
-                className="underline underline-offset-2"
-                onClick={() => {
-                  setCrontab(toCron(sched));
-                  setRawCron(true);
-                }}
-              >
-                Write the cron expression instead
-              </button>
-            </p>
-          </>
-        )}
+          <ConfigTableGroup label="Limits" />
 
-        {/* The timers live HERE, not in an "Advanced" tab of their own — they
-            are all statements about WHEN, which is what this section is. That
-            is also how Superset divides it, and splitting them out left this
-            section with two fields and the General one with three. */}
-        {/* Three up: every one is a number answering "how long", and one short
-            numeric field per full-width row is most of what made this section
-            look empty. */}
-        <div className="grid grid-cols-1 gap-4 border-t pt-4 sm:grid-cols-3">
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="sched-grace">Grace period (seconds)</Label>
+          <ConfigTableRow
+            label="Grace period (seconds)"
+            htmlFor="sched-grace"
+            details="After it fires, stays quiet for this long so a condition that stays true doesn't mail every tick. Any earlier firing counts, not only a repeat of this one — the run still happens, only delivery is skipped. Reports ignore this."
+          >
             <Input
               id="sched-grace"
               value={gracePeriod}
               onChange={(e) => setGracePeriod(e.target.value)}
               inputMode="numeric"
             />
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="sched-timeout">Working timeout (seconds)</Label>
+          </ConfigTableRow>
+
+          <ConfigTableRow
+            label="Working timeout (seconds)"
+            htmlFor="sched-timeout"
+            details="How long a run can go quiet before it's reclaimed, in case the worker running it died mid-run."
+          >
             <Input
               id="sched-timeout"
               value={workingTimeout}
               onChange={(e) => setWorkingTimeout(e.target.value)}
               inputMode="numeric"
             />
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="sched-retention">Run log retention (days)</Label>
+          </ConfigTableRow>
+
+          <ConfigTableRow
+            label="Run log retention (days)"
+            htmlFor="sched-retention"
+            details="How long a finished run stays in the log."
+          >
             <Input
               id="sched-retention"
               value={logRetention}
               onChange={(e) => setLogRetention(e.target.value)}
               inputMode="numeric"
             />
-          </div>
-        </div>
-        <p className="text-xs text-muted-foreground">
-          After firing, an alert stays quiet for the grace period so a condition that stays
-          true does not mail every tick. The working timeout is when a run that never
-          finished is reclaimed, and retention is how long a finished run stays in the log.
-        </p>
+          </ConfigTableRow>
+        </ConfigTable>
+
+        {/* A computed summary, not a field with a value of its own — it names
+            no single row (it reads the whole picker AND the timezone), so it
+            cannot be one row's Details. It follows the precedent set by the
+            Contents section's "+ Add another" button and the Notification
+            section's report-preview paragraph: a bare, non-field element is
+            illegal inside a table body, so it renders below the table. */}
+        {!rawCron && (
+          <p className="text-xs text-muted-foreground">
+            Runs <code>{toCron(sched)}</code> in {timezone}.{" "}
+            <button
+              type="button"
+              className="underline underline-offset-2"
+              onClick={() => {
+                setCrontab(toCron(sched));
+                setRawCron(true);
+              }}
+            >
+              Write the cron expression instead
+            </button>
+          </p>
+        )}
       </ConfigSection>
       )}
 
@@ -927,180 +987,225 @@ export function ScheduleEditor({
             destination produces. */}
         <DestinationList value={destinations} onChange={setDestinations} />
 
-        <div className="flex flex-col gap-1.5">
-          <Label htmlFor="sched-subject">Email subject</Label>
-          <Input
-            id="sched-subject"
-            ref={subjectRef}
-            value={emailSubject}
-            onChange={(e) => setEmailSubject(e.target.value)}
-            placeholder={
-              isAlert ? `[egret] ${name || "name"} triggered` : `[egret] ${name || "name"}`
-            }
-          />
-          {/* A subject fixed for every edition collapses thirty mails into
-              one thread and nobody can find yesterday's, which is why the
-              placeholders exist and why the preview is here rather than in a
-              tooltip. */}
-          <p className="text-xs text-muted-foreground">
-            Leave blank to use the default shown above. Placeholders:{" "}
-            {SUBJECT_TOKENS.map((t, i) => (
-              <span key={t.token}>
-                {i > 0 && ", "}
-                <button
-                  type="button"
-                  className="font-mono underline hover:text-foreground"
-                  onClick={() => insertToken(t.token)}
-                  title={`Insert ${t.hint}`}
-                >{`{{${t.token}}}`}</button>
-              </span>
-            ))}
-            .
-          </p>
-          {emailSubject.includes("{{") && (
-            <p className="text-xs text-muted-foreground">
-              Sends as{" "}
-              <span className="font-medium text-foreground">
-                {renderSubject(emailSubject, name || "name")}
-              </span>
-            </p>
-          )}
-        </div>
+        <ConfigTable valueClassName="w-52 lg:w-80">
+          <ConfigTableGroup label="Message" />
 
-        <div className="flex flex-col gap-1.5">
-          <Label htmlFor="sched-message">Opening note</Label>
-          <Textarea
-            id="sched-message"
-            rows={2}
-            value={message}
-            onChange={(e) => setMessage(e.target.value)}
-            placeholder="Anything the recipient should know — why this exists, who to ask."
-          />
-          <p className="text-xs text-muted-foreground">
-            Above the result, at the top of the notification. Plain text.
-          </p>
-        </div>
-
-        {/* Between the two notes, because that is where the delivered object
-            physically lands in the mail — "opening note / closing note" reads
-            as two adjacent boxes otherwise.
-
-            For an alert this is also WHERE THE CONTROL BELONGS. It used to sit
-            at the foot of the Condition section, which is about the query and
-            the firing rule; a user looking for "can I send the chart too?"
-            never looked there and concluded the feature did not exist. */}
-        <div className="rounded-md border border-dashed px-3 py-3">
-          {isAlert ? (
-            <>
-              <p className="text-center text-xs text-muted-foreground">
-                The triggering rows go here, always attached as CSV.
+          <ConfigTableRow
+            label="Email subject"
+            htmlFor="sched-subject"
+            details="Leave blank to use the default subject."
+          >
+            {/* A subject fixed for every edition collapses thirty mails into
+                one thread and nobody can find yesterday's, which is why the
+                placeholders exist and why the preview is here rather than in a
+                tooltip. The insert buttons stay beside the input rather than
+                in Details: they act on the field, so they belong with it. */}
+            <div className="space-y-1.5">
+              <Input
+                id="sched-subject"
+                ref={subjectRef}
+                value={emailSubject}
+                onChange={(e) => setEmailSubject(e.target.value)}
+                placeholder={
+                  isAlert ? `[egret] ${name || "name"} triggered` : `[egret] ${name || "name"}`
+                }
+              />
+              <p className="text-xs text-muted-foreground">
+                Placeholders:{" "}
+                {SUBJECT_TOKENS.map((t, i) => (
+                  <span key={t.token}>
+                    {i > 0 && ", "}
+                    <button
+                      type="button"
+                      className="font-mono underline hover:text-foreground"
+                      onClick={() => insertToken(t.token)}
+                      title={`Insert ${t.hint}`}
+                    >{`{{${t.token}}}`}</button>
+                  </span>
+                ))}
+                .
               </p>
-              <div className="mt-2 flex items-center gap-2">
-                <Checkbox
-                  id="sched-attach"
-                  checked={attachTarget}
-                  onCheckedChange={(v) => setAttachTarget(v === true)}
-                />
-                <Label htmlFor="sched-attach" className="text-sm font-normal">
-                  Also show a chart or dashboard
-                </Label>
-              </div>
-              {attachTarget && (
-                <div className="mt-2 flex flex-col gap-2 pl-6">
-                  <select
-                    aria-label="Attachment object type"
-                    className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-                    value={targetKind}
-                    onChange={(e) => {
-                      setTargetKind(e.target.value as "dashboard" | "chart");
-                      setTargetId("");
-                    }}
-                  >
-                    <option value="dashboard">A dashboard</option>
-                    <option value="chart">A chart</option>
-                  </select>
-                  <select
-                    aria-label="Attachment object"
-                    className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-                    value={defaultTarget}
-                    onChange={(e) => setTargetId(e.target.value)}
-                  >
-                    {((targetKind === "dashboard" ? dashboards : charts) ?? []).map((o) => (
-                      <option key={o.id} value={o.id}>
-                        {o.name}
-                      </option>
-                    ))}
-                  </select>
-                  <select
-                    aria-label="Attachment format"
-                    className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-                    value={reportFormat}
-                    onChange={(e) => setReportFormat(e.target.value)}
-                  >
-                    <option value="png">PNG image, shown here in the message</option>
-                    <option value="pdf">PDF, as a file</option>
-                  </select>
-                  <p className="text-xs text-muted-foreground">
-                    If it cannot be rendered the alert still sends, with the rows alone.
-                  </p>
-                  <div className="flex gap-2">
-                    <div className="flex flex-1 flex-col gap-1.5">
-                      <Label htmlFor="sched-width">Image width (px)</Label>
-                      <Input
-                        id="sched-width"
-                        value={customWidth}
-                        onChange={(e) => setCustomWidth(e.target.value)}
-                        placeholder="default"
-                        inputMode="numeric"
-                      />
+              {emailSubject.includes("{{") && (
+                <p className="text-xs text-muted-foreground">
+                  Sends as{" "}
+                  <span className="font-medium text-foreground">
+                    {renderSubject(emailSubject, name || "name")}
+                  </span>
+                </p>
+              )}
+            </div>
+          </ConfigTableRow>
+
+          <ConfigTableRow
+            label="Opening note"
+            htmlFor="sched-message"
+            details="Above the result, at the top of the notification. Plain text."
+          >
+            <Textarea
+              id="sched-message"
+              rows={2}
+              value={message}
+              onChange={(e) => setMessage(e.target.value)}
+              placeholder="Anything the recipient should know — why this exists, who to ask."
+            />
+          </ConfigTableRow>
+
+          <ConfigTableRow
+            label="Closing note"
+            htmlFor="sched-message-footer"
+            details="Below the result, before the link back to egret. Plain text."
+          >
+            <Textarea
+              id="sched-message-footer"
+              rows={2}
+              value={messageFooter}
+              onChange={(e) => setMessageFooter(e.target.value)}
+              placeholder="What to do about it — who to contact, where to look next."
+            />
+          </ConfigTableRow>
+
+          {/* The group only exists for an alert: a report's attachment is
+              already chosen in Contents, so there is nothing here to edit and
+              no row to head. Guarding the group row on the same condition as
+              the row beneath it (rather than on `attachTarget`) keeps it from
+              ever heading zero rows — "Also show a chart or dashboard" is
+              unconditional once `isAlert` is true. */}
+          {isAlert && (
+            <>
+              <ConfigTableGroup label="Attachment" />
+
+              {/* This control used to sit at the foot of the Condition
+                  section, which is about the query and the firing rule; a
+                  user looking for "can I send the chart too?" never looked
+                  there and concluded the feature did not exist. */}
+              <ConfigTableRow
+                label="Also show a chart or dashboard"
+                htmlFor="sched-attach"
+                details="Renders the chart or dashboard picked below and attaches it alongside the numbers."
+              >
+                <div className="flex flex-col gap-2">
+                  <Checkbox
+                    id="sched-attach"
+                    checked={attachTarget}
+                    onCheckedChange={(v) => setAttachTarget(v === true)}
+                  />
+                  {attachTarget && (
+                    <div className="flex flex-col gap-2">
+                      <select
+                        aria-label="Attachment object type"
+                        className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                        value={targetKind}
+                        onChange={(e) => {
+                          setTargetKind(e.target.value as "dashboard" | "chart");
+                          setTargetId("");
+                        }}
+                      >
+                        <option value="dashboard">A dashboard</option>
+                        <option value="chart">A chart</option>
+                      </select>
+                      <select
+                        aria-label="Attachment object"
+                        className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                        value={defaultTarget}
+                        onChange={(e) => setTargetId(e.target.value)}
+                      >
+                        {((targetKind === "dashboard" ? dashboards : charts) ?? []).map((o) => (
+                          <option key={o.id} value={o.id}>
+                            {o.name}
+                          </option>
+                        ))}
+                      </select>
+                      <select
+                        aria-label="Attachment format"
+                        className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                        value={reportFormat}
+                        onChange={(e) => setReportFormat(e.target.value)}
+                      >
+                        <option value="png">PNG image, shown here in the message</option>
+                        <option value="pdf">PDF, as a file</option>
+                      </select>
+                      <p className="text-xs text-muted-foreground">
+                        If it cannot be rendered the alert still sends, with the rows alone.
+                      </p>
                     </div>
-                    <div className="flex flex-1 flex-col gap-1.5">
-                      <Label htmlFor="sched-height">Image height (px)</Label>
-                      <Input
-                        id="sched-height"
-                        value={customHeight}
-                        onChange={(e) => setCustomHeight(e.target.value)}
-                        placeholder="default"
-                        inputMode="numeric"
-                      />
-                    </div>
-                  </div>
+                  )}
                 </div>
+              </ConfigTableRow>
+
+              {attachTarget && (
+                <>
+                  <ConfigTableRow
+                    label="Image width (px)"
+                    htmlFor="sched-width"
+                    details="Overrides the rendered image's default width — only takes effect if height is set too; leave either blank and both fall back to the default size."
+                  >
+                    <Input
+                      id="sched-width"
+                      value={customWidth}
+                      onChange={(e) => setCustomWidth(e.target.value)}
+                      placeholder="default"
+                      inputMode="numeric"
+                    />
+                  </ConfigTableRow>
+                  <ConfigTableRow
+                    label="Image height (px)"
+                    htmlFor="sched-height"
+                    details="Overrides the rendered image's default height — only takes effect if width is set too; leave either blank and both fall back to the default size."
+                  >
+                    <Input
+                      id="sched-height"
+                      value={customHeight}
+                      onChange={(e) => setCustomHeight(e.target.value)}
+                      placeholder="default"
+                      inputMode="numeric"
+                    />
+                  </ConfigTableRow>
+                </>
               )}
             </>
-          ) : (
-            <p className="text-center text-xs text-muted-foreground">
-              {reportFormat === "png"
-                ? "The rendered image goes here, inside the message."
-                : "The report goes here — csv and pdf arrive as a file, text is shown inline."}
-            </p>
           )}
-        </div>
 
-        <div className="flex flex-col gap-1.5">
-          <Label htmlFor="sched-message-footer">Closing note</Label>
-          <Textarea
-            id="sched-message-footer"
-            rows={2}
-            value={messageFooter}
-            onChange={(e) => setMessageFooter(e.target.value)}
-            placeholder="What to do about it — who to contact, where to look next."
-          />
+          <ConfigTableGroup label="Delivery" />
+
+          <ConfigTableRow
+            label="Don't send when there are no rows"
+            htmlFor="sched-skip-empty"
+            details="The run still happens and is recorded as noop — only the notification is skipped. Reports don't read this setting."
+          >
+            <Checkbox
+              id="sched-skip-empty"
+              checked={skipIfEmpty}
+              onCheckedChange={(v) => setSkipIfEmpty(v === true)}
+            />
+          </ConfigTableRow>
+        </ConfigTable>
+
+        {/* What the message always carries, not a field itself — it has no
+            control of its own, so (like the report preview below) it cannot
+            be a row and sits outside the table instead. This used to be a
+            centred paragraph above the attachment checkbox; it described the
+            message body, not the checkbox, so it did not belong as that
+            row's Details. */}
+        {isAlert && (
           <p className="text-xs text-muted-foreground">
-            Below the result, before the link back to egret. Plain text.
+            The triggering rows are always attached — as a CSV file to email. A webhook receives
+            them as JSON in the payload instead; Slack does not receive them at all.
           </p>
-        </div>
+        )}
 
-        <div className="flex items-center gap-2">
-          <Checkbox
-            id="sched-skip-empty"
-            checked={skipIfEmpty}
-            onCheckedChange={(v) => setSkipIfEmpty(v === true)}
-          />
-          <Label htmlFor="sched-skip-empty" className="text-sm font-normal">
-            Don&apos;t send when there are no rows
-          </Label>
-        </div>
+        {/* A report's own preview text, not a field — it has no value to
+            edit, so it cannot be a row. It used to sit between the two notes,
+            which the table's grouping (Message, then Attachment) no longer
+            has room for; it moves below the table for the same reason the
+            "+ Add another" button did in the Contents section: a bare,
+            non-field element is illegal inside a table body. */}
+        {!isAlert && (
+          <p className="rounded-md border border-dashed px-3 py-3 text-center text-xs text-muted-foreground">
+            {reportFormat === "png"
+              ? "The rendered image goes here, inside the message."
+              : "The report goes here — csv and pdf arrive as a file, text is shown inline."}
+          </p>
+        )}
       </ConfigSection>
       )}
 
