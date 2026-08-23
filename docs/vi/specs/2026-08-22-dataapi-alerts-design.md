@@ -442,22 +442,29 @@ test, và riêng layout thì không thể chốt bằng cách đọc mã (§10).
   khoá rate limit thôi là client key mà thành IP, `access_log` không có actor, và grant invoke
   của Cedar bị bỏ qua hoàn toàn — nên nó cần một feature gate cấp workspace, không phải một
   checkbox. Dùng lại cơ chế trusted-proxy/XFF đã thiết lập chứ không đọc lại header.
-- **M — nhiều câu SQL trong một endpoint, chỉ đọc.** Ca dùng chính của DBAPI cho việc này là
-  phân trang: một câu lấy dòng, một câu lấy tổng. `EndpointSnapshot.sql: String` thành danh
-  sách statement có tên, kéo theo thay đổi ở cột output đóng băng, envelope trả về, cache key
-  và OpenAPI sinh ra. Đặt trước C và D để format snapshot chỉ đổi **một lần**.
+- **M — nhiều câu SQL trong một endpoint, chỉ đọc. ĐÃ CÓ SPEC 2026-08-23**, ở
+  `docs/vi/specs/2026-08-23-dataapi-multi-statement-design.md`. `EndpointSnapshot.sql:
+  String` thành danh sách statement **có tên**. Hai điều gạch đầu dòng này nói sai, đã được
+  phép đo sửa lại ở đó: cache key **không** đổi (`version` đã phủ sẵn danh sách câu lệnh), và
+  phân trang — đúng ca dùng mà nó nêu — **không thể làm cho nhất quán**, vì không transaction
+  nào bắc qua hai câu lệnh trên bất kỳ engine nào dưới mô hình kết nối của egret. M còn nuốt
+  thêm một lỗi đang sống trên `main`: endpoint điều kiện publish xanh rồi `503` trên chính
+  lời gọi mặc định đã ghi trong tài liệu của nó.
 - **C — rule validate tham số và biến đổi dữ liệu trả về.** DBAPI dùng script để validate vì
   nó không có mô hình tham số có kiểu; egret có, và cả hai ví dụ trong tài liệu DBAPI
   (`name.length <= 10`, regex email) đều biểu đạt được bằng ràng buộc khai báo trên
   `ParamSpec`. Nửa validate có thực sự cần một runtime script hay không là câu hỏi mở cho
   spec đó. Nửa biến đổi là engine Starlark đang tạm dừng, chỉ transform.
-- **D — câu lệnh ghi và transaction.** Hai việc phải chốt trước khi viết dòng code nào. Một,
-  **đo** xem transaction bắc qua nhiều câu lệnh có tồn tại trên Trino và trên StarRocks dưới
-  mô hình kết nối của egret hay không; nếu không thì "nhiều statement có rollback" không phải
-  lời hứa được phép đưa ra. Chính tài liệu DBAPI nói điều tương tự về HIVE. Hai, trả lời "ai
-  là người ghi": trên connection delegated thì service account ghi bằng chính nó và Ranger
-  áp dụng — chạy được; trên connection không delegated thì mọi client ghi bằng một danh tính
-  chung, và điều đó phải bị **từ chối lúc publish** chứ không phải cảnh báo.
+- **D — câu lệnh ghi và transaction. HUỶ 2026-08-23.** Gạch đầu dòng này đòi đo trước, và
+  phép đo đã giết nó. `Connector::execute` tự mở và tự đóng kết nối của mình — StarRocks gọi
+  `disconnect()` ngay bên trong `execute`, Trino dựng client mới mỗi lần — nên **không
+  transaction nào bắc qua được hai câu lệnh trên bất kỳ engine nào**, và `START TRANSACTION`
+  trả `OK` rồi biến mất cùng kết nối. StarRocks chấp nhận nó mà không cô lập gì, còn
+  `ROLLBACK` của nó im lặng giữ lại dòng đã ghi. Nên "nhiều statement có rollback" không phải
+  lời hứa được phép đưa ra. Muốn hồi sinh D thì cần một trait `Connector` có phiên, và một
+  thiết kế cho hỏng giữa chừng, trước khi cần bất kỳ dòng code nào. Phạm vi cũng đã được user
+  thu hẹp về chỉ-đọc trong cùng ngày, một cách độc lập. Bằng chứng:
+  `.superpowers/sdd/multi-statement-transaction-probe.md`.
 - **Z3 — import/export cấu hình endpoint giữa các môi trường.** Cuối cùng, vì format xuất
   *chính là* snapshot và cả C lẫn D đều thêm trường vào đó.
 

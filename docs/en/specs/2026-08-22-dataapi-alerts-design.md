@@ -478,25 +478,30 @@ test suite, and layout in particular cannot be settled by reading the code (§10
   becomes an IP, `access_log` has no actor, and the Cedar invoke grant is bypassed
   entirely — so it needs a workspace feature gate, not a checkbox. Reuses the
   trusted-proxy/XFF handling already established rather than reading headers again.
-- **M — multiple SQL statements per endpoint, read-only.** DBAPI's primary use for this
-  is pagination: one statement for rows, one for the total. `EndpointSnapshot.sql:
-  String` becomes a named statement list, which changes the frozen output columns, the
-  response envelope, the cache key and the generated OpenAPI. Placed before C and D so
-  the snapshot format changes **once**.
+- **M — multiple SQL statements per endpoint, read-only. SPECIFIED 2026-08-23**, in
+  `docs/en/specs/2026-08-23-dataapi-multi-statement-design.md`. `EndpointSnapshot.sql:
+  String` becomes a **named** statement list. Two things this bullet got wrong, corrected
+  there by measurement: the cache key does **not** change (`version` already covers the
+  statement list), and pagination — the use this bullet names — cannot be made consistent,
+  because no transaction spans two statements on any engine under egret's connection
+  model. M also absorbs a live defect on `main`: a conditional endpoint publishes green
+  and then `503`s on its own documented default call.
 - **C — parameter validation rules and response transformation.** DBAPI uses scripts for
   validation because it has no typed parameter model; egret has one, and both examples in
   DBAPI's guide (`name.length <= 10`, an email regex) are expressible as declarative
   `ParamSpec` constraints. Whether the validation half needs a script runtime at all is
   an open question for that spec. The transformation half is the paused Starlark engine,
   transform-only.
-- **D — write statements and transactions.** Two things must be settled before any code
-  is written. First, **measure** whether a transaction spanning multiple statements
-  exists on Trino and on StarRocks under egret's connection model; if it does not, "multi
-  statement with rollback" is not a promise that can be made. DBAPI's own guide says the
-  equivalent about HIVE. Second, answer "who is the writer": on a delegated connection a
-  service account writes as itself and Ranger applies, which works; on a non-delegated
-  connection every client writes as one shared identity, which should be refused at
-  publish rather than warned about.
+- **D — write statements and transactions. CANCELLED 2026-08-23.** This bullet asked for
+  a measurement first, and the measurement killed it. `Connector::execute` opens and
+  closes its own connection — StarRocks calls `disconnect()` inside `execute`, Trino
+  builds a fresh client per call — so **no transaction can span two statements on any
+  engine**, and `START TRANSACTION` returns `OK` and then vanishes with the connection.
+  StarRocks accepts it without isolating, and its `ROLLBACK` silently keeps the row. So
+  "multi statement with rollback" is not a promise that can be made. Reviving D needs a
+  `Connector` trait with a session, and a partial-failure design, before it needs any
+  code. The scope was narrowed to read-only by the user on the same day, independently.
+  Evidence: `.superpowers/sdd/multi-statement-transaction-probe.md`.
 - **Z3 — endpoint configuration import/export between environments.** Last, because the
   export format *is* the snapshot and both C and D add fields to it.
 
