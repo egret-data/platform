@@ -40,6 +40,11 @@ enum Describe {
     BadSql(&'static str),
     /// The relation does not exist.
     Missing(&'static str),
+    /// Resolve by matching a SUBSTRING of the rendered statement, first match
+    /// wins; the last entry is the fallback (give it `""`). Publish describes
+    /// several renderings of one definition, so a fake that answers the same
+    /// columns for all of them cannot tell a union apart from a single describe.
+    PerSql(Vec<(&'static str, Vec<(&'static str, &'static str)>)>),
 }
 
 /// A `QueryExecPort` under the test's control, which also RECORDS what it was
@@ -100,6 +105,17 @@ impl FakePort {
     fn last_param_count(&self) -> usize {
         *self.last_params.lock().unwrap()
     }
+    /// Every statement the port was handed, oldest first. Publish describes one
+    /// statement per branch now, so `last_sql` names an arbitrary one of them
+    /// and a test about "was this branch described" has to look at all of them.
+    fn all_sql(&self) -> Vec<String> {
+        self.seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, _, _, s)| s.clone())
+            .collect()
+    }
 }
 
 #[async_trait::async_trait]
@@ -134,6 +150,20 @@ impl egret_query_api::QueryExecPort for FakePort {
                     ty: ty.into(),
                 })
                 .collect()),
+            Describe::PerSql(table) => {
+                let cols = table
+                    .iter()
+                    .find(|(needle, _)| sql.contains(needle))
+                    .map(|(_, cols)| cols.clone())
+                    .unwrap_or_else(|| panic!("PerSql has no arm matching {sql:?}"));
+                Ok(cols
+                    .into_iter()
+                    .map(|(name, ty)| ColumnMeta {
+                        name: name.into(),
+                        ty: ty.into(),
+                    })
+                    .collect())
+            }
             Describe::Forbidden => Err(Error::Forbidden),
             Describe::BadSql(m) => Err(Error::InvalidInput(m.into())),
             Describe::Missing(m) => Err(Error::NotFound(m.into())),
@@ -1223,20 +1253,232 @@ async fn the_canonical_parameterized_endpoint_publishes() {
     .await;
 
     f.publish(ep).await;
-    let described = f.port.last_sql();
+    // ALL of them, not `last_sql`: publish now describes one statement per
+    // branch, so which one is last is an implementation detail — and the claim
+    // being made here is about what was described, not about what was described
+    // most recently.
+    let described = f.port.all_sql();
     assert!(
-        described.contains("ORDER BY region"),
-        "`| ident` emits the AUTHOR's allowed entry, raw: {described}"
+        described.iter().any(|s| s.contains("ORDER BY region")),
+        "`| ident` emits the AUTHOR's allowed entry, raw: {described:?}"
     );
     assert!(
-        described.contains("region = ?") && described.contains("day >= ?"),
-        "every conditional branch a value reaches must be described: {described}"
+        described
+            .iter()
+            .any(|s| s.contains("region = ?") && s.contains("day >= ?")),
+        "every conditional branch a value reaches must be described: {described:?}"
+    );
+    assert!(
+        described.iter().any(|s| !s.contains("region = ?")),
+        "and so must the branch a caller reaches by omitting the parameter,          which is the one a call with no query string takes: {described:?}"
     );
     assert_eq!(
         f.live_snapshot(ep).await.param_gate,
         egret_dataapi_api::PARAM_GATE,
         "a version that passed the gate must say so, or serving cannot tell it \
          from one published before the gate existed"
+    );
+}
+
+/// The union, and the `required` flag that makes it honest.
+///
+/// Before this, publish described ONE rendering and froze its columns, so a
+/// conditional endpoint returned `503 schema_drift` on every call that took a
+/// different branch — including the call with no query string at all, which is
+/// the one its own generated OpenAPI advertises as the default.
+#[tokio::test]
+async fn publishing_freezes_the_union_of_every_branch() {
+    let f = skip_without_db!();
+    f.port.set(Describe::PerSql(vec![
+        ("name", vec![("id", "uuid"), ("name", "varchar")]),
+        ("", vec![("id", "uuid")]),
+    ]));
+    let ep = f
+        .create_endpoint(
+            "cond",
+            "reports/cond",
+            "SELECT id {% if detail %}, name {% endif %}FROM t",
+        )
+        .await;
+    f.patch_endpoint(
+        ep,
+        serde_json::json!({ "params": [
+            { "name": "detail", "type": "boolean", "location": "query" }
+        ]}),
+    )
+    .await;
+    f.publish(ep).await;
+
+    let snap = f.live_snapshot(ep).await;
+    assert_eq!(
+        snap.columns
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["id", "name"],
+        "both branches are described, and the union keeps first-seen order"
+    );
+    let by = |n: &str| {
+        snap.columns
+            .iter()
+            .find(|c| c.name == n)
+            .unwrap_or_else(|| panic!("no column {n}"))
+            .clone()
+    };
+    assert!(by("id").required, "id is in every branch");
+    assert!(
+        !by("name").required,
+        "name appears only under `detail`, so it is declared and optional"
+    );
+}
+
+/// The branch a caller reaches by sending NOTHING is described too.
+///
+/// This is the one the probe assignments alone cannot reach: a string parameter
+/// has no closed value space, so its representative value is always truthy and
+/// `{% if region %}` always takes its block. Only the absent context renders the
+/// other side — and absent is what most calls actually send.
+#[tokio::test]
+async fn the_branch_an_omitted_parameter_takes_is_described() {
+    let f = skip_without_db!();
+    f.port.set(Describe::PerSql(vec![
+        ("region = ?", vec![("id", "uuid"), ("region", "varchar")]),
+        ("", vec![("id", "uuid")]),
+    ]));
+    let ep = f
+        .create_endpoint(
+            "omit",
+            "reports/omit",
+            "SELECT id {% if region %}, region {% endif %}FROM t \
+             {% if region %}WHERE region = {{ region }}{% endif %}",
+        )
+        .await;
+    f.patch_endpoint(
+        ep,
+        serde_json::json!({ "params": [
+            { "name": "region", "type": "string", "location": "query" }
+        ]}),
+    )
+    .await;
+    f.publish(ep).await;
+
+    let snap = f.live_snapshot(ep).await;
+    assert!(
+        !snap
+            .columns
+            .iter()
+            .find(|c| c.name == "region")
+            .expect("region is declared")
+            .required,
+        "a call with no query string omits `region`, takes the other branch and \
+         returns one column — that call must not be a schema_drift 503"
+    );
+}
+
+/// Two types under one name cannot be unioned into one honest declaration, and
+/// this is the same gap that served a `200` carrying an integer under a declared
+/// `varchar`.
+#[tokio::test]
+async fn a_column_whose_type_differs_between_branches_refuses_to_publish() {
+    let f = skip_without_db!();
+    f.port.set(Describe::PerSql(vec![
+        ("name", vec![("v", "varchar")]),
+        ("", vec![("v", "integer")]),
+    ]));
+    let ep = f
+        .create_endpoint(
+            "conflict",
+            "reports/conflict",
+            "SELECT {% if detail %}name{% else %}id{% endif %} AS v FROM t",
+        )
+        .await;
+    f.patch_endpoint(
+        ep,
+        serde_json::json!({ "params": [
+            { "name": "detail", "type": "boolean", "location": "query" }
+        ]}),
+    )
+    .await;
+    let (status, body) = f.publish_raw(ep).await;
+    // 400, not 422: `ValidationError` becomes `Error::InvalidInput`, which
+    // `egret_core::http` maps to BAD_REQUEST — the same status every other
+    // publish rule refusal carries.
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("two types"),
+        "the message must name the fix, not just the fault: {body}"
+    );
+    assert!(
+        msg.contains("varchar") && msg.contains("integer"),
+        "and both types, or the author cannot tell which branch to CAST: {body}"
+    );
+    assert!(
+        f.versions(ep).await.is_empty(),
+        "a refused publish leaves no version behind"
+    );
+}
+
+/// `representative_value` picks `allowed[0]` (`lifecycle.rs`), so before this the
+/// ORDER the author wrote `allowed` in decided the published contract.
+#[tokio::test]
+async fn every_allowed_enum_value_is_described_not_only_the_first() {
+    let f = skip_without_db!();
+    f.port.set(Describe::PerSql(vec![
+        ("name", vec![("id", "uuid"), ("name", "varchar")]),
+        ("", vec![("id", "uuid")]),
+    ]));
+    let ep = f
+        .create_endpoint(
+            "enum",
+            "reports/enum",
+            "SELECT id {% if mode | value == 'full' %}, name {% endif %}FROM t",
+        )
+        .await;
+    f.patch_endpoint(
+        ep,
+        serde_json::json!({ "params": [
+            { "name": "mode", "type": "enum", "location": "query", "required": true,
+              "allowed": ["summary", "full"] }
+        ]}),
+    )
+    .await;
+    f.publish(ep).await;
+    let snap = f.live_snapshot(ep).await;
+    assert!(
+        snap.columns.iter().any(|c| c.name == "name"),
+        "`full` is not allowed[0], and it was never described before M1: {:?}",
+        snap.columns
+    );
+}
+
+/// The cost argument, measured: describing every branch must not cost a describe
+/// per probe on a definition that has no branches.
+#[tokio::test]
+async fn a_non_conditional_definition_describes_exactly_once() {
+    let f = skip_without_db!();
+    f.port.set(Describe::Columns(vec![("id", "uuid")]));
+    let ep = f
+        .create_endpoint(
+            "plain",
+            "reports/plain",
+            "SELECT id FROM t WHERE r = {{ region }}",
+        )
+        .await;
+    f.patch_endpoint(
+        ep,
+        serde_json::json!({ "params": [
+            { "name": "region", "type": "string", "location": "query" }
+        ]}),
+    )
+    .await;
+    let before = f.port.call_count();
+    f.publish(ep).await;
+    assert_eq!(
+        f.port.call_count() - before,
+        1,
+        "deduplication is the whole cost argument; `at least one` would pass with \
+         it removed"
     );
 }
 

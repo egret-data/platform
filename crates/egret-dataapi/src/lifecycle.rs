@@ -351,6 +351,23 @@ pub enum ValidationError {
          a statement containing a bind marker"
     )]
     DescribeReturnedNoColumns,
+    /// One name, two types, across the branches publish described.
+    ///
+    /// There is no union of two types that is honest: declaring either one is a
+    /// lie on the calls that take the other branch, and that lie is served as a
+    /// `200` — the frozen contract says `varchar` and the row carries an
+    /// integer. So the definition is refused, and the author is told both of the
+    /// two repairs that exist.
+    #[error(
+        "column `{name}` is `{first}` in one branch of this definition and `{second}` in \
+         another. A published contract cannot declare two types for one name — give the \
+         branches a `CAST` to the same type, or return them under different names"
+    )]
+    ColumnTypeConflict {
+        name: String,
+        first: String,
+        second: String,
+    },
 }
 
 impl From<ValidationError> for Error {
@@ -1522,6 +1539,16 @@ fn projection_has_uncast_marker(rest: &str) -> bool {
 /// An empty column list is refused rather than frozen. An endpoint with no
 /// columns has no contract, and the failure it produces — 200s carrying empty
 /// objects — is the kind nobody reports as a bug.
+///
+/// # One rendering is not one contract
+///
+/// A conditional definition has one output schema per branch, and freezing the
+/// one branch the representative values happened to take made every OTHER call
+/// a `503 schema_drift` — including the call with no query string, which is the
+/// one the generated OpenAPI advertises as the default. So every branch is
+/// described and their UNION is frozen, each column carrying whether every
+/// branch returns it. See [`branch_statements`] for which renderings that is and
+/// [`describe_branches`] for how they are folded together.
 pub async fn validate(
     port: &dyn egret_query_api::QueryExecPort,
     workspace: Uuid,
@@ -1537,25 +1564,151 @@ pub async fn validate(
         delegated,
         impersonate,
     )?;
-    // Infallible in practice — `check_render_rules` just rendered this same
-    // context — but reported rather than unwrapped, because "it cannot fail
-    // here" is a claim about another function.
-    let ctx = representative(&draft.sql, &draft.params, &[]);
-    let (rendered, binds) =
-        crate::render::render(&draft.sql, &ctx).map_err(ValidationError::Render)?;
-    let columns = port
-        .describe_as_with_params(
-            workspace,
-            draft.database_id,
-            principal,
-            &rendered,
-            binds.len(),
-        )
-        .await?;
-    if columns.is_empty() {
-        return Err(ValidationError::DescribeReturnedNoColumns.into());
+    Ok(describe_branches(port, workspace, principal, draft)
+        .await?
+        .union)
+}
+
+/// What describing every branch of one definition produced.
+pub(crate) struct DescribedBranches {
+    /// Every column any branch returns, in first-seen order, with `required`
+    /// set for the ones every branch returns.
+    pub union: Vec<ColumnSpec>,
+    /// The column NAMES each described statement resolved to, in describe
+    /// order. The union throws away WHICH branch had which columns, and that is
+    /// the question `output.shape = "arrays"` has to ask: an array row is
+    /// positional, so two branches with different column lists cannot both be
+    /// served under one frozen order.
+    #[allow(
+        dead_code,
+        reason = "the `arrays` gate is the next task; \
+        computing this list is free here and reconstructing it later is not"
+    )]
+    pub per_statement: Vec<Vec<String>>,
+}
+
+/// Every rendering of the definition publish must describe, in describe order.
+///
+/// # Why one render is not enough
+///
+/// A `{% if %}` definition has more than one output schema, and the frozen
+/// contract has to cover all of them or the serving path's schema check refuses
+/// the row it just fetched — a `503 schema_drift` on a call the endpoint's own
+/// generated OpenAPI advertises. Describing only the representative render
+/// picked whichever branch the representative values happened to take.
+///
+/// # The permutation set is the probes PLUS the absent contexts
+///
+/// [`crate::render::render_permutations`] varies each parameter over the
+/// definition's own literals, an enum's `allowed` values and a boolean's two
+/// values — which reaches the other side of `{% if mode | value == 'full' %}`
+/// but never the other side of `{% if region %}`, because every representative
+/// value is deliberately truthy and a string has no closed value space. The
+/// branch a caller reaches by sending NOTHING is only rendered by an ABSENT
+/// context, and that is the branch most calls take. [`check_render_rules`]
+/// builds the same set for its own rules, and for the same reason.
+///
+/// Deduplicated by the rendered statement across all of them, so a definition
+/// with no branch costs exactly one describe however many parameters it
+/// declares.
+fn branch_statements(draft: &DataApiEndpointDto) -> Vec<(String, usize)> {
+    let optional: Vec<&str> = draft
+        .params
+        .iter()
+        .filter(|p| !p.required && p.default.is_none())
+        .map(|p| p.name.as_str())
+        .collect();
+    let mut contexts = vec![representative(&draft.sql, &draft.params, &[])];
+    for name in &optional {
+        contexts.push(representative(&draft.sql, &draft.params, &[name]));
     }
-    Ok(columns.iter().map(ColumnSpec::from).collect())
+    if optional.len() > 1 {
+        contexts.push(representative(&draft.sql, &draft.params, &optional));
+    }
+
+    let mut statements: Vec<(String, usize)> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for ctx in &contexts {
+        for (rendered, binds) in crate::render::render_permutations(&draft.sql, ctx) {
+            if seen.insert(rendered.clone()) {
+                // `binds.len()` is the `param_count` `describe_as_with_params`
+                // wants — the same quantity the single-statement path passed.
+                statements.push((rendered, binds.len()));
+            }
+        }
+    }
+    statements
+}
+
+/// Describe every branch and fold the results into one contract.
+///
+/// A `Vec` accumulator, not a map: the union is a PUBLISHED contract, and a
+/// hash order would make two publishes of byte-identical input declare their
+/// columns in different orders.
+///
+/// `required` is computed only once every statement has been described. Doing it
+/// incrementally would mark the first statement's columns required before
+/// anything knows whether a later branch omits them.
+async fn describe_branches(
+    port: &dyn egret_query_api::QueryExecPort,
+    workspace: Uuid,
+    principal: UserId,
+    draft: &DataApiEndpointDto,
+) -> Result<DescribedBranches> {
+    let mut statements = branch_statements(draft);
+    if statements.is_empty() {
+        // Unreachable while `check_render_rules` has just rendered the
+        // representative context, but `render_permutations` SKIPS an assignment
+        // that does not render, so an empty result is silence rather than an
+        // error. Render the representative context directly: its failure is the
+        // one worth reporting, and its success is a statement to describe.
+        let ctx = representative(&draft.sql, &draft.params, &[]);
+        let (rendered, binds) =
+            crate::render::render(&draft.sql, &ctx).map_err(ValidationError::Render)?;
+        statements.push((rendered, binds.len()));
+    }
+
+    let mut union: Vec<ColumnSpec> = Vec::new();
+    let mut per_statement: Vec<Vec<String>> = Vec::new();
+    for (rendered, bind_count) in &statements {
+        let columns = port
+            .describe_as_with_params(
+                workspace,
+                draft.database_id,
+                principal,
+                rendered,
+                *bind_count,
+            )
+            .await?;
+        if columns.is_empty() {
+            return Err(ValidationError::DescribeReturnedNoColumns.into());
+        }
+        per_statement.push(columns.iter().map(|c| c.name.clone()).collect());
+        for column in &columns {
+            let spec = ColumnSpec::from(column);
+            match union.iter().find(|u| u.name == spec.name) {
+                Some(existing) if existing.ty != spec.ty => {
+                    return Err(ValidationError::ColumnTypeConflict {
+                        name: spec.name,
+                        first: existing.ty.clone(),
+                        second: spec.ty,
+                    }
+                    .into());
+                }
+                Some(_) => {}
+                None => union.push(spec),
+            }
+        }
+    }
+    for column in &mut union {
+        column.required = per_statement
+            .iter()
+            .all(|names| names.contains(&column.name));
+    }
+    Ok(DescribedBranches {
+        union,
+        per_statement,
+    })
 }
 
 /// A published version, as the API reports it.
