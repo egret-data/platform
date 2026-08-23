@@ -1589,6 +1589,42 @@ async fn two_same_named_columns_in_one_statement_are_diagnosed_as_an_alias_probl
     );
 }
 
+/// The duplicate-name refusal does not depend on the types being different.
+///
+/// `SELECT a.id, b.id FROM a JOIN b` with BOTH `bigint` published green before
+/// this: the union deduplicates by name to one column, and `shape_rows` then
+/// compares a live width of 2 against a frozen width of 1 and returns
+/// `503 schema_drift` on EVERY call — not on some branch, on every one. Which is
+/// the publish-green-then-always-fail class this task exists to remove, one
+/// keystroke from the differing-type case above.
+#[tokio::test]
+async fn two_same_named_columns_of_the_same_type_are_refused_too() {
+    let f = skip_without_db!();
+    f.port
+        .set(Describe::Columns(vec![("id", "bigint"), ("id", "bigint")]));
+    let ep = f
+        .create_endpoint(
+            "dupsame",
+            "reports/dupsame",
+            "SELECT a.id, b.id FROM a JOIN b",
+        )
+        .await;
+    let (status, body) = f.publish_raw(ep).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "identical types make the duplicate name MORE invisible, not less: {body}"
+    );
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("two columns named"),
+        "{body}"
+    );
+    assert!(f.versions(ep).await.is_empty(), "nothing may be published");
+}
+
 /// `describe_as` must run as the CALLER, so a delegated connection resolves
 /// under their policy and an author cannot publish a contract over a table they
 /// cannot themselves read.

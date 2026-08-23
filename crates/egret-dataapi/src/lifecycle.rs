@@ -368,22 +368,32 @@ pub enum ValidationError {
         first: String,
         second: String,
     },
-    /// One STATEMENT returning two same-named columns of different types.
+    /// One STATEMENT returning two columns of the same name.
     ///
-    /// Separated from [`ValidationError::ColumnTypeConflict`] because the same
-    /// fold catches both and the repairs are not the same. Telling an author
-    /// their column "is `bigint` in one branch and `varchar` in another" when
-    /// their definition has no branch at all sends them hunting for one.
+    /// # Regardless of their types, and that is the whole point
+    ///
+    /// This started as the same-name-DIFFERENT-type case, split off from
+    /// [`ValidationError::ColumnTypeConflict`] so an author with no `{% if %}`
+    /// in their definition would not be told to go and look at their branches.
+    /// But the condition was the wrong one: the rationale below is about the
+    /// NAME, and it does not care what the types are.
+    ///
+    /// `SELECT a.id, b.id FROM a JOIN b` with **both** `bigint` used to publish
+    /// green. The union deduplicates by name to one column, `shape_rows` then
+    /// compares `out.columns.len() == 2` against `snap.columns.len() == 1`, and
+    /// every call — not some branch, every one — is a `503 schema_drift`. That
+    /// is the publish-green-then-always-fail class this whole gate exists to
+    /// remove, one keystroke away from the differing-type case.
+    ///
+    /// So the check is on the name alone, and it runs per described statement
+    /// before the union fold rather than inside it: a duplicate is a property of
+    /// one statement's describe output, not of the fold.
     #[error(
-        "this definition returns two columns named `{name}`, of types `{first}` and `{second}`. \
-         A JSON object has one key per name, so only one of them could ever be served — alias \
-         them apart, e.g. `SELECT a.{name} AS a_{name}, b.{name} AS b_{name}`"
+        "this definition returns two columns named `{name}`. A JSON object has one key per \
+         name, so only one of them could ever be served — alias them apart, e.g. \
+         `SELECT a.{name} AS a_{name}, b.{name} AS b_{name}`"
     )]
-    AmbiguousColumnName {
-        name: String,
-        first: String,
-        second: String,
-    },
+    AmbiguousColumnName { name: String },
     /// More structurally distinct renderings than publish will describe.
     ///
     /// Refusing, not truncating. Truncating drops whichever branch fell off the
@@ -400,6 +410,29 @@ pub enum ValidationError {
          into two endpoints"
     )]
     TooManyBranches { statements: usize, limit: usize },
+    /// More declared parameters than publish will render a definition for.
+    ///
+    /// # Why a second limit, when [`ValidationError::TooManyBranches`] already caps the cost
+    ///
+    /// Because that one caps the ENGINE half and is measured after the work.
+    /// Publish renders every branch to find out how many there are, and the
+    /// rendering is synchronous CPU on an async task — so a definition with
+    /// enough parameters paid seconds of it and was then refused anyway.
+    /// Measured in release, all-boolean, every parameter guarding its own
+    /// block: 34 ms at 20 parameters, 284 ms at 50, 1.14 s at 100, 4.4 s at 200,
+    /// **18.2 s at 400** — every one of them refused, after paying in full, and
+    /// blocking a runtime worker rather than merely the caller.
+    ///
+    /// Nothing bounded the parameter count before this: the only `params.len()`
+    /// in the whole validator was a `Vec::with_capacity`. So the cost is bounded
+    /// at its own source, by a scan, before the first render.
+    #[error(
+        "this definition declares {declared} parameters, and the limit is {limit}. Publish \
+         renders the definition once for every branch those parameters can take, so checking \
+         it costs more the more of them there are. An endpoint with this many knobs is really \
+         two endpoints: split it, or fold related filters into one `enum` parameter"
+    )]
+    TooManyParameters { declared: usize, limit: usize },
 }
 
 impl From<ValidationError> for Error {
@@ -1099,6 +1132,15 @@ fn check_definition_scans(
     rules: ParamRules,
 ) -> std::result::Result<(), ValidationError> {
     check_single_select(sql)?;
+    // FIRST among the parameter rules, because it is the one that bounds what
+    // every later rule costs — `check_render_rules` renders `optional + 2`
+    // contexts and publish renders them again.
+    if params.len() > MAX_DECLARED_PARAMS {
+        return Err(ValidationError::TooManyParameters {
+            declared: params.len(),
+            limit: MAX_DECLARED_PARAMS,
+        });
+    }
     check_enum_params(params)?;
     check_param_locations(params)?;
     check_defaults(params)?;
@@ -1619,39 +1661,109 @@ pub(crate) struct DescribedBranches {
     pub per_statement: Vec<Vec<String>>,
 }
 
-/// How many structurally distinct statements one definition may publish.
+/// How many parameters one definition may declare.
 ///
-/// # Why there is a limit at all, and why it refuses rather than truncates
+/// # This is the bound on the half [`MAX_PUBLISHED_STATEMENTS`] does not cover
 ///
-/// Publish describes every branch, so its engine cost is the number of distinct
-/// renderings — and nothing else bounds that. `validate_definition` puts no cap
-/// on how many parameters a definition declares, the context set is
-/// `optional + 2`, and each context is probed up to
-/// `render::MAX_PROBES` times, so the ceiling before this constant was
-/// `64 × (optional + 2)` describes from one authenticated publish.
+/// The statement limit is measured from the rendered set, so the rendering is
+/// already paid for by the time it can refuse anything, and that rendering is
+/// synchronous CPU inside an `async fn`. This limit is a scan over
+/// `params.len()` in [`check_definition_scans`], before any render, and it is
+/// what makes the multi-second case unrepresentable rather than merely refused.
 ///
 /// # Where the number comes from
 ///
-/// Measured, by counting the describes one publish actually costs — not derived
-/// from the ceiling, which no realistic definition approaches:
+/// Measured in release, timing everything publish does before its first
+/// describe (`branch_statements` plus [`check_render_rules`]), for *n*
+/// parameters each guarding its own `{% if %}` block:
+///
+/// | *n* | all `string` (linear shape) | all `boolean` (the expensive shape) |
+/// |---|---|---|
+/// | 16 | 18 statements, 2.2 ms | 138 statements, 21 ms |
+/// | 24 | 26 statements, 3.6 ms | 302 statements, 55 ms |
+/// | **32** | **34 statements, 5.9 ms** | **530 statements, 122 ms** |
+/// | 36 | — | 640 statements, 152 ms |
+/// | 48 | 50 statements, 12.5 ms | — |
+/// | 62 | 64 statements, 20.0 ms | — |
+/// | 100 | — | 1.14 s |
+/// | 400 | — | 18.2 s |
+///
+/// So `32`: eight times spec §4.3's canonical endpoint, which declares four. A
+/// 32-parameter definition of the shape anyone actually writes costs 5.9 ms and
+/// 34 statements, so it publishes comfortably — while the worst case the limit
+/// still admits costs 122 ms of rendering before being refused, against the
+/// 18.2 s that was reachable before. Above 32 the expensive curve is steep
+/// (152 ms at 36, 284 ms at 50), and below it a legitimate wide endpoint starts
+/// to feel it.
+///
+/// It also keeps the two limits from fighting: 62 linear parameters render to
+/// exactly 64 statements, so without this bound a perfectly ordinary wide
+/// endpoint could trip [`MAX_PUBLISHED_STATEMENTS`]. At 32 parameters the linear
+/// shape tops out at 34 statements, which leaves the statement limit doing only
+/// the job it was built for — catching the superlinear shapes.
+const MAX_DECLARED_PARAMS: usize = 32;
+
+/// How many structurally distinct statements one definition may publish.
+///
+/// # What it bounds, and what it does not
+///
+/// It bounds the ENGINE half: publish describes every distinct rendering, so
+/// this is the number of round trips one publish may cost. It does **not** bound
+/// the rendering that produces that number — the count has to be known before it
+/// can be refused, so a definition still renders up to `64 × (optional + 2)`
+/// times (`render::MAX_PROBES` assignments per context) before this limit can
+/// say no. That residual is synchronous CPU on an async task, and it is bounded
+/// by [`MAX_DECLARED_PARAMS`] instead, which is a scan and runs first. The two
+/// limits are halves of one bound, not one limit and a spare.
+///
+/// # Why it refuses rather than truncates
+///
+/// Truncating drops whichever branch fell off the end, and an undescribed branch
+/// is a column missing from the union — the exact `503 schema_drift` this gate
+/// exists to remove. A loud publish is the honest failure; a quiet one is the
+/// bug.
+///
+/// # Where the number comes from
+///
+/// Measured, by counting the describes one publish actually costs:
 ///
 /// | definition | distinct statements |
 /// |---|---|
 /// | spec §4.3's canonical endpoint (4 parameters, 3 `{% if %}`, a `{% for %}`) | 10 |
-/// | *n* optional **string** parameters, each guarding a block | *n* + 2 (22 at *n* = 20) |
-/// | *n* optional **enum** parameters, 8 `allowed` each | *n* + 2 |
-/// | *n* optional **boolean** parameters, each guarding a block | 12 at *n* = 4, 38 at *n* = 8, 57 at *n* = 10, **68 at *n* = 11**, 212 at *n* = 20 |
+/// | *n* optional parameters whose blocks are OFF at the representative values | *n* + 1 or *n* + 2 — 22 at *n* = 20 |
+/// | *n* optional parameters whose blocks are ON at the representative values | 12 at *n* = 4, 38 at *n* = 8, 57 at *n* = 10, **68 at *n* = 11**, 212 at *n* = 20 |
 ///
-/// A string or enum parameter costs one statement, because its representative
-/// value is truthy and its candidate values are bound rather than branched on;
-/// only the absent context is new. A boolean has a closed two-value space, so
-/// probing it flips a block from every other context as well — that is the
-/// quadratic row, and it is the only shape that gets anywhere near the limit.
+/// **The split is not by TYPE.** It is whether a parameter's candidate values
+/// can turn its block OFF from a context where the representative values turn it
+/// ON. When blocks start off, every probe turns exactly one on, and the same
+/// single-block statement is reached from every context — they all collapse, and
+/// the cost is linear. When blocks start on, a probe from an absent context
+/// turns off a SECOND block, and the pairs are what grow.
 ///
-/// So `64` is 6.4× the canonical endpoint, admits every string/enum definition
-/// measured at any width the author is likely to write, and admits ten
-/// independent boolean toggles on one endpoint while refusing eleven. It is
-/// also `render::MAX_PROBES`, deliberately: that is already this
+/// Which side a parameter lands on, measured:
+///
+/// * **`boolean`** — always the expensive side. Its representative value is
+///   `true` and its candidates are both of `true`/`false`, so `{% if flag %}`
+///   starts on and can be turned off.
+/// * **`string`** — always the cheap side under `{% if s %}`: representative
+///   values are deliberately truthy and a string's candidates are the
+///   definition's literals, which are bound rather than branched on. Only the
+///   absent context is new.
+/// * **`enum` inspected with `| value == '…'`** — **either side, and the
+///   comparand decides**. `representative_value` picks `allowed[0]`, so a
+///   definition comparing against `allowed[0]` starts every block ON and
+///   measures 4/12/38/57/68/212 at *n* = 2/4/8/10/11/20 — digit for digit the
+///   boolean row. The same definition comparing against any other allowed value
+///   starts every block off and measures *n* + 1: 21 at *n* = 20. Independent of
+///   how many `allowed` entries there are — 2 and 8 measure identically.
+///   An earlier revision of this comment claimed enums were linear; that was
+///   true only of the truthiness spelling, and it was the comparand that
+///   mattered all along.
+///
+/// So `64` is 6.4× the canonical endpoint, admits every linear-shape definition
+/// at any width [`MAX_DECLARED_PARAMS`] permits (32 such parameters render to 34
+/// statements), and admits ten independent always-on toggles while refusing
+/// eleven. It is also `render::MAX_PROBES`, deliberately: that is already this
 /// crate's stated answer to "how much may one definition cost", and two
 /// different budgets would be two numbers to keep in step.
 const MAX_PUBLISHED_STATEMENTS: usize = 64;
@@ -1680,25 +1792,24 @@ const MAX_PUBLISHED_STATEMENTS: usize = 64;
 /// Deduplicated by the rendered statement across all of them, so a definition
 /// with no branch costs exactly one describe however many parameters it
 /// declares.
-fn branch_statements(draft: &DataApiEndpointDto) -> Vec<(String, usize)> {
-    let optional: Vec<&str> = draft
-        .params
+fn branch_statements(sql: &str, params: &[ParamSpec]) -> Vec<(String, usize)> {
+    let optional: Vec<&str> = params
         .iter()
         .filter(|p| !p.required && p.default.is_none())
         .map(|p| p.name.as_str())
         .collect();
-    let mut contexts = vec![representative(&draft.sql, &draft.params, &[])];
+    let mut contexts = vec![representative(sql, params, &[])];
     for name in &optional {
-        contexts.push(representative(&draft.sql, &draft.params, &[name]));
+        contexts.push(representative(sql, params, &[name]));
     }
     if optional.len() > 1 {
-        contexts.push(representative(&draft.sql, &draft.params, &optional));
+        contexts.push(representative(sql, params, &optional));
     }
 
     let mut statements: Vec<(String, usize)> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for ctx in &contexts {
-        for (rendered, binds) in crate::render::render_permutations(&draft.sql, ctx) {
+        for (rendered, binds) in crate::render::render_permutations(sql, ctx) {
             if seen.insert(rendered.clone()) {
                 // `binds.len()` is the `param_count` `describe_as_with_params`
                 // wants — the same quantity the single-statement path passed.
@@ -1724,7 +1835,7 @@ async fn describe_branches(
     principal: UserId,
     draft: &DataApiEndpointDto,
 ) -> Result<DescribedBranches> {
-    let mut statements = branch_statements(draft);
+    let mut statements = branch_statements(&draft.sql, &draft.params);
     if statements.is_empty() {
         // Unreachable while `check_render_rules` has just rendered the
         // representative context, but `render_permutations` SKIPS an assignment
@@ -1761,29 +1872,30 @@ async fn describe_branches(
         if columns.is_empty() {
             return Err(ValidationError::DescribeReturnedNoColumns.into());
         }
-        per_statement.push(columns.iter().map(|c| c.name.clone()).collect());
-        for (i, column) in columns.iter().enumerate() {
+        // A duplicate WITHIN one statement, checked before the fold and without
+        // consulting the types: the fold deduplicates by name, so a second `id`
+        // would vanish into the first and the frozen contract would be one
+        // column narrower than every row the endpoint fetches.
+        let names: Vec<&str> = columns.iter().map(|c| c.name.as_str()).collect();
+        if let Some(name) = names
+            .iter()
+            .enumerate()
+            .find(|(i, name)| names[..*i].contains(name))
+            .map(|(_, name)| (*name).to_owned())
+        {
+            return Err(ValidationError::AmbiguousColumnName { name }.into());
+        }
+        per_statement.push(names.iter().map(|n| (*n).to_string()).collect());
+        for column in &columns {
             let spec = ColumnSpec::from(column);
             match union.iter().find(|u| u.name == spec.name) {
+                // Reachable only ACROSS statements now — a duplicate inside one
+                // was refused above, whatever its types.
                 Some(existing) if existing.ty != spec.ty => {
-                    // WHICH conflict decides which repair. An earlier column of
-                    // this same statement carrying the name means one statement
-                    // returns the name twice — `SELECT a.id, b.id FROM a JOIN b`
-                    // — and there is no branch involved to go looking for.
-                    let same_statement = columns[..i].iter().any(|c| c.name == spec.name);
-                    let (name, first, second) = (spec.name, existing.ty.clone(), spec.ty);
-                    return Err(if same_statement {
-                        ValidationError::AmbiguousColumnName {
-                            name,
-                            first,
-                            second,
-                        }
-                    } else {
-                        ValidationError::ColumnTypeConflict {
-                            name,
-                            first,
-                            second,
-                        }
+                    return Err(ValidationError::ColumnTypeConflict {
+                        name: spec.name,
+                        first: existing.ty.clone(),
+                        second: spec.ty,
                     }
                     .into());
                 }
@@ -2255,6 +2367,94 @@ mod tests {
             allowed: None,
             description: String::new(),
         }
+    }
+
+    /// The declared-parameter bound, from both sides.
+    #[test]
+    fn a_definition_declaring_more_parameters_than_the_limit_is_refused() {
+        let build = |n: usize| {
+            let mut sql = String::from("SELECT id FROM t WHERE 1=1");
+            let mut params = Vec::new();
+            for i in 0..n {
+                sql.push_str(&format!(
+                    " {{% if p{i} %}} AND a{i} = {{{{ p{i} }}}}{{% endif %}}"
+                ));
+                params.push(param(&format!("p{i}"), ParamType::String));
+            }
+            (sql, params)
+        };
+
+        // At the limit, and of the shape a real wide endpoint has: it publishes.
+        let (sql, params) = build(MAX_DECLARED_PARAMS);
+        assert!(
+            validate_definition(
+                &sql,
+                &params,
+                &cache(CacheScope::PerPrincipal),
+                false,
+                false
+            )
+            .is_ok(),
+            "a definition AT the limit must still validate, or the bound is a \
+             refusal of ordinary work"
+        );
+
+        let (sql, params) = build(MAX_DECLARED_PARAMS + 1);
+        assert_eq!(
+            validate_definition(
+                &sql,
+                &params,
+                &cache(CacheScope::PerPrincipal),
+                false,
+                false
+            ),
+            Err(ValidationError::TooManyParameters {
+                declared: MAX_DECLARED_PARAMS + 1,
+                limit: MAX_DECLARED_PARAMS,
+            })
+        );
+    }
+
+    /// The bound has to run BEFORE the rendering, or it bounds nothing that
+    /// matters: the cost it exists to prevent is paid during the render.
+    ///
+    /// Measured rather than asserted structurally, because "runs first" is a
+    /// claim about cost. 400 all-boolean parameters render in **18.2 s in
+    /// release** and far longer in the debug build this test runs under. The
+    /// budget here is two orders of magnitude below that, so it cannot coincide
+    /// with the rendering happening — the two readings are not close enough to
+    /// be confused.
+    #[test]
+    fn the_parameter_bound_is_checked_before_anything_renders() {
+        let mut sql = String::from("SELECT id FROM t WHERE 1=1");
+        let mut params = Vec::new();
+        for i in 0..400 {
+            sql.push_str(&format!(
+                " {{% if p{i} %}} AND a{i} = {{{{ p{i} }}}}{{% endif %}}"
+            ));
+            params.push(param(&format!("p{i}"), ParamType::Boolean));
+        }
+        let started = std::time::Instant::now();
+        let got = validate_definition(
+            &sql,
+            &params,
+            &cache(CacheScope::PerPrincipal),
+            false,
+            false,
+        );
+        let elapsed = started.elapsed();
+        assert_eq!(
+            got,
+            Err(ValidationError::TooManyParameters {
+                declared: 400,
+                limit: MAX_DECLARED_PARAMS,
+            })
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "the refusal must precede the rendering; this took {elapsed:?}, which \
+             means the definition was rendered before being refused"
+        );
     }
 
     fn cache(scope: CacheScope) -> CacheSpec {
