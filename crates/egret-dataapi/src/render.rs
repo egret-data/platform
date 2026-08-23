@@ -358,21 +358,13 @@ impl ParamValues {
     }
 
     /// Candidate values for probing `name`: an enum parameter's own `allowed`
-    /// entries, a boolean parameter's two closed values, or the definition's
-    /// literals for anything else.
+    /// entries, or the definition's literals — plus, for a boolean parameter,
+    /// its two closed values appended to those literals.
     fn candidates(&self, name: &str, literals: &[Param]) -> Vec<Param> {
         let cell = self
             .entries
             .get(name)
             .and_then(|v| v.downcast_object_ref::<Cell>());
-        // A boolean's value space is closed and has exactly two members, so
-        // enumerate it rather than hoping the definition mentions `true`/`false`
-        // as literals. `{% if detail %}, name {% endif %}` contains no literal
-        // at all — without this, `detail` is only ever probed at its own
-        // (usually `true`) value, and the `false` branch is never rendered.
-        if matches!(cell.map(|c| &c.param), Some(Param::Bool(_))) {
-            return vec![Param::Bool(true), Param::Bool(false)];
-        }
         match cell.and_then(|c| c.allowed.clone()) {
             // Capped: `allowed` has no length limit anywhere in the model, and
             // one 64-value enum would otherwise consume the entire probe budget.
@@ -381,7 +373,26 @@ impl ParamValues {
                 .take(MAX_ENUM_CANDIDATES)
                 .map(Param::Str)
                 .collect(),
-            None => literals.to_vec(),
+            None => {
+                // A boolean's value space is closed and has exactly two members,
+                // so both are appended unconditionally rather than hoping the
+                // definition mentions `true`/`false` as literals.
+                // `{% if detail %}, name {% endif %}` contains no literal at
+                // all — without this, `detail` is only ever probed at its own
+                // (usually `true`) value, and the `false` branch is never
+                // rendered. This must be an APPEND, not a replacement: a
+                // boolean can also be inspected against a string literal in a
+                // spelling `check_static` cannot see (`(detail) == 'slow'`),
+                // and the literal harvest is check_dynamic's only route to
+                // that value. An early return that skipped `literals` would
+                // silently drop that detection for every boolean parameter.
+                let mut candidates = literals.to_vec();
+                if matches!(cell.map(|c| &c.param), Some(Param::Bool(_))) {
+                    candidates.push(Param::Bool(true));
+                    candidates.push(Param::Bool(false));
+                }
+                candidates
+            }
         }
     }
 
@@ -1879,5 +1890,24 @@ mod tests {
              so the branch it guards was never described"
         );
         assert!(cands.contains(&Param::Bool(true)));
+    }
+
+    /// Regression for a fix-round-1 defect: an early `return` for booleans in
+    /// `candidates` REPLACED the literal candidates instead of adding to them,
+    /// so a boolean inspected against a *string* literal — a spelling
+    /// `check_static` cannot see — silently stopped being caught by the
+    /// behavioural gate. `candidates` must append `[true, false]` to the
+    /// definition's literals, not substitute for them, or this regresses again.
+    #[test]
+    fn a_boolean_inspected_against_a_string_literal_is_still_caught() {
+        let mut ctx = ParamValues::new();
+        ctx.insert("detail", Param::Bool(true));
+
+        let err = check_dynamic("{{ ',name' if (detail) == 'slow' else '' }}", &ctx)
+            .expect_err("a boolean compared against a string literal must be caught");
+        assert!(
+            matches!(err, RenderError::ParameterInspected),
+            "expected ParameterInspected, got {err:?}"
+        );
     }
 }
