@@ -55,14 +55,20 @@ use uuid::Uuid;
 /// | `55` | drift by NAME — same count, `describe` froze `n` and `execute` returns `m` |
 /// | `66` | two columns whose `camel` forms collide (`total_revenue`, `totalRevenue`) |
 /// | `77` | drift by COUNT — `execute` returns a column `describe` did not (an added table column) |
-/// | `88` | drift by ORDER — the same names in a different position |
+/// | `88` | the same names in a different position — drift under `arrays`, a rekeyed object under `objects` |
 /// | `99` | the connector fetched `max_rows + 1`, saw the extra row, and set `truncated` |
 ///
-/// The three drift markers are separate because they pin three separate clauses
-/// of one predicate. One marker would show that *a* check exists, not that each
-/// clause is load-bearing — and the count clause in particular is the only thing
-/// standing between an `arrays` response and rows longer than its own
-/// `meta.columns`.
+/// The three markers are separate because they pin three separate clauses. One
+/// marker would show that *a* check exists, not that each clause is
+/// load-bearing — and the count clause in particular is the only thing standing
+/// between an `arrays` response and rows longer than its own `meta.columns`.
+///
+/// Since M1 they no longer all belong to ONE predicate: `arrays` keeps the
+/// positional equality check (all three are drift there), while `objects` asks
+/// for containment plus every `required` column plus a type match, and takes its
+/// KEYS from the live columns. `55` and `77` are drift under both — an
+/// undeclared name is a field nobody reviewed at publish — but `88` is not, and
+/// its test asserts the binding instead.
 struct FakePort;
 
 fn first_int(sql: &str) -> i64 {
@@ -946,23 +952,54 @@ async fn a_wider_live_result_is_refused_even_in_arrays_shape() {
 }
 
 #[tokio::test]
-async fn a_reordered_live_result_is_refused() {
-    // Pins the ORDER sensitivity of the drift check. The frozen columns are
-    // [a, b] and the engine now returns [b, a] — the same SET, so a comparison
-    // "simplified" to a sorted or set-based one passes every other test in this
-    // file while `arrays` responses silently transpose two columns and `objects`
-    // responses attach each value to the wrong name.
+async fn a_reordered_live_result_is_refused_in_arrays_and_rekeyed_in_objects() {
+    // Pins the ORDER sensitivity of the drift check — on the shape where order
+    // is the contract. The frozen columns are [a, b] and the engine now returns
+    // [b, a]: the same SET, so a comparison "simplified" to a sorted or
+    // set-based one passes every other test in this file while `arrays`
+    // responses silently transpose two columns.
+    //
+    // `objects` no longer refuses this, and that is the M1 change rather than a
+    // gap: keys are taken from the LIVE columns now, so the value the engine
+    // returned as `b` is served as `b`. It USED to be zipped onto the frozen
+    // names — 88 under `a` — which is the mis-binding the order check existed to
+    // prevent and is now unrepresentable. The `objects` half below asserts the
+    // BINDING, not merely a 200, because a 200 alone is exactly what the old
+    // mis-binding would also have produced.
+    //
+    // Order-insensitivity is forced by the union: a branch returns a subset of
+    // the frozen columns, so "same order" has no meaning to check against.
     let f = skip_without_db!();
-    f.publish_endpoint("GET", "/reordered", "SELECT 88 AS a")
-        .await;
+    f.publish_endpoint_with_output(
+        "GET",
+        "/reordered-arrays",
+        "SELECT 88 AS a",
+        serde_json::json!({ "shape": "arrays" }),
+    )
+    .await;
+    f.publish_endpoint_with_output(
+        "GET",
+        "/reordered-objects",
+        "SELECT 88 AS a",
+        serde_json::json!({ "shape": "objects" }),
+    )
+    .await;
 
-    let res = f.call("reordered").await;
+    let arrays = f.call("reordered-arrays").await;
+    let objects = f.call("reordered-objects").await;
     assert_eq!(
-        res.status,
+        arrays.status,
         StatusCode::SERVICE_UNAVAILABLE,
-        "the same names in a different order are still a different contract: {} {}",
-        res.status,
-        res.body
+        "the same names in a different order are still a different POSITIONAL contract: {} {}",
+        arrays.status,
+        arrays.body
+    );
+    assert_eq!(objects.status, StatusCode::OK, "{}", objects.body);
+    assert_eq!(
+        objects.body["data"],
+        serde_json::json!([{ "b": 88, "a": 89 }]),
+        "each value must be served under the name the ENGINE gave it: {}",
+        objects.body
     );
 }
 
