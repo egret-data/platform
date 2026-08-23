@@ -281,9 +281,9 @@ async fn list(
     ))
 }
 
-/// Refuse a `chart_id`, `dashboard_id`, `schedule_targets` entry, `database_id`,
-/// or `owners` entry that does not belong to (or is not a member of) `ws` — the
-/// write-side half of the report-target scoping fix. Task 1 made the READ safe
+/// Refuse a `chart_id`, `dashboard_id`, `schedule_targets` entry, or
+/// `database_id` that does not belong to `ws` — the write-side half of the
+/// report-target scoping fix. Task 1 made the READ safe
 /// (`ChartRepo::get`/`DashboardRepo::get` now require a workspace and return
 /// `None` for a foreign object); this stops the row from ever being written in
 /// the first place, so the normal experience is a 400 at save rather than a
@@ -301,13 +301,10 @@ async fn list(
 /// the ONLY place stopping a workspace-1 alert from storing workspace-2's
 /// connection id (and, at run time, opening workspace-2's vaulted secret).
 ///
-/// `owners` is a different KIND of check — membership, not object ownership —
-/// because an owner is not "this workspace's data", it is the identity the
-/// query runs as (`resolve_owner` → `owner_identity`). Reused mechanism:
-/// `Authorizer::workspace_roles_for`, the same direct-or-group role lookup
-/// `WsContext` itself is built from; an empty result means "not a member",
-/// whether the id names a real user elsewhere or nothing at all, so there is
-/// no oracle here either.
+/// `owners` is deliberately NOT checked here — see [`validate_owners_in_workspace`],
+/// which runs against the body's own list rather than `new.owners` (which by
+/// this point may already be a server-chosen fallback, not anything the
+/// caller named).
 ///
 /// A foreign object and a nonexistent one are deliberately answered the SAME
 /// way throughout: `ChartRepo::get`/`DashboardRepo::get`/`get_in_workspace`
@@ -374,7 +371,42 @@ async fn validate_targets_in_workspace(
             }
         }
     }
-    for owner in &new.owners {
+    Ok(())
+}
+
+/// Refuse an owner the caller NAMED who is not a member of `ws`.
+///
+/// Takes the body's own `owners: &[Uuid]` — never `NewSchedule::owners` —
+/// because by the time a `NewSchedule` exists, that field may already be a
+/// server-chosen fallback rather than anything the caller wrote:
+///
+/// - On `create`, an empty body falls back to the creator (`to_new`'s
+///   `creator` parameter). Checking THAT id would mean a `platform_admin`
+///   creating a schedule in a workspace they belong to only via the
+///   platform-admin `WsContext` bypass (`egret-workspace/src/context.rs:108-113`
+///   — no `access_grants` row) gets refused for failing to be a member of a
+///   workspace they were just admitted to. A fallback the server chose for
+///   itself is not a naming, so it must never be checked.
+/// - On `update`, an empty body means "keep the existing owners" — `update`
+///   (below) replaces `new.owners` with the STORED owners afterwards. Running
+///   this check on `new.owners` at that point would validate the fallback
+///   (the creator, again) instead of what actually gets written, AND would
+///   spuriously refuse an update that touches nothing about `owners` on a
+///   schedule whose creator has since left the workspace or had their grant
+///   expire.
+///
+/// So this runs BEFORE either fallback substitution, directly over the slice
+/// the request body carried, and is a no-op when that slice is empty — the
+/// caller named nobody, so there is nothing to check. `Authorizer::workspace_roles_for`
+/// is the same direct-or-group role lookup `WsContext` itself is built from;
+/// an empty result means "not a member", whether the id names a real user
+/// elsewhere or nothing at all, so there is no existence oracle here either.
+async fn validate_owners_in_workspace(
+    st: &AutomationState,
+    ws: Uuid,
+    owners: &[Uuid],
+) -> Result<(), AutomationApiError> {
+    for owner in owners {
         let roles = st
             .authz
             .workspace_roles_for(egret_core::UserId(*owner), egret_core::WorkspaceId(ws))
@@ -410,6 +442,10 @@ async fn create(
     let new = crate::model::to_new(&WriteBody::from(&body), Some(ctx.principal.user_id.0))
         .map_err(AutomationApiError::from)?;
     validate_targets_in_workspace(&st, ctx.workspace_id.0, &new).await?;
+    // Against the body's OWN `owners`, not `new.owners` — an empty body falls
+    // back to the creator inside `to_new`, and that fallback must never be
+    // checked (see `validate_owners_in_workspace`'s doc comment).
+    validate_owners_in_workspace(&st, ctx.workspace_id.0, &body.owners).await?;
     let made = st
         .schedules
         .create(ctx.workspace_id.0, &new, Some(ctx.principal.user_id))
@@ -490,6 +526,16 @@ async fn update(
     )
     .map_err(AutomationApiError::from)?;
     validate_targets_in_workspace(&st, ctx.workspace_id.0, &new).await?;
+    // Against the body's OWN `owners`, BEFORE the "empty means keep the
+    // existing ones" substitution below — an empty body here means `new.owners`
+    // is currently `stored.created_by` (another fallback, not a naming), and
+    // is about to be overwritten with the STORED owners regardless. Checking
+    // it now would validate a value that never gets written, AND would 400 an
+    // update that touches nothing about `owners` on a schedule whose creator
+    // has since left the workspace (see `validate_owners_in_workspace`'s doc
+    // comment). The stored owners it falls back to were already validated
+    // when they were written.
+    validate_owners_in_workspace(&st, ctx.workspace_id.0, &body.owners).await?;
     if body.owners.is_empty() {
         let existing = st
             .schedules

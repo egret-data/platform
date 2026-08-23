@@ -90,6 +90,43 @@ async fn grant_ws_role(db: &Db, user: Uuid, ws: Uuid, role: &str) {
     assert_eq!(n, 1, "role {role} must exist and have been granted");
 }
 
+/// A PLATFORM-scoped grant (`scope_id = NULL`) — `platform_admin` reaches
+/// every workspace through `WsContext`'s bypass
+/// (`egret-workspace/src/context.rs:108-113`), never through an
+/// `access_grants` row on the workspace itself, so this is deliberately a
+/// different statement from `grant_ws_role` rather than the same one with
+/// `ws: None`.
+async fn grant_platform_role(db: &Db, user: Uuid, role: &str) {
+    let n = sqlx::query(
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         SELECT 'user', $1, r.id, 'platform', NULL FROM roles r \
+         WHERE r.scope = 'platform' AND r.name = $2",
+    )
+    .bind(user)
+    .bind(role)
+    .execute(&db.pool)
+    .await
+    .expect("add platform grant")
+    .rows_affected();
+    assert_eq!(n, 1, "role {role} must exist and have been granted");
+}
+
+/// The inverse of `grant_ws_role` — used to make a schedule's existing owner
+/// stop being a member of `ws`, so an update that does not touch `owners` can
+/// be checked against a stored owner who has since left.
+async fn revoke_ws_role(db: &Db, user: Uuid, ws: Uuid) {
+    sqlx::query(
+        "DELETE FROM access_grants \
+         WHERE principal_type = 'user' AND principal_id = $1 \
+           AND scope_type = 'workspace' AND scope_id = $2",
+    )
+    .bind(user)
+    .bind(ws)
+    .execute(&db.pool)
+    .await
+    .expect("revoke member");
+}
+
 async fn mk_ws(db: &Db, owner: Uuid, slug: &str) -> Uuid {
     sqlx::query_scalar(
         "INSERT INTO workspaces (slug, name, created_by, status) \
@@ -2279,6 +2316,132 @@ async fn update_refuses_repointing_owners_at_a_non_member() {
         "a rejected owner repoint must not have replaced the existing owner"
     );
     assert_eq!(owners[0]["user_id"], member.to_string());
+}
+
+// ── owners[] must be checked against what the caller NAMED, not a fallback ──
+
+/// Round-1 review regression #1: a `platform_admin` reaches every workspace
+/// through `WsContext`'s bypass (no `access_grants` row on the workspace
+/// itself), so an EMPTY `owners` body falling back to them as the creator
+/// must never be run through the membership check — a fallback the server
+/// chose for itself is not a naming.
+#[tokio::test]
+async fn a_platform_admin_who_is_not_a_workspace_member_can_create_a_schedule() {
+    let fx = fixture!();
+    let admin = mk_user(&fx.db, "platform_admin").await;
+    grant_platform_role(&fx.db, admin, "platform_admin").await;
+    let admin_tok = fx.token_for(admin).await;
+
+    let (s, made) = req(
+        &fx,
+        &admin_tok,
+        "POST",
+        &format!("/ws/{}/alerts", fx.slug),
+        // No `owners` in the body — falls back to the creator (`admin`),
+        // who holds no `access_grants` row on `fx.ws` at all.
+        Some(alert_json(&fx, "platform admin create")),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "got {made}");
+    let owners = made["owners"].as_array().unwrap();
+    assert_eq!(owners.len(), 1);
+    assert_eq!(owners[0]["user_id"], admin.to_string());
+}
+
+#[tokio::test]
+async fn a_platform_admin_who_is_not_a_workspace_member_can_update_a_schedule() {
+    let fx = fixture!();
+    let admin = mk_user(&fx.db, "platform_admin").await;
+    grant_platform_role(&fx.db, admin, "platform_admin").await;
+    let admin_tok = fx.token_for(admin).await;
+
+    let (s, made) = req(
+        &fx,
+        &fx.editor_tok,
+        "POST",
+        &format!("/ws/{}/alerts", fx.slug),
+        Some(alert_json(&fx, "platform admin update target")),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "seed create failed: {made}");
+    let id = made["id"].as_str().unwrap();
+
+    let (s, updated) = req(
+        &fx,
+        &admin_tok,
+        "PUT",
+        &format!("/ws/{}/alerts/{id}", fx.slug),
+        // Still no `owners` — an update's empty body falls back to the
+        // SCHEDULE's existing owners (the editor), never to the platform
+        // admin doing the PUT, but `to_new` computes an intermediate
+        // `stored.created_by` fallback first; that intermediate value must
+        // not be checked either.
+        Some(alert_json(&fx, "platform admin update target")),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "got {updated}");
+}
+
+/// Round-1 review regression #2: `update`'s "empty owners means keep the
+/// existing ones" branch replaces `new.owners` with the STORED owners
+/// *after* validation used to run — so the check was validating a value
+/// (`stored.created_by`) that was never written, while the value actually
+/// written (the stored owners) went unchecked. Proven here the other
+/// direction: an update that does not touch `owners` must keep succeeding
+/// even once the stored owner has left the workspace, and must keep writing
+/// that same (now-foreign) stored owner back — not silently reassign it to
+/// whoever is calling.
+#[tokio::test]
+async fn an_update_that_does_not_touch_owners_still_succeeds_once_the_stored_owner_has_left() {
+    let fx = fixture!();
+    let member = mk_user(&fx.db, "departed_owner").await;
+    grant_ws_role(&fx.db, member, fx.ws, "ws_viewer").await;
+
+    let (s, made) = req(
+        &fx,
+        &fx.editor_tok,
+        "POST",
+        &format!("/ws/{}/alerts", fx.slug),
+        Some(alert_json_full(
+            "owner then departs",
+            fx.database,
+            &[member],
+        )),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "seed create failed: {made}");
+    let id = made["id"].as_str().unwrap();
+
+    revoke_ws_role(&fx.db, member, fx.ws).await;
+
+    let (s, updated) = req(
+        &fx,
+        &fx.editor_tok,
+        "PUT",
+        &format!("/ws/{}/alerts/{id}", fx.slug),
+        // No `owners` field — not touching them — on every other axis just a
+        // routine edit (a changed crontab, say the same body is fine since
+        // nothing else about `alert_json_full` changed).
+        Some(alert_json_full("owner then departs", fx.database, &[])),
+    )
+    .await;
+    assert_eq!(
+        s,
+        StatusCode::OK,
+        "an update that does not touch owners must not be refused just \
+         because the EXISTING owner has since left the workspace: {updated}"
+    );
+    let owners = updated["owners"].as_array().unwrap();
+    assert_eq!(
+        owners.len(),
+        1,
+        "the stored owner must still be written back, unchanged: {updated}"
+    );
+    assert_eq!(
+        owners[0]["user_id"],
+        member.to_string(),
+        "must keep the departed member as owner, not silently reassign to the caller"
+    );
 }
 
 // ── set_folder: a foreign or nonexistent folder must be refused identically ─
