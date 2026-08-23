@@ -19,12 +19,15 @@
 use std::sync::{Arc, Mutex};
 
 use egret_automation::deliver::destination::{Resolver, SsrfPolicy};
+use egret_automation::deliver::smtp_config::{SmtpConfigBody, TlsMode};
 use egret_automation::evaluator::{QueryRunner, RunIdentity};
 use egret_automation::render::client::{RenderRequest, Renderer};
 use egret_automation::runner::AutomationRunner;
 use egret_automation::ScheduleRepo;
 use egret_core::TabularResult;
 use egret_metastore::Db;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::TcpListener;
 use uuid::Uuid;
 
 // ── fakes ────────────────────────────────────────────────────────────────
@@ -748,5 +751,169 @@ async fn a_dataapi_alert_watching_a_foreign_workspace_endpoint_errors_and_sends_
     assert!(
         calls.is_empty(),
         "the PDP must never be consulted once the workspace mismatch is caught: {calls:?}"
+    );
+}
+
+// ── send_email's CSV skip (re-review finding 2) ─────────────────────────────
+
+/// A minimal, single-connection SMTP server double — just enough of RFC 5321
+/// (EHLO/MAIL FROM/RCPT TO/DATA/QUIT) for `lettre`'s plaintext transport
+/// (`TlsMode::None`, the same "trusted relay or mail catcher" branch
+/// `email.rs`'s own tests build) to complete a real send against it. The
+/// captured `DATA` payload — the raw MIME the mail actually carries — is
+/// returned over the oneshot channel.
+///
+/// Built for this test specifically: `send_email` (runner.rs) is a private
+/// method with no injectable transport, so pinning what it attaches needs a
+/// real peer on the other end of `email::send`'s SMTP connection, not a mock
+/// of a trait. No fixture in this file offered that before — every other
+/// tick test here leaves SMTP unconfigured, so `deliver`'s `email_to.is_empty()`
+/// guard short-circuits before `send_email` is ever called (see runner.rs's
+/// `a_dataapi_alert_body_says_nothing_about_attached_rows`, which says this
+/// explicitly).
+async fn fake_smtp() -> (u16, tokio::sync::oneshot::Receiver<Vec<u8>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let mut tx = Some(tx);
+    tokio::spawn(async move {
+        let Ok((stream, _)) = listener.accept().await else {
+            return;
+        };
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader);
+        if writer.write_all(b"220 mock.local ESMTP\r\n").await.is_err() {
+            return;
+        }
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line).await {
+                Ok(0) | Err(_) => return,
+                Ok(_) => {}
+            }
+            let upper = line.trim_end().to_ascii_uppercase();
+            let reply: &[u8] = if upper.starts_with("EHLO") {
+                b"250 mock.local\r\n"
+            } else if upper.starts_with("MAIL FROM") || upper.starts_with("RCPT TO") {
+                b"250 OK\r\n"
+            } else if upper.starts_with("QUIT") {
+                let _ = writer.write_all(b"221 Bye\r\n").await;
+                return;
+            } else if upper.starts_with("DATA") {
+                if writer
+                    .write_all(b"354 Send message, end with <CRLF>.<CRLF>\r\n")
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                let mut data = Vec::new();
+                let mut dline = String::new();
+                loop {
+                    dline.clear();
+                    match reader.read_line(&mut dline).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {}
+                    }
+                    if dline == ".\r\n" {
+                        break;
+                    }
+                    data.extend_from_slice(dline.as_bytes());
+                }
+                if let Some(tx) = tx.take() {
+                    let _ = tx.send(data);
+                }
+                b"250 OK: queued\r\n"
+            } else {
+                b"500 unrecognized\r\n"
+            };
+            if writer.write_all(reply).await.is_err() {
+                return;
+            }
+        }
+    });
+    (port, rx)
+}
+
+/// Pins the fix wave's finding 1 mechanism (the `dataapi_alert` CSV skip in
+/// `send_email`) by driving it end to end: a real `tick_once()`, through
+/// `deliver`, into `send_email`, out over a real (fake) SMTP connection.
+///
+/// The re-reviewer's mutation — `if s.r#type != "dataapi_alert"` flipped to
+/// `if true`, so a CSV is always built — left all 238 existing tests green,
+/// because none of them let `send_email` run this far. This test's fixture
+/// configures a real (loopback) SMTP relay and an email recipient
+/// specifically so that mutation now has something to fail: with it applied,
+/// the mail would carry a fabricated one-column `column_1.csv` attachment
+/// (`send_email`'s positional-header fallback, built from `dataapi_alert`'s
+/// always-empty `Evaluation.columns`) even though a `dataapi_alert` has no
+/// rows at all.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_dataapi_alert_email_carries_no_csv_attachment(pool: sqlx::PgPool) {
+    let fx = setup(
+        pool,
+        "call_count",
+        serde_json::json!({"op": ">", "threshold": 0}),
+        0,
+        true,
+    )
+    .await;
+    seed_call(&fx).await;
+
+    sqlx::query(
+        "INSERT INTO automation.schedule_recipients (schedule_id, kind, config) \
+         VALUES ($1, 'email', $2)",
+    )
+    .bind(fx.schedule)
+    .bind(serde_json::json!({"addresses": ["oncall@example.com"]}))
+    .execute(&fx.db.pool)
+    .await
+    .unwrap();
+
+    let (port, rx) = fake_smtp().await;
+    fx.runner
+        .smtp
+        .upsert(
+            fx.ws,
+            &SmtpConfigBody {
+                host: "127.0.0.1".into(),
+                port: port as i32,
+                username: None,
+                from_address: "alerts@egret.local".into(),
+                from_name: None,
+                tls_mode: TlsMode::None,
+                password: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(fx.runner.tick_once().await, 1, "one schedule was due");
+
+    // A delivery failure would land as an "error" run rather than "success" —
+    // asserting this first is what makes the CSV assertion below trustworthy:
+    // it proves send_email ran to completion against the fake relay, rather
+    // than failing before ever reaching the attachment-building code.
+    let log = run_log(&fx).await;
+    assert_eq!(log.len(), 1, "the tick must write exactly one run row");
+    assert_eq!(
+        log[0].0, "success",
+        "delivery through the fake relay must succeed, or the assertions below prove nothing: {:?}",
+        log[0]
+    );
+
+    let raw = rx
+        .await
+        .expect("the fake SMTP server never received a DATA payload");
+    let raw = String::from_utf8_lossy(&raw);
+    assert!(
+        !raw.to_lowercase().contains("text/csv"),
+        "a dataapi_alert has no rows to attach; the mail must carry no CSV part:\n{raw}"
+    );
+    assert!(
+        !raw.contains(".csv"),
+        "a dataapi_alert's mail must not name a csv attachment:\n{raw}"
     );
 }

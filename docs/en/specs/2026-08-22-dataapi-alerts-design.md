@@ -383,15 +383,20 @@ part was deferred: `evaluate_and_deliver_dataapi_alert`'s own doc comment
 the run log today.
 
 What actually happens instead, as a side effect of how trashing works rather than by
-design: a trashed endpoint's `access_log` rows keep existing but log with
-`endpoint_id = NULL` (the FK reference is cleared, the row is not deleted), so an
-endpoint-scoped watch's traffic simply stops accumulating from that point on. `call_
-count`/`error_count`/`error_code_count` then read a real `0` — not a fabricated
-`noop` — and `error_rate`/`p50_duration_ms`/`p95_duration_ms` read `noop` from the
-resulting empty population, by the same asymmetry this section already describes for
-an ordinary empty window, reached here by a different route. A workspace-wide watch
-(`dataapi_endpoint_id IS NULL`) is unaffected either way — it counts every endpoint's
-traffic, trashed or not.
+design: `endpoint_id` on `dataapi.access_log` carries no foreign key at all — see
+`migrations/0123_dataapi_access_log.sql`'s comment, which explains at length why an
+access log must survive the deletion of what it describes. So a trashed or disabled
+endpoint doesn't get its access-log rows unlinked; it simply stops matching
+`live_snapshot`'s `WHERE e.state = 'live'` (`crates/egret-dataapi/src/serving/router.rs`),
+the router 404s before `entry.endpoint_id` is ever assigned, and no new row for that
+endpoint is ever written — there is no reference left to clear. The practical effect is
+the same: an endpoint-scoped watch's traffic simply stops accumulating from that point
+on. `call_count`/`error_count`/`error_code_count` then read a real `0` — not a
+fabricated `noop` — and `error_rate`/`p50_duration_ms`/`p95_duration_ms` read `noop`
+from the resulting empty population, by the same asymmetry this section already
+describes for an ordinary empty window, reached here by a different route. A
+workspace-wide watch (`dataapi_endpoint_id IS NULL`) is unaffected either way — it
+counts every endpoint's traffic, trashed or not.
 
 **A stated limit.** This alert reads a log egret writes. If egret is not running there
 are no rows, the window is empty, and the alert stays quiet. It detects a broken

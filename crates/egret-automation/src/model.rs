@@ -752,7 +752,7 @@ mod tests {
     fn an_alert_may_carry_a_target_for_its_attachment() {
         // It used to be nulled out, on the belief that an alert with a
         // chart_id would trip the report CHECK. It does not:
-        // `schedule_report_needs_target` is guarded by `type <> 'report'`.
+        // `schedule_report_has_format` is guarded by `type <> 'report'`.
         // Superset allows the same thing behind ALERTS_ATTACH_REPORTS, and it
         // is what lets a fired alert mail a picture rather than only numbers.
         let mut b = alert_body();

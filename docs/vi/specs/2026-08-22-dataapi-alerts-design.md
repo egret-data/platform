@@ -363,14 +363,19 @@ kèm lý do ghi vào run log — không phải `error` — vì bỏ endpoint và
 riêng "endpoint đã vào thùng rác" nào trong run log.
 
 Điều thực sự xảy ra thay vào đó, như hệ quả phụ của cách xoá mềm hoạt động chứ không phải do
-thiết kế: các dòng `access_log` của một endpoint bị xoá mềm vẫn tồn tại nhưng ghi
-`endpoint_id = NULL` (tham chiếu FK bị xoá, dòng thì không), nên một watch theo endpoint đơn
-giản là ngừng tích luỹ traffic từ lúc đó. `call_count`/`error_count`/`error_code_count` khi đó
-đọc ra `0` thật — không phải `noop` giả — còn `error_rate`/`p50_duration_ms`/`p95_duration_ms`
-đọc ra `noop` từ tập rỗng kết quả, theo đúng sự bất đối xứng mục này đã mô tả cho một cửa sổ
-rỗng bình thường, chỉ là đi tới đó bằng một con đường khác. Một watch toàn workspace
-(`dataapi_endpoint_id IS NULL`) không bị ảnh hưởng — nó đếm traffic của mọi endpoint, dù có bị
-xoá mềm hay không.
+thiết kế: cột `endpoint_id` trên `dataapi.access_log` vốn không có foreign key nào cả — xem
+comment trong `migrations/0123_dataapi_access_log.sql`, giải thích khá dài vì sao một access log
+phải sống sót qua việc xoá cái nó mô tả. Nên một endpoint bị xoá mềm hoặc `disabled` không phải
+bị "tháo tham chiếu" khỏi các dòng log cũ; nó chỉ đơn giản là không còn khớp điều kiện
+`WHERE e.state = 'live'` của `live_snapshot` (`crates/egret-dataapi/src/serving/router.rs`),
+router trả 404 trước khi `entry.endpoint_id` từng được gán, và không có dòng mới nào cho
+endpoint đó được ghi ra nữa — không có tham chiếu nào để mà xoá cả. Hiệu ứng thực tế thì vẫn
+vậy: một watch theo endpoint đơn giản là ngừng tích luỹ traffic từ lúc đó. `call_count`/
+`error_count`/`error_code_count` khi đó đọc ra `0` thật — không phải `noop` giả — còn
+`error_rate`/`p50_duration_ms`/`p95_duration_ms` đọc ra `noop` từ tập rỗng kết quả, theo đúng sự
+bất đối xứng mục này đã mô tả cho một cửa sổ rỗng bình thường, chỉ là đi tới đó bằng một con
+đường khác. Một watch toàn workspace (`dataapi_endpoint_id IS NULL`) không bị ảnh hưởng — nó
+đếm traffic của mọi endpoint, dù có bị xoá mềm hay không.
 
 **Một giới hạn được nói rõ.** Alert này đọc một log do egret ghi ra. Nếu egret không chạy thì
 không có dòng nào, cửa sổ rỗng, và alert im lặng. Nó phát hiện endpoint hỏng; nó **không**
