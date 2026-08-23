@@ -1092,6 +1092,10 @@ Publish and call an endpoint returning `varchar`, `decimal(p,s)`, `date`, `times
 `boolean` and `bigint` on **both** Trino and StarRocks, and confirm a `200` each time.
 Do this before the PR, not after.
 
+**Cover `output.shape: "arrays"` as well.** Task 6's fix round extended the type check to
+the positional path, which closed a silent `200` but put positional endpoints under the
+same exposure. Half the measurement would leave the other half unmeasured.
+
 ## Before opening the PR
 
 Run it on kind and check it in the browser. On this programme every live check has found a
