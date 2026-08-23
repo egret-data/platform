@@ -1942,9 +1942,26 @@ mod tests {
 
     #[test]
     fn a_definition_with_no_branch_renders_to_exactly_one_statement() {
-        let sql = "SELECT id FROM t WHERE r = {{ region }}";
+        // `region` is bound, not interpolated, so it can never change the
+        // rendered TEXT — that part of the claim is free. The literals
+        // `'EU'`/`'US'`/`'APAC'` are what make the probe count itself
+        // non-trivial: `region` is neither boolean nor enum, so `candidates`
+        // hands it every literal the definition mentions, and `probe_assignments`
+        // renders one probe per candidate plus the representative context. A
+        // definition with only one probe to begin with would let this test pass
+        // even with the `HashSet` guard deleted, which is why the count is
+        // asserted below rather than assumed.
+        let sql =
+            "SELECT id FROM t WHERE r = {{ region }} AND a = 'EU' AND b = 'US' AND c = 'APAC'";
         let mut ctx = ParamValues::new();
         ctx.insert("region", Param::Str("EU".into()));
+        let probes = probe_assignments(sql, &ctx);
+        assert!(
+            probes.len() > 1,
+            "test is vacuous unless there is more than one probe to deduplicate; \
+             probe_assignments returned {}",
+            probes.len()
+        );
         assert_eq!(
             render_permutations(sql, &ctx).len(),
             1,
