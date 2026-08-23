@@ -1554,6 +1554,26 @@ mod tests {
             "one key for the one column this branch returned"
         );
         assert!(!obj.contains_key("name"));
+
+        // The other half of the same rule, and the one that catches a MIS-BINDING
+        // rather than a missing key: omit the FIRST declared column. Zipping the
+        // FROZEN names onto this row — what the pre-M1 code did — produces
+        // `{"id": "x"}`, a varchar served under the integer key, with a 200. The
+        // omission above cannot see that: truncating a two-name zip onto a
+        // one-value row happens to produce exactly the right object.
+        let snap = snapshot_with_columns(vec![
+            spec("id", "integer", false),
+            spec("name", "varchar", true),
+        ]);
+        let out = result(
+            vec![live("name", "varchar")],
+            vec![vec![serde_json::json!("x")]],
+        );
+        assert_eq!(
+            shape_rows(&out, &snap).expect("the optional column is the FIRST one here"),
+            serde_json::json!([{"name": "x"}]),
+            "the value must be served under the name the ENGINE gave it"
+        );
     }
 
     #[test]
