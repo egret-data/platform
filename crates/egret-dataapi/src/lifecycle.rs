@@ -1673,6 +1673,25 @@ pub(crate) struct DescribedBranches {
 ///
 /// # Where the number comes from
 ///
+/// # The residual, and why it is accepted rather than moved off the runtime
+///
+/// What is left after this bound is up to ~122 ms of SYNCHRONOUS rendering on an
+/// async task, and it is deliberately not wrapped in `spawn_blocking`.
+///
+/// The reason is that the cost is **bounded and authenticated** — publish and
+/// preview both sit behind `data_api_endpoint:manage`, and this constant is what
+/// makes the upper bound a number rather than a function of the request. It is
+/// **not** that an engine `describe` of similar duration happens nearby: an
+/// awaited describe RELEASES the worker, so the runtime schedules other tasks
+/// for those milliseconds and only the one caller waits. This rendering OCCUPIES
+/// the worker — tokio cannot preempt it, every other task queued on that worker
+/// eats the whole spike, and an author calling preview in a loop holds one
+/// worker per in-flight request. Same magnitude, opposite effect on everything
+/// else running. If the bound ever rises, that reasoning has to be redone rather
+/// than carried over.
+///
+/// # Where the number comes from
+///
 /// Measured in release, timing everything publish does before its first
 /// describe (`branch_statements` plus [`check_render_rules`]), for *n*
 /// parameters each guarding its own `{% if %}` block:
@@ -1696,11 +1715,18 @@ pub(crate) struct DescribedBranches {
 /// (152 ms at 36, 284 ms at 50), and below it a legitimate wide endpoint starts
 /// to feel it.
 ///
-/// It also keeps the two limits from fighting: 62 linear parameters render to
-/// exactly 64 statements, so without this bound a perfectly ordinary wide
-/// endpoint could trip [`MAX_PUBLISHED_STATEMENTS`]. At 32 parameters the linear
-/// shape tops out at 34 statements, which leaves the statement limit doing only
-/// the job it was built for — catching the superlinear shapes.
+/// It also pulls the two limits apart, though it does not separate them
+/// completely, and the doc used to claim it did. 62 purely linear parameters
+/// render to exactly 64 statements, so without this bound an ordinary wide
+/// endpoint could trip [`MAX_PUBLISHED_STATEMENTS`] on width alone; at 32 the
+/// linear shape tops out at 34. But the `2n + 2` flag spelling —
+/// `{% if p %} AND s = 'active' {% endif %}`, which `check_params` accepts
+/// because `{% if p %}` counts as a reference — measures 58 at *n* = 28, 62 at
+/// 30, **64 at 31 and 66 at 32**. So the two limits still MEET, at exactly the
+/// width this bound admits: a 32-parameter definition of that shape is refused
+/// by the statement limit rather than this one. That is a loud, actionable
+/// refusal naming a real cost, not a correctness hole — but it is not the clean
+/// separation the earlier wording promised.
 const MAX_DECLARED_PARAMS: usize = 32;
 
 /// How many structurally distinct statements one definition may publish.
@@ -1740,25 +1766,39 @@ const MAX_DECLARED_PARAMS: usize = 32;
 /// the cost is linear. When blocks start on, a probe from an absent context
 /// turns off a SECOND block, and the pairs are what grow.
 ///
-/// Which side a parameter lands on, measured:
+/// # Which side a parameter lands on is decided by its CANDIDATES, not its type
 ///
-/// * **`boolean`** — always the expensive side. Its representative value is
-///   `true` and its candidates are both of `true`/`false`, so `{% if flag %}`
-///   starts on and can be turned off.
-/// * **`string`** — always the cheap side under `{% if s %}`: representative
-///   values are deliberately truthy and a string's candidates are the
-///   definition's literals, which are bound rather than branched on. Only the
-///   absent context is new.
-/// * **`enum` inspected with `| value == '…'`** — **either side, and the
-///   comparand decides**. `representative_value` picks `allowed[0]`, so a
-///   definition comparing against `allowed[0]` starts every block ON and
-///   measures 4/12/38/57/68/212 at *n* = 2/4/8/10/11/20 — digit for digit the
-///   boolean row. The same definition comparing against any other allowed value
-///   starts every block off and measures *n* + 1: 21 at *n* = 20. Independent of
-///   how many `allowed` entries there are — 2 and 8 measure identically.
-///   An earlier revision of this comment claimed enums were linear; that was
-///   true only of the truthiness spelling, and it was the comparand that
-///   mattered all along.
+/// The question is only ever: does this parameter have a candidate value that
+/// turns its block OFF from a context where the representative values turn it
+/// ON? Where the candidates come from is what differs by type, and it is why no
+/// type is reliably on either side. Measured, at *n* = 2/4/8/10/11/20:
+///
+/// * **`boolean`** — the expensive side, always. Candidates are `true` and
+///   `false` unconditionally (they are appended rather than harvested), so
+///   `{% if flag %}` starts on and a probe turns it off: **4/12/38/57/68/212**.
+/// * **`enum` compared against `allowed[0]`** — the expensive side, because
+///   `allowed` always supplies the other values: **4/12/38/57/68/212**, digit
+///   for digit the boolean row, and independent of how many `allowed` entries
+///   there are (2 and 8 measure identically). Compared against any OTHER allowed
+///   value it starts off and measures *n* + 1 — 21 at *n* = 20.
+/// * **`string`, `number`, `date`** — **either side, and the DEFINITION'S OWN
+///   LITERALS decide**, because that is where a non-enum scalar's candidates are
+///   harvested from. `{% if s | value == 'x' %} AND a = {{ s }} {% endif %}`
+///   starts on but has no candidate that turns it off — the only literal in
+///   reach is `'x'` itself, which re-asserts the block — so it measures
+///   *n* + 2 (22 at *n* = 20). Add one literal the comparison is false for,
+///   `{% if s | value == 'x' %} AND a = 'off' {% endif %}`, and the SAME
+///   parameter of the SAME type measures **4/12/38/57/68/212**. One literal in
+///   the block body is the whole difference.
+/// * A **flag** spelling reaches a third rate: `{% if p %} AND s = 'active'
+///   {% endif %}` on a string parameter measures `2n + 2` — the harvested
+///   `'active'` cannot turn the block off, but it CAN turn one on from the
+///   all-absent context. 18 at *n* = 8, 58 at *n* = 28, 66 at *n* = 32.
+///
+/// Two earlier revisions of this comment each named a type as the culprit —
+/// first "booleans", then "booleans and inspected enums", with `string` called
+/// out as always cheap. Both were generalisations from one spelling. The type
+/// never decided it; the candidate set did.
 ///
 /// So `64` is 6.4× the canonical endpoint, admits every linear-shape definition
 /// at any width [`MAX_DECLARED_PARAMS`] permits (32 such parameters render to 34
@@ -3243,6 +3283,36 @@ mod tests {
             description: String::new(),
         }];
         assert!(validate_preview("SELECT 1", &body_param).is_err());
+
+        // More parameters than the bound. Preview renders `optional + 2`
+        // contexts exactly like publish does, so an unbounded preview is the
+        // same unbounded CPU behind the same `:manage` permission — and preview
+        // is the one an author can call in a loop without publishing anything.
+        let too_many: Vec<ParamSpec> = (0..=MAX_DECLARED_PARAMS)
+            .map(|i| param(&format!("p{i}"), ParamType::String))
+            .collect();
+        let wide: String = std::iter::once("SELECT id FROM t WHERE 1=1".to_owned())
+            .chain(
+                (0..=MAX_DECLARED_PARAMS)
+                    .map(|i| format!(" {{% if p{i} %}} AND a{i} = {{{{ p{i} }}}}{{% endif %}}")),
+            )
+            .collect();
+        assert_eq!(
+            validate_preview(&wide, &too_many),
+            Err(ValidationError::TooManyParameters {
+                declared: MAX_DECLARED_PARAMS + 1,
+                limit: MAX_DECLARED_PARAMS,
+            }),
+            "the parameter bound must hold on the PREVIEW path too, not merely \
+             because both paths happen to share `check_definition_scans` today"
+        );
+        assert_eq!(
+            validate_definition(&wide, &too_many, &cache, false, false),
+            Err(ValidationError::TooManyParameters {
+                declared: MAX_DECLARED_PARAMS + 1,
+                limit: MAX_DECLARED_PARAMS,
+            })
+        );
 
         // And a definition both accept.
         assert!(validate_preview("SELECT 1 AS n", &[]).is_ok());
