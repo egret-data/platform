@@ -482,7 +482,7 @@ async fn require_dataapi_endpoint_read(
     match endpoint_id {
         Some(id) => {
             // Fix-round-2, Critical 2: `dataapi_endpoint_id` is a plain FK —
-            // existence only, no workspace predicate (migration 0127) — and
+            // existence only, no workspace predicate (migration 0128) — and
             // `ObjectRef.workspace_id` below is the CALLER's workspace, never
             // the object's: Cedar resolves `resource in workspace` from that
             // stamped ancestry and never loads the row, so a

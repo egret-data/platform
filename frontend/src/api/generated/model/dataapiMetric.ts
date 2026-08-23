@@ -8,7 +8,7 @@
 
 /**
  * The Data API metric a `dataapi_alert` watches — the closed vocabulary of
- * migration 0127's `schedule_dataapi_metric_valid` CHECK.
+ * migration 0128's `schedule_dataapi_metric_valid` CHECK.
  *
  * A typed enum here, unlike the raw `&str` `egret-automation::dataapi_metric`
  * matches on internally: an unknown metric then fails to DESERIALIZE — a 4xx

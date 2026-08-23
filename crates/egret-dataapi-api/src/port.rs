@@ -6,7 +6,7 @@
 //!
 //! Added in Task 5's fix round 2, to close a hole `require_dataapi_endpoint_
 //! read` had from the moment it could take an `id`: `dataapi_endpoint_id` is a
-//! plain FK (existence only, no workspace predicate — migration 0127) and the
+//! plain FK (existence only, no workspace predicate — migration 0128) and the
 //! Cedar object check that follows it is told the CALLER's workspace, never
 //! the object's, so it never noticed a foreign or fictional id either. This
 //! trait exists so that check can be made BEFORE asking the PDP anything.

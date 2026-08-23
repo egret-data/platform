@@ -28,9 +28,11 @@ use sqlx::PgPool;
 // dashboard:certify seed for data_steward)
 // re-embed: 0109 dataset_certify_permission (dataset:certify seed for data_steward; closes
 // self-certification AND client-supplied certified_by on datasets and metrics)
-// re-embed: 0127 dataapi_alerts (third schedules.type, dataapi_alert, watching
+// re-embed: 0128 dataapi_alerts (third schedules.type, dataapi_alert, watching
 // dataapi.access_log; widens schedule_type_valid, adds 4 dataapi_* columns and
-// their shape CHECKs, plus access_log_ws_ep_ts_idx)
+// their shape CHECKs, plus access_log_ws_ep_ts_idx — renumbered from 0127 to
+// 0128 during the rebase onto main, which had independently taken 0127 for
+// render_tokens_workspace_id)
 /// All SQL migrations, embedded at compile time from the workspace `migrations/` dir.
 pub static MIGRATOR: Migrator = sqlx::migrate!("../../migrations");
 

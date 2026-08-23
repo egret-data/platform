@@ -269,7 +269,7 @@ ngập, và đó là một gói riêng chứ không phải một hook.
 
 `dataapi.access_log` là bền. Một cron alert đọc một cửa sổ của nó không thể mất event.
 
-### 5.4 Mô hình dữ liệu — `0127_dataapi_alerts.sql`
+### 5.4 Mô hình dữ liệu — `0128_dataapi_alerts.sql`
 
 ```sql
 -- Mở rộng từ vựng type. Đây là CHECK có sẵn DUY NHẤT bị đổi.

@@ -592,6 +592,8 @@ async fn an_alert_with_a_foreign_chart_id_still_fires_and_notifies_by_webhook(po
         users: egret_auth::users::UserRepo::new(db.clone()),
         minter: Arc::new(NoMinter),
         query: engine.clone(),
+        pdp: Arc::new(NeverPdp),
+        dataapi_endpoints: Arc::new(egret_dataapi::EndpointStore::new(db.clone())),
         resolver: Arc::new(LoopbackDns(webhook_addr)),
         policy: SsrfPolicy {
             allow_hosts: vec![webhook_host.to_string()],

@@ -48,7 +48,7 @@ export interface CreateSchedule {
   /**
      * Required, and only meaningful, when `dataapi_metric` is
      * `error_code_count` — `schedule_dataapi_error_code_needs_metric` /
-     * `schedule_dataapi_metric_needs_error_code` (migration 0127).
+     * `schedule_dataapi_metric_needs_error_code` (migration 0128).
      * @nullable
      */
   dataapi_error_code?: string | null;

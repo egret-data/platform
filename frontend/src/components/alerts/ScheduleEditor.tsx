@@ -359,7 +359,7 @@ export function ScheduleEditor({
         dataapi_endpoint_id: dataapiEndpointId || null,
         dataapi_metric: dataapiMetric,
         // Only meaningful for error_code_count (schedule_dataapi_error_code
-        // _needs_metric / _metric_needs_error_code, migration 0127) — sent as
+        // _needs_metric / _metric_needs_error_code, migration 0128) — sent as
         // `null`, not an empty string, for every other metric so a stale value
         // left over from switching away can never reach the server.
         dataapi_error_code:
@@ -789,7 +789,7 @@ export function ScheduleEditor({
             {/* Reused from the engine alert's own Condition row above: same
                 operator list, same aria-label on Threshold. There is no
                 not_null/operator picker here — schedule_dataapi_needs_source
-                (migration 0127) pins validator_type to 'operator' for every
+                (migration 0128) pins validator_type to 'operator' for every
                 dataapi_alert, so only that half of the pattern applies. */}
             <ConfigTableRow
               label="Condition"

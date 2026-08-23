@@ -218,7 +218,7 @@ impl AutomationRunner {
         // `dataapi_alert` fall through into the SQL-alert branch by default
         // and hit `NotRunnable("alert is missing its query")` below: a
         // `dataapi_alert` carries neither `database_id` nor `sql`
-        // (`schedule_dataapi_needs_source`, migration 0127), so it can never
+        // (`schedule_dataapi_needs_source`, migration 0128), so it can never
         // satisfy that branch's requirements. An unrecognised type is now its
         // own error rather than silently taking the alert path, so a future
         // fourth type fails loudly here instead of repeating this bug.
@@ -300,7 +300,7 @@ impl AutomationRunner {
     /// `deliver`.
     ///
     /// `metric`/`window_s` are asserted `Some` rather than defaulted:
-    /// migration 0127's `schedule_dataapi_needs_source` CHECK already
+    /// migration 0128's `schedule_dataapi_needs_source` CHECK already
     /// requires both non-null (and `window_s > 0`) for a persisted
     /// `dataapi_alert` row, so a `None` here means the row is corrupt, not
     /// that the caller should guess a default — the same "unreachable but
@@ -1444,6 +1444,24 @@ mod tests {
         }
     }
 
+    /// None of this module's tests exercise a `dataapi_alert` — they all
+    /// build engine `alert`s via `mk_alert` — so the run-time
+    /// `data_api_endpoint:read` re-check (`owner_can_read_dataapi_endpoint`)
+    /// must never be reached. A panic here would surface that as a loud
+    /// test failure rather than a silently-wrong `allow`/`deny`.
+    struct NeverPdp;
+    #[async_trait::async_trait]
+    impl egret_core::authz::Pdp for NeverPdp {
+        async fn authorize(
+            &self,
+            _subject: &egret_core::authz::Subject,
+            _action: &str,
+            _resource: &egret_core::authz::Resource,
+        ) -> egret_core::Result<egret_core::authz::Decision> {
+            panic!("this module's tests only build engine alerts; the PDP must never be consulted");
+        }
+    }
+
     struct PublicDns;
     #[async_trait::async_trait]
     impl Resolver for PublicDns {
@@ -1552,6 +1570,8 @@ mod tests {
             users: UserRepo::new(db.clone()),
             minter: Arc::new(NoMinter),
             query,
+            pdp: Arc::new(NeverPdp),
+            dataapi_endpoints: Arc::new(egret_dataapi::EndpointStore::new(db.clone())),
             resolver: Arc::new(PublicDns),
             policy: SsrfPolicy::default(),
             smtp: SmtpConfigRepo::new(

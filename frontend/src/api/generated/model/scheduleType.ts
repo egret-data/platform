@@ -9,7 +9,7 @@
 /**
  * What a schedule does: evaluate a query (`alert`), deliver a rendering of a
  * saved object (`report`), or watch a Data API endpoint's traffic
- * (`dataapi_alert`, migration 0127).
+ * (`dataapi_alert`, migration 0128).
  */
 export type ScheduleType = typeof ScheduleType[keyof typeof ScheduleType];
 

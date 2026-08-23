@@ -58,7 +58,7 @@ pub struct Schedule {
     pub custom_width: Option<i32>,
     pub custom_height: Option<i32>,
 
-    // Data API alert only (migration 0127). Which of `database_id`/`sql` vs.
+    // Data API alert only (migration 0128). Which of `database_id`/`sql` vs.
     // these four is populated is pinned by `schedule_dataapi_needs_source` /
     // `schedule_alert_no_dataapi_columns`.
     pub dataapi_endpoint_id: Option<Uuid>,
@@ -154,7 +154,7 @@ pub struct NewSchedule {
     pub custom_width: Option<i32>,
     pub custom_height: Option<i32>,
 
-    // Data API alert only (migration 0127). `None` throughout for an `alert`
+    // Data API alert only (migration 0128). `None` throughout for an `alert`
     // or a `report` — `schedule_alert_no_dataapi_columns` forbids any of
     // these on a non-`dataapi_alert` row.
     pub dataapi_endpoint_id: Option<Uuid>,

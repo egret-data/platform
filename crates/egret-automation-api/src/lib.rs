@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 /// What a schedule does: evaluate a query (`alert`), deliver a rendering of a
 /// saved object (`report`), or watch a Data API endpoint's traffic
-/// (`dataapi_alert`, migration 0127).
+/// (`dataapi_alert`, migration 0128).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ScheduleType {
@@ -23,7 +23,7 @@ pub enum ScheduleType {
     Report,
     /// `#[serde(rename_all = "lowercase")]` would spell this "dataapialert" —
     /// no underscore — so it is overridden explicitly to match the stored
-    /// vocabulary (`schedule_type_valid`, migration 0127).
+    /// vocabulary (`schedule_type_valid`, migration 0128).
     #[serde(rename = "dataapi_alert")]
     DataapiAlert,
 }
@@ -51,7 +51,7 @@ impl ScheduleType {
 }
 
 /// The Data API metric a `dataapi_alert` watches — the closed vocabulary of
-/// migration 0127's `schedule_dataapi_metric_valid` CHECK.
+/// migration 0128's `schedule_dataapi_metric_valid` CHECK.
 ///
 /// A typed enum here, unlike the raw `&str` `egret-automation::dataapi_metric`
 /// matches on internally: an unknown metric then fails to DESERIALIZE — a 4xx
@@ -323,7 +323,7 @@ pub struct ScheduleDetailDto {
     pub custom_width: Option<i32>,
     pub custom_height: Option<i32>,
 
-    // Data API alert block (migration 0127). `dataapi_endpoint_id: None` is
+    // Data API alert block (migration 0128). `dataapi_endpoint_id: None` is
     // workspace-scoped — it watches every endpoint, not "no endpoint".
     pub dataapi_endpoint_id: Option<String>,
     pub dataapi_metric: Option<DataapiMetric>,
@@ -400,7 +400,7 @@ pub struct CreateSchedule {
     pub dataapi_metric: Option<DataapiMetric>,
     /// Required, and only meaningful, when `dataapi_metric` is
     /// `error_code_count` — `schedule_dataapi_error_code_needs_metric` /
-    /// `schedule_dataapi_metric_needs_error_code` (migration 0127).
+    /// `schedule_dataapi_metric_needs_error_code` (migration 0128).
     #[serde(default)]
     pub dataapi_error_code: Option<String>,
     #[serde(default)]
@@ -478,7 +478,7 @@ pub struct UpdateSchedule {
     pub dataapi_metric: Option<DataapiMetric>,
     /// Required, and only meaningful, when `dataapi_metric` is
     /// `error_code_count` — `schedule_dataapi_error_code_needs_metric` /
-    /// `schedule_dataapi_metric_needs_error_code` (migration 0127).
+    /// `schedule_dataapi_metric_needs_error_code` (migration 0128).
     #[serde(default)]
     pub dataapi_error_code: Option<String>,
     #[serde(default)]

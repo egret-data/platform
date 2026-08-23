@@ -27,7 +27,7 @@ const DEFAULT_LOG_RETENTION_DAYS: i32 = 90;
 
 /// The upper bound on `dataapi_window_s` (fix-wave finding 2) — 30 days, the
 /// widest of the four presets `egret_dataapi::activity::ActivityRange`
-/// offers. Mirrors migration 0127's `schedule_dataapi_needs_source` CHECK; a
+/// offers. Mirrors migration 0128's `schedule_dataapi_needs_source` CHECK; a
 /// second source of truth, not a shared constant, because this crate does
 /// not depend on `egret-dataapi` (see `runner.rs`'s dispatch doc comment) and
 /// a CHECK cannot see a Rust `const` either way.
@@ -202,7 +202,7 @@ pub fn to_new(body: &WriteBody<'_>, creator: Option<Uuid>) -> Result<NewSchedule
                 _ => {}
             }
         }
-        // Mirrors migration 0127's `schedule_dataapi_needs_source`: a
+        // Mirrors migration 0128's `schedule_dataapi_needs_source`: a
         // `dataapi_alert` measures `dataapi.access_log` instead of running a
         // query, so it takes none of an engine alert's or a report's fields —
         // rejected by name here rather than silently dropped, so a client that
@@ -875,7 +875,7 @@ mod tests {
 
     // ── dataapi_alert (Task 5) ───────────────────────────────────────────
     //
-    // Each test below pairs with one of migration 0127's four CHECKs, proven
+    // Each test below pairs with one of migration 0128's four CHECKs, proven
     // against a real database in `tests/dataapi_alert_schema.rs`. These prove
     // the OTHER layer: the same malformed shape gets a 400 naming the field
     // here, before a row is ever attempted.
@@ -927,7 +927,7 @@ mod tests {
     /// decision made unattended every tick, unlike the Activity page's own
     /// range picker, which disables a preset that reaches past retention
     /// rather than let someone misread the thinning tail as a real drop in
-    /// traffic. Mirrors migration 0127's `dataapi_window_s <= 2592000`.
+    /// traffic. Mirrors migration 0128's `dataapi_window_s <= 2592000`.
     #[test]
     fn a_dataapi_alert_window_over_thirty_days_names_the_field() {
         let mut b = dataapi_alert_body();
@@ -1020,7 +1020,7 @@ mod tests {
     }
 
     /// Mirrors `schedule_dataapi_needs_source`'s `database_id IS NULL AND sql
-    /// IS NULL` clause — the load-bearing half (per migration 0127's own
+    /// IS NULL` clause — the load-bearing half (per migration 0128's own
     /// comment) that makes a row both evaluators claim as theirs impossible to
     /// write. Proven rejected by the database in
     /// `dataapi_alert_carrying_sql_is_rejected` /

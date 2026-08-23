@@ -27951,7 +27951,7 @@
               "string",
               "null"
             ],
-            "description": "Required, and only meaningful, when `dataapi_metric` is\n`error_code_count` — `schedule_dataapi_error_code_needs_metric` /\n`schedule_dataapi_metric_needs_error_code` (migration 0127)."
+            "description": "Required, and only meaningful, when `dataapi_metric` is\n`error_code_count` — `schedule_dataapi_error_code_needs_metric` /\n`schedule_dataapi_metric_needs_error_code` (migration 0128)."
           },
           "dataapi_window_s": {
             "type": [
@@ -28946,7 +28946,7 @@
       },
       "DataapiMetric": {
         "type": "string",
-        "description": "The Data API metric a `dataapi_alert` watches — the closed vocabulary of\nmigration 0127's `schedule_dataapi_metric_valid` CHECK.\n\nA typed enum here, unlike the raw `&str` `egret-automation::dataapi_metric`\nmatches on internally: an unknown metric then fails to DESERIALIZE — a 4xx\nthe JSON layer names before `to_new`'s validation ever runs — rather than\nreaching Rust as an unchecked string.",
+        "description": "The Data API metric a `dataapi_alert` watches — the closed vocabulary of\nmigration 0128's `schedule_dataapi_metric_valid` CHECK.\n\nA typed enum here, unlike the raw `&str` `egret-automation::dataapi_metric`\nmatches on internally: an unknown metric then fails to DESERIALIZE — a 4xx\nthe JSON layer names before `to_new`'s validation ever runs — rather than\nreaching Rust as an unchecked string.",
         "enum": [
           "error_rate",
           "error_count",
@@ -32947,7 +32947,7 @@
       },
       "ScheduleType": {
         "type": "string",
-        "description": "What a schedule does: evaluate a query (`alert`), deliver a rendering of a\nsaved object (`report`), or watch a Data API endpoint's traffic\n(`dataapi_alert`, migration 0127).",
+        "description": "What a schedule does: evaluate a query (`alert`), deliver a rendering of a\nsaved object (`report`), or watch a Data API endpoint's traffic\n(`dataapi_alert`, migration 0128).",
         "enum": [
           "alert",
           "report",
@@ -34806,7 +34806,7 @@
               "string",
               "null"
             ],
-            "description": "Required, and only meaningful, when `dataapi_metric` is\n`error_code_count` — `schedule_dataapi_error_code_needs_metric` /\n`schedule_dataapi_metric_needs_error_code` (migration 0127)."
+            "description": "Required, and only meaningful, when `dataapi_metric` is\n`error_code_count` — `schedule_dataapi_error_code_needs_metric` /\n`schedule_dataapi_metric_needs_error_code` (migration 0128)."
           },
           "dataapi_window_s": {
             "type": [

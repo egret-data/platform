@@ -4,7 +4,7 @@
 //! explicitly and fell through everything else — including `dataapi_alert` —
 //! into the SQL-alert branch, which hit the `NotRunnable("alert is missing
 //! its query")` fail-safe at `runner.rs:194-200` (a `dataapi_alert` carries no
-//! `database_id`/`sql` by construction; migration 0127's
+//! `database_id`/`sql` by construction; migration 0128's
 //! `schedule_dataapi_needs_source` forbids it). These tests prove the FIXED
 //! dispatch: a `dataapi_alert` is measured from `dataapi.access_log` via
 //! `dataapi_metric::measure`, never touches the SQL engine, and still goes
@@ -176,7 +176,7 @@ struct Fx {
 
 /// One `dataapi_alert` schedule, due now, plus its owner. `metric` and
 /// `window_s` name what it measures; `validator_config` is the `operator`
-/// condition — migration 0127's `schedule_dataapi_needs_source` pins
+/// condition — migration 0128's `schedule_dataapi_needs_source` pins
 /// `validator_type = 'operator'` for every `dataapi_alert` row, so the
 /// fixture never needs to vary it.
 async fn setup(
@@ -261,6 +261,7 @@ async fn setup(
                 egret_secrets::SecretStore::new(db.clone(), None),
             ),
             charts: egret_bi::ChartRepo::new(db.clone()),
+            dashboards: egret_bi::DashboardRepo::new(db.clone()),
             datasets: egret_bi::DatasetRepo::new(db.clone()),
             render_tokens: egret_automation::render::token::RenderTokenRepo::new(db.clone()),
             renderer: Arc::new(NeverRenderer),
@@ -385,6 +386,7 @@ async fn setup_endpoint_scoped(
                 egret_secrets::SecretStore::new(db.clone(), None),
             ),
             charts: egret_bi::ChartRepo::new(db.clone()),
+            dashboards: egret_bi::DashboardRepo::new(db.clone()),
             datasets: egret_bi::DatasetRepo::new(db.clone()),
             render_tokens: egret_automation::render::token::RenderTokenRepo::new(db.clone()),
             renderer: Arc::new(NeverRenderer),

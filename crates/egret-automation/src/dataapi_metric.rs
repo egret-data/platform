@@ -68,7 +68,7 @@ pub async fn measure(
         "p95_duration_ms" => percentile(db, ws, endpoint_id, since, 0.95).await,
         "error_code_count" => error_code_count(db, ws, endpoint_id, since, error_code).await,
         // Unreachable for a persisted schedule: `schedule_dataapi_metric_valid`
-        // (migration 0127) already rejects any other string at INSERT time.
+        // (migration 0128) already rejects any other string at INSERT time.
         // `None` rather than a panic because this function must not be the
         // thing that turns a data problem into a crashed scheduler tick, and
         // `None` is this module's existing spelling of "no evidence" — it

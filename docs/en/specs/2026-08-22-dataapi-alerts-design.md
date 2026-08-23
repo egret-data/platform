@@ -285,7 +285,7 @@ durable outbox and flood control, which is a package of its own rather than a ho
 `dataapi.access_log` is durable. A cron alert reading a window of it cannot lose an
 event.
 
-### 5.4 Data model — `0127_dataapi_alerts.sql`
+### 5.4 Data model — `0128_dataapi_alerts.sql`
 
 ```sql
 -- Widen the type vocabulary. This is the only existing CHECK that changes.
