@@ -358,14 +358,22 @@ impl ParamValues {
     }
 
     /// Candidate values for probing `name`: an enum parameter's own `allowed`
-    /// entries, or the definition's literals for anything else.
+    /// entries, a boolean parameter's two closed values, or the definition's
+    /// literals for anything else.
     fn candidates(&self, name: &str, literals: &[Param]) -> Vec<Param> {
-        let allowed = self
+        let cell = self
             .entries
             .get(name)
-            .and_then(|v| v.downcast_object_ref::<Cell>())
-            .and_then(|c| c.allowed.clone());
-        match allowed {
+            .and_then(|v| v.downcast_object_ref::<Cell>());
+        // A boolean's value space is closed and has exactly two members, so
+        // enumerate it rather than hoping the definition mentions `true`/`false`
+        // as literals. `{% if detail %}, name {% endif %}` contains no literal
+        // at all — without this, `detail` is only ever probed at its own
+        // (usually `true`) value, and the `false` branch is never rendered.
+        if matches!(cell.map(|c| &c.param), Some(Param::Bool(_))) {
+            return vec![Param::Bool(true), Param::Bool(false)];
+        }
+        match cell.and_then(|c| c.allowed.clone()) {
             // Capped: `allowed` has no length limit anywhere in the model, and
             // one 64-value enum would otherwise consume the entire probe budget.
             Some(list) => list
@@ -1842,4 +1850,34 @@ fn chain_contains(e: &MjError, needle: &str) -> bool {
         cur = std::error::Error::source(err);
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egret_dataapi_api::ParamLocation;
+
+    #[test]
+    fn a_boolean_parameter_is_probed_with_both_values() {
+        let spec = ParamSpec {
+            name: "detail".into(),
+            ty: ParamType::Boolean,
+            location: ParamLocation::Query,
+            required: false,
+            default: None,
+            allowed: None,
+            description: String::new(),
+        };
+        let mut ctx = ParamValues::new();
+        ctx.insert_for_spec(&spec, Param::Bool(true));
+
+        // A definition with no literals in it at all — the shape that hid the defect.
+        let cands = ctx.candidates("detail", &[]);
+        assert!(
+            cands.contains(&Param::Bool(false)),
+            "a boolean whose definition has no literals was never probed with false, \
+             so the branch it guards was never described"
+        );
+        assert!(cands.contains(&Param::Bool(true)));
+    }
 }
