@@ -274,6 +274,75 @@ async fn list(
     ))
 }
 
+/// Refuse a `chart_id`, `dashboard_id`, or `schedule_targets` entry that does
+/// not belong to `ws` — the write-side half of the report-target scoping fix.
+/// Task 1 made the READ safe (`ChartRepo::get`/`DashboardRepo::get` now
+/// require a workspace and return `None` for a foreign object); this stops
+/// the row from ever being written in the first place, so the normal
+/// experience is a 400 at save rather than a schedule that silently starts
+/// failing at run time the next time it ticks.
+///
+/// `schedule_targets.object_id` has no foreign key — `kind` is polymorphic,
+/// so the column cannot point at two tables at once — which is exactly why it
+/// needs its own check here rather than relying on the database to reject it.
+///
+/// A foreign object and a nonexistent one are deliberately answered the SAME
+/// way: `ChartRepo::get`/`DashboardRepo::get` already collapse "exists in
+/// another workspace" and "does not exist at all" into one `None`, and this
+/// function just returns that verdict rather than distinguishing the two
+/// cases — a distinguishable refusal would let a caller use this endpoint to
+/// probe whether an id exists in a workspace it cannot see, the same
+/// existence-oracle concern the rest of this codebase already avoids for
+/// cross-tenant ids.
+async fn validate_targets_in_workspace(
+    st: &AutomationState,
+    ws: Uuid,
+    new: &crate::repo::NewSchedule,
+) -> Result<(), AutomationApiError> {
+    let bi_err =
+        |e: egret_bi::BiError| AutomationApiError::from(AutomationError::Internal(e.to_string()));
+    let bad = |field: &str| {
+        AutomationApiError::from(AutomationError::BadRequest(format!(
+            "{field}: no such object in this workspace"
+        )))
+    };
+
+    if let Some(id) = new.chart_id {
+        if st.charts.get(id, ws).await.map_err(bi_err)?.is_none() {
+            return Err(bad("chart_id"));
+        }
+    }
+    if let Some(id) = new.dashboard_id {
+        if st.dashboards.get(id, ws).await.map_err(bi_err)?.is_none() {
+            return Err(bad("dashboard_id"));
+        }
+    }
+    for (kind, object_id) in &new.targets {
+        let found = match kind.as_str() {
+            "chart" => st
+                .charts
+                .get(*object_id, ws)
+                .await
+                .map_err(bi_err)?
+                .is_some(),
+            "dashboard" => st
+                .dashboards
+                .get(*object_id, ws)
+                .await
+                .map_err(bi_err)?
+                .is_some(),
+            // Not one of the two kinds `schedule_target_kind_valid` allows.
+            // Fail the same way here rather than letting an unrecognised kind
+            // reach the database only to trip that CHECK as a 500.
+            _ => false,
+        };
+        if !found {
+            return Err(bad("targets"));
+        }
+    }
+    Ok(())
+}
+
 #[utoipa::path(
     post, path = "/api/ws/{workspace}/alerts", tag = "alerts", params(WorkspacePath),
     request_body = CreateSchedule,
@@ -294,6 +363,7 @@ async fn create(
 
     let new = crate::model::to_new(&WriteBody::from(&body), Some(ctx.principal.user_id.0))
         .map_err(AutomationApiError::from)?;
+    validate_targets_in_workspace(&st, ctx.workspace_id.0, &new).await?;
     let made = st
         .schedules
         .create(ctx.workspace_id.0, &new, Some(ctx.principal.user_id))
@@ -373,6 +443,7 @@ async fn update(
         stored.created_by.or(Some(ctx.principal.user_id.0)),
     )
     .map_err(AutomationApiError::from)?;
+    validate_targets_in_workspace(&st, ctx.workspace_id.0, &new).await?;
     if body.owners.is_empty() {
         let existing = st
             .schedules

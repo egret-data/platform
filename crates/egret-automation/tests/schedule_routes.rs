@@ -48,6 +48,9 @@ struct Fx {
     /// The workspace behind `slug`, and the service that mints a session for a
     /// principal a test creates itself.
     ws: Uuid,
+    /// The workspace behind `other_slug` — needed by id (not just slug) to
+    /// create a chart/dashboard IN it for the cross-workspace target tests.
+    other_ws: Uuid,
     sessions: egret_auth::session::SessionService,
 }
 
@@ -253,8 +256,65 @@ async fn setup() -> Option<Fx> {
         database,
         db,
         ws,
+        other_ws,
         sessions,
     })
+}
+
+/// A dashboard that exists only in `ws` — used to prove a report/alert in a
+/// DIFFERENT workspace cannot name it.
+async fn mk_dashboard(db: &Db, ws: Uuid, owner: Uuid) -> Uuid {
+    egret_bi::DashboardRepo::new(db.clone())
+        .create(ws, "target dashboard", "", Some(owner))
+        .await
+        .expect("create dashboard")
+        .id
+}
+
+/// A chart that exists only in `ws`, with its own database + dataset so
+/// `ChartRepo::create`'s FK to `analytics.datasets` is satisfied. The chart is
+/// never run in these tests — only its existence and workspace matter.
+async fn mk_chart(db: &Db, ws: Uuid, owner: Uuid) -> Uuid {
+    let database: Uuid = sqlx::query_scalar(
+        "INSERT INTO query.databases (name, engine, host, port, workspace_id) \
+         VALUES ($1,'trino','localhost',8080,$2) RETURNING id",
+    )
+    .bind(format!("db-{}", Uuid::new_v4().simple()))
+    .bind(ws)
+    .fetch_one(&db.pool)
+    .await
+    .expect("insert database");
+
+    let dataset = egret_bi::DatasetRepo::new(db.clone())
+        .create(
+            ws,
+            database,
+            "target dataset",
+            "",
+            &egret_bi::SourceSpec::Physical {
+                catalog: Some("tpch".into()),
+                schema: "tiny".into(),
+                table: "orders".into(),
+            },
+            &[],
+            Some(egret_core::UserId(owner)),
+        )
+        .await
+        .expect("create dataset");
+
+    egret_bi::ChartRepo::new(db.clone())
+        .create(
+            ws,
+            dataset.id,
+            "target chart",
+            "",
+            "table",
+            &serde_json::json!({}),
+            Some(owner),
+        )
+        .await
+        .expect("create chart")
+        .id
 }
 
 async fn req(
@@ -1482,4 +1542,352 @@ async fn saving_a_webhook_without_a_secret_keeps_the_stored_one() {
         hook["config"]["has_secret"], true,
         "a save with no secret field silently unsigned the webhook: {updated}"
     );
+}
+
+// ── SEC-2: a schedule may only name objects in its own workspace ──────────
+//
+// Task 1 made the READ safe: a foreign chart/dashboard simply does not
+// resolve. These prove the WRITE side refuses a foreign target at save, so
+// the normal experience is a 400 rather than a schedule that silently starts
+// failing "no longer exists" the next time it ticks.
+//
+// Every principal below is `fx.editor_tok` — a `ws_editor`, not an admin —
+// which is the role migration 0110 grants `alert:manage` to, and the one
+// that actually separates "may manage schedules" from "may see the target
+// object". `editor` is ALSO a `ws_editor` of `fx.other_ws` (see `setup`),
+// which makes this a STRONGER proof than requiring zero grant there: even a
+// principal who can manage schedules in both workspaces cannot point one
+// workspace's schedule at the other's object.
+
+/// A report body. `targets` rides alongside `chart_id`/`dashboard_id` because
+/// `to_new` requires a `chart_id` or `dashboard_id` on every report
+/// regardless of whether `targets` is used — so the `schedule_targets` tests
+/// below still need a legitimate same-workspace `chart_id` for the body to
+/// pass THAT check before reaching the one this file is testing.
+fn report_json(
+    name: &str,
+    format: &str,
+    chart_id: Option<Uuid>,
+    dashboard_id: Option<Uuid>,
+    targets: &[(&str, Uuid)],
+) -> String {
+    let mut body = serde_json::json!({
+        "type": "report",
+        "name": name,
+        "active": true,
+        "crontab": "0 9 * * *",
+        "timezone": "UTC",
+        "report_format": format,
+        "recipients": [{"kind": "email", "config": {"addresses": ["dest@t.local"]}}],
+        "targets": targets
+            .iter()
+            .map(|(k, id)| serde_json::json!({"kind": k, "object_id": id}))
+            .collect::<Vec<_>>(),
+    });
+    if let Some(id) = chart_id {
+        body["chart_id"] = serde_json::json!(id);
+    }
+    if let Some(id) = dashboard_id {
+        body["dashboard_id"] = serde_json::json!(id);
+    }
+    body.to_string()
+}
+
+#[tokio::test]
+async fn create_refuses_a_report_naming_another_workspaces_chart() {
+    let fx = fixture!();
+    let owner = mk_user(&fx.db, "target_owner").await;
+    let foreign_chart = mk_chart(&fx.db, fx.other_ws, owner).await;
+
+    let (s, err) = req(
+        &fx,
+        &fx.editor_tok,
+        "POST",
+        &format!("/ws/{}/alerts", fx.slug),
+        Some(report_json(
+            "foreign chart",
+            "csv",
+            Some(foreign_chart),
+            None,
+            &[],
+        )),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "got {err}");
+    let msg = err["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("chart_id"),
+        "refusal should name the field: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn create_refuses_a_report_naming_another_workspaces_dashboard() {
+    let fx = fixture!();
+    let owner = mk_user(&fx.db, "target_owner").await;
+    let foreign_dashboard = mk_dashboard(&fx.db, fx.other_ws, owner).await;
+
+    let (s, err) = req(
+        &fx,
+        &fx.editor_tok,
+        "POST",
+        &format!("/ws/{}/alerts", fx.slug),
+        Some(report_json(
+            "foreign dashboard",
+            "png",
+            None,
+            Some(foreign_dashboard),
+            &[],
+        )),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "got {err}");
+    let msg = err["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("dashboard_id"),
+        "refusal should name the field: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn update_refuses_repointing_a_report_at_another_workspaces_target() {
+    let fx = fixture!();
+    let owner = mk_user(&fx.db, "target_owner").await;
+    let own_chart = mk_chart(&fx.db, fx.ws, owner).await;
+    let foreign_chart = mk_chart(&fx.db, fx.other_ws, owner).await;
+    let foreign_dashboard = mk_dashboard(&fx.db, fx.other_ws, owner).await;
+
+    // Seeded legitimately, with the schedule's own workspace's chart.
+    let (s, made) = req(
+        &fx,
+        &fx.editor_tok,
+        "POST",
+        &format!("/ws/{}/alerts", fx.slug),
+        Some(report_json(
+            "repointable",
+            "csv",
+            Some(own_chart),
+            None,
+            &[],
+        )),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "seed create failed: {made}");
+    let id = made["id"].as_str().unwrap();
+
+    // Repoint at the other workspace's chart.
+    let (s, err) = req(
+        &fx,
+        &fx.editor_tok,
+        "PUT",
+        &format!("/ws/{}/alerts/{id}", fx.slug),
+        Some(report_json(
+            "repointable",
+            "csv",
+            Some(foreign_chart),
+            None,
+            &[],
+        )),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "chart repoint: got {err}");
+    assert!(err["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("chart_id"));
+
+    // Repoint at the other workspace's dashboard instead.
+    let (s, err) = req(
+        &fx,
+        &fx.editor_tok,
+        "PUT",
+        &format!("/ws/{}/alerts/{id}", fx.slug),
+        Some(report_json(
+            "repointable",
+            "png",
+            None,
+            Some(foreign_dashboard),
+            &[],
+        )),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "dashboard repoint: got {err}");
+    assert!(err["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("dashboard_id"));
+
+    // And the schedule was NOT changed by either rejected attempt.
+    let (_, still) = req(
+        &fx,
+        &fx.editor_tok,
+        "GET",
+        &format!("/ws/{}/alerts/{id}", fx.slug),
+        None,
+    )
+    .await;
+    assert_eq!(still["chart_id"], own_chart.to_string());
+}
+
+#[tokio::test]
+async fn create_refuses_a_schedule_targets_entry_naming_another_workspaces_chart() {
+    let fx = fixture!();
+    let owner = mk_user(&fx.db, "target_owner").await;
+    let own_chart = mk_chart(&fx.db, fx.ws, owner).await;
+    let foreign_chart = mk_chart(&fx.db, fx.other_ws, owner).await;
+
+    let (s, err) = req(
+        &fx,
+        &fx.editor_tok,
+        "POST",
+        &format!("/ws/{}/alerts", fx.slug),
+        // `chart_id` is workspace 1's OWN, legitimate chart — a patch that
+        // only gated `chart_id`/`dashboard_id` would wave this straight
+        // through, which is exactly the probe's Surface 1 finding.
+        Some(report_json(
+            "multi target chart",
+            "png",
+            Some(own_chart),
+            None,
+            &[("chart", foreign_chart)],
+        )),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "got {err}");
+    let msg = err["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("targets"),
+        "refusal should name the field: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn create_refuses_a_schedule_targets_entry_naming_another_workspaces_dashboard() {
+    let fx = fixture!();
+    let owner = mk_user(&fx.db, "target_owner").await;
+    let own_chart = mk_chart(&fx.db, fx.ws, owner).await;
+    let foreign_dashboard = mk_dashboard(&fx.db, fx.other_ws, owner).await;
+
+    let (s, err) = req(
+        &fx,
+        &fx.editor_tok,
+        "POST",
+        &format!("/ws/{}/alerts", fx.slug),
+        Some(report_json(
+            "multi target dashboard",
+            "png",
+            Some(own_chart),
+            None,
+            &[("dashboard", foreign_dashboard)],
+        )),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "got {err}");
+    let msg = err["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("targets"),
+        "refusal should name the field: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn create_refuses_a_schedule_targets_entry_whose_object_id_exists_nowhere() {
+    let fx = fixture!();
+    let owner = mk_user(&fx.db, "target_owner").await;
+    let own_chart = mk_chart(&fx.db, fx.ws, owner).await;
+    // `schedule_targets.object_id` has no foreign key — this id was never
+    // inserted anywhere, in any workspace. The probe proved it stores fine
+    // with no fix; it must be refused with one.
+    let nonexistent = Uuid::new_v4();
+
+    let (s, err) = req(
+        &fx,
+        &fx.editor_tok,
+        "POST",
+        &format!("/ws/{}/alerts", fx.slug),
+        Some(report_json(
+            "phantom target",
+            "png",
+            Some(own_chart),
+            None,
+            &[("chart", nonexistent)],
+        )),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "got {err}");
+    let msg = err["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("targets"),
+        "refusal should name the field: {msg}"
+    );
+}
+
+/// The negative control. A fix that refuses the working case is not a fix.
+#[tokio::test]
+async fn create_still_saves_a_same_workspace_target() {
+    let fx = fixture!();
+    let owner = mk_user(&fx.db, "target_owner").await;
+    let own_chart = mk_chart(&fx.db, fx.ws, owner).await;
+    let own_dashboard = mk_dashboard(&fx.db, fx.ws, owner).await;
+
+    let (s, made) = req(
+        &fx,
+        &fx.editor_tok,
+        "POST",
+        &format!("/ws/{}/alerts", fx.slug),
+        Some(report_json(
+            "legit multi target",
+            "png",
+            Some(own_chart),
+            None,
+            &[("chart", own_chart), ("dashboard", own_dashboard)],
+        )),
+    )
+    .await;
+    assert_eq!(
+        s,
+        StatusCode::OK,
+        "a same-workspace target must save: {made}"
+    );
+    assert_eq!(made["chart_id"], own_chart.to_string());
+}
+
+/// Context item 3: alerts, not just reports. `model.rs`'s alert branch never
+/// required a target and never checked ownership — an alert carrying a
+/// foreign `chart_id` reaches `render_alert_attachment` unchanged. The same
+/// gate must cover it.
+#[tokio::test]
+async fn create_refuses_an_alert_naming_another_workspaces_chart() {
+    let fx = fixture!();
+    let owner = mk_user(&fx.db, "target_owner").await;
+    let foreign_chart = mk_chart(&fx.db, fx.other_ws, owner).await;
+
+    let body = serde_json::json!({
+        "type": "alert",
+        "name": "alert with foreign attachment",
+        "active": true,
+        "crontab": "0 9 * * *",
+        "timezone": "UTC",
+        "database_id": fx.database,
+        "sql": "SELECT count(*) FROM orders",
+        "validator_type": "not_null",
+        "chart_id": foreign_chart,
+        "report_format": "png",
+        "recipients": [{"kind": "email", "config": {"addresses": ["on-call@t.local"]}}],
+    })
+    .to_string();
+
+    let (s, err) = req(
+        &fx,
+        &fx.editor_tok,
+        "POST",
+        &format!("/ws/{}/alerts", fx.slug),
+        Some(body),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "got {err}");
+    assert!(err["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("chart_id"));
 }
