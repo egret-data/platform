@@ -1668,6 +1668,116 @@ mod tests {
         assert!(!obj.contains_key("name"));
     }
 
+    #[derive(Clone, Default)]
+    struct LogCapture(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    struct LogWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("log lock").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogCapture {
+        type Writer = LogWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            LogWriter(self.0.clone())
+        }
+    }
+
+    fn logs_from_shaping(out: &egret_core::TabularResult, snap: &EndpointSnapshot) -> String {
+        let cap = LogCapture::default();
+        let sub = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(cap.clone())
+            .without_time()
+            // Measured, not assumed: with ANSI on, the field NAME and its `=`
+            // are separated by escape sequences, so `contains("declared=…")`
+            // never matches and every assertion below would be vacuous.
+            .with_ansi(false)
+            .finish();
+        {
+            let _guard = tracing::subscriber::set_default(sub);
+            assert!(
+                matches!(shape_rows(out, snap), Err(ServingError::SchemaDrift)),
+                "expected a refusal so there is a reason to log"
+            );
+        }
+        let bytes = cap.0.lock().expect("log lock").clone();
+        String::from_utf8(bytes).expect("log output is utf-8")
+    }
+
+    /// The log line IS the diagnosis for a type refusal, so it is asserted
+    /// rather than promised.
+    ///
+    /// **This test exists because I first recorded the opposite as a
+    /// limitation** — "verified by compilation and reading, because nothing in
+    /// this crate captures `tracing` output". The premise was false:
+    /// `tests/serving_auth.rs` has captured log CONTENT since
+    /// `every_rejection_logs_a_distinguishable_reason`, and
+    /// `tracing-subscriber` is a dev-dependency of this crate carrying a
+    /// comment saying it is here so that a log promise does not stay prose.
+    ///
+    /// Note what `frozen` and `live` carry here: **identical lists**. That is
+    /// the entire reason the three extra fields exist — for every other clause
+    /// the two name lists are the diagnosis, and for this one they say nothing.
+    ///
+    /// The assertions are per FIELD rather than "both spellings appear
+    /// somewhere", because a call site that transposed `declared` and
+    /// `returned` emits both strings either way and would pass the loose form.
+    /// `declared` must carry the FROZEN spelling and `returned` the LIVE one.
+    #[test]
+    fn a_type_refusal_logs_the_column_and_which_spelling_came_from_where() {
+        let snap = snapshot_with_columns(vec![spec("v", "varchar", true)]);
+        let out = result(vec![live("v", "integer")], vec![vec![serde_json::json!(1)]]);
+
+        let logs = logs_from_shaping(&out, &snap);
+        assert!(
+            logs.contains(r#"why="a declared column changed type""#),
+            "{logs}"
+        );
+        assert!(
+            logs.contains(r#"frozen=["v"] live=["v"]"#),
+            "the premise of this test: the name lists cannot diagnose a type refusal: {logs}"
+        );
+        assert!(logs.contains("column=v "), "{logs}");
+        assert!(
+            logs.contains("declared=varchar "),
+            "`declared` must carry the FROZEN spelling, not the live one: {logs}"
+        );
+        assert!(
+            logs.contains("returned=integer "),
+            "`returned` must carry the LIVE spelling, not the frozen one: {logs}"
+        );
+
+        // The positional path, where the response body carries no names either,
+        // so this line is the only instrument an operator has.
+        let mut arrays = snapshot_with_columns(vec![spec("v", "varchar", true)]);
+        arrays.output.shape = "arrays".into();
+        let logs = logs_from_shaping(&out, &arrays);
+        assert!(logs.contains("column=v "), "arrays: {logs}");
+        assert!(logs.contains("declared=varchar "), "arrays: {logs}");
+        assert!(logs.contains("returned=integer "), "arrays: {logs}");
+
+        // A clause the name lists DO explain leaves the three fields empty —
+        // one log site for every refusal, and nothing stale carried over from
+        // the shape of another one.
+        let undeclared = result(
+            vec![live("v", "varchar"), live("secret", "varchar")],
+            vec![vec![serde_json::json!("a"), serde_json::json!("b")]],
+        );
+        let logs = logs_from_shaping(&undeclared, &snap);
+        assert!(
+            logs.contains("column= declared= returned= "),
+            "a non-type refusal must not invent a column or a type: {logs}"
+        );
+    }
+
     /// **The plan's headline case, asserted positively.**
     /// `SELECT {% if x %}a{% else %}b{% endif %}` unions to two columns that are
     /// BOTH optional, since neither is in every branch — and either branch must
