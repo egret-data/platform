@@ -327,6 +327,7 @@ async fn setup(pool: sqlx::PgPool) -> Fx {
         charts,
         dashboards,
         datasets,
+        folders: egret_bi::folder::FolderRepo::new(db.clone()),
         databases,
         users: egret_auth::users::UserRepo::new(db.clone()),
         engine_minter: Arc::new(NoMinter),

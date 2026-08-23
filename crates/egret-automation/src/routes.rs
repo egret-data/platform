@@ -73,6 +73,13 @@ pub struct AutomationState {
     pub charts: egret_bi::ChartRepo,
     pub dashboards: egret_bi::DashboardRepo,
     pub datasets: egret_bi::DatasetRepo,
+    /// `analytics.folders` is shared across chart/dashboard/dataset/alert
+    /// folders (`entity_type`), keyed on nothing but its own id — used here
+    /// only by `set_folder`, to check a `folder_id` the body supplies belongs
+    /// to THIS workspace (and is an 'alert' folder) before it is stored, the
+    /// same guard `egret-bi`'s own `require_folder` applies to chart/
+    /// dashboard/dataset folders.
+    pub folders: egret_bi::folder::FolderRepo,
     pub databases: egret_query::DatabaseRepo,
     pub users: egret_auth::users::UserRepo,
     pub engine_minter: std::sync::Arc<dyn egret_analytics_api::engine_token::EngineTokenMinter>,
@@ -274,26 +281,42 @@ async fn list(
     ))
 }
 
-/// Refuse a `chart_id`, `dashboard_id`, or `schedule_targets` entry that does
-/// not belong to `ws` — the write-side half of the report-target scoping fix.
-/// Task 1 made the READ safe (`ChartRepo::get`/`DashboardRepo::get` now
-/// require a workspace and return `None` for a foreign object); this stops
-/// the row from ever being written in the first place, so the normal
-/// experience is a 400 at save rather than a schedule that silently starts
-/// failing at run time the next time it ticks.
+/// Refuse a `chart_id`, `dashboard_id`, `schedule_targets` entry, `database_id`,
+/// or `owners` entry that does not belong to (or is not a member of) `ws` — the
+/// write-side half of the report-target scoping fix. Task 1 made the READ safe
+/// (`ChartRepo::get`/`DashboardRepo::get` now require a workspace and return
+/// `None` for a foreign object); this stops the row from ever being written in
+/// the first place, so the normal experience is a 400 at save rather than a
+/// schedule that silently starts failing at run time the next time it ticks.
 ///
 /// `schedule_targets.object_id` has no foreign key — `kind` is polymorphic,
 /// so the column cannot point at two tables at once — which is exactly why it
 /// needs its own check here rather than relying on the database to reject it.
 ///
+/// `database_id` is the sibling of `chart_id`/`dashboard_id`: `to_new` already
+/// restricts it to alert schedules, so a report body naturally has none to
+/// check here. Unlike the chart/dashboard columns, `query.databases` carries
+/// no cross-tenant guard of its own below this — `open_secret` resolves the
+/// credential from whatever `workspace_id` the row itself names — so this is
+/// the ONLY place stopping a workspace-1 alert from storing workspace-2's
+/// connection id (and, at run time, opening workspace-2's vaulted secret).
+///
+/// `owners` is a different KIND of check — membership, not object ownership —
+/// because an owner is not "this workspace's data", it is the identity the
+/// query runs as (`resolve_owner` → `owner_identity`). Reused mechanism:
+/// `Authorizer::workspace_roles_for`, the same direct-or-group role lookup
+/// `WsContext` itself is built from; an empty result means "not a member",
+/// whether the id names a real user elsewhere or nothing at all, so there is
+/// no oracle here either.
+///
 /// A foreign object and a nonexistent one are deliberately answered the SAME
-/// way: `ChartRepo::get`/`DashboardRepo::get` already collapse "exists in
-/// another workspace" and "does not exist at all" into one `None`, and this
-/// function just returns that verdict rather than distinguishing the two
-/// cases — a distinguishable refusal would let a caller use this endpoint to
-/// probe whether an id exists in a workspace it cannot see, the same
-/// existence-oracle concern the rest of this codebase already avoids for
-/// cross-tenant ids.
+/// way throughout: `ChartRepo::get`/`DashboardRepo::get`/`get_in_workspace`
+/// already collapse "exists in another workspace" and "does not exist at all"
+/// into one `None`/`NotFound`, and this function just returns that verdict
+/// rather than distinguishing the two cases — a distinguishable refusal would
+/// let a caller use this endpoint to probe whether an id exists in a
+/// workspace it cannot see, the same existence-oracle concern the rest of
+/// this codebase already avoids for cross-tenant ids.
 async fn validate_targets_in_workspace(
     st: &AutomationState,
     ws: Uuid,
@@ -338,6 +361,29 @@ async fn validate_targets_in_workspace(
         };
         if !found {
             return Err(bad("targets"));
+        }
+    }
+    if let Some(id) = new.database_id {
+        match st.databases.get_in_workspace(ws, id).await {
+            Ok(_) => {}
+            Err(egret_query::DatabaseError::NotFound(_)) => return Err(bad("database_id")),
+            Err(e) => {
+                return Err(AutomationApiError::from(AutomationError::Internal(
+                    e.to_string(),
+                )))
+            }
+        }
+    }
+    for owner in &new.owners {
+        let roles = st
+            .authz
+            .workspace_roles_for(egret_core::UserId(*owner), egret_core::WorkspaceId(ws))
+            .await
+            .map_err(|e| AutomationApiError::from(AutomationError::Internal(e.to_string())))?;
+        if roles.is_empty() {
+            return Err(AutomationApiError::from(AutomationError::BadRequest(
+                "owners: not a member of this workspace".into(),
+            )));
         }
     }
     Ok(())
@@ -709,6 +755,33 @@ async fn set_folder(
     egret_core::authz::require(&*st.pdp, &ctx, MANAGE)
         .await
         .map_err(AutomationApiError::from)?;
+    // The schedule itself is scoped by `set_folder`'s own `WHERE id=$1 AND
+    // workspace_id=$2`, but `folder_id` was going straight into the `SET`
+    // clause unchecked: a foreign folder stored with a 200, and a nonexistent
+    // one tripped `folders_id_fkey` as a 500 — two different status CLASSES,
+    // which made this an existence oracle over every `analytics.folders` row
+    // in the installation (charts, dashboards and datasets included), one
+    // call per guess, open to any `ws_editor`. Both wrongs are refused HERE,
+    // identically, before the write: `st.folders.meta` collapses "belongs to
+    // another workspace", "belongs to a different entity_type", and "does not
+    // exist" into the same `_ =>` arm, so a foreign and a nonexistent id are
+    // no longer distinguishable at all — matching `validate_targets_in_workspace`'s
+    // rule for chart/dashboard/database ids above.
+    if let Some(folder_id) = body.folder_id {
+        let meta = st
+            .folders
+            .meta(folder_id)
+            .await
+            .map_err(|e| AutomationApiError::from(AutomationError::Internal(e.to_string())))?;
+        match meta {
+            Some((w, t)) if w == ctx.workspace_id.0 && t == "alert" => {}
+            _ => {
+                return Err(AutomationApiError::from(AutomationError::BadRequest(
+                    "folder_id: no such object in this workspace".into(),
+                )))
+            }
+        }
+    }
     ack(st
         .schedules
         .set_folder(ctx.workspace_id.0, id, body.folder_id)

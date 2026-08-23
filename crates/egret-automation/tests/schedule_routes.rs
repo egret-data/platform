@@ -222,6 +222,7 @@ async fn setup() -> Option<Fx> {
         charts: egret_bi::ChartRepo::new(db.clone()),
         dashboards: egret_bi::DashboardRepo::new(db.clone()),
         datasets: egret_bi::DatasetRepo::new(db.clone()),
+        folders: egret_bi::folder::FolderRepo::new(db.clone()),
         databases: databases.clone(),
         users: egret_auth::users::UserRepo::new(db.clone()),
         engine_minter: Arc::new(NoMinter),
@@ -717,6 +718,10 @@ async fn an_update_that_does_name_owners_replaces_them() {
     .await;
     let id = made["id"].as_str().unwrap();
     let second = mk_user(&fx.db, "al_new_owner").await;
+    // §4's owners[] fix: an owner must be a member of the schedule's
+    // workspace — the identity `resolve_owner`/`owner_identity` runs the
+    // query as, not merely "some user id".
+    grant_ws_role(&fx.db, second, fx.ws, "ws_viewer").await;
 
     let mut body: serde_json::Value = serde_json::from_str(&alert_json(&fx, "reassigned")).unwrap();
     body["owners"] = serde_json::json!([second]);
@@ -2017,4 +2022,417 @@ async fn update_still_saves_a_same_workspace_schedule_targets_entry() {
         2,
         "both targets should have been written: {updated}"
     );
+}
+
+// ── the database_id sibling (round 4, F1) ───────────────────────────────────
+
+/// A `query.databases` row in `ws`, otherwise identical to the one `setup()`
+/// creates for `fx.database` — used to build a SECOND, foreign database for
+/// the cross-workspace tests below.
+async fn mk_database(db: &Db, ws: Uuid) -> Uuid {
+    sqlx::query_scalar(
+        "INSERT INTO query.databases (name, engine, host, port, workspace_id) \
+         VALUES ($1,'trino','localhost',8080,$2) RETURNING id",
+    )
+    .bind(format!("db-{}", Uuid::new_v4().simple()))
+    .bind(ws)
+    .fetch_one(&db.pool)
+    .await
+    .expect("insert database")
+}
+
+/// An alert body with an explicit `database_id` and `owners` list — the two
+/// fields `alert_json` leaves at their defaults (the fixture's own database,
+/// and an empty `owners` that falls back to the creator).
+fn alert_json_full(name: &str, database_id: Uuid, owners: &[Uuid]) -> String {
+    serde_json::json!({
+        "type": "alert",
+        "name": name,
+        "active": true,
+        "crontab": "0 9 * * *",
+        "timezone": "UTC",
+        "database_id": database_id,
+        "sql": "SELECT count(*) FROM orders",
+        "validator_type": "not_null",
+        "owners": owners,
+        "recipients": [{"kind": "email", "config": {"addresses": ["on-call@t.local"]}}],
+    })
+    .to_string()
+}
+
+#[tokio::test]
+async fn create_refuses_an_alert_naming_another_workspaces_database() {
+    let fx = fixture!();
+    let foreign_database = mk_database(&fx.db, fx.other_ws).await;
+
+    let (s, err) = req(
+        &fx,
+        &fx.editor_tok,
+        "POST",
+        &format!("/ws/{}/alerts", fx.slug),
+        Some(alert_json_full("foreign database", foreign_database, &[])),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "got {err}");
+    let msg = err["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("database_id"),
+        "refusal should name the field: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn create_refuses_an_alert_naming_a_database_that_exists_nowhere() {
+    // Foreign and nonexistent must be literally indistinguishable — the same
+    // rule the chart/dashboard/targets checks already follow — so this
+    // endpoint cannot become an existence oracle over `query.databases`
+    // either.
+    let fx = fixture!();
+    let foreign_database = mk_database(&fx.db, fx.other_ws).await;
+    let ghost = Uuid::new_v4();
+
+    let (s1, foreign_err) = req(
+        &fx,
+        &fx.editor_tok,
+        "POST",
+        &format!("/ws/{}/alerts", fx.slug),
+        Some(alert_json_full("foreign db oracle", foreign_database, &[])),
+    )
+    .await;
+    let (s2, ghost_err) = req(
+        &fx,
+        &fx.editor_tok,
+        "POST",
+        &format!("/ws/{}/alerts", fx.slug),
+        Some(alert_json_full("ghost db oracle", ghost, &[])),
+    )
+    .await;
+    assert_eq!(s1, StatusCode::BAD_REQUEST, "got {foreign_err}");
+    assert_eq!(s2, StatusCode::BAD_REQUEST, "got {ghost_err}");
+    assert_eq!(
+        s1, s2,
+        "status must be identical for foreign vs nonexistent"
+    );
+    assert_eq!(
+        foreign_err["error"], ghost_err["error"],
+        "body must be identical for foreign vs nonexistent — otherwise this \
+         endpoint is an existence oracle over query.databases"
+    );
+}
+
+#[tokio::test]
+async fn create_still_saves_a_same_workspace_database() {
+    // Negative control: the scoping check must not also refuse the
+    // legitimate case.
+    let fx = fixture!();
+
+    let (s, made) = req(
+        &fx,
+        &fx.editor_tok,
+        "POST",
+        &format!("/ws/{}/alerts", fx.slug),
+        Some(alert_json_full("own database", fx.database, &[])),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "got {made}");
+    assert_eq!(made["database_id"], fx.database.to_string());
+}
+
+#[tokio::test]
+async fn update_refuses_repointing_an_alert_at_another_workspaces_database() {
+    let fx = fixture!();
+    let foreign_database = mk_database(&fx.db, fx.other_ws).await;
+
+    let (s, made) = req(
+        &fx,
+        &fx.editor_tok,
+        "POST",
+        &format!("/ws/{}/alerts", fx.slug),
+        Some(alert_json_full("repointable db", fx.database, &[])),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "seed create failed: {made}");
+    let id = made["id"].as_str().unwrap();
+
+    let (s, err) = req(
+        &fx,
+        &fx.editor_tok,
+        "PUT",
+        &format!("/ws/{}/alerts/{id}", fx.slug),
+        Some(alert_json_full("repointable db", foreign_database, &[])),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "got {err}");
+    assert!(err["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("database_id"));
+
+    let (_, still) = req(
+        &fx,
+        &fx.editor_tok,
+        "GET",
+        &format!("/ws/{}/alerts/{id}", fx.slug),
+        None,
+    )
+    .await;
+    assert_eq!(
+        still["database_id"],
+        fx.database.to_string(),
+        "a rejected repoint must not have written the foreign database_id"
+    );
+}
+
+// ── owners[] must name a member of this workspace ───────────────────────────
+
+#[tokio::test]
+async fn create_refuses_an_owner_who_is_not_a_member_of_this_workspace() {
+    let fx = fixture!();
+    // A user with NO grant anywhere — not even on `fx.other_ws` — so this is
+    // unambiguously "not a member", the same shape the probe's "stranger" was.
+    let stranger = mk_user(&fx.db, "stranger").await;
+
+    let (s, err) = req(
+        &fx,
+        &fx.editor_tok,
+        "POST",
+        &format!("/ws/{}/alerts", fx.slug),
+        Some(alert_json_full("stranger owner", fx.database, &[stranger])),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "got {err}");
+    let msg = err["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("owners"),
+        "refusal should name the field: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn create_still_saves_a_member_owner() {
+    // Negative control: a `ws_viewer` of `fx.ws` is a member — membership is
+    // all `owners[]` requires, not `alert:manage` (that stays gated on the
+    // ACTOR making the request, which is the editor token here).
+    let fx = fixture!();
+    let member = mk_user(&fx.db, "member_owner").await;
+    grant_ws_role(&fx.db, member, fx.ws, "ws_viewer").await;
+
+    let (s, made) = req(
+        &fx,
+        &fx.editor_tok,
+        "POST",
+        &format!("/ws/{}/alerts", fx.slug),
+        Some(alert_json_full("member owner", fx.database, &[member])),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "got {made}");
+    let owners = made["owners"].as_array().unwrap();
+    assert_eq!(owners.len(), 1);
+    assert_eq!(owners[0]["user_id"], member.to_string());
+}
+
+#[tokio::test]
+async fn update_refuses_repointing_owners_at_a_non_member() {
+    let fx = fixture!();
+    let member = mk_user(&fx.db, "member_owner").await;
+    grant_ws_role(&fx.db, member, fx.ws, "ws_viewer").await;
+    let stranger = mk_user(&fx.db, "stranger").await;
+
+    let (s, made) = req(
+        &fx,
+        &fx.editor_tok,
+        "POST",
+        &format!("/ws/{}/alerts", fx.slug),
+        Some(alert_json_full("owner repointable", fx.database, &[member])),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "seed create failed: {made}");
+    let id = made["id"].as_str().unwrap();
+
+    let (s, err) = req(
+        &fx,
+        &fx.editor_tok,
+        "PUT",
+        &format!("/ws/{}/alerts/{id}", fx.slug),
+        Some(alert_json_full(
+            "owner repointable",
+            fx.database,
+            &[stranger],
+        )),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "got {err}");
+    assert!(err["error"].as_str().unwrap_or_default().contains("owners"));
+
+    let (_, still) = req(
+        &fx,
+        &fx.editor_tok,
+        "GET",
+        &format!("/ws/{}/alerts/{id}", fx.slug),
+        None,
+    )
+    .await;
+    let owners = still["owners"].as_array().unwrap();
+    assert_eq!(
+        owners.len(),
+        1,
+        "a rejected owner repoint must not have replaced the existing owner"
+    );
+    assert_eq!(owners[0]["user_id"], member.to_string());
+}
+
+// ── set_folder: a foreign or nonexistent folder must be refused identically ─
+
+/// `folder_id` rides on `ScheduleSummaryDto` (the list), not
+/// `ScheduleDetailDto` (the single-schedule GET) — so verifying a `set_folder`
+/// write means reading it back through the list, not the detail route.
+async fn folder_of(fx: &Fx, id: &str) -> serde_json::Value {
+    let (_, list) = req(
+        fx,
+        &fx.editor_tok,
+        "GET",
+        &format!("/ws/{}/alerts", fx.slug),
+        None,
+    )
+    .await;
+    list.as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == id)
+        .unwrap_or_else(|| panic!("schedule {id} not in list: {list}"))["folder_id"]
+        .clone()
+}
+
+#[tokio::test]
+async fn moving_a_schedule_into_another_workspaces_folder_is_refused() {
+    let fx = fixture!();
+    let owner = mk_user(&fx.db, "target_owner").await;
+    let foreign_folder = egret_bi::folder::FolderRepo::new(fx.db.clone())
+        .create(fx.other_ws, "alert", "other ws folder", Some(owner))
+        .await
+        .expect("create foreign folder");
+
+    let (s, made) = req(
+        &fx,
+        &fx.editor_tok,
+        "POST",
+        &format!("/ws/{}/alerts", fx.slug),
+        Some(alert_json(&fx, "folder move target")),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "seed create failed: {made}");
+    let id = made["id"].as_str().unwrap();
+
+    let (s, err) = req(
+        &fx,
+        &fx.editor_tok,
+        "PATCH",
+        &format!("/ws/{}/alerts/{id}/folder", fx.slug),
+        Some(serde_json::json!({"folder_id": foreign_folder.id}).to_string()),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "got {err}");
+    let msg = err["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("folder_id"),
+        "refusal should name the field: {msg}"
+    );
+
+    assert!(
+        folder_of(&fx, id).await.is_null(),
+        "a rejected move must not have written the foreign folder_id"
+    );
+}
+
+#[tokio::test]
+async fn moving_a_schedule_into_a_nonexistent_folder_is_refused_identically() {
+    // Before the fix, a foreign folder was a 200 and a nonexistent one was a
+    // 500 from `folders_id_fkey` — two different status CLASSES, which made
+    // this endpoint an existence oracle over ALL of `analytics.folders`
+    // (charts, dashboards and datasets included), one call per guess, open to
+    // any `ws_editor`. Both must now be refused the SAME way.
+    let fx = fixture!();
+    let owner = mk_user(&fx.db, "target_owner").await;
+    let foreign_folder = egret_bi::folder::FolderRepo::new(fx.db.clone())
+        .create(fx.other_ws, "alert", "other ws folder 2", Some(owner))
+        .await
+        .expect("create foreign folder");
+    let ghost = Uuid::new_v4();
+
+    let (s, made) = req(
+        &fx,
+        &fx.editor_tok,
+        "POST",
+        &format!("/ws/{}/alerts", fx.slug),
+        Some(alert_json(&fx, "folder oracle target")),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "seed create failed: {made}");
+    let id = made["id"].as_str().unwrap();
+
+    let (s1, foreign_err) = req(
+        &fx,
+        &fx.editor_tok,
+        "PATCH",
+        &format!("/ws/{}/alerts/{id}/folder", fx.slug),
+        Some(serde_json::json!({"folder_id": foreign_folder.id}).to_string()),
+    )
+    .await;
+    let (s2, ghost_err) = req(
+        &fx,
+        &fx.editor_tok,
+        "PATCH",
+        &format!("/ws/{}/alerts/{id}/folder", fx.slug),
+        Some(serde_json::json!({"folder_id": ghost}).to_string()),
+    )
+    .await;
+    assert_eq!(s1, StatusCode::BAD_REQUEST, "got {foreign_err}");
+    assert_eq!(s2, StatusCode::BAD_REQUEST, "got {ghost_err}");
+    assert_eq!(
+        s1, s2,
+        "status must be identical for foreign vs nonexistent"
+    );
+    assert_eq!(
+        foreign_err["error"], ghost_err["error"],
+        "body must be identical for foreign vs nonexistent — otherwise this \
+         endpoint is an existence oracle over analytics.folders"
+    );
+    // And neither a foreign-folder guess (200 before the fix) nor a
+    // nonexistent one (500 from the FK before the fix) may be distinguished
+    // by status CLASS either.
+    assert_eq!(s1, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn moving_a_schedule_into_its_own_workspaces_folder_still_works() {
+    // Negative control: the scoping check must not also refuse the
+    // legitimate case.
+    let fx = fixture!();
+    let owner = mk_user(&fx.db, "target_owner").await;
+    let own_folder = egret_bi::folder::FolderRepo::new(fx.db.clone())
+        .create(fx.ws, "alert", "my folder", Some(owner))
+        .await
+        .expect("create own folder");
+
+    let (s, made) = req(
+        &fx,
+        &fx.editor_tok,
+        "POST",
+        &format!("/ws/{}/alerts", fx.slug),
+        Some(alert_json(&fx, "folder move own")),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "seed create failed: {made}");
+    let id = made["id"].as_str().unwrap();
+
+    let (s, ack) = req(
+        &fx,
+        &fx.editor_tok,
+        "PATCH",
+        &format!("/ws/{}/alerts/{id}/folder", fx.slug),
+        Some(serde_json::json!({"folder_id": own_folder.id}).to_string()),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "got {ack}");
+    assert_eq!(folder_of(&fx, id).await, own_folder.id.to_string());
 }

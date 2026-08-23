@@ -207,6 +207,7 @@ impl AutomationRunner {
         let owner = self.resolve_owner(s.id).await?;
         let identity = owner_identity(
             owner,
+            s.workspace_id,
             database_id,
             &self.databases,
             &self.users,
@@ -462,10 +463,18 @@ impl AutomationRunner {
             })?)
             .map_err(|_| EvalError::Query(format!("chart {} spec invalid", chart.id)))?;
 
+        // The SCHEDULE's own workspace, not the chart's — they are the same
+        // value by construction once `validate_targets_in_workspace` refuses a
+        // foreign chart at save time, but passing `chart.workspace_id` here
+        // was the exact self-referential idiom (`ds.workspace_id != workspace_id`
+        // compared against itself) that let the original cross-tenant
+        // disclosure through: the one scoping guard on this path could never
+        // fire because both sides were sourced from the same foreign object.
+        // `s.workspace_id` makes the guard live defence-in-depth again.
         let (sql, database_id) = egret_bi::compile_chart_sql(
             &self.datasets,
             &self.databases,
-            chart.workspace_id,
+            s.workspace_id,
             chart.dataset_id,
             &spec,
         )
@@ -474,6 +483,7 @@ impl AutomationRunner {
 
         let identity = owner_identity(
             owner,
+            s.workspace_id,
             database_id,
             &self.databases,
             &self.users,

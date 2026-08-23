@@ -1519,6 +1519,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         charts: egret_bi::ChartRepo::new(db.clone()),
         dashboards: egret_bi::DashboardRepo::new(db.clone()),
         datasets: egret_bi::DatasetRepo::new(db.clone()),
+        folders: egret_bi::folder::FolderRepo::new(db.clone()),
         databases: databases.clone(),
         users: UserRepo::new(db.clone()),
         engine_minter: engine_minter.clone(),

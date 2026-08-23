@@ -290,10 +290,17 @@ async fn run_card(
         }
     }
 
+    // The GRANT's own workspace, not the chart's — see `runner.rs`'s
+    // `build_chart_report` for why the two must never be conflated: they are
+    // the same value by construction once `build`/`allowed_charts` above have
+    // already re-fetched the chart scoped to `grant.workspace_id`, but a
+    // chart-sourced value here would leave `compile_chart_sql`'s own
+    // `ds.workspace_id != workspace_id` guard comparing a value against
+    // itself, permanently dead.
     let (sql, database_id) = egret_bi::compile_chart_sql(
         &st.datasets,
         &st.databases,
-        chart.workspace_id,
+        grant.workspace_id,
         chart.dataset_id,
         &spec,
     )
@@ -302,6 +309,7 @@ async fn run_card(
 
     let identity = crate::evaluator::owner_identity(
         grant.owner_id,
+        grant.workspace_id,
         database_id,
         &st.databases,
         &st.users,

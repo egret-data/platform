@@ -120,15 +120,33 @@ impl QueryRunner for EngineRunner {
 /// A delegated engine gets a token minted for the owner; a non-delegated one
 /// gets the owner's engine username. Either way the identity is the owner's —
 /// there is no branch here that yields a service identity, which is the point.
+///
+/// `workspace_id` is the caller's own schedule/render workspace, and it is
+/// the ONLY thing standing between this function and the `database_id`
+/// disclosure: `query.databases` carries no other cross-tenant guard below
+/// this point — `crates/egret-query/src/execution/job.rs`'s `run_query` opens
+/// the connection's secret by id alone, resolving the credential from
+/// whatever `workspace_id` the row itself names (proven live: corrupting
+/// workspace 2's vault entry flipped an unscoped run from `success` to
+/// `Access denied for user 'ws2svc'`). `get_in_workspace` — the same guard
+/// `port_impl.rs`'s `connect_as` already applies for the interactive port —
+/// refuses BEFORE any connection is opened, so a foreign or nonexistent
+/// `database_id` never reaches `open_secret` at all. This is the ONLY call
+/// site of `databases.get`/`open_secret` reachable from `egret-automation`
+/// (both `AutomationRunner`'s alert/report paths and `render::payload`'s
+/// `run_card` call this before ever calling `QueryRunner::run` with the same
+/// `database_id`), so gating here closes the batch path the same way
+/// `connect_as` already closes the interactive one.
 pub async fn owner_identity(
     owner: Uuid,
+    workspace_id: Uuid,
     database_id: Uuid,
     databases: &DatabaseRepo,
     users: &UserRepo,
     minter: &dyn EngineTokenMinter,
 ) -> Result<RunIdentity, EvalError> {
     let db = databases
-        .get(database_id)
+        .get_in_workspace(workspace_id, database_id)
         .await
         .map_err(|e| EvalError::Query(e.to_string()))?;
     let username = users
@@ -453,7 +471,10 @@ mod tests {
         }
     }
 
-    async fn seed_db_and_users(db: &egret_metastore::Db, delegated: bool) -> (Uuid, Uuid, Uuid) {
+    async fn seed_db_and_users(
+        db: &egret_metastore::Db,
+        delegated: bool,
+    ) -> (Uuid, Uuid, Uuid, Uuid) {
         let mk_user = |email: String| async move {
             sqlx::query_scalar::<_, Uuid>(
                 "INSERT INTO users (email, provider) VALUES ($1,'local') RETURNING id",
@@ -483,7 +504,7 @@ mod tests {
         .fetch_one(&db.pool)
         .await
         .unwrap();
-        (owner, other, database)
+        (owner, other, ws, database)
     }
 
     fn repos(db: &egret_metastore::Db) -> (DatabaseRepo, UserRepo) {
@@ -502,14 +523,14 @@ mod tests {
         // that this token belongs to the owner. `other` exists precisely so the
         // assertion cannot pass by there being only one user to choose.
         let db = egret_metastore::Db { pool };
-        let (owner, other, database) = seed_db_and_users(&db, true).await;
+        let (owner, other, ws, database) = seed_db_and_users(&db, true).await;
         let (databases, users) = repos(&db);
         let minter = SpyMinter {
             minted_for: Mutex::new(vec![]),
             refuse: false,
         };
 
-        let identity = owner_identity(owner, database, &databases, &users, &minter)
+        let identity = owner_identity(owner, ws, database, &databases, &users, &minter)
             .await
             .unwrap();
 
@@ -536,14 +557,14 @@ mod tests {
         // service — is the escalation this whole design exists to prevent, and
         // it would look like an alert that simply kept working.
         let db = egret_metastore::Db { pool };
-        let (owner, _other, database) = seed_db_and_users(&db, true).await;
+        let (owner, _other, ws, database) = seed_db_and_users(&db, true).await;
         let (databases, users) = repos(&db);
         let minter = SpyMinter {
             minted_for: Mutex::new(vec![]),
             refuse: true,
         };
 
-        let err = owner_identity(owner, database, &databases, &users, &minter)
+        let err = owner_identity(owner, ws, database, &databases, &users, &minter)
             .await
             .unwrap_err();
         assert!(
@@ -557,14 +578,14 @@ mod tests {
         // No token to mint, but the identity must still be the owner's rather
         // than a shared connection user.
         let db = egret_metastore::Db { pool };
-        let (owner, _other, database) = seed_db_and_users(&db, false).await;
+        let (owner, _other, ws, database) = seed_db_and_users(&db, false).await;
         let (databases, users) = repos(&db);
         let minter = SpyMinter {
             minted_for: Mutex::new(vec![]),
             refuse: true, // would fail if it were called at all
         };
 
-        let identity = owner_identity(owner, database, &databases, &users, &minter)
+        let identity = owner_identity(owner, ws, database, &databases, &users, &minter)
             .await
             .unwrap();
         assert!(
@@ -573,6 +594,87 @@ mod tests {
         );
         assert!(identity.session_user.is_some());
         assert_eq!(identity.bearer_token, None);
+    }
+
+    // ── the database_id sibling: F1 (round 4) — the run-time half ───────────
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn owner_identity_refuses_a_database_id_from_another_workspace(pool: sqlx::PgPool) {
+        // §4's F1: `database_id` carried NO workspace check anywhere below the
+        // route — `evaluator::owner_identity` and
+        // `crates/egret-query/src/execution/job.rs`'s `run_query` both called
+        // `databases.get`/`open_secret` by id alone, so a schedule in
+        // workspace 1 could open workspace 2's connection, and (proven live
+        // against the dev StarRocks by corrupting workspace 2's own vault
+        // entry) workspace 2's own vaulted credential. `owner_identity` is
+        // the ONE place both automation call paths (the alert evaluator and
+        // `build_chart_report`/`run_card`) pass `database_id` through before
+        // ever reaching a `QueryRunner`, so gating it here — with the SAME
+        // `get_in_workspace` guard `port_impl.rs`'s `connect_as` already uses
+        // for the interactive port — closes the run-time half for every
+        // automation caller, including a row written before the write-side
+        // fix (or by anything that bypassed the route) that still names a
+        // foreign `database_id` today.
+        let db = egret_metastore::Db { pool };
+        let (owner, _other, ws1, _db1) = seed_db_and_users(&db, false).await;
+        let (_owner2, _other2, _ws2, foreign_database) = seed_db_and_users(&db, false).await;
+        let (databases, users) = repos(&db);
+        let minter = SpyMinter {
+            minted_for: Mutex::new(vec![]),
+            refuse: true, // would fail if it were reached at all
+        };
+
+        let err = owner_identity(owner, ws1, foreign_database, &databases, &users, &minter)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, EvalError::Query(m) if m.contains("not found")),
+            "a foreign database_id must be refused before any connection opens: {err:?}"
+        );
+        assert!(
+            minter.minted_for.lock().unwrap().is_empty(),
+            "refused before the minter (and therefore before the engine) is ever reached"
+        );
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn owner_identity_refuses_a_database_id_that_exists_nowhere(pool: sqlx::PgPool) {
+        // Foreign and nonexistent must be indistinguishable — the same rule
+        // `validate_targets_in_workspace` follows for chart/dashboard/target,
+        // so this endpoint cannot become an existence oracle either.
+        let db = egret_metastore::Db { pool };
+        let (owner, _other, ws1, _db1) = seed_db_and_users(&db, false).await;
+        let (databases, users) = repos(&db);
+        let minter = SpyMinter {
+            minted_for: Mutex::new(vec![]),
+            refuse: true,
+        };
+
+        let err = owner_identity(owner, ws1, Uuid::new_v4(), &databases, &users, &minter)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, EvalError::Query(m) if m.contains("not found")),
+            "{err:?}"
+        );
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn owner_identity_still_runs_a_same_workspace_database_id(pool: sqlx::PgPool) {
+        // Negative control: the scoping check must not also refuse the
+        // legitimate case.
+        let db = egret_metastore::Db { pool };
+        let (owner, _other, ws, database) = seed_db_and_users(&db, false).await;
+        let (databases, users) = repos(&db);
+        let minter = SpyMinter {
+            minted_for: Mutex::new(vec![]),
+            refuse: true,
+        };
+
+        let identity = owner_identity(owner, ws, database, &databases, &users, &minter)
+            .await
+            .unwrap();
+        assert!(identity.session_user.is_some());
     }
 
     #[tokio::test]
