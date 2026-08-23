@@ -433,6 +433,23 @@ pub enum ValidationError {
          two endpoints: split it, or fold related filters into one `enum` parameter"
     )]
     TooManyParameters { declared: usize, limit: usize },
+    /// A conditional definition under `output.shape: "arrays"`.
+    ///
+    /// `shape_rows` (`serving/router.rs`) zips the live row and the frozen
+    /// column list by INDEX, and `data_schema` (`openapi_gen.rs`) documents the
+    /// order in prose rather than in the schema, because OpenAPI 3.0 has no
+    /// tuple type. Both exist because a positional row has no way to name which
+    /// column a given slot holds. A definition whose branches describe
+    /// different column lists has no single order to freeze — `[[1]]` under a
+    /// declared `[id, name, email]` is ambiguous about which of the three is
+    /// missing — so it is refused here rather than served under whichever
+    /// branch happened to be described first.
+    #[error(
+        "this definition returns different columns depending on its parameters, which \
+         `output.shape: arrays` cannot express — a positional row has no way to say which \
+         column is missing. Use `output.shape: objects`, where a column is simply absent"
+    )]
+    BranchingArraysShape,
 }
 
 impl From<ValidationError> for Error {
@@ -1638,9 +1655,24 @@ pub async fn validate(
         delegated,
         impersonate,
     )?;
-    Ok(describe_branches(port, workspace, principal, draft)
-        .await?
-        .union)
+    let described = describe_branches(port, workspace, principal, draft).await?;
+    // `arrays` is positional: `shape_rows` zips the live and frozen column
+    // lists by index and `data_schema` documents the order in prose, because
+    // OpenAPI 3.0 has no tuple type. A definition whose branches resolve to
+    // different column lists — different names, different count, or different
+    // order — has no single order to freeze, so it is refused here rather than
+    // served under whichever branch happened to be described first. A
+    // non-branching definition has exactly one entry in `per_statement`, so
+    // this `any` never fires for it — the rule costs it nothing.
+    if draft.output.shape == "arrays"
+        && described
+            .per_statement
+            .iter()
+            .any(|names| names != &described.per_statement[0])
+    {
+        return Err(ValidationError::BranchingArraysShape.into());
+    }
+    Ok(described.union)
 }
 
 /// What describing every branch of one definition produced.
@@ -1652,12 +1684,7 @@ pub(crate) struct DescribedBranches {
     /// order. The union throws away WHICH branch had which columns, and that is
     /// the question `output.shape = "arrays"` has to ask: an array row is
     /// positional, so two branches with different column lists cannot both be
-    /// served under one frozen order.
-    #[allow(
-        dead_code,
-        reason = "the `arrays` gate is the next task; \
-        computing this list is free here and reconstructing it later is not"
-    )]
+    /// served under one frozen order. See [`ValidationError::BranchingArraysShape`].
     pub per_statement: Vec<Vec<String>>,
 }
 

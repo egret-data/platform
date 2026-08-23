@@ -1422,6 +1422,65 @@ async fn a_column_whose_type_differs_between_branches_refuses_to_publish() {
     );
 }
 
+/// `output.shape: "arrays"` is positional — `shape_rows` zips the live and
+/// frozen column lists by index — so a definition whose branches resolve to
+/// different columns has no single order to freeze and must be refused.
+#[tokio::test]
+async fn an_arrays_endpoint_that_branches_refuses_to_publish() {
+    let f = skip_without_db!();
+    f.port.set(Describe::PerSql(vec![
+        ("name", vec![("id", "uuid"), ("name", "varchar")]),
+        ("", vec![("id", "uuid")]),
+    ]));
+    let ep = f
+        .create_endpoint(
+            "arr",
+            "reports/arr",
+            "SELECT id {% if detail %}, name {% endif %}FROM t",
+        )
+        .await;
+    f.patch_endpoint(
+        ep,
+        serde_json::json!({
+            "params": [
+                { "name": "detail", "type": "boolean", "location": "query" }
+            ],
+            "output": { "shape": "arrays" }
+        }),
+    )
+    .await;
+    let (status, body) = f.publish_raw(ep).await;
+    // 400, not 422: every `ValidationError` becomes `Error::InvalidInput`,
+    // which `egret_core::http` maps to BAD_REQUEST with an `error` field — the
+    // same shape every other publish rule refusal carries.
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("objects"),
+        "the message must point at the fix: {body}"
+    );
+    assert!(
+        f.versions(ep).await.is_empty(),
+        "a refused publish leaves no version behind"
+    );
+}
+
+/// The rule must cost a non-branching `arrays` endpoint nothing: this is the
+/// other half of the same property, from the same shape one parameter apart,
+/// so a rule that refused every `arrays` endpoint outright would fail here.
+#[tokio::test]
+async fn an_arrays_endpoint_that_does_not_branch_still_publishes() {
+    let f = skip_without_db!();
+    f.port
+        .set(Describe::Columns(vec![("id", "uuid"), ("name", "varchar")]));
+    let ep = f
+        .create_endpoint("arr2", "reports/arr2", "SELECT id, name FROM t")
+        .await;
+    f.patch_endpoint(ep, serde_json::json!({ "output": { "shape": "arrays" } }))
+        .await;
+    f.publish(ep).await; // must not refuse
+}
+
 /// `representative_value` picks `allowed[0]` (`lifecycle.rs`), so before this the
 /// ORDER the author wrote `allowed` in decided the published contract.
 #[tokio::test]
