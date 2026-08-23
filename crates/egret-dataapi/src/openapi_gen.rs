@@ -153,7 +153,28 @@ fn data_schema(snap: &EndpointSnapshot, endpoint: &str) -> Result<Value, OpenApi
             }),
         );
     }
-    Ok(json!({ "type": "object", "properties": props }))
+    // Every declared column is a property; only the ones present in every
+    // described branch are `required`. This is what stops the document
+    // advertising a call that 503s: before M1 a conditional endpoint declared
+    // one branch's columns as if they were the whole contract.
+    //
+    // Names go through `apply_naming` — the same as `props` above — because
+    // this `required` list must name the keys a consumer actually receives,
+    // not the raw column name. Note this is OpenAPI's `required` (which
+    // properties must be present), a different thing from `ColumnSpec::required`
+    // (which branches guarantee a column) even though the latter feeds the
+    // former here.
+    let required: Vec<String> = snap
+        .columns
+        .iter()
+        .filter(|c| c.required)
+        .map(|c| crate::serving::router::apply_naming(&c.name, &snap.output.naming))
+        .collect();
+    let mut schema = json!({ "type": "object", "properties": props });
+    if !required.is_empty() {
+        schema["required"] = json!(required);
+    }
+    Ok(schema)
 }
 
 /// The error responses, identical for every path, referenced not inlined.
@@ -362,4 +383,90 @@ pub async fn build(
         },
         "paths": paths,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egret_dataapi_api::ColumnSpec;
+
+    /// `data_schema` is private to this module and `tests/openapi_gen.rs` only
+    /// reaches the public, DB-gated `build` — so this pins the fragment
+    /// directly, the same way `serving/router.rs`'s own test module drives
+    /// `shape_rows` directly rather than through the router.
+    fn col(name: &str, ty: &str, required: bool) -> ColumnSpec {
+        ColumnSpec {
+            name: name.into(),
+            ty: ty.into(),
+            required,
+        }
+    }
+
+    fn snap_with_columns(columns: Vec<ColumnSpec>, naming: &str) -> EndpointSnapshot {
+        EndpointSnapshot {
+            sql: "SELECT 1".into(),
+            method: "GET".into(),
+            path: "/x".into(),
+            database_id: Uuid::nil(),
+            params: vec![],
+            output: serde_json::from_value(json!({ "naming": naming })).unwrap(),
+            cache: serde_json::from_value(json!({})).unwrap(),
+            limits: egret_dataapi_api::LimitsSpec {
+                max_rows: 1,
+                timeout_seconds: 1,
+            },
+            rate_limit: serde_json::from_value(json!({})).unwrap(),
+            delegated: false,
+            impersonate: false,
+            columns,
+            param_gate: egret_dataapi_api::PARAM_GATE,
+        }
+    }
+
+    /// The scenario the whole plan turns on: `id` is guaranteed by every
+    /// branch, `name` only by some. Both are documented as properties — an
+    /// optional column is still reachable — but only `id` may appear in
+    /// `required`, or the document promises a key some branch never returns.
+    #[test]
+    fn only_the_columns_present_in_every_branch_are_required() {
+        let snap = snap_with_columns(
+            vec![col("id", "integer", true), col("name", "varchar", false)],
+            "as_is",
+        );
+        let doc = data_schema(&snap, "e").expect("a branching endpoint has a document");
+        assert_eq!(doc["required"], json!(["id"]));
+        assert!(
+            doc["properties"]["name"].is_object(),
+            "an optional column is still documented — it is reachable, just not guaranteed"
+        );
+    }
+
+    /// No column is guaranteed by every branch: the schema must not carry an
+    /// empty `required: []`, which some generators read as "no properties are
+    /// ever required" rather than "this key happens to be absent from the
+    /// object" — the field is simply omitted.
+    #[test]
+    fn no_required_columns_omits_the_required_key_entirely() {
+        let snap = snap_with_columns(vec![col("name", "varchar", false)], "as_is");
+        let doc = data_schema(&snap, "e").expect("document");
+        assert!(
+            doc.get("required").is_none(),
+            "an empty required array is a different claim than no required key: {doc}"
+        );
+    }
+
+    /// The trap named in this task: `required` must name the key a consumer
+    /// actually receives, run through the SAME `apply_naming` as `properties`
+    /// — not the raw column name.
+    #[test]
+    fn required_names_are_camel_cased_the_same_as_properties() {
+        let snap = snap_with_columns(vec![col("total_revenue", "integer", true)], "camel");
+        let doc = data_schema(&snap, "e").expect("document");
+        assert_eq!(doc["required"], json!(["totalRevenue"]));
+        assert!(doc["properties"]["totalRevenue"].is_object());
+        assert!(
+            doc["properties"].get("total_revenue").is_none(),
+            "the raw name must not leak into properties either: {doc}"
+        );
+    }
 }
