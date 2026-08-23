@@ -186,7 +186,15 @@ không-enum, mỗi cái thu hoạch mười sáu literal, vắt cạn đúng ng�
 cuối của tham số sắp cuối bảng chữ cái không bao giờ được probe. Một lượt chạy đối chứng
 với cùng số tham số đói ở đúng điểm đó, nên giới hạn nằm ở chính ngân sách round-robin và
 có trước gói này. Hệ quả là một endpoint nhiều tham số như vậy vẫn có thể gặp một nhánh mà
-publish chưa từng describe. Vì vậy phép kiểm lúc serving là lưới đỡ cho mọi thứ publish không
+publish chưa từng describe.
+
+**Một đường thứ hai, độc lập, khiến publish bỏ sót nhánh**, tìm thấy lúc review: các ngữ
+cảnh vắng-tham-số là `{không vắng cái nào}`, `{vắng từng cái một}`, và `{vắng hết}` — thừa
+hưởng từ `check_render_rules`, vốn xưa nay chỉ dựng đúng tập đó. **Các cặp thì thiếu.** Với
+ba tham số tuỳ chọn, một định nghĩa rẽ theo tổ hợp kiểu `(a and b) or (a and c)` sẽ describe
+như thể cột đó luôn có mặt, và người gọi chỉ truyền một trong hai sẽ gặp một cột mà publish
+đã đóng băng là `required`. Hơi khiên cưỡng, nhưng cùng loại với giới hạn ngân sách ở trên,
+và an toàn vì cùng một lý do: phép kiểm lúc serving fail đóng. Vì vậy phép kiểm lúc serving là lưới đỡ cho mọi thứ publish không
 với tới, và nó **phải fail đóng**. Một cột không được khai không phải lỗi tài liệu — nó là
 một trường chưa ai duyệt lúc publish đang đi tới tay người gọi.
 

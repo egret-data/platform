@@ -192,7 +192,16 @@ harvesting sixteen literals, exactly exhaust the budget and the alphabetically-l
 parameter's tail candidates are never probed. A control run with the same parameters
 starves identically, so the limit is the round-robin budget itself and predates this
 package. The consequence is that an endpoint with that many parameters can still meet a
-branch publish never described. The serving check is therefore the backstop for everything publish
+branch publish never described.
+
+**A second, independent way publish can miss a branch**, found in review: the
+absent-parameter contexts are `{none absent}`, `{each one absent}`, and `{all absent}` —
+inherited from `check_render_rules`, which has always built exactly that set. The **pairs
+are missing**. With three optional parameters, a definition branching on a combination
+like `(a and b) or (a and c)` describes as though the column were always present, and a
+caller who supplies only one of them meets a column publish froze as `required`.
+Contrived, but the same class as the budget limit above, and safe for the same reason: the
+serving check fails closed. The serving check is therefore the backstop for everything publish
 did not reach, and it **must fail closed**. An undeclared column is not a documentation
 defect — it is a field nobody reviewed at publish reaching a caller.
 
