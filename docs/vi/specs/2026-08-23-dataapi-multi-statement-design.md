@@ -181,7 +181,12 @@ Việc này giữ nguyên si đường đi theo vị trí như hôm nay, và gia
 vào đường `objects`.
 
 Ngân sách 64 probe là một cái trần, không phải bằng chứng vét cạn: một template có thể rẽ
-theo nhiều tổ hợp hơn 64. Vì vậy phép kiểm lúc serving là lưới đỡ cho mọi thứ publish không
+theo nhiều tổ hợp hơn 64. **Điều này đã được đo, không phải phỏng đoán:** năm tham số
+không-enum, mỗi cái thu hoạch mười sáu literal, vắt cạn đúng ngân sách và các ứng viên
+cuối của tham số sắp cuối bảng chữ cái không bao giờ được probe. Một lượt chạy đối chứng
+với cùng số tham số đói ở đúng điểm đó, nên giới hạn nằm ở chính ngân sách round-robin và
+có trước gói này. Hệ quả là một endpoint nhiều tham số như vậy vẫn có thể gặp một nhánh mà
+publish chưa từng describe. Vì vậy phép kiểm lúc serving là lưới đỡ cho mọi thứ publish không
 với tới, và nó **phải fail đóng**. Một cột không được khai không phải lỗi tài liệu — nó là
 một trường chưa ai duyệt lúc publish đang đi tới tay người gọi.
 
