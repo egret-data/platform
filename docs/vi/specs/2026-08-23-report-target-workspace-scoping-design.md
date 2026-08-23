@@ -124,6 +124,28 @@ lặng và lượt chạy hỏng ở engine. Đó là lỗi độ tin cậy và 
 phơi nhiễm này chứ không mở rộng, gói gọn vào connection delegated **jwt-mode**. Nó có
 issue riêng.
 
+### 4.4 Alert bỏ qua phần đính kèm chứ không thành run lỗi — và đó là hành vi duy nhất đúng
+
+`render_alert_attachment` nuôi `send_email`, chạy **sau** khi điều kiện của chính alert đã fire.
+Một target ngoại lai vì thế chỉ làm bước đính kèm bị bỏ qua; nó không lật được `schedule_runs.state`.
+
+Một bản nháp trước coi đó là thoả hiệp mà kiến trúc ép phải chịu. Không phải. Ghi lượt chạy đó là
+`error` sẽ **sai một cách chủ động**: `in_grace` khoá theo `state = 'success'`
+(`crates/egret-automation/src/scheduler.rs:90-95`), nên một alert có run bị ghi là `error` sẽ
+**không bao giờ vào grace và sẽ gửi lại cho mọi người nhận ở mỗi tick**. Bỏ qua phần đính kèm là
+tránh một regression spam thông báo, chứ không phải chấp nhận nó.
+
+Người nhận thực sự nhận được gì thì đã đo, không phải suy: subject và body từ truy vấn *của chính*
+schedule, đúng một đính kèm (dòng dữ liệu của chính nó dạng CSV), và `image_cid = None` — không
+phát ra thẻ `<img>` nào thay vì để lại một `cid:` treo. Giá trị duy nhất bắt nguồn từ workspace kia
+trong toàn bộ thư là href của `object_url`, xuất hiện ở cả HTML email lẫn text Slack: nó render
+dưới **slug của chính workspace 1**, nên không tên, slug hay tiêu đề nào của workspace 2 lọt sang;
+dữ liệu ngoại lai duy nhất là cái UUID mà chính người của workspace 1 đã lưu; và bấm vào thì 404.
+
+Việc bỏ qua không im lặng. Nó được luồn vào `first_error` của `deliver`, thứ mà `run_and_log` ghi
+vào cột `error` trong khi `state` vẫn là `success` — và `RunDto.error` được endpoint runs phục vụ,
+nên người vận hành thấy một lượt chạy thành công kèm một câu nêu tên object và lý do.
+
 ## 5. Chứng minh thế nào, chứ không phải khẳng định
 
 Probe chính là kế hoạch kiểm thử. Mỗi mục dưới đây phải **đỏ trước** bản vá và **xanh sau**:

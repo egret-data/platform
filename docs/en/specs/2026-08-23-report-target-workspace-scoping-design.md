@@ -124,6 +124,29 @@ skipped and the run fails at the engine. That is a reliability bug and it is **f
 closed** — it narrows this exposure rather than widening it, confining it to delegated
 **jwt-mode** connections. It gets its own issue.
 
+### 4.4 The alert attachment skips; it does not become an error run — and that is the only correct behaviour
+
+`render_alert_attachment` feeds `send_email`, which runs **after** the alert's own condition has
+already fired. A foreign attachment target therefore makes the attachment step skip; it cannot
+flip `schedule_runs.state`.
+
+An earlier draft treated that as a compromise the architecture forced. It is not. Recording such
+a run as `error` would be **actively wrong**: `in_grace` keys on `state = 'success'`
+(`crates/egret-automation/src/scheduler.rs:90-95`), so an alert whose runs were recorded as
+`error` would never enter its grace period and would **re-notify every recipient on every tick**.
+Skipping the attachment avoids a notification-spam regression rather than accepting one.
+
+What the recipient gets is measured, not argued — subject and body from the schedule's *own*
+query, exactly one attachment (its own rows as CSV), and `image_cid = None`, which emits no
+`<img>` element at all rather than a dangling `cid:`. The only foreign-derived value anywhere in
+the message is `object_url`'s href, carried in both the email HTML and the Slack text: it is
+rendered under **workspace 1's own slug**, so no name, slug or title of workspace 2 crosses, the
+only foreign datum is the UUID the workspace-1 actor stored themselves, and following it 404s.
+
+The skip is not silent. It is threaded into `deliver`'s `first_error`, which `run_and_log` writes
+to the `error` column while `state` stays `success` — and `RunDto.error` is served by the runs
+endpoint, so an operator sees a successful run with a sentence naming the object and the reason.
+
 ## 5. How this is proven, not asserted
 
 The probe is the test plan. Each of these must fail before the fix and pass after:
