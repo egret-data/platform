@@ -1146,13 +1146,21 @@ fn engine_error(e: egret_core::Error) -> ServingError {
 /// exact-match semantics: subset plus all-required is set equality. What it does
 /// lose is ORDER sensitivity, and only on this path — see below.
 ///
-/// # Order: all of the `arrays` predicate, none of the `objects` one
+/// # Order: all of the `arrays` NAME predicate, none of the `objects` one
 ///
 /// `arrays` is positional, so two identical name SETS in a different order are
-/// still a different contract, and that path keeps the pre-M1 equality check
-/// unchanged. It cannot need anything else: publish refuses an `arrays` endpoint
-/// whose branches describe different columns
-/// (`ValidationError::BranchingArraysShape`), so there is no subset to accept.
+/// still a different contract, and that path keeps the pre-M1 name-and-order
+/// equality check unchanged. Publish refuses an `arrays` endpoint whose branches
+/// describe different columns (`ValidationError::BranchingArraysShape`), so
+/// there is no SUBSET to accept there.
+///
+/// **What that path does not keep is "names and arity are all that matter": it
+/// compares TYPES too.** No branch is needed for `ALTER TABLE … TYPE`, and the
+/// case for comparing them is stronger here than under `objects`, because a
+/// positional row carries no names at all — a client reading `data[i][2]` as the
+/// declared `varchar` has nothing in the body to notice an integer by. "There is
+/// no subset to accept" is a statement about the NAME list; it is not a
+/// statement that the positional path has nothing left to check.
 ///
 /// `objects` no longer compares order, because this function no longer depends
 /// on it: keys are taken from the LIVE columns, so a reordered result binds each
@@ -1209,7 +1217,12 @@ fn shape_rows(
     // (`ValidationError::DescribeReturnedNoColumns`), so a frozen list is never
     // empty and `arrays` reaches this only with a result it would refuse anyway.
     if out.columns.is_empty() {
-        return Err(drift(snap, out, "the engine returned no columns at all"));
+        return Err(drift(
+            snap,
+            out,
+            "the engine returned no columns at all",
+            None,
+        ));
     }
 
     if snap.output.shape == "arrays" {
@@ -1225,7 +1238,7 @@ fn shape_rows(
                 .zip(snap.columns.iter())
                 .any(|(live, frozen)| live.name != frozen.name);
         if drifted {
-            return Err(drift(snap, out, "the positional column list changed"));
+            return Err(drift(snap, out, "the positional column list changed", None));
         }
         // Types are compared HERE TOO, and this half is new.
         //
@@ -1239,13 +1252,22 @@ fn shape_rows(
         // Kept as a second check rather than folded into the `any` above so the
         // log line names which clause refused; three rounds of this plan were
         // spent on refusals that reported the wrong reason.
-        if out
+        if let Some((live, frozen)) = out
             .columns
             .iter()
             .zip(snap.columns.iter())
-            .any(|(live, frozen)| live.ty != frozen.ty)
+            .find(|(live, frozen)| live.ty != frozen.ty)
         {
-            return Err(drift(snap, out, "a declared column changed type"));
+            return Err(drift(
+                snap,
+                out,
+                "a declared column changed type",
+                Some(TypeMismatch {
+                    column: &live.name,
+                    declared: &frozen.ty,
+                    returned: &live.ty,
+                }),
+            ));
         }
         return Ok(serde_json::Value::Array(
             out.rows
@@ -1268,16 +1290,25 @@ fn shape_rows(
     // this is the backstop that has to fail closed.
     for live in &out.columns {
         match snap.columns.iter().find(|f| f.name == live.name) {
-            None => return Err(drift(snap, out, "a column that was never declared")),
+            None => return Err(drift(snap, out, "a column that was never declared", None)),
             Some(frozen) if frozen.ty != live.ty => {
-                return Err(drift(snap, out, "a declared column changed type"))
+                return Err(drift(
+                    snap,
+                    out,
+                    "a declared column changed type",
+                    Some(TypeMismatch {
+                        column: &live.name,
+                        declared: &frozen.ty,
+                        returned: &live.ty,
+                    }),
+                ))
             }
             Some(_) => {}
         }
     }
     for frozen in snap.columns.iter().filter(|c| c.required) {
         if !out.columns.iter().any(|l| l.name == frozen.name) {
-            return Err(drift(snap, out, "a required column was not returned"));
+            return Err(drift(snap, out, "a required column was not returned", None));
         }
     }
     // Two LIVE columns of ONE name — `SELECT *` over a join whose right side
@@ -1298,7 +1329,7 @@ fn shape_rows(
         .iter()
         .any(|c| !live_seen.insert(c.name.as_str()))
     {
-        return Err(drift(snap, out, "two live columns carry one name"));
+        return Err(drift(snap, out, "two live columns carry one name", None));
     }
 
     // The collision check runs over the FROZEN union, not over this call's
@@ -1355,6 +1386,18 @@ fn shape_rows(
     Ok(serde_json::Value::Array(shaped))
 }
 
+/// The column a TYPE refusal is about, and the two spellings that disagree.
+///
+/// Named fields rather than a tuple because `declared` and `returned` are both
+/// `&str` and both type names: positionally they are indistinguishable, so a
+/// call site that swapped them would compile, log plausibly, and tell the
+/// operator to fix the wrong end.
+struct TypeMismatch<'a> {
+    column: &'a str,
+    declared: &'a str,
+    returned: &'a str,
+}
+
 /// One log line for every way the frozen contract and the live columns can
 /// disagree, so an operator sees both lists and the clause that refused.
 ///
@@ -1362,10 +1405,34 @@ fn shape_rows(
 /// operator's FIX: drift means re-publish (the definition and the table have
 /// moved apart), a collision means change `naming` or alias the column. That is
 /// why they stay two variants and two log lines rather than one.
-fn drift(snap: &EndpointSnapshot, out: &egret_core::TabularResult, why: &str) -> ServingError {
+///
+/// # Why the type refusals carry three more fields
+///
+/// For every other clause the two name lists ARE the diagnosis: one list has a
+/// name the other does not, or has it twice, or is empty. For a type refusal the
+/// two lists are IDENTICAL, so an operator reading this line learns which clause
+/// fired and nothing about which column or which types — and on the `arrays`
+/// path there are no names in the response body either, which makes this line
+/// the only instrument there is. `mismatch` is `None` for the clauses the lists
+/// already explain, and the fields log empty there rather than absent, so one
+/// log site serves every refusal and the two cannot drift apart.
+fn drift(
+    snap: &EndpointSnapshot,
+    out: &egret_core::TabularResult,
+    why: &str,
+    mismatch: Option<TypeMismatch<'_>>,
+) -> ServingError {
+    let m = mismatch.unwrap_or(TypeMismatch {
+        column: "",
+        declared: "",
+        returned: "",
+    });
     tracing::warn!(
         frozen = ?snap.columns.iter().map(|c| &c.name).collect::<Vec<_>>(),
         live = ?out.columns.iter().map(|c| &c.name).collect::<Vec<_>>(),
+        column = %m.column,
+        declared = %m.declared,
+        returned = %m.returned,
         why,
         "published output contract no longer matches the engine's columns"
     );
@@ -1599,6 +1666,41 @@ mod tests {
             "one key for the one column this branch returned"
         );
         assert!(!obj.contains_key("name"));
+    }
+
+    /// **The plan's headline case, asserted positively.**
+    /// `SELECT {% if x %}a{% else %}b{% endif %}` unions to two columns that are
+    /// BOTH optional, since neither is in every branch — and either branch must
+    /// serve. Every other all-optional fixture in this module expects an error,
+    /// which is a gap with teeth:
+    /// [`a_branch_that_omits_an_optional_column_is_served`] does not cover this,
+    /// because its `id` is `required: true`, and the mutation that refuses every
+    /// call on an all-optional union was caught only INCIDENTALLY, by a test
+    /// asserting `OutputNamingCollision`. Give that fixture a required column and
+    /// the mutant survives. This test is the one that cannot be dodged that way.
+    ///
+    /// Both branches are asserted, not one: a rule that serves `a` and refuses
+    /// `b` is a rule about the first frozen column, not about optionality.
+    #[test]
+    fn an_all_optional_union_serves_either_branch() {
+        let snap = snapshot_with_columns(vec![
+            spec("a", "integer", false),
+            spec("b", "integer", false),
+        ]);
+
+        let first = result(vec![live("a", "integer")], vec![vec![serde_json::json!(1)]]);
+        assert_eq!(
+            shape_rows(&first, &snap).expect("the `if` branch must serve"),
+            serde_json::json!([{"a": 1}]),
+            "exactly the key this branch returned, and no null for the other"
+        );
+
+        let second = result(vec![live("b", "integer")], vec![vec![serde_json::json!(2)]]);
+        assert_eq!(
+            shape_rows(&second, &snap).expect("the `else` branch must serve"),
+            serde_json::json!([{"b": 2}]),
+            "the other branch of the same union serves too"
+        );
     }
 
     /// The other half of the same rule, and the one that catches a MIS-BINDING
