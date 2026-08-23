@@ -461,7 +461,17 @@ test suite, and layout in particular cannot be settled by reading the code (§10
 
 `U → E → Z2 → Z1 → M → C → D → Z3`.
 
-- **Z1 — IP allow/deny lists and public (unauthenticated) endpoints.** One package, not
+- **Z1 — IP allow/deny lists and public (unauthenticated) endpoints. DEFERRED 2026-08-23**,
+  after reading the edge story rather than the feature list. `egret_core::ratelimit::client_ip`
+  reads hop one of `X-Forwarded-For`, and its own doc says the value is sound **only where the
+  edge overwrites rather than appends** — a posture egret cannot verify from inside, because an
+  appended header is indistinguishable from a genuine proxy chain. That caveat is survivable for
+  a rate limiter (a defeated one costs throughput) and not for an allow-list standing in front of
+  an endpoint with no authentication (a defeated one costs the data). The repo has already
+  measured that spoof once, through its own frontend pod. So the two halves separate after all,
+  and the safe half — an IP list layered *behind* OAuth2 and Cedar on authenticated endpoints —
+  is the one worth building first. The original reasoning, kept because it was right about the
+  danger and wrong about the remedy: one package, not
   two: an IP allow-list is the compensating control for a public endpoint, and shipping
   them apart means shipping a bare public endpoint first. A public endpoint breaks three
   assumptions of the serving path — the rate-limit key stops being a client key and
