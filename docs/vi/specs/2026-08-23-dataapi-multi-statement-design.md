@@ -157,7 +157,28 @@ trong*, và có thêm phép so kiểu:
 - mọi tên trả về phải **nằm trong** `snap.columns` — nếu không, `503 schema_drift`;
 - mọi cột `required` phải **có mặt** — nếu không, `503 schema_drift`;
 - kiểu của cột trả về phải **bằng** kiểu đã khai — nếu không, `503 schema_drift`;
-- khoá của response lấy từ những cột lần chạy này **thực sự trả về**, không phải toàn bộ tập khai.
+- response `objects` mang một khoá cho mỗi cột lần chạy này **thực sự trả về**; cột khai
+  `required: false` mà không được trả về thì đơn giản là **vắng mặt** khỏi object.
+
+`ServingMeta.columns` giữ nguyên ý nghĩa và nguyên comment hiện tại — hợp đồng đã đóng
+băng, không phải hình dạng của lần chạy này. Nay nó là *hợp*, nên nó vẫn là mô tả đúng và
+đầy đủ về những gì endpoint có thể trả về, còn danh sách `required` trong OpenAPI mới là
+thứ nói cho người dùng biết khoá nào chắc chắn có. Không có gì về `meta.columns` thay đổi.
+
+### 3.3.1 `output.shape: "arrays"` thì không được rẽ nhánh
+
+`shape_rows` so danh sách cột sống và cột đóng băng **theo vị trí**, vì shape `arrays` là
+theo vị trí, và `data_schema` ghi thứ tự cột bằng lời văn cũng vì lẽ đó — OpenAPI 3.0 không
+có kiểu tuple.
+
+Một tuple theo vị trí mà số phần tử đổi theo tham số thì không phải hợp đồng: `[[1]]` dưới
+một tập khai `[id, name, email]` thì không ai đọc được. Nên **một endpoint có
+`output.shape` là `arrays` mà các permutation của nó không cùng describe ra một tập cột,
+cùng một thứ tự, thì bị từ chối publish.** Tác giả muốn projection rẽ nhánh thì dùng
+`objects`, nơi một khoá hoặc có hoặc không, không bao giờ nhập nhằng.
+
+Việc này giữ nguyên si đường đi theo vị trí như hôm nay, và giam mọi thay đổi của gói này
+vào đường `objects`.
 
 Ngân sách 64 probe là một cái trần, không phải bằng chứng vét cạn: một template có thể rẽ
 theo nhiều tổ hợp hơn 64. Vì vậy phép kiểm lúc serving là lưới đỡ cho mọi thứ publish không

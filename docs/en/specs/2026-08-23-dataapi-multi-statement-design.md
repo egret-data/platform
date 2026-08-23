@@ -162,7 +162,29 @@ containment, and gains the type check:
 - every returned name must be **in** `snap.columns` — otherwise `503 schema_drift`;
 - every `required` column must be **present** — otherwise `503 schema_drift`;
 - a returned column's type must **equal** the declared type — otherwise `503 schema_drift`;
-- response keys come from the columns this execution **returned**, not from all declared.
+- an `objects` response carries a key per column this execution **returned**; a column
+  declared `required: false` and not returned is simply **absent** from the object.
+
+`ServingMeta.columns` keeps its present meaning and its present doc comment — the frozen
+contract, not this execution's shape. That is now the *union*, so it stays a true and
+complete description of what the endpoint can return, and the `required` list in the
+OpenAPI is what tells a consumer which of those keys are guaranteed. Nothing about
+`meta.columns` changes.
+
+### 3.3.1 `output.shape: "arrays"` refuses to branch
+
+`shape_rows` compares the live and frozen column lists **positionally**, because the
+`arrays` shape is positional, and `data_schema` documents the column order in prose for
+the same reason — OpenAPI 3.0 has no tuple type.
+
+A positional tuple whose arity varies by parameter is not a contract: `[[1]]` under a
+declared `[id, name, email]` cannot be read by anyone. So **an endpoint whose
+`output.shape` is `arrays` and whose permutations do not all describe the same columns, in
+the same order, refuses to publish.** The author who wants a branching projection uses
+`objects`, where a key is either present or absent and never ambiguous.
+
+This keeps the positional path exactly as it is today, and confines every change in this
+package to the `objects` path.
 
 The 64-probe budget is a cap, not a proof of exhaustiveness: a template can branch on more
 combinations than 64. The serving check is therefore the backstop for everything publish
