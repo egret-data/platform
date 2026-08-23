@@ -18,6 +18,11 @@ use crate::error::AutomationError;
 pub struct RenderGrant {
     pub kind: String,
     pub object_id: Uuid,
+    /// The SCHEDULE's workspace, as of mint time — never the object's own.
+    /// This is what lets a reader on the other side of the request boundary
+    /// call `ChartRepo::get`/`DashboardRepo::get` with the correct scope
+    /// instead of trusting the id alone.
+    pub workspace_id: Uuid,
     pub owner_id: Uuid,
 }
 
@@ -43,6 +48,7 @@ impl RenderTokenRepo {
         &self,
         kind: &str,
         object_id: Uuid,
+        workspace_id: Uuid,
         owner: Uuid,
         ttl: Duration,
     ) -> Result<String, AutomationError> {
@@ -50,12 +56,13 @@ impl RenderTokenRepo {
         let expires_at = chrono::Utc::now()
             + chrono::Duration::from_std(ttl).unwrap_or(chrono::Duration::seconds(60));
         sqlx::query(
-            "INSERT INTO automation.render_tokens (token_hash, kind, object_id, owner_id, expires_at) \
-             VALUES ($1,$2,$3,$4,$5)",
+            "INSERT INTO automation.render_tokens (token_hash, kind, object_id, workspace_id, owner_id, expires_at) \
+             VALUES ($1,$2,$3,$4,$5,$6)",
         )
         .bind(hash(&token))
         .bind(kind)
         .bind(object_id)
+        .bind(workspace_id)
         .bind(owner)
         .bind(expires_at)
         .execute(&self.db.pool)
@@ -74,8 +81,8 @@ impl RenderTokenRepo {
     /// token, which is where the envelope in this module's doc comment
     /// actually bites.
     pub async fn peek(&self, token: &str) -> Result<RenderGrant, AutomationError> {
-        let row: Option<(String, Uuid, Uuid)> = sqlx::query_as(
-            "SELECT kind, object_id, owner_id FROM automation.render_tokens \
+        let row: Option<(String, Uuid, Uuid, Uuid)> = sqlx::query_as(
+            "SELECT kind, object_id, workspace_id, owner_id FROM automation.render_tokens \
              WHERE token_hash = $1 AND expires_at > now()",
         )
         .bind(hash(token))
@@ -83,9 +90,10 @@ impl RenderTokenRepo {
         .await
         .map_err(AutomationError::from_db)?;
 
-        row.map(|(kind, object_id, owner_id)| RenderGrant {
+        row.map(|(kind, object_id, workspace_id, owner_id)| RenderGrant {
             kind,
             object_id,
+            workspace_id,
             owner_id,
         })
         .ok_or_else(|| AutomationError::NotFound("render token".into()))
@@ -95,19 +103,20 @@ impl RenderTokenRepo {
     /// two concurrent redemptions cannot both succeed — a `used_at` flag would
     /// leave exactly that race open.
     pub async fn redeem(&self, token: &str) -> Result<RenderGrant, AutomationError> {
-        let row: Option<(String, Uuid, Uuid)> = sqlx::query_as(
+        let row: Option<(String, Uuid, Uuid, Uuid)> = sqlx::query_as(
             "DELETE FROM automation.render_tokens \
              WHERE token_hash = $1 AND expires_at > now() \
-             RETURNING kind, object_id, owner_id",
+             RETURNING kind, object_id, workspace_id, owner_id",
         )
         .bind(hash(token))
         .fetch_optional(&self.db.pool)
         .await
         .map_err(AutomationError::from_db)?;
 
-        row.map(|(kind, object_id, owner_id)| RenderGrant {
+        row.map(|(kind, object_id, workspace_id, owner_id)| RenderGrant {
             kind,
             object_id,
+            workspace_id,
             owner_id,
         })
         .ok_or_else(|| AutomationError::NotFound("render token".into()))

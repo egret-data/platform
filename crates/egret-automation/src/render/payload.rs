@@ -120,7 +120,7 @@ async fn build_chart(
 ) -> Result<RenderPayload, AutomationError> {
     let chart = st
         .charts
-        .get(grant.object_id)
+        .get(grant.object_id, grant.workspace_id)
         .await
         .map_err(bi_err)?
         .ok_or_else(|| AutomationError::NotFound("chart".into()))?;
@@ -140,7 +140,7 @@ async fn build_dashboard(
 ) -> Result<RenderPayload, AutomationError> {
     let dash = st
         .dashboards
-        .get(grant.object_id)
+        .get(grant.object_id, grant.workspace_id)
         .await
         .map_err(bi_err)?
         .ok_or_else(|| AutomationError::NotFound("dashboard".into()))?;
@@ -155,7 +155,7 @@ async fn build_dashboard(
         };
         let chart = st
             .charts
-            .get(chart_id)
+            .get(chart_id, grant.workspace_id)
             .await
             .map_err(bi_err)?
             .ok_or_else(|| AutomationError::NotFound("chart".into()))?;
@@ -211,7 +211,7 @@ pub async fn run_cards(
         }
         let chart = st
             .charts
-            .get(req.chart_id)
+            .get(req.chart_id, grant.workspace_id)
             .await
             .map_err(bi_err)?
             .ok_or_else(|| AutomationError::NotFound("chart".into()))?;
@@ -226,14 +226,38 @@ async fn allowed_charts(
 ) -> Result<std::collections::HashSet<Uuid>, AutomationError> {
     match grant.kind.as_str() {
         "chart" => Ok(std::iter::once(grant.object_id).collect()),
-        "dashboard" => Ok(st
-            .dashboards
-            .cards(grant.object_id)
-            .await
-            .map_err(bi_err)?
-            .iter()
-            .filter_map(|c| c.chart_id)
-            .collect()),
+        "dashboard" => {
+            // Scoped explicitly, even though every id this returns is about
+            // to be re-checked by `charts.get(id, grant.workspace_id)` in
+            // `run_cards` — so a foreign dashboard already 404s here today
+            // via that second check. This first check is what keeps that
+            // true if `run_cards` is ever refactored to trust `allowed`
+            // without re-fetching: without it, `dashboards.cards(object_id)`
+            // reads by id alone and would enumerate a foreign dashboard's
+            // cards with no workspace predicate at all.
+            //
+            // The redundancy cuts both ways — do not "clean up" EITHER
+            // fetch as the duplicate of the other. This one is what defends
+            // `run_cards`' per-chart `get` from ever being simplified away;
+            // that one is what defends THIS fetch from the same fate. Removing
+            // either leaves the hole this comment describes with no compiler
+            // error and no test failure, because today each backstops the
+            // other on every path this crate can currently drive.
+            let dash = st
+                .dashboards
+                .get(grant.object_id, grant.workspace_id)
+                .await
+                .map_err(bi_err)?
+                .ok_or_else(|| AutomationError::NotFound("dashboard".into()))?;
+            Ok(st
+                .dashboards
+                .cards(dash.id)
+                .await
+                .map_err(bi_err)?
+                .iter()
+                .filter_map(|c| c.chart_id)
+                .collect())
+        }
         other => Err(AutomationError::Internal(format!(
             "render token names an unknown object kind: {other}"
         ))),
@@ -266,10 +290,17 @@ async fn run_card(
         }
     }
 
+    // The GRANT's own workspace, not the chart's — see `runner.rs`'s
+    // `build_chart_report` for why the two must never be conflated: they are
+    // the same value by construction once `build`/`allowed_charts` above have
+    // already re-fetched the chart scoped to `grant.workspace_id`, but a
+    // chart-sourced value here would leave `compile_chart_sql`'s own
+    // `ds.workspace_id != workspace_id` guard comparing a value against
+    // itself, permanently dead.
     let (sql, database_id) = egret_bi::compile_chart_sql(
         &st.datasets,
         &st.databases,
-        chart.workspace_id,
+        grant.workspace_id,
         chart.dataset_id,
         &spec,
     )
@@ -278,6 +309,7 @@ async fn run_card(
 
     let identity = crate::evaluator::owner_identity(
         grant.owner_id,
+        grant.workspace_id,
         database_id,
         &st.databases,
         &st.users,

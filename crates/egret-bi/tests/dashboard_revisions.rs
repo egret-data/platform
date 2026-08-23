@@ -64,7 +64,7 @@ async fn snapshot_current_is_a_put_body_with_tab_indices_not_tab_ids() {
     .await
     .unwrap();
 
-    let snap = repo.snapshot_current(d.id).await.unwrap().unwrap();
+    let snap = repo.snapshot_current(d.id, ws).await.unwrap().unwrap();
     assert_eq!(snap["name"], "Snap");
     assert_eq!(snap["description"], "desc");
     // "fixed", not "full": W3's migration 0105 changed the column default to Metabase's fixed
@@ -193,7 +193,7 @@ async fn a_baseline_captures_the_state_the_first_edit_overwrites() {
         .await
         .unwrap();
 
-    let before = repo.snapshot_current(d.id).await.unwrap().unwrap();
+    let before = repo.snapshot_current(d.id, ws).await.unwrap().unwrap();
     repo.update(
         d.id,
         "Base",
@@ -219,7 +219,7 @@ async fn a_baseline_captures_the_state_the_first_edit_overwrites() {
     assert_eq!(revs[0].snapshot["cards"].as_array().unwrap().len(), 2);
     // And the live dashboard has genuinely moved on, so the assertions above are about the
     // snapshot rather than about a dashboard that never changed.
-    let now = repo.snapshot_current(d.id).await.unwrap().unwrap();
+    let now = repo.snapshot_current(d.id, ws).await.unwrap().unwrap();
     assert_eq!(now["description"], "after");
     assert_eq!(now["width"], "full");
     assert_eq!(now["cards"].as_array().unwrap().len(), 1);

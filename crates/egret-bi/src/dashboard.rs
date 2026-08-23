@@ -174,10 +174,12 @@ impl DashboardRepo {
             .map_err(map_conflict_err)
     }
 
-    pub async fn get(&self, id: Uuid) -> Result<Option<Dashboard>, BiError> {
-        let sql = format!("SELECT {COLS} FROM analytics.dashboards WHERE id = $1");
+    pub async fn get(&self, id: Uuid, workspace_id: Uuid) -> Result<Option<Dashboard>, BiError> {
+        let sql =
+            format!("SELECT {COLS} FROM analytics.dashboards WHERE id = $1 AND workspace_id = $2");
         Ok(sqlx::query_as::<_, Dashboard>(sqlx::AssertSqlSafe(sql))
             .bind(id)
+            .bind(workspace_id)
             .fetch_optional(&self.db.pool)
             .await?)
     }
@@ -599,9 +601,10 @@ impl DashboardRepo {
     pub async fn duplicate(
         &self,
         src_id: Uuid,
+        workspace_id: Uuid,
         new_owner: Option<Uuid>,
     ) -> Result<Option<Dashboard>, BiError> {
-        let Some(src) = self.get(src_id).await? else {
+        let Some(src) = self.get(src_id, workspace_id).await? else {
             return Ok(None);
         };
         let src_tabs = self.tabs(src_id).await?;
@@ -669,8 +672,12 @@ impl DashboardRepo {
     /// Migration 0107's comment still describes the id-free design. It is left alone deliberately:
     /// editing an applied migration changes its checksum and sqlx then refuses to run. Read it as
     /// history — this doc comment is the current contract.
-    pub async fn snapshot_current(&self, id: Uuid) -> Result<Option<serde_json::Value>, BiError> {
-        let Some(d) = self.get(id).await? else {
+    pub async fn snapshot_current(
+        &self,
+        id: Uuid,
+        workspace_id: Uuid,
+    ) -> Result<Option<serde_json::Value>, BiError> {
+        let Some(d) = self.get(id, workspace_id).await? else {
             return Ok(None);
         };
         let tabs = self.tabs(id).await?;

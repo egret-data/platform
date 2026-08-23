@@ -47,7 +47,14 @@ impl Renderer for FakeRenderer {
 
 /// A query engine that returns one fixed row — for the CSV-report fixture,
 /// which must never reach `FakeRenderer` at all.
-struct FakeEngine;
+///
+/// Also counts every call it receives, in a counter the FIXTURE owns (not the
+/// engine) — so a test can assert the engine was never even asked to run,
+/// which is the direct proof that a foreign chart's data was never fetched
+/// (SEC-3), not merely that the eventual outcome looked like a failure.
+struct FakeEngine {
+    calls: Arc<Mutex<usize>>,
+}
 
 #[async_trait::async_trait]
 impl QueryRunner for FakeEngine {
@@ -58,6 +65,7 @@ impl QueryRunner for FakeEngine {
         _identity: &RunIdentity,
         _limit: Option<usize>,
     ) -> Result<TabularResult, String> {
+        *self.calls.lock().unwrap() += 1;
         Ok(TabularResult {
             columns: vec![ColumnMeta {
                 name: "orderpriority".into(),
@@ -105,8 +113,10 @@ impl Resolver for PublicDns {
 struct Fx {
     runner: AutomationRunner,
     db: Db,
+    ws: Uuid,
     schedule: Uuid,
     renderer: Arc<FakeRenderer>,
+    engine_calls: Arc<Mutex<usize>>,
 }
 
 async fn mk_user(db: &Db, tag: &str) -> Uuid {
@@ -152,6 +162,7 @@ fn runner(
             egret_secrets::SecretStore::new(db.clone(), None),
         ),
         charts,
+        dashboards: DashboardRepo::new(db.clone()),
         datasets,
         render_tokens: RenderTokenRepo::new(db.clone()),
         renderer,
@@ -205,9 +216,12 @@ async fn setup(pool: sqlx::PgPool, outcome: RenderOutcome) -> Fx {
         outcome,
         seen: Mutex::new(vec![]),
     });
+    let engine_calls = Arc::new(Mutex::new(0));
     let r = runner(
         &db,
-        Arc::new(FakeEngine),
+        Arc::new(FakeEngine {
+            calls: engine_calls.clone(),
+        }),
         renderer.clone(),
         ChartRepo::new(db.clone()),
         DatasetRepo::new(db.clone()),
@@ -216,8 +230,10 @@ async fn setup(pool: sqlx::PgPool, outcome: RenderOutcome) -> Fx {
     Fx {
         runner: r,
         db,
+        ws,
         schedule,
         renderer,
+        engine_calls,
     }
 }
 
@@ -319,9 +335,12 @@ async fn setup_csv_chart_report(pool: sqlx::PgPool) -> Fx {
         outcome: RenderOutcome::Fail("csv reports must never call the renderer".into()),
         seen: Mutex::new(vec![]),
     });
+    let engine_calls = Arc::new(Mutex::new(0));
     let r = runner(
         &db,
-        Arc::new(FakeEngine),
+        Arc::new(FakeEngine {
+            calls: engine_calls.clone(),
+        }),
         renderer.clone(),
         charts,
         datasets,
@@ -330,8 +349,10 @@ async fn setup_csv_chart_report(pool: sqlx::PgPool) -> Fx {
     Fx {
         runner: r,
         db,
+        ws,
         schedule,
         renderer,
+        engine_calls,
     }
 }
 
@@ -369,6 +390,98 @@ async fn make_due_again(fx: &Fx) {
 /// Pull the `t=` value out of a print-page URL.
 fn token_of(url: &str) -> String {
     url.split("t=").nth(1).unwrap_or_default().to_string()
+}
+
+// ── SEC-3 fixtures: a chart/dashboard that live in a SEPARATE workspace ────
+//
+// Every case below inserts the foreign row directly by SQL rather than
+// through the routes — SEC-2 already refuses a foreign target at save, so
+// this is deliberately the row that "got in anyway": written before SEC-2
+// shipped, or by anything that bypasses the API.
+
+/// A chart in its OWN new workspace — for pointing a report/alert in a
+/// DIFFERENT workspace at it.
+async fn mk_foreign_chart(db: &Db, tag: &str) -> (Uuid, Uuid) {
+    let owner = mk_user(db, tag).await;
+    let ws: Uuid = sqlx::query_scalar(
+        "INSERT INTO workspaces (slug,name,created_by) VALUES ($1,'t',$2) RETURNING id",
+    )
+    .bind(format!("w-{}", Uuid::new_v4().simple()))
+    .bind(owner)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    let database: Uuid = sqlx::query_scalar(
+        "INSERT INTO query.databases (name, engine, host, port, workspace_id, delegated) \
+         VALUES ($1,'trino','localhost',8090,$2,false) RETURNING id",
+    )
+    .bind(format!("db-{}", Uuid::new_v4().simple()))
+    .bind(ws)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    let datasets = DatasetRepo::new(db.clone());
+    let dataset = datasets
+        .create(
+            ws,
+            database,
+            "secret",
+            "",
+            &SourceSpec::Physical {
+                catalog: Some("tpch".into()),
+                schema: "tiny".into(),
+                table: "orders".into(),
+            },
+            &[NewColumn {
+                column_name: "orderpriority".into(),
+                data_type: "varchar".into(),
+                type_generic: "string".into(),
+                is_temporal: false,
+            }],
+            Some(egret_core::UserId(owner)),
+        )
+        .await
+        .unwrap();
+    let charts = ChartRepo::new(db.clone());
+    let chart_spec = serde_json::json!({
+        "spec": {
+            "metrics": [], "dimensions": [], "columns": ["orderpriority"],
+            "filters": [], "orderby": [], "row_limit": 5,
+            "rollup_groups": [], "temporal_units": {},
+        }
+    });
+    let chart = charts
+        .create(
+            ws,
+            dataset.id,
+            "foreign chart",
+            "",
+            "table",
+            &chart_spec,
+            Some(owner),
+        )
+        .await
+        .unwrap();
+    (ws, chart.id)
+}
+
+/// A dashboard in its OWN new workspace.
+async fn mk_foreign_dashboard(db: &Db, tag: &str) -> (Uuid, Uuid) {
+    let owner = mk_user(db, tag).await;
+    let ws: Uuid = sqlx::query_scalar(
+        "INSERT INTO workspaces (slug,name,created_by) VALUES ($1,'t',$2) RETURNING id",
+    )
+    .bind(format!("w-{}", Uuid::new_v4().simple()))
+    .bind(owner)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    let dashboards = DashboardRepo::new(db.clone());
+    let dashboard = dashboards
+        .create(ws, "foreign dashboard", "", Some(owner))
+        .await
+        .unwrap();
+    (ws, dashboard.id)
 }
 
 // ── tests ────────────────────────────────────────────────────────────────
@@ -425,4 +538,134 @@ async fn a_csv_report_never_calls_the_renderer(pool: sqlx::PgPool) {
     fx.runner.tick_once().await;
     assert_eq!(run_log(&fx).await[0].0, "success");
     assert!(fx.renderer.seen.lock().unwrap().is_empty());
+}
+
+// ── SEC-3: a pre-existing foreign target fails closed at run time ──────────
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_csv_report_with_a_directly_inserted_foreign_chart_id_fails_closed(pool: sqlx::PgPool) {
+    // Mirrors the probe's Q1/Q2/Q3: a report in one workspace naming a chart
+    // in another. SEC-2 refuses this at save now, so this is the row that
+    // "got in anyway" — set directly by SQL, bypassing every route.
+    let fx = setup_csv_chart_report(pool).await;
+    let (foreign_ws, foreign_chart) = mk_foreign_chart(&fx.db, "csv_foreign").await;
+    assert_ne!(
+        foreign_ws, fx.ws,
+        "the chart must live in a DIFFERENT workspace"
+    );
+    sqlx::query("UPDATE automation.schedules SET chart_id = $2 WHERE id = $1")
+        .bind(fx.schedule)
+        .bind(foreign_chart)
+        .execute(&fx.db.pool)
+        .await
+        .unwrap();
+
+    assert_eq!(fx.runner.tick_once().await, 1);
+    let log = run_log(&fx).await;
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0].0, "error", "the run must be recorded as an error");
+    assert!(
+        log[0]
+            .1
+            .as_deref()
+            .unwrap_or_default()
+            .contains("no longer exists"),
+        "{:?}",
+        log[0].1
+    );
+    // The direct proof that nothing was delivered: the engine that would
+    // have run the foreign chart's compiled SQL was never even asked to.
+    // Asserting only the run STATE would still pass if `build_chart_report`
+    // fetched, compiled and executed the foreign chart and only failed
+    // afterwards (e.g. on delivery) — this rules that out.
+    assert_eq!(
+        *fx.engine_calls.lock().unwrap(),
+        0,
+        "the foreign chart's SQL must never reach the query engine"
+    );
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_png_report_with_a_directly_inserted_foreign_schedule_targets_row_fails_closed(
+    pool: sqlx::PgPool,
+) {
+    // Mirrors the probe's Round-2 Surface 1: `render_image_report` reads
+    // `targets_for` FIRST and `report_target` (the chart_id/dashboard_id
+    // columns) only as a fallback — so this is the entry point a fix scoped
+    // to those two columns would miss entirely. The schedule's own
+    // `dashboard_id` (set by `setup`) is legitimate and in-workspace; the
+    // `schedule_targets` row inserted here is what the runner actually reads.
+    let fx = setup(pool, RenderOutcome::Png(vec![0x89, b'P', b'N', b'G'])).await;
+    let (foreign_ws, foreign_dashboard) = mk_foreign_dashboard(&fx.db, "png_foreign").await;
+    assert_ne!(foreign_ws, fx.ws);
+    sqlx::query(
+        "INSERT INTO automation.schedule_targets (schedule_id, kind, object_id, ordinal) \
+         VALUES ($1, 'dashboard', $2, 0)",
+    )
+    .bind(fx.schedule)
+    .bind(foreign_dashboard)
+    .execute(&fx.db.pool)
+    .await
+    .unwrap();
+
+    assert_eq!(fx.runner.tick_once().await, 1);
+    let log = run_log(&fx).await;
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0].0, "error", "the run must be recorded as an error");
+    assert!(
+        log[0]
+            .1
+            .as_deref()
+            .unwrap_or_default()
+            .contains("no longer exists"),
+        "{:?}",
+        log[0].1
+    );
+    // The direct proof: no token was minted and the renderer was never asked
+    // to fetch the foreign dashboard's print page. A test that only checked
+    // the run state would still pass if the renderer HAD been called and
+    // merely returned an error screenshot — this rules that out, and it is
+    // exactly the gap the probe's Surface 2 exploited (the render/payload
+    // boundary 404s, but nothing upstream of it used to notice).
+    assert!(
+        fx.renderer.seen.lock().unwrap().is_empty(),
+        "the renderer must never be asked to fetch a foreign object's print page"
+    );
+    // Fix round 1's item 2: the comment above claims no token was minted —
+    // prove it against the table, not just the (also correct) renderer seam.
+    let tokens: i64 = sqlx::query_scalar("SELECT count(*) FROM automation.render_tokens")
+        .fetch_one(&fx.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(tokens, 0, "no render token may exist for a foreign object");
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_png_report_with_a_same_workspace_schedule_targets_row_still_renders(pool: sqlx::PgPool) {
+    // The negative control (design §5): the new per-target validation loop
+    // must not break the legitimate multi-target case it sits in front of.
+    let fx = setup(pool, RenderOutcome::Png(vec![0x89, b'P', b'N', b'G'])).await;
+    let dashboards = DashboardRepo::new(fx.db.clone());
+    let own_dashboard = dashboards
+        .create(fx.ws, "second in-workspace dashboard", "", None)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO automation.schedule_targets (schedule_id, kind, object_id, ordinal) \
+         VALUES ($1, 'dashboard', $2, 0)",
+    )
+    .bind(fx.schedule)
+    .bind(own_dashboard.id)
+    .execute(&fx.db.pool)
+    .await
+    .unwrap();
+
+    assert_eq!(fx.runner.tick_once().await, 1);
+    let log = run_log(&fx).await;
+    assert_eq!(log[0].0, "success", "{:?}", log[0].1);
+    assert_eq!(
+        fx.renderer.seen.lock().unwrap().len(),
+        1,
+        "a same-workspace target still renders"
+    );
 }

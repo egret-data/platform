@@ -73,6 +73,13 @@ pub struct AutomationState {
     pub charts: egret_bi::ChartRepo,
     pub dashboards: egret_bi::DashboardRepo,
     pub datasets: egret_bi::DatasetRepo,
+    /// `analytics.folders` is shared across chart/dashboard/dataset/alert
+    /// folders (`entity_type`), keyed on nothing but its own id — used here
+    /// only by `set_folder`, to check a `folder_id` the body supplies belongs
+    /// to THIS workspace (and is an 'alert' folder) before it is stored, the
+    /// same guard `egret-bi`'s own `require_folder` applies to chart/
+    /// dashboard/dataset folders.
+    pub folders: egret_bi::folder::FolderRepo,
     pub databases: egret_query::DatabaseRepo,
     pub users: egret_auth::users::UserRepo,
     pub engine_minter: std::sync::Arc<dyn egret_analytics_api::engine_token::EngineTokenMinter>,
@@ -274,6 +281,146 @@ async fn list(
     ))
 }
 
+/// Refuse a `chart_id`, `dashboard_id`, `schedule_targets` entry, or
+/// `database_id` that does not belong to `ws` — the write-side half of the
+/// report-target scoping fix. Task 1 made the READ safe
+/// (`ChartRepo::get`/`DashboardRepo::get` now require a workspace and return
+/// `None` for a foreign object); this stops the row from ever being written in
+/// the first place, so the normal experience is a 400 at save rather than a
+/// schedule that silently starts failing at run time the next time it ticks.
+///
+/// `schedule_targets.object_id` has no foreign key — `kind` is polymorphic,
+/// so the column cannot point at two tables at once — which is exactly why it
+/// needs its own check here rather than relying on the database to reject it.
+///
+/// `database_id` is the sibling of `chart_id`/`dashboard_id`: `to_new` already
+/// restricts it to alert schedules, so a report body naturally has none to
+/// check here. Unlike the chart/dashboard columns, `query.databases` carries
+/// no cross-tenant guard of its own below this — `open_secret` resolves the
+/// credential from whatever `workspace_id` the row itself names — so this is
+/// the ONLY place stopping a workspace-1 alert from storing workspace-2's
+/// connection id (and, at run time, opening workspace-2's vaulted secret).
+///
+/// `owners` is deliberately NOT checked here — see [`validate_owners_in_workspace`],
+/// which runs against the body's own list rather than `new.owners` (which by
+/// this point may already be a server-chosen fallback, not anything the
+/// caller named).
+///
+/// A foreign object and a nonexistent one are deliberately answered the SAME
+/// way throughout: `ChartRepo::get`/`DashboardRepo::get`/`get_in_workspace`
+/// already collapse "exists in another workspace" and "does not exist at all"
+/// into one `None`/`NotFound`, and this function just returns that verdict
+/// rather than distinguishing the two cases — a distinguishable refusal would
+/// let a caller use this endpoint to probe whether an id exists in a
+/// workspace it cannot see, the same existence-oracle concern the rest of
+/// this codebase already avoids for cross-tenant ids.
+async fn validate_targets_in_workspace(
+    st: &AutomationState,
+    ws: Uuid,
+    new: &crate::repo::NewSchedule,
+) -> Result<(), AutomationApiError> {
+    let bi_err =
+        |e: egret_bi::BiError| AutomationApiError::from(AutomationError::Internal(e.to_string()));
+    let bad = |field: &str| {
+        AutomationApiError::from(AutomationError::BadRequest(format!(
+            "{field}: no such object in this workspace"
+        )))
+    };
+
+    if let Some(id) = new.chart_id {
+        if st.charts.get(id, ws).await.map_err(bi_err)?.is_none() {
+            return Err(bad("chart_id"));
+        }
+    }
+    if let Some(id) = new.dashboard_id {
+        if st.dashboards.get(id, ws).await.map_err(bi_err)?.is_none() {
+            return Err(bad("dashboard_id"));
+        }
+    }
+    for (kind, object_id) in &new.targets {
+        let found = match kind.as_str() {
+            "chart" => st
+                .charts
+                .get(*object_id, ws)
+                .await
+                .map_err(bi_err)?
+                .is_some(),
+            "dashboard" => st
+                .dashboards
+                .get(*object_id, ws)
+                .await
+                .map_err(bi_err)?
+                .is_some(),
+            // Not one of the two kinds `schedule_target_kind_valid` allows.
+            // Fail the same way here rather than letting an unrecognised kind
+            // reach the database only to trip that CHECK as a 500.
+            _ => false,
+        };
+        if !found {
+            return Err(bad("targets"));
+        }
+    }
+    if let Some(id) = new.database_id {
+        match st.databases.get_in_workspace(ws, id).await {
+            Ok(_) => {}
+            Err(egret_query::DatabaseError::NotFound(_)) => return Err(bad("database_id")),
+            Err(e) => {
+                return Err(AutomationApiError::from(AutomationError::Internal(
+                    e.to_string(),
+                )))
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Refuse an owner the caller NAMED who is not a member of `ws`.
+///
+/// Takes the body's own `owners: &[Uuid]` — never `NewSchedule::owners` —
+/// because by the time a `NewSchedule` exists, that field may already be a
+/// server-chosen fallback rather than anything the caller wrote:
+///
+/// - On `create`, an empty body falls back to the creator (`to_new`'s
+///   `creator` parameter). Checking THAT id would mean a `platform_admin`
+///   creating a schedule in a workspace they belong to only via the
+///   platform-admin `WsContext` bypass (`egret-workspace/src/context.rs:108-113`
+///   — no `access_grants` row) gets refused for failing to be a member of a
+///   workspace they were just admitted to. A fallback the server chose for
+///   itself is not a naming, so it must never be checked.
+/// - On `update`, an empty body means "keep the existing owners" — `update`
+///   (below) replaces `new.owners` with the STORED owners afterwards. Running
+///   this check on `new.owners` at that point would validate the fallback
+///   (the creator, again) instead of what actually gets written, AND would
+///   spuriously refuse an update that touches nothing about `owners` on a
+///   schedule whose creator has since left the workspace or had their grant
+///   expire.
+///
+/// So this runs BEFORE either fallback substitution, directly over the slice
+/// the request body carried, and is a no-op when that slice is empty — the
+/// caller named nobody, so there is nothing to check. `Authorizer::workspace_roles_for`
+/// is the same direct-or-group role lookup `WsContext` itself is built from;
+/// an empty result means "not a member", whether the id names a real user
+/// elsewhere or nothing at all, so there is no existence oracle here either.
+async fn validate_owners_in_workspace(
+    st: &AutomationState,
+    ws: Uuid,
+    owners: &[Uuid],
+) -> Result<(), AutomationApiError> {
+    for owner in owners {
+        let roles = st
+            .authz
+            .workspace_roles_for(egret_core::UserId(*owner), egret_core::WorkspaceId(ws))
+            .await
+            .map_err(|e| AutomationApiError::from(AutomationError::Internal(e.to_string())))?;
+        if roles.is_empty() {
+            return Err(AutomationApiError::from(AutomationError::BadRequest(
+                "owners: not a member of this workspace".into(),
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[utoipa::path(
     post, path = "/api/ws/{workspace}/alerts", tag = "alerts", params(WorkspacePath),
     request_body = CreateSchedule,
@@ -294,6 +441,11 @@ async fn create(
 
     let new = crate::model::to_new(&WriteBody::from(&body), Some(ctx.principal.user_id.0))
         .map_err(AutomationApiError::from)?;
+    validate_targets_in_workspace(&st, ctx.workspace_id.0, &new).await?;
+    // Against the body's OWN `owners`, not `new.owners` — an empty body falls
+    // back to the creator inside `to_new`, and that fallback must never be
+    // checked (see `validate_owners_in_workspace`'s doc comment).
+    validate_owners_in_workspace(&st, ctx.workspace_id.0, &body.owners).await?;
     let made = st
         .schedules
         .create(ctx.workspace_id.0, &new, Some(ctx.principal.user_id))
@@ -373,6 +525,17 @@ async fn update(
         stored.created_by.or(Some(ctx.principal.user_id.0)),
     )
     .map_err(AutomationApiError::from)?;
+    validate_targets_in_workspace(&st, ctx.workspace_id.0, &new).await?;
+    // Against the body's OWN `owners`, BEFORE the "empty means keep the
+    // existing ones" substitution below — an empty body here means `new.owners`
+    // is currently `stored.created_by` (another fallback, not a naming), and
+    // is about to be overwritten with the STORED owners regardless. Checking
+    // it now would validate a value that never gets written, AND would 400 an
+    // update that touches nothing about `owners` on a schedule whose creator
+    // has since left the workspace (see `validate_owners_in_workspace`'s doc
+    // comment). The stored owners it falls back to were already validated
+    // when they were written.
+    validate_owners_in_workspace(&st, ctx.workspace_id.0, &body.owners).await?;
     if body.owners.is_empty() {
         let existing = st
             .schedules
@@ -638,6 +801,33 @@ async fn set_folder(
     egret_core::authz::require(&*st.pdp, &ctx, MANAGE)
         .await
         .map_err(AutomationApiError::from)?;
+    // The schedule itself is scoped by `set_folder`'s own `WHERE id=$1 AND
+    // workspace_id=$2`, but `folder_id` was going straight into the `SET`
+    // clause unchecked: a foreign folder stored with a 200, and a nonexistent
+    // one tripped `folders_id_fkey` as a 500 — two different status CLASSES,
+    // which made this an existence oracle over every `analytics.folders` row
+    // in the installation (charts, dashboards and datasets included), one
+    // call per guess, open to any `ws_editor`. Both wrongs are refused HERE,
+    // identically, before the write: `st.folders.meta` collapses "belongs to
+    // another workspace", "belongs to a different entity_type", and "does not
+    // exist" into the same `_ =>` arm, so a foreign and a nonexistent id are
+    // no longer distinguishable at all — matching `validate_targets_in_workspace`'s
+    // rule for chart/dashboard/database ids above.
+    if let Some(folder_id) = body.folder_id {
+        let meta = st
+            .folders
+            .meta(folder_id)
+            .await
+            .map_err(|e| AutomationApiError::from(AutomationError::Internal(e.to_string())))?;
+        match meta {
+            Some((w, t)) if w == ctx.workspace_id.0 && t == "alert" => {}
+            _ => {
+                return Err(AutomationApiError::from(AutomationError::BadRequest(
+                    "folder_id: no such object in this workspace".into(),
+                )))
+            }
+        }
+    }
     ack(st
         .schedules
         .set_folder(ctx.workspace_id.0, id, body.folder_id)

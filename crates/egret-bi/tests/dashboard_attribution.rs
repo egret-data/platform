@@ -63,7 +63,7 @@ async fn new_dashboards_stamp_created_at_and_updates_stamp_updated_by() {
     )
     .await
     .unwrap();
-    let after = repo.get(d.id).await.unwrap().unwrap();
+    let after = repo.get(d.id, ws).await.unwrap().unwrap();
     assert_eq!(after.updated_by, Some(nameless));
     assert_eq!(
         after.created_at, d.created_at,

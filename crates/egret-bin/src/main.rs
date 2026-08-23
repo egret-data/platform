@@ -1484,6 +1484,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             secrets.clone(),
         ),
         charts: egret_bi::ChartRepo::new(db.clone()),
+        dashboards: egret_bi::DashboardRepo::new(db.clone()),
         datasets: egret_bi::DatasetRepo::new(db.clone()),
         render_tokens: egret_automation::render::token::RenderTokenRepo::new(db.clone()),
         renderer: std::sync::Arc::new(egret_automation::render::client::HttpRenderer::new(
@@ -1518,6 +1519,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         charts: egret_bi::ChartRepo::new(db.clone()),
         dashboards: egret_bi::DashboardRepo::new(db.clone()),
         datasets: egret_bi::DatasetRepo::new(db.clone()),
+        folders: egret_bi::folder::FolderRepo::new(db.clone()),
         databases: databases.clone(),
         users: UserRepo::new(db.clone()),
         engine_minter: engine_minter.clone(),

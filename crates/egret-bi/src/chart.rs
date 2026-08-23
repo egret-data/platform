@@ -79,10 +79,12 @@ impl ChartRepo {
             .map_err(map_conflict_err)
     }
 
-    pub async fn get(&self, id: Uuid) -> Result<Option<Chart>, BiError> {
-        let sql = format!("SELECT {COLS} FROM analytics.charts WHERE id = $1");
+    pub async fn get(&self, id: Uuid, workspace_id: Uuid) -> Result<Option<Chart>, BiError> {
+        let sql =
+            format!("SELECT {COLS} FROM analytics.charts WHERE id = $1 AND workspace_id = $2");
         Ok(sqlx::query_as::<_, Chart>(sqlx::AssertSqlSafe(sql))
             .bind(id)
+            .bind(workspace_id)
             .fetch_optional(&self.db.pool)
             .await?)
     }
@@ -237,9 +239,10 @@ impl ChartRepo {
     pub async fn duplicate(
         &self,
         src_id: Uuid,
+        workspace_id: Uuid,
         new_owner: Option<Uuid>,
     ) -> Result<Option<Chart>, BiError> {
-        let Some(src) = self.get(src_id).await? else {
+        let Some(src) = self.get(src_id, workspace_id).await? else {
             return Ok(None);
         };
         let existing = self.names_in_workspace(src.workspace_id).await?;
