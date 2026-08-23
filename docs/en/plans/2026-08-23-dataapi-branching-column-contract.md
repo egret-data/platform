@@ -282,7 +282,12 @@ git add -A && git commit -m "fix(dataapi): probe a boolean parameter with both o
 ```rust
 #[test]
 fn a_definition_with_no_branch_renders_to_exactly_one_statement() {
-    let sql = "SELECT id FROM t WHERE r = {{ region }}";
+    // The literals matter. `{{ region }}` emits a bind marker, so every value of
+    // `region` renders to the SAME statement — and `candidates()` harvests a
+    // non-enum, non-boolean parameter's candidates from the definition's own
+    // literals. Without them `probe_assignments` returns a single assignment and
+    // this test passes with the deduplication DELETED, asserting nothing.
+    let sql = "SELECT id FROM t WHERE r = {{ region }} AND a = 'EU' AND b = 'US' AND c = 'APAC'";
     let mut ctx = ParamValues::new();
     ctx.insert("region".into(), Param::Str("EU".into()));
     assert_eq!(
@@ -307,6 +312,10 @@ fn a_branching_definition_renders_to_one_statement_per_branch() {
 `ParamValues::insert` is the module's own constructor used throughout its tests
 (`render.rs:267`); if the surrounding tests use `insert_for_spec` instead, follow them.
 This task depends on Task 2 — without boolean candidates the second test returns 1.
+
+**Measure before you assert.** Confirm `probe_assignments` really returns more than one
+assignment for the first test's definition. If it returns one, the test is vacuous no
+matter what it claims, and you must find a shape that is not.
 
 - [ ] **Step 2: Run and watch it fail**
 
