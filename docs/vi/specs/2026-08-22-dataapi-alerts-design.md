@@ -356,9 +356,21 @@ refactor sau nếu lý do không đi kèm nó.**
   toàn bộ điểm của `call_count`: "endpoint tắt tiếng" *chính là* sự vắng mặt của các dòng, và
   ánh xạ nó thành `noop` sẽ làm metric đó không thể phát hiện được, theo cấu trúc.
 
-Một endpoint đang trong thùng rác hoặc `disabled` cho ra `noop` kèm lý do ghi vào run log —
-**không phải `error`**. Bỏ endpoint vào thùng rác là hành động cố ý; báo lỗi mỗi năm phút vì
-chuyện đó là nhiễu.
+**Chưa làm (§8).** Một endpoint đang trong thùng rác hoặc `disabled` LẼ RA phải cho ra `noop`
+kèm lý do ghi vào run log — không phải `error` — vì bỏ endpoint vào thùng rác là hành động cố
+ý và báo lỗi mỗi năm phút vì chuyện đó là nhiễu. Phần đó đã bị hoãn: doc comment của
+`evaluate_and_deliver_dataapi_alert` (`runner.rs`) giải thích vì sao, và hiện chưa có lý do
+riêng "endpoint đã vào thùng rác" nào trong run log.
+
+Điều thực sự xảy ra thay vào đó, như hệ quả phụ của cách xoá mềm hoạt động chứ không phải do
+thiết kế: các dòng `access_log` của một endpoint bị xoá mềm vẫn tồn tại nhưng ghi
+`endpoint_id = NULL` (tham chiếu FK bị xoá, dòng thì không), nên một watch theo endpoint đơn
+giản là ngừng tích luỹ traffic từ lúc đó. `call_count`/`error_count`/`error_code_count` khi đó
+đọc ra `0` thật — không phải `noop` giả — còn `error_rate`/`p50_duration_ms`/`p95_duration_ms`
+đọc ra `noop` từ tập rỗng kết quả, theo đúng sự bất đối xứng mục này đã mô tả cho một cửa sổ
+rỗng bình thường, chỉ là đi tới đó bằng một con đường khác. Một watch toàn workspace
+(`dataapi_endpoint_id IS NULL`) không bị ảnh hưởng — nó đếm traffic của mọi endpoint, dù có bị
+xoá mềm hay không.
 
 **Một giới hạn được nói rõ.** Alert này đọc một log do egret ghi ra. Nếu egret không chạy thì
 không có dòng nào, cửa sổ rỗng, và alert im lặng. Nó phát hiện endpoint hỏng; nó **không**
@@ -459,6 +471,15 @@ test, và riêng layout thì không thể chốt bằng cách đọc mã (§10).
   đương ở egret hoặc đã có sẵn ở dạng an toàn hơn (§A.2), hoặc đã được khoanh vào engine Starlark.
 - **Chuyển các trang list Explore ngoài bốn trang nêu ở đây**, và loại bỏ `ConfigSection` ở
   Control Plane. Không liên quan việc này.
+- **Đọc trạng thái thùng rác/`disabled` của `dataapi.endpoints` từ runner**, để cách xử lý
+  `noop` kèm lý do mà §5.6 dự định cho một endpoint bị xoá mềm hoặc disabled thực sự có thể
+  xây được. Doc comment của `evaluate_and_deliver_dataapi_alert` (`runner.rs`) giải thích vì
+  sao: trạng thái đó nằm trên một bảng thuộc `egret-dataapi`, và `egret-automation` cố tình
+  không phụ thuộc nó ngoài leaf `egret-dataapi-api` (cùng ranh giới mà re-check
+  `owner_can_read_dataapi_endpoint` của Task 4 đã tôn trọng). Hình dạng tự nhiên của nó đã
+  được phác trong đó: một DTO `EndpointState { trashed: bool, enabled: bool }` cộng một port
+  trait nhỏ, nối dây giống cách `pdp`/`query`/`renderer` đã có. Trong lúc chờ, phương án dự
+  phòng không phải im lặng — xem ghi chú của §5.6 về điều thực sự xảy ra hiện nay.
 
 ---
 

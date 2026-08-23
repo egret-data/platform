@@ -1117,34 +1117,44 @@ impl AutomationRunner {
             .value
             .map(|v| v.to_string())
             .unwrap_or_else(|| "(no value)".into());
-        let body = format!(
-            "The alert \"{}\" fired.\n\nObserved value: {}\n\nThe triggering rows are attached.\n",
-            s.name, value
-        );
-        // The query's own column names. Falls back to positional headers only
-        // if the engine returned none — a header of `column_1` is a last
-        // resort, not the normal case, because an alert email is read by
-        // someone who cannot see the SQL.
-        let columns: Vec<String> = if eval.columns.is_empty() {
-            let width = eval
-                .rows
-                .as_array()
-                .and_then(|r| r.first())
-                .and_then(|r| r.as_array())
-                .map(Vec::len)
-                .unwrap_or(1);
-            (1..=width).map(|i| format!("column_{i}")).collect()
-        } else {
-            eval.columns.clone()
-        };
-        let csv = email::rows_to_csv(&columns, &eval.rows);
+        let body = alert_email_body(&s.r#type, &s.name, &value);
 
-        let mut attachments = vec![email::Attachment {
-            filename: format!("{}.csv", slugify(&s.name)),
-            content_type: "text/csv".into(),
-            bytes: csv.into_bytes(),
-            inline_cid: None,
-        }];
+        // A `dataapi_alert` measures `dataapi.access_log` directly — there is
+        // no query result set (`evaluate_and_deliver_dataapi_alert` always
+        // builds `Evaluation { rows: Value::Null, columns: Vec::new() }`, its
+        // own doc comment). Building a CSV from that would not describe "zero
+        // rows" — the positional fallback below reads the empty `columns` as
+        // "the engine returned none" and fabricates a `column_1` header, so
+        // the mail would claim rows are attached and enclose a 12-byte lie.
+        // The alerts programme already found and fixed this exact artifact
+        // once on a live check; a `dataapi_alert` must never reach this
+        // branch at all. See `alert_email_body`'s test for the prior wording.
+        let mut attachments: Vec<email::Attachment> = Vec::new();
+        if s.r#type != "dataapi_alert" {
+            // The query's own column names. Falls back to positional headers
+            // only if the engine returned none — a header of `column_1` is a
+            // last resort, not the normal case, because an alert email is
+            // read by someone who cannot see the SQL.
+            let columns: Vec<String> = if eval.columns.is_empty() {
+                let width = eval
+                    .rows
+                    .as_array()
+                    .and_then(|r| r.first())
+                    .and_then(|r| r.as_array())
+                    .map(Vec::len)
+                    .unwrap_or(1);
+                (1..=width).map(|i| format!("column_{i}")).collect()
+            } else {
+                eval.columns.clone()
+            };
+            let csv = email::rows_to_csv(&columns, &eval.rows);
+            attachments.push(email::Attachment {
+                filename: format!("{}.csv", slugify(&s.name)),
+                content_type: "text/csv".into(),
+                bytes: csv.into_bytes(),
+                inline_cid: None,
+            });
+        }
         // An alert may also name a chart or dashboard. When it does, the mail
         // carries a rendering of it beside the numbers — the recipient sees
         // WHAT moved, not only that something did. A render failure must not
@@ -1251,6 +1261,25 @@ fn bi_compile_err(e: egret_bi::BiApiError) -> EvalError {
         egret_bi::BiApiError::Auth(err) => err.to_string(),
         egret_bi::BiApiError::Domain(d) => d.to_string(),
     })
+}
+
+/// The alert email's own summary line (fix-wave finding 1).
+///
+/// An engine `alert` always attaches its triggering rows as a CSV, so its
+/// body says so. A `dataapi_alert` has no query result set — the measured
+/// value IS the whole answer, the same fact `ScheduleEditor.tsx`'s "There are
+/// no query rows to attach" note states to the author — so its body must not
+/// claim rows are attached, the way `send_email`'s hardcoded line used to for
+/// every schedule type unconditionally.
+fn alert_email_body(schedule_type: &str, name: &str, value: &str) -> String {
+    if schedule_type == "dataapi_alert" {
+        format!("The alert \"{name}\" fired.\n\nObserved value: {value}\n")
+    } else {
+        format!(
+            "The alert \"{name}\" fired.\n\nObserved value: {value}\n\n\
+             The triggering rows are attached.\n"
+        )
+    }
 }
 
 /// A filename-safe version of a schedule name.
@@ -1830,5 +1859,34 @@ mod tests {
             renderer.seen.lock().unwrap().is_empty(),
             "the foreign chart must never reach the renderer"
         );
+    }
+
+    // ── fix-wave finding 1: dataapi_alert's email body claims no attached rows ──
+
+    /// Fix-wave finding 1: `send_email` used to hardcode "The triggering rows
+    /// are attached" for EVERY schedule type, including `dataapi_alert` —
+    /// which never has rows, only a measured value — and pair it with a
+    /// fabricated `column_1` CSV built from the query-result fallback path.
+    /// `dataapi_alert_tick.rs`'s tick fixtures configure no SMTP, so
+    /// `send_email` never got far enough to build that body; this proves the
+    /// TEXT decision directly, without a live SMTP relay.
+    #[test]
+    fn a_dataapi_alert_body_says_nothing_about_attached_rows() {
+        let body = alert_email_body("dataapi_alert", "Error spike", "0.72");
+        assert!(
+            !body.to_lowercase().contains("attached"),
+            "a dataapi_alert has no rows to attach: {body:?}"
+        );
+        assert!(body.contains("Error spike"));
+        assert!(body.contains("0.72"));
+    }
+
+    /// The unchanged half: an engine `alert` DOES attach a CSV of its
+    /// triggering rows (`send_email`'s own `if s.r#type != "dataapi_alert"`
+    /// guard), so its body must keep saying so.
+    #[test]
+    fn an_engine_alert_body_still_says_rows_are_attached() {
+        let body = alert_email_body("alert", "Orders dropped", "3");
+        assert!(body.contains("The triggering rows are attached."));
     }
 }

@@ -3,7 +3,7 @@
 -- running SQL. See spec 2026-08-22-dataapi-alerts-design.md §5.
 
 -- Widen the type vocabulary. This is the only existing CHECK that changes:
--- `schedule_alert_needs_query` and `schedule_report_needs_target` are both
+-- `schedule_alert_needs_query` and `schedule_report_has_format` are both
 -- written `type <> 'x' OR (...)`, so a new type excludes itself from both and
 -- neither needs to be touched.
 ALTER TABLE automation.schedules DROP CONSTRAINT schedule_type_valid;
@@ -32,10 +32,25 @@ ALTER TABLE automation.schedules ADD CONSTRAINT schedule_dataapi_metric_needs_er
 -- The shape of a dataapi_alert. The load-bearing half is
 -- `database_id IS NULL AND sql IS NULL`: it makes "a row both evaluators
 -- claim as theirs" impossible to write.
+--
+-- `dataapi_window_s <= 2592000` (30 days, the widest of the four presets
+-- `ActivityRange` offers): review fix-wave finding 2. `> 0` alone left this
+-- unbounded, and unlike the Activity page's own range picker — which
+-- DISABLES a preset that reaches past `access_log` retention (spec §4.7's
+-- `retention_days`, `activity.rs`) rather than let someone watch the data
+-- thin out at the old end and read it as a real drop in traffic — a
+-- dataapi_alert is never rendered for a human to notice that. It is a
+-- threshold decision made unattended every tick. The bound here is a fixed
+-- ceiling, not the live retention setting: `egret-automation` does not
+-- depend on `egret-dataapi`'s runtime config (see this file's own dispatch
+-- doc comment in `runner.rs`), so a CHECK cannot see it either — Postgres
+-- CHECK constraints cannot query another table. `ScheduleEditor.tsx`'s help
+-- text says plainly that the window may still be truncated by retention.
 ALTER TABLE automation.schedules ADD CONSTRAINT schedule_dataapi_needs_source
   CHECK (type <> 'dataapi_alert' OR (
     dataapi_metric IS NOT NULL
-    AND dataapi_window_s IS NOT NULL AND dataapi_window_s > 0
+    AND dataapi_window_s IS NOT NULL
+    AND dataapi_window_s > 0 AND dataapi_window_s <= 2592000
     AND validator_type = 'operator'
     AND database_id IS NULL AND sql IS NULL
     AND chart_id IS NULL AND dashboard_id IS NULL));

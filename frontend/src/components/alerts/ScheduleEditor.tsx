@@ -688,31 +688,51 @@ export function ScheduleEditor({
               htmlFor="sched-dataapi-endpoint"
               details="Which endpoint's traffic this watches. Whole workspace combines every endpoint's traffic into one measurement — choose it deliberately, not by leaving this blank; every save sends this field either way."
             >
-              <select
-                id="sched-dataapi-endpoint"
-                className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-                value={dataapiEndpointId}
-                onChange={(e) => setDataapiEndpointId(e.target.value)}
-              >
-                <option value="">Whole workspace</option>
-                {/* The stored endpoint may no longer be in the (untrashed-only)
-                    list — trashed, or a workspace the caller can no longer
-                    read. Injected as its own option so the picker keeps
-                    showing the REAL stored value rather than silently falling
-                    back to "Whole workspace" and having an untouched Save
-                    widen the watch to the entire workspace. Same precedent as
-                    the Schedule section's timezone picker below. */}
-                {dataapiEndpointId && !endpoints.some((e) => e.id === dataapiEndpointId) && (
-                  <option value={dataapiEndpointId}>
-                    {dataapiEndpointId} (not visible — trashed or inaccessible)
-                  </option>
+              <div className="space-y-2">
+                <select
+                  id="sched-dataapi-endpoint"
+                  className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                  value={dataapiEndpointId}
+                  onChange={(e) => setDataapiEndpointId(e.target.value)}
+                >
+                  <option value="">Whole workspace</option>
+                  {/* The stored endpoint may no longer be in the (untrashed-only)
+                      list — trashed, or a workspace the caller can no longer
+                      read. Injected as its own option so the picker keeps
+                      showing the REAL stored value rather than silently falling
+                      back to "Whole workspace" and having an untouched Save
+                      widen the watch to the entire workspace. Same precedent as
+                      the Schedule section's timezone picker below. */}
+                  {dataapiEndpointId && !endpoints.some((e) => e.id === dataapiEndpointId) && (
+                    <option value={dataapiEndpointId}>
+                      {dataapiEndpointId} (not visible — trashed or inaccessible)
+                    </option>
+                  )}
+                  {endpoints.map((e) => (
+                    <option key={e.id} value={e.id}>
+                      {e.name}
+                    </option>
+                  ))}
+                </select>
+                {/* A FAILED fetch is not "this workspace has no endpoints" — the
+                    picker still renders (it always has "Whole workspace"), so
+                    without this a 403 or a network error is indistinguishable
+                    from a genuinely empty list (ui-conventions.md §2.2). Editing
+                    is already safe either way (the injected stored-value option
+                    above keeps a watch from silently widening), but a NEW
+                    schedule's default is already the broadest scope, so a
+                    creator who cannot see the real endpoint list needs to be
+                    told, not left to assume none exist. */}
+                {endpointsQuery.isError && (
+                  <Alert variant="destructive">
+                    <AlertDescription>
+                      Could not load this workspace&apos;s Data API endpoints.{" "}
+                      {(endpointsQuery.error as unknown as Error)?.message ??
+                        "Try again in a moment."}
+                    </AlertDescription>
+                  </Alert>
                 )}
-                {endpoints.map((e) => (
-                  <option key={e.id} value={e.id}>
-                    {e.name}
-                  </option>
-                ))}
-              </select>
+              </div>
             </ConfigTableRow>
 
             <ConfigTableRow
@@ -753,13 +773,16 @@ export function ScheduleEditor({
             <ConfigTableRow
               label="Window (seconds)"
               htmlFor="sched-dataapi-window"
-              details="How far back from now each run measures — the same kind of trailing window as the Activity page's own range picker."
+              details="How far back from now each run measures, up to 30 days (2,592,000 seconds). Unlike the Activity page's own range picker, this alert is never shown on a screen — so if the window reaches past this workspace's access-log retention, the measurement is silently truncated to whatever traffic survived instead of being disabled."
             >
               <Input
                 id="sched-dataapi-window"
                 value={dataapiWindowS}
                 onChange={(e) => setDataapiWindowS(e.target.value)}
                 inputMode="numeric"
+                type="number"
+                min={1}
+                max={2592000}
               />
             </ConfigTableRow>
 

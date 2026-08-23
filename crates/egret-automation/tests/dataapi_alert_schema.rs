@@ -144,6 +144,25 @@ async fn dataapi_alert_carrying_database_id_is_rejected() {
     assert_rejected_by(err, "schedule_dataapi_needs_source");
 }
 
+/// Fix-wave finding 2: `dataapi_window_s` was bounded below (`> 0`) but not
+/// above, so nothing in the database stopped a window that silently measures
+/// whatever survived `access_log` retention rather than reading the whole
+/// window an operator thinks they configured. `well_formed()`'s own `300` is
+/// far under the bound, so this perturbs only the field under test — the
+/// same one-field-away shape every other case here follows. Model-side
+/// (`model.rs::a_dataapi_alert_window_over_thirty_days_names_the_field`)
+/// proves the same bound is enforced before the database ever sees it; this
+/// proves the CHECK itself still holds if that Rust-side guard is ever
+/// deleted, per this file's own module doc.
+#[tokio::test]
+async fn dataapi_alert_with_a_window_over_thirty_days_is_rejected() {
+    let f = fixture!();
+    let mut r = well_formed();
+    r.dataapi_window_s = Some(2_592_001);
+    let err = try_insert(&f, "window over 30 days", r).await.unwrap_err();
+    assert_rejected_by(err, "schedule_dataapi_needs_source");
+}
+
 #[tokio::test]
 async fn dataapi_alert_with_null_metric_is_rejected() {
     let f = fixture!();

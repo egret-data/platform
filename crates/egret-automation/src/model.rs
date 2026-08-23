@@ -25,6 +25,14 @@ const DEFAULT_GRACE_S: i32 = 14400;
 const DEFAULT_WORKING_TIMEOUT_S: i32 = 3600;
 const DEFAULT_LOG_RETENTION_DAYS: i32 = 90;
 
+/// The upper bound on `dataapi_window_s` (fix-wave finding 2) — 30 days, the
+/// widest of the four presets `egret_dataapi::activity::ActivityRange`
+/// offers. Mirrors migration 0127's `schedule_dataapi_needs_source` CHECK; a
+/// second source of truth, not a shared constant, because this crate does
+/// not depend on `egret-dataapi` (see `runner.rs`'s dispatch doc comment) and
+/// a CHECK cannot see a Rust `const` either way.
+const MAX_DATAAPI_WINDOW_S: i32 = 2_592_000;
+
 /// The fields a create and an update body have in common, so validation is
 /// written once. A body-shaped trait rather than a merged struct because the
 /// two DTOs differ in exactly one field (`type`, absent from update).
@@ -227,6 +235,11 @@ pub fn to_new(body: &WriteBody<'_>, creator: Option<Uuid>) -> Result<NewSchedule
             };
             if window <= 0 {
                 return Err(bad("dataapi_window_s must be positive"));
+            }
+            if window > MAX_DATAAPI_WINDOW_S {
+                return Err(bad(&format!(
+                    "dataapi_window_s must be at most {MAX_DATAAPI_WINDOW_S} (30 days)"
+                )));
             }
             // `schedule_dataapi_needs_source` pins `validator_type = 'operator'`
             // for every `dataapi_alert` row — required explicitly here, rather
@@ -906,6 +919,30 @@ mod tests {
         let mut b = dataapi_alert_body();
         b.dataapi_window_s = Some(-60);
         assert_eq!(err_of(&b), "dataapi_window_s must be positive");
+    }
+
+    /// Fix-wave finding 2: `dataapi_window_s` was bounded below (`> 0`) but
+    /// not above, so nothing stopped a "90-day error rate" that silently
+    /// measures whatever survived `access_log` retention — a threshold
+    /// decision made unattended every tick, unlike the Activity page's own
+    /// range picker, which disables a preset that reaches past retention
+    /// rather than let someone misread the thinning tail as a real drop in
+    /// traffic. Mirrors migration 0127's `dataapi_window_s <= 2592000`.
+    #[test]
+    fn a_dataapi_alert_window_over_thirty_days_names_the_field() {
+        let mut b = dataapi_alert_body();
+        b.dataapi_window_s = Some(MAX_DATAAPI_WINDOW_S);
+        assert!(
+            to_new(&WriteBody::from(&b), Some(Uuid::new_v4())).is_ok(),
+            "the bound itself must still be accepted"
+        );
+
+        let mut b = dataapi_alert_body();
+        b.dataapi_window_s = Some(MAX_DATAAPI_WINDOW_S + 1);
+        assert_eq!(
+            err_of(&b),
+            "dataapi_window_s must be at most 2592000 (30 days)"
+        );
     }
 
     /// Mirrors `schedule_dataapi_needs_source`'s `validator_type = 'operator'`

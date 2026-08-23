@@ -375,9 +375,23 @@ up" by a future refactor unless the reason travels with it.**
   entire point of `call_count`: "the endpoint went silent" *is* the absence of rows,
   and mapping it to `noop` would make the metric undetectable by construction.
 
-An endpoint that is trashed or `disabled` yields `noop` with the reason recorded in
-the run log — **not `error`**. Moving an endpoint to the trash is deliberate; an error
-every five minutes because of it is noise.
+**Not implemented (§8).** An endpoint that is trashed or `disabled` was meant to yield
+`noop` with the reason recorded in the run log — not `error` — since moving an endpoint
+to the trash is deliberate and an error every five minutes because of it is noise. That
+part was deferred: `evaluate_and_deliver_dataapi_alert`'s own doc comment
+(`runner.rs`) explains why, and there is no dedicated "endpoint was trashed" reason in
+the run log today.
+
+What actually happens instead, as a side effect of how trashing works rather than by
+design: a trashed endpoint's `access_log` rows keep existing but log with
+`endpoint_id = NULL` (the FK reference is cleared, the row is not deleted), so an
+endpoint-scoped watch's traffic simply stops accumulating from that point on. `call_
+count`/`error_count`/`error_code_count` then read a real `0` — not a fabricated
+`noop` — and `error_rate`/`p50_duration_ms`/`p95_duration_ms` read `noop` from the
+resulting empty population, by the same asymmetry this section already describes for
+an ordinary empty window, reached here by a different route. A workspace-wide watch
+(`dataapi_endpoint_id IS NULL`) is unaffected either way — it counts every endpoint's
+traffic, trashed or not.
 
 **A stated limit.** This alert reads a log egret writes. If egret is not running there
 are no rows, the window is empty, and the alert stays quiet. It detects a broken
@@ -487,6 +501,15 @@ test suite, and layout in particular cannot be settled by reading the code (§10
   the Starlark engine.
 - **Migrating the remaining Explore list pages beyond the four named here**, and
   retiring `ConfigSection` in Control Plane. Unrelated to this work.
+- **Reading `dataapi.endpoints` trashed/`disabled` state from the runner**, so §5.6's
+  intended `noop`-with-reason handling of a trashed or disabled endpoint can actually be
+  built. `evaluate_and_deliver_dataapi_alert`'s own doc comment (`runner.rs`) explains
+  why: that state lives on a table owned by `egret-dataapi`, and `egret-automation`
+  deliberately does not depend on it beyond the `egret-dataapi-api` leaf (the same
+  boundary Task 4's `owner_can_read_dataapi_endpoint` re-check already respects). Its
+  natural shape is sketched there: an `EndpointState { trashed: bool, enabled: bool }`
+  DTO plus a small port trait, wired the way `pdp`/`query`/`renderer` already are. In the
+  meantime the fallback is not silence — see §5.6's note on what happens today instead.
 
 ---
 
