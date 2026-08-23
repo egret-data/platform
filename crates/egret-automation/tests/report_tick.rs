@@ -93,6 +93,23 @@ impl egret_analytics_api::engine_token::EngineTokenMinter for NoMinter {
     }
 }
 
+/// Task 4's run-time re-check only runs on the `dataapi_alert` path — every
+/// schedule in this file is `type = 'report'` — so a `panic!` here turns "the
+/// report path started calling the PDP" into a loud test failure instead of a
+/// silent one.
+struct NeverPdp;
+#[async_trait::async_trait]
+impl egret_core::authz::Pdp for NeverPdp {
+    async fn authorize(
+        &self,
+        _subject: &egret_core::authz::Subject,
+        _action: &str,
+        _resource: &egret_core::authz::Resource,
+    ) -> egret_core::Result<egret_core::authz::Decision> {
+        panic!("a report must never consult the PDP");
+    }
+}
+
 struct PublicDns;
 #[async_trait::async_trait]
 impl Resolver for PublicDns {
@@ -151,6 +168,8 @@ fn runner(
         users: egret_auth::users::UserRepo::new(db.clone()),
         minter: Arc::new(NoMinter),
         query,
+        pdp: Arc::new(NeverPdp),
+        dataapi_endpoints: Arc::new(egret_dataapi::EndpointStore::new(db.clone())),
         resolver: Arc::new(PublicDns),
         policy: SsrfPolicy::default(),
         smtp: egret_automation::deliver::smtp_config::SmtpConfigRepo::new(

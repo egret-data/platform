@@ -49,6 +49,7 @@
 
 pub mod activity;
 pub mod clients;
+mod endpoint_port;
 pub mod endpoints;
 mod invoke;
 pub mod lifecycle;

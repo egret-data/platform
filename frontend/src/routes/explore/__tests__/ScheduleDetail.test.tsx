@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -52,6 +53,21 @@ vi.mock("@/api/dashboards", () => ({
 vi.mock("@/api/charts", () => ({
   useCharts: () => ({ data: [{ id: "c1", name: "Revenue" }] }),
 }));
+// The dataapi_alert variant's endpoint picker — same envelope shape
+// (`{status, data}`) `useDataApiListEndpoints`'s other consumers mock
+// (Activity.test.tsx / ActivityCallList), so the `.data.status === 200`
+// unwrap in ScheduleEditor gets real data rather than reading through `undefined`.
+vi.mock("@/api/generated/data-api/data-api", () => ({
+  useDataApiListEndpoints: () => ({
+    data: {
+      status: 200,
+      data: [
+        { id: "ep1", name: "Orders API" },
+        { id: "ep2", name: "Users API" },
+      ],
+    },
+  }),
+}));
 // Owners are picked from workspace members, and a chip must show the PERSON
 // rather than the user id it is stored as.
 vi.mock("@/api/members", () => ({
@@ -65,7 +81,7 @@ vi.mock("@/api/members", () => ({
 }));
 
 import ScheduleDetail from "@/routes/explore/ScheduleDetail";
-import { ScheduleEditor } from "@/components/alerts/ScheduleEditor";
+import { FORM_ID, ScheduleEditor, type SectionKey } from "@/components/alerts/ScheduleEditor";
 
 /** Mounts the editor alone so the dirty signal can be observed directly. */
 function ScheduleEditorProbe({ onDirty }: { onDirty: (d: boolean) => void }) {
@@ -78,6 +94,58 @@ function ScheduleEditorProbe({ onDirty }: { onDirty: (d: boolean) => void }) {
       onDirtyChange={onDirty}
       onDone={() => {}}
     />
+  );
+}
+
+/**
+ * Mounts `ScheduleEditor` directly for the `dataapi_alert` type, with its own
+ * plain-button section nav — NOT `ScheduleDetail`'s `<Tabs>`. `ScheduleDetail`
+ * still computes its tab label from a bare `isAlert` boolean (`type ===
+ * "alert"`), which is out of this task's file scope (`ScheduleEditor.tsx`
+ * only) and would show "Contents" rather than "Condition" for this type — a
+ * cosmetic gap, not a functional one, recorded in the task report. Routing
+ * around it here keeps these tests independent of that gap and of the
+ * `SECTIONS` label text entirely.
+ */
+function DataapiAlertHarness({
+  scheduleId = null,
+  onDone = () => {},
+}: {
+  scheduleId?: string | null;
+  onDone?: () => void;
+}) {
+  const [section, setSection] = useState<SectionKey>("general");
+  return (
+    <>
+      {(["general", "what", "schedule", "notification"] as SectionKey[]).map((s) => (
+        <button key={s} type="button" onClick={() => setSection(s)}>
+          {s}
+        </button>
+      ))}
+      <ScheduleEditor
+        ws="eng"
+        type="dataapi_alert"
+        scheduleId={scheduleId}
+        section={section}
+        onDone={onDone}
+      />
+      <button type="submit" form={FORM_ID}>
+        Save
+      </button>
+    </>
+  );
+}
+
+function renderDataapiEditor(scheduleId: string | null = null) {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(
+    <QueryClientProvider client={qc}>
+      <TooltipProvider>
+        <MemoryRouter initialEntries={["/explore/eng/alerts/x"]}>
+          <DataapiAlertHarness scheduleId={scheduleId} />
+        </MemoryRouter>
+      </TooltipProvider>
+    </QueryClientProvider>,
   );
 }
 
@@ -752,4 +820,205 @@ describe("Alerts & Reports editor page", () => {
     await waitFor(() => expect(scrollIntoView).toHaveBeenCalled());
   });
 
+});
+
+describe("Data API alert condition (Task 6)", () => {
+  /** A saved dataapi_alert row, endpoint-scoped. */
+  function dataapiRow(over: Record<string, unknown> = {}) {
+    return {
+      ...row({ type: "dataapi_alert" }),
+      dataapi_endpoint_id: "ep1",
+      dataapi_metric: "error_rate",
+      dataapi_error_code: null,
+      dataapi_window_s: 300,
+      validator_type: "operator",
+      validator_config: { op: ">", threshold: 0.5 },
+      recipients: [],
+      targets: [],
+      ...over,
+    };
+  }
+
+  it("always sends dataapi_endpoint_id, including an explicit null for the whole-workspace choice", async () => {
+    // The load-bearing test from the Task 5 review: `PUT`/`POST` is a full
+    // replace, and an OMITTED `dataapi_endpoint_id` is stored as `null` — the
+    // same value "whole workspace" sends deliberately. A client that simply
+    // stopped sending the key would silently widen an endpoint-scoped alert
+    // to watch the entire workspace, 200 and no warning. This must fail if a
+    // future edit reintroduces a conditional spread that omits the key.
+    const user = userEvent.setup();
+    renderDataapiEditor();
+    await user.type(screen.getByLabelText(/^name$/i), "Error spike");
+    await user.click(screen.getByRole("button", { name: "what" }));
+    // Left as the default — "Whole workspace" — deliberately not touched.
+    await user.click(screen.getByRole("button", { name: /^save$/i }));
+
+    await waitFor(() => expect(createMutate).toHaveBeenCalled());
+    const body = createMutate.mock.calls[0][0];
+    expect(body.type).toBe("dataapi_alert");
+    expect("dataapi_endpoint_id" in body).toBe(true);
+    expect(body.dataapi_endpoint_id).toBeNull();
+    // No not_null/operator picker exists for this type — it is pinned.
+    expect(body.validator_type).toBe("operator");
+  });
+
+  it("sends the chosen endpoint's id when one is picked, not null", async () => {
+    const user = userEvent.setup();
+    renderDataapiEditor();
+    await user.type(screen.getByLabelText(/^name$/i), "Latency up");
+    await user.click(screen.getByRole("button", { name: "what" }));
+    await user.selectOptions(screen.getByLabelText(/^endpoint$/i), "ep2");
+    await user.click(screen.getByRole("button", { name: /^save$/i }));
+
+    await waitFor(() => expect(createMutate).toHaveBeenCalled());
+    expect(createMutate.mock.calls[0][0].dataapi_endpoint_id).toBe("ep2");
+  });
+
+  it("resends dataapi_endpoint_id, unmodified, on a no-op update of an existing row", async () => {
+    // The same guarantee as above, but on the UPDATE path — the one Task 5's
+    // review actually found broken. Opening an endpoint-scoped alert and
+    // saving without touching the endpoint field must keep watching that ONE
+    // endpoint, not fall back to the workspace.
+    scheduleMock.mockReturnValue({ data: dataapiRow(), isLoading: false });
+    const user = userEvent.setup();
+    renderDataapiEditor("s1");
+    await screen.findByDisplayValue("Orders dropped");
+    await user.click(screen.getByRole("button", { name: /^save$/i }));
+
+    await waitFor(() => expect(updateMutate).toHaveBeenCalled());
+    const body = updateMutate.mock.calls[0][0].body;
+    expect("dataapi_endpoint_id" in body).toBe(true);
+    expect(body.dataapi_endpoint_id).toBe("ep1");
+  });
+
+  it("keeps a stored endpoint selectable even when it's missing from the picker's own list", async () => {
+    // Mirrors the Schedule section's timezone picker: a stored value the
+    // browser's list does not contain (here, an endpoint since trashed) must
+    // stay selected rather than silently reading as "Whole workspace" — an
+    // untouched Save would otherwise widen the watch on a row nobody meant
+    // to change.
+    scheduleMock.mockReturnValue({
+      data: dataapiRow({ dataapi_endpoint_id: "gone" }),
+      isLoading: false,
+    });
+    const user = userEvent.setup();
+    renderDataapiEditor("s1");
+    await user.click(screen.getByRole("button", { name: "what" }));
+    expect(await screen.findByLabelText(/^endpoint$/i)).toHaveValue("gone");
+
+    await user.click(screen.getByRole("button", { name: /^save$/i }));
+    await waitFor(() => expect(updateMutate).toHaveBeenCalled());
+    expect(updateMutate.mock.calls[0][0].body.dataapi_endpoint_id).toBe("gone");
+  });
+
+  it("shows the error code field only for error_code_count, and sends it only then", async () => {
+    const user = userEvent.setup();
+    renderDataapiEditor();
+    await user.type(screen.getByLabelText(/^name$/i), "Rate limited");
+    await user.click(screen.getByRole("button", { name: "what" }));
+    expect(screen.queryByLabelText(/^error code$/i)).not.toBeInTheDocument();
+
+    await user.selectOptions(screen.getByLabelText(/^metric$/i), "error_code_count");
+    await user.type(screen.getByLabelText(/^error code$/i), "rate_limited");
+    await user.click(screen.getByRole("button", { name: /^save$/i }));
+
+    await waitFor(() => expect(createMutate).toHaveBeenCalled());
+    const body = createMutate.mock.calls[0][0];
+    expect(body.dataapi_metric).toBe("error_code_count");
+    expect(body.dataapi_error_code).toBe("rate_limited");
+  });
+
+  it("sends no error code for a metric other than error_code_count", async () => {
+    const user = userEvent.setup();
+    renderDataapiEditor();
+    await user.type(screen.getByLabelText(/^name$/i), "Too few calls");
+    await user.click(screen.getByRole("button", { name: "what" }));
+    await user.selectOptions(screen.getByLabelText(/^metric$/i), "call_count");
+    await user.click(screen.getByRole("button", { name: /^save$/i }));
+
+    await waitFor(() => expect(createMutate).toHaveBeenCalled());
+    const body = createMutate.mock.calls[0][0];
+    expect(body.dataapi_metric).toBe("call_count");
+    expect(body.dataapi_error_code).toBeNull();
+  });
+
+  it("defaults the grace period to 900s, shorter than the alert/report default of 14400s", async () => {
+    // §Task 6 Step 4: a `dataapi_alert` watches an operational signal, where
+    // a four-hour default (migration 0110, inherited from Superset) is too
+    // long to go quiet after a first page.
+    const user = userEvent.setup();
+    renderDataapiEditor();
+    await user.click(screen.getByRole("button", { name: "schedule" }));
+    expect(screen.getByLabelText(/grace period/i)).toHaveValue("900");
+  });
+
+  it("sends the window and the comparison the user set", async () => {
+    const user = userEvent.setup();
+    renderDataapiEditor();
+    await user.type(screen.getByLabelText(/^name$/i), "Slow endpoint");
+    await user.click(screen.getByRole("button", { name: "what" }));
+    await user.selectOptions(screen.getByLabelText(/^metric$/i), "p95_duration_ms");
+    await user.clear(screen.getByLabelText(/^window/i));
+    await user.type(screen.getByLabelText(/^window/i), "60");
+    await user.selectOptions(screen.getByLabelText(/^condition$/i), ">=");
+    await user.clear(screen.getByLabelText(/^threshold$/i));
+    await user.type(screen.getByLabelText(/^threshold$/i), "500");
+    await user.click(screen.getByRole("button", { name: /^save$/i }));
+
+    await waitFor(() => expect(createMutate).toHaveBeenCalled());
+    const body = createMutate.mock.calls[0][0];
+    expect(body.dataapi_metric).toBe("p95_duration_ms");
+    expect(body.dataapi_window_s).toBe(60);
+    expect(body.validator_config).toEqual({ op: ">=", threshold: 500 });
+  });
+});
+
+/**
+ * The page-chrome half of reachability (Task 6, fix round 1): `ScheduleDetail`
+ * itself, not the direct-mount `ScheduleEditor` harness above. Before this
+ * round, `type` had no `dataapi_alert` arm for a NEW schedule, and the header
+ * (`Icon`/Type fact) and the `what` tab's own label were driven by a bare
+ * `isAlert` boolean, which read a dataapi_alert as a report ("Contents",
+ * "Report") rather than what it is.
+ */
+describe("ScheduleDetail — dataapi_alert reachability (Task 6 fix round 1)", () => {
+  function dataapiExisting(over: Record<string, unknown> = {}) {
+    return {
+      ...row({ type: "dataapi_alert" }),
+      dataapi_endpoint_id: null,
+      dataapi_metric: "error_rate",
+      dataapi_error_code: null,
+      dataapi_window_s: 300,
+      validator_type: "operator",
+      validator_config: { op: ">", threshold: 0.1 },
+      recipients: [],
+      targets: [],
+      ...over,
+    };
+  }
+
+  it("reads the what-tab Condition, not Contents, for an existing dataapi_alert", async () => {
+    scheduleMock.mockReturnValue({ data: dataapiExisting(), isLoading: false });
+    renderEditor("/explore/eng/alerts/s1");
+
+    expect(await screen.findByRole("tab", { name: /^condition$/i })).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: /^contents$/i })).not.toBeInTheDocument();
+  });
+
+  it("labels the header Type fact 'Data API alert', not 'Report'", async () => {
+    scheduleMock.mockReturnValue({ data: dataapiExisting(), isLoading: false });
+    renderEditor("/explore/eng/alerts/s1");
+
+    expect(await screen.findByText("Data API alert")).toBeInTheDocument();
+    expect(screen.queryByText(/^report$/i)).not.toBeInTheDocument();
+  });
+
+  it("opens a new schedule as a Data API alert from ?type=dataapi_alert, with the Condition tab", async () => {
+    renderEditor("/explore/eng/alerts/new?type=dataapi_alert");
+
+    expect(
+      await screen.findByRole("heading", { name: /new data api alert/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /^condition$/i })).toBeInTheDocument();
+  });
 });

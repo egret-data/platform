@@ -58,6 +58,14 @@ pub struct Schedule {
     pub custom_width: Option<i32>,
     pub custom_height: Option<i32>,
 
+    // Data API alert only (migration 0128). Which of `database_id`/`sql` vs.
+    // these four is populated is pinned by `schedule_dataapi_needs_source` /
+    // `schedule_alert_no_dataapi_columns`.
+    pub dataapi_endpoint_id: Option<Uuid>,
+    pub dataapi_metric: Option<String>,
+    pub dataapi_error_code: Option<String>,
+    pub dataapi_window_s: Option<i32>,
+
     pub grace_period_s: i32,
     pub working_timeout_s: i32,
     pub log_retention_days: i32,
@@ -146,6 +154,14 @@ pub struct NewSchedule {
     pub custom_width: Option<i32>,
     pub custom_height: Option<i32>,
 
+    // Data API alert only (migration 0128). `None` throughout for an `alert`
+    // or a `report` — `schedule_alert_no_dataapi_columns` forbids any of
+    // these on a non-`dataapi_alert` row.
+    pub dataapi_endpoint_id: Option<Uuid>,
+    pub dataapi_metric: Option<String>,
+    pub dataapi_error_code: Option<String>,
+    pub dataapi_window_s: Option<i32>,
+
     pub grace_period_s: i32,
     pub working_timeout_s: i32,
     pub log_retention_days: i32,
@@ -166,6 +182,7 @@ pub struct NewSchedule {
 const COLS: &str = "id, workspace_id, type, name, description, active, crontab, timezone, \
      next_run_at, database_id, sql, validator_type, validator_config, last_eval_at, last_state, \
      last_value, chart_id, dashboard_id, report_format, custom_width, custom_height, \
+     dataapi_endpoint_id, dataapi_metric, dataapi_error_code, dataapi_window_s, \
      grace_period_s, working_timeout_s, log_retention_days, email_subject, message, message_footer, \
      skip_if_empty, folder_id, deleted_at, created_by, updated_at";
 
@@ -348,9 +365,11 @@ impl ScheduleRepo {
              (workspace_id, type, name, description, active, crontab, timezone, next_run_at, \
               database_id, sql, validator_type, validator_config, \
               chart_id, dashboard_id, report_format, custom_width, custom_height, \
+              dataapi_endpoint_id, dataapi_metric, dataapi_error_code, dataapi_window_s, \
               grace_period_s, working_timeout_s, log_retention_days, email_subject, \
               message, message_footer, skip_if_empty, created_by, updated_by) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$25) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,\
+                      $22,$23,$24,$25,$26,$27,$28,$29,$29) \
              RETURNING {COLS}"
         )))
         .bind(ws)
@@ -370,6 +389,10 @@ impl ScheduleRepo {
         .bind(&new.report_format)
         .bind(new.custom_width)
         .bind(new.custom_height)
+        .bind(new.dataapi_endpoint_id)
+        .bind(&new.dataapi_metric)
+        .bind(&new.dataapi_error_code)
+        .bind(new.dataapi_window_s)
         .bind(new.grace_period_s)
         .bind(new.working_timeout_s)
         .bind(new.log_retention_days)
@@ -542,9 +565,10 @@ impl ScheduleRepo {
                name=$3, description=$4, active=$5, crontab=$6, timezone=$7, next_run_at=$8, \
                database_id=$9, sql=$10, validator_type=$11, validator_config=$12, \
                chart_id=$13, dashboard_id=$14, report_format=$15, custom_width=$16, \
-               custom_height=$17, grace_period_s=$18, working_timeout_s=$19, \
-               log_retention_days=$20, email_subject=$21, message=$22, message_footer=$23, \
-               skip_if_empty=$24, updated_by=$25, updated_at=now() \
+               custom_height=$17, dataapi_endpoint_id=$18, dataapi_metric=$19, \
+               dataapi_error_code=$20, dataapi_window_s=$21, grace_period_s=$22, \
+               working_timeout_s=$23, log_retention_days=$24, email_subject=$25, message=$26, \
+               message_footer=$27, skip_if_empty=$28, updated_by=$29, updated_at=now() \
              WHERE id=$1 AND workspace_id=$2 RETURNING {COLS}"
         )))
         .bind(id)
@@ -564,6 +588,10 @@ impl ScheduleRepo {
         .bind(&new.report_format)
         .bind(new.custom_width)
         .bind(new.custom_height)
+        .bind(new.dataapi_endpoint_id)
+        .bind(&new.dataapi_metric)
+        .bind(&new.dataapi_error_code)
+        .bind(new.dataapi_window_s)
         .bind(new.grace_period_s)
         .bind(new.working_timeout_s)
         .bind(new.log_retention_days)

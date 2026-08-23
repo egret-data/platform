@@ -212,6 +212,8 @@ async fn setup() -> Option<Fx> {
                 timeout: std::time::Duration::from_secs(5),
             },
         }),
+        pdp: pdp.clone(),
+        dataapi_endpoints: Arc::new(egret_dataapi::EndpointStore::new(db.clone())),
         resolver: Arc::new(egret_automation::deliver::destination::SystemResolver),
         policy: egret_automation::deliver::destination::SsrfPolicy::default(),
         smtp: smtp.clone(),
@@ -263,6 +265,7 @@ async fn setup() -> Option<Fx> {
         databases: databases.clone(),
         users: egret_auth::users::UserRepo::new(db.clone()),
         engine_minter: Arc::new(NoMinter),
+        dataapi_endpoints: Arc::new(egret_dataapi::EndpointStore::new(db.clone())),
         // Not exercised by this file's tests; wired for the struct to
         // construct at all.
         query: Arc::new(egret_automation::evaluator::EngineRunner {
@@ -2598,4 +2601,1085 @@ async fn moving_a_schedule_into_its_own_workspaces_folder_still_works() {
     .await;
     assert_eq!(s, StatusCode::OK, "got {ack}");
     assert_eq!(folder_of(&fx, id).await, own_folder.id.to_string());
+}
+
+// ── Task 4: dataapi_alert authorization ─────────────────────────────────
+
+/// A brand-new member holding the SEEDED `ws_admin` role (migration 0122
+/// grants it both `data_api_endpoint:read` and `:manage`, alongside the
+/// `alert:manage`/`alert:read` migration 0110/0113 already give it).
+///
+/// Deliberately NOT a freshly-`INSERT`-ed custom role: `CedarPdp` snapshots
+/// role NAMES/templates at `build()` time (`egret-auth/src/pdp/mod.rs`) and
+/// only reloads on a `RolesChanged` event this file's `setup()` has no way to
+/// publish (its `EventBus` is a throwaway temporary — see `setup()`'s own
+/// `CedarPdp::build` call). A role created by raw SQL after `fx` exists is
+/// therefore invisible to `fx.app`'s PDP and every grant through it is
+/// silently a no-op, which would make BOTH assertions below pass — the
+/// "denied" one for the wrong reason (unrecognised role, not the missing
+/// permission) and the "allowed" one not at all. `ws_admin`/`ws_editor` are
+/// seeded by migrations, so they exist before `setup()` ever calls `build()`;
+/// only the ACCESS GRANT (this function's `INSERT INTO access_grants`) is
+/// new, and grants ARE read live per `authorize()` call
+/// (`self.grants.grants_for(...)`), never cached. `egret-dataapi/tests/
+/// lifecycle.rs`'s `principal_with_in` sidesteps the same trap the other
+/// way, by building a FRESH `CedarPdp` after creating its custom role — not
+/// available here without rebuilding `fx.app`'s whole `AutomationState`.
+async fn admin_member(db: &Db, ws: Uuid) -> Uuid {
+    let user = mk_user(db, "dataapi_alert_authz_admin").await;
+    grant_ws_role(db, user, ws, "ws_admin").await;
+    user
+}
+
+/// An OBJECT-scoped `data_api_endpoint:read` grant on exactly `endpoint_id`
+/// — no workspace-level Data API permission at all. Links the SEEDED
+/// `ws_admin` role's template (same PDP-staleness reasoning as
+/// `admin_member` above: the ROLE must already be known, only the GRANT is
+/// new) but binds it to the OBJECT, not the workspace: `templates.rs`
+/// compiles every workspace-scope ROLE's template as `resource in
+/// ?resource` regardless of what scope_type a later GRANT uses it at, and an
+/// `?resource` bound to the endpoint's own entity makes `in` match only that
+/// entity (an endpoint has no descendants) — an object-scoped-only grant in
+/// every practical sense, using a role Cedar already has a template for.
+///
+/// This is what makes `an_endpoint_scoped_grant_with_no_workspace_read_is_
+/// enough` below a REAL positive control for `OBJECT_KIND`: the grant's
+/// `object_type` is the literal the review asked to pin, and the only way
+/// this user's PUT succeeds is if the CHECK builds the exact same string
+/// into the resource it asks the PDP about.
+async fn grant_object_scoped_data_api_read(db: &Db, user: Uuid, endpoint_id: Uuid) {
+    let ws_admin_role: Uuid =
+        sqlx::query_scalar("SELECT id FROM roles WHERE scope = 'workspace' AND name = 'ws_admin'")
+            .fetch_one(&db.pool)
+            .await
+            .expect("ws_admin role must be seeded");
+    sqlx::query(
+        "INSERT INTO access_grants \
+           (principal_type, principal_id, role_id, scope_type, scope_id, object_type) \
+         VALUES ('user', $1, $2, 'object', $3, 'data_api_endpoint')",
+    )
+    .bind(user)
+    .bind(ws_admin_role)
+    .bind(endpoint_id)
+    .execute(&db.pool)
+    .await
+    .expect("grant object-scoped data_api_endpoint:read");
+}
+
+/// A WORKSPACE-scoped `dataapi_alert` (`dataapi_endpoint_id IS NULL` — it
+/// watches every endpoint) — inserted directly, the same way
+/// `dataapi_alert_tick.rs`'s fixture does, since `CreateSchedule` cannot
+/// express this type yet (Task 5). `next_run_at` is left in the past so a
+/// row exists to update; nothing here ticks it.
+async fn insert_workspace_scoped_dataapi_alert(db: &Db, ws: Uuid, owner: Uuid, name: &str) -> Uuid {
+    let schedule: Uuid = sqlx::query_scalar(
+        "INSERT INTO automation.schedules \
+           (workspace_id, type, name, crontab, next_run_at, validator_type, validator_config, \
+            dataapi_metric, dataapi_window_s) \
+         VALUES ($1,'dataapi_alert',$2,'* * * * *',now() - interval '1 minute', \
+                 'operator', $3, 'call_count', 3600) RETURNING id",
+    )
+    .bind(ws)
+    .bind(name)
+    .bind(serde_json::json!({"op": ">", "threshold": 0}))
+    .fetch_one(&db.pool)
+    .await
+    .expect("insert dataapi_alert");
+    sqlx::query("INSERT INTO automation.schedule_owners (schedule_id, user_id) VALUES ($1,$2)")
+        .bind(schedule)
+        .bind(owner)
+        .execute(&db.pool)
+        .await
+        .expect("insert owner");
+    schedule
+}
+
+/// A minimal, validly-shaped `UpdateSchedule` body. Its CONTENT is
+/// irrelevant to the tests below — the save-time gate runs on the STORED
+/// row's type, before this body is ever validated against it — only its
+/// SHAPE matters, so `Json<UpdateSchedule>` extracts successfully and the
+/// handler runs at all.
+fn minimal_update_body() -> String {
+    serde_json::json!({
+        "name": "renamed",
+        "active": true,
+        "crontab": "0 9 * * *",
+        "timezone": "UTC",
+    })
+    .to_string()
+}
+
+/// Same as [`minimal_update_body`], but naming a `dataapi_endpoint_id` —
+/// fix-round-1's second check on `update()` gates the BODY's target endpoint
+/// as well as the stored one, so a body that omits the field now (correctly)
+/// asks to WIDEN the alert to the whole workspace rather than "leave it
+/// alone". Tests that want to prove "an object-scoped grant on the CURRENT
+/// endpoint is enough" have to say so explicitly, or they are actually
+/// testing the widen-by-omission case instead.
+///
+/// A FULL, otherwise-valid `dataapi_alert` body (fix-round-3) — not the
+/// bare `name`/`active`/`crontab`/`timezone` `minimal_update_body` gets away
+/// with. A body missing `dataapi_metric` fails `to_new`'s validation before
+/// ever reaching a write, which made every "no partial write" assertion
+/// built on this helper vacuous: the write was never going to happen anyway,
+/// mutated check or not. A caller sending this body would succeed if the
+/// authz check under test let them through, so a "no partial write"
+/// assertion built on it actually demonstrates the check stopped a write
+/// that would otherwise have gone through — the same standard
+/// `creating_a_dataapi_alert_needs_data_api_endpoint_read`'s ALLOWED branch
+/// holds the create path to.
+fn minimal_update_body_with_endpoint(endpoint_id: Uuid) -> String {
+    serde_json::json!({
+        "name": "renamed",
+        "active": true,
+        "crontab": "0 9 * * *",
+        "timezone": "UTC",
+        "validator_type": "operator",
+        "validator_config": {"op": ">", "threshold": 0},
+        "dataapi_metric": "call_count",
+        "dataapi_window_s": 300,
+        "dataapi_endpoint_id": endpoint_id,
+    })
+    .to_string()
+}
+
+/// The authorization test the brief asks for: a caller who can manage alerts
+/// but cannot read the Data API endpoint(s) a `dataapi_alert` watches must be
+/// refused — otherwise `alert:manage` is a side channel for observing an
+/// endpoint's traffic and error rate without ever holding
+/// `data_api_endpoint:read`.
+///
+/// An ADMIN would pass both checks and prove nothing on its own (the brief's
+/// own warning) — which is why the FIRST assertion below is the one that
+/// carries the test: `fx.editor_tok` (`ws_editor`) holds `alert:manage`
+/// (migration 0110) but, unlike `ws_admin`, was never granted
+/// `data_api_endpoint:read` (migration 0122 stops at `ws_admin` on purpose —
+/// see that migration's own comment). `ws_admin` appears only in the SECOND
+/// assertion, to show the SAME gate also lets a caller through, so the first
+/// assertion is a real yes/no rather than a refusal that fires
+/// unconditionally.
+#[tokio::test]
+async fn updating_a_dataapi_alert_needs_data_api_endpoint_read() {
+    let fx = fixture!();
+    // The schedule's OWNER is unrelated to who is calling PUT — no test here
+    // runs the tick, so a fresh, roleless user is enough to satisfy the
+    // owner FK.
+    let owner = mk_user(&fx.db, "z2_authz_owner").await;
+    let id = insert_workspace_scoped_dataapi_alert(&fx.db, fx.ws, owner, "z2-authz-denied").await;
+
+    // `ws_editor`: `alert:manage`, no `data_api_endpoint:read`. Refused
+    // before the update ever touches the row.
+    let (status, body) = req_raw(
+        &fx,
+        &fx.editor_tok,
+        "PUT",
+        &format!("/ws/{}/alerts/{id}", fx.slug),
+        Some(minimal_update_body()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "alert:manage without data_api_endpoint:read must be refused: {body}"
+    );
+
+    // `ws_admin`: the same `alert:manage`, PLUS workspace-level
+    // `data_api_endpoint:read` — gets past this gate. It still cannot reach
+    // 200: `ScheduleType` has no `dataapi_alert` variant yet (Task 5), so
+    // `update`'s own `ScheduleType::parse(&stored.r#type)` — which runs
+    // strictly AFTER this task's check — fails closed with a named internal
+    // error. That is the pre-existing, separately-tracked gap this task
+    // inherits, not this check; what matters here is that the response is no
+    // longer 403.
+    let admin = admin_member(&fx.db, fx.ws).await;
+    let admin_tok = fx.token_for(admin).await;
+    let (status, body) = req_raw(
+        &fx,
+        &admin_tok,
+        "PUT",
+        &format!("/ws/{}/alerts/{id}", fx.slug),
+        Some(minimal_update_body()),
+    )
+    .await;
+    assert_ne!(
+        status,
+        StatusCode::FORBIDDEN,
+        "data_api_endpoint:read must get the caller PAST the new gate: {body}"
+    );
+    // Task 5 gave `ScheduleType` its `DataapiAlert` variant, so
+    // `ScheduleType::parse(&stored.r#type)` — which runs strictly AFTER this
+    // task's check — no longer fails closed with the internal-error gap this
+    // test used to land on (that gap is gone, not merely hidden: see the
+    // model.rs test suite for the replacement coverage). It now reaches
+    // `to_new`'s own validation instead, which 400s naming a field
+    // `minimal_update_body()` never set — still proof the request got PAST
+    // this gate, just via a different, now-real code path rather than a
+    // placeholder one.
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "expected the caller to reach Task 5's dataapi_alert validation \
+         (proving it passed THIS check), got {status}: {body}"
+    );
+    assert!(
+        body.contains("dataapi_metric"),
+        "expected the 400 to name the missing field: {body}"
+    );
+}
+
+/// The object-scoped half: a `dataapi_alert` that names ONE endpoint
+/// (`dataapi_endpoint_id`) is gated on OBJECT-scoped `data_api_endpoint:read`
+/// on that row, not merely the workspace-level grant the previous test
+/// covers. Workspace-level read must NOT be treated as sufficient on its
+/// own — Cedar's own workspace→object cascade already makes a workspace
+/// grant satisfy an object check, so this test's job is only to prove the
+/// OTHER direction: manage-only, scoped to one endpoint, is still refused.
+#[tokio::test]
+async fn updating_an_endpoint_scoped_dataapi_alert_needs_data_api_endpoint_read() {
+    let fx = fixture!();
+    let owner = mk_user(&fx.db, "z2_authz_object_owner").await;
+
+    // `name`/`path`/`sql`/`database_id` are the columns migration 0121 makes
+    // NOT NULL; `fx.database` is the `query.databases` row `setup` already
+    // creates in this same workspace.
+    let endpoint_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO dataapi.endpoints (workspace_id, name, path, sql, database_id, created_by) \
+         VALUES ($1,'z2 authz test','/z2-authz-test','SELECT 1',$2,$3) RETURNING id",
+    )
+    .bind(fx.ws)
+    .bind(fx.database)
+    .bind(owner)
+    .fetch_one(&fx.db.pool)
+    .await
+    .expect("insert dataapi.endpoints row");
+    let schedule: Uuid = sqlx::query_scalar(
+        "INSERT INTO automation.schedules \
+           (workspace_id, type, name, crontab, next_run_at, validator_type, validator_config, \
+            dataapi_metric, dataapi_window_s, dataapi_endpoint_id) \
+         VALUES ($1,'dataapi_alert','z2-authz-object','* * * * *', \
+                 now() - interval '1 minute','operator',$2,'call_count',3600,$3) RETURNING id",
+    )
+    .bind(fx.ws)
+    .bind(serde_json::json!({"op": ">", "threshold": 0}))
+    .bind(endpoint_id)
+    .fetch_one(&fx.db.pool)
+    .await
+    .expect("insert endpoint-scoped dataapi_alert");
+    sqlx::query("INSERT INTO automation.schedule_owners (schedule_id, user_id) VALUES ($1,$2)")
+        .bind(schedule)
+        .bind(owner)
+        .execute(&fx.db.pool)
+        .await
+        .expect("insert owner");
+
+    // `ws_editor`: `alert:manage`, no `data_api_endpoint:read` on this
+    // endpoint (nor at workspace level — same migration-0122 gap the
+    // previous test relies on).
+    let (status, body) = req_raw(
+        &fx,
+        &fx.editor_tok,
+        "PUT",
+        &format!("/ws/{}/alerts/{schedule}", fx.slug),
+        Some(minimal_update_body()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "alert:manage without data_api_endpoint:read on THIS endpoint must be refused: {body}"
+    );
+
+    // The positive control Finding 3 asked for: a caller whose ONLY Data API
+    // permission is an OBJECT-scoped `data_api_endpoint:read` grant on THIS
+    // endpoint — no `ws_admin`, no workspace-level grant at all — still gets
+    // past the gate. Every prior test in this file (and the workspace-scoped
+    // test above) passes `data_api_endpoint:read` in only at WORKSPACE scope,
+    // where Cedar's own `resource in ?resource` cascade means an object check
+    // would be satisfied even if `OBJECT_KIND` were built wrong (a mismatched
+    // kind never gets compared — the workspace ancestor already matches).
+    // This is the one case that actually exercises the kind string: if
+    // `require_dataapi_endpoint_read`'s object branch built ANY kind other
+    // than the literal this grant was made under, the object entity it asks
+    // the PDP about would not be the one this grant names, and the request
+    // would come back 403 same as `ws_editor` above.
+    let object_reader = mk_user(&fx.db, "z2_authz_object_reader").await;
+    grant_ws_role(&fx.db, object_reader, fx.ws, "ws_editor").await; // alert:manage only
+    grant_object_scoped_data_api_read(&fx.db, object_reader, endpoint_id).await;
+    let object_reader_tok = fx.token_for(object_reader).await;
+    // The body names the SAME endpoint the row already has — fix-round-1's
+    // second check (on the body's target, not just the stored one) means an
+    // update that OMITTED `dataapi_endpoint_id` here would ask to widen to
+    // the whole workspace instead, which this object-scoped-only grant
+    // correctly cannot authorize (see the two dedicated tests below). This
+    // body keeps the test isolated to what it says it proves: read on the
+    // endpoint the row already names is enough to touch it.
+    //
+    // Fix-round-3: `minimal_update_body_with_endpoint` is now a FULL, valid
+    // `dataapi_alert` body, so this caller — having passed the gate — reaches
+    // a real `200`, not merely `to_new`'s 400. That also makes this the
+    // route-level "readable caller successfully updates a dataapi_alert"
+    // corner the re-review asked for: a `PUT` from an authorized caller with
+    // a valid body persists, and the response echoes back what was stored.
+    let (status, body) = req(
+        &fx,
+        &object_reader_tok,
+        "PUT",
+        &format!("/ws/{}/alerts/{schedule}", fx.slug),
+        Some(minimal_update_body_with_endpoint(endpoint_id)),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an object-scoped data_api_endpoint:read grant on THIS endpoint must be enough \
+         to reach a real update, got {status}: {body}"
+    );
+    assert_eq!(body["name"], "renamed");
+    assert_eq!(body["dataapi_endpoint_id"], endpoint_id.to_string());
+    assert_eq!(body["dataapi_metric"], "call_count");
+    assert_eq!(body["dataapi_window_s"], 300);
+
+    let stored: Option<Uuid> =
+        sqlx::query_scalar("SELECT dataapi_endpoint_id FROM automation.schedules WHERE id = $1")
+            .bind(schedule)
+            .fetch_one(&fx.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        stored,
+        Some(endpoint_id),
+        "the update must actually have persisted, not just returned 200"
+    );
+}
+
+/// A second `dataapi.endpoints` row in the SAME workspace, distinct from
+/// `endpoint_id` — for the two fix-round-1 tests below, which both need TWO
+/// endpoints to distinguish "read on the row's CURRENT endpoint" from "read
+/// on the endpoint the update is trying to set".
+async fn a_second_endpoint(fx: &Fx, owner: Uuid, tag: &str) -> Uuid {
+    sqlx::query_scalar(
+        "INSERT INTO dataapi.endpoints (workspace_id, name, path, sql, database_id, created_by) \
+         VALUES ($1,$2,$3,'SELECT 1',$4,$5) RETURNING id",
+    )
+    .bind(fx.ws)
+    .bind(format!("z2 {tag}"))
+    .bind(format!("/z2-{tag}"))
+    .bind(fx.database)
+    .bind(owner)
+    .fetch_one(&fx.db.pool)
+    .await
+    .expect("insert second dataapi.endpoints row")
+}
+
+/// Fix-round-1, Critical 1, exploit 1 ("Repoint"): before this fix, `update()`
+/// checked only the STORED `dataapi_endpoint_id`. A caller who could read
+/// endpoint A could PUT a body naming a DIFFERENT endpoint B and the row
+/// would be repointed at B — measuring and (via the same body's `recipients`)
+/// potentially MAILING B's traffic to a caller who never held
+/// `data_api_endpoint:read` on B, object- or workspace-scoped. Proven live in
+/// review against `egret_test` before this fix; this is the permanent
+/// regression test for it.
+#[tokio::test]
+async fn updating_a_dataapi_alert_cannot_be_repointed_to_an_unreadable_endpoint() {
+    let fx = fixture!();
+    let owner = mk_user(&fx.db, "z2_repoint_owner").await;
+    let endpoint_a: Uuid = sqlx::query_scalar(
+        "INSERT INTO dataapi.endpoints (workspace_id, name, path, sql, database_id, created_by) \
+         VALUES ($1,'z2 repoint a','/z2-repoint-a','SELECT 1',$2,$3) RETURNING id",
+    )
+    .bind(fx.ws)
+    .bind(fx.database)
+    .bind(owner)
+    .fetch_one(&fx.db.pool)
+    .await
+    .expect("insert endpoint A");
+    let endpoint_b = a_second_endpoint(&fx, owner, "repoint-b").await;
+
+    let schedule: Uuid = sqlx::query_scalar(
+        "INSERT INTO automation.schedules \
+           (workspace_id, type, name, crontab, next_run_at, validator_type, validator_config, \
+            dataapi_metric, dataapi_window_s, dataapi_endpoint_id) \
+         VALUES ($1,'dataapi_alert','z2-repoint','* * * * *', \
+                 now() - interval '1 minute','operator',$2,'call_count',3600,$3) RETURNING id",
+    )
+    .bind(fx.ws)
+    .bind(serde_json::json!({"op": ">", "threshold": 0}))
+    .bind(endpoint_a)
+    .fetch_one(&fx.db.pool)
+    .await
+    .expect("insert endpoint-a-scoped dataapi_alert");
+    sqlx::query("INSERT INTO automation.schedule_owners (schedule_id, user_id) VALUES ($1,$2)")
+        .bind(schedule)
+        .bind(owner)
+        .execute(&fx.db.pool)
+        .await
+        .expect("insert owner");
+
+    // ONLY object-scoped `data_api_endpoint:read` on A — nothing on B, no
+    // workspace-level grant at all.
+    let attacker = mk_user(&fx.db, "z2_repoint_attacker").await;
+    grant_ws_role(&fx.db, attacker, fx.ws, "ws_editor").await; // alert:manage only
+    grant_object_scoped_data_api_read(&fx.db, attacker, endpoint_a).await;
+    let attacker_tok = fx.token_for(attacker).await;
+
+    let (status, body) = req_raw(
+        &fx,
+        &attacker_tok,
+        "PUT",
+        &format!("/ws/{}/alerts/{schedule}", fx.slug),
+        Some(minimal_update_body_with_endpoint(endpoint_b)),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "repointing to an endpoint the caller cannot read must be refused: {body}"
+    );
+
+    // No partial write: the row must still watch A, not B and not NULL.
+    let still_a: Option<Uuid> =
+        sqlx::query_scalar("SELECT dataapi_endpoint_id FROM automation.schedules WHERE id = $1")
+            .bind(schedule)
+            .fetch_one(&fx.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        still_a,
+        Some(endpoint_a),
+        "a refused repoint must not have moved the stored endpoint at all"
+    );
+}
+
+/// Fix-round-1, Critical 1, exploit 2 ("widen by omission"): before this fix,
+/// omitting `dataapi_endpoint_id` from the body deserialized to `None` and
+/// was written straight through — turning an endpoint-scoped alert into a
+/// workspace-wide one (this codebase's own definition of `NULL` here), with
+/// no check that the caller could read at WORKSPACE scope. No malice
+/// required: any client that simply does not send the field does this.
+/// Proven live in review; this is the permanent regression test for it.
+#[tokio::test]
+async fn updating_a_dataapi_alert_cannot_be_widened_to_the_workspace_by_omitting_the_endpoint() {
+    let fx = fixture!();
+    let owner = mk_user(&fx.db, "z2_widen_owner").await;
+    let endpoint_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO dataapi.endpoints (workspace_id, name, path, sql, database_id, created_by) \
+         VALUES ($1,'z2 widen','/z2-widen','SELECT 1',$2,$3) RETURNING id",
+    )
+    .bind(fx.ws)
+    .bind(fx.database)
+    .bind(owner)
+    .fetch_one(&fx.db.pool)
+    .await
+    .expect("insert endpoint");
+    let schedule: Uuid = sqlx::query_scalar(
+        "INSERT INTO automation.schedules \
+           (workspace_id, type, name, crontab, next_run_at, validator_type, validator_config, \
+            dataapi_metric, dataapi_window_s, dataapi_endpoint_id) \
+         VALUES ($1,'dataapi_alert','z2-widen','* * * * *', \
+                 now() - interval '1 minute','operator',$2,'call_count',3600,$3) RETURNING id",
+    )
+    .bind(fx.ws)
+    .bind(serde_json::json!({"op": ">", "threshold": 0}))
+    .bind(endpoint_id)
+    .fetch_one(&fx.db.pool)
+    .await
+    .expect("insert endpoint-scoped dataapi_alert");
+    sqlx::query("INSERT INTO automation.schedule_owners (schedule_id, user_id) VALUES ($1,$2)")
+        .bind(schedule)
+        .bind(owner)
+        .execute(&fx.db.pool)
+        .await
+        .expect("insert owner");
+
+    // ONLY object-scoped read on THIS endpoint — enough to touch the row
+    // (proven by the positive-control test above) but not enough to ask for
+    // "every endpoint in the workspace".
+    let attacker = mk_user(&fx.db, "z2_widen_attacker").await;
+    grant_ws_role(&fx.db, attacker, fx.ws, "ws_editor").await; // alert:manage only
+    grant_object_scoped_data_api_read(&fx.db, attacker, endpoint_id).await;
+    let attacker_tok = fx.token_for(attacker).await;
+
+    // `minimal_update_body()`, not `_with_endpoint` — the body under test
+    // OMITS `dataapi_endpoint_id` entirely.
+    let (status, body) = req_raw(
+        &fx,
+        &attacker_tok,
+        "PUT",
+        &format!("/ws/{}/alerts/{schedule}", fx.slug),
+        Some(minimal_update_body()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "omitting dataapi_endpoint_id must not silently widen to the whole workspace: {body}"
+    );
+
+    let still_scoped: Option<Uuid> =
+        sqlx::query_scalar("SELECT dataapi_endpoint_id FROM automation.schedules WHERE id = $1")
+            .bind(schedule)
+            .fetch_one(&fx.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        still_scoped,
+        Some(endpoint_id),
+        "a refused widen must not have nulled out the stored endpoint"
+    );
+}
+
+/// A well-formed `dataapi_alert` create body — workspace-scoped
+/// (`dataapi_endpoint_id` omitted).
+fn dataapi_alert_json(name: &str) -> String {
+    serde_json::json!({
+        "type": "dataapi_alert",
+        "name": name,
+        "active": true,
+        "crontab": "*/5 * * * *",
+        "timezone": "UTC",
+        "validator_type": "operator",
+        "validator_config": {"op": ">", "threshold": 0},
+        "dataapi_metric": "call_count",
+        "dataapi_window_s": 300,
+    })
+    .to_string()
+}
+
+/// The hand-off from Task 4: `create()` could not gate `dataapi_alert`
+/// because `CreateSchedule`/`ScheduleType` could not express one. Task 5 just
+/// gave them that ability, which turns the comment `create()` carried
+/// ("nothing this handler can write today names an endpoint") into a hole
+/// unless the same `require_dataapi_endpoint_read` call `update` already uses
+/// is wired in at create time too — this is that test.
+///
+/// `fx.editor_tok` (`ws_editor`) holds `alert:manage` but, unlike `ws_admin`,
+/// was never granted `data_api_endpoint:read` (migration 0122 stops at
+/// `ws_admin` on purpose). An admin alone would pass both checks and prove
+/// nothing, which is why the FIRST assertion is the one that carries the
+/// test.
+#[tokio::test]
+async fn creating_a_dataapi_alert_needs_data_api_endpoint_read() {
+    let fx = fixture!();
+
+    // `ws_editor`: `alert:manage`, no `data_api_endpoint:read`. Refused
+    // before a row is ever written.
+    let (status, body) = req_raw(
+        &fx,
+        &fx.editor_tok,
+        "POST",
+        &format!("/ws/{}/alerts", fx.slug),
+        Some(dataapi_alert_json("z2-create-authz-denied")),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "alert:manage without data_api_endpoint:read must be refused at create time: {body}"
+    );
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM automation.schedules WHERE workspace_id = $1 AND name = $2",
+    )
+    .bind(fx.ws)
+    .bind("z2-create-authz-denied")
+    .fetch_one(&fx.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        count, 0,
+        "a refused create must never write a row, not even one the caller cannot see"
+    );
+
+    // `ws_admin`: the same `alert:manage`, PLUS workspace-level
+    // `data_api_endpoint:read` — gets past this gate AND all the way to a
+    // real, well-formed row: this also proves the Task 5 write path
+    // (`NewSchedule`'s four new fields, threaded through `create`/`update`'s
+    // INSERT/UPDATE) actually persists a `dataapi_alert`, not merely that the
+    // gate lets the request through.
+    let admin = admin_member(&fx.db, fx.ws).await;
+    let admin_tok = fx.token_for(admin).await;
+    let (status, body) = req(
+        &fx,
+        &admin_tok,
+        "POST",
+        &format!("/ws/{}/alerts", fx.slug),
+        Some(dataapi_alert_json("z2-create-authz-allowed")),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "data_api_endpoint:read must get the caller past the gate and all the way to 200: {body}"
+    );
+    assert_eq!(body["type"], "dataapi_alert");
+    assert_eq!(body["dataapi_metric"], "call_count");
+    assert_eq!(body["dataapi_window_s"], 300);
+    assert!(
+        body["dataapi_endpoint_id"].is_null(),
+        "an omitted dataapi_endpoint_id is workspace-scoped, not an error: {body}"
+    );
+}
+
+/// The object-scoped half of the create-time gate: a `dataapi_alert` create
+/// body naming ONE `dataapi_endpoint_id` is checked against OBJECT-scoped
+/// `data_api_endpoint:read` on THAT endpoint, not merely workspace-level
+/// read — the same distinction `updating_an_endpoint_scoped_dataapi_alert_
+/// needs_data_api_endpoint_read` proves for the update path.
+#[tokio::test]
+async fn creating_an_endpoint_scoped_dataapi_alert_needs_data_api_endpoint_read() {
+    let fx = fixture!();
+    let owner = mk_user(&fx.db, "z2_create_object_owner").await;
+    let endpoint_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO dataapi.endpoints (workspace_id, name, path, sql, database_id, created_by) \
+         VALUES ($1,'z2 create authz test','/z2-create-authz-test','SELECT 1',$2,$3) \
+         RETURNING id",
+    )
+    .bind(fx.ws)
+    .bind(fx.database)
+    .bind(owner)
+    .fetch_one(&fx.db.pool)
+    .await
+    .expect("insert dataapi.endpoints row");
+
+    let mut body: serde_json::Value =
+        serde_json::from_str(&dataapi_alert_json("z2-create-authz-object")).unwrap();
+    body["dataapi_endpoint_id"] = serde_json::Value::String(endpoint_id.to_string());
+    let body = body.to_string();
+
+    // `ws_editor`: `alert:manage`, no `data_api_endpoint:read` on this
+    // endpoint (nor at workspace level).
+    let (status, resp) = req_raw(
+        &fx,
+        &fx.editor_tok,
+        "POST",
+        &format!("/ws/{}/alerts", fx.slug),
+        Some(body.clone()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "alert:manage without data_api_endpoint:read on THIS endpoint must be refused: {resp}"
+    );
+
+    // An OBJECT-scoped grant on THIS endpoint, and nothing at workspace
+    // level, still gets past the gate — the positive control that pins
+    // `OBJECT_KIND` the same way the update test's does.
+    let object_reader = mk_user(&fx.db, "z2_create_object_reader").await;
+    grant_ws_role(&fx.db, object_reader, fx.ws, "ws_editor").await;
+    grant_object_scoped_data_api_read(&fx.db, object_reader, endpoint_id).await;
+    let object_reader_tok = fx.token_for(object_reader).await;
+    let (status, resp) = req(
+        &fx,
+        &object_reader_tok,
+        "POST",
+        &format!("/ws/{}/alerts", fx.slug),
+        Some(body),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an object-scoped data_api_endpoint:read grant on THIS endpoint must be enough: {resp}"
+    );
+    assert_eq!(resp["dataapi_endpoint_id"], endpoint_id.to_string());
+}
+
+/// A second, unrelated workspace holding one real `dataapi.endpoints` row —
+/// for the two fix-round-2 tests below, which both need a REAL endpoint
+/// outside `fx.ws` entirely (not merely one `fx`'s editor happens not to be
+/// able to read, which `other_slug` already covers elsewhere in this file).
+async fn a_foreign_workspace_endpoint(fx: &Fx, tag: &str) -> Uuid {
+    let owner = mk_user(&fx.db, &format!("z2_{tag}_owner")).await;
+    let ws = mk_ws(
+        &fx.db,
+        owner,
+        &format!("z2-{tag}-{}", Uuid::new_v4().simple()),
+    )
+    .await;
+    let database: Uuid = sqlx::query_scalar(
+        "INSERT INTO query.databases (name, engine, host, port, workspace_id) \
+         VALUES ($1,'trino','localhost',8080,$2) RETURNING id",
+    )
+    .bind(format!("db-{}", Uuid::new_v4().simple()))
+    .bind(ws)
+    .fetch_one(&fx.db.pool)
+    .await
+    .unwrap();
+    sqlx::query_scalar(
+        "INSERT INTO dataapi.endpoints (workspace_id, name, path, sql, database_id, created_by) \
+         VALUES ($1,$2,$3,'SELECT 1',$4,$5) RETURNING id",
+    )
+    .bind(ws)
+    .bind(format!("z2 {tag}"))
+    .bind(format!("/z2-{tag}"))
+    .bind(database)
+    .bind(owner)
+    .fetch_one(&fx.db.pool)
+    .await
+    .unwrap()
+}
+
+/// Fix-round-2, Critical 2: `dataapi_endpoint_id` naming a REAL endpoint that
+/// belongs to a DIFFERENT workspace must be refused — the FK
+/// (`schedules_dataapi_endpoint_id_fkey`) checks existence only, and the PDP
+/// object check was told the CALLER's workspace, never the endpoint's, so a
+/// workspace-cascaded grant (`ws_admin`) authorized ANY uuid before this fix.
+///
+/// Both corners the review asked for, on ONE caller: a REAL foreign endpoint
+/// and a FICTIONAL uuid must refuse IDENTICALLY — same status, same body — or
+/// the response is an oracle for "does this uuid name a live endpoint
+/// anywhere in the deployment". The caller is `ws_admin` of `fx.ws`, not
+/// `ws_editor`: an admin's workspace-cascaded `data_api_endpoint:read` is
+/// EXACTLY the grant that used to satisfy the PDP for any uuid, so this is
+/// the caller that actually exercises the new check — an editor with no
+/// grant at all would be refused by the OLD code too and would prove
+/// nothing.
+#[tokio::test]
+async fn creating_a_dataapi_alert_naming_a_foreign_or_nonexistent_endpoint_is_refused_identically()
+{
+    let fx = fixture!();
+    let admin = admin_member(&fx.db, fx.ws).await;
+    let admin_tok = fx.token_for(admin).await;
+    let foreign_endpoint = a_foreign_workspace_endpoint(&fx, "create-foreign").await;
+
+    let mut foreign_body: serde_json::Value =
+        serde_json::from_str(&dataapi_alert_json("z2-create-foreign")).unwrap();
+    foreign_body["dataapi_endpoint_id"] = serde_json::Value::String(foreign_endpoint.to_string());
+    let (foreign_status, foreign_resp) = req_raw(
+        &fx,
+        &admin_tok,
+        "POST",
+        &format!("/ws/{}/alerts", fx.slug),
+        Some(foreign_body.to_string()),
+    )
+    .await;
+    assert_eq!(
+        foreign_status,
+        StatusCode::NOT_FOUND,
+        "a workspace-cascaded grant must not authorize a REAL endpoint in a \
+         different workspace: {foreign_resp}"
+    );
+
+    let mut nonexistent_body: serde_json::Value =
+        serde_json::from_str(&dataapi_alert_json("z2-create-nonexistent")).unwrap();
+    nonexistent_body["dataapi_endpoint_id"] = serde_json::Value::String(Uuid::new_v4().to_string());
+    let (nonexistent_status, nonexistent_resp) = req_raw(
+        &fx,
+        &admin_tok,
+        "POST",
+        &format!("/ws/{}/alerts", fx.slug),
+        Some(nonexistent_body.to_string()),
+    )
+    .await;
+    assert_eq!(
+        nonexistent_status,
+        StatusCode::NOT_FOUND,
+        "{nonexistent_resp}"
+    );
+
+    assert_eq!(
+        foreign_status, nonexistent_status,
+        "a foreign endpoint and a nonexistent one must refuse with the SAME status"
+    );
+    assert_eq!(
+        foreign_resp, nonexistent_resp,
+        "and the SAME body, or the response is still an oracle for existence: \
+         foreign={foreign_resp}, nonexistent={nonexistent_resp}"
+    );
+
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM automation.schedules \
+         WHERE workspace_id = $1 AND name LIKE 'z2-create-%'",
+    )
+    .bind(fx.ws)
+    .fetch_one(&fx.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 0, "a refused create must never write a row");
+}
+
+/// The update-path half of Critical 2's fix: repointing an EXISTING
+/// `dataapi_alert` at a foreign or nonexistent endpoint must be refused the
+/// same way create is, and the two must still be indistinguishable from each
+/// other. Same `ws_admin` reasoning as the create test above — the whole
+/// point is that this caller's grant used to be enough.
+#[tokio::test]
+async fn updating_a_dataapi_alert_to_a_foreign_or_nonexistent_endpoint_is_refused_identically() {
+    let fx = fixture!();
+    let owner = mk_user(&fx.db, "z2_update_foreign_owner").await;
+    let id = insert_workspace_scoped_dataapi_alert(&fx.db, fx.ws, owner, "z2-update-foreign").await;
+    let admin = admin_member(&fx.db, fx.ws).await;
+    let admin_tok = fx.token_for(admin).await;
+    let foreign_endpoint = a_foreign_workspace_endpoint(&fx, "update-foreign").await;
+
+    let (foreign_status, foreign_resp) = req_raw(
+        &fx,
+        &admin_tok,
+        "PUT",
+        &format!("/ws/{}/alerts/{id}", fx.slug),
+        Some(minimal_update_body_with_endpoint(foreign_endpoint)),
+    )
+    .await;
+    assert_eq!(
+        foreign_status,
+        StatusCode::NOT_FOUND,
+        "repointing at a REAL foreign endpoint must be refused: {foreign_resp}"
+    );
+
+    let (nonexistent_status, nonexistent_resp) = req_raw(
+        &fx,
+        &admin_tok,
+        "PUT",
+        &format!("/ws/{}/alerts/{id}", fx.slug),
+        Some(minimal_update_body_with_endpoint(Uuid::new_v4())),
+    )
+    .await;
+    assert_eq!(
+        nonexistent_status,
+        StatusCode::NOT_FOUND,
+        "{nonexistent_resp}"
+    );
+
+    assert_eq!(
+        foreign_status, nonexistent_status,
+        "a foreign endpoint and a nonexistent one must refuse with the SAME status"
+    );
+    assert_eq!(
+        foreign_resp, nonexistent_resp,
+        "and the SAME body: foreign={foreign_resp}, nonexistent={nonexistent_resp}"
+    );
+
+    let still_workspace_scoped: Option<Uuid> =
+        sqlx::query_scalar("SELECT dataapi_endpoint_id FROM automation.schedules WHERE id = $1")
+            .bind(id)
+            .fetch_one(&fx.db.pool)
+            .await
+            .unwrap();
+    assert!(
+        still_workspace_scoped.is_none(),
+        "a refused repoint must not have moved the stored endpoint"
+    );
+}
+
+/// Reading a `dataapi_alert`'s RUN-DERIVED state needs `data_api_endpoint:read`
+/// too — Task 4 review, Finding 1. `alert:read`/`alert:manage` only ever said
+/// something about the SCHEDULE; `RunDto::value` (`runs`) and
+/// `ScheduleDetailDto::last_value` (`detail`) ARE the endpoint's measured
+/// metric, and `run_now` is worse than either: it forces a FRESH measurement
+/// before handing the result back, so a refusal has to land before the
+/// runner ever runs, not merely before the response is built. `list` cannot
+/// use the same all-or-nothing gate — a page mixes schedules of every kind —
+/// so it redacts `last_state`/`last_eval_at` per row instead of failing the
+/// whole request or hiding the row (ordinary alert-management visibility,
+/// name/owners/id, is untouched).
+///
+/// `detail`/`runs` never depended on `ScheduleType::parse` recognising
+/// `dataapi_alert` (`detail_dto`/`summary_dto` both fall back to `Alert` on an
+/// unparseable type rather than erroring, and the tick's own dispatch in
+/// `runner.rs` matches the raw `type` string), so the ALLOWED assertions below
+/// reach a real `200` both before and after Task 5 — unlike `update`'s tests,
+/// which used to land on an internal-error gap here and now land on a real
+/// 400 from `to_new`'s validation instead.
+#[tokio::test]
+async fn reading_a_dataapi_alerts_run_state_needs_data_api_endpoint_read() {
+    let fx = fixture!();
+    let owner = mk_user(&fx.db, "z2_authz_read_owner").await;
+    let id = insert_workspace_scoped_dataapi_alert(&fx.db, fx.ws, owner, "z2-authz-read").await;
+    // A schedule that has already run once, so `list`'s redaction has
+    // something real to redact — an untouched row's `last_state` is NULL
+    // regardless of the gate, which would make that assertion pass for the
+    // wrong reason.
+    sqlx::query(
+        "UPDATE automation.schedules SET last_state = 'success', last_eval_at = now() \
+         WHERE id = $1",
+    )
+    .bind(id)
+    .execute(&fx.db.pool)
+    .await
+    .unwrap();
+    let runs_before: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM automation.schedule_runs WHERE schedule_id = $1")
+            .bind(id)
+            .fetch_one(&fx.db.pool)
+            .await
+            .unwrap();
+
+    // `ws_editor`: `alert:read`/`alert:manage`, no `data_api_endpoint:read`.
+    for (method, path) in [
+        ("GET", format!("/ws/{}/alerts/{id}", fx.slug)),
+        ("GET", format!("/ws/{}/alerts/{id}/runs", fx.slug)),
+    ] {
+        let (status, body) = req_raw(&fx, &fx.editor_tok, method, &path, None).await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "{method} {path} must be refused: {body}"
+        );
+    }
+    let (status, body) = req_raw(
+        &fx,
+        &fx.editor_tok,
+        "POST",
+        &format!("/ws/{}/alerts/{id}/run", fx.slug),
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "run_now must be refused: {body}"
+    );
+    let runs_after_denied: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM automation.schedule_runs WHERE schedule_id = $1")
+            .bind(id)
+            .fetch_one(&fx.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        runs_after_denied, runs_before,
+        "a refused run_now must never re-measure — no run-log row should be written"
+    );
+
+    // `list`: the row is still visible (`alert:read` covers that), but its
+    // run-derived state is blanked, not the request failing.
+    let (status, list_body) = req(
+        &fx,
+        &fx.editor_tok,
+        "GET",
+        &format!("/ws/{}/alerts", fx.slug),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let row = list_body
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == id.to_string())
+        .expect("the schedule is still listed");
+    assert!(
+        row["last_state"].is_null() && row["last_eval_at"].is_null(),
+        "list must redact last_state/last_eval_at for an endpoint the caller cannot read: {row}"
+    );
+
+    // `ws_admin`: the same `alert:manage`, PLUS `data_api_endpoint:read`.
+    let admin = admin_member(&fx.db, fx.ws).await;
+    let admin_tok = fx.token_for(admin).await;
+    for (method, path) in [
+        ("GET", format!("/ws/{}/alerts/{id}", fx.slug)),
+        ("GET", format!("/ws/{}/alerts/{id}/runs", fx.slug)),
+    ] {
+        let (status, body) = req_raw(&fx, &admin_tok, method, &path, None).await;
+        assert_ne!(
+            status,
+            StatusCode::FORBIDDEN,
+            "{method} {path} must NOT be refused for a caller who can read the endpoint: {body}"
+        );
+    }
+    let (status, admin_list_body) = req(
+        &fx,
+        &admin_tok,
+        "GET",
+        &format!("/ws/{}/alerts", fx.slug),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let admin_row = admin_list_body
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == id.to_string())
+        .expect("the schedule is still listed");
+    assert_eq!(
+        admin_row["last_state"], "success",
+        "an admin who CAN read the endpoint must see the real last_state: {admin_row}"
+    );
+    let (status, body) = req_raw(
+        &fx,
+        &admin_tok,
+        "POST",
+        &format!("/ws/{}/alerts/{id}/run", fx.slug),
+        None,
+    )
+    .await;
+    assert_ne!(
+        status,
+        StatusCode::FORBIDDEN,
+        "run_now must NOT be refused for a caller who can read the endpoint: {body}"
+    );
+}
+
+/// `set_active` leaks exactly what `list` redacts (Task 4 review, Finding 4).
+/// `PUT .../active` requires only `alert:manage` and returns
+/// `summary_dto(&row, ...)` built straight from the `UPDATE ... RETURNING`
+/// row — `last_state`/`last_eval_at`, unredacted, would tell a caller who
+/// cannot read the endpoint whether it last fired and when, AND the same
+/// request re-enables the schedule, so it is poll-able as an oracle rather
+/// than a one-off leak.
+///
+/// The other MANAGE-gated mutations were checked too, not assumed clean:
+/// `trash`/`restore`/`set_folder`/`remove` all return `egret_core::Ack`
+/// (`{"ok":true}`) or nothing — no `summary_dto`, no `RETURNING` row reaches
+/// the response, so there is no field for this leak to ride on and nothing
+/// to redact.
+#[tokio::test]
+async fn toggling_active_on_a_dataapi_alert_redacts_run_state_for_a_caller_who_cannot_read_it() {
+    let fx = fixture!();
+    let owner = mk_user(&fx.db, "z2_authz_active_owner").await;
+    let id = insert_workspace_scoped_dataapi_alert(&fx.db, fx.ws, owner, "z2-authz-active").await;
+    // A schedule that has already run once, so redaction has something real
+    // to redact — an untouched row's `last_state` is NULL regardless of the
+    // gate, which would pass for the wrong reason.
+    sqlx::query(
+        "UPDATE automation.schedules SET last_state = 'success', last_eval_at = now() \
+         WHERE id = $1",
+    )
+    .bind(id)
+    .execute(&fx.db.pool)
+    .await
+    .unwrap();
+
+    // `ws_editor`: `alert:manage`, no `data_api_endpoint:read`. The toggle
+    // itself must still work (that is `alert:manage`'s job) — only the
+    // run-derived fields in the RESPONSE are at stake.
+    let (status, body) = req(
+        &fx,
+        &fx.editor_tok,
+        "PUT",
+        &format!("/ws/{}/alerts/{id}/active", fx.slug),
+        Some(serde_json::json!({"active": false}).to_string()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the toggle itself must succeed: {body}"
+    );
+    assert_eq!(
+        body["active"], false,
+        "the field being toggled must still work: {body}"
+    );
+    assert!(
+        body["last_state"].is_null() && body["last_eval_at"].is_null(),
+        "set_active must redact last_state/last_eval_at for an endpoint the caller cannot read: {body}"
+    );
+
+    // `ws_admin`: the same `alert:manage`, PLUS `data_api_endpoint:read` —
+    // sees the real value.
+    let admin = admin_member(&fx.db, fx.ws).await;
+    let admin_tok = fx.token_for(admin).await;
+    let (status, body) = req(
+        &fx,
+        &admin_tok,
+        "PUT",
+        &format!("/ws/{}/alerts/{id}/active", fx.slug),
+        Some(serde_json::json!({"active": true}).to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["last_state"], "success",
+        "an admin who CAN read the endpoint must see the real last_state: {body}"
+    );
 }

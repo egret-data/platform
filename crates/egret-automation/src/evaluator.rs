@@ -46,6 +46,13 @@ pub enum EvalError {
     Validator(#[from] ValidatorError),
     #[error("schedule is not runnable: {0}")]
     NotRunnable(&'static str),
+    /// A `dataapi_alert`'s owner lost `data_api_endpoint:read` on the
+    /// endpoint it watches (or, unscoped, on the workspace) after the
+    /// schedule was saved (Task 4, Z2). The `dataapi_alert` analogue of an
+    /// engine alert's owner losing table access — recorded as `error`, never
+    /// silently kept running, and never falls back to a service identity.
+    #[error("owner can no longer read the watched Data API endpoint")]
+    EndpointAccessRevoked,
     /// The renderer (`egret-renderer`) refused or could not be reached. Its
     /// own message rides through verbatim — it is already redacted of the
     /// render token (`renderer/server.js`'s `safeLocation`) before it ever

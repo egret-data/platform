@@ -13,13 +13,19 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// What a schedule does: evaluate a query (`alert`) or deliver a rendering of a
-/// saved object (`report`).
+/// What a schedule does: evaluate a query (`alert`), deliver a rendering of a
+/// saved object (`report`), or watch a Data API endpoint's traffic
+/// (`dataapi_alert`, migration 0128).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ScheduleType {
     Alert,
     Report,
+    /// `#[serde(rename_all = "lowercase")]` would spell this "dataapialert" —
+    /// no underscore — so it is overridden explicitly to match the stored
+    /// vocabulary (`schedule_type_valid`, migration 0128).
+    #[serde(rename = "dataapi_alert")]
+    DataapiAlert,
 }
 
 impl ScheduleType {
@@ -30,6 +36,7 @@ impl ScheduleType {
         match self {
             ScheduleType::Alert => "alert",
             ScheduleType::Report => "report",
+            ScheduleType::DataapiAlert => "dataapi_alert",
         }
     }
 
@@ -37,6 +44,58 @@ impl ScheduleType {
         match s {
             "alert" => Some(ScheduleType::Alert),
             "report" => Some(ScheduleType::Report),
+            "dataapi_alert" => Some(ScheduleType::DataapiAlert),
+            _ => None,
+        }
+    }
+}
+
+/// The Data API metric a `dataapi_alert` watches — the closed vocabulary of
+/// migration 0128's `schedule_dataapi_metric_valid` CHECK.
+///
+/// A typed enum here, unlike the raw `&str` `egret-automation::dataapi_metric`
+/// matches on internally: an unknown metric then fails to DESERIALIZE — a 4xx
+/// the JSON layer names before `to_new`'s validation ever runs — rather than
+/// reaching Rust as an unchecked string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub enum DataapiMetric {
+    #[serde(rename = "error_rate")]
+    ErrorRate,
+    #[serde(rename = "error_count")]
+    ErrorCount,
+    #[serde(rename = "p50_duration_ms")]
+    P50DurationMs,
+    #[serde(rename = "p95_duration_ms")]
+    P95DurationMs,
+    #[serde(rename = "call_count")]
+    CallCount,
+    #[serde(rename = "error_code_count")]
+    ErrorCodeCount,
+}
+
+impl DataapiMetric {
+    /// The stored spelling — also the exact string `dataapi_metric::measure`
+    /// matches on, so a rename here without a matching change there silently
+    /// stops an alert from ever firing.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DataapiMetric::ErrorRate => "error_rate",
+            DataapiMetric::ErrorCount => "error_count",
+            DataapiMetric::P50DurationMs => "p50_duration_ms",
+            DataapiMetric::P95DurationMs => "p95_duration_ms",
+            DataapiMetric::CallCount => "call_count",
+            DataapiMetric::ErrorCodeCount => "error_code_count",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "error_rate" => Some(DataapiMetric::ErrorRate),
+            "error_count" => Some(DataapiMetric::ErrorCount),
+            "p50_duration_ms" => Some(DataapiMetric::P50DurationMs),
+            "p95_duration_ms" => Some(DataapiMetric::P95DurationMs),
+            "call_count" => Some(DataapiMetric::CallCount),
+            "error_code_count" => Some(DataapiMetric::ErrorCodeCount),
             _ => None,
         }
     }
@@ -264,6 +323,13 @@ pub struct ScheduleDetailDto {
     pub custom_width: Option<i32>,
     pub custom_height: Option<i32>,
 
+    // Data API alert block (migration 0128). `dataapi_endpoint_id: None` is
+    // workspace-scoped — it watches every endpoint, not "no endpoint".
+    pub dataapi_endpoint_id: Option<String>,
+    pub dataapi_metric: Option<DataapiMetric>,
+    pub dataapi_error_code: Option<String>,
+    pub dataapi_window_s: Option<i32>,
+
     // Advanced.
     pub grace_period_s: i32,
     pub working_timeout_s: i32,
@@ -326,6 +392,19 @@ pub struct CreateSchedule {
     pub custom_width: Option<i32>,
     #[serde(default)]
     pub custom_height: Option<i32>,
+
+    /// `None` is workspace-scoped: watch every endpoint rather than one.
+    #[serde(default)]
+    pub dataapi_endpoint_id: Option<Uuid>,
+    #[serde(default)]
+    pub dataapi_metric: Option<DataapiMetric>,
+    /// Required, and only meaningful, when `dataapi_metric` is
+    /// `error_code_count` — `schedule_dataapi_error_code_needs_metric` /
+    /// `schedule_dataapi_metric_needs_error_code` (migration 0128).
+    #[serde(default)]
+    pub dataapi_error_code: Option<String>,
+    #[serde(default)]
+    pub dataapi_window_s: Option<i32>,
 
     #[serde(default)]
     pub grace_period_s: Option<i32>,
@@ -392,6 +471,19 @@ pub struct UpdateSchedule {
     #[serde(default)]
     pub custom_height: Option<i32>,
 
+    /// `None` is workspace-scoped: watch every endpoint rather than one.
+    #[serde(default)]
+    pub dataapi_endpoint_id: Option<Uuid>,
+    #[serde(default)]
+    pub dataapi_metric: Option<DataapiMetric>,
+    /// Required, and only meaningful, when `dataapi_metric` is
+    /// `error_code_count` — `schedule_dataapi_error_code_needs_metric` /
+    /// `schedule_dataapi_metric_needs_error_code` (migration 0128).
+    #[serde(default)]
+    pub dataapi_error_code: Option<String>,
+    #[serde(default)]
+    pub dataapi_window_s: Option<i32>,
+
     #[serde(default)]
     pub grace_period_s: Option<i32>,
     #[serde(default)]
@@ -452,11 +544,25 @@ mod tests {
     /// matches, so round-tripping every variant is worth the few lines.
     #[test]
     fn every_enum_round_trips_through_its_stored_spelling() {
-        for v in [ScheduleType::Alert, ScheduleType::Report] {
+        for v in [
+            ScheduleType::Alert,
+            ScheduleType::Report,
+            ScheduleType::DataapiAlert,
+        ] {
             assert_eq!(ScheduleType::parse(v.as_str()), Some(v));
         }
         for v in [ValidatorType::NotNull, ValidatorType::Operator] {
             assert_eq!(ValidatorType::parse(v.as_str()), Some(v));
+        }
+        for v in [
+            DataapiMetric::ErrorRate,
+            DataapiMetric::ErrorCount,
+            DataapiMetric::P50DurationMs,
+            DataapiMetric::P95DurationMs,
+            DataapiMetric::CallCount,
+            DataapiMetric::ErrorCodeCount,
+        ] {
+            assert_eq!(DataapiMetric::parse(v.as_str()), Some(v));
         }
         for v in [
             ReportFormat::Png,
@@ -497,6 +603,7 @@ mod tests {
         // the crate has been red on main ever since, invisible to per-crate
         // runs. The negative case now uses a spelling nothing will ever add.
         assert_eq!(RecipientKind::parse("carrier_pigeon"), None);
+        assert_eq!(DataapiMetric::parse("p99_duration_ms"), None);
     }
 
     /// The JSON spellings must match the stored spellings, or the wire and the
@@ -513,6 +620,22 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&ReportFormat::Png).unwrap(),
             "\"png\""
+        );
+        // The one spelling `#[serde(rename_all = "lowercase")]` would have
+        // gotten wrong (no underscore) — see the explicit `#[serde(rename)]`
+        // on the variant.
+        assert_eq!(
+            serde_json::to_string(&ScheduleType::DataapiAlert).unwrap(),
+            "\"dataapi_alert\""
+        );
+        // The digit makes this one worth pinning too: serde's automatic case
+        // conversion is not used for `DataapiMetric` at all (every variant
+        // carries an explicit `#[serde(rename)]`) precisely because
+        // "P50DurationMs" is not obviously "p50_duration_ms" under any
+        // mechanical rule.
+        assert_eq!(
+            serde_json::to_string(&DataapiMetric::P50DurationMs).unwrap(),
+            "\"p50_duration_ms\""
         );
     }
 }

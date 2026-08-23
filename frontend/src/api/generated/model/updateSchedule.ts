@@ -5,6 +5,7 @@
  * egret unified data portal HTTP API.
  * OpenAPI spec version: 0.1.0
  */
+import type { DataapiMetric } from './dataapiMetric';
 import type { RecipientInput } from './recipientInput';
 import type { ReportFormat } from './reportFormat';
 import type { TargetInput } from './targetInput';
@@ -36,6 +37,21 @@ export interface UpdateSchedule {
   custom_width?: number | null;
   /** @nullable */
   custom_height?: number | null;
+  /**
+     * `None` is workspace-scoped: watch every endpoint rather than one.
+     * @nullable
+     */
+  dataapi_endpoint_id?: string | null;
+  dataapi_metric?: null | DataapiMetric;
+  /**
+     * Required, and only meaningful, when `dataapi_metric` is
+     * `error_code_count` — `schedule_dataapi_error_code_needs_metric` /
+     * `schedule_dataapi_metric_needs_error_code` (migration 0128).
+     * @nullable
+     */
+  dataapi_error_code?: string | null;
+  /** @nullable */
+  dataapi_window_s?: number | null;
   /** @nullable */
   grace_period_s?: number | null;
   /** @nullable */

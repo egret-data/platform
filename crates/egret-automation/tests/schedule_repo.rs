@@ -95,6 +95,10 @@ fn alert(f: &Fixture, name: &str) -> NewSchedule {
         report_format: None,
         custom_width: None,
         custom_height: None,
+        dataapi_endpoint_id: None,
+        dataapi_metric: None,
+        dataapi_error_code: None,
+        dataapi_window_s: None,
         grace_period_s: 14400,
         working_timeout_s: 3600,
         log_retention_days: 90,
@@ -108,6 +112,43 @@ fn alert(f: &Fixture, name: &str) -> NewSchedule {
             "email".into(),
             serde_json::json!({"addresses": ["on-call@t.local"]}),
         )],
+    }
+}
+
+/// A valid `dataapi_alert`, the minimum that satisfies
+/// `schedule_dataapi_needs_source` — workspace-scoped
+/// (`dataapi_endpoint_id: None`).
+fn dataapi_alert(f: &Fixture, name: &str) -> NewSchedule {
+    NewSchedule {
+        r#type: "dataapi_alert".into(),
+        name: name.into(),
+        description: String::new(),
+        active: true,
+        crontab: "*/5 * * * *".into(),
+        timezone: "UTC".into(),
+        database_id: None,
+        sql: None,
+        validator_type: Some("operator".into()),
+        validator_config: serde_json::json!({"op": ">", "threshold": 0}),
+        chart_id: None,
+        dashboard_id: None,
+        report_format: None,
+        custom_width: None,
+        custom_height: None,
+        dataapi_endpoint_id: None,
+        dataapi_metric: Some("call_count".into()),
+        dataapi_error_code: None,
+        dataapi_window_s: Some(300),
+        grace_period_s: 14400,
+        working_timeout_s: 3600,
+        log_retention_days: 90,
+        email_subject: None,
+        message: None,
+        message_footer: None,
+        skip_if_empty: false,
+        targets: vec![],
+        owners: vec![f.user],
+        recipients: vec![],
     }
 }
 
@@ -348,6 +389,79 @@ async fn update_recomputes_next_run_at_when_the_crontab_changes() {
     );
 }
 
+/// Fix-round-1, Important 2: nothing before this test ever bound the four new
+/// `dataapi_*` columns to anything but `NULL` — `dataapi_alert()`'s create
+/// path binds real values, but no UPDATE test touched them at all, so a
+/// swapped `$18`-`$21` bind (e.g. `dataapi_metric`/`dataapi_error_code`
+/// transposed) would have been invisible. This uses four DISTINCT,
+/// order-sensitive values on the UPDATE path specifically, and reads every
+/// one back from Postgres by column NAME (`ScheduleRepo::get`'s `SELECT
+/// {COLS}` + `sqlx::FromRow`) — a transposed bind would put the wrong VALUE
+/// in the right-named column, which this test would catch; only a
+/// same-shaped, same-adjacent transposition of two `Option<String>` columns
+/// could hide from it, which is exactly why `dataapi_metric` and
+/// `dataapi_error_code` (the two adjacent, same-typed columns) are given
+/// values that could not be confused for one another if swapped.
+#[tokio::test]
+async fn updating_a_dataapi_alert_round_trips_all_four_new_fields() {
+    let f = fixture!();
+    let made = f
+        .repo
+        .create(f.ws, &dataapi_alert(&f, "traffic"), None)
+        .await
+        .unwrap();
+    assert!(
+        made.dataapi_endpoint_id.is_none(),
+        "starts workspace-scoped"
+    );
+    assert_eq!(made.dataapi_metric.as_deref(), Some("call_count"));
+    assert!(made.dataapi_error_code.is_none());
+    assert_eq!(made.dataapi_window_s, Some(300));
+
+    // A real endpoint to repoint to — proves the FK-backed column, not an
+    // opaque uuid nothing else references.
+    let endpoint_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO dataapi.endpoints (workspace_id, name, path, sql, database_id, created_by) \
+         VALUES ($1,'traffic endpoint','/traffic','SELECT 1',$2,$3) RETURNING id",
+    )
+    .bind(f.ws)
+    .bind(f.database)
+    .bind(f.user)
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap();
+
+    let mut changed = dataapi_alert(&f, "traffic");
+    changed.dataapi_endpoint_id = Some(endpoint_id);
+    changed.dataapi_metric = Some("error_code_count".into());
+    changed.dataapi_error_code = Some("QUERY_TIMEOUT".into());
+    changed.dataapi_window_s = Some(900);
+
+    f.repo
+        .update(f.ws, made.id, &changed, None)
+        .await
+        .unwrap()
+        .expect("updated");
+
+    let got = f.repo.get(f.ws, made.id).await.unwrap().expect("present");
+    assert_eq!(
+        got.dataapi_endpoint_id,
+        Some(endpoint_id),
+        "the endpoint must be repointed, not left in another column's slot"
+    );
+    assert_eq!(
+        got.dataapi_metric.as_deref(),
+        Some("error_code_count"),
+        "must not have landed in dataapi_error_code's column instead"
+    );
+    assert_eq!(
+        got.dataapi_error_code.as_deref(),
+        Some("QUERY_TIMEOUT"),
+        "must not have landed in dataapi_metric's column instead"
+    );
+    assert_eq!(got.dataapi_window_s, Some(900));
+}
+
 #[tokio::test]
 async fn owners_for_batches_several_schedules_in_one_call() {
     // The list page renders an owner column; a query per row is what this
@@ -464,6 +578,29 @@ async fn a_create_that_violates_a_check_constraint_leaves_nothing_behind() {
         .await
         .unwrap()
         .is_empty());
+}
+
+/// Fix-round-1, Minor 4: `dataapi_endpoint_id` naming a uuid that is not a
+/// real `dataapi.endpoints` row hits `schedules_dataapi_endpoint_id_fkey`
+/// (a plain FK, not one of the four CHECKs `to_new` mirrors) — before
+/// `AutomationError::from_db` learned this constraint's name, that surfaced
+/// as an opaque 500 rather than a 400 naming the field.
+#[tokio::test]
+async fn a_nonexistent_dataapi_endpoint_id_is_a_400_not_a_500() {
+    let f = fixture!();
+    let mut broken = dataapi_alert(&f, "ghost endpoint");
+    broken.dataapi_endpoint_id = Some(Uuid::new_v4()); // no such row
+
+    let err = f.repo.create(f.ws, &broken, None).await.unwrap_err();
+    match err {
+        egret_automation::AutomationError::BadRequest(m) => {
+            assert!(
+                m.contains("dataapi_endpoint_id"),
+                "expected the message to name the field: {m}"
+            );
+        }
+        other => panic!("expected BadRequest naming dataapi_endpoint_id, got {other:?}"),
+    }
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────

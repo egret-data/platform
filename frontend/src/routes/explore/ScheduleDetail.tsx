@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
+  Activity,
   Bell,
   CalendarClock,
   FileBarChart,
@@ -63,15 +64,19 @@ export default function ScheduleDetail() {
 
   const { data: existing, isLoading, isError, error } = useSchedule(ws, isNew ? null : (id ?? null));
 
-  // A new schedule takes its type from the query (`?type=report`, which is what
-  // the list's own tab links to); an existing one is whatever it was saved as,
-  // since the type is immutable server-side.
+  // A new schedule takes its type from the query (`?type=report` /
+  // `?type=dataapi_alert`, which is what the list's own entry points link
+  // to); an existing one is whatever it was saved as, since the type is
+  // immutable server-side.
   const type: ScheduleType = isNew
     ? params.get("type") === "report"
       ? "report"
-      : "alert"
+      : params.get("type") === "dataapi_alert"
+        ? "dataapi_alert"
+        : "alert"
     : ((existing?.type as ScheduleType) ?? "alert");
   const isAlert = type === "alert";
+  const isDataapiAlert = type === "dataapi_alert";
 
   const prefillKind = params.get("kind");
   const prefill: { kind: "chart" | "dashboard"; object: string } | undefined =
@@ -106,9 +111,12 @@ export default function ScheduleDetail() {
   };
 
   const heading = isNew
-    ? `New ${type === "report" ? "report" : "alert"}`
+    ? `New ${type === "report" ? "report" : isDataapiAlert ? "Data API alert" : "alert"}`
     : (existing?.name ?? "…");
-  const Icon = isAlert ? Bell : FileBarChart;
+  // `Activity` — the same icon the sidebar's Data API → Activity item uses —
+  // rather than reusing the report icon for a type that has neither a report
+  // format nor a rendered attachment.
+  const Icon = isAlert ? Bell : isDataapiAlert ? Activity : FileBarChart;
 
   return (
     // `4xl`, not `6xl`: with the section nav now horizontal there is no column
@@ -150,7 +158,7 @@ export default function ScheduleDetail() {
             <DetailFact
               icon={Icon}
               label="Type"
-              value={isAlert ? "Alert" : "Report"}
+              value={isAlert ? "Alert" : isDataapiAlert ? "Data API alert" : "Report"}
               to={backHref}
             />
             <DetailFact
@@ -186,7 +194,7 @@ export default function ScheduleDetail() {
               return (
                 <TabsTrigger key={s.key} value={s.key}>
                   <SIcon className="h-4 w-4" />
-                  {s.label(isAlert)}
+                  {s.label(type)}
                 </TabsTrigger>
               );
             })}

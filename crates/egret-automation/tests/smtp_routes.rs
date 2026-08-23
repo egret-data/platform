@@ -128,6 +128,8 @@ async fn setup(pool: sqlx::PgPool) -> Fx {
                 timeout: std::time::Duration::from_secs(5),
             },
         }),
+        pdp: pdp.clone(),
+        dataapi_endpoints: Arc::new(egret_dataapi::EndpointStore::new(db.clone())),
         resolver: Arc::new(egret_automation::deliver::destination::SystemResolver),
         policy: egret_automation::deliver::destination::SsrfPolicy::default(),
         smtp: smtp.clone(),
@@ -179,6 +181,7 @@ async fn setup(pool: sqlx::PgPool) -> Fx {
         databases: databases.clone(),
         users: egret_auth::users::UserRepo::new(db.clone()),
         engine_minter: Arc::new(NoMinter),
+        dataapi_endpoints: Arc::new(egret_dataapi::EndpointStore::new(db.clone())),
         // Not exercised by this file's tests; wired for the struct to
         // construct at all.
         query: Arc::new(egret_automation::evaluator::EngineRunner {

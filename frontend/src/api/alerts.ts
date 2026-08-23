@@ -28,7 +28,7 @@ import type {
   UpdateSchedule,
 } from "./generated/model";
 
-export type ScheduleType = "alert" | "report";
+export type ScheduleType = "alert" | "report" | "dataapi_alert";
 export type RunState = "success" | "working" | "error" | "noop" | "grace";
 
 export type ScheduleSummary = ScheduleSummaryDto;

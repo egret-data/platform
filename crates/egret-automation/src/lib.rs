@@ -5,6 +5,7 @@
 //! live here too, beside the repo they claim rows from.
 
 pub mod cron;
+pub mod dataapi_metric;
 pub mod deliver;
 mod error;
 pub mod evaluator;

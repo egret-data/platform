@@ -1461,6 +1461,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         databases: databases.clone(),
         users: UserRepo::new(db.clone()),
         minter: engine_minter.clone(),
+        pdp: pdp.clone(),
+        dataapi_endpoints: std::sync::Arc::new(egret_dataapi::EndpointStore::new(db.clone())),
         query: std::sync::Arc::new(egret_automation::evaluator::EngineRunner {
             databases: databases.clone(),
             factory: std::sync::Arc::new(
@@ -1523,6 +1525,12 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         databases: databases.clone(),
         users: UserRepo::new(db.clone()),
         engine_minter: engine_minter.clone(),
+        // Fix-round-2 (Task 5): a fresh `EndpointStore` rather than reusing
+        // `dataapi.endpoints` below — it is `Clone` and holds only `db`, so a
+        // second instance is free, and building it here keeps this block
+        // constructible without caring whether `dataapi` (built further down
+        // this function) exists yet.
+        dataapi_endpoints: std::sync::Arc::new(egret_dataapi::EndpointStore::new(db.clone())),
         // Same `EngineRunner` shape `automation_runner` above uses for alert
         // evaluation, but with the chart-run ceiling (`egret_bi`'s
         // `MAX_CHART_ROWS`/30s) rather than the alert evaluator's

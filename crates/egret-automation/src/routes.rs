@@ -83,6 +83,14 @@ pub struct AutomationState {
     pub databases: egret_query::DatabaseRepo,
     pub users: egret_auth::users::UserRepo,
     pub engine_minter: std::sync::Arc<dyn egret_analytics_api::engine_token::EngineTokenMinter>,
+    /// The Data API seam as a PORT (fix-round-2), so this crate never names
+    /// `egret-dataapi` — same shape `query`/`engine_minter` already use for
+    /// their own seams. `require_dataapi_endpoint_read` uses this to resolve
+    /// an endpoint id's ACTUAL workspace before ever asking the PDP about it;
+    /// without it, a foreign or fictional id was authorized by any
+    /// workspace-cascaded grant, because nothing checked which workspace the
+    /// id actually belonged to.
+    pub dataapi_endpoints: std::sync::Arc<dyn egret_dataapi_api::DataApiEndpointPort>,
     /// The same execution seam `AutomationRunner` (the tick engine) uses —
     /// `crate::evaluator::QueryRunner` — so a rendered chart card runs through
     /// code a test can fake an engine behind, exactly like `tick_end_to_end.rs`
@@ -204,6 +212,7 @@ pub fn automation_router() -> Router<AutomationState> {
         egret_automation_api::ScheduleType,
         egret_automation_api::ValidatorType,
         egret_automation_api::ReportFormat,
+        egret_automation_api::DataapiMetric,
         crate::deliver::smtp_config::SmtpConfigDto,
         crate::deliver::smtp_config::SmtpConfigBody,
         crate::deliver::smtp_config::TlsMode,
@@ -251,7 +260,7 @@ async fn list(
     egret_core::authz::require(&*st.pdp, &ctx, READ)
         .await
         .map_err(AutomationApiError::from)?;
-    let rows = st
+    let mut rows = st
         .schedules
         .list(
             ctx.workspace_id.0,
@@ -274,6 +283,42 @@ async fn list(
     let can_manage = egret_core::authz::require(&*st.pdp, &ctx, MANAGE)
         .await
         .is_ok();
+
+    // `ScheduleSummaryDto::last_state`/`last_eval_at` say whether a
+    // `dataapi_alert`'s threshold fired — a weaker signal than `runs`'/
+    // `detail`'s raw `value`, but still information ABOUT an endpoint the
+    // caller may not be allowed to read (Task 4 review, Finding 1). `alert:read`
+    // is not that permission, so those two fields are blanked per row rather
+    // than the row (or the whole list) being hidden — the schedule's own
+    // existence/name/owners are ordinary alert-management visibility,
+    // untouched by this gate.
+    //
+    // Checked per DISTINCT `dataapi_endpoint_id` (`None` is the
+    // workspace-wide bucket) and memoized: an object-scoped grant can differ
+    // endpoint to endpoint, but every row naming the SAME endpoint gets the
+    // SAME answer, so a page naming k distinct endpoints costs k PDP calls,
+    // not one per row.
+    let mut endpoint_read: std::collections::HashMap<Option<Uuid>, bool> =
+        std::collections::HashMap::new();
+    for (s, _) in rows.iter_mut() {
+        if s.r#type != "dataapi_alert" {
+            continue;
+        }
+        let key = s.dataapi_endpoint_id;
+        let allowed = match endpoint_read.get(&key) {
+            Some(a) => *a,
+            None => {
+                let a = require_dataapi_endpoint_read(&st, &ctx, key).await.is_ok();
+                endpoint_read.insert(key, a);
+                a
+            }
+        };
+        if !allowed {
+            s.last_state = None;
+            s.last_eval_at = None;
+        }
+    }
+
     Ok(Json(
         rows.iter()
             .map(|(s, bookmarked)| summary_dto(s, &owners, can_manage, *bookmarked))
@@ -421,6 +466,76 @@ async fn validate_owners_in_workspace(
     Ok(())
 }
 
+/// Enforce that a `dataapi_alert` names (or, when unscoped, watches) only an
+/// endpoint the caller can already read (Task 4, Z2).
+///
+/// `endpoint_id: None` is a WORKSPACE-scoped `dataapi_alert` — it watches
+/// every endpoint in the workspace, so the bar is workspace-level
+/// `data_api_endpoint:read` rather than an object-scoped grant on one row.
+/// `Some(id)` is object-scoped, mirroring `egret-dataapi`'s own `EP_READ`
+/// gate on a single endpoint (`egret-dataapi/src/routes.rs`).
+async fn require_dataapi_endpoint_read(
+    st: &AutomationState,
+    ctx: &egret_core::WorkspaceContext,
+    endpoint_id: Option<Uuid>,
+) -> Result<(), AutomationApiError> {
+    match endpoint_id {
+        Some(id) => {
+            // Fix-round-2, Critical 2: `dataapi_endpoint_id` is a plain FK —
+            // existence only, no workspace predicate (migration 0128) — and
+            // `ObjectRef.workspace_id` below is the CALLER's workspace, never
+            // the object's: Cedar resolves `resource in workspace` from that
+            // stamped ancestry and never loads the row, so a
+            // workspace-cascaded grant (e.g. `ws_admin`) authorized ANY uuid,
+            // foreign or fictional, before this check existed. Resolved
+            // through the `DataApiEndpointPort` seam — mirrors
+            // `egret-dataapi::EndpointStore::scoped`'s own "confirm id names
+            // a row in workspace, or NotFound" precedent — rather than a raw
+            // SQL query against `dataapi.endpoints` from this crate, which
+            // this task's own brief says not to invent.
+            //
+            // A mismatch is refused as `NotFound` (404), not `Forbidden`
+            // (403) — the same status `egret-dataapi` itself answers a
+            // foreign id with (`EndpointStore::get`/`scoped`, both
+            // `Error::NotFound`). A 403 here would be an ORACLE: it would
+            // tell this workspace that the uuid names a LIVE endpoint
+            // somewhere, just not here. `None` (no such row at all) takes the
+            // identical path below, so the two cases are indistinguishable
+            // from the response — which is the whole point.
+            let owner_ws = st
+                .dataapi_endpoints
+                .workspace_of(id)
+                .await
+                .map_err(AutomationApiError::from)?;
+            if owner_ws != Some(ctx.workspace_id.0) {
+                return Err(AutomationApiError::from(AutomationError::NotFound(
+                    "endpoint".into(),
+                )));
+            }
+            egret_core::authz::require_object(
+                &*st.pdp,
+                ctx,
+                egret_dataapi_api::EP_READ,
+                egret_core::authz::ObjectRef {
+                    kind: egret_dataapi_api::OBJECT_KIND.to_string(),
+                    id,
+                    // A folder-scoped grant does not cascade to this check,
+                    // matching `egret-dataapi::invoke::can_invoke`'s own
+                    // precedent (see that function's doc comment): conservative
+                    // rather than widening access nobody asked for.
+                    folder_id: None,
+                    workspace_id: ctx.workspace_id,
+                },
+            )
+            .await
+            .map_err(AutomationApiError::from)
+        }
+        None => egret_core::authz::require(&*st.pdp, ctx, egret_dataapi_api::EP_READ)
+            .await
+            .map_err(AutomationApiError::from),
+    }
+}
+
 #[utoipa::path(
     post, path = "/api/ws/{workspace}/alerts", tag = "alerts", params(WorkspacePath),
     request_body = CreateSchedule,
@@ -438,6 +553,18 @@ async fn create(
     egret_core::authz::require(&*st.pdp, &ctx, MANAGE)
         .await
         .map_err(AutomationApiError::from)?;
+
+    // Task 5's carry-forward from Task 4: `CreateSchedule` can now express a
+    // `dataapi_alert` (`ScheduleType::DataapiAlert` + `dataapi_endpoint_id`),
+    // so `alert:manage` alone is no longer enough — the same reasoning
+    // `update` below documents. Checked against the BODY's
+    // `dataapi_endpoint_id` (there is no stored row yet to read one from),
+    // and before `to_new` validates the rest of the shape: a caller who
+    // cannot read the endpoint must be refused before any other field of the
+    // body is even considered.
+    if body.ty == ScheduleType::DataapiAlert {
+        require_dataapi_endpoint_read(&st, &ctx, body.dataapi_endpoint_id).await?;
+    }
 
     let new = crate::model::to_new(&WriteBody::from(&body), Some(ctx.principal.user_id.0))
         .map_err(AutomationApiError::from)?;
@@ -470,6 +597,23 @@ async fn detail(
     egret_core::authz::require(&*st.pdp, &ctx, READ)
         .await
         .map_err(AutomationApiError::from)?;
+
+    // `ScheduleDetailDto::last_value` IS a `dataapi_alert`'s measured metric
+    // (Task 4 review, Finding 1) — the same leak `runs` carries, on the
+    // single-row view. A fresh fetch, not `load_detail`'s (which runs after
+    // this, on the same id): a caller who fails this gate must receive
+    // nothing of the detail DTO, only the 403. A missing row falls through to
+    // `load_detail`'s own 404 unchanged.
+    if let Some(stored) = st
+        .schedules
+        .get(ctx.workspace_id.0, id)
+        .await
+        .map_err(AutomationApiError::from)?
+    {
+        if stored.r#type == "dataapi_alert" {
+            require_dataapi_endpoint_read(&st, &ctx, stored.dataapi_endpoint_id).await?;
+        }
+    }
     load_detail(&st, ctx.workspace_id.0, id).await
 }
 
@@ -502,6 +646,43 @@ async fn update(
         .await
         .map_err(AutomationApiError::from)?
         .ok_or_else(|| AutomationApiError::from(AutomationError::NotFound("schedule".into())))?;
+
+    // `alert:manage` alone is not enough to touch a `dataapi_alert`: the
+    // schedule names (or, unscoped, watches) a Data API endpoint, and its
+    // error rate/traffic are information ABOUT that endpoint — without this,
+    // `alert:manage` would be a side channel for observing an endpoint the
+    // caller cannot otherwise see. Checked against the raw STORED `type`, not
+    // the `ScheduleType::parse` below: a `dataapi_alert` row does not parse
+    // there yet (`ScheduleType` gains that variant in Task 5), and this
+    // authorization gate must not depend on that landing first.
+    //
+    // TWO checks, not one — this is the fix-round-1 correction. `type` is
+    // immutable, so once `stored.r#type` is `dataapi_alert` the body ALWAYS
+    // carries a `dataapi_endpoint_id` too (Task 5 gave `UpdateSchedule` that
+    // field), and checking only the STORED endpoint left the target endpoint
+    // this update would SET unauthorized entirely: a caller who could read
+    // endpoint A could repoint an A-scoped alert at endpoint B (proven live,
+    // fix-round-1 review) — or, by simply omitting the field, widen it to
+    // `dataapi_endpoint_id = NULL`, this codebase's workspace-wide "watch
+    // every endpoint" (proven live too, no malice required, just an omitted
+    // field). Both are now covered by checking `body.dataapi_endpoint_id`
+    // through the SAME `require_dataapi_endpoint_read` used for `create()`:
+    // `None` demands workspace-level `data_api_endpoint:read`, exactly the
+    // bar an intentional "watch the whole workspace" update should clear.
+    // This is a full REPLACE (`PUT`), like every other field `to_new`
+    // validates below — an omitted `dataapi_endpoint_id` is not "leave it
+    // alone" (that reading exists ONLY for `owners`, and is documented,
+    // below, as a deliberate, narrow exception for a different reason). It
+    // is "the caller is asking for `NULL`", and is authorized as such rather
+    // than specially preserved — a client that always resubmits the current
+    // value (the Task 6 editor's own plan: an endpoint picker pre-populated
+    // from `ScheduleDetailDto`) is unaffected either way, and a client that
+    // does not is refused rather than granted a silent widening.
+    if stored.r#type == "dataapi_alert" {
+        require_dataapi_endpoint_read(&st, &ctx, stored.dataapi_endpoint_id).await?;
+        require_dataapi_endpoint_read(&st, &ctx, body.dataapi_endpoint_id).await?;
+    }
+
     let ty = ScheduleType::parse(&stored.r#type).ok_or_else(|| {
         // Unreachable while `schedule_type_valid` holds; if it ever fires, the
         // row is corrupt rather than the request being wrong.
@@ -600,17 +781,20 @@ async fn runs(
         .map_err(AutomationApiError::from)?;
     // The schedule must be visible in this workspace before its runs are, or
     // the child would leak the existence of a parent that 404s.
-    if st
+    let schedule = st
         .schedules
         .get(ctx.workspace_id.0, id)
         .await
         .map_err(AutomationApiError::from)?
-        .is_none()
-    {
-        return Err(AutomationApiError::from(AutomationError::NotFound(
-            "schedule".into(),
-        )));
+        .ok_or_else(|| AutomationApiError::from(AutomationError::NotFound("schedule".into())))?;
+
+    // `RunDto::value` IS a `dataapi_alert`'s measured metric (Task 4 review,
+    // Finding 1) — `alert:read` says nothing about the ENDPOINT the value
+    // describes, only about the schedule.
+    if schedule.r#type == "dataapi_alert" {
+        require_dataapi_endpoint_read(&st, &ctx, schedule.dataapi_endpoint_id).await?;
     }
+
     let rows = st
         .schedules
         .runs(ctx.workspace_id.0, id, RUNS_LIMIT)
@@ -650,6 +834,19 @@ async fn run_now(
         .await
         .map_err(AutomationApiError::from)?
         .ok_or_else(|| AutomationApiError::from(AutomationError::NotFound("schedule".into())))?;
+
+    // Worse than a read (Task 4 review, Finding 1): this does not just show
+    // the LAST measurement, it takes a FRESH one —
+    // `evaluate_and_deliver_dataapi_alert` re-measures `dataapi.access_log`
+    // synchronously — and hands the result straight back in the response.
+    // `alert:manage` lets a caller author the schedule; it says nothing about
+    // the endpoint whose traffic this button would let them re-measure on
+    // demand. Checked BEFORE `runner.run_now`, not merely before the
+    // response is built, so a caller who fails this gate cannot even trigger
+    // the measurement.
+    if schedule.r#type == "dataapi_alert" {
+        require_dataapi_endpoint_read(&st, &ctx, schedule.dataapi_endpoint_id).await?;
+    }
 
     st.runner.run_now(&schedule).await;
 
@@ -698,7 +895,7 @@ async fn set_active(
         .await
         .map_err(AutomationApiError::from)?;
 
-    let row = st
+    let mut row = st
         .schedules
         .set_active(ctx.workspace_id.0, id, body.active)
         .await
@@ -709,6 +906,21 @@ async fn set_active(
         .owners_for(&[id])
         .await
         .map_err(AutomationApiError::from)?;
+
+    // Same leak `list` redacts (Task 4 review, Finding 4): `ScheduleSummaryDto`
+    // built from the `RETURNING` row carries `last_state`/`last_eval_at`, and
+    // `alert:manage` says nothing about the ENDPOINT those fields describe for
+    // a `dataapi_alert`. A caller who can flip `active` but cannot read the
+    // endpoint must still not learn whether it last fired.
+    if row.r#type == "dataapi_alert"
+        && require_dataapi_endpoint_read(&st, &ctx, row.dataapi_endpoint_id)
+            .await
+            .is_err()
+    {
+        row.last_state = None;
+        row.last_eval_at = None;
+    }
+
     // The caller just passed `alert:manage` above, so `can_manage` is `true`
     // for this response — same reasoning `list` uses for every row.
     Ok(Json(summary_dto(&row, &owners, true, false)))

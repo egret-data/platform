@@ -288,6 +288,11 @@ export type idpTokenEndpointResponse401 = {
   status: 401
 }
 
+export type idpTokenEndpointResponse429 = {
+  data: ErrorBody
+  status: 429
+}
+
 export type idpTokenEndpointResponse500 = {
   data: ErrorBody
   status: 500
@@ -296,7 +301,7 @@ export type idpTokenEndpointResponse500 = {
 export type idpTokenEndpointResponseSuccess = (idpTokenEndpointResponse200) & {
   headers: Headers;
 };
-export type idpTokenEndpointResponseError = (idpTokenEndpointResponse400 | idpTokenEndpointResponse401 | idpTokenEndpointResponse500) & {
+export type idpTokenEndpointResponseError = (idpTokenEndpointResponse400 | idpTokenEndpointResponse401 | idpTokenEndpointResponse429 | idpTokenEndpointResponse500) & {
   headers: Headers;
 };
 

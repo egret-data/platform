@@ -89,7 +89,36 @@ export default function Alerts() {
     );
 
   const [showTrash, setShowTrash] = useState(false);
-  const { data, isLoading, isError, error } = useSchedules(ws, tab, showTrash);
+  const {
+    data: primaryData,
+    isLoading: primaryLoading,
+    isError: primaryIsError,
+    error: primaryError,
+  } = useSchedules(ws, tab, showTrash);
+  // A `dataapi_alert` rides on this same tab, badge-distinguished, per spec
+  // §5.8 ("the same Alerts list ... with a badge distinguishing the type —
+  // not a third tab"). The backend's `type` filter is exact-match
+  // (`repo.rs`: `WHERE ... type = $2`), so there is no single request that
+  // returns "alert or dataapi_alert" — fetched as its own call and merged
+  // below, gated to the Alerts tab. Re-filtered to rows that actually claim
+  // `type === "dataapi_alert"` rather than trusted blindly: the server
+  // already guarantees that, but a defensive filter here is cheap and is
+  // what keeps this merge inert on the Reports tab and in every existing
+  // fixture that never sets this type.
+  const {
+    data: dataapiRaw,
+    isLoading: dataapiLoading,
+    isError: dataapiIsError,
+    error: dataapiError,
+  } = useSchedules(ws, "dataapi_alert", showTrash);
+  const data = useMemo(() => {
+    const base = primaryData ?? [];
+    if (tab !== "alert") return base;
+    return [...base, ...(dataapiRaw ?? []).filter((s) => s.type === "dataapi_alert")];
+  }, [primaryData, dataapiRaw, tab]);
+  const isLoading = tab === "alert" ? primaryLoading || dataapiLoading : primaryLoading;
+  const isError = tab === "alert" ? primaryIsError || dataapiIsError : primaryIsError;
+  const error = tab === "alert" ? (primaryError ?? dataapiError) : primaryError;
   const {
     remove,
     runNow,
@@ -240,11 +269,26 @@ export default function Alerts() {
   }
 
   const newHref = `/explore/${ws}/alerts/new${tab === "report" ? "?type=report" : ""}`;
-  const newButton = canManage ? (
-    <Button asChild>
-      <Link to={newHref}>+ {typeLabel === "alert" ? "Alert" : "Report"}</Link>
-    </Button>
-  ) : null;
+  const newDataapiHref = `/explore/${ws}/alerts/new?type=dataapi_alert`;
+  // "+ Alert" stays exactly the entry point it always was — same text, same
+  // href, still a plain `<Link>` (§3.3: an entry point is a link, not an
+  // imperative push, so it can be middle-clicked/opened in a new tab). A
+  // dataapi_alert gets its OWN link beside it rather than folding both
+  // choices into one control: the alternative (a dropdown trigger in place of
+  // the link) would turn "+ Alert" into a button with no href of its own,
+  // which is the one thing about it every existing list test pins.
+  const newButton = !canManage ? null : (
+    <div className="flex items-center gap-2">
+      <Button asChild>
+        <Link to={newHref}>+ {typeLabel === "alert" ? "Alert" : "Report"}</Link>
+      </Button>
+      {tab === "alert" && (
+        <Button asChild variant="outline">
+          <Link to={newDataapiHref}>+ Data API alert</Link>
+        </Button>
+      )}
+    </div>
+  );
 
   const renderRow = (s: ScheduleSummary) => (
     <tr
@@ -291,6 +335,20 @@ export default function Alerts() {
               >
                 {s.name}
               </Link>
+            )}
+            {/* The Alerts tab now mixes two schedule types (spec §5.8) that can
+                share a name — each has its own name-uniqueness namespace
+                server-side ("Name already used by a schedule of this type") —
+                so this is the one thing on the row that tells them apart.
+                `variant="outline"`, not `variant="success"`: that variant is a
+                hardcoded `bg-green-600` reserved elsewhere in this app for an
+                actual state (Endpoints/Versions/Clients' "Live"/"Active"
+                badges use the `bg-success/15 text-success` OKLCH token for
+                exactly that reason), and a type is not a status. */}
+            {s.type === "dataapi_alert" && (
+              <Badge variant="outline" className="ml-1.5 align-middle">
+                Data API
+              </Badge>
             )}
             {s.description && (
               <span className="block truncate text-xs text-muted-foreground">{s.description}</span>

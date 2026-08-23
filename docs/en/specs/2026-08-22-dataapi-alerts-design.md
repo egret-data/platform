@@ -250,7 +250,16 @@ scalar against a threshold. A Data API metric is a scalar. **What is new is the 
 of that scalar, not the evaluation of it.**
 
 Exactly two things are new: an evaluator that reads `dataapi.access_log`, and a source
-section in the editor. The runner branches on `type` — `alert` goes to `EngineRunner`
+section in the editor.
+
+**One cost this understates, measured after the fact.** `evaluate_and_deliver`
+(`runner.rs:185-190`) is not a match on `type` — it is `if s.r#type == "report" { … }`
+followed by a fall-through to the alert path, so a third type routes itself into the
+alert branch by default. There is a fail-safe (`NotRunnable("alert is missing its
+query")` at `:194-200`), so the failure is a loud run-log error rather than a wrong run
+— but making the dispatch explicit is work, not a no-op.
+
+The runner branches on `type` — `alert` goes to `EngineRunner`
 (SQL through `QueryExecPort` under an owner's identity), `dataapi_alert` goes to the
 metric evaluator (metastore pool, no engine identity involved).
 
@@ -276,7 +285,7 @@ durable outbox and flood control, which is a package of its own rather than a ho
 `dataapi.access_log` is durable. A cron alert reading a window of it cannot lose an
 event.
 
-### 5.4 Data model — `0127_dataapi_alerts.sql`
+### 5.4 Data model — `0128_dataapi_alerts.sql`
 
 ```sql
 -- Widen the type vocabulary. This is the only existing CHECK that changes.
@@ -295,9 +304,11 @@ CREATE INDEX access_log_ws_ep_ts_idx
 ```
 
 **A new `type` rather than a `subject` column on `type = 'alert'`.**
-`schedule_alert_needs_query` and `schedule_report_needs_target` are both written as
+`schedule_alert_needs_query` and the report-shape CHECK are both written as
 `type <> 'x' OR (…)`, so a new type excludes itself from both and **neither is
-touched**. A `subject` discriminator would instead require relaxing a constraint that
+touched**. (The report one is `schedule_report_has_format`, not the
+`schedule_report_needs_target` an earlier revision of this section named — `0115` renamed
+it. Verifying against `0110` alone misses that, and did.) A `subject` discriminator would instead require relaxing a constraint that
 is currently protecting live rows, which is exactly where a malformed row gets in.
 
 Four constraints, each making a wrong state unrepresentable rather than merely
@@ -364,9 +375,28 @@ up" by a future refactor unless the reason travels with it.**
   entire point of `call_count`: "the endpoint went silent" *is* the absence of rows,
   and mapping it to `noop` would make the metric undetectable by construction.
 
-An endpoint that is trashed or `disabled` yields `noop` with the reason recorded in
-the run log — **not `error`**. Moving an endpoint to the trash is deliberate; an error
-every five minutes because of it is noise.
+**Not implemented (§8).** An endpoint that is trashed or `disabled` was meant to yield
+`noop` with the reason recorded in the run log — not `error` — since moving an endpoint
+to the trash is deliberate and an error every five minutes because of it is noise. That
+part was deferred: `evaluate_and_deliver_dataapi_alert`'s own doc comment
+(`runner.rs`) explains why, and there is no dedicated "endpoint was trashed" reason in
+the run log today.
+
+What actually happens instead, as a side effect of how trashing works rather than by
+design: `endpoint_id` on `dataapi.access_log` carries no foreign key at all — see
+`migrations/0123_dataapi_access_log.sql`'s comment, which explains at length why an
+access log must survive the deletion of what it describes. So a trashed or disabled
+endpoint doesn't get its access-log rows unlinked; it simply stops matching
+`live_snapshot`'s `WHERE e.state = 'live'` (`crates/egret-dataapi/src/serving/router.rs`),
+the router 404s before `entry.endpoint_id` is ever assigned, and no new row for that
+endpoint is ever written — there is no reference left to clear. The practical effect is
+the same: an endpoint-scoped watch's traffic simply stops accumulating from that point
+on. `call_count`/`error_count`/`error_code_count` then read a real `0` — not a
+fabricated `noop` — and `error_rate`/`p50_duration_ms`/`p95_duration_ms` read `noop`
+from the resulting empty population, by the same asymmetry this section already
+describes for an ordinary empty window, reached here by a different route. A
+workspace-wide watch (`dataapi_endpoint_id IS NULL`) is unaffected either way — it
+counts every endpoint's traffic, trashed or not.
 
 **A stated limit.** This alert reads a log egret writes. If egret is not running there
 are no rows, the window is empty, and the alert stays quiet. It detects a broken
@@ -383,7 +413,11 @@ endpoint one cannot see.
 Checked at save **and** re-checked at run under an owner's identity — an owner can lose
 access after the schedule is written. Losing it records `error` with the reason and
 sends nothing. The precedent already exists: a schedule whose owners are all
-deactivated stops running. A workspace-scoped alert (`dataapi_endpoint_id IS NULL`)
+deactivated stops running.
+
+**A second cost this understates.** `egret-automation`'s *route* state holds a PDP
+(`routes.rs:61`), so the save-time half needs no new plumbing — but `runner.rs` has
+none. The run-time re-check requires threading a PDP into the runner. A workspace-scoped alert (`dataapi_endpoint_id IS NULL`)
 requires workspace-level Data API read.
 
 ### 5.8 UI
@@ -472,6 +506,15 @@ test suite, and layout in particular cannot be settled by reading the code (§10
   the Starlark engine.
 - **Migrating the remaining Explore list pages beyond the four named here**, and
   retiring `ConfigSection` in Control Plane. Unrelated to this work.
+- **Reading `dataapi.endpoints` trashed/`disabled` state from the runner**, so §5.6's
+  intended `noop`-with-reason handling of a trashed or disabled endpoint can actually be
+  built. `evaluate_and_deliver_dataapi_alert`'s own doc comment (`runner.rs`) explains
+  why: that state lives on a table owned by `egret-dataapi`, and `egret-automation`
+  deliberately does not depend on it beyond the `egret-dataapi-api` leaf (the same
+  boundary Task 4's `owner_can_read_dataapi_endpoint` re-check already respects). Its
+  natural shape is sketched there: an `EndpointState { trashed: bool, enabled: bool }`
+  DTO plus a small port trait, wired the way `pdp`/`query`/`renderer` already are. In the
+  meantime the fallback is not silence — see §5.6's note on what happens today instead.
 
 ---
 

@@ -15,17 +15,19 @@ use egret_metastore::Db;
 use egret_query::DatabaseRepo;
 use tokio_util::sync::CancellationToken;
 
+use crate::dataapi_metric;
 use crate::deliver::destination::{Resolver, SsrfPolicy};
 use crate::deliver::email::{self, Attachment, EmailMessage};
 use crate::deliver::slack;
 use crate::deliver::smtp_config::SmtpConfigRepo;
 use crate::deliver::webhook::{self, WebhookPayload};
-use crate::evaluator::{evaluate, owner_identity, EvalError, QueryRunner};
+use crate::evaluator::{evaluate, owner_identity, EvalError, Evaluation, QueryRunner};
 use crate::model::report_target;
 use crate::render::client::{RenderRequest, Renderer};
 use crate::render::token::RenderTokenRepo;
 use crate::repo::{Schedule, ScheduleRepo};
 use crate::scheduler::{claim_due, in_grace, prune_runs, record_run, release};
+use crate::validator::should_fire;
 use egret_automation_api::{RecipientKind, ReportFormat, ValidatorType};
 
 /// How many schedules one tick will take. A cap, not a target: it bounds how
@@ -56,6 +58,29 @@ pub struct AutomationRunner {
     pub users: UserRepo,
     pub minter: Arc<dyn EngineTokenMinter>,
     pub query: Arc<dyn QueryRunner>,
+    /// The single decision point (Task 4, Z2) — needed because a `dataapi_alert`
+    /// re-checks its own access at run time, the way every OTHER schedule kind
+    /// already does but by a different mechanism. An engine `alert` re-verifies
+    /// the owner's access on every run because the CONNECTOR enforces it
+    /// (`evaluator.rs`'s module doc: "authorization is settled by the engine at
+    /// RUN time, not remembered from save time"); a `dataapi_alert` runs no
+    /// query at all — it measures `dataapi.access_log` directly — so nothing
+    /// downstream of this struct would otherwise notice that the owner lost
+    /// `data_api_endpoint:read` after the schedule was saved.
+    pub pdp: Arc<dyn egret_core::authz::Pdp>,
+    /// Fix-round-3: the same `DataApiEndpointPort` seam
+    /// `AutomationState.dataapi_endpoints` uses (routes.rs) — resolves an
+    /// endpoint id's REAL workspace before this run-time re-check ever asks
+    /// the PDP about it. Without this, `owner_can_read_dataapi_endpoint`'s
+    /// `ObjectRef.workspace_id` below is the SCHEDULE's workspace, never the
+    /// endpoint's, so a workspace-cascaded owner grant would authorize ANY
+    /// uuid — structurally the same gap fix-round-2 closed on the routes.
+    /// Confirmed a DEAD branch as of this fix: both write paths now refuse a
+    /// foreign `dataapi_endpoint_id` before any row is ever written, so no
+    /// live schedule can carry one today. Fixed anyway, for symmetry and
+    /// because the seam already exists — see the report for the full
+    /// reachability argument.
+    pub dataapi_endpoints: Arc<dyn egret_dataapi_api::DataApiEndpointPort>,
     pub resolver: Arc<dyn Resolver>,
     pub policy: SsrfPolicy,
     pub smtp: SmtpConfigRepo,
@@ -188,11 +213,25 @@ impl AutomationRunner {
     }
 
     async fn evaluate_and_deliver(&self, s: &Schedule) -> Result<Outcome, EvalError> {
-        // Reports have no condition to evaluate — a report that renders and
-        // delivers always "fires" — so they branch off before any of the
-        // alert's query/validator machinery below.
-        if s.r#type == "report" {
-            return self.render_and_deliver(s).await;
+        // An explicit three-way branch — not `if report { .. } else { /*
+        // alert */ }` — because that shape is exactly what let a
+        // `dataapi_alert` fall through into the SQL-alert branch by default
+        // and hit `NotRunnable("alert is missing its query")` below: a
+        // `dataapi_alert` carries neither `database_id` nor `sql`
+        // (`schedule_dataapi_needs_source`, migration 0128), so it can never
+        // satisfy that branch's requirements. An unrecognised type is now its
+        // own error rather than silently taking the alert path, so a future
+        // fourth type fails loudly here instead of repeating this bug.
+        match s.r#type.as_str() {
+            "report" => {
+                // Reports have no condition to evaluate — a report that
+                // renders and delivers always "fires" — so they branch off
+                // before any of the alert's query/validator machinery below.
+                return self.render_and_deliver(s).await;
+            }
+            "dataapi_alert" => return self.evaluate_and_deliver_dataapi_alert(s).await,
+            "alert" => {}
+            _ => return Err(EvalError::NotRunnable("schedule has an unrecognised type")),
         }
 
         let (Some(database_id), Some(sql), Some(validator)) = (
@@ -248,6 +287,132 @@ impl AutomationRunner {
             value: eval.value,
             delivered,
         })
+    }
+
+    /// The `dataapi_alert` branch (Z2): the condition is MEASURED, from a
+    /// window of `dataapi.access_log` via `dataapi_metric::measure`, rather
+    /// than run as SQL — there is no engine, no owner identity, and no
+    /// `evaluate` here. Everything from `should_fire` onward is the exact
+    /// same machinery `evaluate_and_deliver`'s alert branch uses, so a
+    /// `dataapi_alert` and an engine `alert` behave identically once a value
+    /// is in hand: the same validator, the same grace suppression (§233's
+    /// `in_grace`, called below just like the alert path calls it), the same
+    /// `deliver`.
+    ///
+    /// `metric`/`window_s` are asserted `Some` rather than defaulted:
+    /// migration 0128's `schedule_dataapi_needs_source` CHECK already
+    /// requires both non-null (and `window_s > 0`) for a persisted
+    /// `dataapi_alert` row, so a `None` here means the row is corrupt, not
+    /// that the caller should guess a default — the same "unreachable but
+    /// guarded, not `unwrap`ped" stance `evaluate_and_deliver`'s own
+    /// `NotRunnable` fail-safe takes for the SQL-alert branch just above.
+    /// `validator_type` is trusted to be `"operator"` for the same reason:
+    /// the same CHECK pins it, so `ValidatorType::Operator` is used directly
+    /// rather than parsed from the row.
+    ///
+    /// NOT handled here: a `dataapi_endpoint_id` whose endpoint has been
+    /// trashed or disabled. §5.6 of the design wants that case to read as
+    /// `noop` with the reason in the run log, not `error` — moving an
+    /// endpoint to the trash is deliberate, and an error every five minutes
+    /// because of it is noise nobody asked for. But that state lives on
+    /// `dataapi.endpoints`, owned by `egret-dataapi`, and this crate does not
+    /// depend on it (see `dataapi_metric.rs`'s own module doc: the six
+    /// queries are duplicated rather than importing that crate). Reaching
+    /// into `dataapi.endpoints` with a raw query here would be exactly the
+    /// workaround the brief for this task says not to invent.
+    ///
+    /// Task 4 stands up the first contract seam this crate shares with
+    /// `egret-dataapi` (`egret-dataapi-api`, a pure leaf — no sqlx, no axum),
+    /// but deliberately does not extend it to endpoint STATE. Visibility of a
+    /// trashed/disabled row is a different question from "may the owner READ
+    /// this endpoint" — a trashed endpoint an owner can still read is exactly
+    /// the case this section is about, and folding both into one task risks
+    /// under-building the smaller one to close the box. Its natural shape,
+    /// for whoever picks it up: an `EndpointState { trashed: bool, enabled:
+    /// bool }` DTO in `egret-dataapi-api` plus a small port trait
+    /// (`AutomationRunner` already holds several — `QueryRunner`, `Renderer`,
+    /// `EngineTokenMinter` — this would be one more `Arc<dyn _>`), implemented
+    /// by a thin `egret-dataapi`-backed adapter and wired the same way
+    /// `pdp`/`query`/`renderer` are below. Left for that task.
+    async fn evaluate_and_deliver_dataapi_alert(&self, s: &Schedule) -> Result<Outcome, EvalError> {
+        let (Some(metric), Some(window_s)) = (s.dataapi_metric.as_deref(), s.dataapi_window_s)
+        else {
+            return Err(EvalError::NotRunnable(
+                "dataapi_alert is missing its metric or window",
+            ));
+        };
+
+        // Run-time re-check (Task 4, Z2): the OWNER — the identity everything
+        // downstream answers to, same as an engine alert's `resolve_owner` —
+        // may have lost `data_api_endpoint:read` on the watched endpoint (or,
+        // unscoped, on the workspace) since the schedule was saved. An engine
+        // alert gets this for free because the CONNECTOR enforces the
+        // owner's access on every run (`evaluator.rs`'s module doc); a
+        // `dataapi_alert` runs no query at all, so nothing else on this path
+        // would notice. Checked BEFORE `measure` — a caller who has lost
+        // access to the endpoint must not have its access_log rows counted
+        // for them, even into an aggregate.
+        let owner = self.resolve_owner(s.id).await?;
+        if !owner_can_read_dataapi_endpoint(
+            &*self.pdp,
+            &*self.dataapi_endpoints,
+            owner,
+            s.workspace_id,
+            s.dataapi_endpoint_id,
+        )
+        .await?
+        {
+            return Err(EvalError::EndpointAccessRevoked);
+        }
+
+        let value = dataapi_metric::measure(
+            &self.db,
+            s.workspace_id,
+            s.dataapi_endpoint_id,
+            metric,
+            s.dataapi_error_code.as_deref(),
+            window_s,
+            chrono::Utc::now(),
+        )
+        .await
+        .map_err(|e| EvalError::Query(e.to_string()))?;
+
+        // No extra guard needed for a `None` measurement (an empty window,
+        // e.g. `error_rate` with zero calls): `should_fire`'s `Operator` arm
+        // already answers `false` for every operator when `value` is `None`
+        // (validator.rs's `a_missing_value_never_fires_whatever_the_operator`
+        // — the null trap the module's own doc comment calls out), so it
+        // falls straight into the `!fired` branch below, recorded as `noop`
+        // like any other non-firing evaluation.
+        let fired = should_fire(ValidatorType::Operator, &s.validator_config, value)?;
+        if !fired {
+            return Ok(Outcome::NotFired { value });
+        }
+        // Fired — but recently enough that the user has already been told.
+        // Same call, same column, same semantics as the SQL-alert branch's
+        // grace check above: a dataapi_alert must not bypass anti-spam just
+        // because it reached `Outcome::Fired` a different way.
+        if in_grace(&self.db, s.id, s.grace_period_s)
+            .await
+            .map_err(|e| EvalError::Query(e.to_string()))?
+        {
+            return Ok(Outcome::Suppressed { value });
+        }
+
+        // A dataapi_alert has no query result set to attach — the value IS
+        // the whole answer. `rows`/`columns` are empty rather than omitted so
+        // `deliver` can stay the ONE delivery path both alert kinds share:
+        // `rows_to_csv` over `Value::Null` produces a header-only CSV, and
+        // the webhook payload's `rows` is `null` — an honest description of
+        // "there were no rows", not a fabricated one.
+        let eval = Evaluation {
+            fired: true,
+            value,
+            rows: serde_json::Value::Null,
+            columns: Vec::new(),
+        };
+        let delivered = self.deliver(s, &eval).await;
+        Ok(Outcome::Fired { value, delivered })
     }
 
     /// The identity everything downstream runs as (§5.2) — shared by the
@@ -952,34 +1117,44 @@ impl AutomationRunner {
             .value
             .map(|v| v.to_string())
             .unwrap_or_else(|| "(no value)".into());
-        let body = format!(
-            "The alert \"{}\" fired.\n\nObserved value: {}\n\nThe triggering rows are attached.\n",
-            s.name, value
-        );
-        // The query's own column names. Falls back to positional headers only
-        // if the engine returned none — a header of `column_1` is a last
-        // resort, not the normal case, because an alert email is read by
-        // someone who cannot see the SQL.
-        let columns: Vec<String> = if eval.columns.is_empty() {
-            let width = eval
-                .rows
-                .as_array()
-                .and_then(|r| r.first())
-                .and_then(|r| r.as_array())
-                .map(Vec::len)
-                .unwrap_or(1);
-            (1..=width).map(|i| format!("column_{i}")).collect()
-        } else {
-            eval.columns.clone()
-        };
-        let csv = email::rows_to_csv(&columns, &eval.rows);
+        let body = alert_email_body(&s.r#type, &s.name, &value);
 
-        let mut attachments = vec![email::Attachment {
-            filename: format!("{}.csv", slugify(&s.name)),
-            content_type: "text/csv".into(),
-            bytes: csv.into_bytes(),
-            inline_cid: None,
-        }];
+        // A `dataapi_alert` measures `dataapi.access_log` directly — there is
+        // no query result set (`evaluate_and_deliver_dataapi_alert` always
+        // builds `Evaluation { rows: Value::Null, columns: Vec::new() }`, its
+        // own doc comment). Building a CSV from that would not describe "zero
+        // rows" — the positional fallback below reads the empty `columns` as
+        // "the engine returned none" and fabricates a `column_1` header, so
+        // the mail would claim rows are attached and enclose a 12-byte lie.
+        // The alerts programme already found and fixed this exact artifact
+        // once on a live check; a `dataapi_alert` must never reach this
+        // branch at all. See `alert_email_body`'s test for the prior wording.
+        let mut attachments: Vec<email::Attachment> = Vec::new();
+        if s.r#type != "dataapi_alert" {
+            // The query's own column names. Falls back to positional headers
+            // only if the engine returned none — a header of `column_1` is a
+            // last resort, not the normal case, because an alert email is
+            // read by someone who cannot see the SQL.
+            let columns: Vec<String> = if eval.columns.is_empty() {
+                let width = eval
+                    .rows
+                    .as_array()
+                    .and_then(|r| r.first())
+                    .and_then(|r| r.as_array())
+                    .map(Vec::len)
+                    .unwrap_or(1);
+                (1..=width).map(|i| format!("column_{i}")).collect()
+            } else {
+                eval.columns.clone()
+            };
+            let csv = email::rows_to_csv(&columns, &eval.rows);
+            attachments.push(email::Attachment {
+                filename: format!("{}.csv", slugify(&s.name)),
+                content_type: "text/csv".into(),
+                bytes: csv.into_bytes(),
+                inline_cid: None,
+            });
+        }
         // An alert may also name a chart or dashboard. When it does, the mail
         // carries a rendering of it beside the numbers — the recipient sees
         // WHAT moved, not only that something did. A render failure must not
@@ -1015,6 +1190,67 @@ impl AutomationRunner {
     }
 }
 
+/// Whether `owner` may still read `endpoint_id` (or, when `None`, holds
+/// workspace-level Data API read) — the run-time re-check Task 4 adds for a
+/// `dataapi_alert` (§`evaluate_and_deliver_dataapi_alert`'s own doc comment).
+///
+/// A free function, not a method, because it needs only the PDP: unlike
+/// `egret-dataapi::invoke::can_invoke` (the sibling this mirrors), it is
+/// called from a crate that does not — and, per this task's own decision
+/// above, should not — depend on `egret-dataapi` for anything beyond the two
+/// constants in `egret-dataapi-api`.
+///
+/// `group_ids: Vec::new()` — no group lookup for the owner here, following
+/// `can_invoke`'s own precedent for an owner-based re-check made outside a
+/// live session: a group-scoped grant is a possible false REFUSAL (the owner
+/// is treated as having fewer permissions than they actually do), never a
+/// false allow, so it cannot turn this into a security hole — only, in the
+/// rare case a workspace grants Data API read solely through a group, into an
+/// alert that stops firing until it is re-saved. The same conservative gap
+/// `can_invoke` already accepts.
+///
+/// Fix-round-3: `endpoint_id`'s `Some` branch first resolves the endpoint's
+/// REAL workspace through `dataapi_endpoints` and returns `Ok(false)` on a
+/// mismatch (or a nonexistent id) — folded into the same boolean the PDP
+/// path returns, not a new `EvalError` variant, because the caller already
+/// treats "not allowed" uniformly as `EndpointAccessRevoked` regardless of
+/// WHY: a schedule watching an endpoint outside its own workspace is exactly
+/// as unable to read it as one whose owner lost the grant.
+async fn owner_can_read_dataapi_endpoint(
+    pdp: &dyn egret_core::authz::Pdp,
+    dataapi_endpoints: &dyn egret_dataapi_api::DataApiEndpointPort,
+    owner: uuid::Uuid,
+    workspace_id: uuid::Uuid,
+    endpoint_id: Option<uuid::Uuid>,
+) -> Result<bool, EvalError> {
+    let subject = egret_core::authz::Subject {
+        user_id: egret_core::UserId(owner),
+        group_ids: Vec::new(),
+    };
+    let resource = match endpoint_id {
+        Some(id) => {
+            let owner_ws = dataapi_endpoints
+                .workspace_of(id)
+                .await
+                .map_err(|e| EvalError::Query(e.to_string()))?;
+            if owner_ws != Some(workspace_id) {
+                return Ok(false);
+            }
+            egret_core::authz::Resource::Object(egret_core::authz::ObjectRef {
+                kind: egret_dataapi_api::OBJECT_KIND.to_string(),
+                id,
+                folder_id: None,
+                workspace_id: egret_core::WorkspaceId(workspace_id),
+            })
+        }
+        None => egret_core::authz::Resource::Workspace(egret_core::WorkspaceId(workspace_id)),
+    };
+    pdp.authorize(&subject, egret_dataapi_api::EP_READ, &resource)
+        .await
+        .map(|d| d.allow)
+        .map_err(|e| EvalError::Query(e.to_string()))
+}
+
 /// `egret_bi::compile_chart_sql`'s error has no `Display` of its own
 /// (`ApiError<D>` carries none) — mirrors `render::payload`'s `bi_api_err`,
 /// but flattened to a message rather than a domain `AutomationError`, since
@@ -1025,6 +1261,25 @@ fn bi_compile_err(e: egret_bi::BiApiError) -> EvalError {
         egret_bi::BiApiError::Auth(err) => err.to_string(),
         egret_bi::BiApiError::Domain(d) => d.to_string(),
     })
+}
+
+/// The alert email's own summary line (fix-wave finding 1).
+///
+/// An engine `alert` always attaches its triggering rows as a CSV, so its
+/// body says so. A `dataapi_alert` has no query result set — the measured
+/// value IS the whole answer, the same fact `ScheduleEditor.tsx`'s "There are
+/// no query rows to attach" note states to the author — so its body must not
+/// claim rows are attached, the way `send_email`'s hardcoded line used to for
+/// every schedule type unconditionally.
+fn alert_email_body(schedule_type: &str, name: &str, value: &str) -> String {
+    if schedule_type == "dataapi_alert" {
+        format!("The alert \"{name}\" fired.\n\nObserved value: {value}\n")
+    } else {
+        format!(
+            "The alert \"{name}\" fired.\n\nObserved value: {value}\n\n\
+             The triggering rows are attached.\n"
+        )
+    }
 }
 
 /// A filename-safe version of a schedule name.
@@ -1189,6 +1444,24 @@ mod tests {
         }
     }
 
+    /// None of this module's tests exercise a `dataapi_alert` — they all
+    /// build engine `alert`s via `mk_alert` — so the run-time
+    /// `data_api_endpoint:read` re-check (`owner_can_read_dataapi_endpoint`)
+    /// must never be reached. A panic here would surface that as a loud
+    /// test failure rather than a silently-wrong `allow`/`deny`.
+    struct NeverPdp;
+    #[async_trait::async_trait]
+    impl egret_core::authz::Pdp for NeverPdp {
+        async fn authorize(
+            &self,
+            _subject: &egret_core::authz::Subject,
+            _action: &str,
+            _resource: &egret_core::authz::Resource,
+        ) -> egret_core::Result<egret_core::authz::Decision> {
+            panic!("this module's tests only build engine alerts; the PDP must never be consulted");
+        }
+    }
+
     struct PublicDns;
     #[async_trait::async_trait]
     impl Resolver for PublicDns {
@@ -1297,6 +1570,8 @@ mod tests {
             users: UserRepo::new(db.clone()),
             minter: Arc::new(NoMinter),
             query,
+            pdp: Arc::new(NeverPdp),
+            dataapi_endpoints: Arc::new(egret_dataapi::EndpointStore::new(db.clone())),
             resolver: Arc::new(PublicDns),
             policy: SsrfPolicy::default(),
             smtp: SmtpConfigRepo::new(
@@ -1604,5 +1879,34 @@ mod tests {
             renderer.seen.lock().unwrap().is_empty(),
             "the foreign chart must never reach the renderer"
         );
+    }
+
+    // ── fix-wave finding 1: dataapi_alert's email body claims no attached rows ──
+
+    /// Fix-wave finding 1: `send_email` used to hardcode "The triggering rows
+    /// are attached" for EVERY schedule type, including `dataapi_alert` —
+    /// which never has rows, only a measured value — and pair it with a
+    /// fabricated `column_1` CSV built from the query-result fallback path.
+    /// `dataapi_alert_tick.rs`'s tick fixtures configure no SMTP, so
+    /// `send_email` never got far enough to build that body; this proves the
+    /// TEXT decision directly, without a live SMTP relay.
+    #[test]
+    fn a_dataapi_alert_body_says_nothing_about_attached_rows() {
+        let body = alert_email_body("dataapi_alert", "Error spike", "0.72");
+        assert!(
+            !body.to_lowercase().contains("attached"),
+            "a dataapi_alert has no rows to attach: {body:?}"
+        );
+        assert!(body.contains("Error spike"));
+        assert!(body.contains("0.72"));
+    }
+
+    /// The unchanged half: an engine `alert` DOES attach a CSV of its
+    /// triggering rows (`send_email`'s own `if s.r#type != "dataapi_alert"`
+    /// guard), so its body must keep saying so.
+    #[test]
+    fn an_engine_alert_body_still_says_rows_are_attached() {
+        let body = alert_email_body("alert", "Orders dropped", "3");
+        assert!(body.contains("The triggering rows are attached."));
     }
 }

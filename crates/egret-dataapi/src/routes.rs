@@ -106,7 +106,11 @@ const SA_READ: &str = "service_account:read";
 const SA_MANAGE: &str = "service_account:manage";
 
 /// List and inspect endpoint drafts and their versions.
-const EP_READ: &str = "data_api_endpoint:read";
+///
+/// Re-exported from `egret-dataapi-api` (Task 4) rather than defined here: it
+/// is now the ONE definition, and `egret-automation` names the same
+/// permission through that crate without depending on this one.
+use egret_dataapi_api::EP_READ;
 /// Author endpoints. Flat, like every permission here: it implies no `:read`,
 /// and `:read` implies none of it.
 ///

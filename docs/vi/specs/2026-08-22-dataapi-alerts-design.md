@@ -238,6 +238,12 @@ metric Data API cũng là scalar. **Cái mới là NGUỒN của scalar đó, kh
 nó.**
 
 Đúng hai thứ mới: một evaluator đọc `dataapi.access_log`, và một section nguồn trong editor.
+**Một chi phí spec này nói nhẹ đi, đo được sau khi viết.** `evaluate_and_deliver`
+(`runner.rs:185-190`) KHÔNG phải `match` theo `type` — nó là `if s.r#type == "report"
+{ … }` rồi rơi thẳng xuống nhánh alert, nên một type thứ ba tự động rơi vào nhánh alert.
+Có cơ chế chặn (`NotRunnable("alert is missing its query")` ở `:194-200`), nên hỏng ồn ào
+chứ không chạy sai — nhưng làm dispatch tường minh là việc phải làm, không miễn phí.
+
 Runner rẽ nhánh theo `type` — `alert` đi `EngineRunner` (SQL qua `QueryExecPort` dưới danh
 tính owner), `dataapi_alert` đi metric evaluator (pool metastore, không dính danh tính engine
 nào).
@@ -263,7 +269,7 @@ ngập, và đó là một gói riêng chứ không phải một hook.
 
 `dataapi.access_log` là bền. Một cron alert đọc một cửa sổ của nó không thể mất event.
 
-### 5.4 Mô hình dữ liệu — `0127_dataapi_alerts.sql`
+### 5.4 Mô hình dữ liệu — `0128_dataapi_alerts.sql`
 
 ```sql
 -- Mở rộng từ vựng type. Đây là CHECK có sẵn DUY NHẤT bị đổi.
@@ -282,8 +288,10 @@ CREATE INDEX access_log_ws_ep_ts_idx
 ```
 
 **Dùng `type` mới chứ không thêm cột `subject` vào `type = 'alert'`.**
-`schedule_alert_needs_query` và `schedule_report_needs_target` đều viết dạng
-`type <> 'x' OR (…)`, nên một type mới tự loại trừ khỏi cả hai và **không cái nào bị đụng**.
+`schedule_alert_needs_query` và CHECK hình dạng của report đều viết dạng
+`type <> 'x' OR (…)`, nên một type mới tự loại trừ khỏi cả hai và **không cái nào bị đụng**. (CHECK của report tên là
+`schedule_report_has_format`, không phải `schedule_report_needs_target` như bản trước của mục
+này ghi — `0115` đã đổi tên nó. Kiểm chứng chỉ dựa vào `0110` sẽ bỏ sót điều đó, và đã bỏ sót.)
 Một discriminator `subject` thì ngược lại, buộc phải nới một constraint đang bảo vệ dữ liệu
 thật — đúng chỗ một hàng hỏng lọt vào.
 
@@ -348,9 +356,26 @@ refactor sau nếu lý do không đi kèm nó.**
   toàn bộ điểm của `call_count`: "endpoint tắt tiếng" *chính là* sự vắng mặt của các dòng, và
   ánh xạ nó thành `noop` sẽ làm metric đó không thể phát hiện được, theo cấu trúc.
 
-Một endpoint đang trong thùng rác hoặc `disabled` cho ra `noop` kèm lý do ghi vào run log —
-**không phải `error`**. Bỏ endpoint vào thùng rác là hành động cố ý; báo lỗi mỗi năm phút vì
-chuyện đó là nhiễu.
+**Chưa làm (§8).** Một endpoint đang trong thùng rác hoặc `disabled` LẼ RA phải cho ra `noop`
+kèm lý do ghi vào run log — không phải `error` — vì bỏ endpoint vào thùng rác là hành động cố
+ý và báo lỗi mỗi năm phút vì chuyện đó là nhiễu. Phần đó đã bị hoãn: doc comment của
+`evaluate_and_deliver_dataapi_alert` (`runner.rs`) giải thích vì sao, và hiện chưa có lý do
+riêng "endpoint đã vào thùng rác" nào trong run log.
+
+Điều thực sự xảy ra thay vào đó, như hệ quả phụ của cách xoá mềm hoạt động chứ không phải do
+thiết kế: cột `endpoint_id` trên `dataapi.access_log` vốn không có foreign key nào cả — xem
+comment trong `migrations/0123_dataapi_access_log.sql`, giải thích khá dài vì sao một access log
+phải sống sót qua việc xoá cái nó mô tả. Nên một endpoint bị xoá mềm hoặc `disabled` không phải
+bị "tháo tham chiếu" khỏi các dòng log cũ; nó chỉ đơn giản là không còn khớp điều kiện
+`WHERE e.state = 'live'` của `live_snapshot` (`crates/egret-dataapi/src/serving/router.rs`),
+router trả 404 trước khi `entry.endpoint_id` từng được gán, và không có dòng mới nào cho
+endpoint đó được ghi ra nữa — không có tham chiếu nào để mà xoá cả. Hiệu ứng thực tế thì vẫn
+vậy: một watch theo endpoint đơn giản là ngừng tích luỹ traffic từ lúc đó. `call_count`/
+`error_count`/`error_code_count` khi đó đọc ra `0` thật — không phải `noop` giả — còn
+`error_rate`/`p50_duration_ms`/`p95_duration_ms` đọc ra `noop` từ tập rỗng kết quả, theo đúng sự
+bất đối xứng mục này đã mô tả cho một cửa sổ rỗng bình thường, chỉ là đi tới đó bằng một con
+đường khác. Một watch toàn workspace (`dataapi_endpoint_id IS NULL`) không bị ảnh hưởng — nó
+đếm traffic của mọi endpoint, dù có bị xoá mềm hay không.
 
 **Một giới hạn được nói rõ.** Alert này đọc một log do egret ghi ra. Nếu egret không chạy thì
 không có dòng nào, cửa sổ rỗng, và alert im lặng. Nó phát hiện endpoint hỏng; nó **không**
@@ -364,7 +389,11 @@ tra này thì `alert:manage` trở thành đường vòng để quan sát một 
 
 Kiểm lúc lưu **và** kiểm lại lúc chạy dưới danh tính owner — owner có thể mất quyền sau khi
 schedule đã ghi. Mất quyền thì ghi `error` kèm lý do và không gửi gì. Tiền lệ đã có: một
-schedule mà mọi owner đều bị vô hiệu hoá thì ngừng chạy. Một alert phạm vi workspace
+schedule mà mọi owner đều bị vô hiệu hoá thì ngừng chạy.
+
+**Một chi phí thứ hai bị nói nhẹ.** State của *route* trong `egret-automation` có PDP
+(`routes.rs:61`), nên nửa kiểm-lúc-lưu không cần thêm gì — nhưng `runner.rs` thì không có.
+Kiểm lại lúc chạy đòi phải luồn một PDP vào runner. Một alert phạm vi workspace
 (`dataapi_endpoint_id IS NULL`) đòi quyền đọc Data API cấp workspace.
 
 ### 5.8 Giao diện
@@ -447,6 +476,15 @@ test, và riêng layout thì không thể chốt bằng cách đọc mã (§10).
   đương ở egret hoặc đã có sẵn ở dạng an toàn hơn (§A.2), hoặc đã được khoanh vào engine Starlark.
 - **Chuyển các trang list Explore ngoài bốn trang nêu ở đây**, và loại bỏ `ConfigSection` ở
   Control Plane. Không liên quan việc này.
+- **Đọc trạng thái thùng rác/`disabled` của `dataapi.endpoints` từ runner**, để cách xử lý
+  `noop` kèm lý do mà §5.6 dự định cho một endpoint bị xoá mềm hoặc disabled thực sự có thể
+  xây được. Doc comment của `evaluate_and_deliver_dataapi_alert` (`runner.rs`) giải thích vì
+  sao: trạng thái đó nằm trên một bảng thuộc `egret-dataapi`, và `egret-automation` cố tình
+  không phụ thuộc nó ngoài leaf `egret-dataapi-api` (cùng ranh giới mà re-check
+  `owner_can_read_dataapi_endpoint` của Task 4 đã tôn trọng). Hình dạng tự nhiên của nó đã
+  được phác trong đó: một DTO `EndpointState { trashed: bool, enabled: bool }` cộng một port
+  trait nhỏ, nối dây giống cách `pdp`/`query`/`renderer` đã có. Trong lúc chờ, phương án dự
+  phòng không phải im lặng — xem ghi chú của §5.6 về điều thực sự xảy ra hiện nay.
 
 ---
 
