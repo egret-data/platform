@@ -120,7 +120,7 @@ async fn build_chart(
 ) -> Result<RenderPayload, AutomationError> {
     let chart = st
         .charts
-        .get(grant.object_id)
+        .get(grant.object_id, grant.workspace_id)
         .await
         .map_err(bi_err)?
         .ok_or_else(|| AutomationError::NotFound("chart".into()))?;
@@ -140,7 +140,7 @@ async fn build_dashboard(
 ) -> Result<RenderPayload, AutomationError> {
     let dash = st
         .dashboards
-        .get(grant.object_id)
+        .get(grant.object_id, grant.workspace_id)
         .await
         .map_err(bi_err)?
         .ok_or_else(|| AutomationError::NotFound("dashboard".into()))?;
@@ -155,7 +155,7 @@ async fn build_dashboard(
         };
         let chart = st
             .charts
-            .get(chart_id)
+            .get(chart_id, grant.workspace_id)
             .await
             .map_err(bi_err)?
             .ok_or_else(|| AutomationError::NotFound("chart".into()))?;
@@ -211,7 +211,7 @@ pub async fn run_cards(
         }
         let chart = st
             .charts
-            .get(req.chart_id)
+            .get(req.chart_id, grant.workspace_id)
             .await
             .map_err(bi_err)?
             .ok_or_else(|| AutomationError::NotFound("chart".into()))?;

@@ -1831,7 +1831,7 @@ async fn ch_duplicate(
         .map_err(BiApiError::from)?;
     let copy = st
         .charts
-        .duplicate(id, Some(ctx.principal.user_id.0))
+        .duplicate(id, ctx.workspace_id.0, Some(ctx.principal.user_id.0))
         .await
         .map_err(BiApiError::from)?
         .ok_or(Error::NotFound("chart".into()))?;
@@ -1951,7 +1951,7 @@ async fn ch_get(
         .map_err(BiApiError::from)?;
     let c = st
         .charts
-        .get(id)
+        .get(id, ctx.workspace_id.0)
         .await
         .map_err(BiApiError::from)?
         .ok_or(Error::NotFound("chart".into()))?;
@@ -2010,7 +2010,7 @@ async fn ch_update(
         .map_err(BiApiError::from)?;
     let c = st
         .charts
-        .get(id)
+        .get(id, ctx.workspace_id.0)
         .await
         .map_err(BiApiError::from)?
         .ok_or(Error::NotFound("chart".into()))?;
@@ -2208,7 +2208,7 @@ async fn ch_run(
 
     let chart = st
         .charts
-        .get(id)
+        .get(id, ctx.workspace_id.0)
         .await
         .map_err(BiApiError::from)?
         .ok_or(Error::NotFound("chart".into()))?;
@@ -2582,7 +2582,7 @@ async fn db_card_run(
     // the authority (transitive auth: dashboard grant → card data).
     let chart = st
         .charts
-        .get(chart_id)
+        .get(chart_id, ctx.workspace_id.0)
         .await
         .map_err(BiApiError::from)?
         .ok_or(Error::NotFound("chart".into()))?;
@@ -2905,6 +2905,7 @@ async fn capture_revision(
 async fn pending_baseline(
     st: &BiState,
     id: Uuid,
+    workspace_id: Uuid,
 ) -> Option<(
     serde_json::Value,
     Option<Uuid>,
@@ -2913,8 +2914,12 @@ async fn pending_baseline(
     if st.dashboards.revision_count(id).await.ok()? != 0 {
         return None;
     }
-    let d = st.dashboards.get(id).await.ok()??;
-    let snap = st.dashboards.snapshot_current(id).await.ok()??;
+    let d = st.dashboards.get(id, workspace_id).await.ok()??;
+    let snap = st
+        .dashboards
+        .snapshot_current(id, workspace_id)
+        .await
+        .ok()??;
     Some((snap, d.updated_by.or(d.created_by), d.updated_at))
 }
 
@@ -2938,7 +2943,7 @@ async fn apply_dashboard_update(
         );
     }
     // Held, not written — see pending_baseline.
-    let baseline = pending_baseline(st, id).await;
+    let baseline = pending_baseline(st, id, ctx.workspace_id.0).await;
     // `UpdateDashboard` is a plain struct of owned values, so this cannot fail; on the impossible
     // branch we keep the save working and lose one history entry rather than 500-ing.
     let snapshot = serde_json::to_value(&b).ok();
@@ -3252,7 +3257,7 @@ async fn db_duplicate(
         .map_err(BiApiError::from)?;
     let copy = st
         .dashboards
-        .duplicate(id, Some(ctx.principal.user_id.0))
+        .duplicate(id, ctx.workspace_id.0, Some(ctx.principal.user_id.0))
         .await
         .map_err(BiApiError::from)?
         .ok_or(Error::NotFound("dashboard".into()))?;
@@ -3339,7 +3344,7 @@ async fn load_dashboard(
     let user = ctx.principal.user_id.0;
     let d = st
         .dashboards
-        .get(id)
+        .get(id, ctx.workspace_id.0)
         .await
         .map_err(BiApiError::from)?
         .ok_or(Error::NotFound("dashboard".into()))?;

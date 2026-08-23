@@ -160,7 +160,10 @@ async fn dashboard_crud_cards_and_unique_conflict() {
         .update(d.id, "Ops v2", "", &serde_json::json!([]), "full", None)
         .await
         .unwrap();
-    assert_eq!(f.repo.get(d.id).await.unwrap().unwrap().name, "Ops v2");
+    assert_eq!(
+        f.repo.get(d.id, f.ws).await.unwrap().unwrap().name,
+        "Ops v2"
+    );
     assert_eq!(f.repo.dashboard_workspace(d.id).await.unwrap(), Some(f.ws));
     assert_eq!(f.repo.owner(d.id).await.unwrap(), Some(f.user));
 
@@ -171,7 +174,7 @@ async fn dashboard_crud_cards_and_unique_conflict() {
         .await
         .unwrap();
     assert_eq!(
-        f.repo.get(d.id).await.unwrap().unwrap().parameters,
+        f.repo.get(d.id, f.ws).await.unwrap().unwrap().parameters,
         dash_params
     );
 
@@ -181,8 +184,67 @@ async fn dashboard_crud_cards_and_unique_conflict() {
 
     // deleting the dashboard cascades its cards
     f.repo.delete(d.id).await.unwrap();
-    assert!(f.repo.get(d.id).await.unwrap().is_none());
+    assert!(f.repo.get(d.id, f.ws).await.unwrap().is_none());
     assert!(f.repo.cards(d.id).await.unwrap().is_empty());
+}
+
+/// The defect this repo change exists to close, proven directly rather than
+/// through a caller: `.superpowers/sdd/chart-target-scoping-probe.md` — the same
+/// probe, on the dashboard side — found `DashboardRepo::get` was `WHERE id = $1`,
+/// existence-only, no workspace predicate. `get` now takes the workspace as a
+/// second, required parameter so a caller cannot forget it.
+#[tokio::test]
+async fn get_is_scoped_by_workspace_not_id_alone() {
+    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+        eprintln!("skip");
+        return;
+    };
+    let db = Db::connect(&url, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+
+    let uid: Uuid =
+        sqlx::query_scalar("INSERT INTO users (email, provider) VALUES ($1,'local') RETURNING id")
+            .bind(format!("u_{}@t.local", Uuid::new_v4().simple()))
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    let ws1: Uuid = sqlx::query_scalar(
+        "INSERT INTO workspaces (slug,name,created_by) VALUES ($1,'t1',$2) RETURNING id",
+    )
+    .bind(format!("w1-{}", Uuid::new_v4().simple()))
+    .bind(uid)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    let ws2: Uuid = sqlx::query_scalar(
+        "INSERT INTO workspaces (slug,name,created_by) VALUES ($1,'t2',$2) RETURNING id",
+    )
+    .bind(format!("w2-{}", Uuid::new_v4().simple()))
+    .bind(uid)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+
+    let repo = DashboardRepo::new(db.clone());
+    let dash = repo
+        .create(ws2, "ws2 secret dashboard", "", Some(uid))
+        .await
+        .unwrap();
+
+    // A dashboard that belongs to workspace 2 must not resolve under workspace
+    // 1's scope, even though the id alone is a perfectly valid, existing row.
+    assert!(
+        repo.get(dash.id, ws1).await.unwrap().is_none(),
+        "a workspace-2 dashboard resolved under workspace 1's scope"
+    );
+    // The dashboard's own workspace still resolves it — this is not a blanket
+    // refusal, only a scoped one.
+    let got = repo
+        .get(dash.id, ws2)
+        .await
+        .unwrap()
+        .expect("workspace 2 must still resolve its own dashboard");
+    assert_eq!(got.id, dash.id);
 }
 
 #[tokio::test]
@@ -348,7 +410,7 @@ async fn new_dashboards_default_to_fixed_and_a_stored_width_survives() {
         .update(d.id, "Fresh", "", &serde_json::json!([]), "full", None)
         .await
         .unwrap();
-    let reread = f.repo.get(d.id).await.unwrap().unwrap();
+    let reread = f.repo.get(d.id, f.ws).await.unwrap().unwrap();
     assert_eq!(reread.width, "full");
 
     // And the default is not sticky per-connection or per-transaction — the next create still
@@ -444,7 +506,7 @@ async fn duplicate_copies_tabs_and_cards_with_new_owner() {
             .unwrap();
     let copy = fx
         .repo
-        .duplicate(src.id, Some(other))
+        .duplicate(src.id, fx.ws, Some(other))
         .await
         .unwrap()
         .expect("copy");

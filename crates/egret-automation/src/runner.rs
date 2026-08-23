@@ -335,7 +335,7 @@ impl AutomationRunner {
         for (kind, object_id) in &targets {
             let token = self
                 .render_tokens
-                .mint(kind, *object_id, owner, RENDER_TOKEN_TTL)
+                .mint(kind, *object_id, s.workspace_id, owner, RENDER_TOKEN_TTL)
                 .await
                 .map_err(|e| EvalError::Query(e.to_string()))?;
             urls.push(format!(
@@ -417,7 +417,7 @@ impl AutomationRunner {
             .ok_or(EvalError::NotRunnable("report is missing its chart"))?;
         let chart = self
             .charts
-            .get(chart_id)
+            .get(chart_id, s.workspace_id)
             .await
             .map_err(|e| EvalError::Query(e.to_string()))?
             .ok_or(EvalError::NotRunnable("report's chart no longer exists"))?;
@@ -775,7 +775,7 @@ impl AutomationRunner {
         let owner = self.resolve_owner(s.id).await.ok()?;
         let token = self
             .render_tokens
-            .mint(kind, object_id, owner, RENDER_TOKEN_TTL)
+            .mint(kind, object_id, s.workspace_id, owner, RENDER_TOKEN_TTL)
             .await
             .ok()?;
         let url = format!(

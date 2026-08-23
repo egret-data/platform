@@ -103,6 +103,7 @@ fn fake_engine(seen_sql: std::sync::Arc<std::sync::Mutex<Vec<String>>>) -> FakeE
 struct Fx {
     app: axum::Router,
     render_tokens: RenderTokenRepo,
+    ws: Uuid,
     dashboard: Uuid,
     owner: Uuid,
     admin_tok: String,
@@ -115,6 +116,7 @@ impl Fx {
             .mint(
                 "dashboard",
                 self.dashboard,
+                self.ws,
                 self.owner,
                 Duration::from_secs(60),
             )
@@ -338,6 +340,7 @@ async fn setup(pool: sqlx::PgPool) -> Fx {
             .merge(egret_automation::render_router())
             .with_state(st),
         render_tokens,
+        ws,
         dashboard: dashboard.id,
         owner,
         admin_tok,
