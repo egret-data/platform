@@ -18,6 +18,8 @@
 - **A workspace argument is always the SCHEDULE's workspace, never the object's.** Passing `chart.workspace_id` is what the defect *is*.
 - **`cargo test --workspace` stops at the first failing binary** and is not evidence of anything. Run the crates you touched explicitly.
 - **The database ruling.** `.env` points `DATABASE_URL` at the **dev** database `egret`; never point a test there. **Always `export DATABASE_URL=<the same URL with the database name swapped to egret_test>`.** `#[sqlx::test]` calls `dotenvy::var("DATABASE_URL")` unconditionally, so with nothing exported it falls back to `.env` and writes a `_sqlx_test` schema into the dev database. If you hit `VersionMismatch`, `egret_test` carries a checksum from another branch — drop and recreate it, and say so.
+
+- **Two different env vars, and mixing them up sends you at the dev database.** The *tests* read `DATABASE_URL`. The *binary* (`cargo run -p egret-bin -- migrate|serve`) does **not** — it uses layered config, so the key is `EGRET_DATABASE__URL`. Setting `DATABASE_URL` for the binary silently leaves it on `.env`'s dev database. The controller hit exactly this while preparing the branch: the migrate refused (fail-closed, nothing changed) because the dev database was at a migration this branch does not have. `egret_test` has been recreated and migrated to **126**, this branch's level, so you should not need to.
 - Backend gate before every commit: `cargo fmt --all -- --check`, `cargo clippy -p <crates touched> --all-targets -- -D warnings`, and the tests for those crates.
 - **Do not** change `ON DELETE CASCADE`, do not add a workspace column to `schedule_targets`, do not split it into per-kind tables, and do not fix `owner_identity`'s impersonate branch. Spec §4.3 says why for each.
 
