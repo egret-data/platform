@@ -27299,6 +27299,10 @@
           },
           "ty": {
             "type": "string"
+          },
+          "required": {
+            "type": "boolean",
+            "description": "Present in EVERY permutation described at publish.\n\nDefaults to `true` when absent, which is what a snapshot written before\nthis field existed carries. Those columns were checked for equality on\nevery call, so `true` is the only default that does not loosen an\nalready-published contract."
           }
         }
       },

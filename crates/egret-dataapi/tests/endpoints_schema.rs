@@ -148,10 +148,16 @@ fn fixture_snapshot(database_id: Uuid) -> EndpointSnapshot {
             ColumnSpec {
                 name: "id".to_string(),
                 ty: "uuid".to_string(),
+                required: true,
             },
+            // Deliberately `false`, unlike `id` above: a round trip that
+            // dropped `required` or coerced it back to the pre-M1 default of
+            // `true` would leave both columns looking identical and this
+            // assertion would not catch it.
             ColumnSpec {
                 name: "status".to_string(),
                 ty: "varchar".to_string(),
+                required: false,
             },
         ],
         // Non-default on purpose, like every other field here: a round trip that

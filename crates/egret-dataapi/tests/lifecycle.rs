@@ -1558,8 +1558,8 @@ async fn validate_reports_the_columns_without_publishing_anything() {
     assert_eq!(
         body["columns"],
         serde_json::json!([
-            { "name": "id", "ty": "uuid" },
-            { "name": "n", "ty": "bigint" }
+            { "name": "id", "ty": "uuid", "required": true },
+            { "name": "n", "ty": "bigint", "required": true }
         ])
     );
     assert!(f.versions(ep).await.is_empty(), "validate must not publish");

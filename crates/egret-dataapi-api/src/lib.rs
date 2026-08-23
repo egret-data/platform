@@ -235,6 +235,10 @@ pub struct EndpointSnapshot {
 /// `0` is reserved for "published before the gate existed" and is never written.
 pub const PARAM_GATE: u32 = 1;
 
+fn default_required() -> bool {
+    true
+}
+
 /// The frozen form of a `ColumnMeta`. Deliberately its own type rather than
 /// re-using `egret_core::ColumnMeta`: this one is persisted inside a published
 /// snapshot, so it must stay stable even if the engine-facing type gains or
@@ -243,6 +247,14 @@ pub const PARAM_GATE: u32 = 1;
 pub struct ColumnSpec {
     pub name: String,
     pub ty: String,
+    /// Present in EVERY permutation described at publish.
+    ///
+    /// Defaults to `true` when absent, which is what a snapshot written before
+    /// this field existed carries. Those columns were checked for equality on
+    /// every call, so `true` is the only default that does not loosen an
+    /// already-published contract.
+    #[serde(default = "default_required")]
+    pub required: bool,
 }
 
 impl From<&egret_core::ColumnMeta> for ColumnSpec {
@@ -252,6 +264,10 @@ impl From<&egret_core::ColumnMeta> for ColumnSpec {
         Self {
             name: c.name.clone(),
             ty: c.ty.clone(),
+            // Publish downgrades this to `false` for a column that only some
+            // permutation returns; a single describe means every column is
+            // required, which is the pre-M1 behaviour.
+            required: true,
         }
     }
 }
@@ -301,5 +317,26 @@ mod tests {
         assert_eq!(OutputSpec::default(), from_empty_json);
         assert_eq!(OutputSpec::default().shape, "objects");
         assert_eq!(OutputSpec::default().naming, "as_is");
+    }
+
+    #[test]
+    fn a_snapshot_written_before_required_existed_deserializes_as_required() {
+        // Exactly the shape migration 0121 rows carry today.
+        let old = r#"{"name":"id","ty":"integer"}"#;
+        let c: ColumnSpec = serde_json::from_str(old).unwrap();
+        assert!(
+            c.required,
+            "a column frozen before M1 was checked for equality on every call; \
+             defaulting it to optional would loosen the gate on the whole fleet"
+        );
+    }
+
+    #[test]
+    fn a_described_column_is_required_until_publish_says_otherwise() {
+        let meta = egret_core::ColumnMeta {
+            name: "id".into(),
+            ty: "integer".into(),
+        };
+        assert!(ColumnSpec::from(&meta).required);
     }
 }
