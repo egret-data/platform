@@ -1218,6 +1218,35 @@ pub fn check_dynamic(sql: &str, ctx: &ParamValues) -> Result<(), RenderError> {
     Ok(())
 }
 
+/// Every DISTINCT statement this definition can render to, across the probe
+/// assignments.
+///
+/// Deduplicated **by the rendered SQL string**, which is what makes publish
+/// affordable: the probe budget is sixty-four assignments ([`MAX_PROBES`]), but
+/// a definition with no `{% if %}` renders all sixty-four to the same
+/// statement and costs one describe — exactly what it cost before this
+/// existed. Cost tracks the number of structurally distinct queries, not the
+/// number of parameters.
+///
+/// Assignments that fail to render are skipped, not propagated — the same way
+/// [`check_dynamic`] skips them: publish refuses an unrenderable definition
+/// through its own render of the representative values, and that render
+/// reports the real error. This function has nothing more useful to say about
+/// a probe that does not render.
+pub fn render_permutations(sql: &str, ctx: &ParamValues) -> Vec<(String, Vec<Param>)> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for probe in probe_assignments(sql, ctx) {
+        let Ok((rendered, binds)) = render_inner(sql, &probe) else {
+            continue;
+        };
+        if seen.insert(rendered.clone()) {
+            out.push((rendered, binds));
+        }
+    }
+    out
+}
+
 /// How many probe renders one definition may cost.
 const MAX_PROBES: usize = 64;
 /// How many of a definition's own literals are used as candidate values.
@@ -1909,5 +1938,28 @@ mod tests {
             matches!(err, RenderError::ParameterInspected),
             "expected ParameterInspected, got {err:?}"
         );
+    }
+
+    #[test]
+    fn a_definition_with_no_branch_renders_to_exactly_one_statement() {
+        let sql = "SELECT id FROM t WHERE r = {{ region }}";
+        let mut ctx = ParamValues::new();
+        ctx.insert("region", Param::Str("EU".into()));
+        assert_eq!(
+            render_permutations(sql, &ctx).len(),
+            1,
+            "deduplication must collapse every probe of a non-branching definition \
+             to one statement, or publish silently pays for a describe per probe"
+        );
+    }
+
+    #[test]
+    fn a_branching_definition_renders_to_one_statement_per_branch() {
+        let sql = "SELECT id {% if detail %}, name {% endif %}FROM t";
+        let mut ctx = ParamValues::new();
+        ctx.insert("detail", Param::Bool(true));
+        let got = render_permutations(sql, &ctx);
+        let rendered: Vec<&String> = got.iter().map(|p| &p.0).collect();
+        assert_eq!(got.len(), 2, "got: {rendered:?}");
     }
 }
