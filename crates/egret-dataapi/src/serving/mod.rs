@@ -191,13 +191,19 @@ pub enum ServingError {
     /// from "over".
     #[error("row limit exceeded")]
     RowLimitExceeded { cap: u32 },
-    /// The engine's columns no longer match the ones the snapshot froze.
+    /// The engine's columns are no longer WITHIN the ones the snapshot froze.
     ///
     /// Refused rather than reshaped. `ServingMeta::columns` advertises the
-    /// frozen contract, so serving rows built from a different column set would
-    /// return a body that contradicts its own metadata with no signal — the
-    /// exact drift the frozen snapshot exists to make visible. The operator's
-    /// fix is to re-publish, which is why this is not [`Self::Internal`].
+    /// frozen contract — since M1 the union of every branch described at
+    /// publish — so a body may legitimately carry a SUBSET of those columns: a
+    /// branch that returns fewer is the endpoint's own documented behaviour, and
+    /// refusing it was the defect M1 fixed. What it may never carry is a name
+    /// that is not in the union, a declared column under a different type, fewer
+    /// than the columns flagged `required`, two columns of one name, or no
+    /// columns at all. Each of those is a body contradicting its own metadata
+    /// with no signal — the exact drift the frozen snapshot exists to make
+    /// visible. The operator's fix is to re-publish, which is why this is not
+    /// [`Self::Internal`].
     #[error("published output schema no longer matches the data")]
     SchemaDrift,
     /// `output.naming` maps two frozen columns onto one key.

@@ -379,9 +379,17 @@ pub enum ValidationError {
     /// NAME, and it does not care what the types are.
     ///
     /// `SELECT a.id, b.id FROM a JOIN b` with **both** `bigint` used to publish
-    /// green. The union deduplicates by name to one column, `shape_rows` then
-    /// compares `out.columns.len() == 2` against `snap.columns.len() == 1`, and
-    /// every call — not some branch, every one — is a `503 schema_drift`. That
+    /// green. The union deduplicates by name to one column, and every call — not
+    /// some branch, every one — is then a `503 schema_drift`, because a live
+    /// result carrying two columns of one name is something no JSON object can
+    /// express: a `Map` keeps the last value, so one of the two would simply
+    /// vanish from every row. **The clause that refuses it moved in M1** and is
+    /// worth naming, because the old one no longer exists: until M1 `shape_rows`
+    /// compared `out.columns.len() == 2` against `snap.columns.len() == 1` and
+    /// the refusal came out of that arithmetic. Its predicate is containment
+    /// now and compares no counts, so the repeat is refused by an explicit
+    /// duplicate-name clause instead. Same outcome, and this refusal does not
+    /// depend on which one is doing it. That
     /// is the publish-green-then-always-fail class this whole gate exists to
     /// remove, one keystroke away from the differing-type case.
     ///

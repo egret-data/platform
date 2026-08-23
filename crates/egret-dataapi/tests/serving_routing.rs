@@ -895,10 +895,14 @@ async fn an_arrays_shape_serves_positional_rows() {
     // stayed invisible: every shaping test drove `objects`.
     //
     // `arrays` is positional — a client indexes `data[i][j]` against
-    // `meta.columns[j]` — which is why the drift check compares column ORDER and
-    // not just the set, and why the count clause matters more here than in
-    // `objects` (there is no per-row arity guard on this branch: the row is
-    // cloned through verbatim).
+    // `meta.columns[j]` — which is why this shape's drift check compares column
+    // ORDER and TYPE and not just the set, while `objects` asks only for
+    // containment. The count clause carries more weight here for the same
+    // reason: a row is cloned through verbatim, so nothing downstream of the
+    // check looks at the column list again. (The per-row ARITY guard is shared:
+    // it was hoisted above the shape branch, and
+    // `a_row_wider_than_its_own_column_list_is_refused_in_both_shapes` is what
+    // holds it there.)
     let f = skip_without_db!();
     f.publish_endpoint_with_output(
         "GET",
