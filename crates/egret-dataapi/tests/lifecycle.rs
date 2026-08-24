@@ -1450,7 +1450,7 @@ async fn a_column_whose_type_differs_between_branches_refuses_to_publish() {
 /// that the frozen contract carries `timestamp(0)` only measures that promotion
 /// when the accumulator did NOT already hold it. The first version of this test
 /// keyed its arms so that the parameterised branch — which
-/// `branch_statements` enumerates FIRST — supplied `timestamp(0)`, which meant
+/// `branch_renderings` enumerates FIRST — supplied `timestamp(0)`, which meant
 /// "keep the more specific" and "keep the first" were indistinguishable:
 /// deleting the fold's effect entirely left this test green. So the same
 /// definition is published twice with the two spellings swapped between the

@@ -1326,7 +1326,7 @@ fn keys(row: &serde_json::Value) -> Vec<&str> {
 ///
 /// `render::candidates` answers an enum with its `allowed` list and nothing
 /// else — the definition's own literals are not consulted for it — and then
-/// takes only the first `MAX_ENUM_CANDIDATES` of them. `branch_statements`
+/// takes only the first `MAX_ENUM_CANDIDATES` of them. `branch_renderings`
 /// gives an absent context only to parameters with `default.is_none()`, which
 /// is right (serving substitutes the default, so the parameter is never
 /// absent), but it means the default's own branch has exactly one route into

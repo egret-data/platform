@@ -368,7 +368,7 @@ pub enum ValidationError {
         first: String,
         second: String,
     },
-    /// One STATEMENT returning two columns of the same name.
+    /// One BRANCH returning two columns of the same name.
     ///
     /// # Regardless of their types, and that is the whole point
     ///
@@ -393,9 +393,9 @@ pub enum ValidationError {
     /// is the publish-green-then-always-fail class this whole gate exists to
     /// remove, one keystroke away from the differing-type case.
     ///
-    /// So the check is on the name alone, and it runs per described statement
+    /// So the check is on the name alone, and it runs per described branch
     /// before the union fold rather than inside it: a duplicate is a property of
-    /// one statement's describe output, not of the fold.
+    /// one branch's describe output, not of the fold.
     #[error(
         "this definition returns two columns named `{name}`. A JSON object has one key per \
          name, so only one of them could ever be served — alias them apart, e.g. \
@@ -409,7 +409,7 @@ pub enum ValidationError {
     /// union — which is exactly the `503 schema_drift` this whole gate exists to
     /// remove. A loud publish is the honest failure; a quiet one is the bug.
     #[error(
-        "this definition renders to {statements} structurally distinct statements, and publish \
+        "this definition renders to {branches} structurally distinct branches, and publish \
          describes every one of them against the engine so the frozen contract covers every \
          branch a caller can reach. The limit is {limit}. Each optional parameter with no \
          `default` adds the branch its absence takes, and each one whose value can flip an \
@@ -417,7 +417,7 @@ pub enum ValidationError {
          `default` or mark them `required` so absence is not a separate branch, or split this \
          into two endpoints"
     )]
-    TooManyBranches { statements: usize, limit: usize },
+    TooManyBranches { branches: usize, limit: usize },
     /// More declared parameters than publish will render a definition for.
     ///
     /// # Why a second limit, when [`ValidationError::TooManyBranches`] already caps the cost
@@ -472,7 +472,7 @@ pub enum ValidationError {
     /// collision needed both spellings inside one projection and the raw-name
     /// check caught it. `SELECT {% if d %}total_revenue{% else %}totalRevenue
     /// {% endif %} FROM t` under `naming: camel` puts both names in the union
-    /// with neither statement repeating a name, publishes green, and then:
+    /// with neither branch repeating a name, publishes green, and then:
     ///
     /// * every call, on either branch, is `503 output_naming_collision`; and
     /// * the generated OpenAPI fails at the DOCUMENT level, taking every
@@ -485,7 +485,7 @@ pub enum ValidationError {
         "columns `{first}` and `{second}` both become `{key}` under \
          `output.naming: {naming}`, and a JSON object has one key per name — so one of them \
          could never be served. They come from different branches of this definition, which \
-         is why neither statement looks wrong on its own. Alias one of them apart, or set \
+         is why neither branch looks wrong on its own. Alias one of them apart, or set \
          `output.naming: as_is`"
     )]
     OutputNamingCollision {
@@ -1316,7 +1316,7 @@ fn resting_value(p: &ParamSpec) -> Param {
 /// [`representative`], with every defaulted parameter at its own `default`.
 ///
 /// This is the context a call with NO query string produces, which is the one
-/// the generated document advertises — see [`branch_statements`] for why it has
+/// the generated document advertises — see [`branch_renderings`] for why it has
 /// to be described in its own right.
 fn resting(sql: &str, params: &[ParamSpec], absent: &[&str]) -> ParamValues {
     context_with(sql, params, absent, resting_value)
@@ -1720,7 +1720,7 @@ fn projection_has_uncast_marker(rest: &str) -> bool {
 /// a `503 schema_drift` — including the call with no query string, which is the
 /// one the generated OpenAPI advertises as the default. So every branch is
 /// described and their UNION is frozen, each column carrying whether every
-/// branch returns it. See [`branch_statements`] for which renderings that is and
+/// branch returns it. See [`branch_renderings`] for which renderings that is and
 /// [`describe_branches`] for how they are folded together.
 pub async fn validate(
     port: &dyn egret_query_api::QueryExecPort,
@@ -1744,13 +1744,13 @@ pub async fn validate(
     // different column lists — different names, different count, or different
     // order — has no single order to freeze, so it is refused here rather than
     // served under whichever branch happened to be described first. A
-    // non-branching definition has exactly one entry in `per_statement`, so
+    // non-branching definition has exactly one entry in `per_branch`, so
     // this `any` never fires for it — the rule costs it nothing.
     if draft.output.shape == "arrays"
         && described
-            .per_statement
+            .per_branch
             .iter()
-            .any(|names| names != &described.per_statement[0])
+            .any(|names| names != &described.per_branch[0])
     {
         return Err(ValidationError::BranchingArraysShape.into());
     }
@@ -1784,19 +1784,19 @@ pub(crate) struct DescribedBranches {
     /// Every column any branch returns, in first-seen order, with `required`
     /// set for the ones every branch returns.
     pub union: Vec<ColumnSpec>,
-    /// The column NAMES each described statement resolved to, in describe
+    /// The column NAMES each described branch resolved to, in describe
     /// order. The union throws away WHICH branch had which columns, and that is
     /// the question `output.shape = "arrays"` has to ask: an array row is
     /// positional, so two branches with different column lists cannot both be
     /// served under one frozen order. See [`ValidationError::BranchingArraysShape`].
-    pub per_statement: Vec<Vec<String>>,
+    pub per_branch: Vec<Vec<String>>,
 }
 
 /// How many parameters one definition may declare.
 ///
-/// # This is the bound on the half [`MAX_PUBLISHED_STATEMENTS`] does not cover
+/// # This is the bound on the half [`MAX_DESCRIBED_BRANCHES`] does not cover
 ///
-/// The statement limit is measured from the rendered set, so the rendering is
+/// The branch limit is measured from the rendered set, so the rendering is
 /// already paid for by the time it can refuse anything, and that rendering is
 /// synchronous CPU inside an `async fn`. This limit is a scan over
 /// `params.len()` in [`check_definition_scans`], before any render, and it is
@@ -1824,23 +1824,23 @@ pub(crate) struct DescribedBranches {
 /// # Where the number comes from
 ///
 /// Measured in release, timing everything publish does before its first
-/// describe (`branch_statements` plus [`check_render_rules`]), for *n*
+/// describe (`branch_renderings` plus [`check_render_rules`]), for *n*
 /// parameters each guarding its own `{% if %}` block:
 ///
 /// | *n* | all `string` (linear shape) | all `boolean` (the expensive shape) |
 /// |---|---|---|
-/// | 16 | 18 statements, 2.2 ms | 138 statements, 21 ms |
-/// | 24 | 26 statements, 3.6 ms | 302 statements, 55 ms |
-/// | **32** | **34 statements, 5.9 ms** | **530 statements, 122 ms** |
-/// | 36 | — | 640 statements, 152 ms |
-/// | 48 | 50 statements, 12.5 ms | — |
-/// | 62 | 64 statements, 20.0 ms | — |
+/// | 16 | 18 branches, 2.2 ms | 138 branches, 21 ms |
+/// | 24 | 26 branches, 3.6 ms | 302 branches, 55 ms |
+/// | **32** | **34 branches, 5.9 ms** | **530 branches, 122 ms** |
+/// | 36 | — | 640 branches, 152 ms |
+/// | 48 | 50 branches, 12.5 ms | — |
+/// | 62 | 64 branches, 20.0 ms | — |
 /// | 100 | — | 1.14 s |
 /// | 400 | — | 18.2 s |
 ///
 /// So `32`: eight times spec §4.3's canonical endpoint, which declares four. A
 /// 32-parameter definition of the shape anyone actually writes costs 5.9 ms and
-/// 34 statements, so it publishes comfortably — while the worst case the limit
+/// 34 branches, so it publishes comfortably — while the worst case the limit
 /// still admits costs 122 ms of rendering before being refused, against the
 /// 18.2 s that was reachable before. Above 32 the expensive curve is steep
 /// (152 ms at 36, 284 ms at 50), and below it a legitimate wide endpoint starts
@@ -1848,19 +1848,19 @@ pub(crate) struct DescribedBranches {
 ///
 /// It also pulls the two limits apart, though it does not separate them
 /// completely, and the doc used to claim it did. 62 purely linear parameters
-/// render to exactly 64 statements, so without this bound an ordinary wide
-/// endpoint could trip [`MAX_PUBLISHED_STATEMENTS`] on width alone; at 32 the
+/// render to exactly 64 branches, so without this bound an ordinary wide
+/// endpoint could trip [`MAX_DESCRIBED_BRANCHES`] on width alone; at 32 the
 /// linear shape tops out at 34. But the `2n + 2` flag spelling —
 /// `{% if p %} AND s = 'active' {% endif %}`, which `check_params` accepts
 /// because `{% if p %}` counts as a reference — measures 58 at *n* = 28, 62 at
 /// 30, **64 at 31 and 66 at 32**. So the two limits still MEET, at exactly the
 /// width this bound admits: a 32-parameter definition of that shape is refused
-/// by the statement limit rather than this one. That is a loud, actionable
+/// by the branch limit rather than this one. That is a loud, actionable
 /// refusal naming a real cost, not a correctness hole — but it is not the clean
 /// separation the earlier wording promised.
 const MAX_DECLARED_PARAMS: usize = 32;
 
-/// How many structurally distinct statements one definition may publish.
+/// How many structurally distinct branches one definition may publish.
 ///
 /// # What it bounds, and what it does not
 ///
@@ -1884,7 +1884,7 @@ const MAX_DECLARED_PARAMS: usize = 32;
 ///
 /// Measured, by counting the describes one publish actually costs:
 ///
-/// | definition | distinct statements |
+/// | definition | distinct branches |
 /// |---|---|
 /// | spec §4.3's canonical endpoint (4 parameters, 3 `{% if %}`, a `{% for %}`) | 10 |
 /// | *n* optional parameters whose blocks are OFF at the representative values | *n* + 1 or *n* + 2 — 22 at *n* = 20 |
@@ -1893,7 +1893,7 @@ const MAX_DECLARED_PARAMS: usize = 32;
 /// **The split is not by TYPE.** It is whether a parameter's candidate values
 /// can turn its block OFF from a context where the representative values turn it
 /// ON. When blocks start off, every probe turns exactly one on, and the same
-/// single-block statement is reached from every context — they all collapse, and
+/// single-block branch is reached from every context — they all collapse, and
 /// the cost is linear. When blocks start on, a probe from an absent context
 /// turns off a SECOND block, and the pairs are what grow.
 ///
@@ -1933,11 +1933,11 @@ const MAX_DECLARED_PARAMS: usize = 32;
 ///
 /// So `64` is 6.4× the canonical endpoint, admits every linear-shape definition
 /// at any width [`MAX_DECLARED_PARAMS`] permits (32 such parameters render to 34
-/// statements), and admits ten independent always-on toggles while refusing
+/// branches), and admits ten independent always-on toggles while refusing
 /// eleven. It is also `render::MAX_PROBES`, deliberately: that is already this
 /// crate's stated answer to "how much may one definition cost", and two
 /// different budgets would be two numbers to keep in step.
-const MAX_PUBLISHED_STATEMENTS: usize = 64;
+const MAX_DESCRIBED_BRANCHES: usize = 64;
 
 /// Every rendering of the definition publish must describe, in describe order.
 ///
@@ -1971,7 +1971,7 @@ const MAX_PUBLISHED_STATEMENTS: usize = 64;
 /// Deduplicated by the rendered statement across all of them, so a definition
 /// with no branch costs exactly one describe however many parameters it
 /// declares.
-fn branch_statements(sql: &str, params: &[ParamSpec]) -> Vec<(String, usize)> {
+fn branch_renderings(sql: &str, params: &[ParamSpec]) -> Vec<(String, usize)> {
     let optional: Vec<&str> = params
         .iter()
         .filter(|p| !p.required && p.default.is_none())
@@ -2014,18 +2014,18 @@ fn branch_statements(sql: &str, params: &[ParamSpec]) -> Vec<(String, usize)> {
         }
     }
 
-    let mut statements: Vec<(String, usize)> = Vec::new();
+    let mut renderings: Vec<(String, usize)> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for ctx in &contexts {
         for (rendered, binds) in crate::render::render_permutations(sql, ctx) {
             if seen.insert(rendered.clone()) {
                 // `binds.len()` is the `param_count` `describe_as_with_params`
                 // wants — the same quantity the single-statement path passed.
-                statements.push((rendered, binds.len()));
+                renderings.push((rendered, binds.len()));
             }
         }
     }
-    statements
+    renderings
 }
 
 /// Describe every branch and fold the results into one contract.
@@ -2034,8 +2034,8 @@ fn branch_statements(sql: &str, params: &[ParamSpec]) -> Vec<(String, usize)> {
 /// hash order would make two publishes of byte-identical input declare their
 /// columns in different orders.
 ///
-/// `required` is computed only once every statement has been described. Doing it
-/// incrementally would mark the first statement's columns required before
+/// `required` is computed only once every branch has been described. Doing it
+/// incrementally would mark the first branch's columns required before
 /// anything knows whether a later branch omits them.
 async fn describe_branches(
     port: &dyn egret_query_api::QueryExecPort,
@@ -2043,31 +2043,31 @@ async fn describe_branches(
     principal: UserId,
     draft: &DataApiEndpointDto,
 ) -> Result<DescribedBranches> {
-    let mut statements = branch_statements(&draft.sql, &draft.params);
-    if statements.is_empty() {
+    let mut renderings = branch_renderings(&draft.sql, &draft.params);
+    if renderings.is_empty() {
         // Unreachable while `check_render_rules` has just rendered the
         // representative context, but `render_permutations` SKIPS an assignment
         // that does not render, so an empty result is silence rather than an
         // error. Render the representative context directly: its failure is the
-        // one worth reporting, and its success is a statement to describe.
+        // one worth reporting, and its success is a branch to describe.
         let ctx = representative(&draft.sql, &draft.params, &[]);
         let (rendered, binds) =
             crate::render::render(&draft.sql, &ctx).map_err(ValidationError::Render)?;
-        statements.push((rendered, binds.len()));
+        renderings.push((rendered, binds.len()));
     }
     // Before the first describe, so an over-wide definition costs the author an
     // error rather than costing the engine a few hundred round trips.
-    if statements.len() > MAX_PUBLISHED_STATEMENTS {
+    if renderings.len() > MAX_DESCRIBED_BRANCHES {
         return Err(ValidationError::TooManyBranches {
-            statements: statements.len(),
-            limit: MAX_PUBLISHED_STATEMENTS,
+            branches: renderings.len(),
+            limit: MAX_DESCRIBED_BRANCHES,
         }
         .into());
     }
 
     let mut union: Vec<ColumnSpec> = Vec::new();
-    let mut per_statement: Vec<Vec<String>> = Vec::new();
-    for (rendered, bind_count) in &statements {
+    let mut per_branch: Vec<Vec<String>> = Vec::new();
+    for (rendered, bind_count) in &renderings {
         let columns = port
             .describe_as_with_params(
                 workspace,
@@ -2080,7 +2080,7 @@ async fn describe_branches(
         if columns.is_empty() {
             return Err(ValidationError::DescribeReturnedNoColumns.into());
         }
-        // A duplicate WITHIN one statement, checked before the fold and without
+        // A duplicate WITHIN one branch, checked before the fold and without
         // consulting the types: the fold deduplicates by name, so a second `id`
         // would vanish into the first and the frozen contract would be one
         // column narrower than every row the endpoint fetches.
@@ -2093,13 +2093,13 @@ async fn describe_branches(
         {
             return Err(ValidationError::AmbiguousColumnName { name }.into());
         }
-        per_statement.push(names.iter().map(|n| (*n).to_string()).collect());
+        per_branch.push(names.iter().map(|n| (*n).to_string()).collect());
         for column in &columns {
             let spec = ColumnSpec::from(column);
             match union.iter().position(|u| u.name == spec.name) {
                 None => union.push(spec),
                 // `compare_column_types`, not `!=`, and the reason is specific
-                // to this loop: `bind_count` is computed PER STATEMENT, so a
+                // to this loop: `bind_count` is computed PER BRANCH, so a
                 // conditional definition whose branches interpolate different
                 // numbers of parameters describes one branch through
                 // `Connector::describe` (client protocol) and another through
@@ -2143,14 +2143,9 @@ async fn describe_branches(
         }
     }
     for column in &mut union {
-        column.required = per_statement
-            .iter()
-            .all(|names| names.contains(&column.name));
+        column.required = per_branch.iter().all(|names| names.contains(&column.name));
     }
-    Ok(DescribedBranches {
-        union,
-        per_statement,
-    })
+    Ok(DescribedBranches { union, per_branch })
 }
 
 /// A published version, as the API reports it.

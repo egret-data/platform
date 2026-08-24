@@ -1278,7 +1278,7 @@ const MAX_PROBE_LITERALS: usize = 16;
 /// The cost the old cap was protecting is already bounded twice over, and by
 /// limits that do not degrade silently: [`MAX_PROBES`] caps the ASSIGNMENTS at
 /// 64 however deep any one candidate list is, and `lifecycle`'s
-/// `MAX_PUBLISHED_STATEMENTS` caps the DESCRIBES at 64 with a loud publish
+/// `MAX_DESCRIBED_BRANCHES` caps the DESCRIBES at 64 with a loud publish
 /// refusal. A third, lower cap bought nothing either of those did not already
 /// buy, and it cost an undescribed branch.
 ///
