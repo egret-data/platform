@@ -855,6 +855,18 @@ async fn a_naming_collision_is_refused_rather_than_dropping_a_column() {
     //
     // Anti-triviality: the same endpoint with `as_is` must serve BOTH columns,
     // so the refusal is caused by the naming rule and not by the column pair.
+    //
+    // **The colliding version is no longer published through the route, and that
+    // is the point.** `validate()` now runs the same `apply_naming` fold over
+    // the described union and refuses this definition at publish
+    // (`ValidationError::OutputNamingCollision`, pinned in `tests/lifecycle.rs`)
+    // — where the author is present and the blast radius is one endpoint rather
+    // than the whole workspace's generated OpenAPI. So the shape is frozen the
+    // only way it can still arrive: a version published BEFORE that rule
+    // existed, reproduced here by rewriting the frozen snapshot in place. The
+    // serving refusal is what defends those, and deleting it because publish
+    // now refuses would leave every already-frozen colliding version serving
+    // rows one column short.
     let f = skip_without_db!();
     f.publish_endpoint_with_output(
         "GET",
@@ -872,19 +884,38 @@ async fn a_naming_collision_is_refused_rather_than_dropping_a_column() {
         ok.body
     );
 
-    f.publish_endpoint_with_output(
-        "GET",
-        "/camel",
-        "SELECT 66 AS total_revenue",
-        serde_json::json!({ "naming": "camel" }),
+    let camel = f
+        .publish_endpoint_with_output(
+            "GET",
+            "/camel",
+            "SELECT 66 AS total_revenue",
+            serde_json::json!({ "naming": "as_is" }),
+        )
+        .await;
+    // The pre-rule version, written straight into the frozen snapshot.
+    sqlx::query(
+        "UPDATE dataapi.endpoint_versions \
+            SET snapshot = jsonb_set(snapshot, '{output,naming}', '\"camel\"') \
+          WHERE endpoint_id = $1",
     )
-    .await;
+    .bind(camel)
+    .execute(&f.db.pool)
+    .await
+    .expect("rewrite the frozen naming");
     let res = f.call("camel").await;
     assert_eq!(
         res.status,
         StatusCode::SERVICE_UNAVAILABLE,
         "a naming collision must be refused, not served one column short: {} {}",
         res.status,
+        res.body
+    );
+    // The CODE, not just the status: `schema_drift` is the other 503 on this
+    // path, and it would satisfy the assertion above while meaning something
+    // else entirely.
+    assert_eq!(
+        res.body["error"]["code"], "output_naming_collision",
+        "{}",
         res.body
     );
 }

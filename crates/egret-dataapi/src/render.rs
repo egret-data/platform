@@ -366,8 +366,12 @@ impl ParamValues {
             .get(name)
             .and_then(|v| v.downcast_object_ref::<Cell>());
         match cell.and_then(|c| c.allowed.clone()) {
-            // Capped: `allowed` has no length limit anywhere in the model, and
-            // one 64-value enum would otherwise consume the entire probe budget.
+            // Capped only by the shared probe budget — see
+            // [`MAX_ENUM_CANDIDATES`], which is that budget. `allowed` has no
+            // length limit anywhere in the model, so the cap still has to
+            // exist; what it must not do is stop short of the budget, because
+            // an allowed value publish never probes is a branch it never
+            // describes.
             Some(list) => list
                 .into_iter()
                 .take(MAX_ENUM_CANDIDATES)
@@ -1252,7 +1256,39 @@ const MAX_PROBES: usize = 64;
 /// How many of a definition's own literals are used as candidate values.
 const MAX_PROBE_LITERALS: usize = 16;
 /// How many of an enum parameter's allowed values are probed.
-const MAX_ENUM_CANDIDATES: usize = 8;
+///
+/// # Why this is the same number as [`MAX_PROBES`], and was once an eighth of it
+///
+/// It was `8` while the only consumer was [`check_dynamic`], where missing a
+/// candidate costs SENSITIVITY — a definition that inspects a parameter goes
+/// undetected — and the comment at the `take` reasoned that "one 64-value enum
+/// would otherwise consume the entire probe budget".
+///
+/// It now decides a PUBLISHED CONTRACT: an allowed value that is never probed
+/// is a branch never described, so its columns are missing from the frozen
+/// union and the call that sends that value is a permanent `503 schema_drift`.
+/// Measured through the real publish route, one enum of 64 allowed values whose
+/// last-but-one value turns a column on: **1 describe at `8`** (the branch is
+/// invisible, publish is green, and `?p=v62` can only ever 503) and **2
+/// describes at `64`** (the union covers it). Wall clock for that publish moved
+/// 123 ms → 139 ms; four such enums, 144 ms → 179 ms; thirty-two of them,
+/// 1.24 s → 1.21 s (unchanged — that case is bounded by [`MAX_PROBES`], not by
+/// this).
+///
+/// The cost the old cap was protecting is already bounded twice over, and by
+/// limits that do not degrade silently: [`MAX_PROBES`] caps the ASSIGNMENTS at
+/// 64 however deep any one candidate list is, and `lifecycle`'s
+/// `MAX_PUBLISHED_STATEMENTS` caps the DESCRIBES at 64 with a loud publish
+/// refusal. A third, lower cap bought nothing either of those did not already
+/// buy, and it cost an undescribed branch.
+///
+/// **Residual**: [`MAX_PROBES`] counts the base context itself, so a single
+/// parameter reaches at most 63 candidates, and every parameter shares the
+/// budget round-robin. An enum with more allowed values than the budget can
+/// reach — or several enums sharing it — still leaves branches undescribed.
+/// That is the pre-existing probe-budget starvation, recorded in the spec; the
+/// serving check fails closed, so it is a loud 503 rather than a wrong 200.
+const MAX_ENUM_CANDIDATES: usize = MAX_PROBES;
 
 /// The value assignments the gate renders: the endpoint's own representative
 /// values, then each parameter set to each literal the definition mentions (or,

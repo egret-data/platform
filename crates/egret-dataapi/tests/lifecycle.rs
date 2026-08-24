@@ -2009,3 +2009,226 @@ async fn validate_reports_the_columns_without_publishing_anything() {
     assert!(f.versions(ep).await.is_empty(), "validate must not publish");
     assert_eq!(f.state_of(ep).await.0, "draft");
 }
+
+// ---------------------------------------------------------------------------
+// Whole-branch review, Important 2 — `output.naming` over the UNION
+// ---------------------------------------------------------------------------
+
+/// **Two branches whose column names collapse onto one key under `naming`.**
+///
+/// Three of the four places that share the "what is a column" concept apply
+/// `apply_naming`; the publish-side refusal did not. `describe_branches`
+/// refuses duplicates by RAW name, while `shape_rows` and `data_schema` both
+/// refuse on the naming-APPLIED key over the same frozen union.
+///
+/// Before M1 the frozen list was one branch's columns, so a collision needed
+/// both spellings in one projection — which the raw-name check already caught.
+/// Widening the frozen list to the union of every branch is what made a
+/// CROSS-branch collision possible, and nothing at publish looked for it. The
+/// result published green and then:
+///
+/// * every call, on either branch, answered `503 output_naming_collision`; and
+/// * `openapi_gen` returned `NamingCollision`, which is a DOCUMENT-level error
+///   — it fails the whole workspace's generated OpenAPI, taking every unrelated
+///   endpoint's documentation down with it.
+///
+/// So the refusal belongs at publish, where the author is present and the blast
+/// radius is one endpoint.
+#[tokio::test]
+async fn publish_refuses_a_union_whose_names_collide_under_output_naming() {
+    let f = skip_without_db!();
+    f.port.set(Describe::PerSql(vec![
+        ("total_revenue", vec![("total_revenue", "bigint")]),
+        ("totalRevenue", vec![("totalRevenue", "bigint")]),
+    ]));
+    let ep = f
+        .create_endpoint(
+            "collide",
+            "reports/collide",
+            "SELECT {% if d %}total_revenue{% else %}totalRevenue{% endif %} FROM t",
+        )
+        .await;
+    f.patch_endpoint(
+        ep,
+        serde_json::json!({
+            "params": [{ "name": "d", "type": "boolean", "location": "query" }],
+            "output": { "shape": "objects", "naming": "camel" }
+        }),
+    )
+    .await;
+
+    let (status, body) = f.publish_raw(ep).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a union that collapses onto one key must be refused at publish, not \
+         served as a 503 on every branch: {body}"
+    );
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("totalRevenue") && msg.contains("total_revenue"),
+        "the author must be told BOTH declared names, since either one is the \
+         repair: {body}"
+    );
+    assert!(
+        f.versions(ep).await.is_empty(),
+        "and nothing may have been frozen"
+    );
+    assert_eq!(f.state_of(ep).await.0, "draft");
+}
+
+/// The same definition under `naming: as_is`, which is the control.
+///
+/// `total_revenue` and `totalRevenue` are two distinct keys there, so the
+/// endpoint is perfectly serviceable and publish must NOT refuse it. Without
+/// this, a refusal that ignored `naming` entirely — or one that refused any
+/// two-branch union — would pass the test above.
+#[tokio::test]
+async fn publish_allows_the_same_union_when_naming_keeps_the_names_apart() {
+    let f = skip_without_db!();
+    f.port.set(Describe::PerSql(vec![
+        ("total_revenue", vec![("total_revenue", "bigint")]),
+        ("totalRevenue", vec![("totalRevenue", "bigint")]),
+    ]));
+    let ep = f
+        .create_endpoint(
+            "nocollide",
+            "reports/nocollide",
+            "SELECT {% if d %}total_revenue{% else %}totalRevenue{% endif %} FROM t",
+        )
+        .await;
+    f.patch_endpoint(
+        ep,
+        serde_json::json!({
+            "params": [{ "name": "d", "type": "boolean", "location": "query" }],
+            "output": { "shape": "objects", "naming": "as_is" }
+        }),
+    )
+    .await;
+
+    let (status, body) = f.publish_raw(ep).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let snap = f.live_snapshot(ep).await;
+    let mut names: Vec<&str> = snap.columns.iter().map(|c| c.name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(names, vec!["totalRevenue", "total_revenue"]);
+}
+
+// ---------------------------------------------------------------------------
+// Whole-branch review, Important 3 — `output` moved through the publish window
+// ---------------------------------------------------------------------------
+
+/// **`output` is patchable, and publish never noticed it had moved.**
+///
+/// `ValidationError::BranchingArraysShape` is raised by `validate()` against
+/// `draft.output.shape`, BEFORE the transaction. `publish()` then re-reads the
+/// row under lock and re-runs only `validate_definition`, which knows nothing
+/// about `output`; its staleness guard compared `sql`, `database_id` and
+/// `params` and not `output`. So an author who validates a branching definition
+/// as `objects` and PATCHes `shape: arrays` during the describe round trips
+/// froze an `arrays` snapshot over a branching union — and `shape_rows`, which
+/// zips the live row against the frozen list by INDEX, then answered `503` for
+/// every branch but the widest, permanently.
+///
+/// This is the same window, and the same shape of hole, that the guard's own
+/// comment describes as having been closed for `cache.scope`.
+#[tokio::test]
+async fn an_output_edit_during_describe_is_a_conflict() {
+    let f = skip_without_db!();
+    f.port.set(Describe::PerSql(vec![
+        ("name", vec![("id", "uuid"), ("name", "varchar")]),
+        ("", vec![("id", "uuid")]),
+    ]));
+    let ep = f
+        .create_endpoint(
+            "toctou-out",
+            "toctou-out",
+            "SELECT id {% if detail %}, name {% endif %}FROM t",
+        )
+        .await;
+    f.patch_endpoint(
+        ep,
+        serde_json::json!({ "params": [
+            { "name": "detail", "type": "boolean", "location": "query" }
+        ]}),
+    )
+    .await;
+
+    f.port.patch_during_next_describe(
+        &f.db,
+        "UPDATE dataapi.endpoints SET output = $2 WHERE id = $1",
+        ep,
+        serde_json::json!({ "shape": "arrays", "naming": "as_is" }),
+    );
+
+    let (status, body) = f.publish_raw(ep).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "an `output` that moved under the describe makes the resolved columns \
+         stale in exactly the way `sql` does: {body}"
+    );
+    assert!(
+        f.versions(ep).await.is_empty(),
+        "and no arrays snapshot may have been frozen over a branching union"
+    );
+    assert_eq!(f.state_of(ep).await.0, "draft");
+}
+
+/// **An enum's ninth-and-later allowed values are branches too.**
+///
+/// `render::candidates` answers an enum with its `allowed` list and nothing
+/// else, cut at `MAX_ENUM_CANDIDATES`. That cap was an eighth of the probe
+/// budget while its only consumer was `check_dynamic`, where missing a
+/// candidate costs sensitivity; it now decides a PUBLISHED CONTRACT, and an
+/// allowed value never probed is a branch never described — so `?mode=a10` was
+/// a permanent `503 schema_drift` on an endpoint that published green.
+///
+/// The parameter is `required` here on purpose: that removes the absent context
+/// AND the resting context (no `default`), so the only thing that can put `a10`
+/// in front of the engine is the candidate list itself. Measured at the old cap
+/// of 8: one describe, and `extra` missing from the union.
+#[tokio::test]
+async fn publish_describes_an_enum_value_past_the_old_candidate_cap() {
+    let f = skip_without_db!();
+    f.port.set(Describe::PerSql(vec![
+        ("extra", vec![("id", "uuid"), ("extra", "varchar")]),
+        ("", vec![("id", "uuid")]),
+    ]));
+    let ep = f
+        .create_endpoint(
+            "enum9",
+            "reports/enum9",
+            "SELECT id {% if mode | value == 'a10' %}, extra {% endif %}FROM t",
+        )
+        .await;
+    f.patch_endpoint(
+        ep,
+        serde_json::json!({ "params": [{
+            "name": "mode", "type": "enum", "location": "query", "required": true,
+            "allowed": ["a0","a1","a2","a3","a4","a5","a6","a7","a8","a9","a10","a11"]
+        }]}),
+    )
+    .await;
+    f.publish(ep).await;
+
+    let snap = f.live_snapshot(ep).await;
+    assert_eq!(
+        snap.columns
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["id", "extra"],
+        "the branch on `allowed[10]` was never described, so `?mode=a10` can \
+         only ever be a 503"
+    );
+    assert!(
+        !snap
+            .columns
+            .iter()
+            .find(|c| c.name == "extra")
+            .expect("extra")
+            .required,
+        "and it is optional — eleven of the twelve values do not return it"
+    );
+}

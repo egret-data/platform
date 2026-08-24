@@ -186,6 +186,33 @@ the same order, refuses to publish.** The author who wants a branching projectio
 This keeps the positional path exactly as it is today, and confines every change in this
 package to the `objects` path.
 
+**Both `output` rules run in `validate()`, before publish's transaction, and `output` is
+independently patchable** — so publish's staleness comparison must include it, alongside
+`sql`, `database_id` and `params`. Without that, an author could validate a branching
+definition as `objects`, have a `PATCH` set `shape: arrays` land during the describe round
+trips, and freeze an `arrays` snapshot over a branching union: a permanent `503` on every
+branch but the widest. Re-running the pure validator after the lock cannot close it — that
+validator never sees `output` and never describes anything — so `output` is treated the way
+`sql` is, as a retryable conflict.
+
+### 3.3.2 `output.naming` refuses to collide across branches
+
+`shape_rows` and `data_schema` both apply `output.naming` to the **frozen union** and refuse
+a collision; the publish-side duplicate check compared **raw** names only. Before the union,
+the frozen list was one branch's columns, so a collision needed both spellings inside one
+projection — which the raw-name check already caught. Widening the frozen list to the union
+is what made a *cross-branch* collision possible.
+
+`SELECT {% if d %}total_revenue{% else %}totalRevenue{% endif %} FROM t` under
+`naming: camel` puts both names in the union with neither statement repeating a name. It
+published green, and then every call on either branch answered `503
+output_naming_collision` — and the generated OpenAPI failed at the **document** level,
+taking every unrelated endpoint in the workspace down with it. That is the only failure in
+this package whose blast radius is not the one endpoint.
+
+So the same `apply_naming` fold runs over the described union inside `validate()`, beside
+the `arrays` check, and quotes both declared names back to the author.
+
 The 64-probe budget is a cap, not a proof of exhaustiveness: a template can branch on more
 combinations than 64. **This was measured, not assumed:** five non-enum parameters, each
 harvesting sixteen literals, exactly exhaust the budget and the alphabetically-last
@@ -193,6 +220,20 @@ parameter's tail candidates are never probed. A control run with the same parame
 starves identically, so the limit is the round-robin budget itself and predates this
 package. The consequence is that an endpoint with that many parameters can still meet a
 branch publish never described.
+
+**A third way, found by the whole-branch review: a parameter's own `default`.** A parameter
+with a `default` is never absent — serving substitutes the default — so it gets no absent
+context, which left the default reachable only as a probe *candidate*. For an **enum** that
+route did not exist at all: `render::candidates` answers an enum with its `allowed` list and
+never consults the definition's literals, and the list was cut at `MAX_ENUM_CANDIDATES = 8`.
+An enum with twelve allowed values and `default` at index 10 therefore published green and
+then answered `503 schema_drift` on the call with **no query string** — the §1.3 defect
+again, through the one parameter type that is supposed to be the most tightly described. A
+plain `string` would have been probed with the same value, because a non-enum scalar
+harvests its candidates from the definition's own literals. Fixed two ways, each pinned by a
+test the other cannot satisfy: the declared `default` is now a **context**
+(`lifecycle::resting`, always rendered, never starved), and `MAX_ENUM_CANDIDATES` was raised
+to `MAX_PROBES`.
 
 **A second, independent way publish can miss a branch**, found in review: the
 absent-parameter contexts are `{none absent}`, `{each one absent}`, and `{all absent}` —
@@ -210,8 +251,26 @@ defect — it is a field nobody reviewed at publish reaching a caller.
 The §1.3 table becomes `200` in every row, with `?detail=false` returning `{id}` and
 `?detail=true` returning `{id, name, email}`; `name` and `email` are declared
 `required: false` and `id` `required: true`; the OpenAPI stops advertising calls that
-cannot succeed; and the enum-ordering hazard disappears, because every allowed value is
-described rather than only `allowed[0]`.
+cannot succeed; and the enum-ordering hazard is *reduced* rather than removed — the
+representative render no longer decides the contract on its own, but not every allowed value
+is described.
+
+**That last clause said "the enum-ordering hazard disappears, because every allowed value is
+described rather than only `allowed[0]`", and it was false above eight values.**
+`render::candidates` cut an enum's list at `MAX_ENUM_CANDIDATES`, which was `8`. Measured
+through the real publish route, one enum of sixty-four allowed values whose value at index 62
+turns a column on: **one describe** at the old cap, so the column never entered the union and
+`?p=v62` could only ever be a `503`. The cap is now `MAX_PROBES`, and that case describes two
+statements. This is a **third residual**, alongside the two below:
+
+* `MAX_PROBES` counts the base context itself, so a single parameter reaches at most
+  sixty-three candidates, and every parameter shares that budget round-robin. An enum with
+  more allowed values than the budget can reach — or several enums sharing it — still leaves
+  branches undescribed. Raising the cap further cannot fix that; only the probe budget could.
+* The parameter's declared **`default`** is exempt from all of it, because it is a context
+  rather than a candidate. That is deliberate: the default is the value every call with no
+  query string sends, so it is the one value that must never be able to lose a race for the
+  budget.
 
 ## 4. M2 — several statements, and one envelope
 

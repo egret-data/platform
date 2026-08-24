@@ -180,6 +180,32 @@ cùng một thứ tự, thì bị từ chối publish.** Tác giả muốn proje
 Việc này giữ nguyên si đường đi theo vị trí như hôm nay, và giam mọi thay đổi của gói này
 vào đường `objects`.
 
+**Cả hai luật về `output` đều chạy trong `validate()`, TRƯỚC transaction của publish, mà
+`output` lại patch được độc lập** — nên phép so sánh chống lỗi thời của publish phải tính cả
+nó, bên cạnh `sql`, `database_id` và `params`. Thiếu điều đó, tác giả có thể validate một
+định nghĩa rẽ nhánh ở dạng `objects`, để một `PATCH` đặt `shape: arrays` rơi vào giữa các
+vòng describe, và đóng băng một snapshot `arrays` trên một union rẽ nhánh: `503` vĩnh viễn
+cho mọi nhánh trừ nhánh rộng nhất. Chạy lại validator thuần sau lock không bịt được — nó
+không thấy `output` và không describe gì cả — nên `output` được xử như `sql`: một conflict
+có thể thử lại.
+
+### 3.3.2 `output.naming` không được va chạm xuyên nhánh
+
+`shape_rows` và `data_schema` đều áp `output.naming` lên **union đóng băng** và từ chối khi
+va chạm; phép kiểm trùng lặp phía publish chỉ so tên **thô**. Trước khi có union, danh sách
+đóng băng là cột của một nhánh, nên muốn va chạm thì hai cách viết phải nằm trong cùng một
+projection — mà phép kiểm tên thô đã bắt được. Chính việc mở rộng danh sách đóng băng thành
+union đã làm cho va chạm *xuyên nhánh* trở nên khả dĩ.
+
+`SELECT {% if d %}total_revenue{% else %}totalRevenue{% endif %} FROM t` với `naming: camel`
+đưa cả hai tên vào union mà không câu lệnh nào lặp tên. Nó publish xanh, rồi mọi lời gọi ở
+cả hai nhánh đều trả `503 output_naming_collision` — và OpenAPI sinh ra hỏng ở mức **tài
+liệu**, kéo theo mọi endpoint không liên quan trong workspace. Đó là hỏng hóc duy nhất trong
+gói này có bán kính ảnh hưởng vượt ra ngoài một endpoint.
+
+Vì vậy đúng phép gấp `apply_naming` ấy chạy trên union đã describe, ngay trong `validate()`,
+cạnh phép kiểm `arrays`, và trả lại cho tác giả cả hai tên đã khai.
+
 Ngân sách 64 probe là một cái trần, không phải bằng chứng vét cạn: một template có thể rẽ
 theo nhiều tổ hợp hơn 64. **Điều này đã được đo, không phải phỏng đoán:** năm tham số
 không-enum, mỗi cái thu hoạch mười sáu literal, vắt cạn đúng ngân sách và các ứng viên
@@ -187,6 +213,19 @@ cuối của tham số sắp cuối bảng chữ cái không bao giờ được 
 với cùng số tham số đói ở đúng điểm đó, nên giới hạn nằm ở chính ngân sách round-robin và
 có trước gói này. Hệ quả là một endpoint nhiều tham số như vậy vẫn có thể gặp một nhánh mà
 publish chưa từng describe.
+
+**Đường thứ ba, do review toàn nhánh tìm ra: chính `default` của tham số.** Một tham số có
+`default` thì không bao giờ vắng — serving thay thế bằng default — nên nó không có ngữ cảnh
+vắng nào, và đường duy nhất còn lại để default lọt vào tập render là làm *candidate* của
+probe. Với **enum**, đường đó vốn không tồn tại: `render::candidates` trả về đúng danh sách
+`allowed` của enum và không bao giờ đọc literal của định nghĩa, còn danh sách đó bị cắt tại
+`MAX_ENUM_CANDIDATES = 8`. Một enum có mười hai giá trị `allowed` với `default` ở chỉ số 10
+vì thế publish xanh, rồi trả `503 schema_drift` cho lời gọi **không có query string** — đúng
+lỗi §1.3, qua đúng cái kiểu tham số lẽ ra được mô tả chặt nhất. Một `string` thường thì đã
+được probe bằng chính giá trị ấy, vì scalar không-enum thu candidate từ literal của định
+nghĩa. Đã vá theo hai đường, mỗi đường được ghim bởi một test mà đường kia không thoả được:
+`default` khai báo nay là một **ngữ cảnh** (`lifecycle::resting`, luôn được render, không thể
+bị đói), và `MAX_ENUM_CANDIDATES` được nâng lên `MAX_PROBES`.
 
 **Một đường thứ hai, độc lập, khiến publish bỏ sót nhánh**, tìm thấy lúc review: các ngữ
 cảnh vắng-tham-số là `{không vắng cái nào}`, `{vắng từng cái một}`, và `{vắng hết}` — thừa
@@ -202,8 +241,25 @@ một trường chưa ai duyệt lúc publish đang đi tới tay người gọi
 
 Bảng ở §1.3 thành `200` ở mọi dòng, với `?detail=false` trả `{id}` và `?detail=true` trả
 `{id, name, email}`; `name` và `email` khai `required: false`, `id` khai `required: true`;
-OpenAPI thôi quảng cáo những lời gọi không thể thành công; và mối nguy thứ-tự-enum biến
-mất, vì mọi giá trị `allowed` đều được describe chứ không chỉ `allowed[0]`.
+OpenAPI thôi quảng cáo những lời gọi không thể thành công; và mối nguy thứ-tự-enum *giảm*
+chứ không biến mất — lần render đại diện không còn một mình quyết định hợp đồng, nhưng không
+phải mọi giá trị `allowed` đều được describe.
+
+**Vế cuối trước đây viết "mối nguy thứ-tự-enum biến mất, vì mọi giá trị `allowed` đều được
+describe chứ không chỉ `allowed[0]`", và câu đó SAI khi enum có hơn tám giá trị.**
+`render::candidates` cắt danh sách của enum tại `MAX_ENUM_CANDIDATES`, khi đó là `8`. Đo qua
+đúng route publish thật, một enum sáu mươi tư giá trị `allowed` mà giá trị ở chỉ số 62 bật
+thêm một cột: **một describe** ở cap cũ, nên cột đó không bao giờ vào union và `?p=v62` chỉ
+có thể là `503`. Cap nay là `MAX_PROBES`, và trường hợp đó describe hai câu lệnh. Đây là
+**tồn dư thứ ba**, bên cạnh hai cái dưới:
+
+* `MAX_PROBES` đếm cả ngữ cảnh gốc, nên một tham số đơn lẻ với tới tối đa sáu mươi ba
+  candidate, và mọi tham số chia nhau ngân sách đó theo vòng tròn. Một enum có nhiều giá trị
+  `allowed` hơn mức ngân sách với tới — hoặc vài enum cùng chia ngân sách — vẫn còn nhánh
+  chưa được describe. Nâng cap thêm nữa không sửa được; chỉ ngân sách probe mới sửa được.
+* `default` khai báo của tham số miễn nhiễm với tất cả những cái đó, vì nó là ngữ cảnh chứ
+  không phải candidate. Đó là cố ý: default là giá trị mà mọi lời gọi không query string đều
+  gửi, nên nó là giá trị duy nhất không được phép thua trong cuộc tranh ngân sách.
 
 ## 4. M2 — nhiều câu lệnh, và một cái vỏ
 

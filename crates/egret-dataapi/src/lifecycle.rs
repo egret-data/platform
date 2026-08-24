@@ -458,6 +458,38 @@ pub enum ValidationError {
          column is missing. Use `output.shape: objects`, where a column is simply absent"
     )]
     BranchingArraysShape,
+    /// Two DECLARED column names that `output.naming` maps onto one key.
+    ///
+    /// # This package is what made a cross-branch collision possible
+    ///
+    /// Four places in this crate share the "what is a column" concept, and
+    /// three of them apply `apply_naming`: `shape_rows` refuses a collision
+    /// over the frozen union with `503 output_naming_collision`, and
+    /// `data_schema` refuses it with `OpenApiGenError::NamingCollision`. Only
+    /// the publish-side duplicate check did not — it compared RAW names.
+    ///
+    /// Before the union, the frozen list was one branch's columns, so a
+    /// collision needed both spellings inside one projection and the raw-name
+    /// check caught it. `SELECT {% if d %}total_revenue{% else %}totalRevenue
+    /// {% endif %} FROM t` under `naming: camel` puts both names in the union
+    /// with neither statement repeating a name, publishes green, and then:
+    ///
+    /// * every call, on either branch, is `503 output_naming_collision`; and
+    /// * the generated OpenAPI fails at the DOCUMENT level, taking every
+    ///   unrelated endpoint in the workspace down with it — the one failure
+    ///   here whose blast radius is not this endpoint.
+    ///
+    /// So it is refused where the author is standing, and both declared names
+    /// are quoted back, because renaming either one is the repair.
+    #[error(
+        "columns `{first}` and `{second}` both become `{key}` under          `output.naming: {naming}`, and a JSON object has one key per name — so one of them          could never be served. They come from different branches of this definition, which          is why neither statement looks wrong on its own. Alias one of them apart, or set          `output.naming: as_is`"
+    )]
+    OutputNamingCollision {
+        key: String,
+        first: String,
+        second: String,
+        naming: String,
+    },
 }
 
 impl From<ValidationError> for Error {
@@ -1258,6 +1290,44 @@ fn representative_value(p: &ParamSpec) -> Param {
 /// false. That is the same distinction the serving path makes, and it is what
 /// makes these renders representative of what will actually be served.
 fn representative(sql: &str, params: &[ParamSpec], absent: &[&str]) -> ParamValues {
+    context_with(sql, params, absent, representative_value)
+}
+
+/// The value a parameter carries when the CALLER supplies nothing: its declared
+/// `default`, or the representative value when it has none.
+///
+/// Coerced by [`crate::serving::params::coerce`] — the same function the
+/// serving path uses — so the value publish renders against and the value a
+/// bare call binds are produced by one rule rather than two. The fallback is
+/// unreachable rather than lenient: [`check_defaults`] refuses a `default` this
+/// cannot coerce, and it runs inside [`check_definition_scans`], before any
+/// render.
+fn resting_value(p: &ParamSpec) -> Param {
+    match &p.default {
+        Some(d) => crate::serving::params::coerce(p, d).unwrap_or_else(|_| representative_value(p)),
+        None => representative_value(p),
+    }
+}
+
+/// [`representative`], with every defaulted parameter at its own `default`.
+///
+/// This is the context a call with NO query string produces, which is the one
+/// the generated document advertises — see [`branch_statements`] for why it has
+/// to be described in its own right.
+fn resting(sql: &str, params: &[ParamSpec], absent: &[&str]) -> ParamValues {
+    context_with(sql, params, absent, resting_value)
+}
+
+/// The shared body of [`representative`] and [`resting`]: the two differ only in
+/// which value a present parameter carries, and everything else about building
+/// the context — the list/scalar inference, and `insert_absent` rather than
+/// omission — must not be able to drift between them.
+fn context_with(
+    sql: &str,
+    params: &[ParamSpec],
+    absent: &[&str],
+    value: fn(&ParamSpec) -> Param,
+) -> ParamValues {
     let declared: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
     let lists = crate::render::iterated_params(sql, &declared);
     let mut ctx = ParamValues::new();
@@ -1265,9 +1335,9 @@ fn representative(sql: &str, params: &[ParamSpec], absent: &[&str]) -> ParamValu
         if absent.contains(&p.name.as_str()) {
             ctx.insert_absent(p.name.clone());
         } else if lists.iter().any(|l| l == &p.name) {
-            ctx.insert_list(p.name.clone(), vec![representative_value(p)]);
+            ctx.insert_list(p.name.clone(), vec![value(p)]);
         } else {
-            ctx.insert_for_spec(p, representative_value(p));
+            ctx.insert_for_spec(p, value(p));
         }
     }
     ctx
@@ -1680,6 +1750,28 @@ pub async fn validate(
     {
         return Err(ValidationError::BranchingArraysShape.into());
     }
+    // The SAME fold `shape_rows` and `data_schema` run, over the SAME frozen
+    // union, run here first — where the author is present and the blast radius
+    // is one endpoint. `draft.output` is already in hand for the check above.
+    //
+    // `describe_branches` refuses duplicates by RAW name; `output.naming` can
+    // collapse two distinct raw names onto one key, and until the union existed
+    // that needed both spellings inside ONE projection, which the raw-name check
+    // already caught. See `ValidationError::OutputNamingCollision`.
+    let mut mapped: Vec<(String, &str)> = Vec::with_capacity(described.union.len());
+    for column in &described.union {
+        let key = crate::serving::router::apply_naming(&column.name, &draft.output.naming);
+        if let Some((_, first)) = mapped.iter().find(|(k, _)| *k == key) {
+            return Err(ValidationError::OutputNamingCollision {
+                key,
+                first: (*first).to_owned(),
+                second: column.name.clone(),
+                naming: draft.output.naming.clone(),
+            }
+            .into());
+        }
+        mapped.push((key, column.name.as_str()));
+    }
     Ok(described.union)
 }
 
@@ -1864,6 +1956,14 @@ const MAX_PUBLISHED_STATEMENTS: usize = 64;
 /// context, and that is the branch most calls take. [`check_render_rules`]
 /// builds the same set for its own rules, and for the same reason.
 ///
+/// # …plus the resting contexts, for a parameter that HAS a default
+///
+/// A defaulted parameter is never absent, so it gets no absent context — which
+/// left its `default` reachable only as a probe candidate, and for an enum not
+/// even that. [`resting`] renders the definition with every default applied,
+/// which is exactly the assignment a call with no query string produces. See
+/// the comment at that push.
+///
 /// Deduplicated by the rendered statement across all of them, so a definition
 /// with no branch costs exactly one describe however many parameters it
 /// declares.
@@ -1879,6 +1979,35 @@ fn branch_statements(sql: &str, params: &[ParamSpec]) -> Vec<(String, usize)> {
     }
     if optional.len() > 1 {
         contexts.push(representative(sql, params, &optional));
+    }
+    // The RESTING contexts: every defaulted parameter at its own `default`.
+    //
+    // A parameter with a `default` is never absent — serving substitutes the
+    // default — so it gets no absent context above, and the only other route
+    // its default had into the render set was being a probe CANDIDATE. For an
+    // enum that route does not exist at all: `candidates` answers an enum with
+    // its `allowed` list and never consults the definition's literals, and the
+    // list is cut at `render::MAX_ENUM_CANDIDATES`. So an enum whose `default`
+    // sat past the cut was never rendered, its branch never described, and the
+    // call with NO query string — the one `openapi_gen` advertises as the
+    // default — was a permanent `503 schema_drift`. The §1.3 defect again,
+    // through the one parameter type that is supposed to be the most tightly
+    // described: a plain `string` would have been probed with the same value,
+    // because a non-enum scalar harvests its candidates from the definition's
+    // own literals.
+    //
+    // A CONTEXT rather than a candidate, deliberately. A candidate competes for
+    // `render::MAX_PROBES` and can be starved by a wide definition; a context
+    // is always rendered, it costs the same for every parameter type, and it is
+    // literally the assignment a bare call produces. Guarded on there being a
+    // default at all, so the common endpoint pays nothing.
+    if params.iter().any(|p| p.default.is_some()) {
+        contexts.push(resting(sql, params, &[]));
+        if !optional.is_empty() {
+            // The bare call in full: defaults applied AND every parameter that
+            // has no default omitted.
+            contexts.push(resting(sql, params, &optional));
+        }
     }
 
     let mut statements: Vec<(String, usize)> = Vec::new();
@@ -2105,12 +2234,24 @@ impl EndpointStore {
     /// are one (the live column can still move afterwards — see the comment at
     /// that read, and the module comment on why the frozen witness exists).
     ///
-    /// `output`, `limits` and `rate_limit` went through the same window, and
-    /// re-validation does NOT fix them — there is no rule for those fields
-    /// anywhere in this crate, so there is nothing for the re-run to check. What
-    /// they gain is consistency: they are frozen from the same read that was
-    /// validated, rather than from a row nobody looked at. See the module
-    /// comment's "What is not validated at all".
+    /// `limits` and `rate_limit` went through the same window, and re-validation
+    /// does NOT fix them — there is no rule for those fields anywhere in this
+    /// crate, so there is nothing for the re-run to check. What they gain is
+    /// consistency: they are frozen from the same read that was validated,
+    /// rather than from a row nobody looked at. See the module comment's "What
+    /// is not validated at all".
+    ///
+    /// **`output` used to be named in that list, and that has been false since
+    /// M1.** There are now two rules that read it —
+    /// [`ValidationError::BranchingArraysShape`] reads `output.shape` and
+    /// [`ValidationError::OutputNamingCollision`] reads `output.naming` — and
+    /// both run in [`validate`], which happens BEFORE this transaction and
+    /// against the pre-lock draft. Re-running `validate_definition` cannot
+    /// re-check them either: it is the PURE validator and never sees `output`,
+    /// while the two rules that do need the describe results. So `output` is
+    /// handled the way `sql` is instead — by the identity check below, as a
+    /// retryable conflict. Anyone adding a third `output` rule should put it
+    /// beside those two and needs no new machinery here.
     ///
     /// # State
     ///
@@ -2132,12 +2273,24 @@ impl EndpointStore {
         let mut tx = self.db.pool.begin().await.map_err(db_err)?;
 
         let current = self.locked(&mut tx, workspace, id).await?;
-        // The three inputs the resolved `columns` depend on. A change to any of
+        // The four inputs the resolved `columns` depend on. A change to any of
         // them makes `columns` stale, which no amount of re-validation would
         // detect — only a fresh describe would, and that is the caller's to retry.
+        //
+        // `output` is the fourth and was added last. It reaches `validate()` —
+        // the `arrays`-over-a-branching-union refusal reads `draft.output.shape`
+        // — and that refusal runs BEFORE this transaction, against the pre-lock
+        // draft, while `output` is independently patchable. So an author could
+        // validate a branching definition as `objects`, have a PATCH set
+        // `shape: arrays` during the describe round trips, and freeze an
+        // `arrays` snapshot over a union no positional row can express:
+        // `shape_rows` zips live against frozen by INDEX, so every branch but
+        // the widest is a permanent `503`. Exactly the hole the paragraph above
+        // describes closing for `cache.scope`, one field along.
         if current.sql != draft.sql
             || current.database_id != draft.database_id
             || current.params != draft.params
+            || current.output != draft.output
         {
             return Err(Error::Conflict(
                 "the endpoint was edited while it was being published; validate and publish again"
