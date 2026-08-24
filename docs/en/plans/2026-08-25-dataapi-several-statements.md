@@ -309,6 +309,35 @@ two endpoints differing only in their statement list must not collide, because t
 
 ---
 
+### Task 10b: the editor can author several statements
+
+**Added after Task 3, which found that nothing owned this.** Dropping `sql` from the draft
+changes the shape of the create/patch request body, so **the frontend breaks at runtime,
+not at build time**: the orval models still say `sql`, no CI gate asserts them against
+`openapi.json`, and the editor will POST a body that `deny_unknown_fields` refuses. M1 shipped
+with a stale generated client for the same reason — nothing checks it.
+
+This is not a regeneration chore. An endpoint with several statements has to be *authorable*:
+the editor needs to add, name, reorder and remove statements, and the SQL panel that assumes
+one definition has to become a list.
+
+- [ ] **Step 1: regenerate the orval models**, and keep **only** the files this change requires.
+  A full regeneration rewrites 27 files and **silently strips `encodeURIComponent` from every
+  URL builder**, because the committed client came from orval 8.20.0 while the pin is 8.24.0
+  and 8.24 made path-parameter encoding the opt-in `output.urlEncodeParameters`, default
+  false. Setting it inside `output.override` is ignored without warning; only `output` level
+  works. Verify no URL builder lost its encoding before you commit.
+- [ ] **Step 2: write the failing component tests**, then build the list UI. A single-statement
+  endpoint must look and behave exactly as it does today — the common case is not allowed to
+  get heavier for a feature most endpoints will not use.
+- [ ] **Step 3: mutate in both directions.** Removing the add-statement control must redden a
+  test; making the editor always send a list of two must redden a **different** one.
+- [ ] **Step 4:** full frontend suite, `tsc --noEmit`, and eslint. The recorded baseline is
+  **177 warnings** — not 178. Do not let it grow.
+- [ ] **Step 5: Commit**
+
+---
+
 ### Task 11: drive it end to end, and prove the upgrade path
 
 **Files:** `crates/egret-dataapi/tests/serving_errors.rs` or a sibling that owns the real router
