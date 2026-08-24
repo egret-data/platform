@@ -152,22 +152,26 @@ async fn trino_engine_state() -> Option<Fixture> {
     // `X-Trino-User`. Seeded once and reused, so a re-run does not have to
     // allocate `tester-2` and desync from the token's `preferred_username`.
     let engine_user = std::env::var("EGRET_TEST_TRINO_USER").unwrap_or_else(|_| "admin".into());
-    let existing: Option<Uuid> = sqlx::query_scalar("SELECT id FROM users WHERE username = $1")
-        .bind(&engine_user)
-        .fetch_optional(&db.pool)
-        .await
-        .expect("lookup user");
-    let uid: Uuid = match existing {
-        Some(id) => id,
-        None => sqlx::query_scalar(
-            "INSERT INTO users (provider, email, username) VALUES ('local', $1, $2) RETURNING id",
-        )
-        .bind(format!("port-describe-{engine_user}@egret.local"))
-        .bind(&engine_user)
-        .fetch_one(&db.pool)
-        .await
-        .expect("insert user"),
-    };
+    // ONE statement, not a check-then-insert. The eight tests in this binary run
+    // in parallel and all seed the SAME `engine_user`, so a `SELECT` followed by
+    // an `INSERT` races on the FIRST run for any new `EGRET_TEST_TRINO_USER` —
+    // and it collides on `users_email_key` rather than on the `username` the
+    // check looked at, so it fails a different test each run, which is what a
+    // race looks like from the outside. Reproduced deterministically before it
+    // was fixed: delete the row, re-run the binary, and the failure returns.
+    //
+    // `DO UPDATE` rather than `DO NOTHING`: `DO NOTHING` yields no row on
+    // conflict, so `RETURNING id` gives back nothing and the loser of the race
+    // gets an empty result instead of the existing id.
+    let uid: Uuid = sqlx::query_scalar(
+        "INSERT INTO users (provider, email, username) VALUES ('local', $1, $2) \
+         ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email RETURNING id",
+    )
+    .bind(format!("port-describe-{engine_user}@egret.local"))
+    .bind(&engine_user)
+    .fetch_one(&db.pool)
+    .await
+    .expect("seed the engine user");
     let ws: Uuid = sqlx::query_scalar(
         "INSERT INTO workspaces (slug, name, created_by, status) \
          VALUES ($1, 'Port Describe', $2, 'active') RETURNING id",

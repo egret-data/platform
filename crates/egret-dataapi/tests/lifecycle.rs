@@ -1422,6 +1422,124 @@ async fn a_column_whose_type_differs_between_branches_refuses_to_publish() {
     );
 }
 
+/// The publish half of the Trino parametric-datetime fix, and it exists because
+/// nothing else in this crate pinned it.
+///
+/// **Measured, not assumed**: reverting `lifecycle.rs`'s guard from
+/// `column_types_match` back to `existing.ty != spec.ty` left all 434 tests in
+/// this crate green.
+/// [`a_column_whose_type_differs_between_branches_refuses_to_publish`] pins only
+/// the REFUSAL side (`varchar` vs `integer`), so the tolerance was protected by
+/// nothing at all and a later "simplification" back to `!=` would have
+/// reintroduced the exact defect the fix exists for, silently.
+///
+/// The two spellings here are not invented. `describe_branches` computes
+/// `bind_count` PER STATEMENT, and `describe_with_params(sql, 0, _)`
+/// early-returns into `Connector::describe`, whose Trino implementation is the
+/// trait default — `execute` over a `LIMIT 0` wrapper. So a branch that
+/// interpolates NO parameter is typed through the client protocol, which
+/// suppresses datetime precision without
+/// `X-Trino-Client-Capabilities: PARAMETRIC_DATETIME`, and a branch that
+/// interpolates one is typed through `DESCRIBE OUTPUT`, which states it. One
+/// unchanging column, two spellings, and a `400 ColumnTypeConflict` on a
+/// definition nobody changed. Measured live against Trino 483.
+#[tokio::test]
+async fn a_datetime_column_two_branches_spell_differently_still_publishes() {
+    let f = skip_without_db!();
+    // The needle must appear in the RENDERED sql, not in the template: `PerSql`
+    // matches on `sql.contains(needle)` and the engine sees the rendered text,
+    // so `"detail"` would match NEITHER branch and `""` would then match both —
+    // collapsing the fixture to one spelling and passing this test vacuously.
+    // That is exactly what the first draft of this test did.
+    //
+    // So the else arm is keyed on `IS NOT NULL`, which only it renders: that
+    // branch interpolates NO parameter and is typed through the client protocol
+    // (precision suppressed), while the `{{ detail }}` branch interpolates one
+    // and is typed through `DESCRIBE OUTPUT` (precision stated). Exactly the
+    // pairing `bind_count` produces on Trino.
+    f.port.set(Describe::PerSql(vec![
+        ("IS NOT NULL", vec![("v", "timestamp")]),
+        ("", vec![("v", "timestamp(0)")]),
+    ]));
+    let ep = f
+        .create_endpoint(
+            "dt",
+            "reports/dt",
+            "SELECT ts AS v FROM t WHERE {% if detail %}k = {{ detail }}{% else %}k IS NOT NULL{% endif %}",
+        )
+        .await;
+    f.patch_endpoint(
+        ep,
+        serde_json::json!({ "params": [
+            { "name": "detail", "type": "string", "location": "query" }
+        ]}),
+    )
+    .await;
+
+    let (status, body) = f.publish_raw(ep).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "one column whose precision one branch's typing path suppressed is not \
+         two types, and must not refuse the publish: {body}"
+    );
+
+    // And the frozen contract keeps the spelling that STATES the precision,
+    // whichever branch was described first — otherwise `meta.columns` and the
+    // generated document's `x-egret-engine-type` would depend on branch
+    // enumeration order.
+    let snap = f.live_snapshot(ep).await;
+    let v = snap
+        .columns
+        .iter()
+        .find(|c| c.name == "v")
+        .expect("v is declared");
+    assert_eq!(
+        v.ty, "timestamp(0)",
+        "the union must keep the precision-bearing spelling, not whichever \
+         branch happened to be enumerated first"
+    );
+}
+
+/// The boundary of the tolerance above, on the SAME path. Two branches that
+/// each STATE a precision, and state different ones, is a real conflict and
+/// still refuses — the relaxation is only for a precision one side suppressed.
+#[tokio::test]
+async fn two_branches_stating_different_datetime_precisions_still_refuse() {
+    let f = skip_without_db!();
+    // Keyed the same way as the test above, and for the same reason.
+    f.port.set(Describe::PerSql(vec![
+        ("IS NOT NULL", vec![("v", "timestamp(3)")]),
+        ("", vec![("v", "timestamp(6)")]),
+    ]));
+    let ep = f
+        .create_endpoint(
+            "dtc",
+            "reports/dtc",
+            "SELECT ts AS v FROM t WHERE {% if detail %}k = {{ detail }}{% else %}k IS NOT NULL{% endif %}",
+        )
+        .await;
+    f.patch_endpoint(
+        ep,
+        serde_json::json!({ "params": [
+            { "name": "detail", "type": "string", "location": "query" }
+        ]}),
+    )
+    .await;
+
+    let (status, body) = f.publish_raw(ep).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("timestamp(3)") && msg.contains("timestamp(6)"),
+        "and both spellings, or the author cannot tell which branch to CAST: {body}"
+    );
+    assert!(
+        f.versions(ep).await.is_empty(),
+        "a refused publish leaves no version behind"
+    );
+}
+
 /// `output.shape: "arrays"` is positional — `shape_rows` zips the live and
 /// frozen column lists by index — so a definition whose branches resolve to
 /// different columns has no single order to freeze and must be refused.

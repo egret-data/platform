@@ -331,6 +331,35 @@ pub fn column_types_match(declared: &str, returned: &str) -> bool {
     d == declared || r == returned
 }
 
+/// Of two type names that [`column_types_match`] has already accepted, the one
+/// that STATES a datetime precision.
+///
+/// Total by construction rather than by convention: the pair can only be equal
+/// (return either), or differ by a precision exactly one side states — that is
+/// the whole of what `column_types_match` accepts, whose last clause requires
+/// at least one side to carry no precision at all. So testing whether `b` is
+/// the precision-free spelling decides it.
+///
+/// Publishing a branching definition uses this to keep the frozen contract
+/// independent of which branch happened to be described first: a branch that
+/// interpolates no parameters is typed through Trino's client protocol (bare
+/// `timestamp`) and a branch that interpolates some through `DESCRIBE OUTPUT`
+/// (`timestamp(0)`), and the union must not advertise a different
+/// `x-egret-engine-type` depending on branch enumeration order. Keeping the
+/// stated precision is also the right state to be in if
+/// `X-Trino-Client-Capabilities: PARAMETRIC_DATETIME` is ever adopted, since
+/// the live side would then state it too.
+pub fn more_specific_type<'a>(a: &'a str, b: &'a str) -> &'a str {
+    if a == b {
+        return a;
+    }
+    if erase_datetime_precision(b) == b {
+        a
+    } else {
+        b
+    }
+}
+
 /// Remove the precision argument from every `time`/`timestamp` token in a SQL
 /// type name, leaving everything else — including `decimal(10, 2)`,
 /// `varchar(20)` and the `with time zone` suffix — byte-identical.

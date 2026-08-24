@@ -1118,7 +1118,12 @@ fn engine_error(e: egret_core::Error) -> ServingError {
 /// returns (spec §3.2). A branch that legitimately omits an optional column
 /// must therefore be served rather than refused, and the `objects` predicate is:
 /// every returned name is IN the frozen union, every `required` column is
-/// present, and a returned column's type EQUALS the declared one. A column
+/// present, and a returned column's type still HONOURS the declared one —
+/// [`column_types_match`], not string equality, for the one measured reason in
+/// its doc comment: Trino spells a datetime column's precision differently
+/// depending on which of its two typing paths answered, and both spellings are
+/// already in the published corpus. Every other difference, including two
+/// STATED precisions, is still drift. A column
 /// declared `required: false` and not returned is simply ABSENT from the object,
 /// never null — absent is what "this branch does not return it" means, and null
 /// would be indistinguishable from a returned NULL value.
@@ -1130,7 +1135,10 @@ fn engine_error(e: egret_core::Error) -> ServingError {
 /// is the only thing left tying a returned column to the one that was reviewed
 /// at publish — and publish already refuses a name that describes with two
 /// types across branches (§3.2), because two types cannot be unioned into one
-/// honest declaration. Without the comparison here, that same disagreement
+/// honest declaration. "Two types" is the same predicate there as here, and for
+/// the same reason: one column whose precision one branch's typing path merely
+/// suppressed is not two types, and refusing it made a definition nobody had
+/// changed unpublishable. Without the comparison here, that same disagreement
 /// arrives at serving time and is answered with a `200` carrying an integer
 /// under a declared `varchar`.
 ///

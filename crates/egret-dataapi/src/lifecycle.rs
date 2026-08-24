@@ -227,8 +227,8 @@
 
 use egret_core::{Error, Result, UserId};
 use egret_dataapi_api::{
-    column_types_match, CacheScope, CacheSpec, ColumnSpec, EndpointSnapshot, ParamLocation,
-    ParamSpec, ParamType, PARAM_GATE,
+    column_types_match, more_specific_type, CacheScope, CacheSpec, ColumnSpec, EndpointSnapshot,
+    ParamLocation, ParamSpec, ParamType, PARAM_GATE,
 };
 use egret_query_api::Param;
 use uuid::Uuid;
@@ -2096,7 +2096,7 @@ async fn describe_branches(
         per_statement.push(names.iter().map(|n| (*n).to_string()).collect());
         for column in &columns {
             let spec = ColumnSpec::from(column);
-            match union.iter().find(|u| u.name == spec.name) {
+            match union.iter().position(|u| u.name == spec.name) {
                 // Reachable only ACROSS statements now — a duplicate inside one
                 // was refused above, whatever its types.
                 //
@@ -2111,15 +2111,23 @@ async fn describe_branches(
                 // `timestamp` in one branch and `timestamp(0)` in the next and
                 // this arm refused the publish outright. Measured live on Trino
                 // 483, not argued.
-                Some(existing) if !column_types_match(&existing.ty, &spec.ty) => {
+                Some(i) if !column_types_match(&union[i].ty, &spec.ty) => {
                     return Err(ValidationError::ColumnTypeConflict {
                         name: spec.name,
-                        first: existing.ty.clone(),
+                        first: union[i].ty.clone(),
                         second: spec.ty,
                     }
                     .into());
                 }
-                Some(_) => {}
+                // The two spellings agree, possibly only modulo a precision the
+                // client protocol suppressed. Keep whichever STATES it, so the
+                // frozen contract — and therefore `meta.columns` and the
+                // generated document's `x-egret-engine-type` — does not depend
+                // on which branch happened to be described first.
+                Some(i) => {
+                    let keep = more_specific_type(&union[i].ty, &spec.ty).to_owned();
+                    union[i].ty = keep;
+                }
                 None => union.push(spec),
             }
         }
