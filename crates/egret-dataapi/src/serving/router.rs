@@ -158,7 +158,7 @@ use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use egret_dataapi_api::{ColumnSpec, EndpointSnapshot};
+use egret_dataapi_api::{column_types_match, ColumnSpec, EndpointSnapshot};
 use egret_metastore::Db;
 use serde::Serialize;
 use uuid::Uuid;
@@ -1252,11 +1252,18 @@ fn shape_rows(
         // Kept as a second check rather than folded into the `any` above so the
         // log line names which clause refused; three rounds of this plan were
         // spent on refusals that reported the wrong reason.
+        //
+        // `column_types_match` rather than `!=` — see its doc comment. Trino
+        // spells one and the same datetime column two ways depending on which
+        // of its two typing paths answered, and both spellings are already in
+        // the published corpus, so the comparison is where they reconcile. The
+        // strings LOGGED below stay verbatim: an operator must see what each
+        // side actually said, not the canonical form they were judged on.
         if let Some((live, frozen)) = out
             .columns
             .iter()
             .zip(snap.columns.iter())
-            .find(|(live, frozen)| live.ty != frozen.ty)
+            .find(|(live, frozen)| !column_types_match(&frozen.ty, &live.ty))
         {
             return Err(drift(
                 snap,
@@ -1288,10 +1295,15 @@ fn shape_rows(
     // declared, and it may never change a declared column's type. See this
     // function's doc comment for why the type comparison is here now and why
     // this is the backstop that has to fail closed.
+    //
+    // "Change its type" is `column_types_match`, not `!=`: a Trino datetime
+    // column arrives with its precision SUPPRESSED on the client protocol and
+    // STATED by `DESCRIBE OUTPUT`, so `timestamp(0)` and `timestamp` are one
+    // column, not two types. Two stated precisions still disagree.
     for live in &out.columns {
         match snap.columns.iter().find(|f| f.name == live.name) {
             None => return Err(drift(snap, out, "a column that was never declared", None)),
-            Some(frozen) if frozen.ty != live.ty => {
+            Some(frozen) if !column_types_match(&frozen.ty, &live.ty) => {
                 return Err(drift(
                     snap,
                     out,
@@ -1775,6 +1787,81 @@ mod tests {
         assert!(
             logs.contains("column= declared= returned= "),
             "a non-type refusal must not invent a column or a type: {logs}"
+        );
+    }
+
+    /// The merge blocker this comparison exists for, on BOTH shapes.
+    ///
+    /// Trino suppresses a datetime column's precision on the client protocol
+    /// unless the caller sends `X-Trino-Client-Capabilities: PARAMETRIC_DATETIME`,
+    /// which `TrinoConnector` does not — while `DESCRIBE OUTPUT`, the publish
+    /// path for every endpoint that declares a parameter, states it. Measured
+    /// live on Trino 483: an endpoint whose SQL never changed froze
+    /// `timestamp(0)` and served `timestamp`, and answered `503 schema_drift`
+    /// on **every** call, on both shapes. Re-publishing re-ran `DESCRIBE
+    /// OUTPUT` and re-froze `timestamp(0)`, so no author action cleared it.
+    ///
+    /// The fixture freezes the spelling a snapshot written BEFORE this branch
+    /// carries, and never re-publishes: this is the upgrade path, not a fresh
+    /// publish. Every other fixture in this module types its columns `integer`,
+    /// which is why 432 green tests did not see this.
+    #[test]
+    fn a_datetime_column_whose_precision_the_client_protocol_suppressed_still_serves() {
+        for (frozen_ty, live_ty) in [
+            ("timestamp(0)", "timestamp"),
+            ("timestamp(3)", "timestamp"),
+            ("time(0)", "time"),
+            ("timestamp(0) with time zone", "timestamp with time zone"),
+            ("array(timestamp(0))", "array(timestamp)"),
+            // The reverse pairing too: a snapshot frozen through the NO-param
+            // path carries the bare spelling, and both are in the corpus.
+            ("timestamp", "timestamp(0)"),
+        ] {
+            let out = result(
+                vec![live("c", live_ty)],
+                vec![vec![serde_json::json!("2020-01-01 10:20:30.000")]],
+            );
+
+            let objects = snapshot_with_columns(vec![spec("c", frozen_ty, true)]);
+            assert_eq!(
+                shape_rows(&out, &objects)
+                    .unwrap_or_else(|e| panic!("objects: {frozen_ty} vs {live_ty} refused: {e:?}")),
+                serde_json::json!([{"c": "2020-01-01 10:20:30.000"}]),
+            );
+
+            let mut arrays = snapshot_with_columns(vec![spec("c", frozen_ty, true)]);
+            arrays.output.shape = "arrays".into();
+            assert_eq!(
+                shape_rows(&out, &arrays)
+                    .unwrap_or_else(|e| panic!("arrays: {frozen_ty} vs {live_ty} refused: {e:?}")),
+                serde_json::json!([["2020-01-01 10:20:30.000"]]),
+            );
+        }
+    }
+
+    /// The tolerance above is bounded, and this is where the boundary is.
+    ///
+    /// Asserted on the REASON, not on the status: `503` alone covers
+    /// `output_naming_collision` too, so a test that only checked the code
+    /// would pass on a refusal that fired for the wrong reason entirely.
+    #[test]
+    fn two_stated_datetime_precisions_are_still_drift() {
+        let out = result(
+            vec![live("c", "timestamp(6)")],
+            vec![vec![serde_json::json!("2020-01-01 10:20:30.000000")]],
+        );
+        let snap = snapshot_with_columns(vec![spec("c", "timestamp(3)", true)]);
+        assert!(
+            logs_from_shaping(&out, &snap).contains(r#"why="a declared column changed type""#),
+            "a precision BOTH sides stated is a real type change, not a suppressed one"
+        );
+
+        // And the ordinary case the whole gate is for.
+        let out = result(vec![live("c", "integer")], vec![vec![serde_json::json!(1)]]);
+        let snap = snapshot_with_columns(vec![spec("c", "varchar", true)]);
+        assert!(
+            logs_from_shaping(&out, &snap).contains(r#"why="a declared column changed type""#),
+            "varchar -> integer must still be refused, and for THIS reason"
         );
     }
 

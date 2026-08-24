@@ -546,3 +546,76 @@ async fn describe_and_describe_with_params_type_the_same_columns_identically_on_
         "the varchar(n) column must also type identically through both paths"
     );
 }
+
+/// Fix round 2, and the reason this file gained a SECOND consistency test
+/// rather than more columns in the one above: on the parametric **datetime**
+/// family the two paths genuinely do NOT agree, and the divergence is left in
+/// place deliberately.
+///
+/// Trino's client protocol suppresses a datetime type's precision unless the
+/// request carries `X-Trino-Client-Capabilities: PARAMETRIC_DATETIME`, which
+/// this connector does not send. `DESCRIBE OUTPUT` answers in result **rows**,
+/// which that flag does not reach. Measured live against Trino 483, same
+/// statement, one header apart:
+///
+/// ```text
+/// no capability header                             : [('c','timestamp'),    ('t','time')]
+/// X-Trino-Client-Capabilities: PARAMETRIC_DATETIME : [('c','timestamp(0)'), ('t','time(0)')]
+/// ```
+///
+/// Sending the header was considered and rejected: it would make the LIVE side
+/// state the precision, which fixes the parameterised endpoints whose snapshots
+/// carry `timestamp(0)` and breaks the non-parameterised ones whose snapshots
+/// carry the bare `timestamp` — both spellings are already in the published
+/// corpus, so no change to what the connector reports can satisfy both. The
+/// reconciliation is `egret_dataapi_api::column_types_match`, at the one place
+/// that sees both sides.
+///
+/// So this test pins the divergence as a MEASURED FACT rather than asserting it
+/// away. If a Trino upgrade, or a future capability header, makes these agree,
+/// this test fails and points at the comparison that may then be narrowed.
+#[tokio::test]
+async fn the_two_describe_paths_disagree_about_datetime_precision_on_trino() {
+    let Some(c) = trino_or_skip() else {
+        eprintln!("skip");
+        return;
+    };
+
+    let via_plain = c
+        .describe(
+            "SELECT TIMESTAMP '2020-01-01 10:20:30' AS c, TIME '10:20:30' AS t",
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("plain describe");
+
+    let via_params = c
+        .describe_with_params(
+            "SELECT ? AS v, TIMESTAMP '2020-01-01 10:20:30' AS c, TIME '10:20:30' AS t",
+            1,
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("describe_with_params");
+
+    let ty = |cols: &[egret_core::ColumnMeta], name: &str| {
+        cols.iter()
+            .find(|c| c.name == name)
+            .unwrap_or_else(|| panic!("no column named {name} in {cols:?}"))
+            .ty
+            .clone()
+    };
+
+    assert_eq!(
+        ty(&via_plain, "c"),
+        "timestamp",
+        "the client protocol suppresses the precision"
+    );
+    assert_eq!(
+        ty(&via_params, "c"),
+        "timestamp(0)",
+        "DESCRIBE OUTPUT states it"
+    );
+    assert_eq!(ty(&via_plain, "t"), "time");
+    assert_eq!(ty(&via_params, "t"), "time(0)");
+}

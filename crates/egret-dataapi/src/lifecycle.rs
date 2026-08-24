@@ -227,8 +227,8 @@
 
 use egret_core::{Error, Result, UserId};
 use egret_dataapi_api::{
-    CacheScope, CacheSpec, ColumnSpec, EndpointSnapshot, ParamLocation, ParamSpec, ParamType,
-    PARAM_GATE,
+    column_types_match, CacheScope, CacheSpec, ColumnSpec, EndpointSnapshot, ParamLocation,
+    ParamSpec, ParamType, PARAM_GATE,
 };
 use egret_query_api::Param;
 use uuid::Uuid;
@@ -2099,7 +2099,19 @@ async fn describe_branches(
             match union.iter().find(|u| u.name == spec.name) {
                 // Reachable only ACROSS statements now — a duplicate inside one
                 // was refused above, whatever its types.
-                Some(existing) if existing.ty != spec.ty => {
+                //
+                // `column_types_match`, not `!=`, and the reason is specific to
+                // this loop: `bind_count` is computed PER STATEMENT, so a
+                // conditional definition whose branches interpolate different
+                // numbers of parameters describes one branch through
+                // `Connector::describe` (client protocol) and another through
+                // `describe_with_params` (`DESCRIBE OUTPUT`). On Trino those two
+                // paths spell a datetime column's precision differently, so a
+                // single unchanging `timestamp` column reported itself as
+                // `timestamp` in one branch and `timestamp(0)` in the next and
+                // this arm refused the publish outright. Measured live on Trino
+                // 483, not argued.
+                Some(existing) if !column_types_match(&existing.ty, &spec.ty) => {
                     return Err(ValidationError::ColumnTypeConflict {
                         name: spec.name,
                         first: existing.ty.clone(),
