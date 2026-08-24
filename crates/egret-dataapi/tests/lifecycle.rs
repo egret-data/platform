@@ -2070,6 +2070,21 @@ async fn publish_refuses_a_union_whose_names_collide_under_output_naming() {
         "the author must be told BOTH declared names, since either one is the \
          repair: {body}"
     );
+    // A CONTIGUOUS span across a line continuation, not two `contains` on the
+    // names. The first version of this message lost its `\` continuations and
+    // shipped four runs of ten spaces — "…both become `totalRevenue` under
+    // ␣␣␣␣␣␣␣␣␣␣`output.naming: camel`…" — which every name-only assertion
+    // reads as passing. Asserting a span is what makes the rendered sentence,
+    // rather than its vocabulary, the thing under test.
+    assert!(
+        msg.contains("both become `totalRevenue` under `output.naming: camel`"),
+        "the message must read as a sentence, not as words with the line \
+         continuations dropped: {msg}"
+    );
+    assert!(
+        !msg.contains("  "),
+        "no run of two spaces belongs in an author-facing message: {msg}"
+    );
     assert!(
         f.versions(ep).await.is_empty(),
         "and nothing may have been frozen"

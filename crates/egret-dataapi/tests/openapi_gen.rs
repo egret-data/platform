@@ -413,3 +413,118 @@ async fn a_read_only_principal_cannot_read_the_generated_document() {
     assert_eq!(status, 200, "`:manage` must still be served: {body}");
     assert!(body["paths"].is_object(), "{body}");
 }
+
+/// **The one failure in this crate whose blast radius is the whole workspace.**
+///
+/// `data_schema` refuses to document a version whose `output.naming` maps two
+/// frozen columns onto one key, because serving answers `503
+/// output_naming_collision` for it and a document describing a call that never
+/// returns 200 is worse than none. But the refusal is `OpenApiGenError`, which
+/// the route turns into a **409 for the entire document** — so one broken
+/// endpoint takes every unrelated endpoint's documentation with it. That is the
+/// only failure mode here that is not confined to its own endpoint, and it had
+/// no test at all.
+///
+/// # Why the subject is built this way
+///
+/// `validate()` now refuses a colliding union at publish, so this shape can no
+/// longer be created through the route (`tests/lifecycle.rs`). It can still
+/// ARRIVE, and that is the whole reason both later refusals must stay: a version
+/// frozen BEFORE that rule existed. Reproduced by publishing under `as_is` and
+/// rewriting the frozen snapshot in place — the same fixture
+/// `serving_routing`'s sibling test uses, and for the same reason.
+///
+/// # Anti-triviality
+///
+/// The narrowed request must still be 200. Without it, a generator that refused
+/// every document — or a fixture that simply broke the route — satisfies the
+/// 409 above, and the test would say nothing about WHICH endpoint caused it.
+#[tokio::test]
+async fn one_endpoints_naming_collision_fails_the_whole_document() {
+    let Some(f) = fixture().await else { return };
+    let sa = f.create_service_account("collision-sa").await;
+    // `ws_admin`, so every endpoint is cascade-reachable and the document really
+    // does contain both this endpoint and the fixture's own.
+    f.grant_ws_admin(sa).await;
+
+    // Two columns that are distinct under `as_is` and identical under `camel`.
+    f.port
+        .set_columns_per_sql(&[("", &["total_revenue", "totalRevenue"][..])]);
+    let ep = f
+        .publish(
+            "/collide-doc",
+            f.database_id,
+            serde_json::json!({ "enabled": false }),
+            serde_json::json!({}),
+        )
+        .await;
+    // The refusal names the endpoint by its `name` column, not by its path
+    // (`data_schema` is handed `name`), so give it one a human wrote.
+    sqlx::query("UPDATE dataapi.endpoints SET name = 'collide-doc' WHERE id = $1")
+        .bind(ep)
+        .execute(&f.db.pool)
+        .await
+        .expect("rename");
+
+    // Before the rewrite the document is fine — so the 409 below is caused by
+    // `naming`, not by the column pair.
+    let (ok, doc) = f
+        .mgmt_get(&format!(
+            "/api/ws/{}/data-api/openapi?service_account_id={sa}",
+            f.ws_slug
+        ))
+        .await;
+    assert_eq!(ok, 200, "doc: {doc}");
+    assert!(
+        doc["paths"]
+            .as_object()
+            .is_some_and(|p| p.contains_key("/collide-doc")),
+        "the endpoint must be IN the document before it can break it: {doc}"
+    );
+
+    // The pre-rule version, written straight into the frozen snapshot.
+    let rewritten = sqlx::query(
+        "UPDATE dataapi.endpoint_versions \
+            SET snapshot = jsonb_set(snapshot, '{output,naming}', '\"camel\"') \
+          WHERE endpoint_id = $1",
+    )
+    .bind(ep)
+    .execute(&f.db.pool)
+    .await
+    .expect("rewrite the frozen naming")
+    .rows_affected();
+    assert_eq!(
+        rewritten, 1,
+        "the rewrite must have hit exactly one version"
+    );
+
+    let (status, body) = f
+        .mgmt_get(&format!(
+            "/api/ws/{}/data-api/openapi?service_account_id={sa}",
+            f.ws_slug
+        ))
+        .await;
+    assert_eq!(
+        status, 409,
+        "one endpoint's collision must fail the whole document, loudly: {body}"
+    );
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("collide-doc") && e.contains("re-publish")),
+        "the refusal must name WHICH endpoint and what to do about it — with \
+         every other endpoint's document gone, that name is the only lead: \
+         {body}"
+    );
+
+    // Narrowing to an UNRELATED endpoint still works. This is what makes the
+    // 409 a statement about the document rather than about the route, and it is
+    // the operator's way to keep reading the rest while the author re-publishes.
+    let (one, doc) = f
+        .mgmt_get(&format!(
+            "/api/ws/{}/data-api/openapi?service_account_id={sa}&endpoint_id={}",
+            f.ws_slug, f.endpoint_id
+        ))
+        .await;
+    assert_eq!(one, 200, "doc: {doc}");
+}

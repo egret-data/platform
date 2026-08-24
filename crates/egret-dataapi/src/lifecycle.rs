@@ -482,7 +482,11 @@ pub enum ValidationError {
     /// So it is refused where the author is standing, and both declared names
     /// are quoted back, because renaming either one is the repair.
     #[error(
-        "columns `{first}` and `{second}` both become `{key}` under          `output.naming: {naming}`, and a JSON object has one key per name — so one of them          could never be served. They come from different branches of this definition, which          is why neither statement looks wrong on its own. Alias one of them apart, or set          `output.naming: as_is`"
+        "columns `{first}` and `{second}` both become `{key}` under \
+         `output.naming: {naming}`, and a JSON object has one key per name — so one of them \
+         could never be served. They come from different branches of this definition, which \
+         is why neither statement looks wrong on its own. Alias one of them apart, or set \
+         `output.naming: as_is`"
     )]
     OutputNamingCollision {
         key: String,
