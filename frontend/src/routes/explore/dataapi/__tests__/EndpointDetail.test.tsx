@@ -21,7 +21,7 @@ vi.mock("@/lib/useUnsavedChangesWarning", () => ({
 
 import * as api from "@/api/generated/data-api/data-api";
 import * as accessApi from "@/api/access";
-import type { DataApiEndpointDto, DataApiEndpointVersionDto } from "@/api/generated/model";
+import type { ColumnSpec, DataApiEndpointDto, DataApiEndpointVersionDto } from "@/api/generated/model";
 import EndpointDetail from "@/routes/explore/dataapi/EndpointDetail";
 import Config from "@/routes/explore/dataapi/detail/Config";
 import ResponseSection from "@/routes/explore/dataapi/detail/ResponseSection";
@@ -372,7 +372,13 @@ const OPENAPI_FIXTURE = {
 // against so none of them change meaning.
 function makeVersion(
   overrides: Partial<DataApiEndpointVersionDto> = {},
-  columns: { name: string; ty: string }[] = [{ name: "total_revenue", ty: "bigint" }],
+  // `ColumnSpec`, not a local `{ name; ty }`, because `required` is the third
+  // field and the whole point of the tests below is which value of it the row
+  // was built from. The generated type has it OPTIONAL (`required?: boolean`)
+  // — it carries a serde default server-side and so is absent from the
+  // schema's `required` list — which is exactly the shape a fixture must be
+  // able to express to pin `undefined` meaning "guaranteed".
+  columns: ColumnSpec[] = [{ name: "total_revenue", ty: "bigint" }],
 ): DataApiEndpointVersionDto {
   return {
     id: "v-1",
@@ -740,6 +746,111 @@ describe("ResponseSection", () => {
       ["order_id", "varchar"],
       ["total_revenue", "bigint"],
     ]);
+  });
+
+  /**
+   * The branching-columns half of the contract, and the half an author could
+   * not see: a published endpoint's frozen `columns` are the UNION of every
+   * branch publish described, and `required` says whether every branch returns
+   * that column. A consumer reads the distinction twice — in the served
+   * `meta.columns` and in the generated document's per-schema `required` list.
+   * The editor rendered `Name | Type` only, so a column a caller can rely on
+   * and one that vanishes on some parameter values looked identical.
+   *
+   * **A badge on the rows that differ, not a third column.** §4.3: "a column
+   * whose every cell is identical is section-level copy in disguise". Every
+   * endpoint published before this branch, and every endpoint whose definition
+   * does not branch, has `required` true on every column — so a `Required`
+   * column would hold one repeated word in every cell of the common case,
+   * while costing width in the one table §5.1 measured down to `max-w-xl`
+   * *because* the type had drifted away from the name it describes. Marking
+   * only the exceptions leaves that case byte-identical to what it renders
+   * today, which is why neither test above changed.
+   *
+   * The two tests below are deliberately separable, one per mutation
+   * direction. Dropping the badge reddens the first and leaves the second
+   * green; flagging every column — the `!c.required` spelling that reads
+   * natural and inverts the feature — reddens the second and leaves the first
+   * green. A single test asserting the whole grid would have been shorter and
+   * would have collapsed both directions into one signal.
+   */
+  function renderColumns(columns: ColumnSpec[]) {
+    vi.mocked(api.useDataApiGetOpenapi).mockReturnValue(
+      { data: undefined, isError: false } as unknown as ReturnType<typeof api.useDataApiGetOpenapi>,
+    );
+    vi.mocked(api.useDataApiListEndpointVersions).mockReturnValue(
+      {
+        data: { status: 200, data: [makeVersion({ id: "v-1", version: 2, is_live: true }, columns)] },
+        isLoading: false,
+        isError: false,
+      } as unknown as ReturnType<typeof api.useDataApiListEndpointVersions>,
+    );
+    return renderResponse(makeEndpoint({ live_version_id: "v-1" }));
+  }
+
+  // Direction one: the indicator exists, and it is on the row it describes
+  // rather than merely somewhere on the page. Two columns in the fixture and
+  // the badge scoped to `order_id`'s ROW, so "rendered a badge" cannot pass for
+  // "rendered the badge beside the column that earned it" (§8).
+  it("marks a column that only some branches return", async () => {
+    renderColumns([
+      { name: "refund_reason", ty: "varchar", required: false },
+      { name: "total_revenue", ty: "bigint", required: true },
+    ]);
+
+    const optionalRow = (await screen.findByText("refund_reason")).closest("tr") as HTMLElement;
+    expect(within(optionalRow).getByText(/may be absent/i)).toBeInTheDocument();
+  });
+
+  // Direction two, and the one a careless implementation passes by accident.
+  // `required` is ABSENT from the schema's own `required` array — it carries a
+  // serde default of `true` on the Rust side, precisely so a snapshot frozen
+  // before this field existed keeps exact-match semantics — so TypeScript types
+  // it `required?: boolean` and `undefined` MUST read as guaranteed. The
+  // `total_revenue` row is that case: no `required` key at all, the literal
+  // shape of every endpoint published before this branch. Flagging it would
+  // tell an author that every column of every pre-existing endpoint may be
+  // missing, which is the opposite of what the server does with it.
+  it("leaves a guaranteed column unmarked, including one frozen before the flag existed", async () => {
+    renderColumns([
+      { name: "order_id", ty: "varchar", required: true },
+      { name: "total_revenue", ty: "bigint" },
+    ]);
+
+    await screen.findByText("order_id");
+    for (const name of ["order_id", "total_revenue"]) {
+      const row = screen.getByText(name).closest("tr") as HTMLElement;
+      expect(within(row).queryByText(/may be absent/i), name).not.toBeInTheDocument();
+    }
+  });
+
+  // §4.3 again, the other half of the same rule: when the exception is a mark
+  // rather than a column, what the ABSENCE of the mark means has to be said
+  // once, above the table — otherwise an unmarked row is ambiguous between
+  // "guaranteed" and "nobody knows". It is said only when a marked row is
+  // actually on screen: an endpoint with no branching column has no marker to
+  // explain, and a sentence about one would be the noise the badge was chosen
+  // over a column to avoid.
+  //
+  // Both halves in one test, because "renders the sentence" is satisfied by an
+  // implementation that always renders it, and that implementation is the
+  // whole thing this asserts against.
+  it("explains what an unmarked row means only where a marked row exists", async () => {
+    const withOptional = renderColumns([
+      { name: "refund_reason", ty: "varchar", required: false },
+      { name: "total_revenue", ty: "bigint", required: true },
+    ]);
+    expect(await screen.findByText(/every other column is in every response/i)).toBeInTheDocument();
+    withOptional.unmount();
+
+    // Same two columns, same types, same order — only the flag differs, so a
+    // difference here can be nothing but the flag.
+    renderColumns([
+      { name: "refund_reason", ty: "varchar", required: true },
+      { name: "total_revenue", ty: "bigint", required: true },
+    ]);
+    await screen.findByText("refund_reason");
+    expect(screen.queryByText(/every other column is in every response/i)).not.toBeInTheDocument();
   });
 });
 
