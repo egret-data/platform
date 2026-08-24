@@ -61,10 +61,11 @@ pub enum ParamLocation {
 /// with `per_key_qps` silently defaulted to `0`. A rate limit the author
 /// believes they set and did not is worse than an error.
 ///
-/// Applied to the five types an AUTHOR fills in — [`ParamSpec`], [`CacheSpec`],
-/// [`LimitsSpec`], [`RateLimitSpec`], [`OutputSpec`] — and deliberately NOT to
-/// [`EndpointSnapshot`] or [`ColumnSpec`], which the server writes for itself
-/// and where a typo is impossible.
+/// Applied to the six types an AUTHOR fills in — [`ParamSpec`], [`CacheSpec`],
+/// [`LimitsSpec`], [`RateLimitSpec`], [`OutputSpec`], [`StatementSpec`] — and
+/// deliberately NOT to [`EndpointSnapshot`], [`ColumnSpec`] or
+/// [`StatementSnapshot`], which the server writes for itself and where a typo
+/// is impossible.
 ///
 /// **The cost, stated because it is a real constraint on a persisted format.**
 /// These types are also how a stored `jsonb` column is read back. Adding a field
@@ -270,6 +271,100 @@ impl From<&egret_core::ColumnMeta> for ColumnSpec {
             required: true,
         }
     }
+}
+
+/// One of an endpoint's N SQL definitions, as an author writes it (M2). The
+/// canonical shape is a `rows` statement and a `total` statement for
+/// pagination, but any number is allowed.
+///
+/// `name` is not decoration: once an endpoint has more than one statement,
+/// the response envelope is a JSON object keyed by statement name and the
+/// generated OpenAPI document names it as a property (M2 Tasks 8-9). A name a
+/// caller writes into their own code is a contract, which is what
+/// [`validate_statement_name`] and [`validate_statements`] enforce —
+/// `^[a-z][a-z0-9_]*$` so the key never needs quoting in JSON and never reads
+/// as private, and uniqueness within the endpoint so the key is unambiguous.
+///
+/// `#[serde(deny_unknown_fields)]` for the same reason as [`ParamSpec`] and
+/// its four siblings: this is a type an AUTHOR fills in, so a typo in the
+/// request body must be a 400, not a silently-ignored field.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StatementSpec {
+    pub name: String,
+    pub sql: String,
+}
+
+/// The frozen form of a [`StatementSpec`]: what a publish freezes into
+/// [`EndpointSnapshot`] for one statement, its own [`ColumnSpec`] union
+/// included (M1's per-branch column union, now scoped to one statement of N).
+///
+/// No `deny_unknown_fields` — like [`EndpointSnapshot`] and [`ColumnSpec`],
+/// the server writes this for itself; a typo here is not possible the way one
+/// is in a request body.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+pub struct StatementSnapshot {
+    pub name: String,
+    pub sql: String,
+    pub columns: Vec<ColumnSpec>,
+}
+
+/// What [`validate_statement_name`] and [`validate_statements`] refuse.
+///
+/// One enum rather than two, because [`validate_statements`] is defined in
+/// terms of [`validate_statement_name`] and a caller that matches on the
+/// result of either should not have to match two different types for the
+/// same underlying question ("is this name/list well-formed?").
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum StatementError {
+    /// `name` does not match `^[a-z][a-z0-9_]*$`.
+    #[error(
+        "statement name {0:?} is not a valid identifier: it must match `^[a-z][a-z0-9_]*$` — \
+         lowercase ASCII letters, digits and `_`, starting with a lowercase letter. A name \
+         becomes a JSON object key and an OpenAPI property once an endpoint has more than one \
+         statement, so it may not need quoting and may not read as private"
+    )]
+    InvalidName(String),
+    /// Two statements in the same endpoint declared the same name.
+    #[error(
+        "statement name `{0}` is used by more than one statement in this endpoint; the response \
+         envelope keys results by name, so two statements cannot share one"
+    )]
+    DuplicateName(String),
+    /// The list had no statements at all.
+    #[error("an endpoint must declare at least one statement")]
+    Empty,
+}
+
+/// `^[a-z][a-z0-9_]*$` — see [`StatementSpec`]'s doc comment for why this
+/// exact shape and not, say, camelCase or a leading underscore for "private".
+pub fn validate_statement_name(name: &str) -> Result<(), StatementError> {
+    let mut chars = name.chars();
+    let starts_with_lowercase_letter = matches!(chars.next(), Some(c) if c.is_ascii_lowercase());
+    let rest_is_lowercase_alnum_or_underscore =
+        chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+    if starts_with_lowercase_letter && rest_is_lowercase_alnum_or_underscore {
+        Ok(())
+    } else {
+        Err(StatementError::InvalidName(name.to_string()))
+    }
+}
+
+/// Every statement's name is a valid identifier, no two statements share a
+/// name, and the list is non-empty — the three rules that make "keyed by
+/// statement name" (M2 Tasks 8-9) a safe thing to build a response around.
+pub fn validate_statements(statements: &[StatementSpec]) -> Result<(), StatementError> {
+    if statements.is_empty() {
+        return Err(StatementError::Empty);
+    }
+    let mut seen = std::collections::HashSet::with_capacity(statements.len());
+    for statement in statements {
+        validate_statement_name(&statement.name)?;
+        if !seen.insert(statement.name.as_str()) {
+            return Err(StatementError::DuplicateName(statement.name.clone()));
+        }
+    }
+    Ok(())
 }
 
 /// Whether two SQL type names describe the same column, and — when they do but
@@ -502,6 +597,67 @@ mod tests {
             ty: "integer".into(),
         };
         assert!(ColumnSpec::from(&meta).required);
+    }
+
+    // --- statement naming ------------------------------------------------
+    //
+    // A statement's name becomes a JSON object key in the response envelope
+    // and an OpenAPI property name once an endpoint has more than one
+    // statement (M2 Tasks 8-9), so the rule is a contract with a caller's
+    // generated client, not a style preference.
+
+    #[test]
+    fn a_statement_name_must_be_an_identifier() {
+        for bad in ["Rows", "1st", "row count", "rows-total", "", "_rows"] {
+            assert!(validate_statement_name(bad).is_err(), "accepted {bad:?}");
+        }
+        for good in ["rows", "row_count", "r2"] {
+            assert!(validate_statement_name(good).is_ok(), "refused {good:?}");
+        }
+    }
+
+    #[test]
+    fn two_statements_may_not_share_a_name() {
+        let statements = vec![
+            StatementSpec {
+                name: "rows".into(),
+                sql: "SELECT 1".into(),
+            },
+            StatementSpec {
+                name: "rows".into(),
+                sql: "SELECT 2".into(),
+            },
+        ];
+        assert_eq!(
+            validate_statements(&statements),
+            Err(StatementError::DuplicateName("rows".into()))
+        );
+    }
+
+    #[test]
+    fn an_endpoint_needs_at_least_one_statement() {
+        assert_eq!(validate_statements(&[]), Err(StatementError::Empty));
+    }
+
+    #[test]
+    fn a_single_valid_statement_is_accepted() {
+        let statements = vec![StatementSpec {
+            name: "rows".into(),
+            sql: "SELECT 1".into(),
+        }];
+        assert!(validate_statements(&statements).is_ok());
+    }
+
+    #[test]
+    fn an_invalid_name_inside_the_list_is_refused_by_the_list_validator() {
+        let statements = vec![StatementSpec {
+            name: "Rows".into(),
+            sql: "SELECT 1".into(),
+        }];
+        assert_eq!(
+            validate_statements(&statements),
+            Err(StatementError::InvalidName("Rows".into()))
+        );
     }
 
     // --- compare_column_types ------------------------------------------------
