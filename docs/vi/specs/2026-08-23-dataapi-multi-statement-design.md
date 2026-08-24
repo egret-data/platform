@@ -288,6 +288,28 @@ Các câu lệnh được **đặt tên**, không đánh theo vị trí. Tên t�
 không vỡ khi tác giả chèn thêm một câu lệnh vào giữa. §6 ghi rằng SQLREST chọn vị trí và vì
 sao ta làm khác.
 
+### 4.1.1 M1 đã chiếm mất từ "statement", và nó mang nghĩa khác
+
+Viết sau khi M1 đã lên, vì §4.1 ở trên ra đời trước nó.
+
+Trong mã đã ship, **"statement" nghĩa là một permutation đã render của MỘT định nghĩa
+SQL**: `MAX_PUBLISHED_STATEMENTS = 64` chặn số *nhánh* của một định nghĩa mà publish sẽ
+describe, còn `DescribedBranches::per_statement` giữ một danh sách tên cột cho mỗi *nhánh*.
+Ở §4.1 cùng từ đó lại nghĩa là **một trong N định nghĩa SQL của endpoint**. Hai nghĩa, một
+module — và va chạm này không phải chuyện thẩm mỹ: sau M2, ai gặp `MAX_PUBLISHED_STATEMENTS`
+sẽ hiểu là giới hạn số câu lệnh mỗi endpoint, mà nó không phải vậy.
+
+M2 đổi tên cách dùng của M1 sang *branch* — `MAX_DESCRIBED_BRANCHES`, `per_branch` — và giữ
+"statement" cho thứ mà tác giả viết ra. Việc đổi tên là cơ học và thuộc về một commit
+riêng, đi trước mọi thay đổi hành vi, để diff hành vi còn đọc được.
+
+**Và bản thân cái trần phải được quyết lại, vì trần của M1 nay sai hình dạng.** Publish
+describe mọi nhánh của mọi câu lệnh, nên tổng là **tổng trên các câu lệnh**, không phải 64
+cho mỗi câu — nếu không thì mười câu lệnh cho phép 640 lượt round-trip xuống engine từ một
+lần publish. Giới hạn áp cho cả endpoint. `MAX_DECLARED_PARAMS = 32` giữ nguyên phạm vi
+endpoint vì tham số dùng chung, nhưng chi phí render trong tiến trình mà nó chặn nay bị
+nhân với N, và ca xấu nhất đã đo (~122 ms) phải **đo lại** chứ không mang sang.
+
 ### 4.2 Tham số dùng chung
 
 Một request mang một bộ tham số. `resolve_supplied` (`serving/params.rs:119`, đi tới từ

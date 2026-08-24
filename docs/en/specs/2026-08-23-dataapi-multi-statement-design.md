@@ -299,6 +299,29 @@ Statements are **named**, not positional. A name is self-describing in the respo
 does not break when an author inserts a statement in the middle. §6 records that SQLREST
 chose position and why we diverge.
 
+### 4.1.1 M1 already took the word "statement", and it means something else
+
+Written after M1 landed, because §4.1 above predates it.
+
+In the shipped code, **"statement" means one rendered permutation of one SQL definition**:
+`MAX_PUBLISHED_STATEMENTS = 64` bounds how many *branches* of a single definition publish
+will describe, and `DescribedBranches::per_statement` holds one column-name list per
+*branch*. In §4.1 the same word means **one of the endpoint's N SQL definitions**. Two
+meanings, one module — and the collision is not cosmetic: after M2, a reader meeting
+`MAX_PUBLISHED_STATEMENTS` will take it for a limit on statements per endpoint, which it
+is not.
+
+M2 renames M1's usage to say branch — `MAX_DESCRIBED_BRANCHES`, `per_branch` — and keeps
+"statement" for the thing an author writes. The rename is mechanical and belongs in its
+own commit, ahead of any behaviour change, so the behavioural diff stays readable.
+
+**And the bound itself has to be re-decided, because M1's is now the wrong shape.** Publish
+describes every branch of every statement, so the total is the **sum over statements**, not
+64 per statement — otherwise ten statements permit 640 engine round trips from one publish.
+The limit applies across the endpoint. `MAX_DECLARED_PARAMS = 32` stays per endpoint since
+parameters are shared, but the in-process render cost it bounds is now multiplied by N and
+its measured worst case (~122 ms) must be re-measured rather than carried over.
+
 ### 4.2 Parameters are shared
 
 One request carries one parameter set. `resolve_supplied`
