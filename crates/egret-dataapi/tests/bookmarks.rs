@@ -192,8 +192,8 @@ impl Fixture {
     ) -> Uuid {
         sqlx::query_scalar(
             "INSERT INTO dataapi.endpoints \
-               (workspace_id, name, path, method, database_id, sql, created_by) \
-             VALUES ($1, $2, $3, 'GET', $4, 'SELECT 1', $5) RETURNING id",
+               (workspace_id, name, path, method, database_id, statements, created_by) \
+             VALUES ($1, $2, $3, 'GET', $4, jsonb_build_array(jsonb_build_object('name', 'main', 'sql', 'SELECT 1')), $5) RETURNING id",
         )
         .bind(ws)
         .bind(name)

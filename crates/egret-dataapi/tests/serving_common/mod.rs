@@ -1175,8 +1175,8 @@ impl Fixture {
     ) -> Uuid {
         let ep: Uuid = sqlx::query_scalar(
             "INSERT INTO dataapi.endpoints \
-               (workspace_id, name, path, method, database_id, sql, params, cache, rate_limit, created_by) \
-             VALUES ($1, $2, $3, 'GET', $4, $5, $6, $7, $8, $9) RETURNING id",
+               (workspace_id, name, path, method, database_id, statements, params, cache, rate_limit, created_by) \
+             VALUES ($1, $2, $3, 'GET', $4, jsonb_build_array(jsonb_build_object('name', 'main', 'sql', $5::text)), $6, $7, $8, $9) RETURNING id",
         )
         .bind(self.ws_id)
         .bind(format!("ep-{}", Uuid::new_v4().simple()))
@@ -1216,8 +1216,8 @@ impl Fixture {
     ) -> (StatusCode, serde_json::Value) {
         let ep: Uuid = sqlx::query_scalar(
             "INSERT INTO dataapi.endpoints \
-               (workspace_id, name, path, method, database_id, sql, cache, created_by) \
-             VALUES ($1, $2, $3, 'GET', $4, 'SELECT 1 AS n', $5, $6) RETURNING id",
+               (workspace_id, name, path, method, database_id, statements, cache, created_by) \
+             VALUES ($1, $2, $3, 'GET', $4, jsonb_build_array(jsonb_build_object('name', 'main', 'sql', 'SELECT 1 AS n')), $5, $6) RETURNING id",
         )
         .bind(self.ws_id)
         .bind(format!("ep-{}", Uuid::new_v4().simple()))
@@ -1247,7 +1247,7 @@ impl Fixture {
                     "name": name,
                     "path": path,
                     "database_id": self.database_id,
-                    "sql": "SELECT 1 AS n",
+                    "statements": [{ "name": "main", "sql": "SELECT 1 AS n" }],
                 })),
             )
             .await;

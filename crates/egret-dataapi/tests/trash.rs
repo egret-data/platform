@@ -302,8 +302,8 @@ impl Fixture {
     async fn create_endpoint(&self, name: &str, path: &str, state: &str) -> Uuid {
         sqlx::query_scalar(
             "INSERT INTO dataapi.endpoints \
-               (workspace_id, name, path, method, database_id, sql, state, created_by) \
-             VALUES ($1, $2, $3, 'GET', $4, 'SELECT 1', $5, $6) RETURNING id",
+               (workspace_id, name, path, method, database_id, statements, state, created_by) \
+             VALUES ($1, $2, $3, 'GET', $4, jsonb_build_array(jsonb_build_object('name', 'main', 'sql', 'SELECT 1')), $5, $6) RETURNING id",
         )
         .bind(self.ws_id)
         .bind(name)
@@ -376,7 +376,7 @@ impl Fixture {
             &self.collection(),
             Some(serde_json::json!({
                 "name": name, "path": path,
-                "database_id": self.database_id, "sql": "SELECT 1 AS n"
+                "database_id": self.database_id, "statements": [{ "name": "main", "sql": "SELECT 1 AS n" }]
             })),
         )
         .await

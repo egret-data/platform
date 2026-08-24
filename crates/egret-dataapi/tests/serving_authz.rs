@@ -473,8 +473,8 @@ impl Fixture {
     async fn publish_endpoint(&self, method: &str, path: &str, sql: &str) -> Uuid {
         let ep: Uuid = sqlx::query_scalar(
             "INSERT INTO dataapi.endpoints \
-               (workspace_id, name, path, method, database_id, sql, created_by) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
+               (workspace_id, name, path, method, database_id, statements, created_by) \
+             VALUES ($1, $2, $3, $4, $5, jsonb_build_array(jsonb_build_object('name', 'main', 'sql', $6::text)), $7) RETURNING id",
         )
         .bind(self.ws_id)
         .bind(format!("ep-{}", Uuid::new_v4().simple()))

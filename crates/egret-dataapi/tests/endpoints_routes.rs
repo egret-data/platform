@@ -209,8 +209,8 @@ impl Fixture {
     ) -> Uuid {
         sqlx::query_scalar(
             "INSERT INTO dataapi.endpoints \
-               (workspace_id, name, path, method, database_id, sql, created_by) \
-             VALUES ($1, $2, $3, 'GET', $4, $5, $6) RETURNING id",
+               (workspace_id, name, path, method, database_id, statements, created_by) \
+             VALUES ($1, $2, $3, 'GET', $4, jsonb_build_array(jsonb_build_object('name', 'main', 'sql', $5::text)), $6) RETURNING id",
         )
         .bind(ws)
         .bind(name)
@@ -380,7 +380,7 @@ async fn read_permission_cannot_create_an_endpoint() {
             &f.collection(),
             serde_json::json!({
                 "name": "rev", "path": "reports/revenue",
-                "database_id": f.database_id, "sql": "SELECT 1"
+                "database_id": f.database_id, "statements": [{ "name": "main", "sql": "SELECT 1" }]
             }),
         )
         .await;
@@ -471,16 +471,17 @@ async fn updating_an_endpoint_requires_manage() {
         .patch_as(
             &reader,
             &format!("{}/{id}", f.collection()),
-            serde_json::json!({ "sql": "SELECT 2" }),
+            serde_json::json!({ "statements": [{ "name": "main", "sql": "SELECT 2" }] }),
         )
         .await;
     assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
 
-    let sql: String = sqlx::query_scalar("SELECT sql FROM dataapi.endpoints WHERE id = $1")
-        .bind(id)
-        .fetch_one(&f.db.pool)
-        .await
-        .expect("sql");
+    let sql: String =
+        sqlx::query_scalar("SELECT statements->0->>'sql' FROM dataapi.endpoints WHERE id = $1")
+            .bind(id)
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("sql");
     assert_eq!(sql, "SELECT 1", "the refused edit must not have edited");
 }
 
@@ -576,16 +577,17 @@ async fn an_endpoint_cannot_be_updated_across_workspaces() {
         .patch_as(
             &mgr,
             &format!("/api/ws/{other_ws}/data-api/endpoints/{ep}"),
-            serde_json::json!({ "sql": "SELECT 'pwned'" }),
+            serde_json::json!({ "statements": [{ "name": "main", "sql": "SELECT 'pwned'" }] }),
         )
         .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "body: {body}");
 
-    let sql: String = sqlx::query_scalar("SELECT sql FROM dataapi.endpoints WHERE id = $1")
-        .bind(ep)
-        .fetch_one(&f.db.pool)
-        .await
-        .expect("sql");
+    let sql: String =
+        sqlx::query_scalar("SELECT statements->0->>'sql' FROM dataapi.endpoints WHERE id = $1")
+            .bind(ep)
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("sql");
     assert_eq!(sql, "SELECT 1", "the outsider must not have edited it");
 }
 
@@ -663,7 +665,7 @@ async fn create_refuses_a_database_from_another_workspace() {
             &f.collection(),
             serde_json::json!({
                 "name": "poach", "path": "/reports/poach",
-                "database_id": foreign_db, "sql": "SELECT 1"
+                "database_id": foreign_db, "statements": [{ "name": "main", "sql": "SELECT 1" }]
             }),
         )
         .await;
@@ -726,7 +728,7 @@ async fn create_refuses_a_database_that_does_not_exist() {
             &f.collection(),
             serde_json::json!({
                 "name": "ghost", "path": "/reports/ghost",
-                "database_id": Uuid::new_v4(), "sql": "SELECT 1"
+                "database_id": Uuid::new_v4(), "statements": [{ "name": "main", "sql": "SELECT 1" }]
             }),
         )
         .await;
@@ -755,7 +757,7 @@ async fn create_refuses_a_folder_from_another_workspace() {
             &f.collection(),
             serde_json::json!({
                 "name": "filed-away", "path": "/reports/filed",
-                "database_id": f.database_id, "sql": "SELECT 1",
+                "database_id": f.database_id, "statements": [{ "name": "main", "sql": "SELECT 1" }],
                 "folder_id": foreign_folder
             }),
         )
@@ -792,7 +794,7 @@ async fn create_refuses_a_folder_of_the_wrong_entity_type() {
             &f.collection(),
             serde_json::json!({
                 "name": "miscategorised", "path": "/reports/misc",
-                "database_id": f.database_id, "sql": "SELECT 1",
+                "database_id": f.database_id, "statements": [{ "name": "main", "sql": "SELECT 1" }],
                 "folder_id": chart_folder
             }),
         )
@@ -814,7 +816,7 @@ async fn create_refuses_a_folder_that_does_not_exist() {
             &f.collection(),
             serde_json::json!({
                 "name": "ghost-folder", "path": "/reports/ghostf",
-                "database_id": f.database_id, "sql": "SELECT 1",
+                "database_id": f.database_id, "statements": [{ "name": "main", "sql": "SELECT 1" }],
                 "folder_id": Uuid::new_v4()
             }),
         )
@@ -864,7 +866,7 @@ async fn a_folder_of_this_workspace_and_type_is_accepted_and_clearable() {
             &f.collection(),
             serde_json::json!({
                 "name": "filed", "path": "/reports/filed",
-                "database_id": f.database_id, "sql": "SELECT 1",
+                "database_id": f.database_id, "statements": [{ "name": "main", "sql": "SELECT 1" }],
                 "folder_id": folder
             }),
         )
@@ -925,7 +927,7 @@ async fn every_path_alias_family_is_a_bad_request() {
                 &f.collection(),
                 serde_json::json!({
                     "name": why, "path": path,
-                    "database_id": f.database_id, "sql": "SELECT 1"
+                    "database_id": f.database_id, "statements": [{ "name": "main", "sql": "SELECT 1" }]
                 }),
             )
             .await;
@@ -988,7 +990,7 @@ async fn a_refused_path_says_which_rule_it_broke() {
             &f.collection(),
             serde_json::json!({
                 "name": "enc", "path": "/reports/rev%20enue",
-                "database_id": f.database_id, "sql": "SELECT 1"
+                "database_id": f.database_id, "statements": [{ "name": "main", "sql": "SELECT 1" }]
             }),
         )
         .await;
@@ -1013,7 +1015,7 @@ async fn duplicate_method_and_path_is_a_conflict() {
             &f.collection(),
             serde_json::json!({
                 "name": "b", "path": "reports/revenue",
-                "database_id": f.database_id, "sql": "SELECT 2"
+                "database_id": f.database_id, "statements": [{ "name": "main", "sql": "SELECT 2" }]
             }),
         )
         .await;
@@ -1051,7 +1053,7 @@ async fn a_path_differing_only_by_its_leading_slash_is_the_same_path() {
             &f.collection(),
             serde_json::json!({
                 "name": "a", "path": "reports/revenue/",
-                "database_id": f.database_id, "sql": "SELECT 1"
+                "database_id": f.database_id, "statements": [{ "name": "main", "sql": "SELECT 1" }]
             }),
         )
         .await;
@@ -1068,7 +1070,7 @@ async fn a_path_differing_only_by_its_leading_slash_is_the_same_path() {
             &f.collection(),
             serde_json::json!({
                 "name": "b", "path": "/reports/revenue",
-                "database_id": f.database_id, "sql": "SELECT 2"
+                "database_id": f.database_id, "statements": [{ "name": "main", "sql": "SELECT 2" }]
             }),
         )
         .await;
@@ -1088,7 +1090,7 @@ async fn the_same_path_under_a_different_method_is_allowed() {
                 &f.collection(),
                 serde_json::json!({
                     "name": method, "path": "/reports/revenue", "method": method,
-                    "database_id": f.database_id, "sql": "SELECT 1"
+                    "database_id": f.database_id, "statements": [{ "name": "main", "sql": "SELECT 1" }]
                 }),
             )
             .await;
@@ -1142,7 +1144,7 @@ async fn a_draft_round_trips_through_create_get_update_and_delete() {
                 "path": "/reports/revenue",
                 "method": "POST",
                 "database_id": f.database_id,
-                "sql": "SELECT 1",
+                "statements": [{ "name": "main", "sql": "SELECT 1" }],
                 "params": [{
                     "name": "region", "type": "string", "location": "query",
                     "required": true, "description": "Region code"
@@ -1164,7 +1166,8 @@ async fn a_draft_round_trips_through_create_get_update_and_delete() {
     assert_eq!(status, StatusCode::OK, "body: {got}");
     assert_eq!(got["name"].as_str(), Some("revenue"));
     assert_eq!(got["description"].as_str(), Some("daily revenue"));
-    assert_eq!(got["sql"].as_str(), Some("SELECT 1"));
+    assert_eq!(got["statements"][0]["name"].as_str(), Some("main"));
+    assert_eq!(got["statements"][0]["sql"].as_str(), Some("SELECT 1"));
     assert_eq!(got["params"][0]["name"].as_str(), Some("region"));
     assert_eq!(got["params"][0]["type"].as_str(), Some("string"));
     assert_eq!(got["output"]["shape"].as_str(), Some("arrays"));
@@ -1177,11 +1180,11 @@ async fn a_draft_round_trips_through_create_get_update_and_delete() {
         .patch_as(
             &mgr,
             &format!("{}/{id}", f.collection()),
-            serde_json::json!({ "sql": "SELECT 2", "limits": { "max_rows": 7 } }),
+            serde_json::json!({ "statements": [{ "name": "main", "sql": "SELECT 2" }], "limits": { "max_rows": 7 } }),
         )
         .await;
     assert_eq!(status, StatusCode::OK, "body: {patched}");
-    assert_eq!(patched["sql"].as_str(), Some("SELECT 2"));
+    assert_eq!(patched["statements"][0]["sql"].as_str(), Some("SELECT 2"));
     assert_eq!(patched["limits"]["max_rows"].as_u64(), Some(7));
     // Untouched fields survive a partial PATCH.
     assert_eq!(patched["name"].as_str(), Some("revenue"));
@@ -1211,7 +1214,7 @@ async fn absent_spec_fields_come_back_as_their_serde_defaults() {
             &f.collection(),
             serde_json::json!({
                 "name": "bare", "path": "/reports/bare",
-                "database_id": f.database_id, "sql": "SELECT 1"
+                "database_id": f.database_id, "statements": [{ "name": "main", "sql": "SELECT 1" }]
             }),
         )
         .await;
@@ -1244,7 +1247,7 @@ async fn an_unsupported_method_is_a_bad_request() {
             &f.collection(),
             serde_json::json!({
                 "name": "nope", "path": "/reports/nope", "method": "DELETE",
-                "database_id": f.database_id, "sql": "SELECT 1"
+                "database_id": f.database_id, "statements": [{ "name": "main", "sql": "SELECT 1" }]
             }),
         )
         .await;
@@ -1263,7 +1266,7 @@ async fn an_empty_name_or_path_is_a_bad_request() {
                 &f.collection(),
                 serde_json::json!({
                     "name": name, "path": path,
-                    "database_id": f.database_id, "sql": "SELECT 1"
+                    "database_id": f.database_id, "statements": [{ "name": "main", "sql": "SELECT 1" }]
                 }),
             )
             .await;
@@ -1273,4 +1276,158 @@ async fn an_empty_name_or_path_is_a_bad_request() {
             "name={name:?} path={path:?} body: {body}"
         );
     }
+}
+
+/// The draft row holds a LIST, in the order the author wrote it, and a PATCH
+/// replaces that list whole.
+///
+/// The one test on this surface that a single-statement fixture cannot stand in
+/// for: every other test here happens to use one statement, and every one of
+/// them would still pass against a store that kept only the first.
+#[tokio::test]
+async fn a_draft_holds_several_named_statements_in_order() {
+    let f = skip_without_db!();
+    let mgr = f.principal_with(Fixture::MANAGER).await;
+
+    let (status, created) = f
+        .post_as(
+            &mgr,
+            &f.collection(),
+            serde_json::json!({
+                "name": "pair", "path": "/reports/pair",
+                "database_id": f.database_id,
+                "statements": [
+                    { "name": "rows", "sql": "SELECT 1 AS n" },
+                    { "name": "total", "sql": "SELECT 2 AS n" },
+                ]
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {created}");
+    let id: Uuid = created["id"].as_str().expect("id").parse().expect("uuid");
+
+    // Read back through the store, not just echoed from the request body: the
+    // jsonb round trip is where a dropped or reordered element would show.
+    let (status, got) = f.get_as(&mgr, &format!("{}/{id}", f.collection())).await;
+    assert_eq!(status, StatusCode::OK, "body: {got}");
+    let statements = got["statements"].as_array().expect("statements");
+    assert_eq!(statements.len(), 2, "both statements must survive: {got}");
+    assert_eq!(statements[0]["name"].as_str(), Some("rows"));
+    assert_eq!(statements[0]["sql"].as_str(), Some("SELECT 1 AS n"));
+    assert_eq!(statements[1]["name"].as_str(), Some("total"));
+    assert_eq!(statements[1]["sql"].as_str(), Some("SELECT 2 AS n"));
+
+    // Order is part of the definition — statements execute in order — so a
+    // store that returned a set rather than a sequence would fail here.
+    let (status, patched) = f
+        .patch_as(
+            &mgr,
+            &format!("{}/{id}", f.collection()),
+            serde_json::json!({
+                "statements": [
+                    { "name": "total", "sql": "SELECT 2 AS n" },
+                    { "name": "rows", "sql": "SELECT 1 AS n" },
+                ]
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "body: {patched}");
+    assert_eq!(patched["statements"][0]["name"].as_str(), Some("total"));
+    assert_eq!(patched["statements"][1]["name"].as_str(), Some("rows"));
+
+    // A PATCH replaces the list whole rather than merging into it.
+    let (status, patched) = f
+        .patch_as(
+            &mgr,
+            &format!("{}/{id}", f.collection()),
+            serde_json::json!({ "statements": [{ "name": "only", "sql": "SELECT 3 AS n" }] }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "body: {patched}");
+    assert_eq!(
+        patched["statements"].as_array().expect("statements").len(),
+        1,
+        "a PATCH replaces the list, it does not merge into it: {patched}"
+    );
+}
+
+/// A statement list that breaks the naming rules is a 400 that names the rule —
+/// not a 500 carrying `dataapi_endpoints_statements_nonempty` at the author,
+/// which is what the schema alone would produce.
+///
+/// Each case asserts on the MESSAGE, not just the status: 400 is the answer to
+/// an empty name, an empty list, a bad path and an unsupported method alike, so
+/// a status on its own cannot say which refusal fired.
+#[tokio::test]
+async fn a_statement_list_that_breaks_the_rules_is_a_400_naming_the_rule() {
+    let f = skip_without_db!();
+    let mgr = f.principal_with(Fixture::MANAGER).await;
+
+    for (statements, expected, why) in [
+        (
+            serde_json::json!([]),
+            "at least one statement",
+            "empty list",
+        ),
+        (
+            serde_json::json!([
+                { "name": "rows", "sql": "SELECT 1" },
+                { "name": "rows", "sql": "SELECT 2" },
+            ]),
+            "rows",
+            "a repeated name",
+        ),
+        (
+            serde_json::json!([{ "name": "Rows", "sql": "SELECT 1" }]),
+            "Rows",
+            "a name that is not an identifier",
+        ),
+    ] {
+        let (status, body) = f
+            .post_as(
+                &mgr,
+                &f.collection(),
+                serde_json::json!({
+                    "name": "bad", "path": format!("/bad/{}", Uuid::new_v4().simple()),
+                    "database_id": f.database_id, "statements": statements,
+                }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{why}: {body}");
+        assert!(
+            body.to_string().contains(expected),
+            "{why}: the message must name what was wrong, expected {expected:?}: {body}"
+        );
+    }
+
+    // And on the PATCH, where the list arrives the same way and the row already
+    // holds a legitimate one.
+    let ep = f
+        .create_endpoint("patchable", "/patchable", "SELECT 1")
+        .await;
+    let (status, body) = f
+        .patch_as(
+            &mgr,
+            &format!("{}/{ep}", f.collection()),
+            serde_json::json!({ "statements": [] }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    assert!(
+        body.to_string().contains("at least one statement"),
+        "the PATCH must be refused for the same reason: {body}"
+    );
+
+    // Anti-triviality: the row still holds what it held, so the refusal above is
+    // a refusal and not a 400 issued after the write.
+    let still: serde_json::Value =
+        sqlx::query_scalar("SELECT statements FROM dataapi.endpoints WHERE id = $1")
+            .bind(ep)
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("statements");
+    assert_eq!(
+        still,
+        serde_json::json!([{ "name": "main", "sql": "SELECT 1" }])
+    );
 }

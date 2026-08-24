@@ -10,7 +10,7 @@
 //! copied from `crates/egret-dataapi/tests/clients_store.rs`.
 use egret_dataapi_api::{
     CacheScope, CacheSpec, ColumnSpec, EndpointSnapshot, LimitsSpec, OutputSpec, ParamLocation,
-    ParamSpec, ParamType, RateLimitSpec,
+    ParamSpec, ParamType, RateLimitSpec, StatementSpec,
 };
 use egret_metastore::Db;
 use uuid::Uuid;
@@ -173,8 +173,9 @@ async fn a_snapshot_round_trips_through_postgres_jsonb_unchanged() {
 
     let endpoint_id: Uuid = sqlx::query_scalar(
         "INSERT INTO dataapi.endpoints \
-         (workspace_id, name, path, method, database_id, sql, created_by) \
-         VALUES ($1, 'orders by status', '/orders/by-status', 'GET', $2, 'SELECT 1', $3) \
+         (workspace_id, name, path, method, database_id, statements, created_by) \
+         VALUES ($1, 'orders by status', '/orders/by-status', 'GET', $2, \
+                 jsonb_build_array(jsonb_build_object('name', 'main', 'sql', 'SELECT 1')), $3) \
          RETURNING id",
     )
     .bind(f.ws)
@@ -223,8 +224,8 @@ async fn an_endpoint_cannot_reference_a_nonexistent_database() {
 
     let err = sqlx::query(
         "INSERT INTO dataapi.endpoints \
-         (workspace_id, name, path, method, database_id, sql, created_by) \
-         VALUES ($1, 'dangling', '/dangling', 'GET', $2, 'SELECT 1', $3)",
+         (workspace_id, name, path, method, database_id, statements, created_by) \
+         VALUES ($1, 'dangling', '/dangling', 'GET', $2, jsonb_build_array(jsonb_build_object('name', 'main', 'sql', 'SELECT 1')), $3)",
     )
     .bind(f.ws)
     .bind(Uuid::new_v4()) // no such row in query.databases
@@ -239,4 +240,119 @@ async fn an_endpoint_cannot_reference_a_nonexistent_database() {
         Some("endpoints_database_id_fkey"),
         "must fail specifically on the database_id FK, not some other constraint: {db_err}"
     );
+}
+
+/// An endpoint that existed before M2 must come out of migration 0129 with its
+/// SQL intact, as a one-element `statements` list named `main`.
+///
+/// A migration is a one-way door on data, so this runs the **embedded bytes of
+/// migration 0129** — the same `Migration` value the migrator applies — rather
+/// than a transcription of its statements into the test. A transcription would
+/// pass against SQL no database ever ran; this fails if the file is renumbered,
+/// and it fails if `egret-metastore` was not touched and the embedded set is
+/// stale, which is a recorded failure mode in this repo.
+///
+/// The pre-M2 shape is rebuilt inside a transaction that is never committed.
+/// Postgres DDL is transactional, so dropping `statements`, putting `sql` back,
+/// inserting an old-shape row and re-running the migration all disappear on
+/// rollback — the shared test database is left exactly as it was.
+#[tokio::test]
+async fn an_endpoint_written_before_m2_survives_the_migration() {
+    let f = skip_without_db!();
+
+    // Quotes and a trailing comment, not `SELECT 1`: the conversion goes through
+    // `jsonb_build_object`, and a string that survives only because it contains
+    // nothing worth mangling proves nothing about one that does.
+    const ORIGINAL: &str = "SELECT id, name FROM orders WHERE region = 'EU' -- ships";
+
+    let migration = egret_metastore::MIGRATOR
+        .migrations
+        .iter()
+        .find(|m| m.version == 129)
+        .expect("migration 0129 must be embedded — touch egret-metastore's lib.rs if it is not");
+
+    let mut tx = f.db.pool.begin().await.expect("begin");
+
+    // Rewind this table to its pre-0129 shape. Dropping the column takes the
+    // non-empty CHECK with it, since that constraint names no other column.
+    sqlx::raw_sql(
+        "ALTER TABLE dataapi.endpoints DROP COLUMN statements; \
+         ALTER TABLE dataapi.endpoints ADD COLUMN sql text NOT NULL DEFAULT ''",
+    )
+    .execute(&mut *tx)
+    .await
+    .expect("rewind to the pre-M2 shape");
+
+    let id: Uuid = sqlx::query_scalar(
+        "INSERT INTO dataapi.endpoints \
+         (workspace_id, name, path, method, database_id, sql, created_by) \
+         VALUES ($1, 'legacy', '/legacy', 'GET', $2, $3, $4) RETURNING id",
+    )
+    .bind(f.ws)
+    .bind(f.database)
+    .bind(ORIGINAL)
+    .bind(f.admin)
+    .fetch_one(&mut *tx)
+    .await
+    .expect("insert a pre-M2 draft");
+
+    sqlx::raw_sql(migration.sql.clone())
+        .execute(&mut *tx)
+        .await
+        .expect("apply migration 0129");
+
+    let stored: serde_json::Value =
+        sqlx::query_scalar("SELECT statements FROM dataapi.endpoints WHERE id = $1")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await
+            .expect("read the converted row");
+
+    assert_eq!(
+        stored,
+        serde_json::json!([{ "name": "main", "sql": ORIGINAL }]),
+        "an existing draft must convert to exactly one statement named `main`, \
+         carrying its SQL byte for byte"
+    );
+
+    // And the shape the DRAFT ROW is read back through, not just the shape a
+    // human reads: `StatementSpec` is `deny_unknown_fields`, so a conversion
+    // that emitted an extra key would fail here rather than in production.
+    let parsed: Vec<StatementSpec> =
+        serde_json::from_value(stored).expect("the converted list must be a Vec<StatementSpec>");
+    assert_eq!(parsed.len(), 1);
+    assert_eq!(parsed[0].name, "main");
+    assert_eq!(parsed[0].sql, ORIGINAL);
+
+    // The old column is gone, so nothing can go on reading it and quietly serve
+    // the pre-M2 definition.
+    let sql_column_still_there: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.columns \
+         WHERE table_schema = 'dataapi' AND table_name = 'endpoints' AND column_name = 'sql')",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .expect("read the column list");
+    assert!(
+        !sql_column_still_there,
+        "migration 0129 must drop `sql`, not leave two definitions of the same thing"
+    );
+
+    // An empty list is refused by the schema itself, so a draft with nothing to
+    // run cannot be stored by any writer, present or future.
+    let empty = sqlx::query("UPDATE dataapi.endpoints SET statements = '[]'::jsonb WHERE id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .expect_err("an empty statement list must be refused");
+    assert_eq!(
+        empty
+            .as_database_error()
+            .expect("a Postgres error")
+            .constraint(),
+        Some("dataapi_endpoints_statements_nonempty"),
+        "must fail on the non-empty CHECK, not on some other constraint: {empty}"
+    );
+
+    tx.rollback().await.expect("rollback");
 }

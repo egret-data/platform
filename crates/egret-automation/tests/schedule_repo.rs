@@ -421,8 +421,9 @@ async fn updating_a_dataapi_alert_round_trips_all_four_new_fields() {
     // A real endpoint to repoint to — proves the FK-backed column, not an
     // opaque uuid nothing else references.
     let endpoint_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO dataapi.endpoints (workspace_id, name, path, sql, database_id, created_by) \
-         VALUES ($1,'traffic endpoint','/traffic','SELECT 1',$2,$3) RETURNING id",
+        "INSERT INTO dataapi.endpoints \
+           (workspace_id, name, path, statements, database_id, created_by) \
+         VALUES ($1,'traffic endpoint','/traffic','[{\"name\":\"main\",\"sql\":\"SELECT 1\"}]',$2,$3) RETURNING id",
     )
     .bind(f.ws)
     .bind(f.database)

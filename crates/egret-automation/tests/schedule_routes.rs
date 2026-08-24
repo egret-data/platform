@@ -2843,8 +2843,9 @@ async fn updating_an_endpoint_scoped_dataapi_alert_needs_data_api_endpoint_read(
     // NOT NULL; `fx.database` is the `query.databases` row `setup` already
     // creates in this same workspace.
     let endpoint_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO dataapi.endpoints (workspace_id, name, path, sql, database_id, created_by) \
-         VALUES ($1,'z2 authz test','/z2-authz-test','SELECT 1',$2,$3) RETURNING id",
+        "INSERT INTO dataapi.endpoints \
+           (workspace_id, name, path, statements, database_id, created_by) \
+         VALUES ($1,'z2 authz test','/z2-authz-test','[{\"name\":\"main\",\"sql\":\"SELECT 1\"}]',$2,$3) RETURNING id",
     )
     .bind(fx.ws)
     .bind(fx.database)
@@ -2958,8 +2959,9 @@ async fn updating_an_endpoint_scoped_dataapi_alert_needs_data_api_endpoint_read(
 /// on the endpoint the update is trying to set".
 async fn a_second_endpoint(fx: &Fx, owner: Uuid, tag: &str) -> Uuid {
     sqlx::query_scalar(
-        "INSERT INTO dataapi.endpoints (workspace_id, name, path, sql, database_id, created_by) \
-         VALUES ($1,$2,$3,'SELECT 1',$4,$5) RETURNING id",
+        "INSERT INTO dataapi.endpoints \
+           (workspace_id, name, path, statements, database_id, created_by) \
+         VALUES ($1,$2,$3,'[{\"name\":\"main\",\"sql\":\"SELECT 1\"}]',$4,$5) RETURNING id",
     )
     .bind(fx.ws)
     .bind(format!("z2 {tag}"))
@@ -2984,8 +2986,9 @@ async fn updating_a_dataapi_alert_cannot_be_repointed_to_an_unreadable_endpoint(
     let fx = fixture!();
     let owner = mk_user(&fx.db, "z2_repoint_owner").await;
     let endpoint_a: Uuid = sqlx::query_scalar(
-        "INSERT INTO dataapi.endpoints (workspace_id, name, path, sql, database_id, created_by) \
-         VALUES ($1,'z2 repoint a','/z2-repoint-a','SELECT 1',$2,$3) RETURNING id",
+        "INSERT INTO dataapi.endpoints \
+           (workspace_id, name, path, statements, database_id, created_by) \
+         VALUES ($1,'z2 repoint a','/z2-repoint-a','[{\"name\":\"main\",\"sql\":\"SELECT 1\"}]',$2,$3) RETURNING id",
     )
     .bind(fx.ws)
     .bind(fx.database)
@@ -3062,8 +3065,9 @@ async fn updating_a_dataapi_alert_cannot_be_widened_to_the_workspace_by_omitting
     let fx = fixture!();
     let owner = mk_user(&fx.db, "z2_widen_owner").await;
     let endpoint_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO dataapi.endpoints (workspace_id, name, path, sql, database_id, created_by) \
-         VALUES ($1,'z2 widen','/z2-widen','SELECT 1',$2,$3) RETURNING id",
+        "INSERT INTO dataapi.endpoints \
+           (workspace_id, name, path, statements, database_id, created_by) \
+         VALUES ($1,'z2 widen','/z2-widen','[{\"name\":\"main\",\"sql\":\"SELECT 1\"}]',$2,$3) RETURNING id",
     )
     .bind(fx.ws)
     .bind(fx.database)
@@ -3229,8 +3233,9 @@ async fn creating_an_endpoint_scoped_dataapi_alert_needs_data_api_endpoint_read(
     let fx = fixture!();
     let owner = mk_user(&fx.db, "z2_create_object_owner").await;
     let endpoint_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO dataapi.endpoints (workspace_id, name, path, sql, database_id, created_by) \
-         VALUES ($1,'z2 create authz test','/z2-create-authz-test','SELECT 1',$2,$3) \
+        "INSERT INTO dataapi.endpoints \
+           (workspace_id, name, path, statements, database_id, created_by) \
+         VALUES ($1,'z2 create authz test','/z2-create-authz-test','[{\"name\":\"main\",\"sql\":\"SELECT 1\"}]',$2,$3) \
          RETURNING id",
     )
     .bind(fx.ws)
@@ -3306,8 +3311,9 @@ async fn a_foreign_workspace_endpoint(fx: &Fx, tag: &str) -> Uuid {
     .await
     .unwrap();
     sqlx::query_scalar(
-        "INSERT INTO dataapi.endpoints (workspace_id, name, path, sql, database_id, created_by) \
-         VALUES ($1,$2,$3,'SELECT 1',$4,$5) RETURNING id",
+        "INSERT INTO dataapi.endpoints \
+           (workspace_id, name, path, statements, database_id, created_by) \
+         VALUES ($1,$2,$3,'[{\"name\":\"main\",\"sql\":\"SELECT 1\"}]',$4,$5) RETURNING id",
     )
     .bind(ws)
     .bind(format!("z2 {tag}"))

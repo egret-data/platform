@@ -524,8 +524,8 @@ impl Fixture {
     ) -> Uuid {
         let ep: Uuid = sqlx::query_scalar(
             "INSERT INTO dataapi.endpoints \
-               (workspace_id, name, path, method, database_id, sql, output, created_by) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
+               (workspace_id, name, path, method, database_id, statements, output, created_by) \
+             VALUES ($1, $2, $3, $4, $5, jsonb_build_array(jsonb_build_object('name', 'main', 'sql', $6::text)), $7, $8) RETURNING id",
         )
         .bind(self.ws_id)
         .bind(format!("ep-{}", Uuid::new_v4().simple()))
@@ -661,16 +661,20 @@ async fn a_draft_edit_does_not_change_what_is_served() {
     let ep = f.publish_endpoint("GET", "/x", "SELECT 1 AS n").await;
     assert_eq!(f.call("x").await.ns(), vec![1]);
 
-    f.patch_draft(ep, serde_json::json!({ "sql": "SELECT 2 AS n" }))
-        .await;
+    f.patch_draft(
+        ep,
+        serde_json::json!({ "statements": [{ "name": "main", "sql": "SELECT 2 AS n" }] }),
+    )
+    .await;
 
     // Anti-triviality: the draft really did change, so a serving path that read
     // it would return 2 and this assertion would have something to fail on.
-    let draft_sql: String = sqlx::query_scalar("SELECT sql FROM dataapi.endpoints WHERE id = $1")
-        .bind(ep)
-        .fetch_one(&f.db.pool)
-        .await
-        .unwrap();
+    let draft_sql: String =
+        sqlx::query_scalar("SELECT statements->0->>'sql' FROM dataapi.endpoints WHERE id = $1")
+            .bind(ep)
+            .fetch_one(&f.db.pool)
+            .await
+            .unwrap();
     assert_eq!(draft_sql, "SELECT 2 AS n", "the draft edit did not land");
 
     assert_eq!(
@@ -789,8 +793,8 @@ async fn an_unpublished_endpoint_is_404() {
     let f = skip_without_db!();
     sqlx::query(
         "INSERT INTO dataapi.endpoints \
-           (workspace_id, name, path, method, database_id, sql, created_by) \
-         VALUES ($1, 'draft-only', '/never', 'GET', $2, 'SELECT 1 AS n', $3)",
+           (workspace_id, name, path, method, database_id, statements, created_by) \
+         VALUES ($1, 'draft-only', '/never', 'GET', $2, jsonb_build_array(jsonb_build_object('name', 'main', 'sql', 'SELECT 1 AS n')), $3)",
     )
     .bind(f.ws_id)
     .bind(f.database_id)

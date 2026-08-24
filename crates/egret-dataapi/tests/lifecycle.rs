@@ -436,8 +436,8 @@ impl Fixture {
     ) -> Uuid {
         sqlx::query_scalar(
             "INSERT INTO dataapi.endpoints \
-               (workspace_id, name, path, method, database_id, sql, created_by) \
-             VALUES ($1, $2, $3, 'GET', $4, $5, $6) RETURNING id",
+               (workspace_id, name, path, method, database_id, statements, created_by) \
+             VALUES ($1, $2, $3, 'GET', $4, jsonb_build_array(jsonb_build_object('name', 'main', 'sql', $5::text)), $6) RETURNING id",
         )
         .bind(self.ws_id)
         .bind(name)
@@ -591,7 +591,7 @@ async fn a_published_version_is_unaffected_by_later_draft_edits() {
     f.patch_endpoint(
         ep,
         serde_json::json!({
-            "sql": "SELECT 2 AS n WHERE r = {{r}}",
+            "statements": [{ "name": "main", "sql": "SELECT 2 AS n WHERE r = {{r}}" }],
             "params": [{ "name": "r", "type": "string", "location": "query" }],
             "limits": { "max_rows": 1, "timeout_seconds": 1 },
         }),
@@ -619,8 +619,11 @@ async fn rollback_restores_the_previous_snapshot() {
         .create_endpoint("rev", "reports/revenue", "SELECT 1 AS n")
         .await;
     f.publish(ep).await; // v1
-    f.patch_endpoint(ep, serde_json::json!({ "sql": "SELECT 2 AS n" }))
-        .await;
+    f.patch_endpoint(
+        ep,
+        serde_json::json!({ "statements": [{ "name": "main", "sql": "SELECT 2 AS n" }] }),
+    )
+    .await;
     f.publish(ep).await; // v2
     assert_eq!(f.live_snapshot(ep).await.sql, "SELECT 2 AS n");
 
@@ -720,8 +723,11 @@ async fn republishing_increments_the_version() {
     let f = skip_without_db!();
     let ep = f.create_endpoint("rev", "rev", "SELECT 1 AS n").await;
     f.publish(ep).await;
-    f.patch_endpoint(ep, serde_json::json!({ "sql": "SELECT 2 AS n" }))
-        .await;
+    f.patch_endpoint(
+        ep,
+        serde_json::json!({ "statements": [{ "name": "main", "sql": "SELECT 2 AS n" }] }),
+    )
+    .await;
     let second = f.publish(ep).await;
     assert_eq!(second["version"], 2);
 
@@ -975,9 +981,9 @@ async fn an_sql_edit_during_describe_is_a_conflict() {
         .await;
     f.port.patch_during_next_describe(
         &f.db,
-        "UPDATE dataapi.endpoints SET sql = $2 #>> '{}' WHERE id = $1",
+        "UPDATE dataapi.endpoints SET statements = $2 WHERE id = $1",
         ep,
-        serde_json::json!("SELECT 2 AS n"),
+        serde_json::json!([{ "name": "main", "sql": "SELECT 2 AS n" }]),
     );
 
     let (status, body) = f.publish_raw(ep).await;
@@ -1052,8 +1058,11 @@ async fn publishing_a_disabled_endpoint_does_not_put_it_back_in_service() {
     )
     .await;
 
-    f.patch_endpoint(ep, serde_json::json!({ "sql": "SELECT 2 AS n" }))
-        .await;
+    f.patch_endpoint(
+        ep,
+        serde_json::json!({ "statements": [{ "name": "main", "sql": "SELECT 2 AS n" }] }),
+    )
+    .await;
     let published = f.publish(ep).await;
     assert_eq!(published["version"], 2, "the version is still minted");
     assert_eq!(
@@ -1982,8 +1991,11 @@ async fn rollback_does_not_silently_re_enable_a_disabled_endpoint() {
     let f = skip_without_db!();
     let ep = f.create_endpoint("rev", "rev", "SELECT 1 AS n").await;
     f.publish(ep).await;
-    f.patch_endpoint(ep, serde_json::json!({ "sql": "SELECT 2 AS n" }))
-        .await;
+    f.patch_endpoint(
+        ep,
+        serde_json::json!({ "statements": [{ "name": "main", "sql": "SELECT 2 AS n" }] }),
+    )
+    .await;
     f.publish(ep).await;
     f.send(
         &f.manager,
@@ -2454,4 +2466,57 @@ async fn publish_describes_an_enum_value_past_the_old_candidate_cap() {
             .required,
         "and it is optional — eleven of the twelve values do not return it"
     );
+}
+
+/// **Delete this with the bridge it pins (M2 Task 5).** Until publish validates
+/// and describes every statement, an endpoint that declares more than one is
+/// refused rather than published with the first one frozen and the rest
+/// silently dropped — which would freeze a contract missing a whole result set
+/// and serve 200s that are simply short of it.
+///
+/// The message is asserted, not just the status: 400 is the answer to a dozen
+/// definition rules here, so a status alone cannot say which one fired.
+#[tokio::test]
+async fn publishing_more_than_one_statement_is_refused_until_task_5() {
+    let f = skip_without_db!();
+    let ep = f
+        .create_endpoint("several", "several", "SELECT 1 AS n")
+        .await;
+    let touched = sqlx::query("UPDATE dataapi.endpoints SET statements = $2 WHERE id = $1")
+        .bind(ep)
+        .bind(serde_json::json!([
+            { "name": "rows", "sql": "SELECT 1 AS n" },
+            { "name": "total", "sql": "SELECT 2 AS n" },
+        ]))
+        .execute(&f.db.pool)
+        .await
+        .expect("store two statements")
+        .rows_affected();
+    assert_eq!(
+        touched, 1,
+        "the two-statement draft must actually be stored"
+    );
+
+    let (status, body) = f.publish_raw(ep).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body.to_string().contains("exactly one statement"),
+        "the refusal must name the rule that fired, not some other 400: {body}"
+    );
+    assert!(
+        f.versions(ep).await.is_empty(),
+        "and nothing may have been frozen"
+    );
+
+    // Anti-triviality: the same endpoint publishes the moment it declares one
+    // statement, so the refusal above is about the COUNT and not about the
+    // fixture being unpublishable for some other reason.
+    sqlx::query("UPDATE dataapi.endpoints SET statements = $2 WHERE id = $1")
+        .bind(ep)
+        .bind(serde_json::json!([{ "name": "rows", "sql": "SELECT 1 AS n" }]))
+        .execute(&f.db.pool)
+        .await
+        .expect("store one statement");
+    let (status, body) = f.publish_raw(ep).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
 }

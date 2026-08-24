@@ -318,8 +318,9 @@ async fn setup_endpoint_scoped(
     .await
     .unwrap();
     let endpoint_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO dataapi.endpoints (workspace_id, name, path, sql, database_id, created_by) \
-         VALUES ($1,'z2 tick test','/z2-tick-test','SELECT 1',$2,$3) RETURNING id",
+        "INSERT INTO dataapi.endpoints \
+           (workspace_id, name, path, statements, database_id, created_by) \
+         VALUES ($1,'z2 tick test','/z2-tick-test','[{\"name\":\"main\",\"sql\":\"SELECT 1\"}]',$2,$3) RETURNING id",
     )
     .bind(ws)
     .bind(database_id)
@@ -706,8 +707,9 @@ async fn a_dataapi_alert_watching_a_foreign_workspace_endpoint_errors_and_sends_
     .await
     .unwrap();
     let foreign_endpoint: Uuid = sqlx::query_scalar(
-        "INSERT INTO dataapi.endpoints (workspace_id, name, path, sql, database_id, created_by) \
-         VALUES ($1,'foreign','/foreign','SELECT 1',$2,$3) RETURNING id",
+        "INSERT INTO dataapi.endpoints \
+           (workspace_id, name, path, statements, database_id, created_by) \
+         VALUES ($1,'foreign','/foreign','[{\"name\":\"main\",\"sql\":\"SELECT 1\"}]',$2,$3) RETURNING id",
     )
     .bind(foreign_ws)
     .bind(foreign_database)

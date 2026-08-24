@@ -80,7 +80,9 @@ use egret_auth::session::SessionService;
 use egret_auth::users::UserRepo;
 use egret_core::http::ErrorBody;
 use egret_core::{Ack, Error, UserId, WorkspacePath};
-use egret_dataapi_api::{CacheSpec, LimitsSpec, OutputSpec, ParamSpec, RateLimitSpec};
+use egret_dataapi_api::{
+    validate_statements, CacheSpec, LimitsSpec, OutputSpec, ParamSpec, RateLimitSpec,
+};
 use egret_metastore::Db;
 use egret_workspace::context::WsContext;
 use egret_workspace::rbac::Authorizer;
@@ -957,6 +959,11 @@ async fn create_endpoint(
     if body.name.trim().is_empty() {
         return Err(Error::InvalidInput("name must not be empty".into()));
     }
+    // Before the insert, so the schema's non-empty CHECK never has to answer for
+    // it: a constraint violation is a 500 with a constraint name in it, and this
+    // is a 400 that names the statement and the rule it broke. Same division of
+    // labour as `normalize_path` and the `method` CHECK.
+    validate_statements(&body.statements).map_err(|e| Error::InvalidInput(e.to_string()))?;
     let path = normalize_path(&body.path).map_err(Error::InvalidInput)?;
     let method = checked_method(body.method.as_deref())?;
     // Both before the insert, so a refused reference never reaches its FK — and
@@ -1029,6 +1036,11 @@ async fn update_endpoint(
     }
     if body.method.is_some() {
         body.method = Some(checked_method(body.method.as_deref())?);
+    }
+    // A PATCH replaces the whole list, so the same rules apply to it as to a
+    // create — an author cannot edit their way to an empty or ambiguous one.
+    if let Some(statements) = &body.statements {
+        validate_statements(statements).map_err(|e| Error::InvalidInput(e.to_string()))?;
     }
     // A PATCH may repoint the endpoint at a different connection or folder, so
     // the same containment applies here as on create — and it has to run before

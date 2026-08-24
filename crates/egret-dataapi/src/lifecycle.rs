@@ -228,7 +228,7 @@
 use egret_core::{Error, Result, UserId};
 use egret_dataapi_api::{
     compare_column_types, CacheScope, CacheSpec, ColumnSpec, EndpointSnapshot, ParamLocation,
-    ParamSpec, ParamType, TypeAgreement, PARAM_GATE,
+    ParamSpec, ParamType, StatementSpec, TypeAgreement, PARAM_GATE,
 };
 use egret_query_api::Param;
 use uuid::Uuid;
@@ -251,6 +251,12 @@ pub enum ValidationError {
          engine's lexer, and that agreement is exactly what cannot be assumed"
     )]
     MultipleStatements,
+    #[error(
+        "an endpoint must declare exactly one statement to be published; this one declares {0}. \
+         Publishing several is M2 Task 5 — until then the draft may hold them and publish \
+         refuses, rather than freezing the first and silently dropping the rest"
+    )]
+    SeveralStatements(usize),
     #[error(
         "`#` may not appear in a published definition — delete it. StarRocks ACCEPTS AND IGNORES \
          `#` (`SELECT 1 #x` returns a column named `x`), so any meaning read into it here is a \
@@ -1681,6 +1687,29 @@ fn projection_has_uncast_marker(rest: &str) -> bool {
     false
 }
 
+/// The one statement publish can still freeze, or a refusal naming the count.
+///
+/// **A bridge, written to be deleted.** The draft row holds a LIST as of
+/// migration 0129, but the published snapshot still carries a single `sql`
+/// (its shape changes in M2 Task 4) and nothing yet validates or describes more
+/// than one definition (M2 Task 5). Between here and there, the honest answer
+/// for a two-statement endpoint is a refusal: freezing `statements[0]` would
+/// publish a contract missing everything the author wrote after it, and the
+/// endpoint would serve 200s that are simply short a result set — the kind of
+/// failure nobody reports as a bug.
+///
+/// An EMPTY list is not one of the cases this has to explain away: the route
+/// refuses it and `dataapi_endpoints_statements_nonempty` makes it
+/// unrepresentable, so the arm is here to be total, not because it is reachable.
+fn sole_statement(
+    draft: &DataApiEndpointDto,
+) -> std::result::Result<&StatementSpec, ValidationError> {
+    match draft.statements.as_slice() {
+        [only] => Ok(only),
+        several => Err(ValidationError::SeveralStatements(several.len())),
+    }
+}
+
 /// Validate a draft and resolve its output columns against the engine.
 ///
 /// Shared by `POST /validate` and `POST /publish` so the two can never diverge:
@@ -1731,7 +1760,7 @@ pub async fn validate(
     impersonate: bool,
 ) -> Result<Vec<ColumnSpec>> {
     validate_definition(
-        &draft.sql,
+        &sole_statement(draft)?.sql,
         &draft.params,
         &draft.cache,
         delegated,
@@ -2043,16 +2072,17 @@ async fn describe_branches(
     principal: UserId,
     draft: &DataApiEndpointDto,
 ) -> Result<DescribedBranches> {
-    let mut renderings = branch_renderings(&draft.sql, &draft.params);
+    let sql = &sole_statement(draft)?.sql;
+    let mut renderings = branch_renderings(sql, &draft.params);
     if renderings.is_empty() {
         // Unreachable while `check_render_rules` has just rendered the
         // representative context, but `render_permutations` SKIPS an assignment
         // that does not render, so an empty result is silence rather than an
         // error. Render the representative context directly: its failure is the
         // one worth reporting, and its success is a branch to describe.
-        let ctx = representative(&draft.sql, &draft.params, &[]);
+        let ctx = representative(sql, &draft.params, &[]);
         let (rendered, binds) =
-            crate::render::render(&draft.sql, &ctx).map_err(ValidationError::Render)?;
+            crate::render::render(sql, &ctx).map_err(ValidationError::Render)?;
         renderings.push((rendered, binds.len()));
     }
     // Before the first describe, so an over-wide definition costs the author an
@@ -2316,7 +2346,7 @@ impl EndpointStore {
         // `shape_rows` zips live against frozen by INDEX, so every branch but
         // the widest is a permanent `503`. Exactly the hole the paragraph above
         // describes closing for `cache.scope`, one field along.
-        if current.sql != draft.sql
+        if current.statements != draft.statements
             || current.database_id != draft.database_id
             || current.params != draft.params
             || current.output != draft.output
@@ -2360,8 +2390,9 @@ impl EndpointStore {
 
         // The whole pure validator, against the row actually being frozen. See the
         // doc comment: this is what closes the window, not the identity check above.
+        let sole_sql = sole_statement(&current)?.sql.clone();
         validate_definition(
-            &current.sql,
+            &sole_sql,
             &current.params,
             &current.cache,
             delegated,
@@ -2371,7 +2402,7 @@ impl EndpointStore {
         let snapshot = EndpointSnapshot {
             // The stored path, which `normalize_path` already canonicalised. The
             // snapshot must never carry a spelling the endpoint row does not have.
-            sql: current.sql.clone(),
+            sql: sole_sql,
             method: current.method.clone(),
             path: current.path.clone(),
             database_id: current.database_id,

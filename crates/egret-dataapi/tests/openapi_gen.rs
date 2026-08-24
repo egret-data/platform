@@ -278,8 +278,10 @@ async fn more_live_endpoints_than_the_bound_is_refused_not_truncated() {
     // The fixture already publishes `/probe`, so `MAX` more reaches `MAX + 1`.
     let pad = egret_dataapi::openapi_gen::MAX_DOCUMENTED_ENDPOINTS as i32;
     sqlx::query(
-        "INSERT INTO dataapi.endpoints (workspace_id, name, path, database_id, sql, state) \
-         SELECT $1, 'bound-' || i, '/bound-' || i, $2, 'SELECT 1 AS n', 'live' \
+        "INSERT INTO dataapi.endpoints \
+           (workspace_id, name, path, database_id, statements, state) \
+         SELECT $1, 'bound-' || i, '/bound-' || i, $2, \
+                jsonb_build_array(jsonb_build_object('name', 'main', 'sql', 'SELECT 1 AS n')), 'live' \
          FROM generate_series(1, $3::int) AS i",
     )
     .bind(f.ws_id)

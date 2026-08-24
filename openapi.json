@@ -27564,7 +27564,7 @@
           "name",
           "path",
           "database_id",
-          "sql"
+          "statements"
         ],
         "properties": {
           "name": {
@@ -27579,8 +27579,12 @@
             "format": "uuid",
             "description": "The connection this endpoint queries. Validated against the CALLER's\nworkspace by the route before it is stored — it arrives from the request\nbody, so nothing else would stop it naming another workspace's database."
           },
-          "sql": {
-            "type": "string"
+          "statements": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StatementSpec"
+            },
+            "description": "The statements this endpoint runs, in order. Required and non-empty:\n[`egret_dataapi_api::validate_statements`] refuses an empty list, a name\nthat is not an identifier, and a repeated name, all as a 400 naming the\nreason — the schema's own `CHECK` behind it means an empty list is not\nmerely refused here but unrepresentable."
           },
           "method": {
             "type": [
@@ -28614,7 +28618,7 @@
           "path",
           "method",
           "database_id",
-          "sql",
+          "statements",
           "params",
           "output",
           "cache",
@@ -28653,8 +28657,12 @@
             "type": "string",
             "format": "uuid"
           },
-          "sql": {
-            "type": "string"
+          "statements": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StatementSpec"
+            },
+            "description": "The endpoint's statements, in execution order.\n\nA LIST, not a string, and a one-statement endpoint is the same shape as\na ten-statement one — there is no \"simple\" spelling to keep in step with\nthe general one. Stored as `jsonb`, like every other structured column\non this row."
           },
           "params": {
             "type": "array",
@@ -33804,6 +33812,23 @@
           }
         }
       },
+      "StatementSpec": {
+        "type": "object",
+        "description": "One of an endpoint's N SQL definitions, as an author writes it (M2). The\ncanonical shape is a `rows` statement and a `total` statement for\npagination, but any number is allowed.\n\n`name` is not decoration: once an endpoint has more than one statement,\nthe response envelope is a JSON object keyed by statement name and the\ngenerated OpenAPI document names it as a property (M2 Tasks 8-9). A name a\ncaller writes into their own code is a contract, which is what\n[`validate_statement_name`] and [`validate_statements`] enforce —\n`^[a-z][a-z0-9_]*$` so the key never needs quoting in JSON and never reads\nas private, and uniqueness within the endpoint so the key is unambiguous.\n\n`#[serde(deny_unknown_fields)]` for the same reason as [`ParamSpec`] and\nits four siblings: this is a type an AUTHOR fills in, so a typo in the\nrequest body must be a 400, not a silently-ignored field.",
+        "required": [
+          "name",
+          "sql"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "sql": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
       "StatusBody": {
         "type": "object",
         "required": [
@@ -34566,11 +34591,15 @@
             ],
             "format": "uuid"
           },
-          "sql": {
+          "statements": {
             "type": [
-              "string",
+              "array",
               "null"
-            ]
+            ],
+            "items": {
+              "$ref": "#/components/schemas/StatementSpec"
+            },
+            "description": "Replaces the whole list when present. There is no per-statement patch:\nthe order is part of the definition, so \"edit statement 2\" and \"insert a\nstatement\" would need an addressing scheme the list itself already is."
           },
           "params": {
             "type": [

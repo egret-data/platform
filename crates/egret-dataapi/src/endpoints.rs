@@ -32,7 +32,9 @@
 
 use chrono::{DateTime, Utc};
 use egret_core::{Error, Result, UserId};
-use egret_dataapi_api::{CacheSpec, LimitsSpec, OutputSpec, ParamSpec, RateLimitSpec};
+use egret_dataapi_api::{
+    CacheSpec, LimitsSpec, OutputSpec, ParamSpec, RateLimitSpec, StatementSpec,
+};
 use egret_metastore::Db;
 use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
@@ -43,7 +45,7 @@ use uuid::Uuid;
 /// have to go through `AssertSqlSafe`.
 macro_rules! endpoint_cols {
     () => {
-        "id, folder_id, name, description, path, method, database_id, sql, params, output, \
+        "id, folder_id, name, description, path, method, database_id, statements, params, output, \
          cache, limits, rate_limit, source_kind, source_ref, live_version_id, state, \
          created_by, created_at, updated_at, deleted_at"
     };
@@ -61,7 +63,7 @@ struct Row {
     path: String,
     method: String,
     database_id: Uuid,
-    sql: String,
+    statements: serde_json::Value,
     params: serde_json::Value,
     output: serde_json::Value,
     cache: serde_json::Value,
@@ -100,7 +102,13 @@ pub struct DataApiEndpointDto {
     pub path: String,
     pub method: String,
     pub database_id: Uuid,
-    pub sql: String,
+    /// The endpoint's statements, in execution order.
+    ///
+    /// A LIST, not a string, and a one-statement endpoint is the same shape as
+    /// a ten-statement one — there is no "simple" spelling to keep in step with
+    /// the general one. Stored as `jsonb`, like every other structured column
+    /// on this row.
+    pub statements: Vec<StatementSpec>,
     pub params: Vec<ParamSpec>,
     pub output: OutputSpec,
     pub cache: CacheSpec,
@@ -180,7 +188,7 @@ impl TryFrom<Row> for DataApiEndpointDto {
             path: r.path,
             method: r.method,
             database_id: r.database_id,
-            sql: r.sql,
+            statements: spec("statements", r.statements)?,
             params: spec("params", r.params)?,
             output: spec("output", r.output)?,
             cache: spec("cache", r.cache)?,
@@ -230,7 +238,12 @@ pub struct CreateEndpointInput {
     /// workspace by the route before it is stored — it arrives from the request
     /// body, so nothing else would stop it naming another workspace's database.
     pub database_id: Uuid,
-    pub sql: String,
+    /// The statements this endpoint runs, in order. Required and non-empty:
+    /// [`egret_dataapi_api::validate_statements`] refuses an empty list, a name
+    /// that is not an identifier, and a repeated name, all as a 400 naming the
+    /// reason — the schema's own `CHECK` behind it means an empty list is not
+    /// merely refused here but unrepresentable.
+    pub statements: Vec<StatementSpec>,
     #[serde(default)]
     pub method: Option<String>,
     #[serde(default)]
@@ -281,7 +294,11 @@ pub struct UpdateEndpointInput {
     pub description: Option<String>,
     #[serde(default)]
     pub database_id: Option<Uuid>,
-    pub sql: Option<String>,
+    /// Replaces the whole list when present. There is no per-statement patch:
+    /// the order is part of the definition, so "edit statement 2" and "insert a
+    /// statement" would need an addressing scheme the list itself already is.
+    #[serde(default)]
+    pub statements: Option<Vec<StatementSpec>>,
     #[serde(default)]
     pub params: Option<Vec<ParamSpec>>,
     #[serde(default)]
@@ -838,8 +855,9 @@ impl EndpointStore {
     ) -> Result<DataApiEndpointDto> {
         let row: std::result::Result<Row, sqlx::Error> = sqlx::query_as(concat!(
             "INSERT INTO dataapi.endpoints \
-               (workspace_id, folder_id, name, description, path, method, database_id, sql, \
-                params, output, cache, limits, rate_limit, source_kind, source_ref, created_by) \
+               (workspace_id, folder_id, name, description, path, method, database_id, \
+                statements, params, output, cache, limits, rate_limit, source_kind, source_ref, \
+                created_by) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, \
                      COALESCE($9, '[]'::jsonb), COALESCE($10, '{}'::jsonb), \
                      COALESCE($11, '{}'::jsonb), COALESCE($12, '{}'::jsonb), \
@@ -854,7 +872,7 @@ impl EndpointStore {
         .bind(path)
         .bind(method)
         .bind(input.database_id)
-        .bind(&input.sql)
+        .bind(json_value(&input.statements)?)
         .bind(to_json(input.params.as_ref())?)
         .bind(to_json(input.output.as_ref())?)
         .bind(to_json(input.cache.as_ref())?)
@@ -1027,7 +1045,7 @@ impl EndpointStore {
                path = COALESCE($4, path), \
                method = COALESCE($5, method), \
                database_id = COALESCE($6, database_id), \
-               sql = COALESCE($7, sql), \
+               statements = COALESCE($7, statements), \
                params = COALESCE($8, params), \
                output = COALESCE($9, output), \
                cache = COALESCE($10, cache), \
@@ -1047,7 +1065,7 @@ impl EndpointStore {
         .bind(input.path.as_deref())
         .bind(input.method.as_deref())
         .bind(input.database_id)
-        .bind(input.sql.as_deref())
+        .bind(to_json(input.statements.as_ref())?)
         .bind(to_json(input.params.as_ref())?)
         .bind(to_json(input.output.as_ref())?)
         .bind(to_json(input.cache.as_ref())?)
@@ -1213,11 +1231,15 @@ pub struct DeletedEndpoint {
 /// statement above `COALESCE`s to the column's existing value (update) or its
 /// declared default (create).
 fn to_json<T: Serialize>(v: Option<&T>) -> Result<Option<serde_json::Value>> {
-    v.map(|v| {
-        serde_json::to_value(v)
-            .map_err(|e| Error::Internal(anyhow::anyhow!("serialize endpoint spec: {e}")))
-    })
-    .transpose()
+    v.map(json_value).transpose()
+}
+
+/// [`to_json`] for a column that is never absent — `statements` is required on
+/// create, so binding it as `Option` would invite a `None` the NOT NULL column
+/// would answer with a 500.
+fn json_value<T: Serialize>(v: &T) -> Result<serde_json::Value> {
+    serde_json::to_value(v)
+        .map_err(|e| Error::Internal(anyhow::anyhow!("serialize endpoint spec: {e}")))
 }
 
 #[cfg(test)]
@@ -1335,7 +1357,8 @@ mod tests {
     #[test]
     fn an_unknown_field_is_refused_rather_than_dropped() {
         let body = r#"{"name":"n","path":"/a","database_id":"00000000-0000-0000-0000-000000000000",
-                       "sql":"SELECT 1","rate_limit":{"per_client_qps":5}}"#;
+                       "statements":[{"name":"main","sql":"SELECT 1"}],
+                       "rate_limit":{"per_client_qps":5}}"#;
         let err = serde_json::from_str::<CreateEndpointInput>(body).unwrap_err();
         assert!(
             err.to_string().contains("per_client_qps"),
@@ -1352,7 +1375,8 @@ mod tests {
     /// whole reason `folder_id` is a double option.
     #[test]
     fn an_absent_folder_id_is_not_an_explicit_null() {
-        let absent: UpdateEndpointInput = serde_json::from_str(r#"{"sql":"SELECT 1"}"#).unwrap();
+        let absent: UpdateEndpointInput =
+            serde_json::from_str(r#"{"statements":[{"name":"main","sql":"SELECT 1"}]}"#).unwrap();
         assert_eq!(absent.folder_id, None, "absent means leave it alone");
 
         let cleared: UpdateEndpointInput = serde_json::from_str(r#"{"folder_id":null}"#).unwrap();
