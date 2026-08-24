@@ -227,8 +227,8 @@
 
 use egret_core::{Error, Result, UserId};
 use egret_dataapi_api::{
-    column_types_match, more_specific_type, CacheScope, CacheSpec, ColumnSpec, EndpointSnapshot,
-    ParamLocation, ParamSpec, ParamType, PARAM_GATE,
+    compare_column_types, CacheScope, CacheSpec, ColumnSpec, EndpointSnapshot, ParamLocation,
+    ParamSpec, ParamType, TypeAgreement, PARAM_GATE,
 };
 use egret_query_api::Param;
 use uuid::Uuid;
@@ -2097,11 +2097,9 @@ async fn describe_branches(
         for column in &columns {
             let spec = ColumnSpec::from(column);
             match union.iter().position(|u| u.name == spec.name) {
-                // Reachable only ACROSS statements now — a duplicate inside one
-                // was refused above, whatever its types.
-                //
-                // `column_types_match`, not `!=`, and the reason is specific to
-                // this loop: `bind_count` is computed PER STATEMENT, so a
+                None => union.push(spec),
+                // `compare_column_types`, not `!=`, and the reason is specific
+                // to this loop: `bind_count` is computed PER STATEMENT, so a
                 // conditional definition whose branches interpolate different
                 // numbers of parameters describes one branch through
                 // `Connector::describe` (client protocol) and another through
@@ -2109,26 +2107,38 @@ async fn describe_branches(
                 // paths spell a datetime column's precision differently, so a
                 // single unchanging `timestamp` column reported itself as
                 // `timestamp` in one branch and `timestamp(0)` in the next and
-                // this arm refused the publish outright. Measured live on Trino
+                // this fold refused the publish outright. Measured live on Trino
                 // 483, not argued.
-                Some(i) if !column_types_match(&union[i].ty, &spec.ty) => {
-                    return Err(ValidationError::ColumnTypeConflict {
-                        name: spec.name,
-                        first: union[i].ty.clone(),
-                        second: spec.ty,
+                //
+                // Matching on the AGREEMENT rather than calling a second
+                // "which is more specific?" helper is what keeps the unguarded
+                // case unrepresentable: the preferred spelling is only reachable
+                // through an arm that is not `No`.
+                Some(i) => match compare_column_types(&union[i].ty, &spec.ty) {
+                    TypeAgreement::No => {
+                        return Err(ValidationError::ColumnTypeConflict {
+                            name: spec.name,
+                            first: union[i].ty.clone(),
+                            second: spec.ty,
+                        }
+                        .into());
                     }
-                    .into());
-                }
-                // The two spellings agree, possibly only modulo a precision the
-                // client protocol suppressed. Keep whichever STATES it, so the
-                // frozen contract — and therefore `meta.columns` and the
-                // generated document's `x-egret-engine-type` — does not depend
-                // on which branch happened to be described first.
-                Some(i) => {
-                    let keep = more_specific_type(&union[i].ty, &spec.ty).to_owned();
-                    union[i].ty = keep;
-                }
-                None => union.push(spec),
+                    // The accumulator holds the precision-FREE spelling and this
+                    // branch states the precision. Keep the informative one, so
+                    // the frozen contract — and therefore `meta.columns` and the
+                    // generated document's `x-egret-engine-type` — does not
+                    // depend on which branch happened to be described first.
+                    //
+                    // This also TIGHTENS the >= 3 branch case rather than merely
+                    // tidying it. With `timestamp`, `timestamp(3)` and
+                    // `timestamp(6)` across three branches, an accumulator that
+                    // kept the bare `timestamp` agreed with both of the others
+                    // and published a contract naming NEITHER precision;
+                    // promoting it means the third branch meets `timestamp(3)`
+                    // and is correctly refused as two stated precisions.
+                    TypeAgreement::PreferRight => union[i].ty = spec.ty,
+                    TypeAgreement::Same | TypeAgreement::PreferLeft => {}
+                },
             }
         }
     }

@@ -568,7 +568,7 @@ async fn describe_and_describe_with_params_type_the_same_columns_identically_on_
 /// carry `timestamp(0)` and breaks the non-parameterised ones whose snapshots
 /// carry the bare `timestamp` — both spellings are already in the published
 /// corpus, so no change to what the connector reports can satisfy both. The
-/// reconciliation is `egret_dataapi_api::column_types_match`, at the one place
+/// reconciliation is `egret_dataapi_api::compare_column_types`, at the one place
 /// that sees both sides.
 ///
 /// So this test pins the divergence as a MEASURED FACT rather than asserting it

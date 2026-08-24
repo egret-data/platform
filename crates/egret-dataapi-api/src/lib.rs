@@ -272,6 +272,42 @@ impl From<&egret_core::ColumnMeta> for ColumnSpec {
     }
 }
 
+/// Whether two SQL type names describe the same column, and — when they do but
+/// are spelled differently — which spelling carries more information.
+///
+/// One type rather than a `bool` plus a separate "which is more specific?"
+/// helper, because the two questions cannot be asked independently **safely**.
+/// A helper that answers "the more specific of these two" has no correct answer
+/// for a pair that does not agree at all, so it must either return something
+/// misleading (the `more_specific_type` this replaced answered
+/// `more_specific_type("varchar", "integer")` with `"varchar"`) or be
+/// documented as "only call this once the other one said yes" — a convention,
+/// which the next caller is free not to know. Folding the choice into the
+/// answer makes the unguarded call **unrepresentable**: there is no way to
+/// obtain a preferred spelling without having been handed, and having had to
+/// handle, [`TypeAgreement::No`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypeAgreement {
+    /// Byte-identical.
+    Same,
+    /// They describe the same column, and the LEFT argument is the spelling
+    /// that states the datetime precision.
+    PreferLeft,
+    /// They describe the same column, and the RIGHT argument is the spelling
+    /// that states the datetime precision.
+    PreferRight,
+    /// They do not describe the same column. This is schema drift.
+    No,
+}
+
+impl TypeAgreement {
+    /// True unless this is [`TypeAgreement::No`] — for the call sites that need
+    /// only the gate, not the spelling.
+    pub fn agrees(self) -> bool {
+        !matches!(self, TypeAgreement::No)
+    }
+}
+
 /// Does a live column's type name still honour the one frozen at publish?
 ///
 /// Exact equality, plus ONE measured exception: **Trino suppresses a datetime
@@ -307,56 +343,43 @@ impl From<&egret_core::ColumnMeta> for ColumnSpec {
 /// # What this deliberately does NOT relax
 ///
 /// A *suppressed* precision and a *stated* one are reconciled; two stated
-/// precisions are still compared. `timestamp(3)` vs `timestamp(6)` is a
-/// genuine type change and is still refused — the pair is only accepted when
-/// one side never said anything about precision, which is the case where there
-/// is no information to compare rather than a case where it disagrees.
+/// precisions are still compared. `timestamp(3)` vs `timestamp(6)` is
+/// [`TypeAgreement::No`] — the pair is accepted only when one side never said
+/// anything about precision, which is the case where there is no information to
+/// compare rather than a case where it disagrees.
+///
+/// That is also **forward-safe**: if
+/// `X-Trino-Client-Capabilities: PARAMETRIC_DATETIME` is ever adopted, both
+/// sides state a precision, the relaxing clause stops firing, and full
+/// detection returns for every re-published endpoint with no code change here.
 ///
 /// StarRocks is structurally untouched: its connector names every column
 /// through a lossy `coltype_name` that already throws away every type
 /// parameter, so no StarRocks type string contains a parenthesis at all and
 /// [`erase_datetime_precision`] is the identity on all of them.
-pub fn column_types_match(declared: &str, returned: &str) -> bool {
-    if declared == returned {
-        return true;
+pub fn compare_column_types(left: &str, right: &str) -> TypeAgreement {
+    if left == right {
+        return TypeAgreement::Same;
     }
-    let d = erase_datetime_precision(declared);
-    let r = erase_datetime_precision(returned);
-    if d != r {
-        return false;
+    let l = erase_datetime_precision(left);
+    let r = erase_datetime_precision(right);
+    if l != r {
+        return TypeAgreement::No;
     }
     // At least one side must have carried no precision to begin with. Without
     // this clause the function would also equate `timestamp(3)` with
     // `timestamp(6)`, which is a real type change nobody suppressed.
-    d == declared || r == returned
-}
-
-/// Of two type names that [`column_types_match`] has already accepted, the one
-/// that STATES a datetime precision.
-///
-/// Total by construction rather than by convention: the pair can only be equal
-/// (return either), or differ by a precision exactly one side states — that is
-/// the whole of what `column_types_match` accepts, whose last clause requires
-/// at least one side to carry no precision at all. So testing whether `b` is
-/// the precision-free spelling decides it.
-///
-/// Publishing a branching definition uses this to keep the frozen contract
-/// independent of which branch happened to be described first: a branch that
-/// interpolates no parameters is typed through Trino's client protocol (bare
-/// `timestamp`) and a branch that interpolates some through `DESCRIBE OUTPUT`
-/// (`timestamp(0)`), and the union must not advertise a different
-/// `x-egret-engine-type` depending on branch enumeration order. Keeping the
-/// stated precision is also the right state to be in if
-/// `X-Trino-Client-Capabilities: PARAMETRIC_DATETIME` is ever adopted, since
-/// the live side would then state it too.
-pub fn more_specific_type<'a>(a: &'a str, b: &'a str) -> &'a str {
-    if a == b {
-        return a;
-    }
-    if erase_datetime_precision(b) == b {
-        a
-    } else {
-        b
+    //
+    // `l == left` means nothing was erased, i.e. `left` is the precision-FREE
+    // spelling — so the other one is the informative one.
+    match (l == left, r == right) {
+        (true, false) => TypeAgreement::PreferRight,
+        (false, true) => TypeAgreement::PreferLeft,
+        // Both precision-free and still unequal is impossible: the erased forms
+        // matched and neither string was rewritten, so the originals were equal
+        // and the first line already returned. Both precision-BEARING is the
+        // `timestamp(3)` vs `timestamp(6)` case, which is genuine drift.
+        (true, true) | (false, false) => TypeAgreement::No,
     }
 }
 
@@ -481,7 +504,7 @@ mod tests {
         assert!(ColumnSpec::from(&meta).required);
     }
 
-    // --- column_types_match ------------------------------------------------
+    // --- compare_column_types ------------------------------------------------
     //
     // The pairs below are not invented: every Trino spelling in these tests was
     // read off a live Trino 483 coordinator, both with and without
@@ -511,12 +534,12 @@ mod tests {
             ),
         ] {
             assert!(
-                column_types_match(declared, returned),
+                compare_column_types(declared, returned).agrees(),
                 "{declared:?} vs {returned:?} is one column, one precision, and \
                  one client-capability header apart"
             );
             assert!(
-                column_types_match(returned, declared),
+                compare_column_types(returned, declared).agrees(),
                 "the relation must not depend on which side is frozen"
             );
         }
@@ -540,7 +563,7 @@ mod tests {
             ("datetime", "date"),
         ] {
             assert!(
-                !column_types_match(declared, returned),
+                !compare_column_types(declared, returned).agrees(),
                 "{declared:?} vs {returned:?} must still be schema drift"
             );
         }
@@ -560,7 +583,7 @@ mod tests {
                 ty,
                 "{ty:?} is a StarRocks column type; nothing may rewrite it"
             );
-            assert!(column_types_match(ty, ty));
+            assert_eq!(compare_column_types(ty, ty), TypeAgreement::Same);
         }
     }
 
@@ -586,6 +609,54 @@ mod tests {
                 ty,
                 "{ty:?} carries no suppressible datetime precision"
             );
+        }
+    }
+
+    /// The agreement must also say WHICH spelling is informative, and it must
+    /// say it symmetrically — a caller folding a union sees the pair in
+    /// whichever order the branches happened to be described.
+    ///
+    /// This is the property the union fold depends on, and it is asserted here
+    /// rather than only through the fold, because a fixture whose first branch
+    /// already carries the precise spelling exercises "keep the first" and
+    /// "keep the more specific" identically.
+    #[test]
+    fn the_agreement_names_the_spelling_that_states_the_precision() {
+        for (precise, bare) in [
+            ("timestamp(0)", "timestamp"),
+            ("timestamp(6)", "timestamp"),
+            ("time(3)", "time"),
+            ("timestamp(0) with time zone", "timestamp with time zone"),
+            ("array(timestamp(0))", "array(timestamp)"),
+        ] {
+            assert_eq!(
+                compare_column_types(precise, bare),
+                TypeAgreement::PreferLeft,
+                "{precise:?} is the informative spelling of {bare:?}"
+            );
+            assert_eq!(
+                compare_column_types(bare, precise),
+                TypeAgreement::PreferRight,
+                "and the answer must not depend on argument order"
+            );
+        }
+    }
+
+    /// A pair that does not agree never names a preferred spelling. This is the
+    /// property that made the two questions one type: the helper this replaced
+    /// answered `more_specific_type("varchar", "integer")` with `"varchar"`,
+    /// which is meaningless, and was safe only because its single call site
+    /// happened to be guarded.
+    #[test]
+    fn a_disagreeing_pair_never_names_a_preferred_spelling() {
+        for (a, b) in [
+            ("varchar", "integer"),
+            ("timestamp(3)", "timestamp(6)"),
+            ("timestamp", "date"),
+            ("decimal(10, 2)", "decimal(38, 10)"),
+        ] {
+            assert_eq!(compare_column_types(a, b), TypeAgreement::No, "{a} vs {b}");
+            assert!(!compare_column_types(a, b).agrees());
         }
     }
 

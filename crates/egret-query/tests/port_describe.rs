@@ -152,26 +152,55 @@ async fn trino_engine_state() -> Option<Fixture> {
     // `X-Trino-User`. Seeded once and reused, so a re-run does not have to
     // allocate `tester-2` and desync from the token's `preferred_username`.
     let engine_user = std::env::var("EGRET_TEST_TRINO_USER").unwrap_or_else(|_| "admin".into());
-    // ONE statement, not a check-then-insert. The eight tests in this binary run
-    // in parallel and all seed the SAME `engine_user`, so a `SELECT` followed by
-    // an `INSERT` races on the FIRST run for any new `EGRET_TEST_TRINO_USER` —
-    // and it collides on `users_email_key` rather than on the `username` the
-    // check looked at, so it fails a different test each run, which is what a
-    // race looks like from the outside. Reproduced deterministically before it
-    // was fixed: delete the row, re-run the binary, and the failure returns.
+    // Not a check-then-insert. The eight tests in this binary run in parallel and
+    // all seed the SAME `engine_user`, so a `SELECT` followed by an `INSERT`
+    // races on the FIRST run for any new `EGRET_TEST_TRINO_USER`, failing a
+    // different test each run — which is what a race looks like from the
+    // outside. Reproduced deterministically before it was fixed: delete the row,
+    // re-run the binary, and the failure returns.
     //
-    // `DO UPDATE` rather than `DO NOTHING`: `DO NOTHING` yields no row on
-    // conflict, so `RETURNING id` gives back nothing and the loser of the race
-    // gets an empty result instead of the existing id.
-    let uid: Uuid = sqlx::query_scalar(
+    // `ON CONFLICT DO NOTHING` with NO conflict target, which is the part that
+    // took two measurements to get right. `users` is UNIQUE on `email` AND on
+    // `username`, and a targeted `ON CONFLICT (col)` suppresses a violation of
+    // THAT index only — so each single-column arbiter fixes one failure and
+    // reintroduces the other, measured both ways on a live database:
+    //
+    //   * `ON CONFLICT (email)` — a pre-existing row holding the username under
+    //     a different email raises `users_username_key` and all eight tests
+    //     panic at seed time with a message naming email. `egret_test` already
+    //     contains such a row for the DEFAULT `EGRET_TEST_TRINO_USER=admin`,
+    //     since `ensure_username` derives `admin` from `admin@…`'s local part.
+    //   * `ON CONFLICT (username)` — two concurrent inserts of the identical row
+    //     raise `users_email_key`, because Postgres reports whichever index it
+    //     happens to check first. That is the cold-start race this fix exists
+    //     for, back again.
+    //
+    // Untargeted `DO NOTHING` covers every unique index, which is the only form
+    // that is correct under both. It returns no row when it fires, so the
+    // fallback `SELECT` reads the row that blocked it — matched on EITHER key,
+    // since either is what blocked it. That `SELECT` cannot come up empty: the
+    // insert only did nothing because a conflicting row exists.
+    let email = format!("port-describe-{engine_user}@egret.local");
+    let claimed: Option<Uuid> = sqlx::query_scalar(
         "INSERT INTO users (provider, email, username) VALUES ('local', $1, $2) \
-         ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email RETURNING id",
+         ON CONFLICT DO NOTHING RETURNING id",
     )
-    .bind(format!("port-describe-{engine_user}@egret.local"))
+    .bind(&email)
     .bind(&engine_user)
-    .fetch_one(&db.pool)
+    .fetch_optional(&db.pool)
     .await
-    .expect("seed the engine user");
+    .expect("claim the engine user");
+    let uid: Uuid = match claimed {
+        Some(id) => id,
+        None => {
+            sqlx::query_scalar("SELECT id FROM users WHERE username = $1 OR email = $2 LIMIT 1")
+                .bind(&engine_user)
+                .bind(&email)
+                .fetch_one(&db.pool)
+                .await
+                .expect("a conflicting row must exist — that is why the insert did nothing")
+        }
+    };
     let ws: Uuid = sqlx::query_scalar(
         "INSERT INTO workspaces (slug, name, created_by, status) \
          VALUES ($1, 'Port Describe', $2, 'active') RETURNING id",

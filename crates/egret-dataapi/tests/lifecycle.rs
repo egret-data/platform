@@ -1425,8 +1425,8 @@ async fn a_column_whose_type_differs_between_branches_refuses_to_publish() {
 /// The publish half of the Trino parametric-datetime fix, and it exists because
 /// nothing else in this crate pinned it.
 ///
-/// **Measured, not assumed**: reverting `lifecycle.rs`'s guard from
-/// `column_types_match` back to `existing.ty != spec.ty` left all 434 tests in
+/// **Measured, not assumed**: reverting `lifecycle.rs`'s fold from
+/// `compare_column_types` back to `existing.ty != spec.ty` left all 434 tests in
 /// this crate green.
 /// [`a_column_whose_type_differs_between_branches_refuses_to_publish`] pins only
 /// the REFUSAL side (`varchar` vs `integer`), so the tolerance was protected by
@@ -1443,62 +1443,80 @@ async fn a_column_whose_type_differs_between_branches_refuses_to_publish() {
 /// interpolates one is typed through `DESCRIBE OUTPUT`, which states it. One
 /// unchanging column, two spellings, and a `400 ColumnTypeConflict` on a
 /// definition nobody changed. Measured live against Trino 483.
+///
+/// # Why BOTH orders are published
+///
+/// The union fold promotes the precision-bearing spelling, and an assertion
+/// that the frozen contract carries `timestamp(0)` only measures that promotion
+/// when the accumulator did NOT already hold it. The first version of this test
+/// keyed its arms so that the parameterised branch — which
+/// `branch_statements` enumerates FIRST — supplied `timestamp(0)`, which meant
+/// "keep the more specific" and "keep the first" were indistinguishable:
+/// deleting the fold's effect entirely left this test green. So the same
+/// definition is published twice with the two spellings swapped between the
+/// branches, and both must freeze `timestamp(0)`. Whichever branch the
+/// enumerator visits first, exactly one of the two is order-sensitive, and no
+/// change to that order can hide the fold again.
+///
+/// The second endpoint is deliberately BACKWARDS with respect to Trino — there
+/// the parameterised branch is the one that states the precision. It is a
+/// synthetic that exists to fix the enumeration order, not a claim about any
+/// engine.
+///
+/// The arms carry no `""` fallback on purpose: `PerSql` panics when no arm
+/// matches, so the needles below are a measurement of what actually renders
+/// (`… WHERE k = ?` and `… WHERE k IS NOT NULL`) rather than an assumption
+/// about it. The first draft of this test keyed an arm on `"detail"`, which the
+/// TEMPLATE contains and the RENDERED statement does not — that arm matched
+/// neither branch, `""` matched both, and the fixture collapsed to a single
+/// spelling.
 #[tokio::test]
 async fn a_datetime_column_two_branches_spell_differently_still_publishes() {
     let f = skip_without_db!();
-    // The needle must appear in the RENDERED sql, not in the template: `PerSql`
-    // matches on `sql.contains(needle)` and the engine sees the rendered text,
-    // so `"detail"` would match NEITHER branch and `""` would then match both —
-    // collapsing the fixture to one spelling and passing this test vacuously.
-    // That is exactly what the first draft of this test did.
-    //
-    // So the else arm is keyed on `IS NOT NULL`, which only it renders: that
-    // branch interpolates NO parameter and is typed through the client protocol
-    // (precision suppressed), while the `{{ detail }}` branch interpolates one
-    // and is typed through `DESCRIBE OUTPUT` (precision stated). Exactly the
-    // pairing `bind_count` produces on Trino.
-    f.port.set(Describe::PerSql(vec![
-        ("IS NOT NULL", vec![("v", "timestamp")]),
-        ("", vec![("v", "timestamp(0)")]),
-    ]));
-    let ep = f
-        .create_endpoint(
-            "dt",
-            "reports/dt",
-            "SELECT ts AS v FROM t WHERE {% if detail %}k = {{ detail }}{% else %}k IS NOT NULL{% endif %}",
+
+    for (case, on_param_branch, on_bare_branch) in [
+        ("param-branch-precise", "timestamp(0)", "timestamp"),
+        ("bare-branch-precise", "timestamp", "timestamp(0)"),
+    ] {
+        f.port.set(Describe::PerSql(vec![
+            ("= ?", vec![("v", on_param_branch)]),
+            ("IS NOT NULL", vec![("v", on_bare_branch)]),
+        ]));
+        let ep = f
+            .create_endpoint(
+                case,
+                &format!("reports/{case}"),
+                "SELECT ts AS v FROM t WHERE {% if detail %}k = {{ detail }}{% else %}k IS NOT NULL{% endif %}",
+            )
+            .await;
+        f.patch_endpoint(
+            ep,
+            serde_json::json!({ "params": [
+                { "name": "detail", "type": "string", "location": "query" }
+            ]}),
         )
         .await;
-    f.patch_endpoint(
-        ep,
-        serde_json::json!({ "params": [
-            { "name": "detail", "type": "string", "location": "query" }
-        ]}),
-    )
-    .await;
 
-    let (status, body) = f.publish_raw(ep).await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "one column whose precision one branch's typing path suppressed is not \
-         two types, and must not refuse the publish: {body}"
-    );
+        let (status, body) = f.publish_raw(ep).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "[{case}] one column whose precision one branch's typing path \
+             suppressed is not two types, and must not refuse the publish: {body}"
+        );
 
-    // And the frozen contract keeps the spelling that STATES the precision,
-    // whichever branch was described first — otherwise `meta.columns` and the
-    // generated document's `x-egret-engine-type` would depend on branch
-    // enumeration order.
-    let snap = f.live_snapshot(ep).await;
-    let v = snap
-        .columns
-        .iter()
-        .find(|c| c.name == "v")
-        .expect("v is declared");
-    assert_eq!(
-        v.ty, "timestamp(0)",
-        "the union must keep the precision-bearing spelling, not whichever \
-         branch happened to be enumerated first"
-    );
+        let snap = f.live_snapshot(ep).await;
+        let v = snap
+            .columns
+            .iter()
+            .find(|c| c.name == "v")
+            .expect("v is declared");
+        assert_eq!(
+            v.ty, "timestamp(0)",
+            "[{case}] the union must keep the precision-bearing spelling, not \
+             whichever branch happened to be enumerated first"
+        );
+    }
 }
 
 /// The boundary of the tolerance above, on the SAME path. Two branches that
@@ -1509,8 +1527,8 @@ async fn two_branches_stating_different_datetime_precisions_still_refuse() {
     let f = skip_without_db!();
     // Keyed the same way as the test above, and for the same reason.
     f.port.set(Describe::PerSql(vec![
-        ("IS NOT NULL", vec![("v", "timestamp(3)")]),
-        ("", vec![("v", "timestamp(6)")]),
+        ("= ?", vec![("v", "timestamp(3)")]),
+        ("IS NOT NULL", vec![("v", "timestamp(6)")]),
     ]));
     let ep = f
         .create_endpoint(
@@ -1538,6 +1556,78 @@ async fn two_branches_stating_different_datetime_precisions_still_refuse() {
         f.versions(ep).await.is_empty(),
         "a refused publish leaves no version behind"
     );
+}
+
+/// **Three branches, and the fold's promotion is what makes this a refusal.**
+///
+/// A bare `timestamp` agrees with `timestamp(3)` AND with `timestamp(6)`, so an
+/// accumulator that kept the FIRST spelling never compared the two stated
+/// precisions against each other: the definition published, and the frozen
+/// contract named neither precision. Measured on the code as it stood one
+/// commit ago, not argued — it froze `timestamp`.
+///
+/// Promoting the precision-bearing spelling turns the accumulator into
+/// `timestamp(3)` as soon as it meets one, so the branch carrying
+/// `timestamp(6)` is compared against a STATED precision and correctly refused.
+/// That is what makes the promotion a correctness fix rather than a cosmetic
+/// one, and it is why the assertion below is on the MESSAGE: a refusal naming
+/// the bare spelling would mean something else refused.
+///
+/// The fixture is arranged so that ONLY the promotion can produce this refusal
+/// — see the comment on the arms. An earlier arrangement put `timestamp(6)` on
+/// the first-enumerated statement, which made the accumulator precision-bearing
+/// immediately and refused with or without the promotion; that version stayed
+/// green under the mutation that deletes the fold, which is how it was caught.
+#[tokio::test]
+async fn three_branches_spanning_two_stated_precisions_refuse() {
+    let f = skip_without_db!();
+    // The BARE spelling goes on the statement enumerated FIRST, so the
+    // accumulator starts precision-free and only the promotion can bring the two
+    // stated precisions into contact. Which statement that is was MEASURED, not
+    // assumed: a `PerSql` table with no matching arm panics on the first
+    // statement it is handed, and it named
+    // `SELECT ts AS v FROM t WHERE 1 = 1 AND k = ? AND j = ?`.
+    //
+    // Arms are ordered most-specific first, because `PerSql` matches on
+    // `contains` and the both-parameter statement also contains `k = ?`.
+    f.port.set(Describe::PerSql(vec![
+        ("k = ? AND j = ?", vec![("v", "timestamp")]),
+        ("k = ?", vec![("v", "timestamp(3)")]),
+        ("j = ?", vec![("v", "timestamp(3)")]),
+        ("1 = 1", vec![("v", "timestamp(6)")]),
+    ]));
+    let ep = f
+        .create_endpoint(
+            "dt3",
+            "reports/dt3",
+            "SELECT ts AS v FROM t WHERE 1 = 1\
+             {% if a %} AND k = {{ a }}{% endif %}\
+             {% if b %} AND j = {{ b }}{% endif %}",
+        )
+        .await;
+    f.patch_endpoint(
+        ep,
+        serde_json::json!({ "params": [
+            { "name": "a", "type": "string", "location": "query" },
+            { "name": "b", "type": "string", "location": "query" }
+        ]}),
+    )
+    .await;
+
+    let (status, body) = f.publish_raw(ep).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a bare `timestamp` agrees with both stated precisions, so keeping the \
+         FIRST spelling published a contract naming neither: {body}"
+    );
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("timestamp(3)") && msg.contains("timestamp(6)"),
+        "the refusal must name the two STATED precisions that disagree, not the \
+         bare spelling that agreed with both: {body}"
+    );
+    assert!(f.versions(ep).await.is_empty());
 }
 
 /// `output.shape: "arrays"` is positional — `shape_rows` zips the live and

@@ -158,7 +158,7 @@ use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use egret_dataapi_api::{column_types_match, ColumnSpec, EndpointSnapshot};
+use egret_dataapi_api::{compare_column_types, ColumnSpec, EndpointSnapshot};
 use egret_metastore::Db;
 use serde::Serialize;
 use uuid::Uuid;
@@ -1119,7 +1119,7 @@ fn engine_error(e: egret_core::Error) -> ServingError {
 /// must therefore be served rather than refused, and the `objects` predicate is:
 /// every returned name is IN the frozen union, every `required` column is
 /// present, and a returned column's type still HONOURS the declared one —
-/// [`column_types_match`], not string equality, for the one measured reason in
+/// [`compare_column_types`], not string equality, for the one measured reason in
 /// its doc comment: Trino spells a datetime column's precision differently
 /// depending on which of its two typing paths answered, and both spellings are
 /// already in the published corpus. Every other difference, including two
@@ -1261,7 +1261,7 @@ fn shape_rows(
         // log line names which clause refused; three rounds of this plan were
         // spent on refusals that reported the wrong reason.
         //
-        // `column_types_match` rather than `!=` — see its doc comment. Trino
+        // `compare_column_types` rather than `!=` — see its doc comment. Trino
         // spells one and the same datetime column two ways depending on which
         // of its two typing paths answered, and both spellings are already in
         // the published corpus, so the comparison is where they reconcile. The
@@ -1271,7 +1271,7 @@ fn shape_rows(
             .columns
             .iter()
             .zip(snap.columns.iter())
-            .find(|(live, frozen)| !column_types_match(&frozen.ty, &live.ty))
+            .find(|(live, frozen)| !compare_column_types(&frozen.ty, &live.ty).agrees())
         {
             return Err(drift(
                 snap,
@@ -1304,14 +1304,14 @@ fn shape_rows(
     // function's doc comment for why the type comparison is here now and why
     // this is the backstop that has to fail closed.
     //
-    // "Change its type" is `column_types_match`, not `!=`: a Trino datetime
+    // "Change its type" is `compare_column_types`, not `!=`: a Trino datetime
     // column arrives with its precision SUPPRESSED on the client protocol and
     // STATED by `DESCRIBE OUTPUT`, so `timestamp(0)` and `timestamp` are one
     // column, not two types. Two stated precisions still disagree.
     for live in &out.columns {
         match snap.columns.iter().find(|f| f.name == live.name) {
             None => return Err(drift(snap, out, "a column that was never declared", None)),
-            Some(frozen) if !column_types_match(&frozen.ty, &live.ty) => {
+            Some(frozen) if !compare_column_types(&frozen.ty, &live.ty).agrees() => {
                 return Err(drift(
                     snap,
                     out,
