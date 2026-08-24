@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ConfigTable, ConfigTableGroup, ConfigTableRow } from "@/components/config/ConfigTable";
 import {
@@ -77,7 +78,59 @@ interface OpenApiDocPreview {
  *
  * The `output` controls are unchanged: a `Setting | Details | Value` table
  * whose "Output shape" heading is a `ConfigTableGroup` row.
+ *
+ * # What a frozen column's `required` adds, and why it is a badge
+ *
+ * A conditional definition describes EVERY branch at publish and freezes the
+ * UNION of their columns, flagging `required` for the ones every branch returns
+ * (`serving/router.rs#shape_rows`). A consumer sees that distinction twice — in
+ * the served `meta.columns` and in the generated document's per-schema
+ * `required` list — and an author saw it nowhere: `Name | Type` renders a
+ * column a caller can rely on identically to one that vanishes on some
+ * parameter values.
+ *
+ * **The mark rides in the Name cell; there is no third column.** §4.3's "a
+ * column whose every cell is identical is section-level copy in disguise" is
+ * the reason. Every endpoint published before the branching-columns work
+ * carries `required: true` on every column — the serde default exists so those
+ * snapshots keep exact-match semantics — and so does every endpoint whose
+ * definition does not branch, which is most of them. A `Required` column would
+ * therefore hold one repeated word in every cell of the common case, and would
+ * spend width in the one table §5.1 measured down to `max-w-xl` *because* the
+ * type had drifted away from the name it describes. Marking only the exceptions
+ * leaves the common case rendering byte-identically to what it did before, and
+ * the two tests that already pinned this table's grid did not have to change.
+ *
+ * §4.3's other half is why the caveat sentence exists: with the exception
+ * carried by a badge, the ABSENCE of one is what says "a consumer can rely on
+ * this", and that has to be said once above the table rather than inferred. It
+ * renders only when a marked row is actually on screen — an endpoint with no
+ * branching column has no marker to explain, and a sentence about one would be
+ * the noise a badge was chosen over a column to avoid.
+ *
+ * **Not a hover, not a colour.** `title` and an icon both hide the fact from a
+ * reader who is not using a pointer, and §4.4 already ruled that the
+ * load-bearing half of a per-row caveat stays on screen with nothing clicked.
+ * The badge is a text label; `variant="outline"` is the neutral tone
+ * `AccessSection` already uses for a per-row fact that is not a status.
  */
+/**
+ * Whether a consumer may find this column MISSING from a response object.
+ *
+ * `=== false`, never `!c.required`, and the difference is the whole feature.
+ * `required` carries `#[serde(default)]` on the Rust side and so is absent from
+ * the schema's own `required` array — orval therefore types it
+ * `required?: boolean`, and `undefined` is exactly what a snapshot frozen
+ * before the branching-columns work persisted. The server reads those as
+ * `true` (`ColumnSpec`'s serde default) so an already-published endpoint keeps
+ * exact-match semantics; `!c.required` would read them as `false` and tell an
+ * author that every column of every pre-existing endpoint may be absent —
+ * inverting the fact for the majority of endpoints on the instance.
+ */
+function mayBeAbsent(column: { required?: boolean }): boolean {
+  return column.required === false;
+}
+
 export default function ResponseSection() {
   const { ws, id, endpoint, form, setForm } = useEndpointDetail();
 
@@ -87,6 +140,9 @@ export default function ResponseSection() {
   const versionsEnvelope = versionsQuery.data;
   const versions = versionsEnvelope?.status === 200 ? versionsEnvelope.data : [];
   const liveVersion = versions.find((v) => v.is_live);
+  // Only the LIVE version's columns, same as the table below: the caveat
+  // explains a marker, so it must be computed from the rows that carry it.
+  const hasOptionalColumn = !!liveVersion?.snapshot.columns.some(mayBeAbsent);
   // The endpoint record says a live version exists, but this section's own
   // fetch of it hasn't landed yet — distinct from "never published", which is
   // `!endpoint.live_version_id` below. Conflating the two would flash "no
@@ -145,6 +201,28 @@ export default function ResponseSection() {
 
       <div className="space-y-2">
         <h3 className="text-sm font-medium">Frozen columns</h3>
+        {/* Said once, above the table, and only when a marked row is on screen
+            (§4.3). With the exception carried by a badge rather than by a
+            column, an UNMARKED row is otherwise ambiguous between "guaranteed"
+            and "nobody recorded it" — and it is the unmarked rows that are the
+            answer to "what can a consumer rely on", so leaving that to
+            inference is leaving the majority of the table unexplained.
+
+            Conditional because an endpoint whose definition does not branch has
+            no marker to explain, and a sentence about one would be exactly the
+            per-row noise a badge was chosen over a third column to avoid.
+
+            `max-w-prose`, matching the OpenAPI block's sentence two blocks
+            down: the table is capped at `max-w-xl` (§5.1) for a reason about
+            two short cells, and prose held to that measure would run
+            unnecessarily tall. */}
+        {hasOptionalColumn && (
+          <p className="max-w-prose text-sm text-muted-foreground">
+            Columns marked <span className="font-medium">May be absent</span> come from a branch that
+            only some parameter values reach — on the calls that skip it the key is missing from the
+            row entirely, never null. Every other column is in every response.
+          </p>
+        )}
         {/* Two short columns — a column name and a type. Left at the shared
             `Table`'s `w-full`, `bigint` sat a screen-width away from the column
             it describes even inside the section cap, so the table keeps the
@@ -192,7 +270,31 @@ export default function ResponseSection() {
             ) : (
               liveVersion.snapshot.columns.map((c) => (
                 <TableRow key={c.name}>
-                  <TableCell className="py-2 font-mono text-xs">{c.name}</TableCell>
+                  {/* The badge marks the EXCEPTION, and rides in the Name cell
+                      rather than in a `Required` column of its own. §4.3: a
+                      column whose every cell is identical is section-level copy
+                      in disguise — and every endpoint published before the
+                      branching-columns work, plus every endpoint whose
+                      definition does not branch, has every column guaranteed,
+                      so a third column would hold one repeated word in every
+                      cell of the common case while costing width in the one
+                      table §5.1 measured down to `max-w-xl` precisely because
+                      the type had drifted away from the name it describes.
+
+                      Text, not a colour or an icon: it has to be legible
+                      without a hover and to a reader who is not reading
+                      visually. The Name cell keeps its own `font-mono text-xs`
+                      on the name alone — the badge's label is prose. */}
+                  <TableCell className="py-2">
+                    <span className="flex items-center gap-2">
+                      <span className="font-mono text-xs">{c.name}</span>
+                      {mayBeAbsent(c) && (
+                        <Badge variant="outline" className="text-muted-foreground">
+                          May be absent
+                        </Badge>
+                      )}
+                    </span>
+                  </TableCell>
                   <TableCell className="py-2 text-muted-foreground">{c.ty}</TableCell>
                 </TableRow>
               ))

@@ -358,22 +358,45 @@ impl ParamValues {
     }
 
     /// Candidate values for probing `name`: an enum parameter's own `allowed`
-    /// entries, or the definition's literals for anything else.
+    /// entries, or the definition's literals — plus, for a boolean parameter,
+    /// its two closed values appended to those literals.
     fn candidates(&self, name: &str, literals: &[Param]) -> Vec<Param> {
-        let allowed = self
+        let cell = self
             .entries
             .get(name)
-            .and_then(|v| v.downcast_object_ref::<Cell>())
-            .and_then(|c| c.allowed.clone());
-        match allowed {
-            // Capped: `allowed` has no length limit anywhere in the model, and
-            // one 64-value enum would otherwise consume the entire probe budget.
+            .and_then(|v| v.downcast_object_ref::<Cell>());
+        match cell.and_then(|c| c.allowed.clone()) {
+            // Capped only by the shared probe budget — see
+            // [`MAX_ENUM_CANDIDATES`], which is that budget. `allowed` has no
+            // length limit anywhere in the model, so the cap still has to
+            // exist; what it must not do is stop short of the budget, because
+            // an allowed value publish never probes is a branch it never
+            // describes.
             Some(list) => list
                 .into_iter()
                 .take(MAX_ENUM_CANDIDATES)
                 .map(Param::Str)
                 .collect(),
-            None => literals.to_vec(),
+            None => {
+                // A boolean's value space is closed and has exactly two members,
+                // so both are appended unconditionally rather than hoping the
+                // definition mentions `true`/`false` as literals.
+                // `{% if detail %}, name {% endif %}` contains no literal at
+                // all — without this, `detail` is only ever probed at its own
+                // (usually `true`) value, and the `false` branch is never
+                // rendered. This must be an APPEND, not a replacement: a
+                // boolean can also be inspected against a string literal in a
+                // spelling `check_static` cannot see (`(detail) == 'slow'`),
+                // and the literal harvest is check_dynamic's only route to
+                // that value. An early return that skipped `literals` would
+                // silently drop that detection for every boolean parameter.
+                let mut candidates = literals.to_vec();
+                if matches!(cell.map(|c| &c.param), Some(Param::Bool(_))) {
+                    candidates.push(Param::Bool(true));
+                    candidates.push(Param::Bool(false));
+                }
+                candidates
+            }
         }
     }
 
@@ -1199,12 +1222,73 @@ pub fn check_dynamic(sql: &str, ctx: &ParamValues) -> Result<(), RenderError> {
     Ok(())
 }
 
+/// Every DISTINCT statement this definition can render to, across the probe
+/// assignments.
+///
+/// Deduplicated **by the rendered SQL string**, which is what makes publish
+/// affordable: the probe budget is sixty-four assignments ([`MAX_PROBES`]), but
+/// a definition with no `{% if %}` renders all sixty-four to the same
+/// statement and costs one describe — exactly what it cost before this
+/// existed. Cost tracks the number of structurally distinct queries, not the
+/// number of parameters.
+///
+/// Assignments that fail to render are skipped, not propagated — the same way
+/// [`check_dynamic`] skips them: publish refuses an unrenderable definition
+/// through its own render of the representative values, and that render
+/// reports the real error. This function has nothing more useful to say about
+/// a probe that does not render.
+pub fn render_permutations(sql: &str, ctx: &ParamValues) -> Vec<(String, Vec<Param>)> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for probe in probe_assignments(sql, ctx) {
+        let Ok((rendered, binds)) = render_inner(sql, &probe) else {
+            continue;
+        };
+        if seen.insert(rendered.clone()) {
+            out.push((rendered, binds));
+        }
+    }
+    out
+}
+
 /// How many probe renders one definition may cost.
 const MAX_PROBES: usize = 64;
 /// How many of a definition's own literals are used as candidate values.
 const MAX_PROBE_LITERALS: usize = 16;
 /// How many of an enum parameter's allowed values are probed.
-const MAX_ENUM_CANDIDATES: usize = 8;
+///
+/// # Why this is the same number as [`MAX_PROBES`], and was once an eighth of it
+///
+/// It was `8` while the only consumer was [`check_dynamic`], where missing a
+/// candidate costs SENSITIVITY — a definition that inspects a parameter goes
+/// undetected — and the comment at the `take` reasoned that "one 64-value enum
+/// would otherwise consume the entire probe budget".
+///
+/// It now decides a PUBLISHED CONTRACT: an allowed value that is never probed
+/// is a branch never described, so its columns are missing from the frozen
+/// union and the call that sends that value is a permanent `503 schema_drift`.
+/// Measured through the real publish route, one enum of 64 allowed values whose
+/// last-but-one value turns a column on: **1 describe at `8`** (the branch is
+/// invisible, publish is green, and `?p=v62` can only ever 503) and **2
+/// describes at `64`** (the union covers it). Wall clock for that publish moved
+/// 123 ms → 139 ms; four such enums, 144 ms → 179 ms; thirty-two of them,
+/// 1.24 s → 1.21 s (unchanged — that case is bounded by [`MAX_PROBES`], not by
+/// this).
+///
+/// The cost the old cap was protecting is already bounded twice over, and by
+/// limits that do not degrade silently: [`MAX_PROBES`] caps the ASSIGNMENTS at
+/// 64 however deep any one candidate list is, and `lifecycle`'s
+/// `MAX_PUBLISHED_STATEMENTS` caps the DESCRIBES at 64 with a loud publish
+/// refusal. A third, lower cap bought nothing either of those did not already
+/// buy, and it cost an undescribed branch.
+///
+/// **Residual**: [`MAX_PROBES`] counts the base context itself, so a single
+/// parameter reaches at most 63 candidates, and every parameter shares the
+/// budget round-robin. An enum with more allowed values than the budget can
+/// reach — or several enums sharing it — still leaves branches undescribed.
+/// That is the pre-existing probe-budget starvation, recorded in the spec; the
+/// serving check fails closed, so it is a loud 503 rather than a wrong 200.
+const MAX_ENUM_CANDIDATES: usize = MAX_PROBES;
 
 /// The value assignments the gate renders: the endpoint's own representative
 /// values, then each parameter set to each literal the definition mentions (or,
@@ -1842,4 +1926,93 @@ fn chain_contains(e: &MjError, needle: &str) -> bool {
         cur = std::error::Error::source(err);
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egret_dataapi_api::ParamLocation;
+
+    #[test]
+    fn a_boolean_parameter_is_probed_with_both_values() {
+        let spec = ParamSpec {
+            name: "detail".into(),
+            ty: ParamType::Boolean,
+            location: ParamLocation::Query,
+            required: false,
+            default: None,
+            allowed: None,
+            description: String::new(),
+        };
+        let mut ctx = ParamValues::new();
+        ctx.insert_for_spec(&spec, Param::Bool(true));
+
+        // A definition with no literals in it at all — the shape that hid the defect.
+        let cands = ctx.candidates("detail", &[]);
+        assert!(
+            cands.contains(&Param::Bool(false)),
+            "a boolean whose definition has no literals was never probed with false, \
+             so the branch it guards was never described"
+        );
+        assert!(cands.contains(&Param::Bool(true)));
+    }
+
+    /// Regression for a fix-round-1 defect: an early `return` for booleans in
+    /// `candidates` REPLACED the literal candidates instead of adding to them,
+    /// so a boolean inspected against a *string* literal — a spelling
+    /// `check_static` cannot see — silently stopped being caught by the
+    /// behavioural gate. `candidates` must append `[true, false]` to the
+    /// definition's literals, not substitute for them, or this regresses again.
+    #[test]
+    fn a_boolean_inspected_against_a_string_literal_is_still_caught() {
+        let mut ctx = ParamValues::new();
+        ctx.insert("detail", Param::Bool(true));
+
+        let err = check_dynamic("{{ ',name' if (detail) == 'slow' else '' }}", &ctx)
+            .expect_err("a boolean compared against a string literal must be caught");
+        assert!(
+            matches!(err, RenderError::ParameterInspected),
+            "expected ParameterInspected, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_definition_with_no_branch_renders_to_exactly_one_statement() {
+        // `region` is bound, not interpolated, so it can never change the
+        // rendered TEXT — that part of the claim is free. The literals
+        // `'EU'`/`'US'`/`'APAC'` are what make the probe count itself
+        // non-trivial: `region` is neither boolean nor enum, so `candidates`
+        // hands it every literal the definition mentions, and `probe_assignments`
+        // renders one probe per candidate plus the representative context. A
+        // definition with only one probe to begin with would let this test pass
+        // even with the `HashSet` guard deleted, which is why the count is
+        // asserted below rather than assumed.
+        let sql =
+            "SELECT id FROM t WHERE r = {{ region }} AND a = 'EU' AND b = 'US' AND c = 'APAC'";
+        let mut ctx = ParamValues::new();
+        ctx.insert("region", Param::Str("EU".into()));
+        let probes = probe_assignments(sql, &ctx);
+        assert!(
+            probes.len() > 1,
+            "test is vacuous unless there is more than one probe to deduplicate; \
+             probe_assignments returned {}",
+            probes.len()
+        );
+        assert_eq!(
+            render_permutations(sql, &ctx).len(),
+            1,
+            "deduplication must collapse every probe of a non-branching definition \
+             to one statement, or publish silently pays for a describe per probe"
+        );
+    }
+
+    #[test]
+    fn a_branching_definition_renders_to_one_statement_per_branch() {
+        let sql = "SELECT id {% if detail %}, name {% endif %}FROM t";
+        let mut ctx = ParamValues::new();
+        ctx.insert("detail", Param::Bool(true));
+        let got = render_permutations(sql, &ctx);
+        let rendered: Vec<&String> = got.iter().map(|p| &p.0).collect();
+        assert_eq!(got.len(), 2, "got: {rendered:?}");
+    }
 }

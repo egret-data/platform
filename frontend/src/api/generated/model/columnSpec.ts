@@ -15,4 +15,13 @@
 export interface ColumnSpec {
   name: string;
   ty: string;
+  /**
+     * Present in EVERY permutation described at publish.
+     *
+     * Defaults to `true` when absent, which is what a snapshot written before
+     * this field existed carries. Those columns were checked for equality on
+     * every call, so `true` is the only default that does not loosen an
+     * already-published contract.
+     */
+  required?: boolean;
 }

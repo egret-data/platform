@@ -40,6 +40,11 @@ enum Describe {
     BadSql(&'static str),
     /// The relation does not exist.
     Missing(&'static str),
+    /// Resolve by matching a SUBSTRING of the rendered statement, first match
+    /// wins; the last entry is the fallback (give it `""`). Publish describes
+    /// several renderings of one definition, so a fake that answers the same
+    /// columns for all of them cannot tell a union apart from a single describe.
+    PerSql(Vec<(&'static str, Vec<(&'static str, &'static str)>)>),
 }
 
 /// A `QueryExecPort` under the test's control, which also RECORDS what it was
@@ -100,6 +105,17 @@ impl FakePort {
     fn last_param_count(&self) -> usize {
         *self.last_params.lock().unwrap()
     }
+    /// Every statement the port was handed, oldest first. Publish describes one
+    /// statement per branch now, so `last_sql` names an arbitrary one of them
+    /// and a test about "was this branch described" has to look at all of them.
+    fn all_sql(&self) -> Vec<String> {
+        self.seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, _, _, s)| s.clone())
+            .collect()
+    }
 }
 
 #[async_trait::async_trait]
@@ -134,6 +150,20 @@ impl egret_query_api::QueryExecPort for FakePort {
                     ty: ty.into(),
                 })
                 .collect()),
+            Describe::PerSql(table) => {
+                let cols = table
+                    .iter()
+                    .find(|(needle, _)| sql.contains(needle))
+                    .map(|(_, cols)| cols.clone())
+                    .unwrap_or_else(|| panic!("PerSql has no arm matching {sql:?}"));
+                Ok(cols
+                    .into_iter()
+                    .map(|(name, ty)| ColumnMeta {
+                        name: name.into(),
+                        ty: ty.into(),
+                    })
+                    .collect())
+            }
             Describe::Forbidden => Err(Error::Forbidden),
             Describe::BadSql(m) => Err(Error::InvalidInput(m.into())),
             Describe::Missing(m) => Err(Error::NotFound(m.into())),
@@ -1223,14 +1253,25 @@ async fn the_canonical_parameterized_endpoint_publishes() {
     .await;
 
     f.publish(ep).await;
-    let described = f.port.last_sql();
+    // ALL of them, not `last_sql`: publish now describes one statement per
+    // branch, so which one is last is an implementation detail — and the claim
+    // being made here is about what was described, not about what was described
+    // most recently.
+    let described = f.port.all_sql();
     assert!(
-        described.contains("ORDER BY region"),
-        "`| ident` emits the AUTHOR's allowed entry, raw: {described}"
+        described.iter().any(|s| s.contains("ORDER BY region")),
+        "`| ident` emits the AUTHOR's allowed entry, raw: {described:?}"
     );
     assert!(
-        described.contains("region = ?") && described.contains("day >= ?"),
-        "every conditional branch a value reaches must be described: {described}"
+        described
+            .iter()
+            .any(|s| s.contains("region = ?") && s.contains("day >= ?")),
+        "every conditional branch a value reaches must be described: {described:?}"
+    );
+    assert!(
+        described.iter().any(|s| !s.contains("region = ?")),
+        "and so must the branch a caller reaches by omitting the parameter, which \
+         is the one a call with no query string takes: {described:?}"
     );
     assert_eq!(
         f.live_snapshot(ep).await.param_gate,
@@ -1238,6 +1279,617 @@ async fn the_canonical_parameterized_endpoint_publishes() {
         "a version that passed the gate must say so, or serving cannot tell it \
          from one published before the gate existed"
     );
+}
+
+/// The union, and the `required` flag that makes it honest.
+///
+/// Before this, publish described ONE rendering and froze its columns, so a
+/// conditional endpoint returned `503 schema_drift` on every call that took a
+/// different branch — including the call with no query string at all, which is
+/// the one its own generated OpenAPI advertises as the default.
+#[tokio::test]
+async fn publishing_freezes_the_union_of_every_branch() {
+    let f = skip_without_db!();
+    f.port.set(Describe::PerSql(vec![
+        ("name", vec![("id", "uuid"), ("name", "varchar")]),
+        ("", vec![("id", "uuid")]),
+    ]));
+    let ep = f
+        .create_endpoint(
+            "cond",
+            "reports/cond",
+            "SELECT id {% if detail %}, name {% endif %}FROM t",
+        )
+        .await;
+    f.patch_endpoint(
+        ep,
+        serde_json::json!({ "params": [
+            { "name": "detail", "type": "boolean", "location": "query" }
+        ]}),
+    )
+    .await;
+    f.publish(ep).await;
+
+    let snap = f.live_snapshot(ep).await;
+    assert_eq!(
+        snap.columns
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["id", "name"],
+        "both branches are described, and the union keeps first-seen order"
+    );
+    let by = |n: &str| {
+        snap.columns
+            .iter()
+            .find(|c| c.name == n)
+            .unwrap_or_else(|| panic!("no column {n}"))
+            .clone()
+    };
+    assert!(by("id").required, "id is in every branch");
+    assert!(
+        !by("name").required,
+        "name appears only under `detail`, so it is declared and optional"
+    );
+}
+
+/// The branch a caller reaches by sending NOTHING is described too.
+///
+/// This is the one the probe assignments alone cannot reach: a string parameter
+/// has no closed value space, so its representative value is always truthy and
+/// `{% if region %}` always takes its block. Only the absent context renders the
+/// other side — and absent is what most calls actually send.
+#[tokio::test]
+async fn the_branch_an_omitted_parameter_takes_is_described() {
+    let f = skip_without_db!();
+    f.port.set(Describe::PerSql(vec![
+        ("region = ?", vec![("id", "uuid"), ("region", "varchar")]),
+        ("", vec![("id", "uuid")]),
+    ]));
+    let ep = f
+        .create_endpoint(
+            "omit",
+            "reports/omit",
+            "SELECT id {% if region %}, region {% endif %}FROM t \
+             {% if region %}WHERE region = {{ region }}{% endif %}",
+        )
+        .await;
+    f.patch_endpoint(
+        ep,
+        serde_json::json!({ "params": [
+            { "name": "region", "type": "string", "location": "query" }
+        ]}),
+    )
+    .await;
+    f.publish(ep).await;
+
+    let snap = f.live_snapshot(ep).await;
+    assert!(
+        !snap
+            .columns
+            .iter()
+            .find(|c| c.name == "region")
+            .expect("region is declared")
+            .required,
+        "a call with no query string omits `region`, takes the other branch and \
+         returns one column, so `region` is not in every branch. This pins the \
+         FLAG only: `shape_rows` still compares names and arity exactly, so that \
+         call is a schema_drift 503 until Task 6 makes the check a subset one"
+    );
+}
+
+/// Two types under one name cannot be unioned into one honest declaration, and
+/// this is the same gap that served a `200` carrying an integer under a declared
+/// `varchar`.
+#[tokio::test]
+async fn a_column_whose_type_differs_between_branches_refuses_to_publish() {
+    let f = skip_without_db!();
+    f.port.set(Describe::PerSql(vec![
+        ("name", vec![("v", "varchar")]),
+        ("", vec![("v", "integer")]),
+    ]));
+    let ep = f
+        .create_endpoint(
+            "conflict",
+            "reports/conflict",
+            "SELECT {% if detail %}name{% else %}id{% endif %} AS v FROM t",
+        )
+        .await;
+    f.patch_endpoint(
+        ep,
+        serde_json::json!({ "params": [
+            { "name": "detail", "type": "boolean", "location": "query" }
+        ]}),
+    )
+    .await;
+    let (status, body) = f.publish_raw(ep).await;
+    // 400, not 422: `ValidationError` becomes `Error::InvalidInput`, which
+    // `egret_core::http` maps to BAD_REQUEST — the same status every other
+    // publish rule refusal carries.
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("two types"),
+        "the message must name the fix, not just the fault: {body}"
+    );
+    assert!(
+        msg.contains("varchar") && msg.contains("integer"),
+        "and both types, or the author cannot tell which branch to CAST: {body}"
+    );
+    assert!(
+        f.versions(ep).await.is_empty(),
+        "a refused publish leaves no version behind"
+    );
+}
+
+/// The publish half of the Trino parametric-datetime fix, and it exists because
+/// nothing else in this crate pinned it.
+///
+/// **Measured, not assumed**: reverting `lifecycle.rs`'s fold from
+/// `compare_column_types` back to `existing.ty != spec.ty` left all 434 tests in
+/// this crate green.
+/// [`a_column_whose_type_differs_between_branches_refuses_to_publish`] pins only
+/// the REFUSAL side (`varchar` vs `integer`), so the tolerance was protected by
+/// nothing at all and a later "simplification" back to `!=` would have
+/// reintroduced the exact defect the fix exists for, silently.
+///
+/// The two spellings here are not invented. `describe_branches` computes
+/// `bind_count` PER STATEMENT, and `describe_with_params(sql, 0, _)`
+/// early-returns into `Connector::describe`, whose Trino implementation is the
+/// trait default — `execute` over a `LIMIT 0` wrapper. So a branch that
+/// interpolates NO parameter is typed through the client protocol, which
+/// suppresses datetime precision without
+/// `X-Trino-Client-Capabilities: PARAMETRIC_DATETIME`, and a branch that
+/// interpolates one is typed through `DESCRIBE OUTPUT`, which states it. One
+/// unchanging column, two spellings, and a `400 ColumnTypeConflict` on a
+/// definition nobody changed. Measured live against Trino 483.
+///
+/// # Why BOTH orders are published
+///
+/// The union fold promotes the precision-bearing spelling, and an assertion
+/// that the frozen contract carries `timestamp(0)` only measures that promotion
+/// when the accumulator did NOT already hold it. The first version of this test
+/// keyed its arms so that the parameterised branch — which
+/// `branch_statements` enumerates FIRST — supplied `timestamp(0)`, which meant
+/// "keep the more specific" and "keep the first" were indistinguishable:
+/// deleting the fold's effect entirely left this test green. So the same
+/// definition is published twice with the two spellings swapped between the
+/// branches, and both must freeze `timestamp(0)`. Whichever branch the
+/// enumerator visits first, exactly one of the two is order-sensitive, and no
+/// change to that order can hide the fold again.
+///
+/// The second endpoint is deliberately BACKWARDS with respect to Trino — there
+/// the parameterised branch is the one that states the precision. It is a
+/// synthetic that exists to fix the enumeration order, not a claim about any
+/// engine.
+///
+/// The arms carry no `""` fallback on purpose: `PerSql` panics when no arm
+/// matches, so the needles below are a measurement of what actually renders
+/// (`… WHERE k = ?` and `… WHERE k IS NOT NULL`) rather than an assumption
+/// about it. The first draft of this test keyed an arm on `"detail"`, which the
+/// TEMPLATE contains and the RENDERED statement does not — that arm matched
+/// neither branch, `""` matched both, and the fixture collapsed to a single
+/// spelling.
+#[tokio::test]
+async fn a_datetime_column_two_branches_spell_differently_still_publishes() {
+    let f = skip_without_db!();
+
+    for (case, on_param_branch, on_bare_branch) in [
+        ("param-branch-precise", "timestamp(0)", "timestamp"),
+        ("bare-branch-precise", "timestamp", "timestamp(0)"),
+    ] {
+        f.port.set(Describe::PerSql(vec![
+            ("= ?", vec![("v", on_param_branch)]),
+            ("IS NOT NULL", vec![("v", on_bare_branch)]),
+        ]));
+        let ep = f
+            .create_endpoint(
+                case,
+                &format!("reports/{case}"),
+                "SELECT ts AS v FROM t WHERE {% if detail %}k = {{ detail }}{% else %}k IS NOT NULL{% endif %}",
+            )
+            .await;
+        f.patch_endpoint(
+            ep,
+            serde_json::json!({ "params": [
+                { "name": "detail", "type": "string", "location": "query" }
+            ]}),
+        )
+        .await;
+
+        let (status, body) = f.publish_raw(ep).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "[{case}] one column whose precision one branch's typing path \
+             suppressed is not two types, and must not refuse the publish: {body}"
+        );
+
+        let snap = f.live_snapshot(ep).await;
+        let v = snap
+            .columns
+            .iter()
+            .find(|c| c.name == "v")
+            .expect("v is declared");
+        assert_eq!(
+            v.ty, "timestamp(0)",
+            "[{case}] the union must keep the precision-bearing spelling, not \
+             whichever branch happened to be enumerated first"
+        );
+    }
+}
+
+/// The boundary of the tolerance above, on the SAME path. Two branches that
+/// each STATE a precision, and state different ones, is a real conflict and
+/// still refuses — the relaxation is only for a precision one side suppressed.
+#[tokio::test]
+async fn two_branches_stating_different_datetime_precisions_still_refuse() {
+    let f = skip_without_db!();
+    // Keyed the same way as the test above, and for the same reason.
+    f.port.set(Describe::PerSql(vec![
+        ("= ?", vec![("v", "timestamp(3)")]),
+        ("IS NOT NULL", vec![("v", "timestamp(6)")]),
+    ]));
+    let ep = f
+        .create_endpoint(
+            "dtc",
+            "reports/dtc",
+            "SELECT ts AS v FROM t WHERE {% if detail %}k = {{ detail }}{% else %}k IS NOT NULL{% endif %}",
+        )
+        .await;
+    f.patch_endpoint(
+        ep,
+        serde_json::json!({ "params": [
+            { "name": "detail", "type": "string", "location": "query" }
+        ]}),
+    )
+    .await;
+
+    let (status, body) = f.publish_raw(ep).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("timestamp(3)") && msg.contains("timestamp(6)"),
+        "and both spellings, or the author cannot tell which branch to CAST: {body}"
+    );
+    assert!(
+        f.versions(ep).await.is_empty(),
+        "a refused publish leaves no version behind"
+    );
+}
+
+/// **Three branches, and the fold's promotion is what makes this a refusal.**
+///
+/// A bare `timestamp` agrees with `timestamp(3)` AND with `timestamp(6)`, so an
+/// accumulator that kept the FIRST spelling never compared the two stated
+/// precisions against each other: the definition published, and the frozen
+/// contract named neither precision. Measured on the code as it stood one
+/// commit ago, not argued — it froze `timestamp`.
+///
+/// Promoting the precision-bearing spelling turns the accumulator into
+/// `timestamp(3)` as soon as it meets one, so the branch carrying
+/// `timestamp(6)` is compared against a STATED precision and correctly refused.
+/// That is what makes the promotion a correctness fix rather than a cosmetic
+/// one, and it is why the assertion below is on the MESSAGE: a refusal naming
+/// the bare spelling would mean something else refused.
+///
+/// The fixture is arranged so that ONLY the promotion can produce this refusal
+/// — see the comment on the arms. An earlier arrangement put `timestamp(6)` on
+/// the first-enumerated statement, which made the accumulator precision-bearing
+/// immediately and refused with or without the promotion; that version stayed
+/// green under the mutation that deletes the fold, which is how it was caught.
+#[tokio::test]
+async fn three_branches_spanning_two_stated_precisions_refuse() {
+    let f = skip_without_db!();
+    // The BARE spelling goes on the statement enumerated FIRST, so the
+    // accumulator starts precision-free and only the promotion can bring the two
+    // stated precisions into contact. Which statement that is was MEASURED, not
+    // assumed: a `PerSql` table with no matching arm panics on the first
+    // statement it is handed, and it named
+    // `SELECT ts AS v FROM t WHERE 1 = 1 AND k = ? AND j = ?`.
+    //
+    // Arms are ordered most-specific first, because `PerSql` matches on
+    // `contains` and the both-parameter statement also contains `k = ?`.
+    f.port.set(Describe::PerSql(vec![
+        ("k = ? AND j = ?", vec![("v", "timestamp")]),
+        ("k = ?", vec![("v", "timestamp(3)")]),
+        ("j = ?", vec![("v", "timestamp(3)")]),
+        ("1 = 1", vec![("v", "timestamp(6)")]),
+    ]));
+    let ep = f
+        .create_endpoint(
+            "dt3",
+            "reports/dt3",
+            "SELECT ts AS v FROM t WHERE 1 = 1\
+             {% if a %} AND k = {{ a }}{% endif %}\
+             {% if b %} AND j = {{ b }}{% endif %}",
+        )
+        .await;
+    f.patch_endpoint(
+        ep,
+        serde_json::json!({ "params": [
+            { "name": "a", "type": "string", "location": "query" },
+            { "name": "b", "type": "string", "location": "query" }
+        ]}),
+    )
+    .await;
+
+    let (status, body) = f.publish_raw(ep).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a bare `timestamp` agrees with both stated precisions, so keeping the \
+         FIRST spelling published a contract naming neither: {body}"
+    );
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("timestamp(3)") && msg.contains("timestamp(6)"),
+        "the refusal must name the two STATED precisions that disagree, not the \
+         bare spelling that agreed with both: {body}"
+    );
+    assert!(f.versions(ep).await.is_empty());
+}
+
+/// `output.shape: "arrays"` is positional — `shape_rows` zips the live and
+/// frozen column lists by index — so a definition whose branches resolve to
+/// different columns has no single order to freeze and must be refused.
+#[tokio::test]
+async fn an_arrays_endpoint_that_branches_refuses_to_publish() {
+    let f = skip_without_db!();
+    f.port.set(Describe::PerSql(vec![
+        ("name", vec![("id", "uuid"), ("name", "varchar")]),
+        ("", vec![("id", "uuid")]),
+    ]));
+    let ep = f
+        .create_endpoint(
+            "arr",
+            "reports/arr",
+            "SELECT id {% if detail %}, name {% endif %}FROM t",
+        )
+        .await;
+    f.patch_endpoint(
+        ep,
+        serde_json::json!({
+            "params": [
+                { "name": "detail", "type": "boolean", "location": "query" }
+            ],
+            "output": { "shape": "arrays" }
+        }),
+    )
+    .await;
+    let (status, body) = f.publish_raw(ep).await;
+    // 400, not 422: every `ValidationError` becomes `Error::InvalidInput`,
+    // which `egret_core::http` maps to BAD_REQUEST with an `error` field — the
+    // same shape every other publish rule refusal carries.
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("objects"),
+        "the message must point at the fix: {body}"
+    );
+    assert!(
+        f.versions(ep).await.is_empty(),
+        "a refused publish leaves no version behind"
+    );
+}
+
+/// The rule must cost a non-branching `arrays` endpoint nothing: this is the
+/// other half of the same property, from the same shape one parameter apart,
+/// so a rule that refused every `arrays` endpoint outright would fail here.
+#[tokio::test]
+async fn an_arrays_endpoint_that_does_not_branch_still_publishes() {
+    let f = skip_without_db!();
+    f.port
+        .set(Describe::Columns(vec![("id", "uuid"), ("name", "varchar")]));
+    let ep = f
+        .create_endpoint("arr2", "reports/arr2", "SELECT id, name FROM t")
+        .await;
+    f.patch_endpoint(ep, serde_json::json!({ "output": { "shape": "arrays" } }))
+        .await;
+    f.publish(ep).await; // must not refuse
+}
+
+/// `representative_value` picks `allowed[0]` (`lifecycle.rs`), so before this the
+/// ORDER the author wrote `allowed` in decided the published contract.
+#[tokio::test]
+async fn every_allowed_enum_value_is_described_not_only_the_first() {
+    let f = skip_without_db!();
+    f.port.set(Describe::PerSql(vec![
+        ("name", vec![("id", "uuid"), ("name", "varchar")]),
+        ("", vec![("id", "uuid")]),
+    ]));
+    let ep = f
+        .create_endpoint(
+            "enum",
+            "reports/enum",
+            "SELECT id {% if mode | value == 'full' %}, name {% endif %}FROM t",
+        )
+        .await;
+    f.patch_endpoint(
+        ep,
+        serde_json::json!({ "params": [
+            { "name": "mode", "type": "enum", "location": "query", "required": true,
+              "allowed": ["summary", "full"] }
+        ]}),
+    )
+    .await;
+    f.publish(ep).await;
+    let snap = f.live_snapshot(ep).await;
+    assert!(
+        snap.columns.iter().any(|c| c.name == "name"),
+        "`full` is not allowed[0], and it was never described before M1: {:?}",
+        snap.columns
+    );
+}
+
+/// The cost argument, measured: describing every branch must not cost a describe
+/// per probe on a definition that has no branches.
+#[tokio::test]
+async fn a_non_conditional_definition_describes_exactly_once() {
+    let f = skip_without_db!();
+    f.port.set(Describe::Columns(vec![("id", "uuid")]));
+    let ep = f
+        .create_endpoint(
+            "plain",
+            "reports/plain",
+            "SELECT id FROM t WHERE r = {{ region }}",
+        )
+        .await;
+    f.patch_endpoint(
+        ep,
+        serde_json::json!({ "params": [
+            { "name": "region", "type": "string", "location": "query" }
+        ]}),
+    )
+    .await;
+    let before = f.port.call_count();
+    f.publish(ep).await;
+    assert_eq!(
+        f.port.call_count() - before,
+        1,
+        "deduplication is the whole cost argument; `at least one` would pass with \
+         it removed"
+    );
+}
+
+/// The publish fan-out is bounded, and the bound is a REFUSAL.
+///
+/// Truncating the described set would drop whichever branch fell off the end,
+/// and an undescribed branch is a column missing from the union — the exact
+/// `503 schema_drift` this gate exists to remove. So the definition is refused
+/// instead, and the author is told which knob reduces it.
+///
+/// Both sides are asserted from the same shape, one parameter apart, because a
+/// test that only proved the refusal would pass against a limit of zero.
+#[tokio::test]
+async fn a_definition_with_more_branches_than_publish_will_describe_is_refused() {
+    let f = skip_without_db!();
+    f.port.set(Describe::Columns(vec![("id", "uuid")]));
+    // Measured: n independent optional booleans render to 57 distinct statements
+    // at n = 10 and 68 at n = 11, against a limit of 64. Ten independent boolean
+    // toggles on one endpoint is already past what anyone writes; eleven is the
+    // first count that costs more than the budget.
+    let build = |n: usize| {
+        let mut sql = String::from("SELECT id FROM t WHERE 1=1");
+        let mut params = Vec::new();
+        for i in 0..n {
+            sql.push_str(&format!(
+                " {{% if p{i} %}} AND a{i} = {{{{ p{i} }}}}{{% endif %}}"
+            ));
+            params.push(serde_json::json!({
+                "name": format!("p{i}"), "type": "boolean", "location": "query"
+            }));
+        }
+        (sql, serde_json::Value::from(params))
+    };
+
+    let (sql, params) = build(10);
+    let ok = f.create_endpoint("under", "reports/under", &sql).await;
+    f.patch_endpoint(ok, serde_json::json!({ "params": params }))
+        .await;
+    let before = f.port.call_count();
+    let (status, body) = f.publish_raw(ok).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "ten optional booleans is under the limit and must still publish: {body}"
+    );
+    let described = f.port.call_count() - before;
+    assert!(
+        described > 10 && described <= 64,
+        "and it must have cost real describes, all of them within the budget: \
+         {described}"
+    );
+
+    let (sql, params) = build(11);
+    let over = f.create_endpoint("over", "reports/over", &sql).await;
+    f.patch_endpoint(over, serde_json::json!({ "params": params }))
+        .await;
+    let before = f.port.call_count();
+    let (status, body) = f.publish_raw(over).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("68") && msg.contains("64"),
+        "the author needs the measured count AND the limit, or they cannot tell \
+         how far over they are: {body}"
+    );
+    assert!(
+        msg.contains("`default`") && msg.contains("split"),
+        "and what to do about it, not just the number: {body}"
+    );
+    assert_eq!(
+        f.port.call_count(),
+        before,
+        "the refusal must come BEFORE the first describe — the point of the \
+         limit is that the engine never sees the fan-out"
+    );
+    assert!(
+        f.versions(over).await.is_empty(),
+        "nothing may be published"
+    );
+}
+
+/// Two same-named columns of different types in ONE statement is a different
+/// fault from two branches disagreeing, and the fold catches both — so it must
+/// not tell an author with no `{% if %}` in their definition to go and look at
+/// their branches.
+#[tokio::test]
+async fn two_same_named_columns_in_one_statement_are_diagnosed_as_an_alias_problem() {
+    let f = skip_without_db!();
+    f.port
+        .set(Describe::Columns(vec![("id", "bigint"), ("id", "varchar")]));
+    let ep = f
+        .create_endpoint("dup", "reports/dup", "SELECT a.id, b.id FROM a JOIN b")
+        .await;
+    let (status, body) = f.publish_raw(ep).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("two columns named") && msg.contains("alias"),
+        "the repair is an alias: {body}"
+    );
+    assert!(
+        !msg.contains("branch"),
+        "this definition has no branch, and sending the author to look for one \
+         is the misdiagnosis this arm exists to avoid: {body}"
+    );
+}
+
+/// The duplicate-name refusal does not depend on the types being different.
+///
+/// `SELECT a.id, b.id FROM a JOIN b` with BOTH `bigint` published green before
+/// this: the union deduplicates by name to one column, and `shape_rows` then
+/// compares a live width of 2 against a frozen width of 1 and returns
+/// `503 schema_drift` on EVERY call — not on some branch, on every one. Which is
+/// the publish-green-then-always-fail class this task exists to remove, one
+/// keystroke from the differing-type case above.
+#[tokio::test]
+async fn two_same_named_columns_of_the_same_type_are_refused_too() {
+    let f = skip_without_db!();
+    f.port
+        .set(Describe::Columns(vec![("id", "bigint"), ("id", "bigint")]));
+    let ep = f
+        .create_endpoint(
+            "dupsame",
+            "reports/dupsame",
+            "SELECT a.id, b.id FROM a JOIN b",
+        )
+        .await;
+    let (status, body) = f.publish_raw(ep).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "identical types make the duplicate name MORE invisible, not less: {body}"
+    );
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("two columns named"),
+        "{body}"
+    );
+    assert!(f.versions(ep).await.is_empty(), "nothing may be published");
 }
 
 /// `describe_as` must run as the CALLER, so a delegated connection resolves
@@ -1558,10 +2210,248 @@ async fn validate_reports_the_columns_without_publishing_anything() {
     assert_eq!(
         body["columns"],
         serde_json::json!([
-            { "name": "id", "ty": "uuid" },
-            { "name": "n", "ty": "bigint" }
+            { "name": "id", "ty": "uuid", "required": true },
+            { "name": "n", "ty": "bigint", "required": true }
         ])
     );
     assert!(f.versions(ep).await.is_empty(), "validate must not publish");
     assert_eq!(f.state_of(ep).await.0, "draft");
+}
+
+// ---------------------------------------------------------------------------
+// Whole-branch review, Important 2 — `output.naming` over the UNION
+// ---------------------------------------------------------------------------
+
+/// **Two branches whose column names collapse onto one key under `naming`.**
+///
+/// Three of the four places that share the "what is a column" concept apply
+/// `apply_naming`; the publish-side refusal did not. `describe_branches`
+/// refuses duplicates by RAW name, while `shape_rows` and `data_schema` both
+/// refuse on the naming-APPLIED key over the same frozen union.
+///
+/// Before M1 the frozen list was one branch's columns, so a collision needed
+/// both spellings in one projection — which the raw-name check already caught.
+/// Widening the frozen list to the union of every branch is what made a
+/// CROSS-branch collision possible, and nothing at publish looked for it. The
+/// result published green and then:
+///
+/// * every call, on either branch, answered `503 output_naming_collision`; and
+/// * `openapi_gen` returned `NamingCollision`, which is a DOCUMENT-level error
+///   — it fails the whole workspace's generated OpenAPI, taking every unrelated
+///   endpoint's documentation down with it.
+///
+/// So the refusal belongs at publish, where the author is present and the blast
+/// radius is one endpoint.
+#[tokio::test]
+async fn publish_refuses_a_union_whose_names_collide_under_output_naming() {
+    let f = skip_without_db!();
+    f.port.set(Describe::PerSql(vec![
+        ("total_revenue", vec![("total_revenue", "bigint")]),
+        ("totalRevenue", vec![("totalRevenue", "bigint")]),
+    ]));
+    let ep = f
+        .create_endpoint(
+            "collide",
+            "reports/collide",
+            "SELECT {% if d %}total_revenue{% else %}totalRevenue{% endif %} FROM t",
+        )
+        .await;
+    f.patch_endpoint(
+        ep,
+        serde_json::json!({
+            "params": [{ "name": "d", "type": "boolean", "location": "query" }],
+            "output": { "shape": "objects", "naming": "camel" }
+        }),
+    )
+    .await;
+
+    let (status, body) = f.publish_raw(ep).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a union that collapses onto one key must be refused at publish, not \
+         served as a 503 on every branch: {body}"
+    );
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("totalRevenue") && msg.contains("total_revenue"),
+        "the author must be told BOTH declared names, since either one is the \
+         repair: {body}"
+    );
+    // A CONTIGUOUS span across a line continuation, not two `contains` on the
+    // names. The first version of this message lost its `\` continuations and
+    // shipped four runs of ten spaces — "…both become `totalRevenue` under
+    // ␣␣␣␣␣␣␣␣␣␣`output.naming: camel`…" — which every name-only assertion
+    // reads as passing. Asserting a span is what makes the rendered sentence,
+    // rather than its vocabulary, the thing under test.
+    assert!(
+        msg.contains("both become `totalRevenue` under `output.naming: camel`"),
+        "the message must read as a sentence, not as words with the line \
+         continuations dropped: {msg}"
+    );
+    assert!(
+        !msg.contains("  "),
+        "no run of two spaces belongs in an author-facing message: {msg}"
+    );
+    assert!(
+        f.versions(ep).await.is_empty(),
+        "and nothing may have been frozen"
+    );
+    assert_eq!(f.state_of(ep).await.0, "draft");
+}
+
+/// The same definition under `naming: as_is`, which is the control.
+///
+/// `total_revenue` and `totalRevenue` are two distinct keys there, so the
+/// endpoint is perfectly serviceable and publish must NOT refuse it. Without
+/// this, a refusal that ignored `naming` entirely — or one that refused any
+/// two-branch union — would pass the test above.
+#[tokio::test]
+async fn publish_allows_the_same_union_when_naming_keeps_the_names_apart() {
+    let f = skip_without_db!();
+    f.port.set(Describe::PerSql(vec![
+        ("total_revenue", vec![("total_revenue", "bigint")]),
+        ("totalRevenue", vec![("totalRevenue", "bigint")]),
+    ]));
+    let ep = f
+        .create_endpoint(
+            "nocollide",
+            "reports/nocollide",
+            "SELECT {% if d %}total_revenue{% else %}totalRevenue{% endif %} FROM t",
+        )
+        .await;
+    f.patch_endpoint(
+        ep,
+        serde_json::json!({
+            "params": [{ "name": "d", "type": "boolean", "location": "query" }],
+            "output": { "shape": "objects", "naming": "as_is" }
+        }),
+    )
+    .await;
+
+    let (status, body) = f.publish_raw(ep).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let snap = f.live_snapshot(ep).await;
+    let mut names: Vec<&str> = snap.columns.iter().map(|c| c.name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(names, vec!["totalRevenue", "total_revenue"]);
+}
+
+// ---------------------------------------------------------------------------
+// Whole-branch review, Important 3 — `output` moved through the publish window
+// ---------------------------------------------------------------------------
+
+/// **`output` is patchable, and publish never noticed it had moved.**
+///
+/// `ValidationError::BranchingArraysShape` is raised by `validate()` against
+/// `draft.output.shape`, BEFORE the transaction. `publish()` then re-reads the
+/// row under lock and re-runs only `validate_definition`, which knows nothing
+/// about `output`; its staleness guard compared `sql`, `database_id` and
+/// `params` and not `output`. So an author who validates a branching definition
+/// as `objects` and PATCHes `shape: arrays` during the describe round trips
+/// froze an `arrays` snapshot over a branching union — and `shape_rows`, which
+/// zips the live row against the frozen list by INDEX, then answered `503` for
+/// every branch but the widest, permanently.
+///
+/// This is the same window, and the same shape of hole, that the guard's own
+/// comment describes as having been closed for `cache.scope`.
+#[tokio::test]
+async fn an_output_edit_during_describe_is_a_conflict() {
+    let f = skip_without_db!();
+    f.port.set(Describe::PerSql(vec![
+        ("name", vec![("id", "uuid"), ("name", "varchar")]),
+        ("", vec![("id", "uuid")]),
+    ]));
+    let ep = f
+        .create_endpoint(
+            "toctou-out",
+            "toctou-out",
+            "SELECT id {% if detail %}, name {% endif %}FROM t",
+        )
+        .await;
+    f.patch_endpoint(
+        ep,
+        serde_json::json!({ "params": [
+            { "name": "detail", "type": "boolean", "location": "query" }
+        ]}),
+    )
+    .await;
+
+    f.port.patch_during_next_describe(
+        &f.db,
+        "UPDATE dataapi.endpoints SET output = $2 WHERE id = $1",
+        ep,
+        serde_json::json!({ "shape": "arrays", "naming": "as_is" }),
+    );
+
+    let (status, body) = f.publish_raw(ep).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "an `output` that moved under the describe makes the resolved columns \
+         stale in exactly the way `sql` does: {body}"
+    );
+    assert!(
+        f.versions(ep).await.is_empty(),
+        "and no arrays snapshot may have been frozen over a branching union"
+    );
+    assert_eq!(f.state_of(ep).await.0, "draft");
+}
+
+/// **An enum's ninth-and-later allowed values are branches too.**
+///
+/// `render::candidates` answers an enum with its `allowed` list and nothing
+/// else, cut at `MAX_ENUM_CANDIDATES`. That cap was an eighth of the probe
+/// budget while its only consumer was `check_dynamic`, where missing a
+/// candidate costs sensitivity; it now decides a PUBLISHED CONTRACT, and an
+/// allowed value never probed is a branch never described — so `?mode=a10` was
+/// a permanent `503 schema_drift` on an endpoint that published green.
+///
+/// The parameter is `required` here on purpose: that removes the absent context
+/// AND the resting context (no `default`), so the only thing that can put `a10`
+/// in front of the engine is the candidate list itself. Measured at the old cap
+/// of 8: one describe, and `extra` missing from the union.
+#[tokio::test]
+async fn publish_describes_an_enum_value_past_the_old_candidate_cap() {
+    let f = skip_without_db!();
+    f.port.set(Describe::PerSql(vec![
+        ("extra", vec![("id", "uuid"), ("extra", "varchar")]),
+        ("", vec![("id", "uuid")]),
+    ]));
+    let ep = f
+        .create_endpoint(
+            "enum9",
+            "reports/enum9",
+            "SELECT id {% if mode | value == 'a10' %}, extra {% endif %}FROM t",
+        )
+        .await;
+    f.patch_endpoint(
+        ep,
+        serde_json::json!({ "params": [{
+            "name": "mode", "type": "enum", "location": "query", "required": true,
+            "allowed": ["a0","a1","a2","a3","a4","a5","a6","a7","a8","a9","a10","a11"]
+        }]}),
+    )
+    .await;
+    f.publish(ep).await;
+
+    let snap = f.live_snapshot(ep).await;
+    assert_eq!(
+        snap.columns
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["id", "extra"],
+        "the branch on `allowed[10]` was never described, so `?mode=a10` can \
+         only ever be a 503"
+    );
+    assert!(
+        !snap
+            .columns
+            .iter()
+            .find(|c| c.name == "extra")
+            .expect("extra")
+            .required,
+        "and it is optional — eleven of the twelve values do not return it"
+    );
 }

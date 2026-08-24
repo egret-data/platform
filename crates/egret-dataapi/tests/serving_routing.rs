@@ -55,14 +55,20 @@ use uuid::Uuid;
 /// | `55` | drift by NAME — same count, `describe` froze `n` and `execute` returns `m` |
 /// | `66` | two columns whose `camel` forms collide (`total_revenue`, `totalRevenue`) |
 /// | `77` | drift by COUNT — `execute` returns a column `describe` did not (an added table column) |
-/// | `88` | drift by ORDER — the same names in a different position |
+/// | `88` | the same names in a different position — drift under `arrays`, a rekeyed object under `objects` |
 /// | `99` | the connector fetched `max_rows + 1`, saw the extra row, and set `truncated` |
 ///
-/// The three drift markers are separate because they pin three separate clauses
-/// of one predicate. One marker would show that *a* check exists, not that each
-/// clause is load-bearing — and the count clause in particular is the only thing
-/// standing between an `arrays` response and rows longer than its own
-/// `meta.columns`.
+/// The three markers are separate because they pin three separate clauses. One
+/// marker would show that *a* check exists, not that each clause is
+/// load-bearing — and the count clause in particular is the only thing standing
+/// between an `arrays` response and rows longer than its own `meta.columns`.
+///
+/// Since M1 they no longer all belong to ONE predicate: `arrays` keeps the
+/// positional equality check (all three are drift there), while `objects` asks
+/// for containment plus every `required` column plus a type match, and takes its
+/// KEYS from the live columns. `55` and `77` are drift under both — an
+/// undeclared name is a field nobody reviewed at publish — but `88` is not, and
+/// its test asserts the binding instead.
 struct FakePort;
 
 fn first_int(sql: &str) -> i64 {
@@ -76,6 +82,17 @@ fn col(name: &str) -> ColumnMeta {
     ColumnMeta {
         name: name.into(),
         ty: "integer".into(),
+    }
+}
+
+/// A column with an EXPLICIT type. `col` types everything `integer`, and
+/// `integer` is one of the many names on which every engine path agrees —
+/// which is exactly why this crate's suites never saw the Trino
+/// parametric-datetime blocker.
+fn typed(name: &str, ty: &str) -> ColumnMeta {
+    ColumnMeta {
+        name: name.into(),
+        ty: ty.into(),
     }
 }
 
@@ -117,6 +134,19 @@ impl egret_query_api::QueryExecPort for FakePort {
             55 => vec![col("m")],
             77 => vec![col("n"), col("added_later")],
             88 => vec![col("b"), col("a")],
+            // The type-drift trio. `frozen_columns` still answers `n: integer`
+            // for all three, so the FROZEN side is whatever the test writes into
+            // the snapshot; these choose only what EXECUTION reports.
+            //
+            // 33 is the blocker: Trino's client protocol suppresses a datetime
+            // column's precision without
+            // `X-Trino-Client-Capabilities: PARAMETRIC_DATETIME`, while
+            // `DESCRIBE OUTPUT` — the publish path for any endpoint with a
+            // parameter — states it. 34 is the boundary (both sides state a
+            // precision, and different ones), 35 the ordinary drift.
+            33 => vec![typed("n", "timestamp")],
+            34 => vec![typed("n", "timestamp(6)")],
+            35 => vec![typed("n", "integer")],
             _ => frozen_columns(sql),
         };
         // Rows are length-matched to `columns` BY CONSTRUCTION, which is what a
@@ -849,6 +879,18 @@ async fn a_naming_collision_is_refused_rather_than_dropping_a_column() {
     //
     // Anti-triviality: the same endpoint with `as_is` must serve BOTH columns,
     // so the refusal is caused by the naming rule and not by the column pair.
+    //
+    // **The colliding version is no longer published through the route, and that
+    // is the point.** `validate()` now runs the same `apply_naming` fold over
+    // the described union and refuses this definition at publish
+    // (`ValidationError::OutputNamingCollision`, pinned in `tests/lifecycle.rs`)
+    // — where the author is present and the blast radius is one endpoint rather
+    // than the whole workspace's generated OpenAPI. So the shape is frozen the
+    // only way it can still arrive: a version published BEFORE that rule
+    // existed, reproduced here by rewriting the frozen snapshot in place. The
+    // serving refusal is what defends those, and deleting it because publish
+    // now refuses would leave every already-frozen colliding version serving
+    // rows one column short.
     let f = skip_without_db!();
     f.publish_endpoint_with_output(
         "GET",
@@ -866,13 +908,24 @@ async fn a_naming_collision_is_refused_rather_than_dropping_a_column() {
         ok.body
     );
 
-    f.publish_endpoint_with_output(
-        "GET",
-        "/camel",
-        "SELECT 66 AS total_revenue",
-        serde_json::json!({ "naming": "camel" }),
+    let camel = f
+        .publish_endpoint_with_output(
+            "GET",
+            "/camel",
+            "SELECT 66 AS total_revenue",
+            serde_json::json!({ "naming": "as_is" }),
+        )
+        .await;
+    // The pre-rule version, written straight into the frozen snapshot.
+    sqlx::query(
+        "UPDATE dataapi.endpoint_versions \
+            SET snapshot = jsonb_set(snapshot, '{output,naming}', '\"camel\"') \
+          WHERE endpoint_id = $1",
     )
-    .await;
+    .bind(camel)
+    .execute(&f.db.pool)
+    .await
+    .expect("rewrite the frozen naming");
     let res = f.call("camel").await;
     assert_eq!(
         res.status,
@@ -881,6 +934,97 @@ async fn a_naming_collision_is_refused_rather_than_dropping_a_column() {
         res.status,
         res.body
     );
+    // The CODE, not just the status: `schema_drift` is the other 503 on this
+    // path, and it would satisfy the assertion above while meaning something
+    // else entirely.
+    assert_eq!(
+        res.body["error"]["code"], "output_naming_collision",
+        "{}",
+        res.body
+    );
+}
+
+/// **The upgrade path, through the router.** A snapshot frozen BEFORE this
+/// branch, never re-published, must still serve `200`.
+///
+/// The `shape_rows` unit tests pin the predicate; this pins that the route
+/// actually reaches it. Measured live before it was fixed: a Trino endpoint
+/// with a parameter froze `timestamp(0)` — from `DESCRIBE OUTPUT`, the only way
+/// to type a parameterised query without running it — and served `timestamp`,
+/// from the client protocol, which suppresses datetime precision without
+/// `X-Trino-Client-Capabilities: PARAMETRIC_DATETIME`. Every call was
+/// `503 schema_drift`, and re-publishing re-ran `DESCRIBE OUTPUT` and re-froze
+/// the same string, so no author action cleared it.
+///
+/// The frozen side is written straight into `dataapi.endpoint_versions.snapshot`
+/// rather than being described, because "published weeks ago on `main`" is the
+/// situation under test. `rows_affected` is asserted: a `jsonb_set` whose path
+/// does not exist updates the row to an unchanged value and still reports
+/// success, and this test would then run against an untouched `integer`
+/// snapshot and pass while measuring nothing.
+#[tokio::test]
+async fn a_snapshot_frozen_with_a_stated_datetime_precision_still_serves() {
+    let f = skip_without_db!();
+
+    // Three endpoints, because the frozen type is a property of the snapshot
+    // and the live type is chosen by the magic number in the SQL.
+    let freeze = |ep: Uuid, ty: &'static str| {
+        let pool = f.db.pool.clone();
+        async move {
+            let touched = sqlx::query(
+                "UPDATE dataapi.endpoint_versions \
+                    SET snapshot = jsonb_set(snapshot, '{columns,0,ty}', $2::jsonb) \
+                  WHERE endpoint_id = $1",
+            )
+            .bind(ep)
+            .bind(format!("\"{ty}\""))
+            .execute(&pool)
+            .await
+            .expect("rewrite the frozen column type")
+            .rows_affected();
+            assert_eq!(touched, 1, "the frozen snapshot must actually have changed");
+        }
+    };
+
+    // (1) The blocker: frozen states the precision, live suppressed it.
+    let ok = f.publish_endpoint("GET", "/dt-ok", "SELECT 33 AS n").await;
+    freeze(ok, "timestamp(0)").await;
+    let res = f.call("dt-ok").await;
+    assert_eq!(
+        res.status,
+        StatusCode::OK,
+        "an endpoint published before this branch must serve without a \
+         re-publish — a re-publish could not even clear it: {} {}",
+        res.status,
+        res.body
+    );
+    assert_eq!(
+        res.body["meta"]["columns"][0]["ty"], "timestamp(0)",
+        "`meta.columns` still reports the CONTRACT, not this execution: {}",
+        res.body
+    );
+
+    // (2) The boundary: a precision BOTH sides state, and state differently, is
+    // a real type change and is still refused.
+    let precision = f
+        .publish_endpoint("GET", "/dt-precision", "SELECT 34 AS n")
+        .await;
+    freeze(precision, "timestamp(3)").await;
+    let res = f.call("dt-precision").await;
+    assert_eq!(res.status, StatusCode::SERVICE_UNAVAILABLE, "{}", res.body);
+    // The CODE, not just the status: `output_naming_collision` is the other 503
+    // on this path and would satisfy the assertion above while meaning something
+    // else entirely.
+    assert_eq!(res.body["error"]["code"], "schema_drift", "{}", res.body);
+
+    // (3) The ordinary drift the whole gate exists for.
+    let plain = f
+        .publish_endpoint("GET", "/dt-drift", "SELECT 35 AS n")
+        .await;
+    freeze(plain, "varchar").await;
+    let res = f.call("dt-drift").await;
+    assert_eq!(res.status, StatusCode::SERVICE_UNAVAILABLE, "{}", res.body);
+    assert_eq!(res.body["error"]["code"], "schema_drift", "{}", res.body);
 }
 
 #[tokio::test]
@@ -889,10 +1033,14 @@ async fn an_arrays_shape_serves_positional_rows() {
     // stayed invisible: every shaping test drove `objects`.
     //
     // `arrays` is positional — a client indexes `data[i][j]` against
-    // `meta.columns[j]` — which is why the drift check compares column ORDER and
-    // not just the set, and why the count clause matters more here than in
-    // `objects` (there is no per-row arity guard on this branch: the row is
-    // cloned through verbatim).
+    // `meta.columns[j]` — which is why this shape's drift check compares column
+    // ORDER and TYPE and not just the set, while `objects` asks only for
+    // containment. The count clause carries more weight here for the same
+    // reason: a row is cloned through verbatim, so nothing downstream of the
+    // check looks at the column list again. (The per-row ARITY guard is shared:
+    // it was hoisted above the shape branch, and
+    // `a_row_wider_than_its_own_column_list_is_refused_in_both_shapes` is what
+    // holds it there.)
     let f = skip_without_db!();
     f.publish_endpoint_with_output(
         "GET",
@@ -946,23 +1094,54 @@ async fn a_wider_live_result_is_refused_even_in_arrays_shape() {
 }
 
 #[tokio::test]
-async fn a_reordered_live_result_is_refused() {
-    // Pins the ORDER sensitivity of the drift check. The frozen columns are
-    // [a, b] and the engine now returns [b, a] — the same SET, so a comparison
-    // "simplified" to a sorted or set-based one passes every other test in this
-    // file while `arrays` responses silently transpose two columns and `objects`
-    // responses attach each value to the wrong name.
+async fn a_reordered_live_result_is_refused_in_arrays_and_rekeyed_in_objects() {
+    // Pins the ORDER sensitivity of the drift check — on the shape where order
+    // is the contract. The frozen columns are [a, b] and the engine now returns
+    // [b, a]: the same SET, so a comparison "simplified" to a sorted or
+    // set-based one passes every other test in this file while `arrays`
+    // responses silently transpose two columns.
+    //
+    // `objects` no longer refuses this, and that is the M1 change rather than a
+    // gap: keys are taken from the LIVE columns now, so the value the engine
+    // returned as `b` is served as `b`. It USED to be zipped onto the frozen
+    // names — 88 under `a` — which is the mis-binding the order check existed to
+    // prevent and is now unrepresentable. The `objects` half below asserts the
+    // BINDING, not merely a 200, because a 200 alone is exactly what the old
+    // mis-binding would also have produced.
+    //
+    // Order-insensitivity is forced by the union: a branch returns a subset of
+    // the frozen columns, so "same order" has no meaning to check against.
     let f = skip_without_db!();
-    f.publish_endpoint("GET", "/reordered", "SELECT 88 AS a")
-        .await;
+    f.publish_endpoint_with_output(
+        "GET",
+        "/reordered-arrays",
+        "SELECT 88 AS a",
+        serde_json::json!({ "shape": "arrays" }),
+    )
+    .await;
+    f.publish_endpoint_with_output(
+        "GET",
+        "/reordered-objects",
+        "SELECT 88 AS a",
+        serde_json::json!({ "shape": "objects" }),
+    )
+    .await;
 
-    let res = f.call("reordered").await;
+    let arrays = f.call("reordered-arrays").await;
+    let objects = f.call("reordered-objects").await;
     assert_eq!(
-        res.status,
+        arrays.status,
         StatusCode::SERVICE_UNAVAILABLE,
-        "the same names in a different order are still a different contract: {} {}",
-        res.status,
-        res.body
+        "the same names in a different order are still a different POSITIONAL contract: {} {}",
+        arrays.status,
+        arrays.body
+    );
+    assert_eq!(objects.status, StatusCode::OK, "{}", objects.body);
+    assert_eq!(
+        objects.body["data"],
+        serde_json::json!([{ "b": 88, "a": 89 }]),
+        "each value must be served under the name the ENGINE gave it: {}",
+        objects.body
     );
 }
 

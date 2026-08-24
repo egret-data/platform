@@ -158,7 +158,7 @@ use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use egret_dataapi_api::{ColumnSpec, EndpointSnapshot};
+use egret_dataapi_api::{compare_column_types, ColumnSpec, EndpointSnapshot};
 use egret_metastore::Db;
 use serde::Serialize;
 use uuid::Uuid;
@@ -1078,15 +1078,20 @@ fn engine_error(e: egret_core::Error) -> ServingError {
 ///
 /// # The contract is checked, not assumed
 ///
-/// [`ServingMeta::columns`] reports the FROZEN columns, so every key and every
-/// position in `data` must come from those same frozen columns or the response
-/// contradicts its own advertised shape with no signal. Three ways that
+/// [`ServingMeta::columns`] reports the FROZEN contract — since M1 the UNION of
+/// every branch described at publish — so every key in an `objects` response and
+/// every position in an `arrays` one must come from those frozen columns, or the
+/// response contradicts its own advertised shape with no signal. Three ways that
 /// happened before this function refused anything, each of which produced a
 /// perfectly ordinary-looking 200:
 ///
-/// * keys taken from the LIVE `out.columns` while `meta.columns` reported the
-///   frozen ones — a drifted endpoint returning rows whose keys disagree with
-///   its contract;
+/// * keys taken from the live `out.columns` with NOTHING checking that those
+///   names were declared — a drifted endpoint returning rows whose keys are not
+///   in its contract. **The keys do come from the live columns now**, and the
+///   section below says why: what makes that safe is the containment check, not
+///   where the names are read from. Reading them from the frozen list instead is
+///   not the fix and is its own defect — it serves this execution's values under
+///   another column's name;
 /// * `names.zip(row)` truncating to the shorter side, so an extra live column
 ///   was dropped and a missing one shortened every object;
 /// * `apply_naming` CREATING a collision — `total_revenue` and `totalRevenue`
@@ -1106,36 +1111,74 @@ fn engine_error(e: egret_core::Error) -> ServingError {
 /// refusing would make a published endpoint permanently dead over a cosmetic
 /// field, and unlike the two cases above it cannot silently lose a column.
 ///
-/// Column TYPES are deliberately not compared: a widened `integer` → `bigint`
-/// does not change any key or position, and refusing it would break endpoints
-/// over a change their clients cannot observe. Names and arity are what the
-/// response shape actually depends on.
+/// # Containment, not equality — and why types are compared now
+///
+/// A conditional definition describes EVERY branch at publish and freezes the
+/// union of their columns, flagging `required` for the ones every branch
+/// returns (spec §3.2). A branch that legitimately omits an optional column
+/// must therefore be served rather than refused, and the `objects` predicate is:
+/// every returned name is IN the frozen union, every `required` column is
+/// present, and a returned column's type still HONOURS the declared one —
+/// [`compare_column_types`], not string equality, for the one measured reason in
+/// its doc comment: Trino spells a datetime column's precision differently
+/// depending on which of its two typing paths answered, and both spellings are
+/// already in the published corpus. Every other difference, including two
+/// STATED precisions, is still drift. A column
+/// declared `required: false` and not returned is simply ABSENT from the object,
+/// never null — absent is what "this branch does not return it" means, and null
+/// would be indistinguishable from a returned NULL value.
+///
+/// Types used to be deliberately ignored here, on the argument that a widened
+/// `integer` → `bigint` changes no key and no position so refusing it would
+/// break endpoints over a change their clients cannot observe. That argument
+/// does not survive the union: once the NAME check is a subset check, the type
+/// is the only thing left tying a returned column to the one that was reviewed
+/// at publish — and publish already refuses a name that describes with two
+/// types across branches (§3.2), because two types cannot be unioned into one
+/// honest declaration. "Two types" is the same predicate there as here, and for
+/// the same reason: one column whose precision one branch's typing path merely
+/// suppressed is not two types, and refusing it made a definition nobody had
+/// changed unpublishable. Without the comparison here, that same disagreement
+/// arrives at serving time and is answered with a `200` carrying an integer
+/// under a declared `varchar`.
+///
+/// **This is the backstop for every branch publish did not reach**, and it fails
+/// closed for that reason. The probe budget is bounded (`MAX_PROBES`) and a
+/// definition can branch on more combinations than it covers; the absent-
+/// parameter contexts do not include pairs. Both gaps are measured and recorded
+/// in the spec. An undeclared column reaching a caller is not a documentation
+/// defect — it is a field nobody reviewed at publish being served.
+///
+/// A snapshot frozen before any of this carries `required: true` on every column
+/// ([`ColumnSpec`]'s serde default), so an already-published endpoint keeps
+/// exact-match semantics: subset plus all-required is set equality. What it does
+/// lose is ORDER sensitivity, and only on this path — see below.
+///
+/// # Order: all of the `arrays` NAME predicate, none of the `objects` one
+///
+/// `arrays` is positional, so two identical name SETS in a different order are
+/// still a different contract, and that path keeps the pre-M1 name-and-order
+/// equality check unchanged. Publish refuses an `arrays` endpoint whose branches
+/// describe different columns (`ValidationError::BranchingArraysShape`), so
+/// there is no SUBSET to accept there.
+///
+/// **What that path does not keep is "names and arity are all that matter": it
+/// compares TYPES too.** No branch is needed for `ALTER TABLE … TYPE`, and the
+/// case for comparing them is stronger here than under `objects`, because a
+/// positional row carries no names at all — a client reading `data[i][2]` as the
+/// declared `varchar` has nothing in the body to notice an integer by. "There is
+/// no subset to accept" is a statement about the NAME list; it is not a
+/// statement that the positional path has nothing left to check.
+///
+/// `objects` no longer compares order, because this function no longer depends
+/// on it: keys are taken from the LIVE columns, so a reordered result binds each
+/// value to its own name by construction. The old code zipped the FROZEN names
+/// onto the row, which is what made a reorder dangerous — and that mis-binding
+/// is now unrepresentable rather than merely refused.
 fn shape_rows(
     out: &egret_core::TabularResult,
     snap: &EndpointSnapshot,
 ) -> Result<serde_json::Value, ServingError> {
-    // Order-sensitive, because `arrays` shape is positional: two identical name
-    // SETS in a different order are still a different contract.
-    let drifted = out.columns.len() != snap.columns.len()
-        || out
-            .columns
-            .iter()
-            .zip(snap.columns.iter())
-            .any(|(live, frozen)| live.name != frozen.name);
-    if drifted {
-        tracing::warn!(
-            frozen = ?snap.columns.iter().map(|c| &c.name).collect::<Vec<_>>(),
-            live = ?out.columns.iter().map(|c| &c.name).collect::<Vec<_>>(),
-            "published output contract no longer matches the engine's columns"
-        );
-        return Err(ServingError::SchemaDrift);
-    }
-
-    // From here the two sets are equal, so the FROZEN names are used throughout:
-    // the contract is the thing being served, and reading them from the snapshot
-    // makes that true by construction rather than by the check above holding.
-    let frozen: Vec<&str> = snap.columns.iter().map(|c| c.name.as_str()).collect();
-
     // Row arity, checked for BOTH shapes and BEFORE the branch on `shape`.
     //
     // The column LISTS agreeing does not imply each row has that many values —
@@ -1146,20 +1189,101 @@ fn shape_rows(
     // `meta.columns`, silently, while `objects` refused it. Hoisted above the
     // branch rather than duplicated, so the two shapes cannot drift apart again.
     //
+    // Measured against the LIVE column list, not the frozen one: an `objects`
+    // response may now carry a SUBSET of the frozen union, so the frozen count
+    // is no longer the number of values a row is supposed to have. On the
+    // `arrays` path the equality check below makes the two counts identical, so
+    // nothing there changes.
+    //
     // It is a connector bug, not a caller's or an author's problem, so it is
     // `Internal` rather than one of the contract variants — but it is refused
     // rather than zipped past, which is the whole point of this function.
     for row in &out.rows {
-        if row.len() != frozen.len() {
+        if row.len() != out.columns.len() {
             return Err(ServingError::internal(format!(
                 "connector returned a row of {} values for {} columns",
                 row.len(),
-                frozen.len()
+                out.columns.len()
             )));
         }
     }
 
+    // A result with NO columns at all, refused before either shape reads it.
+    //
+    // Containment cannot see this one. Against an all-optional union — which
+    // `SELECT {% if x %}a{% else %}b{% endif %}` produces, since neither column
+    // is in every branch — zero live columns satisfies every clause vacuously:
+    // nothing is undeclared, no `required` column is missing, no name repeats.
+    // The `objects` path then serves `200 [{}]`, one empty object per row.
+    // MEASURED on the code as it stood one commit ago, not argued: `Ok("[{}]")`.
+    // The pre-M1 count equality refused it by arithmetic, and this gate must not
+    // be looser than what it replaced.
+    //
+    // Above the shape branch rather than inside `objects`, for the same reason
+    // the arity guard is: a guard that lives on one path is a guard the other
+    // path silently lacks. Publish refuses a describe that returns no columns
+    // (`ValidationError::DescribeReturnedNoColumns`), so a frozen list is never
+    // empty and `arrays` reaches this only with a result it would refuse anyway.
+    if out.columns.is_empty() {
+        return Err(drift(
+            snap,
+            out,
+            "the engine returned no columns at all",
+            None,
+        ));
+    }
+
     if snap.output.shape == "arrays" {
+        // Order-sensitive equality: an array row is positional, so the same
+        // names in a different order — or one name more, or one fewer — are a
+        // different contract. Task 5 refuses to publish a branching definition
+        // under this shape, so there is never a legitimate subset to accept
+        // here, and this half of the predicate is the pre-M1 one unchanged.
+        let drifted = out.columns.len() != snap.columns.len()
+            || out
+                .columns
+                .iter()
+                .zip(snap.columns.iter())
+                .any(|(live, frozen)| live.name != frozen.name);
+        if drifted {
+            return Err(drift(snap, out, "the positional column list changed", None));
+        }
+        // Types are compared HERE TOO, and this half is new.
+        //
+        // Nothing stops a table's type drifting under a positional endpoint:
+        // `arrays` cannot branch, but `ALTER TABLE … TYPE` needs no branch. The
+        // reason the `objects` path compares types applies here word for word —
+        // the type is what ties a returned column to the one that was reviewed
+        // at publish — and it applies with LESS warning, because a positional
+        // row carries no names at all, so a client reading `data[i][2]` as the
+        // declared `varchar` has nothing in the body to notice the integer by.
+        // Kept as a second check rather than folded into the `any` above so the
+        // log line names which clause refused; three rounds of this plan were
+        // spent on refusals that reported the wrong reason.
+        //
+        // `compare_column_types` rather than `!=` — see its doc comment. Trino
+        // spells one and the same datetime column two ways depending on which
+        // of its two typing paths answered, and both spellings are already in
+        // the published corpus, so the comparison is where they reconcile. The
+        // strings LOGGED below stay verbatim: an operator must see what each
+        // side actually said, not the canonical form they were judged on.
+        if let Some((live, frozen)) = out
+            .columns
+            .iter()
+            .zip(snap.columns.iter())
+            .find(|(live, frozen)| !compare_column_types(&frozen.ty, &live.ty).agrees())
+        {
+            return Err(drift(
+                snap,
+                out,
+                "a declared column changed type",
+                Some(TypeMismatch {
+                    column: &live.name,
+                    declared: &frozen.ty,
+                    returned: &live.ty,
+                }),
+            ));
+        }
         return Ok(serde_json::Value::Array(
             out.rows
                 .iter()
@@ -1174,9 +1298,70 @@ fn shape_rows(
         );
     }
 
-    let names: Vec<String> = frozen
+    // Containment, not equality. A branch may legitimately omit a column
+    // declared `required: false`; it may never return one that was never
+    // declared, and it may never change a declared column's type. See this
+    // function's doc comment for why the type comparison is here now and why
+    // this is the backstop that has to fail closed.
+    //
+    // "Change its type" is `compare_column_types`, not `!=`: a Trino datetime
+    // column arrives with its precision SUPPRESSED on the client protocol and
+    // STATED by `DESCRIBE OUTPUT`, so `timestamp(0)` and `timestamp` are one
+    // column, not two types. Two stated precisions still disagree.
+    for live in &out.columns {
+        match snap.columns.iter().find(|f| f.name == live.name) {
+            None => return Err(drift(snap, out, "a column that was never declared", None)),
+            Some(frozen) if !compare_column_types(&frozen.ty, &live.ty).agrees() => {
+                return Err(drift(
+                    snap,
+                    out,
+                    "a declared column changed type",
+                    Some(TypeMismatch {
+                        column: &live.name,
+                        declared: &frozen.ty,
+                        returned: &live.ty,
+                    }),
+                ))
+            }
+            Some(_) => {}
+        }
+    }
+    for frozen in snap.columns.iter().filter(|c| c.required) {
+        if !out.columns.iter().any(|l| l.name == frozen.name) {
+            return Err(drift(snap, out, "a required column was not returned", None));
+        }
+    }
+    // Two LIVE columns of ONE name — `SELECT *` over a join whose right side
+    // gained a column the left already had. Equality refused this for free, by
+    // arithmetic: a repeat made the counts disagree. Containment does not — both
+    // are declared, both type-match, and every required column is present — and
+    // the two would then land on one key with the `Map` keeping the last value,
+    // which is a whole column gone with no error. So it is checked explicitly.
+    //
+    // `SchemaDrift` rather than `OutputNamingCollision` because `naming` is not
+    // what did it: publish refuses two columns of one name outright
+    // (`ValidationError::AmbiguousColumnName`), so re-publishing is what shows
+    // the author the aliasing fix, and re-publishing is what `schema_drift`
+    // tells the operator to do.
+    let mut live_seen = std::collections::HashSet::with_capacity(out.columns.len());
+    if out
+        .columns
         .iter()
-        .map(|n| apply_naming(n, &snap.output.naming))
+        .any(|c| !live_seen.insert(c.name.as_str()))
+    {
+        return Err(drift(snap, out, "two live columns carry one name", None));
+    }
+
+    // The collision check runs over the FROZEN union, not over this call's
+    // columns. `output.naming` collapsing two DECLARED names onto one key is a
+    // property of the published contract, so it must refuse whichever branch is
+    // being served: otherwise the generated document advertises two keys, and
+    // the endpoint answers or refuses depending on which parameters it was
+    // called with.
+    let names: Vec<String> = snap
+        .columns
+        .iter()
+        .map(|c| apply_naming(&c.name, &snap.output.naming))
         .collect();
     // A `Map` silently keeps the LAST value for a duplicated key, which is how a
     // whole column disappears from every row without a single error.
@@ -1185,18 +1370,33 @@ fn shape_rows(
         tracing::warn!(
             key = %dup,
             naming = %snap.output.naming,
-            frozen = ?frozen,
+            frozen = ?snap.columns.iter().map(|c| &c.name).collect::<Vec<_>>(),
             "output.naming maps two frozen columns onto one key"
         );
         return Err(ServingError::OutputNamingCollision);
     }
 
-    // `names` is `frozen` mapped one-to-one, so every row's arity was already
-    // checked against it above and the zip below cannot truncate.
+    // The LIVE names, because a branch's response carries the keys THAT BRANCH
+    // returned. `meta.columns` still reports the frozen union — the contract,
+    // not this execution — which is what tells a consumer the absent key can
+    // appear at all, and the OpenAPI `required` list which ones always do.
+    //
+    // These cannot collide with one another: they are `apply_naming` over a
+    // subset of the frozen names (checked above) that carries no repeats
+    // (checked above) drawn from a frozen list whose mapped names are distinct
+    // (checked just above). So no row can lose a column below.
+    let live_names: Vec<String> = out
+        .columns
+        .iter()
+        .map(|c| apply_naming(&c.name, &snap.output.naming))
+        .collect();
+
+    // `live_names` is `out.columns` mapped one-to-one, so every row's arity was
+    // already checked against it above and the zip below cannot truncate.
     let mut shaped = Vec::with_capacity(out.rows.len());
     for row in &out.rows {
         shaped.push(serde_json::Value::Object(
-            names
+            live_names
                 .iter()
                 .cloned()
                 .zip(row.iter().cloned())
@@ -1204,6 +1404,59 @@ fn shape_rows(
         ));
     }
     Ok(serde_json::Value::Array(shaped))
+}
+
+/// The column a TYPE refusal is about, and the two spellings that disagree.
+///
+/// Named fields rather than a tuple because `declared` and `returned` are both
+/// `&str` and both type names: positionally they are indistinguishable, so a
+/// call site that swapped them would compile, log plausibly, and tell the
+/// operator to fix the wrong end.
+struct TypeMismatch<'a> {
+    column: &'a str,
+    declared: &'a str,
+    returned: &'a str,
+}
+
+/// One log line for every way the frozen contract and the live columns can
+/// disagree, so an operator sees both lists and the clause that refused.
+///
+/// The distinction from [`ServingError::OutputNamingCollision`] is the
+/// operator's FIX: drift means re-publish (the definition and the table have
+/// moved apart), a collision means change `naming` or alias the column. That is
+/// why they stay two variants and two log lines rather than one.
+///
+/// # Why the type refusals carry three more fields
+///
+/// For every other clause the two name lists ARE the diagnosis: one list has a
+/// name the other does not, or has it twice, or is empty. For a type refusal the
+/// two lists are IDENTICAL, so an operator reading this line learns which clause
+/// fired and nothing about which column or which types — and on the `arrays`
+/// path there are no names in the response body either, which makes this line
+/// the only instrument there is. `mismatch` is `None` for the clauses the lists
+/// already explain, and the fields log empty there rather than absent, so one
+/// log site serves every refusal and the two cannot drift apart.
+fn drift(
+    snap: &EndpointSnapshot,
+    out: &egret_core::TabularResult,
+    why: &str,
+    mismatch: Option<TypeMismatch<'_>>,
+) -> ServingError {
+    let m = mismatch.unwrap_or(TypeMismatch {
+        column: "",
+        declared: "",
+        returned: "",
+    });
+    tracing::warn!(
+        frozen = ?snap.columns.iter().map(|c| &c.name).collect::<Vec<_>>(),
+        live = ?out.columns.iter().map(|c| &c.name).collect::<Vec<_>>(),
+        column = %m.column,
+        declared = %m.declared,
+        returned = %m.returned,
+        why,
+        "published output contract no longer matches the engine's columns"
+    );
+    ServingError::SchemaDrift
 }
 
 /// `as_is` (default) | `camel` | `snake`. Unrecognised falls back to `as_is`.
@@ -1354,6 +1607,627 @@ mod tests {
         assert_eq!(
             l.timeout,
             std::time::Duration::from_secs(TIMEOUT_CEILING_SECS)
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // `shape_rows`: containment, `required`, and types.
+    //
+    // These drive the function directly rather than through the router because
+    // the interesting inputs are results no well-behaved engine produces — a
+    // branch that returns fewer columns than the union, a column that was never
+    // declared, a declared column that came back with another type. The
+    // end-to-end half (a real snapshot, a real 503 body) lives in
+    // `tests/serving_routing.rs`.
+    // -----------------------------------------------------------------------
+
+    fn spec(name: &str, ty: &str, required: bool) -> ColumnSpec {
+        ColumnSpec {
+            name: name.into(),
+            ty: ty.into(),
+            required,
+        }
+    }
+
+    fn live(name: &str, ty: &str) -> egret_core::ColumnMeta {
+        egret_core::ColumnMeta {
+            name: name.into(),
+            ty: ty.into(),
+        }
+    }
+
+    /// `snapshot_with_limits` with the frozen columns replaced. The limits are
+    /// the clamped-to-1 pair, which `shape_rows` never reads.
+    fn snapshot_with_columns(columns: Vec<ColumnSpec>) -> EndpointSnapshot {
+        EndpointSnapshot {
+            columns,
+            ..snapshot_with_limits(1, 1)
+        }
+    }
+
+    fn result(
+        columns: Vec<egret_core::ColumnMeta>,
+        rows: Vec<Vec<serde_json::Value>>,
+    ) -> egret_core::TabularResult {
+        egret_core::TabularResult {
+            row_count: rows.len() as u64,
+            columns,
+            rows,
+            ..Default::default()
+        }
+    }
+
+    /// The whole point of the plan: the branch that returns fewer columns is the
+    /// endpoint's OWN documented default call, and it used to 503.
+    #[test]
+    fn a_branch_that_omits_an_optional_column_is_served() {
+        let snap = snapshot_with_columns(vec![
+            spec("id", "integer", true),
+            spec("name", "varchar", false),
+        ]);
+        let out = result(
+            vec![live("id", "integer")],
+            vec![vec![serde_json::json!(1)]],
+        );
+
+        let v = shape_rows(&out, &snap).expect("an optional column may be absent");
+        assert_eq!(
+            v,
+            serde_json::json!([{"id": 1}]),
+            "the key is ABSENT, not null: null is indistinguishable from a returned NULL"
+        );
+        // Asserted on the object rather than inferred from the equality above,
+        // because a `null` under the key would still be a two-key object and the
+        // reader of a failure needs to see which it was.
+        let obj = v[0].as_object().unwrap();
+        assert_eq!(
+            obj.len(),
+            1,
+            "one key for the one column this branch returned"
+        );
+        assert!(!obj.contains_key("name"));
+    }
+
+    #[derive(Clone, Default)]
+    struct LogCapture(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    struct LogWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("log lock").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogCapture {
+        type Writer = LogWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            LogWriter(self.0.clone())
+        }
+    }
+
+    fn logs_from_shaping(out: &egret_core::TabularResult, snap: &EndpointSnapshot) -> String {
+        let cap = LogCapture::default();
+        let sub = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(cap.clone())
+            .without_time()
+            // Measured, not assumed: with ANSI on, the field NAME and its `=`
+            // are separated by escape sequences, so `contains("declared=…")`
+            // never matches and every assertion below would be vacuous.
+            .with_ansi(false)
+            .finish();
+        {
+            let _guard = tracing::subscriber::set_default(sub);
+            assert!(
+                matches!(shape_rows(out, snap), Err(ServingError::SchemaDrift)),
+                "expected a refusal so there is a reason to log"
+            );
+        }
+        let bytes = cap.0.lock().expect("log lock").clone();
+        String::from_utf8(bytes).expect("log output is utf-8")
+    }
+
+    /// The log line IS the diagnosis for a type refusal, so it is asserted
+    /// rather than promised.
+    ///
+    /// **This test exists because I first recorded the opposite as a
+    /// limitation** — "verified by compilation and reading, because nothing in
+    /// this crate captures `tracing` output". The premise was false:
+    /// `tests/serving_auth.rs` has captured log CONTENT since
+    /// `every_rejection_logs_a_distinguishable_reason`, and
+    /// `tracing-subscriber` is a dev-dependency of this crate carrying a
+    /// comment saying it is here so that a log promise does not stay prose.
+    ///
+    /// Note what `frozen` and `live` carry here: **identical lists**. That is
+    /// the entire reason the three extra fields exist — for every other clause
+    /// the two name lists are the diagnosis, and for this one they say nothing.
+    ///
+    /// The assertions are per FIELD rather than "both spellings appear
+    /// somewhere", because a call site that transposed `declared` and
+    /// `returned` emits both strings either way and would pass the loose form.
+    /// `declared` must carry the FROZEN spelling and `returned` the LIVE one.
+    #[test]
+    fn a_type_refusal_logs_the_column_and_which_spelling_came_from_where() {
+        let snap = snapshot_with_columns(vec![spec("v", "varchar", true)]);
+        let out = result(vec![live("v", "integer")], vec![vec![serde_json::json!(1)]]);
+
+        let logs = logs_from_shaping(&out, &snap);
+        assert!(
+            logs.contains(r#"why="a declared column changed type""#),
+            "{logs}"
+        );
+        assert!(
+            logs.contains(r#"frozen=["v"] live=["v"]"#),
+            "the premise of this test: the name lists cannot diagnose a type refusal: {logs}"
+        );
+        assert!(logs.contains("column=v "), "{logs}");
+        assert!(
+            logs.contains("declared=varchar "),
+            "`declared` must carry the FROZEN spelling, not the live one: {logs}"
+        );
+        assert!(
+            logs.contains("returned=integer "),
+            "`returned` must carry the LIVE spelling, not the frozen one: {logs}"
+        );
+
+        // The positional path, where the response body carries no names either,
+        // so this line is the only instrument an operator has.
+        let mut arrays = snapshot_with_columns(vec![spec("v", "varchar", true)]);
+        arrays.output.shape = "arrays".into();
+        let logs = logs_from_shaping(&out, &arrays);
+        assert!(logs.contains("column=v "), "arrays: {logs}");
+        assert!(logs.contains("declared=varchar "), "arrays: {logs}");
+        assert!(logs.contains("returned=integer "), "arrays: {logs}");
+
+        // A clause the name lists DO explain leaves the three fields empty —
+        // one log site for every refusal, and nothing stale carried over from
+        // the shape of another one.
+        let undeclared = result(
+            vec![live("v", "varchar"), live("secret", "varchar")],
+            vec![vec![serde_json::json!("a"), serde_json::json!("b")]],
+        );
+        let logs = logs_from_shaping(&undeclared, &snap);
+        assert!(
+            logs.contains("column= declared= returned= "),
+            "a non-type refusal must not invent a column or a type: {logs}"
+        );
+    }
+
+    /// The merge blocker this comparison exists for, on BOTH shapes.
+    ///
+    /// Trino suppresses a datetime column's precision on the client protocol
+    /// unless the caller sends `X-Trino-Client-Capabilities: PARAMETRIC_DATETIME`,
+    /// which `TrinoConnector` does not — while `DESCRIBE OUTPUT`, the publish
+    /// path for every endpoint that declares a parameter, states it. Measured
+    /// live on Trino 483: an endpoint whose SQL never changed froze
+    /// `timestamp(0)` and served `timestamp`, and answered `503 schema_drift`
+    /// on **every** call, on both shapes. Re-publishing re-ran `DESCRIBE
+    /// OUTPUT` and re-froze `timestamp(0)`, so no author action cleared it.
+    ///
+    /// The fixture freezes the spelling a snapshot written BEFORE this branch
+    /// carries, and never re-publishes: this is the upgrade path, not a fresh
+    /// publish. Every other fixture in this module types its columns `integer`,
+    /// which is why 432 green tests did not see this.
+    #[test]
+    fn a_datetime_column_whose_precision_the_client_protocol_suppressed_still_serves() {
+        for (frozen_ty, live_ty) in [
+            ("timestamp(0)", "timestamp"),
+            ("timestamp(3)", "timestamp"),
+            ("time(0)", "time"),
+            ("timestamp(0) with time zone", "timestamp with time zone"),
+            ("array(timestamp(0))", "array(timestamp)"),
+            // The reverse pairing too: a snapshot frozen through the NO-param
+            // path carries the bare spelling, and both are in the corpus.
+            ("timestamp", "timestamp(0)"),
+        ] {
+            let out = result(
+                vec![live("c", live_ty)],
+                vec![vec![serde_json::json!("2020-01-01 10:20:30.000")]],
+            );
+
+            let objects = snapshot_with_columns(vec![spec("c", frozen_ty, true)]);
+            assert_eq!(
+                shape_rows(&out, &objects)
+                    .unwrap_or_else(|e| panic!("objects: {frozen_ty} vs {live_ty} refused: {e:?}")),
+                serde_json::json!([{"c": "2020-01-01 10:20:30.000"}]),
+            );
+
+            let mut arrays = snapshot_with_columns(vec![spec("c", frozen_ty, true)]);
+            arrays.output.shape = "arrays".into();
+            assert_eq!(
+                shape_rows(&out, &arrays)
+                    .unwrap_or_else(|e| panic!("arrays: {frozen_ty} vs {live_ty} refused: {e:?}")),
+                serde_json::json!([["2020-01-01 10:20:30.000"]]),
+            );
+        }
+    }
+
+    /// The tolerance above is bounded, and this is where the boundary is.
+    ///
+    /// Asserted on the REASON, not on the status: `503` alone covers
+    /// `output_naming_collision` too, so a test that only checked the code
+    /// would pass on a refusal that fired for the wrong reason entirely.
+    #[test]
+    fn two_stated_datetime_precisions_are_still_drift() {
+        let out = result(
+            vec![live("c", "timestamp(6)")],
+            vec![vec![serde_json::json!("2020-01-01 10:20:30.000000")]],
+        );
+        let snap = snapshot_with_columns(vec![spec("c", "timestamp(3)", true)]);
+        assert!(
+            logs_from_shaping(&out, &snap).contains(r#"why="a declared column changed type""#),
+            "a precision BOTH sides stated is a real type change, not a suppressed one"
+        );
+
+        // And the ordinary case the whole gate is for.
+        let out = result(vec![live("c", "integer")], vec![vec![serde_json::json!(1)]]);
+        let snap = snapshot_with_columns(vec![spec("c", "varchar", true)]);
+        assert!(
+            logs_from_shaping(&out, &snap).contains(r#"why="a declared column changed type""#),
+            "varchar -> integer must still be refused, and for THIS reason"
+        );
+    }
+
+    /// **The plan's headline case, asserted positively.**
+    /// `SELECT {% if x %}a{% else %}b{% endif %}` unions to two columns that are
+    /// BOTH optional, since neither is in every branch — and either branch must
+    /// serve. Every other all-optional fixture in this module expects an error,
+    /// which is a gap with teeth:
+    /// [`a_branch_that_omits_an_optional_column_is_served`] does not cover this,
+    /// because its `id` is `required: true`, and the mutation that refuses every
+    /// call on an all-optional union was caught only INCIDENTALLY, by a test
+    /// asserting `OutputNamingCollision`. Give that fixture a required column and
+    /// the mutant survives. This test is the one that cannot be dodged that way.
+    ///
+    /// Both branches are asserted, not one: a rule that serves `a` and refuses
+    /// `b` is a rule about the first frozen column, not about optionality.
+    #[test]
+    fn an_all_optional_union_serves_either_branch() {
+        let snap = snapshot_with_columns(vec![
+            spec("a", "integer", false),
+            spec("b", "integer", false),
+        ]);
+
+        let first = result(vec![live("a", "integer")], vec![vec![serde_json::json!(1)]]);
+        assert_eq!(
+            shape_rows(&first, &snap).expect("the `if` branch must serve"),
+            serde_json::json!([{"a": 1}]),
+            "exactly the key this branch returned, and no null for the other"
+        );
+
+        let second = result(vec![live("b", "integer")], vec![vec![serde_json::json!(2)]]);
+        assert_eq!(
+            shape_rows(&second, &snap).expect("the `else` branch must serve"),
+            serde_json::json!([{"b": 2}]),
+            "the other branch of the same union serves too"
+        );
+    }
+
+    /// The other half of the same rule, and the one that catches a MIS-BINDING
+    /// rather than a missing key: the omitted column is the FIRST declared one.
+    /// Building the object from the FROZEN names instead produces `{"id": "x"}`
+    /// — a varchar served under the integer column's key, with a 200.
+    ///
+    /// Split out from [`a_branch_that_omits_an_optional_column_is_served`]
+    /// because that test **cannot** see it: truncating a two-name zip onto a
+    /// one-value row happens to produce exactly the right object when the
+    /// omitted column is the last one. Measured, not assumed — the frozen-keys
+    /// mutation reddened one test with the two scenarios fused and two once they
+    /// were separated.
+    #[test]
+    fn an_omitted_column_does_not_shift_the_others_onto_its_name() {
+        let snap = snapshot_with_columns(vec![
+            spec("id", "integer", false),
+            spec("name", "varchar", true),
+        ]);
+        let out = result(
+            vec![live("name", "varchar")],
+            vec![vec![serde_json::json!("x")]],
+        );
+        assert_eq!(
+            shape_rows(&out, &snap).expect("the optional column is the FIRST one here"),
+            serde_json::json!([{"name": "x"}]),
+            "the value must be served under the name the ENGINE gave it"
+        );
+    }
+
+    #[test]
+    fn a_missing_required_column_is_still_drift() {
+        let snap = snapshot_with_columns(vec![
+            spec("id", "integer", true),
+            spec("name", "varchar", false),
+        ]);
+        let out = result(
+            vec![live("name", "varchar")],
+            vec![vec![serde_json::json!("x")]],
+        );
+        assert!(
+            matches!(shape_rows(&out, &snap), Err(ServingError::SchemaDrift)),
+            "`required` means EVERY branch returns it, so its absence is drift"
+        );
+    }
+
+    /// A snapshot frozen before `required` existed deserializes with every
+    /// column `required: true` (Task 1), and that is what keeps an
+    /// already-published endpoint on exact-match semantics. Pinned here on the
+    /// serving side, where the loosening would have shown up.
+    #[test]
+    fn an_all_required_snapshot_still_demands_every_column() {
+        let snap = snapshot_with_columns(vec![
+            spec("id", "integer", true),
+            spec("name", "varchar", true),
+        ]);
+        let out = result(
+            vec![live("id", "integer")],
+            vec![vec![serde_json::json!(1)]],
+        );
+        assert!(
+            matches!(shape_rows(&out, &snap), Err(ServingError::SchemaDrift)),
+            "subset + all-required is SET equality. Pre-M1 was SEQUENCE equality, \
+             so this is that contract minus its order clause and nothing else"
+        );
+    }
+
+    #[test]
+    fn an_undeclared_column_is_drift() {
+        let snap = snapshot_with_columns(vec![spec("id", "integer", true)]);
+        let out = result(
+            vec![live("id", "integer"), live("secret", "varchar")],
+            vec![vec![serde_json::json!(1), serde_json::json!("s")]],
+        );
+        assert!(
+            matches!(shape_rows(&out, &snap), Err(ServingError::SchemaDrift)),
+            "an undeclared column is a field nobody reviewed at publish reaching a caller"
+        );
+    }
+
+    #[test]
+    fn a_declared_column_returning_the_wrong_type_is_drift() {
+        let snap = snapshot_with_columns(vec![spec("v", "varchar", true)]);
+        let out = result(vec![live("v", "integer")], vec![vec![serde_json::json!(1)]]);
+        assert!(
+            matches!(shape_rows(&out, &snap), Err(ServingError::SchemaDrift)),
+            "this is the gap that served 200 with an integer under a declared varchar"
+        );
+    }
+
+    /// The hole containment opens that equality closed by arithmetic: a repeated
+    /// name used to make the COUNTS disagree. Both columns here are declared,
+    /// both type-match, and the required one is present — so every other clause
+    /// passes, and without this check the `Map` keeps the last value and the
+    /// column vanishes from every row.
+    #[test]
+    fn two_live_columns_of_one_name_are_drift() {
+        let snap = snapshot_with_columns(vec![
+            spec("id", "integer", true),
+            spec("name", "varchar", false),
+        ]);
+        let out = result(
+            vec![live("id", "integer"), live("id", "integer")],
+            vec![vec![serde_json::json!(1), serde_json::json!(2)]],
+        );
+        // Anti-triviality: the SAME two-column result with distinct declared
+        // names is served, so the refusal is caused by the repeat and not by the
+        // arity or by anything else in this fixture.
+        let ok = result(
+            vec![live("id", "integer"), live("name", "varchar")],
+            vec![vec![serde_json::json!(1), serde_json::json!("x")]],
+        );
+        assert_eq!(
+            shape_rows(&ok, &snap).expect("two distinct declared columns are fine"),
+            serde_json::json!([{"id": 1, "name": "x"}])
+        );
+        assert!(
+            matches!(shape_rows(&out, &snap), Err(ServingError::SchemaDrift)),
+            "one key would keep the last value and the other column would be gone"
+        );
+    }
+
+    /// Order stops being part of the `objects` predicate, so this pins what
+    /// replaces it: each value under ITS OWN name. The old code zipped the
+    /// FROZEN names onto the row, which bound 88 to `a` when the engine had
+    /// returned it as `b`.
+    #[test]
+    fn a_reordered_result_binds_each_value_to_its_own_name() {
+        let snap =
+            snapshot_with_columns(vec![spec("a", "integer", true), spec("b", "integer", true)]);
+        let out = result(
+            vec![live("b", "integer"), live("a", "integer")],
+            vec![vec![serde_json::json!(88), serde_json::json!(89)]],
+        );
+        let v = shape_rows(&out, &snap).expect("a reorder is not a different object");
+        assert_eq!(
+            v,
+            serde_json::json!([{"b": 88, "a": 89}]),
+            "the value the engine returned as `b` must be served as `b`"
+        );
+    }
+
+    /// `apply_naming` has to reach the LIVE names, not only the frozen list the
+    /// collision check walks. Dropping it there would serve the raw column name
+    /// under an endpoint published as `camel`.
+    #[test]
+    fn naming_is_applied_to_the_columns_this_branch_returned() {
+        let mut snap = snapshot_with_columns(vec![
+            spec("total_revenue", "integer", true),
+            spec("unit_count", "integer", false),
+        ]);
+        snap.output.naming = "camel".into();
+        let out = result(
+            vec![live("total_revenue", "integer")],
+            vec![vec![serde_json::json!(7)]],
+        );
+        assert_eq!(
+            shape_rows(&out, &snap).expect("an optional column may be absent"),
+            serde_json::json!([{"totalRevenue": 7}])
+        );
+    }
+
+    /// A collision between two DECLARED names refuses on every branch, including
+    /// the branch that returns only one of them. Serving and the generated
+    /// document have to agree about naming for the whole contract, not for the
+    /// call that happened to be made.
+    #[test]
+    fn a_frozen_collision_refuses_even_the_branch_that_returns_one_column() {
+        let mut snap = snapshot_with_columns(vec![
+            spec("total_revenue", "integer", false),
+            spec("totalRevenue", "integer", false),
+        ]);
+        snap.output.naming = "camel".into();
+        let out = result(
+            vec![live("total_revenue", "integer")],
+            vec![vec![serde_json::json!(1)]],
+        );
+        assert!(
+            matches!(
+                shape_rows(&out, &snap),
+                Err(ServingError::OutputNamingCollision)
+            ),
+            "the contract collides whichever branch is served"
+        );
+    }
+
+    /// The relaxation must not leak onto the positional path. `arrays` cannot
+    /// branch (publish refuses it), so a short live list there is drift, not a
+    /// branch — and a tuple one member short cannot be read by anyone.
+    #[test]
+    fn an_arrays_endpoint_does_not_get_the_subset_rule() {
+        let mut snap = snapshot_with_columns(vec![
+            spec("id", "integer", true),
+            spec("name", "varchar", false),
+        ]);
+        snap.output.shape = "arrays".into();
+        let out = result(
+            vec![live("id", "integer")],
+            vec![vec![serde_json::json!(1)]],
+        );
+        assert!(
+            matches!(shape_rows(&out, &snap), Err(ServingError::SchemaDrift)),
+            "a positional row that is one member short is not a contract"
+        );
+
+        // …and the same-order, same-names case still serves positionally.
+        let full = result(
+            vec![live("id", "integer"), live("name", "varchar")],
+            vec![vec![serde_json::json!(1), serde_json::json!("x")]],
+        );
+        assert_eq!(
+            shape_rows(&full, &snap).expect("arrays serves an equal column list"),
+            serde_json::json!([[1, "x"]])
+        );
+
+        // Order is still all of the `arrays` predicate, unlike `objects`.
+        let swapped = result(
+            vec![live("name", "varchar"), live("id", "integer")],
+            vec![vec![serde_json::json!("x"), serde_json::json!(1)]],
+        );
+        assert!(
+            matches!(shape_rows(&swapped, &snap), Err(ServingError::SchemaDrift)),
+            "a transposed tuple reads as the wrong column at every index"
+        );
+    }
+
+    /// `arrays` cannot branch, but nothing stops a TYPE drifting under it — and
+    /// a positional row carries no names, so a client reading `data[i][0]` as the
+    /// declared `varchar` has nothing in the body to notice the integer by. The
+    /// type comparison is therefore on both paths, not only on `objects`.
+    #[test]
+    fn an_arrays_endpoint_refuses_a_declared_column_that_changed_type() {
+        let mut snap = snapshot_with_columns(vec![spec("v", "varchar", true)]);
+        snap.output.shape = "arrays".into();
+
+        let drifted = result(vec![live("v", "integer")], vec![vec![serde_json::json!(1)]]);
+        assert!(
+            matches!(shape_rows(&drifted, &snap), Err(ServingError::SchemaDrift)),
+            "a positional column whose type moved is drift, exactly as under objects"
+        );
+
+        // Anti-triviality: the same one-column, same-order result with the
+        // DECLARED type still serves positionally, so the refusal is caused by
+        // the type and not by the fixture.
+        let ok = result(
+            vec![live("v", "varchar")],
+            vec![vec![serde_json::json!("x")]],
+        );
+        assert_eq!(
+            shape_rows(&ok, &snap).expect("the declared type is served"),
+            serde_json::json!([["x"]])
+        );
+    }
+
+    /// A live result with NO columns, against a union where every column is
+    /// optional — which is what `SELECT {% if x %}a{% else %}b{% endif %}`
+    /// freezes, since neither column is in every branch.
+    ///
+    /// Every containment clause passes vacuously here: nothing is undeclared, no
+    /// `required` column is missing, no name repeats. Before the explicit
+    /// refusal this measured `Ok("[{}]")` — a 200 carrying one empty object per
+    /// row, under a `meta.columns` advertising two. The pre-M1 count equality
+    /// refused it by arithmetic, so accepting it would make this gate looser
+    /// than the one it replaced.
+    #[test]
+    fn a_result_with_no_columns_at_all_is_drift() {
+        let snap = snapshot_with_columns(vec![
+            spec("a", "integer", false),
+            spec("b", "integer", false),
+        ]);
+        assert!(
+            matches!(
+                shape_rows(&result(vec![], vec![vec![]]), &snap),
+                Err(ServingError::SchemaDrift)
+            ),
+            "an all-optional union must not turn an empty result into 200 [{{}}]"
+        );
+        // With no rows either — the loop below the guard would never run, so the
+        // refusal has to come from the column list and not from a row.
+        assert!(
+            matches!(
+                shape_rows(&result(vec![], vec![]), &snap),
+                Err(ServingError::SchemaDrift)
+            ),
+            "no rows is not a reason to stop checking the columns"
+        );
+        // And on the positional path, where it would otherwise serve `[[]]`.
+        let mut arrays = snapshot_with_columns(vec![spec("a", "integer", false)]);
+        arrays.output.shape = "arrays".into();
+        assert!(matches!(
+            shape_rows(&result(vec![], vec![vec![]]), &arrays),
+            Err(ServingError::SchemaDrift)
+        ));
+    }
+
+    /// The row-arity guard measures against the LIVE column list now, because a
+    /// branch's rows are as wide as the columns THAT BRANCH returned. Against
+    /// the frozen union, a legitimate short branch would report a connector bug.
+    #[test]
+    fn a_row_is_measured_against_the_live_column_list() {
+        let snap = snapshot_with_columns(vec![
+            spec("id", "integer", true),
+            spec("name", "varchar", false),
+        ]);
+        // One live column, one value: correct, and two values wide of the frozen
+        // union would be the reading that refuses it.
+        assert!(shape_rows(
+            &result(
+                vec![live("id", "integer")],
+                vec![vec![serde_json::json!(1)]]
+            ),
+            &snap
+        )
+        .is_ok());
+        // One live column, two values: a connector bug, and still refused.
+        let bug = result(
+            vec![live("id", "integer")],
+            vec![vec![serde_json::json!(1), serde_json::json!(2)]],
+        );
+        assert!(
+            matches!(shape_rows(&bug, &snap), Err(ServingError::Internal { .. })),
+            "a row that disagrees with the connector's own column list is a fault"
         );
     }
 

@@ -71,6 +71,10 @@ pub fn bind_signature(params: &[Param]) -> i64 {
     h
 }
 
+/// `(SQL needle, column names)` arms, first match wins — the table
+/// [`FakePort::set_columns_per_sql`] installs.
+type PerSqlColumns = Vec<(String, Vec<String>)>;
+
 /// Counts executions, so a test can tell a cache HIT from a re-execution that
 /// happened to return the same rows — and records what the last one was ASKED to
 /// run, so a test can assert on the rendered statement rather than only on the
@@ -97,6 +101,10 @@ pub struct FakePort {
     /// itself under every mode, so a test about `output.naming` being applied (or
     /// not) is vacuous with it: `camel("n") == "n"`.
     columns: Mutex<Option<Vec<String>>>,
+    /// The column names to return per RENDERED statement — see
+    /// [`FakePort::set_columns_per_sql`]. `None` (the default) leaves every
+    /// existing assertion in these suites on the two paths above.
+    per_sql: Mutex<Option<PerSqlColumns>>,
 }
 
 impl FakePort {
@@ -170,11 +178,72 @@ impl FakePort {
         *self.columns.lock().unwrap() = Some(names.iter().map(|n| (*n).to_string()).collect());
     }
 
+    /// Answer with DIFFERENT columns per statement, matching a SUBSTRING of the
+    /// rendered SQL; first arm wins, so the fallback goes last with `""`.
+    ///
+    /// Unlike [`FakePort::set_columns`], which only affects execution, this
+    /// drives the DESCRIBE paths too — and that is the whole point. A branching
+    /// definition is described once per branch at publish and executed on
+    /// exactly one branch per call, so a fake that hands the same columns to
+    /// both cannot tell a frozen union apart from a single describe, and an
+    /// end-to-end test written against it would pass with the union never
+    /// computed. Modelled on `lifecycle.rs`'s `Describe::PerSql`, which does the
+    /// same job for the publish suite.
+    ///
+    /// Panics rather than falling back when no arm matches: a statement the
+    /// table did not anticipate is a branch the test did not know publish would
+    /// render, and answering it with a default would hide exactly that.
+    pub fn set_columns_per_sql(&self, table: &[(&str, &[&str])]) {
+        *self.per_sql.lock().unwrap() = Some(
+            table
+                .iter()
+                .map(|(needle, names)| {
+                    (
+                        (*needle).to_string(),
+                        names.iter().map(|n| (*n).to_string()).collect(),
+                    )
+                })
+                .collect(),
+        );
+    }
+
+    /// The per-statement answer, or `None` when no table was installed.
+    ///
+    /// Returns owned columns and drops the guard before it returns, so a caller
+    /// may fall back to [`FakePort::out_columns`] — which takes a different lock
+    /// — without nesting the two.
+    fn per_sql_columns(&self, sql: &str) -> Option<Vec<ColumnMeta>> {
+        let guard = self.per_sql.lock().unwrap();
+        let table = guard.as_ref()?;
+        let names = table
+            .iter()
+            .find(|(needle, _)| sql.contains(needle.as_str()))
+            .unwrap_or_else(|| panic!("set_columns_per_sql has no arm matching {sql:?}"))
+            .1
+            .clone();
+        Some(names.iter().map(|n| col(n)).collect())
+    }
+
     fn out_columns(&self) -> Vec<ColumnMeta> {
         match self.columns.lock().unwrap().as_ref() {
             Some(names) => names.iter().map(|n| col(n)).collect(),
             None => vec![col("n")],
         }
+    }
+
+    /// What an EXECUTION of `sql` returns: the per-statement table when one is
+    /// installed, otherwise the suite's existing sticky/default columns.
+    fn out_columns_for(&self, sql: &str) -> Vec<ColumnMeta> {
+        self.per_sql_columns(sql)
+            .unwrap_or_else(|| self.out_columns())
+    }
+
+    /// What a DESCRIBE of `sql` returns. Without a per-statement table this is
+    /// the single column `n` every other test in these suites was written
+    /// against — deliberately NOT `out_columns`, so installing `set_columns`
+    /// still changes only what execution returns.
+    fn describe_columns(&self, sql: &str) -> Vec<ColumnMeta> {
+        self.per_sql_columns(sql).unwrap_or_else(|| vec![col("n")])
     }
 }
 
@@ -192,9 +261,9 @@ impl egret_query_api::QueryExecPort for FakePort {
         _ws: Uuid,
         _database_id: Uuid,
         _principal: UserId,
-        _sql: &str,
+        sql: &str,
     ) -> Result<Vec<ColumnMeta>, Error> {
-        Ok(vec![col("n")])
+        Ok(self.describe_columns(sql))
     }
 
     /// Publish describes the RENDERED statement, which carries `?` markers, so
@@ -207,10 +276,10 @@ impl egret_query_api::QueryExecPort for FakePort {
         _ws: Uuid,
         _database_id: Uuid,
         _principal: UserId,
-        _sql: &str,
+        sql: &str,
         _param_count: usize,
     ) -> Result<Vec<ColumnMeta>, Error> {
-        Ok(vec![col("n")])
+        Ok(self.describe_columns(sql))
     }
 
     /// Deliberately NOT the method the serving path calls, and it returns rows
@@ -235,7 +304,7 @@ impl egret_query_api::QueryExecPort for FakePort {
         self.executions.fetch_add(1, Ordering::SeqCst);
         *self.last.lock().unwrap() = Some((sql.to_string(), Vec::new()));
         *self.last_limits.lock().unwrap() = Some((limits.max_rows, limits.timeout));
-        let columns = self.out_columns();
+        let columns = self.out_columns_for(sql);
         Ok(TabularResult {
             // One cell per column, so a test that asked for extra columns still
             // gets a row the serving path's arity check accepts.
@@ -270,7 +339,7 @@ impl egret_query_api::QueryExecPort for FakePort {
         self.executions.fetch_add(1, Ordering::SeqCst);
         *self.last.lock().unwrap() = Some((sql.to_string(), params.to_vec()));
         *self.last_limits.lock().unwrap() = Some((limits.max_rows, limits.timeout));
-        let columns = self.out_columns();
+        let columns = self.out_columns_for(sql);
         Ok(TabularResult {
             rows: vec![vec![
                 serde_json::json!(

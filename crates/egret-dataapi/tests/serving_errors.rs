@@ -1143,3 +1143,292 @@ async fn an_internal_fault_is_never_classified_as_a_data_access_denial() {
         res.body
     );
 }
+
+// ---------------------------------------------------------------------------
+// M1 Task 8 — the defect from spec §1.3, driven end to end
+// ---------------------------------------------------------------------------
+
+/// **The defect this whole change exists for, through publish AND serving.**
+///
+/// Spec §1.3: a conditional projection published green and then answered
+/// `503 schema_drift` on `?detail=false` — and on the call with NO query string
+/// at all, which is the default the endpoint's own generated OpenAPI document
+/// advertises. Only `?detail=true` worked, because publish described the one
+/// rendering the representative (truthy) values happened to take and froze THAT
+/// branch's columns as the contract; every other branch then failed serving's
+/// schema check with a row it had just fetched successfully.
+///
+/// Every other test in this change measures one half. This one is the only place
+/// the two halves meet: the union can be computed perfectly at publish while
+/// `shape_rows` still demands equality, and each half's own suite would stay
+/// green. It lives here because this file owns the `schema_drift` cases, and
+/// this test retires one of them.
+///
+/// # What stops it passing vacuously
+///
+/// `FakePort::set_columns_per_sql` answers `{id, name}` only for the statement
+/// that CONTAINS `name`, and `{id}` for everything else — for describe and for
+/// execute alike. So:
+///
+/// * if publish froze one branch instead of the union, the frozen list is
+///   `{id, name}` (or `{id}`) and two of the three calls below drift;
+/// * if serving still compared column SETS for equality, the two calls that
+///   omit `name` are `503`;
+/// * if nothing rendered at all, every call executes the same statement and the
+///   `?detail=true` assertion — two keys, not one — fails.
+///
+/// Measured red at `fc530bc7` (the tree before any of this change landed): the
+/// bare call and `?detail=false` both returned `503 schema_drift`.
+#[tokio::test]
+async fn a_conditional_endpoint_serves_its_own_default_call() {
+    let Some(f) = serving_common::fixture().await else {
+        eprintln!("DATABASE_URL unset — skipping");
+        return;
+    };
+    // First arm wins, so the fallback is last. Installed BEFORE publish, since
+    // publish is where the union is described and frozen.
+    f.port
+        .set_columns_per_sql(&[("name", &["id", "name"][..]), ("", &["id"][..])]);
+
+    f.publish_with_params(
+        "/cond",
+        f.database_id,
+        serde_json::json!({ "enabled": false }),
+        serde_json::json!({}),
+        "SELECT id {% if detail %}, name {% endif %}FROM t",
+        // Optional and with no default: `required` and `default` both take their
+        // serde defaults, which is the exact shape spec §1.3 describes.
+        serde_json::json!([{ "name": "detail", "type": "boolean", "location": "query" }]),
+    )
+    .await;
+
+    // 1. The documented default: no query string at all. This was the 503.
+    let bare = f.call_as(f.principal_a, "cond").await;
+    assert_eq!(
+        bare.status,
+        StatusCode::OK,
+        "the call the endpoint's own document advertises: {}",
+        bare.body
+    );
+    assert_eq!(
+        keys(&bare.body["data"][0]),
+        vec!["id"],
+        "an optional column a branch does not return must be ABSENT, not null: {}",
+        bare.body
+    );
+
+    // 2. The parameter sent explicitly false — the same branch, reached the
+    //    other way. Kept separate because the absent context and the `false`
+    //    probe are two different renders at publish, and only one of them is
+    //    produced by `render_permutations`.
+    let off = f.call_as(f.principal_a, "cond?detail=false").await;
+    assert_eq!(off.status, StatusCode::OK, "{}", off.body);
+    assert_eq!(keys(&off.body["data"][0]), vec!["id"], "{}", off.body);
+
+    // 3. The branch that always worked, so a fix that simply stopped checking
+    //    anything is still visible: this one has to gain a column.
+    let on = f.call_as(f.principal_a, "cond?detail=true").await;
+    assert_eq!(on.status, StatusCode::OK, "{}", on.body);
+    assert_eq!(keys(&on.body["data"][0]), vec!["id", "name"], "{}", on.body);
+
+    // And the contract the caller is handed is the UNION, with `name` marked
+    // optional — not the branch this particular call took. Without this the
+    // three assertions above are satisfied by a serving path that ignores the
+    // frozen list entirely.
+    let declared: Vec<(&str, bool)> = on.body["meta"]["columns"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no meta.columns in {}", on.body))
+        .iter()
+        .map(|c| {
+            (
+                c["name"].as_str().expect("column name"),
+                c["required"].as_bool().expect("column required"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        declared,
+        vec![("id", true), ("name", false)],
+        "publish froze one branch rather than the union of them: {}",
+        on.body
+    );
+}
+
+/// **The same defect BEYOND the probe budget, which no cap can reach.**
+///
+/// `render::MAX_PROBES` counts the base context itself, so a single parameter
+/// reaches at most sixty-three candidates however high `MAX_ENUM_CANDIDATES`
+/// is set. An enum with a hundred allowed values and a `default` at index 90
+/// therefore has NO route into the probe set at all — and it is the value every
+/// call with no query string sends.
+///
+/// This is the test the cap raise cannot satisfy, and it is why the declared
+/// default is a CONTEXT (`lifecycle::resting`) rather than a candidate: a
+/// context is always rendered and cannot be starved by a wide definition. The
+/// sibling test above is the defect as reported; this one is the general rule.
+#[tokio::test]
+async fn an_enum_default_beyond_the_probe_budget_still_serves_its_default_call() {
+    let Some(f) = serving_common::fixture().await else {
+        eprintln!("DATABASE_URL unset — skipping");
+        return;
+    };
+    f.port
+        .set_columns_per_sql(&[("wide_col", &["id", "wide_col"][..]), ("", &["id"][..])]);
+
+    let allowed: Vec<String> = (0..100).map(|i| format!("v{i}")).collect();
+    f.publish_with_params(
+        "/enumwide",
+        f.database_id,
+        serde_json::json!({ "enabled": false }),
+        serde_json::json!({}),
+        "SELECT id {% if mode | value == 'v90' %}, wide_col {% endif %}FROM t",
+        serde_json::json!([{
+            "name": "mode", "type": "enum", "location": "query",
+            "default": "v90", "allowed": allowed
+        }]),
+    )
+    .await;
+
+    let bare = f.call_as(f.principal_a, "enumwide").await;
+    assert_eq!(
+        bare.status,
+        StatusCode::OK,
+        "the default is past every candidate the budget can reach: {}",
+        bare.body
+    );
+    assert_eq!(
+        keys(&bare.body["data"][0]),
+        vec!["id", "wide_col"],
+        "{}",
+        bare.body
+    );
+
+    // The other side, so a fix that stopped checking anything is still visible.
+    let off = f.call_as(f.principal_a, "enumwide?mode=v0").await;
+    assert_eq!(off.status, StatusCode::OK, "{}", off.body);
+    assert_eq!(keys(&off.body["data"][0]), vec!["id"], "{}", off.body);
+}
+
+/// The keys of one row object, in the order the body carries them.
+fn keys(row: &serde_json::Value) -> Vec<&str> {
+    row.as_object()
+        .unwrap_or_else(|| panic!("expected an object row, got {row}"))
+        .keys()
+        .map(String::as_str)
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Whole-branch review, Important 1 — an enum's own DEFAULT is never described
+// ---------------------------------------------------------------------------
+
+/// **The headline defect, reproduced through a CONSTRAINED parameter.**
+///
+/// `render::candidates` answers an enum with its `allowed` list and nothing
+/// else — the definition's own literals are not consulted for it — and then
+/// takes only the first `MAX_ENUM_CANDIDATES` of them. `branch_statements`
+/// gives an absent context only to parameters with `default.is_none()`, which
+/// is right (serving substitutes the default, so the parameter is never
+/// absent), but it means the default's own branch has exactly one route into
+/// the probe set: being a candidate.
+///
+/// So an enum whose `default` sits past the cap is never rendered at publish.
+/// The union is built without its columns, publish is green, and the call with
+/// NO query string — the one `openapi_gen` advertises as the default — answers
+/// `503 schema_drift`. That is the §1.3 defect this whole change exists to
+/// remove, back again through the one parameter type that is supposed to be
+/// the most tightly described.
+///
+/// The perversity worth keeping: a plain `string` parameter would have been
+/// probed with `'revenue'`, because a non-enum scalar harvests its candidates
+/// from the definition's own literals and `'revenue'` is written right there in
+/// the `{% if %}`. Constraining the type is what created the blind spot.
+#[tokio::test]
+async fn an_enum_default_past_the_candidate_cap_still_serves_its_default_call() {
+    let Some(f) = serving_common::fixture().await else {
+        eprintln!("DATABASE_URL unset — skipping");
+        return;
+    };
+    f.port.set_columns_per_sql(&[
+        ("revenue_rank", &["id", "revenue_rank"][..]),
+        ("", &["id"][..]),
+    ]);
+
+    // Twelve allowed values with the DEFAULT at index 10 — past the cap of
+    // eight, and deliberately not `allowed[0]`, which is the value
+    // `representative_value` picks.
+    f.publish_with_params(
+        "/enumdef",
+        f.database_id,
+        serde_json::json!({ "enabled": false }),
+        serde_json::json!({}),
+        "SELECT id {% if mode | value == 'revenue' %}, revenue_rank {% endif %}FROM t",
+        serde_json::json!([{
+            "name": "mode",
+            "type": "enum",
+            "location": "query",
+            "default": "revenue",
+            "allowed": [
+                "a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8", "a9",
+                "revenue", "z11"
+            ]
+        }]),
+    )
+    .await;
+
+    // The documented default call: no query string at all.
+    let bare = f.call_as(f.principal_a, "enumdef").await;
+    assert_eq!(
+        bare.status,
+        StatusCode::OK,
+        "the call the endpoint's own document advertises: {}",
+        bare.body
+    );
+    assert_eq!(
+        keys(&bare.body["data"][0]),
+        vec!["id", "revenue_rank"],
+        "the default's branch must be served, not merely accepted: {}",
+        bare.body
+    );
+
+    // The same value sent explicitly, which is the same branch reached the
+    // other way. Kept separate: the default is applied in `serving::params` and
+    // an explicit value in the coercion path, and only one of them is what
+    // publish had to anticipate.
+    let sent = f.call_as(f.principal_a, "enumdef?mode=revenue").await;
+    assert_eq!(sent.status, StatusCode::OK, "{}", sent.body);
+    assert_eq!(
+        keys(&sent.body["data"][0]),
+        vec!["id", "revenue_rank"],
+        "{}",
+        sent.body
+    );
+
+    // A value from the OTHER side of the `{% if %}`, so a fix that simply
+    // stopped checking anything is still visible: this one has to LOSE the
+    // column, and it has to keep its 200.
+    let off = f.call_as(f.principal_a, "enumdef?mode=a0").await;
+    assert_eq!(off.status, StatusCode::OK, "{}", off.body);
+    assert_eq!(keys(&off.body["data"][0]), vec!["id"], "{}", off.body);
+
+    // And the frozen contract is the union, with `revenue_rank` optional —
+    // without this the three assertions above are satisfied by a serving path
+    // that ignores the frozen list.
+    let declared: Vec<(&str, bool)> = sent.body["meta"]["columns"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no meta.columns in {}", sent.body))
+        .iter()
+        .map(|c| {
+            (
+                c["name"].as_str().expect("column name"),
+                c["required"].as_bool().expect("column required"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        declared,
+        vec![("id", true), ("revenue_rank", false)],
+        "the enum's default branch never entered the union: {}",
+        sent.body
+    );
+}
