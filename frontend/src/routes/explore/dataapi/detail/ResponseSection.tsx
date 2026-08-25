@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -10,6 +10,7 @@ import {
   useDataApiListEndpointVersions,
   useDataApiListServiceAccounts,
 } from "@/api/generated/data-api/data-api";
+import type { ColumnSpec } from "@/api/generated/model";
 import { useEndpointDetail } from "../EndpointDetail";
 import { DownloadOpenApiDialog } from "../DownloadOpenApiDialog";
 
@@ -26,11 +27,27 @@ interface OpenApiDocPreview {
 
 /**
  * What a consumer actually receives when they call this endpoint: the frozen
- * `columns` of the LIVE version (never the draft — a draft can differ from
- * what is currently served, and this section exists to show the real
- * contract), the `output.shape`/`naming` controls that decide how those
- * columns are keyed in the response body, and the served base URL plus the
- * per-service-account OpenAPI download.
+ * columns of the LIVE version (never the draft — a draft can differ from what
+ * is currently served, and this section exists to show the real contract), the
+ * `output` controls that decide how those columns are keyed and wrapped in the
+ * response body, and the served base URL plus the per-service-account OpenAPI
+ * download.
+ *
+ * # One contract per statement
+ *
+ * A snapshot freezes a LIST of statements (M2), each with its own columns, so
+ * this section renders one `Name | Type` table PER statement. At one statement
+ * — the common case, and the shape migration 0129 gave every endpoint that
+ * pre-dated the list — it renders exactly the one unlabelled table it always
+ * did: that endpoint answers with an ARRAY, so its statement name is not a key
+ * any caller reads, and printing it here would put a word on screen that looks
+ * like part of the contract and is not one. With several, `data` and
+ * `meta.statements` are both objects keyed by that name, so the name IS the
+ * contract and each table is labelled with it.
+ *
+ * The four FETCH states stay one table between them. A state is about the
+ * request, not about a statement; repeating "Loading…" once per statement would
+ * say it N times about one fetch.
  *
  * # Why there are no `Card`s here any more, having deliberately kept two
  *
@@ -76,8 +93,11 @@ interface OpenApiDocPreview {
  * not the reason either of these went. The reason is that both blocks read as
  * the same *kind* of thing as their four sibling sections, and now look it.
  *
- * The `output` controls are unchanged: a `Setting | Details | Value` table
- * whose "Output shape" heading is a `ConfigTableGroup` row.
+ * The `output` controls are a `Setting | Details | Value` table whose "Output
+ * shape" heading is a `ConfigTableGroup` row. `Envelope` joined `Shape` and
+ * `Naming` there because it had shipped with no control at all: `bare` was
+ * reachable through the API and invisible to whoever publishes the endpoint —
+ * the same gap `required` had, and had to be come back for.
  *
  * # What a frozen column's `required` adds, and why it is a badge
  *
@@ -131,6 +151,70 @@ function mayBeAbsent(column: { required?: boolean }): boolean {
   return column.required === false;
 }
 
+/**
+ * The `Name | Type` frame, with whatever rows it is given.
+ *
+ * Two short columns — a column name and a type. Left at the shared `Table`'s
+ * `w-full`, `bigint` sat a screen-width away from the column it describes even
+ * inside the section cap, so it keeps the `max-w-xl` the width pass gave it
+ * (§5.1). Auto layout, not `table-fixed`: nothing here truncates, and the state
+ * rows are sentences that want to wrap rather than scroll.
+ *
+ * A component rather than a copy per branch because a several-statement
+ * contract renders one of these PER STATEMENT, and the headers are what say
+ * what the list records in every state.
+ */
+function ColumnTable({ children }: { children: ReactNode }) {
+  return (
+    <Table className="max-w-xl">
+      <TableHeader>
+        <TableRow>
+          <TableHead>Name</TableHead>
+          <TableHead>Type</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>{children}</TableBody>
+    </Table>
+  );
+}
+
+/** One row per frozen column, with the exception marked. */
+function ColumnRows({ columns }: { columns: ColumnSpec[] }) {
+  return (
+    <>
+      {columns.map((c) => (
+        <TableRow key={c.name}>
+          {/* The badge marks the EXCEPTION, and rides in the Name cell rather
+              than in a `Required` column of its own. §4.3: a column whose every
+              cell is identical is section-level copy in disguise — and every
+              endpoint published before the branching-columns work, plus every
+              endpoint whose definition does not branch, has every column
+              guaranteed, so a third column would hold one repeated word in
+              every cell of the common case while costing width in the one table
+              §5.1 measured down to `max-w-xl` precisely because the type had
+              drifted away from the name it describes.
+
+              Text, not a colour or an icon: it has to be legible without a
+              hover and to a reader who is not reading visually. The Name cell
+              keeps its own `font-mono text-xs` on the name alone — the badge's
+              label is prose. */}
+          <TableCell className="py-2">
+            <span className="flex items-center gap-2">
+              <span className="font-mono text-xs">{c.name}</span>
+              {mayBeAbsent(c) && (
+                <Badge variant="outline" className="text-muted-foreground">
+                  May be absent
+                </Badge>
+              )}
+            </span>
+          </TableCell>
+          <TableCell className="py-2 text-muted-foreground">{c.ty}</TableCell>
+        </TableRow>
+      ))}
+    </>
+  );
+}
+
 export default function ResponseSection() {
   const { ws, id, endpoint, form, setForm } = useEndpointDetail();
 
@@ -140,9 +224,14 @@ export default function ResponseSection() {
   const versionsEnvelope = versionsQuery.data;
   const versions = versionsEnvelope?.status === 200 ? versionsEnvelope.data : [];
   const liveVersion = versions.find((v) => v.is_live);
-  // Only the LIVE version's columns, same as the table below: the caveat
-  // explains a marker, so it must be computed from the rows that carry it.
-  const hasOptionalColumn = !!liveVersion?.snapshot.columns.some(mayBeAbsent);
+  // A snapshot freezes one column set PER STATEMENT (M2) — an endpoint has one
+  // result set per statement, and a union of them would report a contract no
+  // version holds.
+  const frozen = liveVersion?.snapshot.statements ?? [];
+  // Only the LIVE version's columns, same as the tables below: the caveat
+  // explains a marker, so it must be computed from the rows that carry it —
+  // across every statement, because any of them can contribute one.
+  const hasOptionalColumn = frozen.some((s) => s.columns.some(mayBeAbsent));
   // The endpoint record says a live version exists, but this section's own
   // fetch of it hasn't landed yet — distinct from "never published", which is
   // `!endpoint.live_version_id` below. Conflating the two would flash "no
@@ -223,84 +312,70 @@ export default function ResponseSection() {
             row entirely, never null. Every other column is in every response.
           </p>
         )}
-        {/* Two short columns — a column name and a type. Left at the shared
-            `Table`'s `w-full`, `bigint` sat a screen-width away from the column
-            it describes even inside the section cap, so the table keeps the
-            `max-w-xl` it was given in the width pass (§5.1). Auto layout, not
-            `table-fixed`: nothing here truncates, and the state rows below are
-            sentences that want to wrap rather than scroll. */}
-        <Table className="max-w-xl">
-          <TableHeader>
-            <TableRow>
-              <TableHead>Name</TableHead>
-              <TableHead>Type</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {/* The four states are rows spanning the table rather than a branch
-                that replaces it (§4.3), so `Name`/`Type` are on screen in every
-                one of them — with the card gone there is otherwise nothing left
-                to say what this list even records. `whitespace-normal` because
-                the shared `TableCell` is `whitespace-nowrap` and these are
-                sentences. */}
-            {columnsLoading ? (
-              <TableRow className="hover:bg-transparent">
-                <TableCell colSpan={2} className="whitespace-normal text-sm text-muted-foreground">
-                  Loading…
-                </TableCell>
-              </TableRow>
-            ) : columnsErrored ? (
-              <TableRow className="hover:bg-transparent">
-                <TableCell colSpan={2} className="whitespace-normal">
-                  <Alert variant="destructive">
-                    <AlertDescription>
-                      Could not load the published contract.{" "}
-                      {(versionsQuery.error as unknown as Error)?.message ?? "Try again in a moment."}
-                    </AlertDescription>
-                  </Alert>
-                </TableCell>
-              </TableRow>
-            ) : !endpoint.live_version_id || !liveVersion ? (
-              <TableRow className="hover:bg-transparent">
-                <TableCell colSpan={2} className="whitespace-normal text-sm text-muted-foreground">
-                  This endpoint has no live version yet. Publish it to see the columns a consumer will
-                  receive — these come from the published contract, not the draft.
-                </TableCell>
-              </TableRow>
-            ) : (
-              liveVersion.snapshot.columns.map((c) => (
-                <TableRow key={c.name}>
-                  {/* The badge marks the EXCEPTION, and rides in the Name cell
-                      rather than in a `Required` column of its own. §4.3: a
-                      column whose every cell is identical is section-level copy
-                      in disguise — and every endpoint published before the
-                      branching-columns work, plus every endpoint whose
-                      definition does not branch, has every column guaranteed,
-                      so a third column would hold one repeated word in every
-                      cell of the common case while costing width in the one
-                      table §5.1 measured down to `max-w-xl` precisely because
-                      the type had drifted away from the name it describes.
+        {/* The four states are rows spanning the table rather than a branch
+            that replaces it (§4.3), so `Name`/`Type` are on screen in every one
+            of them — with the card gone there is otherwise nothing left to say
+            what this list even records. `whitespace-normal` because the shared
+            `TableCell` is `whitespace-nowrap` and these are sentences.
 
-                      Text, not a colour or an icon: it has to be legible
-                      without a hover and to a reader who is not reading
-                      visually. The Name cell keeps its own `font-mono text-xs`
-                      on the name alone — the badge's label is prose. */}
-                  <TableCell className="py-2">
-                    <span className="flex items-center gap-2">
-                      <span className="font-mono text-xs">{c.name}</span>
-                      {mayBeAbsent(c) && (
-                        <Badge variant="outline" className="text-muted-foreground">
-                          May be absent
-                        </Badge>
-                      )}
-                    </span>
-                  </TableCell>
-                  <TableCell className="py-2 text-muted-foreground">{c.ty}</TableCell>
-                </TableRow>
-              ))
-            )}
-          </TableBody>
-        </Table>
+            One table for the states even when the contract has several
+            statements: a state is about the FETCH, not about a statement, and
+            repeating "Loading…" once per statement would say it N times about
+            one request. */}
+        {columnsLoading ? (
+          <ColumnTable>
+            <TableRow className="hover:bg-transparent">
+              <TableCell colSpan={2} className="whitespace-normal text-sm text-muted-foreground">
+                Loading…
+              </TableCell>
+            </TableRow>
+          </ColumnTable>
+        ) : columnsErrored ? (
+          <ColumnTable>
+            <TableRow className="hover:bg-transparent">
+              <TableCell colSpan={2} className="whitespace-normal">
+                <Alert variant="destructive">
+                  <AlertDescription>
+                    Could not load the published contract.{" "}
+                    {(versionsQuery.error as unknown as Error)?.message ?? "Try again in a moment."}
+                  </AlertDescription>
+                </Alert>
+              </TableCell>
+            </TableRow>
+          </ColumnTable>
+        ) : !endpoint.live_version_id || !liveVersion ? (
+          <ColumnTable>
+            <TableRow className="hover:bg-transparent">
+              <TableCell colSpan={2} className="whitespace-normal text-sm text-muted-foreground">
+                This endpoint has no live version yet. Publish it to see the columns a consumer will
+                receive — these come from the published contract, not the draft.
+              </TableCell>
+            </TableRow>
+          </ColumnTable>
+        ) : frozen.length <= 1 ? (
+          // The common case, and byte-identical to what it rendered before an
+          // endpoint could have several statements: one table, no name. A
+          // one-statement endpoint answers with an ARRAY, so its statement name
+          // is not a key any caller reads — printing it here would put a word
+          // on screen that looks like part of the contract and is not one.
+          <ColumnTable>
+            <ColumnRows columns={frozen[0]?.columns ?? []} />
+          </ColumnTable>
+        ) : (
+          // With several, the name IS part of the contract: `data` and
+          // `meta.statements` are both objects keyed by it. One table each, and
+          // each under its own name, because these are separate result sets —
+          // a single table with a `Statement` column would read as one contract
+          // with a repeated qualifier.
+          frozen.map((s) => (
+            <div key={s.name} className="space-y-1 pt-2">
+              <h4 className="font-mono text-xs font-medium">{s.name}</h4>
+              <ColumnTable>
+                <ColumnRows columns={s.columns} />
+              </ColumnTable>
+            </div>
+          ))
+        )}
       </div>
 
       <ConfigTable detailsClassName="max-w-prose">
@@ -339,6 +414,34 @@ export default function ResponseSection() {
               <SelectItem value="as_is">As-is</SelectItem>
               <SelectItem value="camel">camelCase</SelectItem>
               <SelectItem value="snake">snake_case</SelectItem>
+            </SelectContent>
+          </Select>
+        </ConfigTableRow>
+        {/* `output.envelope` shipped with no control at all — `bare` was
+            reachable through the API and invisible to the person publishing the
+            endpoint, which is the same gap `required` had and had to be come
+            back for.
+
+            The default is spelled here as `"wrapped"` rather than left blank,
+            and it matches `serving::router::envelope_of`: an absent value —
+            what every endpoint saved before this field existed carries — serves
+            the WRAPPER, so an unpublished endpoint cannot change shape by being
+            re-read. Anything unrecognised serves the wrapper too, and logs. */}
+        <ConfigTableRow
+          label="Envelope"
+          htmlFor="resp-envelope"
+          details="Wrapped answers with status, message, data and meta around the rows. Bare answers with the rows alone — no version, no cache flag, no request id. A refused call still answers with the full error body either way."
+        >
+          <Select
+            value={form.output.envelope ?? "wrapped"}
+            onValueChange={(v) => setForm((f) => ({ ...f, output: { ...f.output, envelope: v } }))}
+          >
+            <SelectTrigger id="resp-envelope" className="w-full" aria-label="Envelope">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="wrapped">Wrapped</SelectItem>
+              <SelectItem value="bare">Bare — data only</SelectItem>
             </SelectContent>
           </Select>
         </ConfigTableRow>

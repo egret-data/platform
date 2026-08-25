@@ -10,6 +10,7 @@ import type { LimitsSpec } from './limitsSpec';
 import type { OutputSpec } from './outputSpec';
 import type { ParamSpec } from './paramSpec';
 import type { RateLimitSpec } from './rateLimitSpec';
+import type { StatementSpec } from './statementSpec';
 
 /**
  * The `POST` body.
@@ -47,7 +48,14 @@ export interface CreateEndpointInput {
      * body, so nothing else would stop it naming another workspace's database.
      */
   database_id: string;
-  sql: string;
+  /**
+     * The statements this endpoint runs, in order. Required and non-empty:
+     * [`egret_dataapi_api::validate_statements`] refuses an empty list, a name
+     * that is not an identifier, and a repeated name, all as a 400 naming the
+     * reason — the schema's own `CHECK` behind it means an empty list is not
+     * merely refused here but unrepresentable.
+     */
+  statements: StatementSpec[];
   /** @nullable */
   method?: string | null;
   description?: string;

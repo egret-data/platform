@@ -375,6 +375,16 @@ async fn delete_leaves_named_secret() {
 /// Inserts directly into `dataapi.endpoints` with raw SQL rather than taking
 /// a dependency on `egret-dataapi`/`egret-dataapi-api`: this crate must not
 /// depend downward on a seam that itself depends on it.
+///
+/// **That independence has a running cost, and this test has already paid it
+/// once.** A raw string naming another seam's columns compiles no matter what
+/// that seam's schema does, so M2's migration 0129 — which replaced
+/// `dataapi.endpoints.sql` with `statements jsonb` — left this seed inserting
+/// into a dropped column and the failure only appeared at run time, in a crate
+/// no M2 task had reason to open. The sibling seeds in `egret-automation`'s
+/// tests were updated with the migration; this one was not. Keep the literal in
+/// step with `dataapi.endpoints`, or the test measures a broken seed rather than
+/// the FK it is named after.
 #[tokio::test]
 async fn delete_conflicts_when_a_dataapi_endpoint_still_references_it() {
     let Some((r, _ws, db, wid)) = repo_with_db(true).await else {
@@ -387,8 +397,9 @@ async fn delete_conflicts_when_a_dataapi_endpoint_still_references_it() {
         .unwrap();
 
     sqlx::query(
-        "INSERT INTO dataapi.endpoints (workspace_id, name, path, database_id, sql) \
-         VALUES ($1, 'blocks delete', '/blocks-delete', $2, 'SELECT 1')",
+        "INSERT INTO dataapi.endpoints (workspace_id, name, path, database_id, statements) \
+         VALUES ($1, 'blocks delete', '/blocks-delete', $2, \
+                 '[{\"name\":\"main\",\"sql\":\"SELECT 1\"}]')",
     )
     .bind(wid)
     .bind(database.id)

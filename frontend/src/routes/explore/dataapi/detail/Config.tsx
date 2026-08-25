@@ -7,12 +7,35 @@ import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { ConfigTable, ConfigTableGroup, ConfigTableRow } from "@/components/config/ConfigTable";
 import { useDataApiValidateEndpoint } from "@/api/generated/data-api/data-api";
-import { CacheScope } from "@/api/generated/model";
+import { CacheScope, type StatementSnapshot } from "@/api/generated/model";
 import { useEndpointDetail } from "../EndpointDetail";
 
+/**
+ * What `POST /validate` came back with.
+ *
+ * `statements`, not `columns`: the response carries one entry per statement,
+ * each with the columns `describe` resolved for it (M2). Folding them into one
+ * list would report a contract no version will ever hold — two statements each
+ * returning a `total` are two result sets, not one column declared twice.
+ */
 type Validation =
-  | { ok: true; columns: { name: string; ty: string }[] }
+  | { ok: true; statements: StatementSnapshot[] }
   | { ok: false; message: string };
+
+/**
+ * "Resolves to 2 columns: a (int), b (int)", or the same without the lead-in
+ * for a line that is already labelled with its statement's name.
+ *
+ * One function rather than two strings so the singular/plural and the
+ * "no columns at all" case cannot diverge between the one-statement sentence
+ * and the several-statement list.
+ */
+function describeColumns(columns: { name: string; ty: string }[], bare = false): string {
+  const count = `${columns.length} column${columns.length === 1 ? "" : "s"}`;
+  const named = columns.map((c) => `${c.name} (${c.ty})`).join(", ");
+  if (columns.length === 0) return bare ? count : `Resolves to ${count}`;
+  return bare ? `${count} — ${named}` : `Resolves to ${count}: ${named}`;
+}
 
 /**
  * Everything about the endpoint as an HTTP object: the URL contract callers use,
@@ -41,7 +64,7 @@ export default function Config() {
     setValidation(null);
     try {
       const res = await validateMutation.mutateAsync({ workspace: ws, id });
-      if (res.status === 200) setValidation({ ok: true, columns: res.data.columns });
+      if (res.status === 200) setValidation({ ok: true, statements: res.data.statements });
     } catch (e) {
       setValidation({ ok: false, message: e instanceof Error ? e.message : String(e) });
     }
@@ -351,9 +374,26 @@ export default function Config() {
           (validation.ok ? (
             <Alert>
               <AlertDescription>
-                Resolves to {validation.columns.length} column{validation.columns.length === 1 ? "" : "s"}
-                {validation.columns.length > 0 &&
-                  `: ${validation.columns.map((c) => `${c.name} (${c.ty})`).join(", ")}`}
+                {/* One statement keeps the sentence it always had, name and
+                    all left out: its response is an ARRAY, so `main` is not a
+                    key any caller reads, and printing it here would be the
+                    first thing on this page to suggest otherwise. Several get
+                    a list, because each one is a separately-keyed result set
+                    with its own contract. */}
+                {validation.statements.length <= 1 ? (
+                  // `<= 1`, not `=== 1`: a validate that resolves nothing must
+                  // still say "Resolves to 0 columns" rather than render an
+                  // empty list with no sentence at all.
+                  describeColumns(validation.statements[0]?.columns ?? [])
+                ) : (
+                  <ul className="space-y-0.5">
+                    {validation.statements.map((s) => (
+                      <li key={s.name}>
+                        <span className="font-mono">{s.name}</span>: {describeColumns(s.columns, true)}
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </AlertDescription>
             </Alert>
           ) : (

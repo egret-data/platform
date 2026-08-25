@@ -56,6 +56,7 @@ use axum::Json;
 use serde::Serialize;
 
 use super::ratelimit::retry_after_secs;
+use super::router::ServingStatus;
 use super::ServingError;
 
 /// How long a caller is asked to wait before retrying a 503 caused by published
@@ -144,6 +145,20 @@ pub(crate) fn is_permission_denied(msg: &str) -> bool {
 /// would then be typed against whichever won.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ServingErrorBody {
+    /// Always [`ServingStatus::Error`] here, and DERIVED from the status this
+    /// response will actually carry rather than written as a constant — see
+    /// [`ServingStatus`]. `status` mirrors the HTTP status; it never replaces
+    /// it, and a body saying `"error"` under a `200` is the failure mode the
+    /// mirror exists to make unrepresentable.
+    pub status: ServingStatus,
+    /// The same human-readable string as `error.message`, lifted to where the
+    /// success envelope carries it (`null` there) so that `status` and
+    /// `message` are readable on EVERY serving response without knowing first
+    /// which of the two bodies arrived.
+    ///
+    /// `error.code` is what a client branches on and is untouched; this is the
+    /// human half, and it may be reworded.
+    pub message: String,
     pub error: ServingErrorDetail,
 }
 
@@ -367,10 +382,17 @@ impl Wire {
     /// `tracing` line carrying the detail, and in `dataapi.access_log` — three
     /// places that are only useful if they agree.
     pub(crate) fn into_response(self, request_id: &str) -> Response {
+        let message = self.message.into_owned();
         let body = Json(ServingErrorBody {
+            // Read off `self.status`, the very value the tuple below turns into
+            // the status line. The two spellings of one outcome are therefore
+            // one decision, and a `200` carrying `"status":"error"` is not a
+            // thing this function can produce.
+            status: ServingStatus::mirroring(self.status),
+            message: message.clone(),
             error: ServingErrorDetail {
                 code: self.code.to_string(),
-                message: self.message.into_owned(),
+                message,
                 request_id: request_id.to_string(),
             },
         });

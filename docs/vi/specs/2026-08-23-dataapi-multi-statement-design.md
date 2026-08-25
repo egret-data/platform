@@ -288,6 +288,60 @@ Các câu lệnh được **đặt tên**, không đánh theo vị trí. Tên t�
 không vỡ khi tác giả chèn thêm một câu lệnh vào giữa. §6 ghi rằng SQLREST chọn vị trí và vì
 sao ta làm khác.
 
+### 4.1.1 M1 đã chiếm mất từ "statement", và nó mang nghĩa khác
+
+Viết sau khi M1 đã lên, vì §4.1 ở trên ra đời trước nó.
+
+Trong mã đã ship, **"statement" nghĩa là một permutation đã render của MỘT định nghĩa
+SQL**: `MAX_PUBLISHED_STATEMENTS = 64` chặn số *nhánh* của một định nghĩa mà publish sẽ
+describe, còn `DescribedBranches::per_statement` giữ một danh sách tên cột cho mỗi *nhánh*.
+Ở §4.1 cùng từ đó lại nghĩa là **một trong N định nghĩa SQL của endpoint**. Hai nghĩa, một
+module — và va chạm này không phải chuyện thẩm mỹ: sau M2, ai gặp `MAX_PUBLISHED_STATEMENTS`
+sẽ hiểu là giới hạn số câu lệnh mỗi endpoint, mà nó không phải vậy.
+
+M2 đổi tên cách dùng của M1 sang *branch* — `MAX_DESCRIBED_BRANCHES`, `per_branch` — và giữ
+"statement" cho thứ mà tác giả viết ra. Việc đổi tên là cơ học và thuộc về một commit
+riêng, đi trước mọi thay đổi hành vi, để diff hành vi còn đọc được.
+
+**Và bản thân cái trần phải được quyết lại, vì trần của M1 nay sai hình dạng.** Publish
+describe mọi nhánh của mọi câu lệnh, nên tổng là **tổng trên các câu lệnh**, không phải 64
+cho mỗi câu — nếu không thì mười câu lệnh cho phép 640 lượt round-trip xuống engine từ một
+lần publish. Giới hạn áp cho cả endpoint. `MAX_DECLARED_PARAMS = 32` giữ nguyên phạm vi
+endpoint vì tham số dùng chung, nhưng chi phí render trong tiến trình mà nó chặn nay bị
+nhân với N, và ca xấu nhất đã đo (~122 ms) phải **đo lại** chứ không mang sang.
+
+### 4.1.2 Và một trần thứ ba, cho SỐ LƯỢNG câu lệnh
+
+Viết sau khi đã đo lại theo yêu cầu ở §4.1.1. `MAX_STATEMENTS = 16` (`egret-dataapi-api`),
+do `validate_statements` từ chối — nghĩa là ở create, ở PATCH và ở publish, trước lượt scan
+đầu tiên và trước lượt describe đầu tiên rất xa.
+
+**Đã đo, bản release, N = 1…1024.** Chi phí publish trước lượt describe đầu tiên, với câu
+lệnh đắt nhất mà hai trần kia còn cho qua (32 tham số boolean, 530 nhánh): **121 ms mỗi câu
+lệnh, tuyến tính theo N** — 0,99 s ở 8, 1,97 s ở 16, 7,9 s ở 64, **31,6 s ở 256**, toàn bộ
+trả trước khi trần nhánh từ chối endpoint, trên một đường đồng bộ CHIẾM một worker của
+tokio. Phía serving: 42 ms mỗi câu lệnh ở mọi N với engine giả tốn 40 ms (99,0 ms ở N = 2,
+2,7 s ở 64), nên phần của egret chỉ ~2 ms và ca xấu nhất là `N × min(timeout_seconds, 300)`.
+
+`64` là nơi trần nhánh ở §4.1.1 vốn đã chặn N — mỗi câu lệnh tốn ít nhất một lượt describe —
+nhưng chỉ với câu lệnh không có nhánh nào, và chỉ *sau khi* cả N câu đã render xong. `16` là
+8× endpoint chuẩn `rows` + `total`, đúng hệ số mà `MAX_DECLARED_PARAMS` lấy so với bốn tham
+số ở §4.3, và là chỗ hai trần GẶP nhau: 64 / 16 = 4 nhánh mỗi câu lệnh, dưới mức đó thì số
+câu lệnh từ chối, trên mức đó thì trần nhánh từ chối.
+
+**Là một trần đếm, không phải ngân sách thời gian trải trên các câu lệnh.** Ngân sách chỉ có
+thể hỏng GIỮA vòng lặp, và envelope ở §4.4 không diễn đạt được một phản hồi một phần: `data`
+khoá theo tên câu lệnh và `meta.statements` mang một mục cho mỗi câu, nên một body có ba
+trên bốn khoá là client đọc phải một lỗ hổng trong im lặng — đúng kiểu hỏng mà vòng lặp ở
+§4.3 đã từ chối với drift giữa chừng. Chạy hết ngân sách rồi vứt tất cả thì tiêu hết tài
+nguyên trước khi từ chối, và chỉ chạm tới nửa serving; chi phí publish ở trên trả trước khi
+bất kỳ câu lệnh nào chạy. `limits.timeout_seconds` vẫn là núm cho thời gian MỘT câu lệnh.
+
+**Không suy ra từ một mốc thời gian phản hồi.** `Ingress` đang triển khai không đặt
+`proxy-read-timeout`, nên mặc định của ingress-nginx được áp — `proxy_read_timeout 60s`, đọc
+ra từ chính config của controller đang chạy. Mặc định `timeout_seconds` là 30, nên hai câu
+lệnh đã chạm mốc cắt đó trong ca xấu nhất, và không N nào làm ca xấu nhất lọt vào trong đó.
+
 ### 4.2 Tham số dùng chung
 
 Một request mang một bộ tham số. `resolve_supplied` (`serving/params.rs:119`, đi tới từ
@@ -330,11 +384,33 @@ lấy dữ liệu.
 của SQLREST và là phần duy nhất trong thiết kế response của họ đáng chép.
 
 **Đây là breaking change với một API đang sống.** Hình hiện tại là `{data, meta}`, và các
-endpoint P4 đã phục vụ traffic thật từ 2026-08-16. Quyết định phá thay vì version hoá được
+endpoint P4 đã phục vụ traffic thật từ 2026-08-16.
+
+**Đo trên dây sau khi cài đặt, và cách diễn đạt trước đó là nói quá:** với endpoint **một
+câu lệnh**, body thành công là **thuần bổ sung** — `data` và `meta` giữ nguyên hình, chỉ
+thêm khoá `status`/`message` — nên một consumer dễ tính **không hỏng gì cả**. Thứ hỏng là
+consumer **nghiêm ngặt**: client từ chối trường lạ, hoặc client đọc `meta.row_count` trên
+một endpoint nay có nhiều câu lệnh. Quyết định phá thay vì version hoá vẫn giữ; còn lời
+khẳng định rằng mọi consumer đều hỏng thì không. Quyết định phá thay vì version hoá được
 đưa ra có chủ ý: consumer còn ít và nội bộ, API chưa 1.0, và gánh hai hình vỏ mãi mãi đắt
 hơn một lần migrate bây giờ. Migration đặt `envelope = "wrapped"` cho mọi endpoint hiện có,
 và thay đổi này **phải xuất hiện trong ghi chú triển khai**. Nó không im lặng và không được
 phép làm cho im lặng.
+
+**Điều thứ hai ghi chú triển khai phải nói, do rà soát toàn nhánh tìm ra chứ không task nào
+thấy: `dataapi.access_log.row_count` ĐỔI Ý NGHĨA mà không đổi kiểu.** Nay nó là TỔNG trên
+mọi câu lệnh của endpoint; trước M2 nó là số dòng của một câu lệnh. Phần tách theo câu lệnh
+đã được trả cho người gọi trong `meta.statements` và một cột integer không chứa nổi phần
+tách đó, nên ghi tổng là đúng — nhưng cột này dùng chung với mọi thứ đọc bảng. Đã đo: **không
+có gì trong egret đọc nó**. `ActivityStore::summary` và `egret_automation::dataapi_metric`
+đo số lời gọi, số lỗi, tỷ lệ lỗi và phân vị thời lượng, còn CHECK
+`schedule_dataapi_metric_valid` của migration 0128 chỉ nhận đúng sáu tên metric, không tên
+nào dựa trên số dòng — nên hôm nay không cảnh báo Z2 nào đọc nó và cũng không tạo được. Thứ
+bị phơi ra là SQL của chính người vận hành trên cột này, và bất kỳ metric dựa trên số dòng
+nào thêm sau này: nó sẽ trộn số dòng của một câu lệnh (trước nâng cấp) với tổng của cả
+endpoint (sau nâng cấp). Ghi chú phải nói: **các dòng trong `dataapi.access_log` ghi trước
+nâng cấp mang số dòng của một câu lệnh; các dòng ghi sau mang tổng trên mọi câu lệnh của
+endpoint. Một ngưỡng đặt trên cột đó sẽ đọc CAO trên mọi endpoint nhiều câu lệnh.**
 
 ### 4.5 Người gọi được nói gì về tính nhất quán
 

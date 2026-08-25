@@ -1137,8 +1137,43 @@ pub fn context_names(sql: &str) -> Result<Vec<String>, RenderError> {
     Ok(names)
 }
 
-/// The declared parameters this definition iterates over in a `{% for %}`
+/// The declared parameters SOME statement of an endpoint iterates over in a
+/// `{% for %}` header — the union across `sqls`.
+///
+/// **The union is the whole point, and it is why this takes a slice.** One
+/// request's parameters are shared by every statement an endpoint declares
+/// (spec §4.2) and every statement renders against ONE `ParamValues`, so
+/// whether a parameter is a list is a property of the ENDPOINT, not of the
+/// statement being looked at. A signature taking a single `&str` can express
+/// "just this one statement", and both sides of the endpoint — the publish-time
+/// context builder and the serve-time resolver — used to ask it that way on the
+/// publish side and this way on the serving side. They agree only at N = 1;
+/// where they disagree the endpoint publishes green and answers 500 on every
+/// call. There is now one function, and it cannot be asked about one statement
+/// of several.
+///
+/// Order is the order first seen, so a caller that reports the set reports it
+/// deterministically.
+pub fn iterated_params_union(sqls: &[&str], declared: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for sql in sqls {
+        for name in iterated_params(sql, declared) {
+            if !out.iter().any(|o| o == &name) {
+                out.push(name);
+            }
+        }
+    }
+    out
+}
+
+/// The declared parameters ONE definition iterates over in a `{% for %}`
 /// header.
+///
+/// `pub(crate)` and, outside its own tests, called only by
+/// [`iterated_params_union`]: an endpoint's shape decision is the union, and a
+/// caller reaching for this one would be asking the question that used to
+/// disagree with serving. Everything with an endpoint in hand goes through the
+/// union.
 ///
 /// Publish-time only, and it exists because `ParamSpec` has no multiplicity
 /// field: whether a parameter arrives as one value or as a list is decided by
@@ -1151,7 +1186,7 @@ pub fn context_names(sql: &str) -> Result<Vec<String>, RenderError> {
 /// direction it fails in is the safe one: a misclassified parameter makes the
 /// representative render FAIL, which refuses the publish. It cannot make a
 /// definition publish that would not otherwise.
-pub fn iterated_params(sql: &str, declared: &[String]) -> Vec<String> {
+pub(crate) fn iterated_params(sql: &str, declared: &[String]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let Ok(bs) = blocks(sql) else {
         return out;
@@ -1278,7 +1313,7 @@ const MAX_PROBE_LITERALS: usize = 16;
 /// The cost the old cap was protecting is already bounded twice over, and by
 /// limits that do not degrade silently: [`MAX_PROBES`] caps the ASSIGNMENTS at
 /// 64 however deep any one candidate list is, and `lifecycle`'s
-/// `MAX_PUBLISHED_STATEMENTS` caps the DESCRIBES at 64 with a loud publish
+/// `MAX_DESCRIBED_BRANCHES` caps the DESCRIBES at 64 with a loud publish
 /// refusal. A third, lower cap bought nothing either of those did not already
 /// buy, and it cost an undescribed branch.
 ///

@@ -299,6 +299,64 @@ Statements are **named**, not positional. A name is self-describing in the respo
 does not break when an author inserts a statement in the middle. §6 records that SQLREST
 chose position and why we diverge.
 
+### 4.1.1 M1 already took the word "statement", and it means something else
+
+Written after M1 landed, because §4.1 above predates it.
+
+In the shipped code, **"statement" means one rendered permutation of one SQL definition**:
+`MAX_PUBLISHED_STATEMENTS = 64` bounds how many *branches* of a single definition publish
+will describe, and `DescribedBranches::per_statement` holds one column-name list per
+*branch*. In §4.1 the same word means **one of the endpoint's N SQL definitions**. Two
+meanings, one module — and the collision is not cosmetic: after M2, a reader meeting
+`MAX_PUBLISHED_STATEMENTS` will take it for a limit on statements per endpoint, which it
+is not.
+
+M2 renames M1's usage to say branch — `MAX_DESCRIBED_BRANCHES`, `per_branch` — and keeps
+"statement" for the thing an author writes. The rename is mechanical and belongs in its
+own commit, ahead of any behaviour change, so the behavioural diff stays readable.
+
+**And the bound itself has to be re-decided, because M1's is now the wrong shape.** Publish
+describes every branch of every statement, so the total is the **sum over statements**, not
+64 per statement — otherwise ten statements permit 640 engine round trips from one publish.
+The limit applies across the endpoint. `MAX_DECLARED_PARAMS = 32` stays per endpoint since
+parameters are shared, but the in-process render cost it bounds is now multiplied by N and
+its measured worst case (~122 ms) must be re-measured rather than carried over.
+
+### 4.1.2 And a third bound, on the statement COUNT
+
+Written after §4.1.1's re-measurement was done. `MAX_STATEMENTS = 16`
+(`egret-dataapi-api`), refused by `validate_statements` — so on create, on PATCH and at
+publish, before the first scan and long before the first describe.
+
+**Measured, in release, at N = 1…1024.** Publish's pre-describe cost, for the most
+expensive statement the other two limits still admit (32 boolean parameters, 530 branches):
+**121 ms per statement, linear in N** — 0.99 s at 8, 1.97 s at 16, 7.9 s at 64, **31.6 s at
+256**, all of it paid before the branch budget refuses the endpoint, on a synchronous path
+that occupies a tokio worker. Serving: 42 ms per statement at every N against a 40 ms stub
+engine (99.0 ms at N = 2, 2.7 s at 64), so egret's own share is ~2 ms and the worst case is
+`N × min(timeout_seconds, 300)`.
+
+`64` is where §4.1.1's branch budget already capped N — every statement costs at least one
+describe — but only for statements with no branches at all, and only *after* all N had been
+rendered. `16` is 8× the canonical `rows` + `total` endpoint, the multiplier
+`MAX_DECLARED_PARAMS` takes over §4.3's four parameters, and it is where the two bounds
+meet: 64 / 16 = 4 branches per statement, below which the count refuses and above which the
+branch budget does.
+
+**A count and not a time budget across statements.** A budget can only fail mid-loop, and
+§4.4's envelope cannot express a partial: `data` is keyed by statement name and
+`meta.statements` carries one entry per statement, so a body with three of four keys is a
+client silently reading a hole — the failure §4.3's loop already refuses for a mid-loop
+drift. Running the budget down and then discarding everything spends the resource in full
+before refusing, and reaches only the serving half; the publish cost above is paid before
+any statement executes. `limits.timeout_seconds` stays the knob for one statement's time.
+
+**Not derived from a target response time.** The deployed `Ingress` sets no
+`proxy-read-timeout`, so ingress-nginx's default applies — `proxy_read_timeout 60s`, read
+out of the running controller's own config. The default `timeout_seconds` is 30, so two
+statements already reach that cut-off in the worst case, and no N makes the worst case fit
+inside it.
+
 ### 4.2 Parameters are shared
 
 One request carries one parameter set. `resolve_supplied`
@@ -343,11 +401,34 @@ writes `data`'s value alone. This is taken from SQLREST's `USE_SYSTEM_RESPONSE_F
 is the one part of its response design worth copying.
 
 **This is a breaking change to a live API.** Today's shape is `{data, meta}`, and P4
-endpoints have served real traffic since 2026-08-16. The decision to break rather than
+endpoints have served real traffic since 2026-08-16.
+
+**Measured on the wire after implementation, and the earlier framing overstated it:** for a
+one-statement endpoint the success body is **purely additive** — `data` and `meta` keep
+their shape and `status`/`message` are new keys — so a lenient consumer does not break at
+all. What breaks is a **strict** one: a client that rejects unknown fields, or that reads
+`meta.row_count` on an endpoint that now has several statements. The decision to break
+rather than version stands; the claim that every consumer breaks does not. The decision to break rather than
 version was taken deliberately: consumers are few and internal, the API is pre-1.0, and
 carrying two envelope shapes forever costs more than one migration now. The migration sets
 `envelope = "wrapped"` on every existing endpoint, and the change must appear in the deploy
 note. It is not silent and must not be made silent.
+
+**A second thing the deploy note must say, found by the whole-branch review and not by any
+task: `dataapi.access_log.row_count` changed MEANING without changing type.** It is now the
+sum across an endpoint's statements; before M2 it was the one statement's count. The split
+is reported to the caller in `meta.statements` and one integer column cannot hold it, so the
+total is the right thing to log — but the column is shared with everything that reads the
+table. Measured: nothing in egret reads it. `ActivityStore::summary` and
+`egret_automation::dataapi_metric` measure call counts, error counts, error rates and
+duration percentiles, and migration 0128's `schedule_dataapi_metric_valid` admits exactly
+six metric names, none of them rows-based — so no Z2 alert can be reading it today and none
+can be created. What is exposed is an operator's own SQL over the column, and any
+rows-based metric added later, which would be averaging a per-statement count from before
+the upgrade against a per-endpoint sum after it. The note must say: **rows in
+`dataapi.access_log` written before the upgrade carry one statement's row count; rows
+written after carry the sum over all of an endpoint's statements. A threshold set on that
+column reads high on any multi-statement endpoint.**
 
 ### 4.5 What the caller is told about consistency
 

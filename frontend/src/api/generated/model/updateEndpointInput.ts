@@ -10,6 +10,7 @@ import type { LimitsSpec } from './limitsSpec';
 import type { OutputSpec } from './outputSpec';
 import type { ParamSpec } from './paramSpec';
 import type { RateLimitSpec } from './rateLimitSpec';
+import type { StatementSpec } from './statementSpec';
 
 /**
  * The `PATCH` body: every field absent means "leave it alone".
@@ -39,8 +40,13 @@ export interface UpdateEndpointInput {
   description?: string | null;
   /** @nullable */
   database_id?: string | null;
-  /** @nullable */
-  sql?: string | null;
+  /**
+     * Replaces the whole list when present. There is no per-statement patch:
+     * the order is part of the definition, so "edit statement 2" and "insert a
+     * statement" would need an addressing scheme the list itself already is.
+     * @nullable
+     */
+  statements?: StatementSpec[] | null;
   /** @nullable */
   params?: ParamSpec[] | null;
   output?: null | OutputSpec;

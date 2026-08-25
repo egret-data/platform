@@ -81,6 +81,21 @@ pub struct AccessLogEntry {
     pub service_account_id: Option<Uuid>,
     pub client_id: Option<String>,
     pub status_code: i32,
+    /// Rows returned to the caller — **summed across every statement** since M2,
+    /// where it was one statement's count before.
+    ///
+    /// One integer column cannot hold a per-statement split, and the split is
+    /// reported where a caller can use it (`meta.statements`), so the log keeps
+    /// the total. Recorded here because the meaning of an existing column
+    /// changed WITHOUT the column changing: nothing in egret reads it today —
+    /// `activity::ActivityStore` and `egret_automation::dataapi_metric` measure
+    /// counts, error rates and durations, and migration 0128's
+    /// `schedule_dataapi_metric_valid` admits no rows-based metric at all — so
+    /// there is no query to update and nothing that breaks. An operator's own
+    /// SQL over this column, or a rows-based metric added later, is reading a
+    /// sum from an M2 endpoint and a single statement's count from every row
+    /// written before the upgrade. It belongs in the deploy note beside the
+    /// envelope break for that reason and no other.
     pub row_count: Option<i64>,
     pub duration_ms: i32,
     pub cache_hit: bool,

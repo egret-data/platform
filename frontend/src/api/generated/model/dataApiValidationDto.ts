@@ -5,15 +5,24 @@
  * egret unified data portal HTTP API.
  * OpenAPI spec version: 0.1.0
  */
-import type { ColumnSpec } from './columnSpec';
+import type { StatementSnapshot } from './statementSnapshot';
 
 /**
  * What `POST /validate` answers with.
  */
 export interface DataApiValidationDto {
   /**
-     * The output schema `describe` resolved. This is what `publish` would
-     * freeze, so an author sees the contract before committing to it.
+     * Exactly what `publish` would freeze: one entry per statement, in the
+     * author's order, each carrying the output schema `describe` resolved for
+     * it — so an author sees the contract before committing to it.
+     *
+     * A LIST rather than the single `columns` this carried before M2, because
+     * an endpoint has one column set per statement and folding them into one
+     * would report a contract no version will ever hold: two statements each
+     * returning a `total` are two result sets, not one column declared twice.
+     * [`egret_dataapi_api::StatementSnapshot`] rather than a new pair type,
+     * because it IS the frozen shape and reusing it keeps "what validate says"
+     * and "what publish writes" the same words.
      */
-  columns: ColumnSpec[];
+  statements: StatementSnapshot[];
 }

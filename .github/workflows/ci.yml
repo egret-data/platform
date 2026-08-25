@@ -74,6 +74,22 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
+      # Nothing else checks `src/api/generated/` against the committed
+      # `openapi.json` — that gap shipped three runtime breaks of the same
+      # kind: a `ColumnSpec` missing `required`, and twice a client still
+      # declaring a field the backend's request body had already dropped
+      # (`deny_unknown_fields` refused it, and no test failed). `gen:api` is
+      # the npm script, never bare `orval`: it also runs
+      # `encode-path-params.mjs`, the codemod that puts back the
+      # `encodeURIComponent` orval 8.24 drops from every URL builder.
+      - run: npm run gen:api
+      - name: Fail if the generated API client drifted from openapi.json
+        run: |
+          if ! git diff --quiet -- src/api/generated; then
+            echo "::error::frontend/src/api/generated is stale relative to openapi.json — run 'npm run gen:api' in frontend/ and commit the result"
+            git diff --stat -- src/api/generated
+            exit 1
+          fi
       - run: npm run lint
       - run: npm run typecheck
       - run: npm test

@@ -56,6 +56,8 @@ use uuid::Uuid;
 /// as a route bug. Nothing in this file SERVES, so `execute_as` is `unreachable!`: a
 /// query executed from a trash test would mean a handler reached the engine, which
 /// is a finding rather than a nuisance.
+#[path = "test_db/mod.rs"]
+mod test_db;
 struct OkPort;
 
 #[async_trait::async_trait]
@@ -262,9 +264,11 @@ async fn principal_with_in(db: &Db, audit: AuditSink, perms: &[&str], ws: Uuid) 
 }
 
 async fn fixture() -> Option<Fixture> {
-    let url = std::env::var("DATABASE_URL").ok()?;
+    // One private database per test process, cloned from a migrated template.
+    // See tests/test_db/mod.rs for why sharing one database made the suite
+    // slower every time it ran.
+    let url = test_db::url().await?;
     let db = Db::connect(&url, 5).await.expect("connect");
-    db.migrate().await.expect("migrate");
     let admin = insert_user(&db, "dataapi_trash_admin").await;
     let (ws_id, ws) = insert_workspace(&db, admin, "dataapi-trash").await;
     let database_id = insert_database(&db, ws_id, admin).await;
@@ -302,8 +306,8 @@ impl Fixture {
     async fn create_endpoint(&self, name: &str, path: &str, state: &str) -> Uuid {
         sqlx::query_scalar(
             "INSERT INTO dataapi.endpoints \
-               (workspace_id, name, path, method, database_id, sql, state, created_by) \
-             VALUES ($1, $2, $3, 'GET', $4, 'SELECT 1', $5, $6) RETURNING id",
+               (workspace_id, name, path, method, database_id, statements, state, created_by) \
+             VALUES ($1, $2, $3, 'GET', $4, jsonb_build_array(jsonb_build_object('name', 'main', 'sql', 'SELECT 1')), $5, $6) RETURNING id",
         )
         .bind(self.ws_id)
         .bind(name)
@@ -376,7 +380,7 @@ impl Fixture {
             &self.collection(),
             Some(serde_json::json!({
                 "name": name, "path": path,
-                "database_id": self.database_id, "sql": "SELECT 1 AS n"
+                "database_id": self.database_id, "statements": [{ "name": "main", "sql": "SELECT 1 AS n" }]
             })),
         )
         .await

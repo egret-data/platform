@@ -67,11 +67,16 @@ describe("EndpointCreate", () => {
     expect(body).toMatchObject({
       name: "Daily report",
       path: "reports/daily",
-      sql: "SELECT 1",
       database_id: "db-2",
       method: "POST",
       description: "Yesterday's orders",
     });
+    // ONE statement, named `main` — the shape migration 0129 gave every
+    // endpoint that pre-dated the statement list, so a new endpoint and a
+    // migrated one are the same shape from here on. A deep-equal, not a length
+    // check: a page that sent a rows/total pair, or that left the name blank
+    // (which the server refuses with a 400), passes any weaker assertion.
+    expect(body.statements).toEqual([{ name: "main", sql: "SELECT 1" }]);
     // The create page must not invent config the editor owns.
     expect(Object.keys(body)).not.toContain("cache");
     expect(Object.keys(body)).not.toContain("rate_limit");

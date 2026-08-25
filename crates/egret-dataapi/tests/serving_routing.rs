@@ -58,6 +58,8 @@ use uuid::Uuid;
 /// | `88` | the same names in a different position — drift under `arrays`, a rekeyed object under `objects` |
 /// | `99` | the connector fetched `max_rows + 1`, saw the extra row, and set `truncated` |
 ///
+#[path = "test_db/mod.rs"]
+mod test_db;
 /// The three markers are separate because they pin three separate clauses. One
 /// marker would show that *a* check exists, not that each clause is
 /// load-bearing — and the count clause in particular is the only thing standing
@@ -342,9 +344,11 @@ fn build_state(db: &Db, pdp: Arc<dyn egret_core::authz::Pdp>) -> DataApiState {
 }
 
 async fn fixture() -> Option<Fixture> {
-    let url = std::env::var("DATABASE_URL").ok()?;
+    // One private database per test process, cloned from a migrated template.
+    // See tests/test_db/mod.rs for why sharing one database made the suite
+    // slower every time it ran.
+    let url = test_db::url().await?;
     let db = Db::connect(&url, 5).await.expect("connect");
-    db.migrate().await.expect("migrate");
 
     let admin = insert_user(&db, "serving_admin").await;
     let (ws_id, ws_slug) = insert_workspace(&db, admin, "serving").await;
@@ -524,8 +528,8 @@ impl Fixture {
     ) -> Uuid {
         let ep: Uuid = sqlx::query_scalar(
             "INSERT INTO dataapi.endpoints \
-               (workspace_id, name, path, method, database_id, sql, output, created_by) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
+               (workspace_id, name, path, method, database_id, statements, output, created_by) \
+             VALUES ($1, $2, $3, $4, $5, jsonb_build_array(jsonb_build_object('name', 'main', 'sql', $6::text)), $7, $8) RETURNING id",
         )
         .bind(self.ws_id)
         .bind(format!("ep-{}", Uuid::new_v4().simple()))
@@ -661,16 +665,20 @@ async fn a_draft_edit_does_not_change_what_is_served() {
     let ep = f.publish_endpoint("GET", "/x", "SELECT 1 AS n").await;
     assert_eq!(f.call("x").await.ns(), vec![1]);
 
-    f.patch_draft(ep, serde_json::json!({ "sql": "SELECT 2 AS n" }))
-        .await;
+    f.patch_draft(
+        ep,
+        serde_json::json!({ "statements": [{ "name": "main", "sql": "SELECT 2 AS n" }] }),
+    )
+    .await;
 
     // Anti-triviality: the draft really did change, so a serving path that read
     // it would return 2 and this assertion would have something to fail on.
-    let draft_sql: String = sqlx::query_scalar("SELECT sql FROM dataapi.endpoints WHERE id = $1")
-        .bind(ep)
-        .fetch_one(&f.db.pool)
-        .await
-        .unwrap();
+    let draft_sql: String =
+        sqlx::query_scalar("SELECT statements->0->>'sql' FROM dataapi.endpoints WHERE id = $1")
+            .bind(ep)
+            .fetch_one(&f.db.pool)
+            .await
+            .unwrap();
     assert_eq!(draft_sql, "SELECT 2 AS n", "the draft edit did not land");
 
     assert_eq!(
@@ -789,8 +797,8 @@ async fn an_unpublished_endpoint_is_404() {
     let f = skip_without_db!();
     sqlx::query(
         "INSERT INTO dataapi.endpoints \
-           (workspace_id, name, path, method, database_id, sql, created_by) \
-         VALUES ($1, 'draft-only', '/never', 'GET', $2, 'SELECT 1 AS n', $3)",
+           (workspace_id, name, path, method, database_id, statements, created_by) \
+         VALUES ($1, 'draft-only', '/never', 'GET', $2, jsonb_build_array(jsonb_build_object('name', 'main', 'sql', 'SELECT 1 AS n')), $3)",
     )
     .bind(f.ws_id)
     .bind(f.database_id)
@@ -973,7 +981,7 @@ async fn a_snapshot_frozen_with_a_stated_datetime_precision_still_serves() {
         async move {
             let touched = sqlx::query(
                 "UPDATE dataapi.endpoint_versions \
-                    SET snapshot = jsonb_set(snapshot, '{columns,0,ty}', $2::jsonb) \
+                    SET snapshot = jsonb_set(snapshot, '{statements,0,columns,0,ty}', $2::jsonb) \
                   WHERE endpoint_id = $1",
             )
             .bind(ep)
@@ -1192,4 +1200,219 @@ async fn a_row_wider_than_its_own_column_list_is_refused_in_both_shapes() {
         objects.status,
         objects.body
     );
+}
+
+// ---------------------------------------------------------------------------
+// M2 Task 8 — the envelope (spec §4.4)
+// ---------------------------------------------------------------------------
+
+/// Top-level keys of a JSON object, in wire order.
+///
+/// Order is asserted rather than membership because `serde_json`'s
+/// `preserve_order` is on across this workspace, so the wire order IS stable —
+/// and `status` before `data` is what makes the envelope readable in a log
+/// excerpt truncated at the first line.
+fn top_keys(v: &serde_json::Value) -> Vec<&str> {
+    v.as_object()
+        .unwrap_or_else(|| panic!("expected a JSON object, got {v}"))
+        .keys()
+        .map(String::as_str)
+        .collect()
+}
+
+/// **The wrapped envelope, which is the default.**
+///
+/// `status` and `message` are new keys, `data` and `meta` are where they always
+/// were. `meta.statements` is asserted ABSENT: a one-statement endpoint reports
+/// `row_count`/`columns` directly, and reporting both would let a client read
+/// one endpoint's contract two ways that could disagree.
+#[tokio::test]
+async fn a_one_statement_body_is_wrapped_and_says_ok() {
+    let f = skip_without_db!();
+    f.publish_endpoint("GET", "/wrapped", "SELECT 1 AS n").await;
+
+    let res = f.call("wrapped").await;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.body);
+    assert_eq!(
+        top_keys(&res.body),
+        vec!["status", "message", "data", "meta"],
+        "the envelope is four keys in this order: {}",
+        res.body
+    );
+    assert_eq!(res.body["status"], "ok", "{}", res.body);
+    assert!(
+        res.body["message"].is_null(),
+        "`message` is null on success — it is the human-readable half of an \
+         error, not a success banner: {}",
+        res.body
+    );
+    assert!(
+        res.body["data"].is_array(),
+        "one statement's `data` is the rows themselves: {}",
+        res.body
+    );
+    assert_eq!(res.body["meta"]["row_count"], 1, "{}", res.body);
+    assert_eq!(res.body["meta"]["columns"][0]["name"], "n", "{}", res.body);
+    assert!(
+        res.body["meta"]["statements"].is_null(),
+        "a one-statement endpoint reports its contract directly, never also \
+         under a name: {}",
+        res.body
+    );
+}
+
+/// **`bare` writes `data`'s value alone**, and nothing else.
+///
+/// The whole body is asserted, not just its type: a `bare` response that still
+/// carried `meta` somewhere would satisfy `is_array` if `data` happened to be
+/// first, and the point of the toggle is that there is no wrapper at all.
+#[tokio::test]
+async fn the_bare_envelope_writes_data_alone() {
+    let f = skip_without_db!();
+    f.publish_endpoint_with_output(
+        "GET",
+        "/bare",
+        "SELECT 1 AS n",
+        serde_json::json!({ "envelope": "bare" }),
+    )
+    .await;
+
+    let res = f.call("bare").await;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.body);
+    assert_eq!(
+        res.body,
+        serde_json::json!([{ "n": 1 }]),
+        "`bare` is the rows and nothing around them: {}",
+        res.body
+    );
+}
+
+/// An unrecognised `envelope` in an ALREADY FROZEN snapshot serves the
+/// documented default, like `shape` and `naming` before it.
+///
+/// **This test used to publish the junk value through the route, and it can no
+/// longer be written that way.** `egret_dataapi_api::validate_envelope` now runs
+/// on create, on PATCH and inside `validate_endpoint`, so an unrecognised
+/// envelope is a 400 on the way in and the publish above answered `400`, not
+/// `200`. That rule and this fallback are the two halves of one decision and
+/// neither replaces the other: the WRITER is refused so no new row can carry a
+/// value serving does not understand, and the READER still falls back, because a
+/// snapshot frozen before the rule existed — or written by a second writer of
+/// the table — must keep answering rather than become permanently dead over a
+/// cosmetic field.
+///
+/// So the junk goes straight into the frozen snapshot, the same way
+/// `a_snapshot_frozen_with_a_stated_datetime_precision_still_serves` writes
+/// its pre-rule row, and `rows_affected` is asserted for the reason recorded
+/// there: a `jsonb_set` that changed nothing still reports success, and this
+/// test would then measure a `wrapped` snapshot serving `wrapped`.
+#[tokio::test]
+async fn an_unrecognised_envelope_serves_the_wrapped_default() {
+    let f = skip_without_db!();
+    let ep = f
+        .publish_endpoint_with_output(
+            "GET",
+            "/envelope-junk",
+            "SELECT 1 AS n",
+            serde_json::json!({ "envelope": "wrapped" }),
+        )
+        .await;
+    let touched = sqlx::query(
+        "UPDATE dataapi.endpoint_versions \
+            SET snapshot = jsonb_set(snapshot, '{output,envelope}', '\"nonsense\"') \
+          WHERE endpoint_id = $1",
+    )
+    .bind(ep)
+    .execute(&f.db.pool)
+    .await
+    .expect("rewrite the frozen envelope")
+    .rows_affected();
+    assert_eq!(touched, 1, "the frozen snapshot must actually have changed");
+
+    let res = f.call("envelope-junk").await;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.body);
+    assert_eq!(res.body["status"], "ok", "{}", res.body);
+    assert!(res.body["data"].is_array(), "{}", res.body);
+}
+
+/// **`status` mirrors the HTTP status; it never replaces it.**
+///
+/// Three different real statuses, because a `status` field hard-coded to
+/// `"error"` on the error path would satisfy a test that only ever drove one
+/// refusal — and the point of "mirrors" is that the body and the status line
+/// cannot disagree.
+///
+/// The CODE is read on every arm, not just the status: `503` covers both
+/// `schema_drift` and `output_naming_collision`, and a test that reads only the
+/// number cannot say which refusal it measured.
+#[tokio::test]
+async fn an_error_body_says_error_under_the_real_http_status() {
+    let f = skip_without_db!();
+
+    // 404 — no such endpoint.
+    let missing = f.call("no-such-endpoint").await;
+    assert_eq!(missing.status, StatusCode::NOT_FOUND, "{}", missing.body);
+    assert_eq!(
+        missing.body["error"]["code"], "not_found",
+        "{}",
+        missing.body
+    );
+    assert_eq!(missing.body["status"], "error", "{}", missing.body);
+    assert_eq!(
+        missing.body["message"], "no such endpoint",
+        "`message` is the human-readable half, and on an error it is not null: {}",
+        missing.body
+    );
+
+    // 401 — no bearer at all.
+    let anon = f.request("GET", &f.ws_slug, "no-such-endpoint", None).await;
+    assert_eq!(anon.status, StatusCode::UNAUTHORIZED, "{}", anon.body);
+    assert_eq!(anon.body["error"]["code"], "key_invalid", "{}", anon.body);
+    assert_eq!(anon.body["status"], "error", "{}", anon.body);
+
+    // 503 — the endpoint exists and its contract has drifted.
+    f.publish_endpoint("GET", "/drifted", "SELECT 55 AS n")
+        .await;
+    let drift = f.call("drifted").await;
+    assert_eq!(
+        drift.status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{}",
+        drift.body
+    );
+    assert_eq!(
+        drift.body["error"]["code"], "schema_drift",
+        "{}",
+        drift.body
+    );
+    assert_eq!(drift.body["status"], "error", "{}", drift.body);
+
+    // And the machine-readable detail every deployed client already branches on
+    // is untouched by the two new keys.
+    assert!(
+        drift.body["error"]["request_id"].is_string(),
+        "{}",
+        drift.body
+    );
+}
+
+/// **`bare` is a SUCCESS-path toggle.** A refused call still answers with the
+/// error body, because an unwrapped error would be a bare `null` — a body that
+/// says nothing at all about what went wrong, under a status the toggle cannot
+/// change.
+#[tokio::test]
+async fn a_bare_endpoint_still_answers_a_refusal_with_the_error_body() {
+    let f = skip_without_db!();
+    f.publish_endpoint_with_output(
+        "GET",
+        "/bare-drift",
+        "SELECT 55 AS n",
+        serde_json::json!({ "envelope": "bare" }),
+    )
+    .await;
+
+    let res = f.call("bare-drift").await;
+    assert_eq!(res.status, StatusCode::SERVICE_UNAVAILABLE, "{}", res.body);
+    assert_eq!(res.body["error"]["code"], "schema_drift", "{}", res.body);
+    assert_eq!(res.body["status"], "error", "{}", res.body);
 }

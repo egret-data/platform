@@ -172,7 +172,7 @@ function makeEndpoint(overrides: Partial<DataApiEndpointDto> = {}): DataApiEndpo
     path: "reports/daily",
     method: "GET",
     database_id: "db-1",
-    sql: "SELECT 1",
+    statements: [{ name: "main", sql: "SELECT 1" }],
     params: [],
     output: {},
     cache: {},
@@ -217,7 +217,7 @@ describe("Query section — preview", () => {
   });
 
   it("sends the on-screen SQL, not the loaded draft", async () => {
-    const endpoint = makeEndpoint({ sql: "SELECT 1" });
+    const endpoint = makeEndpoint({ statements: [{ name: "main", sql: "SELECT 1" }] } as Partial<DataApiEndpointDto>);
     vi.mocked(api.useDataApiGetEndpoint).mockReturnValue({
       data: { status: 200, data: endpoint },
       isLoading: false,
@@ -733,8 +733,8 @@ describe("Query section — dirtiness and save", () => {
   // would show B's name in the header over A's SQL/path/params/database —
   // and a subsequent Save would silently overwrite B's record with A's data.
   it("shows the newly-navigated endpoint's own fields, not the previous one's, after an in-app navigation", async () => {
-    const epA = makeEndpoint({ id: "ep-a", name: "Endpoint A", sql: "SELECT A" });
-    const epB = makeEndpoint({ id: "ep-b", name: "Endpoint B", sql: "SELECT B" });
+    const epA = makeEndpoint({ id: "ep-a", name: "Endpoint A", statements: [{ name: "main", sql: "SELECT A" }] } as Partial<DataApiEndpointDto>);
+    const epB = makeEndpoint({ id: "ep-b", name: "Endpoint B", statements: [{ name: "main", sql: "SELECT B" }] } as Partial<DataApiEndpointDto>);
     vi.mocked(api.useDataApiGetEndpoint).mockImplementation(((_ws: string, id: string) => ({
       data: { status: 200, data: id === "ep-a" ? epA : epB },
       isLoading: false,
@@ -800,7 +800,7 @@ describe("Query section — dirtiness and save", () => {
     // absent field means "leave it alone" — a whole-document PATCH built from
     // a form hydrated once at mount would silently revert any change made
     // elsewhere since. Only `sql` changed, so only `sql` should be sent.
-    expect(call.data).toEqual({ sql: "SELECT 1 -- x" });
+    expect(call.data).toEqual({ statements: [{ name: "main", sql: "SELECT 1 -- x" }] });
   });
 
   // Only pins Preview's own half of §3.4 (stays enabled, and Save stays
@@ -811,7 +811,7 @@ describe("Query section — dirtiness and save", () => {
   // the edit still unsaved (see the doc comment on that block for why the
   // navigation itself is load-bearing).
   it("keeps Preview and Save enabled while dirty", async () => {
-    const endpoint = makeEndpoint({ sql: "SELECT 1" });
+    const endpoint = makeEndpoint({ statements: [{ name: "main", sql: "SELECT 1" }] } as Partial<DataApiEndpointDto>);
     vi.mocked(api.useDataApiGetEndpoint).mockReturnValue({
       data: { status: 200, data: endpoint },
       isLoading: false,
@@ -1397,7 +1397,7 @@ describe("Query section — the editor, the split and the preview", () => {
   });
 
   it("runs the preview from the editor's ⌘↵, on the SQL that is on screen", async () => {
-    show(makeEndpoint({ sql: "SELECT 1" }));
+    show(makeEndpoint({ statements: [{ name: "main", sql: "SELECT 1" }] } as Partial<DataApiEndpointDto>));
     const sql = await screen.findByLabelText("SQL");
     await userEvent.type(sql, " -- edited");
 

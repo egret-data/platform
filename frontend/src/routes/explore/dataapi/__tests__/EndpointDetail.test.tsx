@@ -21,7 +21,12 @@ vi.mock("@/lib/useUnsavedChangesWarning", () => ({
 
 import * as api from "@/api/generated/data-api/data-api";
 import * as accessApi from "@/api/access";
-import type { ColumnSpec, DataApiEndpointDto, DataApiEndpointVersionDto } from "@/api/generated/model";
+import type {
+  ColumnSpec,
+  DataApiEndpointDto,
+  DataApiEndpointVersionDto,
+  StatementSnapshot,
+} from "@/api/generated/model";
 import EndpointDetail from "@/routes/explore/dataapi/EndpointDetail";
 import Config from "@/routes/explore/dataapi/detail/Config";
 import ResponseSection from "@/routes/explore/dataapi/detail/ResponseSection";
@@ -40,7 +45,7 @@ function makeEndpoint(overrides: Partial<DataApiEndpointDto> = {}): DataApiEndpo
     path: "reports/daily",
     method: "GET",
     database_id: "db-1",
-    sql: "SELECT 1",
+    statements: [{ name: "main", sql: "SELECT 1" }],
     params: [],
     output: {},
     cache: {},
@@ -120,7 +125,7 @@ beforeEach(() => {
 
   updateMutateAsync.mockImplementation(({ data }: { workspace: string; id: string; data: Partial<DataApiEndpointDto> }) =>
     Promise.resolve({ status: 200, data: { ...makeEndpoint(), ...data }, headers: new Headers() }));
-  validateMutateAsync.mockResolvedValue({ status: 200, data: { columns: [] }, headers: new Headers() });
+  validateMutateAsync.mockResolvedValue({ status: 200, data: { statements: [] }, headers: new Headers() });
   restoreMutateAsync.mockResolvedValue({
     status: 200,
     data: makeEndpoint({ state: "disabled", deleted_at: null }),
@@ -189,6 +194,84 @@ describe("Config", () => {
     } as never);
     renderConfig(endpoint);
     expect(await screen.findByRole("button", { name: /validate saved draft/i })).toBeInTheDocument();
+  });
+
+  /**
+   * `POST /validate` answers with `statements` — one entry per statement, each
+   * carrying the columns `describe` resolved for it. It carried a single
+   * `columns` before M2, and the editor still read that key: the field is now
+   * `undefined`, so the result read "Resolves to 0 columns" for every endpoint
+   * whose SQL was perfectly fine. Nothing failed at build time, because nothing
+   * gates the generated client against `openapi.json`.
+   *
+   * Two statements in the fixture, and the columns of the SECOND asserted:
+   * reading `statements[0]` for everything is the shape a one-statement fixture
+   * cannot tell from reading each entry.
+   */
+  it("reports every statement's resolved columns, not the first one's", async () => {
+    const endpoint = makeEndpoint();
+    vi.mocked(api.useDataApiGetEndpoint).mockReturnValue({
+      data: { status: 200, data: endpoint },
+      isLoading: false,
+      isError: false,
+      refetch: vi.fn(),
+    } as never);
+    validateMutateAsync.mockResolvedValue({
+      status: 200,
+      data: {
+        statements: [
+          { name: "rows", sql: "SELECT …", columns: [{ name: "order_id", ty: "varchar" }] },
+          {
+            name: "total",
+            sql: "SELECT count(*)",
+            columns: [{ name: "n", ty: "bigint" }, { name: "pages", ty: "integer" }],
+          },
+        ],
+      },
+      headers: new Headers(),
+    });
+    renderConfig(endpoint);
+    await userEvent.click(await screen.findByRole("button", { name: /validate saved draft/i }));
+
+    const alert = await screen.findByRole("alert");
+    expect(within(alert).getAllByRole("listitem").map((li) => li.textContent)).toEqual([
+      "rows: 1 column — order_id (varchar)",
+      "total: 2 columns — n (bigint), pages (integer)",
+    ]);
+  });
+
+  // The common case keeps the sentence it had. A one-statement endpoint's
+  // response is an ARRAY, so its name is not a key any caller reads, and
+  // putting `main:` in front of the answer would be the first place on this
+  // page to suggest otherwise.
+  it("keeps the one-statement result a plain sentence with no statement name", async () => {
+    const endpoint = makeEndpoint();
+    vi.mocked(api.useDataApiGetEndpoint).mockReturnValue({
+      data: { status: 200, data: endpoint },
+      isLoading: false,
+      isError: false,
+      refetch: vi.fn(),
+    } as never);
+    validateMutateAsync.mockResolvedValue({
+      status: 200,
+      data: {
+        statements: [
+          {
+            name: "main",
+            sql: "SELECT …",
+            columns: [{ name: "order_id", ty: "varchar" }, { name: "total_revenue", ty: "bigint" }],
+          },
+        ],
+      },
+      headers: new Headers(),
+    });
+    renderConfig(endpoint);
+    await userEvent.click(await screen.findByRole("button", { name: /validate saved draft/i }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Resolves to 2 columns: order_id (varchar), total_revenue (bigint)");
+    expect(within(alert).queryByRole("listitem")).not.toBeInTheDocument();
+    expect(alert).not.toHaveTextContent("main");
   });
 
   // Phase 5 §5: the four groups used to be four `ConfigSection` cards, each
@@ -379,6 +462,12 @@ function makeVersion(
   // schema's `required` list — which is exactly the shape a fixture must be
   // able to express to pin `undefined` meaning "guaranteed".
   columns: ColumnSpec[] = [{ name: "total_revenue", ty: "bigint" }],
+  // A snapshot freezes a LIST of statements (M2), each with its own frozen
+  // columns — `columns` above builds the one-statement case every test in this
+  // file was written against, and this overrides it outright for the few that
+  // are about several. Both spellings rather than only the list, so none of the
+  // pre-existing tests had to be rewritten to keep meaning what they meant.
+  statements?: StatementSnapshot[],
 ): DataApiEndpointVersionDto {
   return {
     id: "v-1",
@@ -388,7 +477,7 @@ function makeVersion(
     created_by: "user-1",
     created_at: "2026-08-01T00:00:00Z",
     snapshot: {
-      sql: "SELECT 1",
+      statements: statements ?? [{ name: "main", sql: "SELECT 1", columns }],
       method: "GET",
       path: "reports/daily",
       database_id: "db-1",
@@ -398,7 +487,6 @@ function makeVersion(
       limits: {},
       rate_limit: {},
       delegated: false,
-      columns,
     },
     ...overrides,
   } as unknown as DataApiEndpointVersionDto;
@@ -851,6 +939,104 @@ describe("ResponseSection", () => {
     ]);
     await screen.findByText("refund_reason");
     expect(screen.queryByText(/every other column is in every response/i)).not.toBeInTheDocument();
+  });
+
+  /**
+   * A snapshot freezes ONE column set PER STATEMENT (M2), and this section is
+   * the only place an author reads the published contract.
+   *
+   * The pair is deliberately two tests, one per direction. Folding every
+   * statement's columns into one table reddens the second and leaves the first
+   * green; labelling the one-statement case with the name `main` — which no
+   * caller ever reads, because a one-statement response is an ARRAY, not a
+   * keyed object — reddens the first and leaves the second green.
+   */
+  it("shows a one-statement contract as the plain column list, with no statement name", async () => {
+    renderColumns([
+      { name: "order_id", ty: "varchar" },
+      { name: "total_revenue", ty: "bigint" },
+    ]);
+    await screen.findByText("order_id");
+    expect(screen.queryByText("main")).not.toBeInTheDocument();
+    // One table, and it is the whole contract.
+    const body = (screen.getByText("order_id").closest("table") as HTMLElement).querySelector(
+      "tbody",
+    ) as HTMLTableSectionElement;
+    expect(Array.from(body.rows).map((r) => Array.from(r.cells).map((c) => c.textContent))).toEqual([
+      ["order_id", "varchar"],
+      ["total_revenue", "bigint"],
+    ]);
+  });
+
+  it("gives each statement of a several-statement contract its own named list", async () => {
+    vi.mocked(api.useDataApiGetOpenapi).mockReturnValue(
+      { data: undefined, isError: false } as unknown as ReturnType<typeof api.useDataApiGetOpenapi>,
+    );
+    vi.mocked(api.useDataApiListEndpointVersions).mockReturnValue(
+      {
+        data: {
+          status: 200,
+          data: [
+            makeVersion({ id: "v-1", version: 2, is_live: true }, undefined, [
+              { name: "rows", sql: "SELECT …", columns: [{ name: "order_id", ty: "varchar" }] },
+              { name: "total", sql: "SELECT count(*)", columns: [{ name: "n", ty: "bigint" }] },
+            ]),
+          ],
+        },
+        isLoading: false,
+        isError: false,
+      } as unknown as ReturnType<typeof api.useDataApiListEndpointVersions>,
+    );
+    renderResponse(makeEndpoint({ live_version_id: "v-1" }));
+
+    // Each name labels its OWN table, so "rendered both names" cannot pass for
+    // "put each column under the statement that returns it".
+    const rowsTable = (await screen.findByText("order_id")).closest("table") as HTMLElement;
+    const totalTable = screen.getByText("n").closest("table") as HTMLElement;
+    expect(rowsTable).not.toBe(totalTable);
+    expect(screen.getByRole("heading", { name: "rows" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "total" })).toBeInTheDocument();
+    expect(within(rowsTable).queryByText("n")).not.toBeInTheDocument();
+    expect(within(totalTable).queryByText("order_id")).not.toBeInTheDocument();
+  });
+
+  /**
+   * `output.envelope` shipped with no control at all: `bare` was reachable
+   * through the API and invisible to the person publishing the endpoint — the
+   * same gap `required` had, and had to be come back for.
+   *
+   * Two directions again. Dropping the control reddens the first; hard-coding
+   * the value the picker sends (`"bare"` because it is the one being chosen,
+   * or `"wrapped"` because it is the default) reddens the second.
+   */
+  it("offers the envelope, defaulting to the wrapper a snapshot with no value reads back as", async () => {
+    vi.mocked(api.useDataApiGetOpenapi).mockReturnValue(
+      { data: undefined, isError: false } as unknown as ReturnType<typeof api.useDataApiGetOpenapi>,
+    );
+    // `output: {}` — no `envelope` key at all, which is what every endpoint
+    // saved before this field existed carries and what the server reads as
+    // `wrapped`.
+    renderResponse(makeEndpoint({ output: {} }));
+    expect(await screen.findByRole("combobox", { name: "Envelope" })).toHaveTextContent(/wrapped/i);
+  });
+
+  it("sends the chosen envelope, and only that field", async () => {
+    vi.mocked(api.useDataApiGetOpenapi).mockReturnValue(
+      { data: undefined, isError: false } as unknown as ReturnType<typeof api.useDataApiGetOpenapi>,
+    );
+    renderResponse(makeEndpoint({ output: { shape: "objects", naming: "as_is" } }));
+
+    await userEvent.click(await screen.findByRole("combobox", { name: "Envelope" }));
+    await userEvent.click(await screen.findByRole("option", { name: /^bare/i }));
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(updateMutateAsync).toHaveBeenCalled());
+    // The whole `output`, not a `toMatchObject` on `envelope`: this control
+    // shares an object with Shape and Naming, and a spread that drops either
+    // silently reverts a setting the author never touched.
+    expect(updateMutateAsync.mock.calls[0][0].data).toEqual({
+      output: { shape: "objects", naming: "as_is", envelope: "bare" },
+    });
   });
 });
 

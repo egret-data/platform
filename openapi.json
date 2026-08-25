@@ -27564,7 +27564,7 @@
           "name",
           "path",
           "database_id",
-          "sql"
+          "statements"
         ],
         "properties": {
           "name": {
@@ -27579,8 +27579,12 @@
             "format": "uuid",
             "description": "The connection this endpoint queries. Validated against the CALLER's\nworkspace by the route before it is stored — it arrives from the request\nbody, so nothing else would stop it naming another workspace's database."
           },
-          "sql": {
-            "type": "string"
+          "statements": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StatementSpec"
+            },
+            "description": "The statements this endpoint runs, in order. Required and non-empty:\n[`egret_dataapi_api::validate_statements`] refuses an empty list, a name\nthat is not an identifier, and a repeated name, all as a 400 naming the\nreason — the schema's own `CHECK` behind it means an empty list is not\nmerely refused here but unrepresentable."
           },
           "method": {
             "type": [
@@ -28614,7 +28618,7 @@
           "path",
           "method",
           "database_id",
-          "sql",
+          "statements",
           "params",
           "output",
           "cache",
@@ -28653,8 +28657,12 @@
             "type": "string",
             "format": "uuid"
           },
-          "sql": {
-            "type": "string"
+          "statements": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StatementSpec"
+            },
+            "description": "The endpoint's statements, in execution order.\n\nA LIST, not a string, and a one-statement endpoint is the same shape as\na ten-statement one — there is no \"simple\" spelling to keep in step with\nthe general one. Stored as `jsonb`, like every other structured column\non this row."
           },
           "params": {
             "type": "array",
@@ -28936,15 +28944,15 @@
         "type": "object",
         "description": "What `POST /validate` answers with.",
         "required": [
-          "columns"
+          "statements"
         ],
         "properties": {
-          "columns": {
+          "statements": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/ColumnSpec"
+              "$ref": "#/components/schemas/StatementSnapshot"
             },
-            "description": "The output schema `describe` resolved. This is what `publish` would\nfreeze, so an author sees the contract before committing to it."
+            "description": "Exactly what `publish` would freeze: one entry per statement, in the\nauthor's order, each carrying the output schema `describe` resolved for\nit — so an author sees the contract before committing to it.\n\nA LIST rather than the single `columns` this carried before M2, because\nan endpoint has one column set per statement and folding them into one\nwould report a contract no version will ever hold: two statements each\nreturning a `total` are two result sets, not one column declared twice.\n[`egret_dataapi_api::StatementSnapshot`] rather than a new pair type,\nbecause it IS the frozen shape and reusing it keeps \"what validate says\"\nand \"what publish writes\" the same words."
           }
         }
       },
@@ -29601,9 +29609,9 @@
       },
       "EndpointSnapshot": {
         "type": "object",
-        "description": "What a published version freezes. Self-contained on purpose: P4's serving\npath must be able to answer a request from this alone, without reading the\ndraft row.",
+        "description": "What a published version freezes. Self-contained on purpose: P4's serving\npath must be able to answer a request from this alone, without reading the\ndraft row.\n\n**This type is read back out of an immutable column.** M2 does not migrate\n`dataapi.endpoint_versions.snapshot` and must not: a published version is\nthe contract a live consumer is already coding against, and rewriting frozen\nrows to suit a newer binary is the one thing \"frozen\" is supposed to\nprevent. The compatibility therefore lives in the READER — see\n[`EndpointSnapshotRepr`] — exactly as M1's `#[serde(default =\n\"default_required\")]` on [`ColumnSpec::required`] did.",
         "required": [
-          "sql",
+          "statements",
           "method",
           "path",
           "database_id",
@@ -29612,12 +29620,15 @@
           "cache",
           "limits",
           "rate_limit",
-          "delegated",
-          "columns"
+          "delegated"
         ],
         "properties": {
-          "sql": {
-            "type": "string"
+          "statements": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StatementSnapshot"
+            },
+            "description": "The endpoint's N SQL definitions, in execution order, each with its own\nfrozen columns (M1's per-branch union, now scoped to one statement).\n\nNever empty: [`EndpointSnapshotRepr`] refuses a snapshot that carries\nneither a `statements` list nor the pre-M2 `sql` + `columns` pair, and\nrefuses an explicitly empty list."
           },
           "method": {
             "type": "string"
@@ -29654,13 +29665,6 @@
           "impersonate": {
             "type": "boolean",
             "description": "Whether `query.databases.options.impersonate` was set at the moment this\nversion was published. The other half of the witness pair.\n\n**`delegated` alone does not decide whether the engine runs per\nprincipal, and believing it did was a real leak.** `delegation_for`'s\nNON-delegated arm still returns `Some(principal_email)` as the session\nuser (`egret-query/src/execution/mod.rs:86`), and both connectors act on\n`options.impersonate` independently of `delegated`:\n\n* `connector/trino.rs:43` — `bearer_token.is_some() || options.impersonate\n  == Some(true)` sends `X-Trino-User: <caller>`;\n* `connector/starrocks.rs:129` — `bearer_token.is_none() &&\n  options.impersonate == Some(true)` issues\n  `EXECUTE AS <caller> WITH NO REVERT`.\n\nSo `{delegated: false, options: {impersonate: true}}` — which\n`DatabaseInput` accepts, the two fields being independent and unvalidated\n— runs every query under the caller's own Ranger policy while looking\nnon-delegated to anything that reads `delegated`.\n\n**Both halves must be compared against the live row before serving from a\nshared cache.** Freezing only `delegated` let a `shared` endpoint on such\na connection cache principal A's filtered rows under a principal-less key\nand serve them to principal B: a 200, `meta.cached: true`, nothing in\n`access_log` to distinguish it, and the witness silent because live\n`delegated` still equalled frozen `delegated`.\n\n`#[serde(default)]` so a snapshot written before this field existed\ndeserialises as `false`. That is the fail-closed direction: such a\nsnapshot can only have been published against a connection this check now\nrefuses, so comparing `false` against a live `true` yields\n`cache_scope_stale` and a re-publish, which is the correct outcome."
-          },
-          "columns": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/ColumnSpec"
-            },
-            "description": "Resolved by `describe_as` at publish time and frozen here, so the\npublished contract does not drift when the underlying table changes."
           },
           "param_gate": {
             "type": "integer",
@@ -30519,6 +30523,52 @@
           }
         }
       },
+      "MetaContract": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "One statement — every endpoint published before M2, and most after it.",
+            "required": [
+              "row_count",
+              "columns"
+            ],
+            "properties": {
+              "row_count": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              "columns": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ColumnSpec"
+                },
+                "description": "The FROZEN columns from the snapshot, not the ones this execution\nhappened to return. The published contract is what a client codes\nagainst; if the underlying table has drifted, the difference is a\ndefect to surface, not something to paper over by reporting today's\nshape."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Several statements, keyed by name — the same keys, in the same order, as\n`data`.",
+            "required": [
+              "statements"
+            ],
+            "properties": {
+              "statements": {
+                "type": "object",
+                "description": "Serialized as a JSON OBJECT, from a `Vec` rather than a map, for one\nreason: the order is the author's, stated by the list they published,\nand it has to be the order `data` uses. A `BTreeMap` would sort the\nnames and make `meta` disagree with `data` about the sequence for\nevery endpoint whose statements are not alphabetical.\n\nNo key can be lost to another: publish refuses two statements of one\nname (`validate_statements`), which is the same guarantee\n`statements_data` rests on one level up.",
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/StatementMeta"
+                },
+                "propertyNames": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        ],
+        "description": "What `meta` reports about the published contract, keyed the only way the\nendpoint's statement count permits.\n\nAn enum rather than four `Option` fields: `{row_count, columns}` and\n`{statements}` are the two legal fillings, and a struct with all of them\noptional can also represent both at once and neither at all — two states in\nwhich a client would have two readings of one contract that can disagree.\n\n**`Several` is what Task 7's `meta.columns` could not express.** Until this\nexisted the field held every statement's frozen columns CONCATENATED in\nstatement order: complete, but unkeyed, so a caller holding\n`[\"id\",\"name\",\"total\"]` could not learn which statement declared which — and\nhad no way to notice the question was unanswerable."
+      },
       "MetricBody": {
         "type": "object",
         "required": [
@@ -31139,6 +31189,10 @@
           },
           "naming": {
             "type": "string"
+          },
+          "envelope": {
+            "type": "string",
+            "description": "Whether the response carries the `{status, message, data, meta}` wrapper\n(`\"wrapped\"`, the default) or `data`'s value on its own (`\"bare\"`) —\nspec §4.4.\n\nDefaulted rather than made an `Option`, and defaulted to the WRAPPER, so\nthat every snapshot frozen before this field existed reads back as\n`wrapped`: the migration sets no rows and an unpublished endpoint cannot\nchange shape by being re-read.\n\n`bare` is the success path only. A refusal still answers with\n`ServingErrorBody`, because an unwrapped error would be a bare `null` —\nnothing at all about what went wrong — under a status this toggle does\nnot reach.\n\nA `String` like `shape` and `naming`, but — unlike them — **checked\nbefore it is stored**, by [`validate_envelope`]. Serving still falls back\nto the documented default and logs rather than refusing (see\n`serving::router::envelope_of`), because a frozen snapshot must keep\nanswering; the check exists so no new row can reach that fallback. See\n[`validate_envelope`] for why this field and not its two neighbours."
           }
         },
         "additionalProperties": false
@@ -31168,7 +31222,7 @@
       },
       "ParamSpec": {
         "type": "object",
-        "description": "`deny_unknown_fields` on the author-supplied config types.\n\n`#[serde(deny_unknown_fields)]` on the request-body struct does NOT reach a\nnested one, and the nested one is where the damage was: posting the\ndocumented-but-wrong `{\"rate_limit\": {\"per_client_qps\": 5}}` returned 201\nwith `per_key_qps` silently defaulted to `0`. A rate limit the author\nbelieves they set and did not is worse than an error.\n\nApplied to the five types an AUTHOR fills in — [`ParamSpec`], [`CacheSpec`],\n[`LimitsSpec`], [`RateLimitSpec`], [`OutputSpec`] — and deliberately NOT to\n[`EndpointSnapshot`] or [`ColumnSpec`], which the server writes for itself\nand where a typo is impossible.\n\n**The cost, stated because it is a real constraint on a persisted format.**\nThese types are also how a stored `jsonb` column is read back. Adding a field\nin some future version and then rolling the binary back would make the older\ncode refuse to deserialize rows the newer one wrote, as a 500 on read. That is\na loud failure rather than a silent one, and it is the standard price of\nstrict deserialization; a future field that must be readable by older code has\nto be introduced some other way.",
+        "description": "`deny_unknown_fields` on the author-supplied config types.\n\n`#[serde(deny_unknown_fields)]` on the request-body struct does NOT reach a\nnested one, and the nested one is where the damage was: posting the\ndocumented-but-wrong `{\"rate_limit\": {\"per_client_qps\": 5}}` returned 201\nwith `per_key_qps` silently defaulted to `0`. A rate limit the author\nbelieves they set and did not is worse than an error.\n\nApplied to the six types an AUTHOR fills in — [`ParamSpec`], [`CacheSpec`],\n[`LimitsSpec`], [`RateLimitSpec`], [`OutputSpec`], [`StatementSpec`] — and\ndeliberately NOT to [`EndpointSnapshot`], [`ColumnSpec`] or\n[`StatementSnapshot`], which the server writes for itself and where a typo\nis impossible.\n\n**The cost, stated because it is a real constraint on a persisted format.**\nThese types are also how a stored `jsonb` column is read back. Adding a field\nin some future version and then rolling the binary back would make the older\ncode refuse to deserialize rows the newer one wrote, as a 500 on read. That is\na loud failure rather than a silent one, and it is the standard price of\nstrict deserialization; a future field that must be readable by older code has\nto be introduced some other way.",
         "required": [
           "name",
           "type",
@@ -33150,9 +33204,19 @@
         "type": "object",
         "description": "The serving surface's error envelope (spec §7).\n\nNamed `ServingErrorBody` and not `ErrorBody` on purpose. `egret_core::http`\nalready exports an `ErrorBody`, it is a DIFFERENT shape (`{\"error\":\n\"<string>\"}`), and `egret_server::openapi_doc` merges this crate's serving\ndocument with the rest of the API into one OpenAPI document — where two\nschemas sharing a name silently overwrite each other. A generated client\nwould then be typed against whichever won.",
         "required": [
+          "status",
+          "message",
           "error"
         ],
         "properties": {
+          "status": {
+            "$ref": "#/components/schemas/ServingStatus",
+            "description": "Always [`ServingStatus::Error`] here, and DERIVED from the status this\nresponse will actually carry rather than written as a constant — see\n[`ServingStatus`]. `status` mirrors the HTTP status; it never replaces\nit, and a body saying `\"error\"` under a `200` is the failure mode the\nmirror exists to make unrepresentable."
+          },
+          "message": {
+            "type": "string",
+            "description": "The same human-readable string as `error.message`, lifted to where the\nsuccess envelope carries it (`null` there) so that `status` and\n`message` are readable on EVERY serving response without knowing first\nwhich of the two bodies arrived.\n\n`error.code` is what a client branches on and is untouched; this is the\nhuman half, and it may be reworded."
+          },
           "error": {
             "$ref": "#/components/schemas/ServingErrorDetail"
           }
@@ -33182,58 +33246,69 @@
         }
       },
       "ServingMeta": {
-        "type": "object",
-        "required": [
-          "columns",
-          "row_count",
-          "version",
-          "cached",
-          "request_id"
-        ],
-        "properties": {
-          "columns": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/ColumnSpec"
-            },
-            "description": "The FROZEN columns from the snapshot, not the ones this execution\nhappened to return. The published contract is what a client codes\nagainst; if the underlying table has drifted, the difference is a defect\nto surface, not something to paper over by reporting today's shape."
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/MetaContract",
+            "description": "Flattened, so the wire carries `{version, cached, request_id, row_count,\ncolumns}` or `{version, cached, request_id, statements}` — never a\n`contract` key of its own."
           },
-          "row_count": {
-            "type": "integer",
-            "format": "int64",
-            "minimum": 0
-          },
-          "version": {
-            "type": "integer",
-            "format": "int32"
-          },
-          "cached": {
-            "type": "boolean"
-          },
-          "request_id": {
-            "type": "string"
+          {
+            "type": "object",
+            "required": [
+              "version",
+              "cached",
+              "request_id"
+            ],
+            "properties": {
+              "version": {
+                "type": "integer",
+                "format": "int32"
+              },
+              "cached": {
+                "type": "boolean"
+              },
+              "request_id": {
+                "type": "string"
+              }
+            }
           }
-        }
+        ],
+        "description": "The endpoint-wide half of `meta`, plus whichever contract shape the\nendpoint's statement count calls for."
       },
       "ServingResponse": {
         "type": "object",
-        "description": "The success body (spec §5.1.2).\n\n`meta.version` is the published version that served the call, so a\nclient-side bug is reproducible against the exact snapshot that produced it.\n`meta.cached` is likewise not cosmetic: without it a stale-looking result is\nindistinguishable from a fresh one while debugging. It is a real value — Task\n4 landed the cache and [`run`] sets it `true` on a hit — and this comment\nsaid \"hard-`false` until Task 4 lands\" for three tasks after Task 4 landed.",
+        "description": "The success body (spec §4.4, §5.1.2).\n\n```json\n{ \"status\": \"ok\", \"message\": null, \"data\": …, \"meta\": { … } }\n```\n\n**This replaced the `{data, meta}` body P4 shipped, in one migration rather\nthan by carrying two shapes.** Endpoints published under the old envelope\nhave served real traffic since 2026-08-16; the decision to break rather than\nversion was taken deliberately (spec §4.4) because consumers are few and\ninternal, the API is pre-1.0, and two envelopes forever cost more than one\nmigration. It belongs in the deploy note and must not be made silent.\n\n`meta.version` is the published version that served the call, so a\nclient-side bug is reproducible against the exact snapshot that produced it.\n`meta.cached` is likewise not cosmetic: without it a stale-looking result is\nindistinguishable from a fresh one while debugging.",
         "required": [
+          "status",
           "data",
           "meta"
         ],
         "properties": {
+          "status": {
+            "$ref": "#/components/schemas/ServingStatus",
+            "description": "Always [`ServingStatus::Ok`] here — this type is only built on the\nsuccess path — but read off `StatusCode::OK` rather than written as a\nconstant, so the two cannot drift apart. See [`ServingStatus`]."
+          },
+          "message": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`null` on success. It is the human-readable half of a REFUSAL\n([`ServingErrorBody`](super::error::ServingErrorBody)), not a success\nbanner, and a client that finds a string here is reading an error."
+          },
           "data": {
-            "type": "array",
-            "items": {
-              "type": "object"
-            },
-            "description": "Rows, shaped by the snapshot's `output.shape`: an array of objects\n(default) or an array of arrays."
+            "description": "The rows for a ONE-statement endpoint — an array of objects (default) or\nof arrays, per `output.shape` — and an object keyed by statement NAME for\nseveral.\n\nNot a union at the contract level: `openapi_gen` writes one document per\nendpoint and an endpoint's statement count is frozen in its snapshot, so\neach generated schema is unambiguous.\n\nThe SHARED serving document below describes every endpoint at once, so it\ndeliberately carries no `value_type`: utoipa then emits the unconstrained\nschema for `serde_json::Value`, which is the only honest answer there.\n`value_type = Vec<Object>` — what this field carried until M2 — asserted\n\"array of objects\" about a body that is an OBJECT for a several-statement\nendpoint."
           },
           "meta": {
             "$ref": "#/components/schemas/ServingMeta"
           }
         }
+      },
+      "ServingStatus": {
+        "type": "string",
+        "description": "`status` in the envelope (spec §4.4).\n\n**It MIRRORS the HTTP status; it never replaces it.** A body saying\n`\"status\": \"error\"` under a `200` is the failure mode this exists to avoid —\nSQLREST answers `200` for everything and pushes the outcome into the body\n(`HttpApiServlet.process` never calls `setStatus`), which breaks HTTP caches,\nproxies and monitoring, and forces every client to parse a body to learn that\nit failed. egret keeps returning real `400`/`403`/`429`/`503`.\n\nSo this value is DERIVED from the status line rather than written beside it —\nsee [`ServingStatus::mirroring`], which is the only constructor. Two\nindependent spellings of one outcome is exactly the shape that drifts.",
+        "enum": [
+          "ok",
+          "error"
+        ]
       },
       "SetAccessPolicy": {
         "type": "object",
@@ -33804,6 +33879,68 @@
           }
         }
       },
+      "StatementMeta": {
+        "type": "object",
+        "description": "One statement's half of `meta.statements`.",
+        "required": [
+          "row_count",
+          "columns"
+        ],
+        "properties": {
+          "row_count": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "columns": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ColumnSpec"
+            },
+            "description": "This statement's own frozen columns — see [`MetaContract::Single`]'s\n`columns` for why they are the frozen ones."
+          }
+        }
+      },
+      "StatementSnapshot": {
+        "type": "object",
+        "description": "The frozen form of a [`StatementSpec`]: what a publish freezes into\n[`EndpointSnapshot`] for one statement, its own [`ColumnSpec`] union\nincluded (M1's per-branch column union, now scoped to one statement of N).\n\nNo `deny_unknown_fields` — like [`EndpointSnapshot`] and [`ColumnSpec`],\nthe server writes this for itself; a typo here is not possible the way one\nis in a request body.",
+        "required": [
+          "name",
+          "sql",
+          "columns"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "sql": {
+            "type": "string"
+          },
+          "columns": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ColumnSpec"
+            }
+          }
+        }
+      },
+      "StatementSpec": {
+        "type": "object",
+        "description": "One of an endpoint's N SQL definitions, as an author writes it (M2). The\ncanonical shape is a `rows` statement and a `total` statement for\npagination, but any number is allowed.\n\n`name` is not decoration: once an endpoint has more than one statement,\nthe response envelope is a JSON object keyed by statement name and the\ngenerated OpenAPI document names it as a property (M2 Tasks 8-9). A name a\ncaller writes into their own code is a contract, which is what\n[`validate_statement_name`] and [`validate_statements`] enforce —\n`^[a-z][a-z0-9_]*$` so the key never needs quoting in JSON and never reads\nas private, and uniqueness within the endpoint so the key is unambiguous.\n\n`#[serde(deny_unknown_fields)]` for the same reason as [`ParamSpec`] and\nits four siblings: this is a type an AUTHOR fills in, so a typo in the\nrequest body must be a 400, not a silently-ignored field.",
+        "required": [
+          "name",
+          "sql"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "sql": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
       "StatusBody": {
         "type": "object",
         "required": [
@@ -34321,7 +34458,7 @@
           },
           "body": {
             "type": "object",
-            "description": "The serving path's own body, verbatim: rows and `meta` on success, spec\n§7's `{code, message, request_id}` on a refusal. Verbatim because the\npoint of the feature is to show what the consumer gets, and a body this\nroute summarised would be a different answer than the real one."
+            "description": "The serving path's own body, verbatim: on success the spec §4.4 envelope\n`{status, message, data, meta}` — `data` an array for a one-statement\nendpoint and an object keyed by statement name for several — or, for an\nendpoint published with `output.envelope: \"bare\"`, `data`'s value on its\nown. On a refusal, spec §7's `{code, message, request_id}`. Verbatim\nbecause the point of the feature is to show what the consumer gets, and a\nbody this route summarised would be a different answer than the real\none — including about which envelope the endpoint is published in."
           },
           "request": {
             "$ref": "#/components/schemas/TryRequestEcho"
@@ -34566,11 +34703,15 @@
             ],
             "format": "uuid"
           },
-          "sql": {
+          "statements": {
             "type": [
-              "string",
+              "array",
               "null"
-            ]
+            ],
+            "items": {
+              "$ref": "#/components/schemas/StatementSpec"
+            },
+            "description": "Replaces the whole list when present. There is no per-statement patch:\nthe order is part of the definition, so \"edit statement 2\" and \"insert a\nstatement\" would need an addressing scheme the list itself already is."
           },
           "params": {
             "type": [

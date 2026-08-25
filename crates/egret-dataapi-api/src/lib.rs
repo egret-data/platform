@@ -61,10 +61,11 @@ pub enum ParamLocation {
 /// with `per_key_qps` silently defaulted to `0`. A rate limit the author
 /// believes they set and did not is worse than an error.
 ///
-/// Applied to the five types an AUTHOR fills in — [`ParamSpec`], [`CacheSpec`],
-/// [`LimitsSpec`], [`RateLimitSpec`], [`OutputSpec`] — and deliberately NOT to
-/// [`EndpointSnapshot`] or [`ColumnSpec`], which the server writes for itself
-/// and where a typo is impossible.
+/// Applied to the six types an AUTHOR fills in — [`ParamSpec`], [`CacheSpec`],
+/// [`LimitsSpec`], [`RateLimitSpec`], [`OutputSpec`], [`StatementSpec`] — and
+/// deliberately NOT to [`EndpointSnapshot`], [`ColumnSpec`] or
+/// [`StatementSnapshot`], which the server writes for itself and where a typo
+/// is impossible.
 ///
 /// **The cost, stated because it is a real constraint on a persisted format.**
 /// These types are also how a stored `jsonb` column is read back. Adding a field
@@ -147,9 +148,24 @@ pub struct RateLimitSpec {
 /// What a published version freezes. Self-contained on purpose: P4's serving
 /// path must be able to answer a request from this alone, without reading the
 /// draft row.
+///
+/// **This type is read back out of an immutable column.** M2 does not migrate
+/// `dataapi.endpoint_versions.snapshot` and must not: a published version is
+/// the contract a live consumer is already coding against, and rewriting frozen
+/// rows to suit a newer binary is the one thing "frozen" is supposed to
+/// prevent. The compatibility therefore lives in the READER — see
+/// [`EndpointSnapshotRepr`] — exactly as M1's `#[serde(default =
+/// "default_required")]` on [`ColumnSpec::required`] did.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+#[serde(try_from = "EndpointSnapshotRepr")]
 pub struct EndpointSnapshot {
-    pub sql: String,
+    /// The endpoint's N SQL definitions, in execution order, each with its own
+    /// frozen columns (M1's per-branch union, now scoped to one statement).
+    ///
+    /// Never empty: [`EndpointSnapshotRepr`] refuses a snapshot that carries
+    /// neither a `statements` list nor the pre-M2 `sql` + `columns` pair, and
+    /// refuses an explicitly empty list.
+    pub statements: Vec<StatementSnapshot>,
     pub method: String,
     pub path: String,
     pub database_id: uuid::Uuid,
@@ -202,9 +218,6 @@ pub struct EndpointSnapshot {
     /// `cache_scope_stale` and a re-publish, which is the correct outcome.
     #[serde(default)]
     pub impersonate: bool,
-    /// Resolved by `describe_as` at publish time and frozen here, so the
-    /// published contract does not drift when the underlying table changes.
-    pub columns: Vec<ColumnSpec>,
     /// Which revision of the publish-time parameter gate this version passed.
     ///
     /// **A stamp, not a note.** P4.5's §7 said "every endpoint with parameters
@@ -226,6 +239,111 @@ pub struct EndpointSnapshot {
     /// and nothing to force a re-publish of.
     #[serde(default)]
     pub param_gate: u32,
+}
+
+/// The name given to the single statement synthesized from a pre-M2 snapshot.
+///
+/// The same name migration 0129 gave every existing DRAFT, so a pre-M2
+/// endpoint reads identically whether it is served from its frozen snapshot or
+/// re-published from its migrated draft — two paths that would otherwise
+/// disagree about what the endpoint's one statement is called.
+///
+/// A caller never sees it. Spec §4.4: `data` is an ARRAY for a one-statement
+/// endpoint, and only becomes an object keyed by statement name once there is
+/// more than one. So naming something that was previously anonymous changes
+/// nothing on the wire for every endpoint this compatibility path exists for.
+pub const LEGACY_STATEMENT_NAME: &str = "main";
+
+/// How an [`EndpointSnapshot`] is READ. Not how it is written.
+///
+/// `dataapi.endpoint_versions.snapshot` is immutable, so the corpus contains
+/// two shapes at once and always will: pre-M2 rows carrying a single `sql`
+/// string with one `columns` list beside it, and M2 rows carrying
+/// `statements`. Migrating the old ones was available and was rejected —
+/// a published version is the frozen contract a live consumer is coding
+/// against, and the precedent is M1's `#[serde(default = "default_required")]`
+/// on [`ColumnSpec::required`], where the reader accommodated an old row
+/// rather than an `UPDATE` rewriting it.
+///
+/// A separate representation type rather than keeping `sql`/`columns` as
+/// `Option` fields on [`EndpointSnapshot`] itself: the legacy pair must be
+/// readable and must never be WRITTEN again, and an `Option` field that
+/// serde can still serialize is one `skip_serializing_if` away from putting
+/// the old shape back into a new row. Here it is unrepresentable — the fields
+/// exist only on the way in.
+#[derive(Deserialize)]
+struct EndpointSnapshotRepr {
+    /// Present on every snapshot published from M2 onwards.
+    #[serde(default)]
+    statements: Option<Vec<StatementSnapshot>>,
+    /// The pre-M2 pair. Required together, exactly as they were required
+    /// before M2 — neither carried a serde default, so a snapshot missing
+    /// either one has never deserialized and does not start now.
+    #[serde(default)]
+    sql: Option<String>,
+    #[serde(default)]
+    columns: Option<Vec<ColumnSpec>>,
+    method: String,
+    path: String,
+    database_id: uuid::Uuid,
+    params: Vec<ParamSpec>,
+    output: OutputSpec,
+    cache: CacheSpec,
+    limits: LimitsSpec,
+    rate_limit: RateLimitSpec,
+    delegated: bool,
+    #[serde(default)]
+    impersonate: bool,
+    #[serde(default)]
+    param_gate: u32,
+}
+
+/// What the reader refuses. A snapshot in neither shape is corrupt data, and
+/// saying so is better than an endpoint that deserializes with nothing to run
+/// and discovers it at request time.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum SnapshotShapeError {
+    #[error(
+        "a published snapshot must carry a non-empty `statements` list, or the pre-M2 `sql` \
+         and `columns` pair it is read as one statement from; this one carries neither"
+    )]
+    NoStatements,
+}
+
+impl TryFrom<EndpointSnapshotRepr> for EndpointSnapshot {
+    type Error = SnapshotShapeError;
+
+    fn try_from(r: EndpointSnapshotRepr) -> Result<Self, Self::Error> {
+        let statements = match (r.statements, r.sql, r.columns) {
+            // M2 and later. The legacy pair is ignored if some future row
+            // somehow carries both: `statements` is the authority, so a
+            // multi-statement endpoint can never be flattened to its first.
+            (Some(s), _, _) if !s.is_empty() => s,
+            // Pre-M2: one anonymous SQL string and the columns frozen beside
+            // it become one named statement. Both halves are required, which
+            // is what the old struct already demanded of them.
+            (_, Some(sql), Some(columns)) => vec![StatementSnapshot {
+                name: LEGACY_STATEMENT_NAME.to_string(),
+                sql,
+                columns,
+            }],
+            _ => return Err(SnapshotShapeError::NoStatements),
+        };
+        Ok(EndpointSnapshot {
+            statements,
+            method: r.method,
+            path: r.path,
+            database_id: r.database_id,
+            params: r.params,
+            output: r.output,
+            cache: r.cache,
+            limits: r.limits,
+            rate_limit: r.rate_limit,
+            delegated: r.delegated,
+            impersonate: r.impersonate,
+            param_gate: r.param_gate,
+        })
+    }
 }
 
 /// The current revision of the publish-time parameter gate — what
@@ -270,6 +388,263 @@ impl From<&egret_core::ColumnMeta> for ColumnSpec {
             required: true,
         }
     }
+}
+
+/// One of an endpoint's N SQL definitions, as an author writes it (M2). The
+/// canonical shape is a `rows` statement and a `total` statement for
+/// pagination, but any number is allowed.
+///
+/// `name` is not decoration: once an endpoint has more than one statement,
+/// the response envelope is a JSON object keyed by statement name and the
+/// generated OpenAPI document names it as a property (M2 Tasks 8-9). A name a
+/// caller writes into their own code is a contract, which is what
+/// [`validate_statement_name`] and [`validate_statements`] enforce —
+/// `^[a-z][a-z0-9_]*$` so the key never needs quoting in JSON and never reads
+/// as private, and uniqueness within the endpoint so the key is unambiguous.
+///
+/// `#[serde(deny_unknown_fields)]` for the same reason as [`ParamSpec`] and
+/// its four siblings: this is a type an AUTHOR fills in, so a typo in the
+/// request body must be a 400, not a silently-ignored field.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StatementSpec {
+    pub name: String,
+    pub sql: String,
+}
+
+/// The frozen form of a [`StatementSpec`]: what a publish freezes into
+/// [`EndpointSnapshot`] for one statement, its own [`ColumnSpec`] union
+/// included (M1's per-branch column union, now scoped to one statement of N).
+///
+/// No `deny_unknown_fields` — like [`EndpointSnapshot`] and [`ColumnSpec`],
+/// the server writes this for itself; a typo here is not possible the way one
+/// is in a request body.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+pub struct StatementSnapshot {
+    pub name: String,
+    pub sql: String,
+    pub columns: Vec<ColumnSpec>,
+}
+
+/// What [`validate_statement_name`] and [`validate_statements`] refuse.
+///
+/// One enum rather than two, because [`validate_statements`] is defined in
+/// terms of [`validate_statement_name`] and a caller that matches on the
+/// result of either should not have to match two different types for the
+/// same underlying question ("is this name/list well-formed?").
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum StatementError {
+    /// `name` does not match `^[a-z][a-z0-9_]*$`.
+    #[error(
+        "statement name {0:?} is not a valid identifier: it must match `^[a-z][a-z0-9_]*$` — \
+         lowercase ASCII letters, digits and `_`, starting with a lowercase letter. A name \
+         becomes a JSON object key and an OpenAPI property once an endpoint has more than one \
+         statement, so it may not need quoting and may not read as private"
+    )]
+    InvalidName(String),
+    /// A name longer than [`MAX_STATEMENT_NAME_LEN`].
+    ///
+    /// The identifier rule bounds the ALPHABET a name may use and said nothing
+    /// about its length, so a 4 KB name passed every rule above and then became
+    /// a JSON object key in every response body, an OpenAPI property name in the
+    /// generated document, and a `data.<name>` path in every consumer's code.
+    /// None of those has a length limit either, which is what makes this the
+    /// bound's only home.
+    #[error(
+        "statement name is {len} characters and the limit is {limit}. A name becomes a JSON \
+         object key in every response and a property name in the generated OpenAPI document, \
+         so it is part of the endpoint's public contract rather than a label"
+    )]
+    NameTooLong { len: usize, limit: usize },
+    /// Two statements in the same endpoint declared the same name.
+    #[error(
+        "statement name `{0}` is used by more than one statement in this endpoint; the response \
+         envelope keys results by name, so two statements cannot share one"
+    )]
+    DuplicateName(String),
+    /// `output.envelope` is not one of [`ENVELOPES`].
+    ///
+    /// In [`StatementError`] rather than an error type of its own because it is
+    /// refused by the same three call sites at the same moment — the create
+    /// route, the patch route and publish — and every one of them converts this
+    /// type to a 400 already. A second type would be a second thing each of them
+    /// has to remember to call.
+    #[error(
+        "output.envelope {0:?} is not one of `wrapped` or `bare`. It decides whether the \
+         response carries the {{status, message, data, meta}} wrapper, so a value that is \
+         merely close — a capital letter, a trailing space — would be stored, echoed back, \
+         and then served as the OTHER shape"
+    )]
+    UnknownEnvelope(String),
+    /// The list had no statements at all.
+    #[error("an endpoint must declare at least one statement")]
+    Empty,
+    /// More statements than [`MAX_STATEMENTS`].
+    ///
+    /// The message names the two costs the count multiplies rather than only
+    /// the number, because neither is visible in the editor: the author sees a
+    /// list of statements and a `timeout_seconds` field, and nothing on that
+    /// screen says the two are multiplied.
+    #[error(
+        "this endpoint declares {count} statements and the limit is {limit}. Statements run \
+         one after another, so an endpoint's worst-case response time is its \
+         `limits.timeout_seconds` MULTIPLIED by how many it has, and publish renders and \
+         describes every branch of every one of them. Fold statements a caller always reads \
+         together into one query with a join or a `UNION ALL`, or split this into two \
+         endpoints"
+    )]
+    TooManyStatements { count: usize, limit: usize },
+}
+
+/// How many SQL statements one endpoint may declare.
+///
+/// # Why a count and not a time budget
+///
+/// The cost this bounds is wall clock, and wall clock is what a budget would
+/// bound directly — but a budget can only fail in the middle of the loop, with
+/// some statements already executed, and **the response envelope cannot express
+/// that**. `data` is an object keyed by statement name and `meta.statements`
+/// reports one `row_count`/`columns` entry per statement; a body carrying three
+/// of four keys is a client silently reading a hole, which is the exact failure
+/// `serving::router`'s execution loop already refuses for a mid-loop drift
+/// ("their rows are discarded rather than served beside a partial failure").
+/// The alternative — run the budget down, then discard everything — spends the
+/// resource in full before refusing, so it bounds nothing an abusive caller
+/// cares about while turning a slow-but-correct endpoint into an intermittent
+/// one. It would also bound only the serving half: the publish cost below is
+/// paid before any statement executes, and no serving budget reaches it.
+///
+/// A count is checkable at publish, refuses once, loudly, to the author who can
+/// fix it, and bounds both halves with one number. `limits.timeout_seconds`
+/// stays the knob for how long ONE statement may take; this is the bound on the
+/// multiplier.
+///
+/// # Where the number comes from
+///
+/// Measured in release, 2026-08-25, at N = 1…1024.
+///
+/// **Publish, before the first describe** — everything `validate_endpoint` and
+/// the branch enumeration do, per statement, for the most expensive statement
+/// the other two limits still admit (32 boolean parameters, 530 branches, which
+/// is `egret_dataapi`'s `MAX_DECLARED_PARAMS` worst case):
+///
+/// | N | scans + render | enumerate | total |
+/// |---|---|---|---|
+/// | 1 | 10.1 ms | 111.3 ms | **121 ms** |
+/// | 8 | 80.3 ms | 913.9 ms | 0.99 s |
+/// | **16** | 166.0 ms | 1.8 s | **1.97 s** |
+/// | 64 | 646.6 ms | 7.3 s | 7.9 s |
+/// | 256 | 2.6 s | 29.0 s | **31.6 s** |
+///
+/// Linear in N, and every one of those is refused afterwards — the branch
+/// budget answers `16 × 530 = 8480 > 64` — so the whole table is time paid for
+/// a `400`, on a synchronous CPU path that OCCUPIES a tokio worker rather than
+/// releasing it. That is the same relationship `MAX_DECLARED_PARAMS` has to
+/// `MAX_DESCRIBED_BRANCHES`: this bound is a SCAN, it runs first, and it makes
+/// the table above unreachable rather than merely refused.
+///
+/// **Serving** — one call to an endpoint of N statements, against a stub engine
+/// costing 40 ms per execution: 99.0 ms at N = 2, 343.2 ms at 8, 682.6 ms at 16,
+/// 2.7 s at 64 — **42 ms per statement at every N**, so egret's own share is
+/// ~2 ms and the rest is the engine. Sequential and linear, exactly as
+/// `serving::router` executes it. The endpoint's worst case is therefore
+/// `N × min(timeout_seconds, TIMEOUT_CEILING_SECS)`, and nothing bounded N.
+///
+/// # So `16`
+///
+/// * **8× the canonical several-statement endpoint** — a `rows` query and the
+///   `total` that paginates it (spec §4.4) — which is the multiplier
+///   `MAX_DECLARED_PARAMS` takes over spec §4.3's four parameters.
+/// * **It is where this bound and the branch budget MEET.** Every statement
+///   costs at least one describe, so `MAX_DESCRIBED_BRANCHES = 64` already
+///   capped N at 64 — but only for statements with no branches at all, and only
+///   *after* all N had been rendered. 64 / 16 = 4 branches per statement: below
+///   that width the statement count is what refuses, above it the branch budget
+///   is. At 8 this bound would fire for lists of cheap statements the branch
+///   budget was happy to describe; at 32 the branch budget binds first for
+///   anything with two or more branches, so the statement count would almost
+///   never speak.
+/// * It takes the worst wall clock one call can buy from `64 × 300 s` (5 h
+///   20 min) to `16 × 300 s`, and the publish CPU from unbounded — nothing
+///   caps the list on the create or PATCH routes — to a measured 1.97 s.
+///
+/// # What it is not derived from
+///
+/// **Not from a target response time.** The deployed ingress gives a Data API
+/// call 60 seconds: egret's `Ingress` sets no `proxy-read-timeout` annotation,
+/// so ingress-nginx's default applies, and the running controller's generated
+/// config reads `proxy_read_timeout 60s` (read out of the live pod, not assumed).
+/// The default `limits.timeout_seconds` is 30, so **two** statements already
+/// reach that cut-off in the worst case. No value of N makes the worst case fit
+/// inside 60 s; keeping a real endpoint inside it is `timeout_seconds`'s job,
+/// per statement. This bound exists because N was a multiplier on two costs that
+/// were each already bounded, and it was itself bounded by nothing.
+pub const MAX_STATEMENTS: usize = 16;
+
+/// How long a statement name may be.
+///
+/// Sixty-four characters, which is Postgres's own identifier limit (63) rounded
+/// to the nearest power of two — a number an author will never reach writing
+/// `rows`, `total` or `by_region_last_quarter`, and small enough that the JSON
+/// key it becomes stays readable in a response body. The alphabet rule above
+/// bounds what a name may contain and bounded nothing about its size.
+pub const MAX_STATEMENT_NAME_LEN: usize = 64;
+
+/// `^[a-z][a-z0-9_]*$`, and no longer than [`MAX_STATEMENT_NAME_LEN`] — see
+/// [`StatementSpec`]'s doc comment for why this exact shape and not, say,
+/// camelCase or a leading underscore for "private".
+///
+/// The length is checked FIRST, and by `chars().count()` rather than `len()`:
+/// the alphabet rule below is ASCII-only, so the two agree for every name it
+/// accepts, and a rejected name is measured in characters the author can count
+/// on screen rather than in UTF-8 bytes.
+pub fn validate_statement_name(name: &str) -> Result<(), StatementError> {
+    let len = name.chars().count();
+    if len > MAX_STATEMENT_NAME_LEN {
+        return Err(StatementError::NameTooLong {
+            len,
+            limit: MAX_STATEMENT_NAME_LEN,
+        });
+    }
+    let mut chars = name.chars();
+    let starts_with_lowercase_letter = matches!(chars.next(), Some(c) if c.is_ascii_lowercase());
+    let rest_is_lowercase_alnum_or_underscore =
+        chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+    if starts_with_lowercase_letter && rest_is_lowercase_alnum_or_underscore {
+        Ok(())
+    } else {
+        Err(StatementError::InvalidName(name.to_string()))
+    }
+}
+
+/// Every statement's name is a valid identifier, no two statements share a
+/// name, and the list is non-empty — the three rules that make "keyed by
+/// statement name" (M2 Tasks 8-9) a safe thing to build a response around.
+pub fn validate_statements(statements: &[StatementSpec]) -> Result<(), StatementError> {
+    if statements.is_empty() {
+        return Err(StatementError::Empty);
+    }
+    // The other end of the same question, and it is asked here — before the
+    // per-name loop, and on every path that writes or publishes a list — for the
+    // reason [`MAX_STATEMENTS`] records: it is the bound that makes the cost of
+    // everything downstream a number rather than a function of the request, so
+    // it has to run before any of it. `egret_dataapi`'s `validate_endpoint`
+    // calls this function first, ahead of every scan and every render, which is
+    // what makes it a publish-time refusal rather than a note.
+    if statements.len() > MAX_STATEMENTS {
+        return Err(StatementError::TooManyStatements {
+            count: statements.len(),
+            limit: MAX_STATEMENTS,
+        });
+    }
+    let mut seen = std::collections::HashSet::with_capacity(statements.len());
+    for statement in statements {
+        validate_statement_name(&statement.name)?;
+        if !seen.insert(statement.name.as_str()) {
+            return Err(StatementError::DuplicateName(statement.name.clone()));
+        }
+    }
+    Ok(())
 }
 
 /// Whether two SQL type names describe the same column, and — when they do but
@@ -443,12 +818,69 @@ pub struct OutputSpec {
     pub shape: String, // "objects" | "arrays"
     #[serde(default = "default_naming")]
     pub naming: String, // "as_is" | "camel" | "snake"
+    /// Whether the response carries the `{status, message, data, meta}` wrapper
+    /// (`"wrapped"`, the default) or `data`'s value on its own (`"bare"`) —
+    /// spec §4.4.
+    ///
+    /// Defaulted rather than made an `Option`, and defaulted to the WRAPPER, so
+    /// that every snapshot frozen before this field existed reads back as
+    /// `wrapped`: the migration sets no rows and an unpublished endpoint cannot
+    /// change shape by being re-read.
+    ///
+    /// `bare` is the success path only. A refusal still answers with
+    /// `ServingErrorBody`, because an unwrapped error would be a bare `null` —
+    /// nothing at all about what went wrong — under a status this toggle does
+    /// not reach.
+    ///
+    /// A `String` like `shape` and `naming`, but — unlike them — **checked
+    /// before it is stored**, by [`validate_envelope`]. Serving still falls back
+    /// to the documented default and logs rather than refusing (see
+    /// `serving::router::envelope_of`), because a frozen snapshot must keep
+    /// answering; the check exists so no new row can reach that fallback. See
+    /// [`validate_envelope`] for why this field and not its two neighbours.
+    #[serde(default = "default_envelope")]
+    pub envelope: String, // "wrapped" | "bare"
 }
 fn default_shape() -> String {
     "objects".into()
 }
 fn default_naming() -> String {
     "as_is".into()
+}
+fn default_envelope() -> String {
+    "wrapped".into()
+}
+
+/// The two values [`OutputSpec::envelope`] may take.
+pub const ENVELOPES: [&str; 2] = ["wrapped", "bare"];
+
+/// `output.envelope` names an envelope that exists.
+///
+/// # Why this field and not `shape` or `naming`
+///
+/// All three are free `String`s, and only this one decides the **shape of the
+/// wire body**: `"Bare"` or `"bare "` passes create, PATCH, publish and the
+/// migration, and then serves `{status, message, data, meta}` to a client whose
+/// author asked for the value on its own and read `envelope: "Bare"` back from
+/// the API confirming it. The only trace is a `tracing::warn!` on the serving
+/// side, in a log the author does not read. `shape` and `naming` fall back the
+/// same way, but this field is also NEW (M2 Task 8) — there is no corpus of
+/// rows carrying an unrecognised value, so a rule here refuses nothing that was
+/// ever accepted. That is not true of the other two, and retro-fitting a rule to
+/// them is a separate decision about existing drafts.
+///
+/// Not a serde-level rule and not an `enum`: `OutputSpec` is deserialized from a
+/// FROZEN snapshot as well as from a request body, and an enum would make an old
+/// row with an unrecognised value unreadable — a published endpoint that stops
+/// serving entirely rather than serving its documented default. The fallback is
+/// what a reader needs; a validator is what a WRITER needs. They are different
+/// paths and this is the writer's.
+pub fn validate_envelope(output: &OutputSpec) -> Result<(), StatementError> {
+    if ENVELOPES.contains(&output.envelope.as_str()) {
+        Ok(())
+    } else {
+        Err(StatementError::UnknownEnvelope(output.envelope.clone()))
+    }
 }
 
 // Hand-written, not `#[derive(Default)]`: a derive builds each field from
@@ -463,6 +895,7 @@ impl Default for OutputSpec {
         Self {
             shape: default_shape(),
             naming: default_naming(),
+            envelope: default_envelope(),
         }
     }
 }
@@ -481,6 +914,11 @@ mod tests {
         assert_eq!(OutputSpec::default(), from_empty_json);
         assert_eq!(OutputSpec::default().shape, "objects");
         assert_eq!(OutputSpec::default().naming, "as_is");
+        // The one that matters on the WIRE: a snapshot frozen before M2 carries
+        // no `envelope`, and reading it back as anything but `wrapped` would
+        // change the response shape of every endpoint published since
+        // 2026-08-16 without anybody re-publishing.
+        assert_eq!(OutputSpec::default().envelope, "wrapped");
     }
 
     #[test]
@@ -502,6 +940,324 @@ mod tests {
             ty: "integer".into(),
         };
         assert!(ColumnSpec::from(&meta).required);
+    }
+
+    // --- statement naming ------------------------------------------------
+    //
+    // A statement's name becomes a JSON object key in the response envelope
+    // and an OpenAPI property name once an endpoint has more than one
+    // statement (M2 Tasks 8-9), so the rule is a contract with a caller's
+    // generated client, not a style preference.
+
+    #[test]
+    fn a_statement_name_must_be_an_identifier() {
+        for bad in ["Rows", "1st", "row count", "rows-total", "", "_rows"] {
+            assert!(validate_statement_name(bad).is_err(), "accepted {bad:?}");
+        }
+        for good in ["rows", "row_count", "r2"] {
+            assert!(validate_statement_name(good).is_ok(), "refused {good:?}");
+        }
+    }
+
+    /// The LENGTH bound, from both sides and by the exact variant.
+    ///
+    /// Every character in the long name below is one the alphabet rule accepts,
+    /// so nothing else in `validate_statement_name` can answer for it — which is
+    /// the point: the identifier rule bounded the alphabet and bounded nothing
+    /// about the size of the JSON key the name becomes.
+    #[test]
+    fn a_statement_name_has_a_length_bound() {
+        let at_limit = "r".repeat(MAX_STATEMENT_NAME_LEN);
+        assert_eq!(
+            validate_statement_name(&at_limit),
+            Ok(()),
+            "the limit itself must be accepted, or the bound is off by one"
+        );
+        let past = "r".repeat(MAX_STATEMENT_NAME_LEN + 1);
+        assert_eq!(
+            validate_statement_name(&past),
+            Err(StatementError::NameTooLong {
+                len: MAX_STATEMENT_NAME_LEN + 1,
+                limit: MAX_STATEMENT_NAME_LEN,
+            })
+        );
+        // And through the list validator, which is what the routes and publish
+        // actually call.
+        assert_eq!(
+            validate_statements(&[StatementSpec {
+                name: past.clone(),
+                sql: "SELECT 1".into(),
+            }]),
+            Err(StatementError::NameTooLong {
+                len: MAX_STATEMENT_NAME_LEN + 1,
+                limit: MAX_STATEMENT_NAME_LEN,
+            })
+        );
+    }
+
+    /// `output.envelope` decides the shape of the wire body, so the values that
+    /// are ALMOST right are the ones worth pinning: each of them would be
+    /// stored, echoed back as accepted, and then served as the other shape.
+    #[test]
+    fn only_the_two_documented_envelopes_are_accepted() {
+        // The two values SPELLED OUT, not iterated from `ENVELOPES`. A loop over
+        // the constant moves with it: narrowing the constant to
+        // `["wrapped", "wrapped"]` — which stops `bare` being publishable at all
+        // — left this test green, and only the two DB-backed tests caught it.
+        assert_eq!(ENVELOPES, ["wrapped", "bare"]);
+        for good in ["wrapped", "bare"] {
+            let output = OutputSpec {
+                envelope: good.into(),
+                ..OutputSpec::default()
+            };
+            assert_eq!(validate_envelope(&output), Ok(()), "refused {good:?}");
+        }
+        for bad in ["Bare", "bare ", " bare", "", "WRAPPED", "none"] {
+            let output = OutputSpec {
+                envelope: bad.to_string(),
+                ..OutputSpec::default()
+            };
+            assert_eq!(
+                validate_envelope(&output),
+                Err(StatementError::UnknownEnvelope(bad.to_string())),
+                "accepted {bad:?}"
+            );
+        }
+        // The DEFAULT — what an absent `output` deserializes to — must pass the
+        // rule it is the default for.
+        assert_eq!(validate_envelope(&OutputSpec::default()), Ok(()));
+    }
+
+    #[test]
+    fn two_statements_may_not_share_a_name() {
+        let statements = vec![
+            StatementSpec {
+                name: "rows".into(),
+                sql: "SELECT 1".into(),
+            },
+            StatementSpec {
+                name: "rows".into(),
+                sql: "SELECT 2".into(),
+            },
+        ];
+        assert_eq!(
+            validate_statements(&statements),
+            Err(StatementError::DuplicateName("rows".into()))
+        );
+    }
+
+    #[test]
+    fn an_endpoint_needs_at_least_one_statement() {
+        assert_eq!(validate_statements(&[]), Err(StatementError::Empty));
+    }
+
+    /// The upper bound, from the side that must be refused.
+    ///
+    /// Reads WHICH refusal fired, not merely that one did: `validate_statements`
+    /// has four now, and three of them are also reachable from a list this long.
+    #[test]
+    fn a_statement_list_past_the_limit_is_refused() {
+        let statements: Vec<StatementSpec> = (0..=MAX_STATEMENTS)
+            .map(|i| StatementSpec {
+                name: format!("s{i}"),
+                sql: "SELECT 1".into(),
+            })
+            .collect();
+        assert_eq!(
+            validate_statements(&statements),
+            Err(StatementError::TooManyStatements {
+                count: MAX_STATEMENTS + 1,
+                limit: MAX_STATEMENTS,
+            })
+        );
+    }
+
+    /// The other side, and deliberately its own test rather than a second
+    /// assertion in the one above: a bound that refuses the work it exists to
+    /// permit is not a bound, it is an outage, and the two failures are
+    /// different mistakes.
+    ///
+    /// Two statements is the canonical several-statement endpoint — a `rows`
+    /// query and the `total` that paginates it (spec §4.4) — and the list AT the
+    /// limit is the widest thing an author may write.
+    #[test]
+    fn the_canonical_two_statement_endpoint_and_a_list_at_the_limit_are_accepted() {
+        let build = |n: usize| -> Vec<StatementSpec> {
+            (0..n)
+                .map(|i| StatementSpec {
+                    name: format!("s{i}"),
+                    sql: "SELECT 1".into(),
+                })
+                .collect()
+        };
+        assert_eq!(validate_statements(&build(2)), Ok(()));
+        assert_eq!(validate_statements(&build(MAX_STATEMENTS)), Ok(()));
+    }
+
+    #[test]
+    fn a_single_valid_statement_is_accepted() {
+        let statements = vec![StatementSpec {
+            name: "rows".into(),
+            sql: "SELECT 1".into(),
+        }];
+        assert!(validate_statements(&statements).is_ok());
+    }
+
+    #[test]
+    fn an_invalid_name_inside_the_list_is_refused_by_the_list_validator() {
+        let statements = vec![StatementSpec {
+            name: "Rows".into(),
+            sql: "SELECT 1".into(),
+        }];
+        assert_eq!(
+            validate_statements(&statements),
+            Err(StatementError::InvalidName("Rows".into()))
+        );
+    }
+
+    // --- the snapshot's statement list, and what an old row deserializes to ---
+    //
+    // `dataapi.endpoint_versions.snapshot` is immutable: a published version is
+    // the contract a live consumer is already coding against, so M2 migrates
+    // NOTHING there. The reader accommodates the old shape instead — the same
+    // call M1 made with `#[serde(default = "default_required")]` above.
+
+    /// Exactly the shape rows published before M2 carry: `sql` + `columns`,
+    /// no `statements`.
+    fn a_snapshot_as_published_before_m2() -> String {
+        r#"{
+            "sql": "SELECT 1 AS a",
+            "columns": [{"name":"a","ty":"integer","required":true}],
+            "method": "GET",
+            "path": "old",
+            "database_id": "00000000-0000-0000-0000-000000000001",
+            "params": [],
+            "output": {"shape":"objects","naming":"as_is"},
+            "cache": {"enabled":false,"ttl_seconds":60,"scope":"per_principal"},
+            "limits": {"max_rows":10000,"timeout_seconds":30},
+            "rate_limit": {"per_key_qps":0,"burst":0,"per_endpoint_qps":0},
+            "delegated": false,
+            "param_gate": 1
+        }"#
+        .to_string()
+    }
+
+    #[test]
+    fn a_snapshot_published_before_m2_reads_as_one_statement() {
+        let s: EndpointSnapshot = serde_json::from_str(&a_snapshot_as_published_before_m2())
+            .expect("a snapshot already serving traffic must still deserialize");
+        assert_eq!(
+            s.statements.len(),
+            1,
+            "one `sql` is one statement — not zero, and not a list the serving \
+             path would iterate emptily over"
+        );
+        assert_eq!(s.statements[0].sql, "SELECT 1 AS a");
+        assert_eq!(s.statements[0].columns.len(), 1);
+        assert_eq!(s.statements[0].columns[0].name, "a");
+        assert!(
+            s.statements[0].columns[0].required,
+            "M1's frozen contract must survive the fold, not be re-derived"
+        );
+    }
+
+    /// The synthesized name is `main` — the same name migration 0129 gave every
+    /// existing DRAFT, so a pre-M2 endpoint reads the same whether it is served
+    /// from its frozen snapshot or re-published from its migrated draft.
+    ///
+    /// It is invisible to a caller: spec §4.4 says `data` is an ARRAY for a
+    /// one-statement endpoint and only becomes an object keyed by name once
+    /// there is more than one. Nothing a pre-M2 consumer receives changes.
+    #[test]
+    fn the_synthesized_statement_is_named_main() {
+        let s: EndpointSnapshot =
+            serde_json::from_str(&a_snapshot_as_published_before_m2()).unwrap();
+        assert_eq!(s.statements[0].name, "main");
+    }
+
+    /// A snapshot that carries `statements` is read from `statements`, and the
+    /// legacy fold does not get to overwrite it. Without this the compat path
+    /// could quietly flatten every M2 endpoint to one statement.
+    #[test]
+    fn a_snapshot_carrying_statements_keeps_all_of_them() {
+        let new = r#"{
+            "statements": [
+                {"name":"rows","sql":"SELECT 1 AS a","columns":[{"name":"a","ty":"integer","required":true}]},
+                {"name":"total","sql":"SELECT 2 AS n","columns":[{"name":"n","ty":"bigint","required":true}]}
+            ],
+            "method": "GET",
+            "path": "new",
+            "database_id": "00000000-0000-0000-0000-000000000001",
+            "params": [],
+            "output": {"shape":"objects","naming":"as_is"},
+            "cache": {"enabled":false,"ttl_seconds":60,"scope":"per_principal"},
+            "limits": {"max_rows":10000,"timeout_seconds":30},
+            "rate_limit": {"per_key_qps":0,"burst":0,"per_endpoint_qps":0},
+            "delegated": false,
+            "param_gate": 1
+        }"#;
+        let s: EndpointSnapshot = serde_json::from_str(new).unwrap();
+        let names: Vec<&str> = s.statements.iter().map(|x| x.name.as_str()).collect();
+        assert_eq!(names, ["rows", "total"]);
+        assert_eq!(s.statements[1].columns[0].ty, "bigint");
+    }
+
+    /// Round-trips through its own serialization: what publish writes is what
+    /// serving reads back, with no legacy fields left behind.
+    #[test]
+    fn the_statement_list_round_trips() {
+        let s: EndpointSnapshot =
+            serde_json::from_str(&a_snapshot_as_published_before_m2()).unwrap();
+        let written = serde_json::to_string(&s).unwrap();
+        assert!(
+            !written.contains("\"sql\":\"SELECT 1 AS a\"") || written.contains("\"statements\""),
+            "a re-serialized snapshot must carry `statements`, not a top-level `sql`"
+        );
+        let again: EndpointSnapshot = serde_json::from_str(&written).unwrap();
+        assert_eq!(s, again);
+    }
+
+    /// Neither shape present is corrupt data, and it was an error before M2
+    /// too — `sql` and `columns` had no serde default. It stays a loud refusal
+    /// rather than an endpoint with nothing to run.
+    #[test]
+    fn a_snapshot_with_neither_shape_is_refused() {
+        let broken = r#"{
+            "method": "GET",
+            "path": "broken",
+            "database_id": "00000000-0000-0000-0000-000000000001",
+            "params": [],
+            "output": {"shape":"objects","naming":"as_is"},
+            "cache": {"enabled":false,"ttl_seconds":60,"scope":"per_principal"},
+            "limits": {"max_rows":10000,"timeout_seconds":30},
+            "rate_limit": {"per_key_qps":0,"burst":0,"per_endpoint_qps":0},
+            "delegated": false
+        }"#;
+        let err = serde_json::from_str::<EndpointSnapshot>(broken).unwrap_err();
+        assert!(
+            err.to_string().contains("statements"),
+            "the refusal must name what is missing, got {err}"
+        );
+    }
+
+    /// An explicitly empty list is refused too. The serving path indexes the
+    /// list; a snapshot that deserializes into zero statements would be an
+    /// endpoint with nothing to run, discovered at request time.
+    #[test]
+    fn a_snapshot_with_an_empty_statement_list_is_refused() {
+        let empty = r#"{
+            "statements": [],
+            "method": "GET",
+            "path": "empty",
+            "database_id": "00000000-0000-0000-0000-000000000001",
+            "params": [],
+            "output": {"shape":"objects","naming":"as_is"},
+            "cache": {"enabled":false,"ttl_seconds":60,"scope":"per_principal"},
+            "limits": {"max_rows":10000,"timeout_seconds":30},
+            "rate_limit": {"per_key_qps":0,"burst":0,"per_endpoint_qps":0},
+            "delegated": false
+        }"#;
+        assert!(serde_json::from_str::<EndpointSnapshot>(empty).is_err());
     }
 
     // --- compare_column_types ------------------------------------------------

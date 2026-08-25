@@ -24,6 +24,9 @@ use egret_dataapi::{
     management_router, serving_router, ActivityStore, ClientStore, DataApiState, EndpointStore,
 };
 use egret_machine_idp::{generate_rsa_key, sign_claims, IdpError, KeyMaterial, SigningKeyStore};
+#[path = "../test_db/mod.rs"]
+pub mod test_db;
+
 use egret_metastore::Db;
 use egret_query_api::Param;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -105,6 +108,17 @@ pub struct FakePort {
     /// [`FakePort::set_columns_per_sql`]. `None` (the default) leaves every
     /// existing assertion in these suites on the two paths above.
     per_sql: Mutex<Option<PerSqlColumns>>,
+    /// The column names EXECUTION returns per rendered statement, when they must
+    /// differ from the ones DESCRIBE reported — see
+    /// [`FakePort::set_execution_columns_per_sql`].
+    exec_per_sql: Mutex<Option<PerSqlColumns>>,
+    /// Every execution's `(max_rows, timeout)`, in order.
+    ///
+    /// [`Self::last_limits`] keeps only the most recent, which cannot answer the
+    /// question M2 asks: whether the SECOND statement of an endpoint was handed
+    /// the same row cap as the first, or a budget the first had already spent.
+    /// One call, several executions, so the answer is a LIST.
+    limits_log: Mutex<Vec<(usize, Duration)>>,
 }
 
 impl FakePort {
@@ -127,6 +141,16 @@ impl FakePort {
             .lock()
             .unwrap()
             .expect("no execution has reached the port")
+    }
+
+    /// The `(max_rows, timeout)` of EVERY execution, in the order they ran.
+    ///
+    /// A per-statement row cap is invisible in the response body — a fake that
+    /// returns one row per statement looks identical whether the second was told
+    /// the endpoint's cap or the cap minus what the first returned — so this
+    /// list is the only instrument that can tell the two apart.
+    pub fn limits_seen(&self) -> Vec<(usize, Duration)> {
+        self.limits_log.lock().unwrap().clone()
     }
 
     /// Make the NEXT `execute_as`/`execute_as_with_params` call fail, carrying
@@ -207,6 +231,48 @@ impl FakePort {
         );
     }
 
+    /// Answer an EXECUTION with different columns than the DESCRIBE that froze
+    /// the contract — the only way to drive a drift into ONE statement of
+    /// several.
+    ///
+    /// [`FakePort::set_columns_per_sql`] drives describe and execute alike, so a
+    /// table installed before publish freezes exactly what it later serves and
+    /// can never drift; [`FakePort::set_columns`] drifts EVERY statement at
+    /// once, since it is keyed on nothing. Neither can express "the second
+    /// statement's table was altered after publish", which is the case M2 has to
+    /// refuse — and refusing it for the wrong statement, or not at all, are both
+    /// silent.
+    ///
+    /// Installed AFTER publish, like `set_columns`. Same first-match-wins arms,
+    /// same panic when none matches.
+    pub fn set_execution_columns_per_sql(&self, table: &[(&str, &[&str])]) {
+        *self.exec_per_sql.lock().unwrap() = Some(
+            table
+                .iter()
+                .map(|(needle, names)| {
+                    (
+                        (*needle).to_string(),
+                        names.iter().map(|n| (*n).to_string()).collect(),
+                    )
+                })
+                .collect(),
+        );
+    }
+
+    /// The execution-only per-statement answer, or `None` when no table was
+    /// installed. Same shape as [`Self::per_sql_columns`], a different table.
+    fn exec_per_sql_columns(&self, sql: &str) -> Option<Vec<ColumnMeta>> {
+        let guard = self.exec_per_sql.lock().unwrap();
+        let table = guard.as_ref()?;
+        let names = table
+            .iter()
+            .find(|(needle, _)| sql.contains(needle.as_str()))
+            .unwrap_or_else(|| panic!("set_execution_columns_per_sql has no arm matching {sql:?}"))
+            .1
+            .clone();
+        Some(names.iter().map(|n| col(n)).collect())
+    }
+
     /// The per-statement answer, or `None` when no table was installed.
     ///
     /// Returns owned columns and drops the guard before it returns, so a caller
@@ -234,6 +300,9 @@ impl FakePort {
     /// What an EXECUTION of `sql` returns: the per-statement table when one is
     /// installed, otherwise the suite's existing sticky/default columns.
     fn out_columns_for(&self, sql: &str) -> Vec<ColumnMeta> {
+        if let Some(c) = self.exec_per_sql_columns(sql) {
+            return c;
+        }
         self.per_sql_columns(sql)
             .unwrap_or_else(|| self.out_columns())
     }
@@ -304,6 +373,10 @@ impl egret_query_api::QueryExecPort for FakePort {
         self.executions.fetch_add(1, Ordering::SeqCst);
         *self.last.lock().unwrap() = Some((sql.to_string(), Vec::new()));
         *self.last_limits.lock().unwrap() = Some((limits.max_rows, limits.timeout));
+        self.limits_log
+            .lock()
+            .unwrap()
+            .push((limits.max_rows, limits.timeout));
         let columns = self.out_columns_for(sql);
         Ok(TabularResult {
             // One cell per column, so a test that asked for extra columns still
@@ -339,6 +412,10 @@ impl egret_query_api::QueryExecPort for FakePort {
         self.executions.fetch_add(1, Ordering::SeqCst);
         *self.last.lock().unwrap() = Some((sql.to_string(), params.to_vec()));
         *self.last_limits.lock().unwrap() = Some((limits.max_rows, limits.timeout));
+        self.limits_log
+            .lock()
+            .unwrap()
+            .push((limits.max_rows, limits.timeout));
         let columns = self.out_columns_for(sql);
         Ok(TabularResult {
             rows: vec![vec![
@@ -701,10 +778,16 @@ async fn grant_ws_admin(db: &Db, user: Uuid, ws: Uuid) {
     .expect("grant ws_admin");
 }
 
+/// Migrations are applied ONCE per test process, not once per test.
+///
+/// `db.migrate()` is idempotent, but a no-op run still reads and checksums every
+/// migration in `migrations/` — measured at **1.24s** against an already-migrated
+/// database. `fixture()` is called by every test in the binary, so this binary's
+/// 27 tests were paying ~33s of a 91s run to re-verify migrations that could not
+/// have changed since the process started.
 pub async fn fixture() -> Option<Fixture> {
-    let url = std::env::var("DATABASE_URL").ok()?;
+    let url = test_db::url().await?;
     let db = Db::connect(&url, 5).await.expect("connect");
-    db.migrate().await.expect("migrate");
 
     let admin = insert_user(&db, "t4_admin").await;
     let slug = format!("t4-{}", Uuid::new_v4().simple());
@@ -1175,8 +1258,8 @@ impl Fixture {
     ) -> Uuid {
         let ep: Uuid = sqlx::query_scalar(
             "INSERT INTO dataapi.endpoints \
-               (workspace_id, name, path, method, database_id, sql, params, cache, rate_limit, created_by) \
-             VALUES ($1, $2, $3, 'GET', $4, $5, $6, $7, $8, $9) RETURNING id",
+               (workspace_id, name, path, method, database_id, statements, params, cache, rate_limit, created_by) \
+             VALUES ($1, $2, $3, 'GET', $4, jsonb_build_array(jsonb_build_object('name', 'main', 'sql', $5::text)), $6, $7, $8, $9) RETURNING id",
         )
         .bind(self.ws_id)
         .bind(format!("ep-{}", Uuid::new_v4().simple()))
@@ -1207,6 +1290,79 @@ impl Fixture {
         ep
     }
 
+    /// Publish an endpoint carrying an arbitrary STATEMENT LIST, and its own
+    /// `limits`, through the real publish route.
+    ///
+    /// [`Fixture::publish_with_params`] builds the one-element list inline and
+    /// takes no `limits`, so it can express neither of the two things M2 Task 7
+    /// is about: an endpoint with several statements, and a row cap a test can
+    /// recognise. `statements` is the jsonb the draft column stores —
+    /// `[{"name": …, "sql": …}, …]` — so a test states the list exactly as an
+    /// author would, and publish validates it exactly as it would theirs.
+    ///
+    /// Caching is off: every assertion here counts EXECUTIONS, and a warm entry
+    /// would answer with none.
+    pub async fn publish_statements(
+        &self,
+        path: &str,
+        database_id: Uuid,
+        statements: serde_json::Value,
+        limits: serde_json::Value,
+    ) -> Uuid {
+        self.publish_statements_with_output(
+            path,
+            database_id,
+            statements,
+            limits,
+            serde_json::json!({}),
+        )
+        .await
+    }
+
+    /// The same, with an explicit `output` spec.
+    ///
+    /// Separate from `publish_statements` rather than a fifth argument on it
+    /// because `output.envelope` (M2 Task 8) is the only reason a several-
+    /// statement fixture needs one, and every existing caller wants the default.
+    pub async fn publish_statements_with_output(
+        &self,
+        path: &str,
+        database_id: Uuid,
+        statements: serde_json::Value,
+        limits: serde_json::Value,
+        output: serde_json::Value,
+    ) -> Uuid {
+        let ep: Uuid = sqlx::query_scalar(
+            "INSERT INTO dataapi.endpoints \
+               (workspace_id, name, path, method, database_id, statements, cache, limits, output, created_by) \
+             VALUES ($1, $2, $3, 'GET', $4, $5, $6, $7, $8, $9) RETURNING id",
+        )
+        .bind(self.ws_id)
+        .bind(format!("ep-{}", Uuid::new_v4().simple()))
+        .bind(path)
+        .bind(database_id)
+        .bind(&statements)
+        .bind(serde_json::json!({ "enabled": false }))
+        .bind(&limits)
+        .bind(&output)
+        .bind(self.admin)
+        .fetch_one(&self.db.pool)
+        .await
+        .expect("insert endpoint draft");
+
+        let (status, body) = self
+            .mgmt_send(
+                "POST",
+                &format!("/api/ws/{}/data-api/endpoints/{ep}/publish", self.ws_slug),
+                Some(serde_json::json!({})),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "publish failed: {body}");
+        grant_invoke(&self.db, self.principal_a, ep).await;
+        grant_invoke(&self.db, self.principal_b, ep).await;
+        ep
+    }
+
     /// Publish without asserting success, so a test can assert the REFUSAL.
     pub async fn try_publish(
         &self,
@@ -1216,8 +1372,8 @@ impl Fixture {
     ) -> (StatusCode, serde_json::Value) {
         let ep: Uuid = sqlx::query_scalar(
             "INSERT INTO dataapi.endpoints \
-               (workspace_id, name, path, method, database_id, sql, cache, created_by) \
-             VALUES ($1, $2, $3, 'GET', $4, 'SELECT 1 AS n', $5, $6) RETURNING id",
+               (workspace_id, name, path, method, database_id, statements, cache, created_by) \
+             VALUES ($1, $2, $3, 'GET', $4, jsonb_build_array(jsonb_build_object('name', 'main', 'sql', 'SELECT 1 AS n')), $5, $6) RETURNING id",
         )
         .bind(self.ws_id)
         .bind(format!("ep-{}", Uuid::new_v4().simple()))
@@ -1247,7 +1403,7 @@ impl Fixture {
                     "name": name,
                     "path": path,
                     "database_id": self.database_id,
-                    "sql": "SELECT 1 AS n",
+                    "statements": [{ "name": "main", "sql": "SELECT 1 AS n" }],
                 })),
             )
             .await;
@@ -1366,5 +1522,40 @@ impl Fixture {
             .execute(&self.db.pool)
             .await
             .expect("flip delegated");
+    }
+
+    /// Replace an already-published endpoint's DRAFT statement list, straight
+    /// into the table — mirrors `lifecycle.rs`'s helper of the same name.
+    /// Written rather than PATCHed so a cache test does not also depend on the
+    /// write route being correct. The affected-row count is asserted because a
+    /// forge that missed the row would leave [`Fixture::republish`] refreezing
+    /// the OLD statement list and the test would measure nothing.
+    pub async fn set_statements(&self, ep: Uuid, statements: serde_json::Value) {
+        let touched = sqlx::query("UPDATE dataapi.endpoints SET statements = $2 WHERE id = $1")
+            .bind(ep)
+            .bind(&statements)
+            .execute(&self.db.pool)
+            .await
+            .expect("store statements")
+            .rows_affected();
+        assert_eq!(touched, 1, "the statement list must actually be stored");
+    }
+
+    /// Publish an EXISTING endpoint id a second time, through the real publish
+    /// route (via [`Fixture::mgmt_post`]), and return the version number it
+    /// reports. [`Fixture::publish`]/[`Fixture::publish_with_params`] always
+    /// insert a fresh endpoint, which cannot produce a version-2 snapshot for a
+    /// test that needs to prove a republish invalidates a warm cache entry.
+    pub async fn republish(&self, ep: Uuid) -> i32 {
+        let (status, body) = self
+            .mgmt_post(
+                &format!("/api/ws/{}/data-api/endpoints/{ep}/publish", self.ws_slug),
+                Some(serde_json::json!({})),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "republish failed: {body}");
+        body["version"]
+            .as_i64()
+            .unwrap_or_else(|| panic!("no version in publish response: {body}")) as i32
     }
 }

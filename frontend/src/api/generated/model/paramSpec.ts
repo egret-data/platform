@@ -17,10 +17,11 @@ import type { ParamType } from './paramType';
  * with `per_key_qps` silently defaulted to `0`. A rate limit the author
  * believes they set and did not is worse than an error.
  *
- * Applied to the five types an AUTHOR fills in — [`ParamSpec`], [`CacheSpec`],
- * [`LimitsSpec`], [`RateLimitSpec`], [`OutputSpec`] — and deliberately NOT to
- * [`EndpointSnapshot`] or [`ColumnSpec`], which the server writes for itself
- * and where a typo is impossible.
+ * Applied to the six types an AUTHOR fills in — [`ParamSpec`], [`CacheSpec`],
+ * [`LimitsSpec`], [`RateLimitSpec`], [`OutputSpec`], [`StatementSpec`] — and
+ * deliberately NOT to [`EndpointSnapshot`], [`ColumnSpec`] or
+ * [`StatementSnapshot`], which the server writes for itself and where a typo
+ * is impossible.
  *
  * **The cost, stated because it is a real constraint on a persisted format.**
  * These types are also how a stored `jsonb` column is read back. Adding a field

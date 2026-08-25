@@ -5,19 +5,14 @@
  * egret unified data portal HTTP API.
  * OpenAPI spec version: 0.1.0
  */
-import type { ColumnSpec } from './columnSpec';
+import type { MetaContract } from './metaContract';
 
-export interface ServingMeta {
-  /**
-     * The FROZEN columns from the snapshot, not the ones this execution
-     * happened to return. The published contract is what a client codes
-     * against; if the underlying table has drifted, the difference is a defect
-     * to surface, not something to paper over by reporting today's shape.
-     */
-  columns: ColumnSpec[];
-  /** @minimum 0 */
-  row_count: number;
+/**
+ * The endpoint-wide half of `meta`, plus whichever contract shape the
+ * endpoint's statement count calls for.
+ */
+export type ServingMeta = MetaContract & {
   version: number;
   cached: boolean;
   request_id: string;
-}
+};

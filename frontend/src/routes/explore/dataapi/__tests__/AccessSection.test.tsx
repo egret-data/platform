@@ -28,7 +28,7 @@ function makeEndpoint(overrides: Partial<DataApiEndpointDto> = {}): DataApiEndpo
     path: "reports/daily",
     method: "GET",
     database_id: "db-1",
-    sql: "SELECT 1",
+    statements: [{ name: "main", sql: "SELECT 1" }],
     params: [],
     output: {},
     cache: {},
