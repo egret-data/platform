@@ -372,6 +372,26 @@ package shipped with `required` and had to come back for.
 
 ---
 
+### Task 10c: make a stale generated client a build failure
+
+**Added after Task 10b, which found the third runtime break of the same kind.** Nothing
+checks `frontend/src/api/generated/` against `openapi.json`. That is why M1 shipped a
+`ColumnSpec` missing `required`, and why this package shipped a client still declaring
+`sql` after the request body became `statements` — the editor POSTed a body
+`deny_unknown_fields` refuses, and no test failed.
+
+- [ ] **Step 1: add a CI step** that runs `npm run gen:api` and fails if the working tree
+  is dirty afterwards. Use the npm script, **never bare `orval`** — the script runs
+  `scripts/encode-path-params.mjs`, which puts back the `encodeURIComponent` that orval
+  8.24 drops.
+- [ ] **Step 2: prove it fails.** Hand-edit one generated model, run the step, and confirm
+  it reports the drift. A gate nobody has watched fail is not a gate.
+- [ ] **Step 3: prove it passes** on a clean tree, and that a second run is a no-op — a
+  generator that is not deterministic would make this permanently red.
+- [ ] **Step 4: Commit**
+
+---
+
 ### Task 11: drive it end to end, and prove the upgrade path
 
 **Files:** `crates/egret-dataapi/tests/serving_errors.rs` or a sibling that owns the real router
