@@ -112,30 +112,66 @@ fn param_description(p: &egret_dataapi_api::ParamSpec) -> String {
     d
 }
 
-/// The response schema for one published version.
+/// §4.5's promise, and the whole of it.
+///
+/// N statements are N independent reads (§1.1): `router.rs`'s loop calls
+/// `execute_as_with_params` once per statement, on its own connection, and
+/// nothing pins a snapshot across them. So a `total` statement and the `rows`
+/// statement it counts can disagree, and the ONLY place a caller can learn that
+/// is this sentence. It is deliberately not a caveat about egret being slow — it
+/// is a statement about what the endpoint does not promise.
+///
+/// Written in plain words rather than as a link to a spec a consumer cannot
+/// read, and appended to the AUTHOR's description rather than replacing it.
+const NO_TRANSACTION_NO_SNAPSHOT: &str =
+    "This endpoint runs its SQL statements as independent reads, one after another. They \
+     share no transaction and no snapshot, so a total and the rows it counts may disagree \
+     if the underlying table changes between them.";
+
+/// The operation `description`: what the author wrote, plus §4.5's sentence once
+/// there is more than one statement.
+///
+/// One statement gets nothing appended. A single read has nothing to disclaim,
+/// and telling every pre-M2 consumer their one query is inconsistent with itself
+/// would make the sentence noise — which is how a disclosure stops being read.
+fn operation_description(authored: &str, snap: &EndpointSnapshot) -> String {
+    if snap.statements.len() < 2 {
+        return authored.to_string();
+    }
+    let mut d = authored.trim().to_string();
+    if !d.is_empty() {
+        d.push_str("\n\n");
+    }
+    d.push_str(NO_TRANSACTION_NO_SNAPSHOT);
+    d
+}
+
+/// One ROW of one statement's result set.
 ///
 /// `output.shape` decides the container: `objects` gives one property per
 /// column, `arrays` gives a positional tuple. Property names go through
 /// `apply_naming` — the SAME function serving calls — because the document must
 /// name the keys a consumer will actually receive.
-fn data_schema(snap: &EndpointSnapshot, endpoint: &str) -> Result<Value, OpenApiGenError> {
-    // **M2 Task 4 bridge, deleted by Task 9**, which documents `data` as an
-    // object with one property per statement once there is more than one.
-    // Publish freezes a list of them as of Task 5, so for an endpoint with
-    // several this documents only the FIRST — the document is short the others
-    // until Task 9, exactly as this path serves only the first until Task 7.
-    let frozen = &snap
-        .sole_statement()
-        .ok_or_else(|| {
-            OpenApiGenError::Core(egret_core::Error::Internal(anyhow::anyhow!(
-                "published snapshot for endpoint {endpoint} carries no statements"
-            )))
-        })?
-        .columns;
+///
+/// Per STATEMENT, never per endpoint: `output.shape` and `output.naming` are one
+/// setting for the endpoint, but the COLUMNS they are applied to belong to one
+/// statement, and two statements have no reason to share either a column list or
+/// an order.
+fn row_schema(
+    stmt: &egret_dataapi_api::StatementSnapshot,
+    snap: &EndpointSnapshot,
+    endpoint: &str,
+) -> Result<Value, OpenApiGenError> {
+    let frozen = &stmt.columns;
     if snap.output.shape == "arrays" {
         // A positional row: OpenAPI 3.0 has no tuple type, so this is an array
         // of mixed scalars and the column order is documented in the
         // description rather than pretended into the schema.
+        //
+        // The order is a fact about THIS statement and is stable: publish
+        // refuses `arrays` over a definition whose branches resolve to different
+        // column lists (`lifecycle.rs`'s `BranchingArraysShape`), and it applies
+        // that rule per statement.
         return Ok(json!({
             "type": "array",
             "description": format!(
@@ -187,6 +223,159 @@ fn data_schema(snap: &EndpointSnapshot, endpoint: &str) -> Result<Value, OpenApi
         schema["required"] = json!(required);
     }
     Ok(schema)
+}
+
+/// One statement's whole result set: an array of its rows.
+fn statement_schema(
+    stmt: &egret_dataapi_api::StatementSnapshot,
+    snap: &EndpointSnapshot,
+    endpoint: &str,
+) -> Result<Value, OpenApiGenError> {
+    Ok(json!({ "type": "array", "items": row_schema(stmt, snap, endpoint)? }))
+}
+
+/// What `data` holds, for THIS endpoint (spec §4.4).
+///
+/// One statement: the rows array. Several: an object with one property per
+/// statement NAME, each that statement's own rows array — the same keys, in the
+/// same order, that `statements_data` writes.
+///
+/// **Not a union.** The document is generated per endpoint and an endpoint's
+/// statement list is frozen in its snapshot, so a `oneOf` covering both shapes
+/// would ask every consumer to branch on a question their own endpoint has
+/// already answered — and openapi-generator would hand them an untagged
+/// either-type to unwrap on every call.
+fn data_schema(snap: &EndpointSnapshot, endpoint: &str) -> Result<Value, OpenApiGenError> {
+    if snap.statements.is_empty() {
+        return Err(OpenApiGenError::Core(egret_core::Error::Internal(
+            anyhow::anyhow!("published snapshot for endpoint {endpoint} carries no statements"),
+        )));
+    }
+    if snap.statements.len() == 1 {
+        return statement_schema(&snap.statements[0], snap, endpoint);
+    }
+    let mut props = Map::new();
+    for stmt in &snap.statements {
+        props.insert(stmt.name.clone(), statement_schema(stmt, snap, endpoint)?);
+    }
+    Ok(json!({
+        "type": "object",
+        // Every statement answers or the call is refused: `router.rs`'s loop
+        // returns on the first refusal and discards the result sets that already
+        // succeeded, so there is no 200 carrying a subset of these keys.
+        "required": snap.statements.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+        "properties": props,
+    }))
+}
+
+/// What `meta` holds, for THIS endpoint (spec §4.4).
+///
+/// Per-endpoint for the same reason `data` is: one statement reports the
+/// endpoint-wide `row_count`/`columns`, several report `statements` keyed by
+/// name and carry NEITHER of those two — `MetaContract` is an untagged enum
+/// precisely so that a response cannot carry both readings at once.
+///
+/// `request_id` is documented although spec §4.4's field list omits it. It is
+/// emitted on every response, it predates §4.4, and it is the only thing tying
+/// the body a caller holds to the `tracing` line, the `dataapi.access_log` row
+/// and the engine's query id — "quote your request_id" stops being actionable
+/// without it. Documenting the served body is the point of this module; the
+/// omission is a spec correction, not a field to hide.
+fn meta_schema(snap: &EndpointSnapshot) -> Value {
+    let mut required = vec!["version", "cached", "request_id"];
+    let mut props = json!({
+        "version": {
+            "type": "integer",
+            "description": "The published version that served this call.",
+        },
+        "cached": { "type": "boolean" },
+        "request_id": {
+            "type": "string",
+            "description": "Correlation id, also written to this call's access-log row.",
+        },
+    });
+    let obj = props.as_object_mut().expect("just built");
+    if snap.statements.len() < 2 {
+        required.push("row_count");
+        required.push("columns");
+        obj.insert("row_count".into(), json!({ "type": "integer" }));
+        obj.insert(
+            "columns".into(),
+            json!({
+                "type": "array",
+                "description": "The FROZEN contract from the published snapshot, not the \
+                                shape this execution happened to return.",
+                "items": { "$ref": "#/components/schemas/ServingColumn" },
+            }),
+        );
+    } else {
+        required.push("statements");
+        let mut per = Map::new();
+        for stmt in &snap.statements {
+            per.insert(
+                stmt.name.clone(),
+                json!({ "$ref": "#/components/schemas/StatementMeta" }),
+            );
+        }
+        obj.insert(
+            "statements".into(),
+            json!({
+                "type": "object",
+                "description": "One entry per statement, under the same names, in the \
+                                same order, as `data`.",
+                "required": snap.statements.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+                "properties": per,
+            }),
+        );
+    }
+    json!({ "type": "object", "required": required, "properties": props })
+}
+
+/// The whole 200 body for THIS endpoint — envelope included, or not.
+///
+/// `output.envelope: "bare"` writes `data`'s VALUE alone (`Served::into_response`),
+/// so the document for such an endpoint is that value's schema and nothing
+/// around it. An endpoint documented as wrapped that answers bare is the same
+/// class of defect this function exists to fix, and `bare` is reachable through
+/// the API today.
+///
+/// The envelope is read through `envelope_of` — the function SERVING calls — so
+/// an unrecognised value is documented as wrapped because it is served wrapped.
+/// A local `== "bare"` here would agree with serving today and drift silently
+/// the moment that fallback changed.
+fn success_schema(snap: &EndpointSnapshot, endpoint: &str) -> Result<Value, OpenApiGenError> {
+    let data = data_schema(snap, endpoint)?;
+    if matches!(
+        crate::serving::router::envelope_of(&snap.output),
+        crate::serving::router::Envelope::Bare
+    ) {
+        return Ok(data);
+    }
+    Ok(json!({
+        "type": "object",
+        // `message` is required AND nullable: the key is written on every
+        // success and its value there is always `null`. Declaring it merely
+        // optional would let a client that omits it believe it conformed.
+        "required": ["status", "message", "data", "meta"],
+        "properties": {
+            "status": {
+                "type": "string",
+                // One value, not two: this schema describes a 200, and `status`
+                // MIRRORS the HTTP status (`ServingStatus::mirroring`). `error`
+                // belongs to the refusal bodies, which reference
+                // `ServingErrorBody`.
+                "enum": ["ok"],
+            },
+            "message": {
+                "type": "string",
+                "nullable": true,
+                "description": "Always null on success. A string here is the human half \
+                                of a refusal — read `error.code`.",
+            },
+            "data": data,
+            "meta": meta_schema(snap),
+        }
+    }))
 }
 
 /// The error responses, identical for every path, referenced not inlined.
@@ -304,18 +493,25 @@ pub async fn build(
             })
             .collect();
 
+        let bare = matches!(
+            crate::serving::router::envelope_of(&snap.output),
+            crate::serving::router::Envelope::Bare
+        );
         let mut responses = Map::new();
         responses.insert(
             "200".into(),
             json!({
-                "description": "Rows",
-                "content": { "application/json": { "schema": {
-                    "type": "object",
-                    "properties": {
-                        "data": { "type": "array", "items": data_schema(&snap, &name)? },
-                        "meta": { "$ref": "#/components/schemas/ServingMeta" }
-                    }
-                }}}
+                "description": if bare {
+                    "Rows. This endpoint is published with `output.envelope: \"bare\"`, so the \
+                     body is the data value alone — no `status`, `message` or `meta` around it. \
+                     A refusal is still returned in the standard error envelope, under its real \
+                     HTTP status."
+                } else {
+                    "Rows, in the standard serving envelope."
+                },
+                "content": { "application/json": {
+                    "schema": success_schema(&snap, &name)?
+                }}
             }),
         );
         if let Value::Object(errs) = error_responses() {
@@ -325,7 +521,9 @@ pub async fn build(
         let op = json!({
             "operationId": format!("dataApi_{}", id.simple()),
             "summary": name,
-            "description": description,
+            // The author's words, plus §4.5's sentence once there is more than
+            // one statement — see `operation_description`.
+            "description": operation_description(&description, &snap),
             "parameters": params,
             "responses": responses,
             // Which frozen contract this description belongs to. Without it a
@@ -373,22 +571,68 @@ pub async fn build(
                 }
             },
             "schemas": {
+                // The refusal body as `Wire::into_response` writes it —
+                // `{status, message, error:{code, message, request_id}}`. It
+                // was documented FLAT here (`{code, message, request_id}`,
+                // i.e. the nested detail hoisted to the top level) until M2
+                // Task 9, which is a body egret has never produced.
                 "ServingErrorBody": {
                     "type": "object",
+                    "required": ["status", "message", "error"],
                     "properties": {
-                        "code": { "type": "string" },
+                        "status": { "type": "string", "enum": ["error"] },
+                        "message": {
+                            "type": "string",
+                            "description": "The same human-readable string as `error.message`, \
+                                            lifted to where the success envelope carries it, so \
+                                            `status` and `message` are readable on every serving \
+                                            response without knowing which body arrived."
+                        },
+                        "error": { "$ref": "#/components/schemas/ServingErrorDetail" }
+                    }
+                },
+                "ServingErrorDetail": {
+                    "type": "object",
+                    "required": ["code", "message", "request_id"],
+                    "properties": {
+                        "code": {
+                            "type": "string",
+                            "description": "The stable code to branch on. `message` is for \
+                                            humans and may be reworded.",
+                            "example": "row_limit_exceeded"
+                        },
                         "message": { "type": "string" },
                         "request_id": { "type": "string" }
                     }
                 },
-                "ServingMeta": {
+                // One frozen output column, as `meta` reports it.
+                "ServingColumn": {
                     "type": "object",
+                    "required": ["name", "ty", "required"],
                     "properties": {
-                        "columns": { "type": "array", "items": { "type": "object" } },
+                        "name": { "type": "string" },
+                        "ty": {
+                            "type": "string",
+                            "description": "The engine's own type name, unmapped."
+                        },
+                        "required": {
+                            "type": "boolean",
+                            "description": "Whether every described branch of the definition \
+                                            returns this column."
+                        }
+                    }
+                },
+                // Referenced only by the endpoints that have several statements;
+                // a document containing none simply does not point at it.
+                "StatementMeta": {
+                    "type": "object",
+                    "required": ["row_count", "columns"],
+                    "properties": {
                         "row_count": { "type": "integer" },
-                        "version": { "type": "integer" },
-                        "cached": { "type": "boolean" },
-                        "request_id": { "type": "string" }
+                        "columns": {
+                            "type": "array",
+                            "items": { "$ref": "#/components/schemas/ServingColumn" }
+                        }
                     }
                 }
             }
@@ -414,18 +658,29 @@ mod tests {
         }
     }
 
+    fn stmt(name: &str, columns: Vec<ColumnSpec>) -> egret_dataapi_api::StatementSnapshot {
+        egret_dataapi_api::StatementSnapshot {
+            name: name.into(),
+            sql: "SELECT 1".into(),
+            columns,
+        }
+    }
+
     fn snap_with_columns(columns: Vec<ColumnSpec>, naming: &str) -> EndpointSnapshot {
+        snap_with_statements(vec![stmt("main", columns)], json!({ "naming": naming }))
+    }
+
+    fn snap_with_statements(
+        statements: Vec<egret_dataapi_api::StatementSnapshot>,
+        output: Value,
+    ) -> EndpointSnapshot {
         EndpointSnapshot {
-            statements: vec![egret_dataapi_api::StatementSnapshot {
-                name: "main".into(),
-                sql: "SELECT 1".into(),
-                columns,
-            }],
+            statements,
             method: "GET".into(),
             path: "/x".into(),
             database_id: Uuid::nil(),
             params: vec![],
-            output: serde_json::from_value(json!({ "naming": naming })).unwrap(),
+            output: serde_json::from_value(output).unwrap(),
             cache: serde_json::from_value(json!({})).unwrap(),
             limits: egret_dataapi_api::LimitsSpec {
                 max_rows: 1,
@@ -449,9 +704,10 @@ mod tests {
             "as_is",
         );
         let doc = data_schema(&snap, "e").expect("a branching endpoint has a document");
-        assert_eq!(doc["required"], json!(["id"]));
+        let row = &doc["items"];
+        assert_eq!(row["required"], json!(["id"]));
         assert!(
-            doc["properties"]["name"].is_object(),
+            row["properties"]["name"].is_object(),
             "an optional column is still documented — it is reachable, just not guaranteed"
         );
     }
@@ -465,7 +721,7 @@ mod tests {
         let snap = snap_with_columns(vec![col("name", "varchar", false)], "as_is");
         let doc = data_schema(&snap, "e").expect("document");
         assert!(
-            doc.get("required").is_none(),
+            doc["items"].get("required").is_none(),
             "an empty required array is a different claim than no required key: {doc}"
         );
     }
@@ -477,11 +733,299 @@ mod tests {
     fn required_names_are_camel_cased_the_same_as_properties() {
         let snap = snap_with_columns(vec![col("total_revenue", "integer", true)], "camel");
         let doc = data_schema(&snap, "e").expect("document");
-        assert_eq!(doc["required"], json!(["totalRevenue"]));
-        assert!(doc["properties"]["totalRevenue"].is_object());
+        let row = &doc["items"];
+        assert_eq!(row["required"], json!(["totalRevenue"]));
+        assert!(row["properties"]["totalRevenue"].is_object());
         assert!(
-            doc["properties"].get("total_revenue").is_none(),
+            row["properties"].get("total_revenue").is_none(),
             "the raw name must not leak into properties either: {doc}"
+        );
+    }
+
+    /// **The M2 shape.** With more than one statement `data` is an OBJECT with
+    /// one property per statement NAME, each an array of that statement's own
+    /// row schema — the same keys serving writes (`statements_data`).
+    ///
+    /// The per-statement columns are asserted separately from the keys because
+    /// they fail separately: a generator that keys correctly and hands every
+    /// statement the FIRST one's columns passes a key-only assertion, and that
+    /// is exactly the bridge this task deletes.
+    #[test]
+    fn several_statements_document_data_as_an_object_keyed_by_statement_name() {
+        let snap = snap_with_statements(
+            vec![
+                stmt("rows", vec![col("id", "integer", true)]),
+                stmt("total", vec![col("total", "bigint", true)]),
+            ],
+            json!({}),
+        );
+        let doc = data_schema(&snap, "e").expect("document");
+        assert_eq!(doc["type"], "object", "{doc}");
+        assert_eq!(
+            doc["properties"]
+                .as_object()
+                .expect("properties")
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["rows".to_string(), "total".to_string()],
+            "one property per statement name, in the published order: {doc}"
+        );
+        assert_eq!(doc["properties"]["rows"]["type"], "array", "{doc}");
+        assert_eq!(
+            doc["properties"]["rows"]["items"]["properties"]
+                .as_object()
+                .expect("row properties")
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["id".to_string()],
+            "the rows statement's OWN columns: {doc}"
+        );
+        assert_eq!(
+            doc["properties"]["total"]["items"]["properties"]
+                .as_object()
+                .expect("row properties")
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["total".to_string()],
+            "the total statement's own column, not the rows statement's: {doc}"
+        );
+        // Every statement answers, or the whole call is refused — there is no
+        // 200 carrying a subset of them (`router.rs`'s loop returns on the
+        // first refusal), so every key is `required`.
+        assert_eq!(doc["required"], json!(["rows", "total"]), "{doc}");
+    }
+
+    /// **Neither shape is a union type.** The document is generated per
+    /// endpoint and an endpoint's statement count is frozen, so a `oneOf`
+    /// covering both would make every consumer branch on a question its own
+    /// endpoint already answered.
+    #[test]
+    fn neither_shape_is_a_union_type() {
+        for snap in [
+            snap_with_columns(vec![col("id", "integer", true)], "as_is"),
+            snap_with_statements(
+                vec![
+                    stmt("rows", vec![col("id", "integer", true)]),
+                    stmt("total", vec![col("total", "bigint", true)]),
+                ],
+                json!({}),
+            ),
+        ] {
+            let doc = success_schema(&snap, "e").expect("document");
+            let rendered = doc.to_string();
+            for combinator in ["oneOf", "anyOf", "allOf"] {
+                assert!(
+                    !rendered.contains(combinator),
+                    "the per-endpoint 200 schema must not need {combinator}: {rendered}"
+                );
+            }
+        }
+    }
+
+    /// Each statement keeps its OWN positional order under `output.shape:
+    /// "arrays"`. There is one order per statement, never one for the endpoint:
+    /// `arrays` over a branching definition is refused per statement at publish
+    /// (`lifecycle.rs`'s `BranchingArraysShape`), so each frozen list has an
+    /// order — but two statements' lists have no reason to agree.
+    #[test]
+    fn each_statement_documents_its_own_column_order_under_the_arrays_shape() {
+        let snap = snap_with_statements(
+            vec![
+                stmt(
+                    "rows",
+                    vec![col("id", "integer", true), col("name", "varchar", true)],
+                ),
+                stmt("total", vec![col("total", "bigint", true)]),
+            ],
+            json!({ "shape": "arrays" }),
+        );
+        let doc = data_schema(&snap, "e").expect("document");
+        assert_eq!(doc["type"], "object", "{doc}");
+        assert_eq!(
+            doc["properties"]["rows"]["items"]["description"],
+            "Positional row. Column order: id, name",
+            "{doc}"
+        );
+        assert_eq!(
+            doc["properties"]["total"]["items"]["description"],
+            "Positional row. Column order: total",
+            "{doc}"
+        );
+    }
+
+    /// A naming collision in the SECOND statement refuses the document too.
+    ///
+    /// Serving answers `output_naming_collision` (503) for such a version
+    /// whichever statement carries it, and the fold at publish runs per
+    /// statement for the same reason. A generator that checked only the first
+    /// would emit a document for an endpoint that never returns 200.
+    #[test]
+    fn a_naming_collision_in_the_second_statement_refuses_the_document() {
+        let snap = snap_with_statements(
+            vec![
+                stmt("rows", vec![col("id", "integer", true)]),
+                stmt(
+                    "total",
+                    vec![
+                        col("total_revenue", "bigint", true),
+                        col("totalRevenue", "bigint", true),
+                    ],
+                ),
+            ],
+            json!({ "naming": "camel" }),
+        );
+        assert!(
+            matches!(
+                data_schema(&snap, "e"),
+                Err(OpenApiGenError::NamingCollision { .. })
+            ),
+            "a collision anywhere in the list refuses the document"
+        );
+    }
+
+    /// The wrapped 200 body is the one Task 8 emits: `status`, `message`,
+    /// `data`, `meta`, all four present on every success.
+    ///
+    /// `message` is `required` AND `nullable` — that pair is the accurate
+    /// statement, because the key is always written and its value on a success
+    /// is always `null`. Declaring it merely optional would let a client that
+    /// omits it think it was conforming.
+    #[test]
+    fn the_wrapped_body_carries_status_message_data_and_meta() {
+        let snap = snap_with_columns(vec![col("id", "integer", true)], "as_is");
+        let doc = success_schema(&snap, "e").expect("document");
+        assert_eq!(
+            doc["required"],
+            json!(["status", "message", "data", "meta"]),
+            "{doc}"
+        );
+        assert_eq!(doc["properties"]["status"]["enum"], json!(["ok"]), "{doc}");
+        assert_eq!(doc["properties"]["message"]["nullable"], true, "{doc}");
+        assert_eq!(doc["properties"]["data"]["type"], "array", "{doc}");
+        let meta = &doc["properties"]["meta"];
+        assert_eq!(
+            meta["required"],
+            json!(["version", "cached", "request_id", "row_count", "columns"]),
+            "one statement reports the endpoint-wide contract: {doc}"
+        );
+        assert!(
+            meta["properties"].get("statements").is_none(),
+            "`statements` is absent from a one-statement meta: {doc}"
+        );
+    }
+
+    /// `meta` is per-endpoint too. With several statements it carries
+    /// `statements`, keyed by the same names as `data`, and NOT the
+    /// endpoint-wide `row_count`/`columns` — which Task 8 stopped emitting.
+    #[test]
+    fn several_statements_document_meta_keyed_the_same_way_as_data() {
+        let snap = snap_with_statements(
+            vec![
+                stmt("rows", vec![col("id", "integer", true)]),
+                stmt("total", vec![col("total", "bigint", true)]),
+            ],
+            json!({}),
+        );
+        let doc = success_schema(&snap, "e").expect("document");
+        let meta = &doc["properties"]["meta"];
+        assert_eq!(
+            meta["required"],
+            json!(["version", "cached", "request_id", "statements"]),
+            "{doc}"
+        );
+        assert!(
+            meta["properties"].get("row_count").is_none()
+                && meta["properties"].get("columns").is_none(),
+            "the endpoint-wide count and columns are absent for several: {doc}"
+        );
+        assert_eq!(
+            meta["properties"]["statements"]["properties"]
+                .as_object()
+                .expect("statements properties")
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            doc["properties"]["data"]["properties"]
+                .as_object()
+                .expect("data properties")
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            "`meta.statements` and `data` are keyed the same, in the same order: {doc}"
+        );
+    }
+
+    /// `output.envelope: "bare"` writes `data`'s VALUE alone, so the document
+    /// for a bare endpoint is that value's schema and nothing around it. An
+    /// endpoint documented as wrapped that answers bare is the defect this task
+    /// exists to close, and it is reachable through the API today.
+    #[test]
+    fn a_bare_endpoint_is_documented_without_the_envelope() {
+        let snap = snap_with_columns(vec![col("id", "integer", true)], "as_is");
+        let bare = snap_with_statements(
+            vec![stmt("main", vec![col("id", "integer", true)])],
+            json!({ "envelope": "bare" }),
+        );
+        let wrapped_doc = success_schema(&snap, "e").expect("document");
+        let bare_doc = success_schema(&bare, "e").expect("document");
+        assert_eq!(bare_doc["type"], "array", "{bare_doc}");
+        assert_eq!(
+            bare_doc["items"], wrapped_doc["properties"]["data"]["items"],
+            "bare is the SAME data schema, unwrapped: {bare_doc}"
+        );
+        assert!(
+            bare_doc["properties"].is_null(),
+            "no `status`, `message` or `meta` around it: {bare_doc}"
+        );
+    }
+
+    /// An unrecognised `output.envelope` is documented as WRAPPED, because
+    /// `envelope_of` — the function serving itself calls — falls back to
+    /// wrapped. Reading `== "bare"` here instead would agree with serving today
+    /// and drift the moment that fallback changed.
+    #[test]
+    fn an_unrecognised_envelope_is_documented_as_wrapped() {
+        let snap = snap_with_statements(
+            vec![stmt("main", vec![col("id", "integer", true)])],
+            json!({ "envelope": "sideways" }),
+        );
+        let doc = success_schema(&snap, "e").expect("document");
+        assert_eq!(
+            doc["required"],
+            json!(["status", "message", "data", "meta"]),
+            "the documented default is the served default: {doc}"
+        );
+    }
+
+    /// §4.5's sentence, on the operation, once there is more than one
+    /// statement — and NOT before. It is the whole of the consistency promise:
+    /// a caller has no other way to learn that a total and the rows it counts
+    /// are two independent reads.
+    #[test]
+    fn the_consistency_sentence_appears_only_with_several_statements() {
+        let one = snap_with_columns(vec![col("id", "integer", true)], "as_is");
+        assert!(
+            operation_description("An author's words.", &one).trim() == "An author's words.",
+            "one statement has nothing to disclaim"
+        );
+        let several = snap_with_statements(
+            vec![
+                stmt("rows", vec![col("id", "integer", true)]),
+                stmt("total", vec![col("total", "bigint", true)]),
+            ],
+            json!({}),
+        );
+        let d = operation_description("An author's words.", &several);
+        assert!(
+            d.starts_with("An author's words."),
+            "the author's description is kept: {d}"
+        );
+        assert!(
+            d.contains("no transaction") && d.contains("no snapshot") && d.contains("may disagree"),
+            "the plain sentence §4.5 requires: {d}"
         );
     }
 }

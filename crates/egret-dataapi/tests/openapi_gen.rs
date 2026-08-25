@@ -530,3 +530,298 @@ async fn one_endpoints_naming_collision_fails_the_whole_document() {
         .await;
     assert_eq!(one, 200, "doc: {doc}");
 }
+
+/// Helper: the operation object a consumer would read for `path`.
+fn operation<'a>(doc: &'a serde_json::Value, path: &str) -> &'a serde_json::Value {
+    let op = &doc["paths"][path]["get"];
+    assert!(op.is_object(), "no operation for {path} in {doc}");
+    op
+}
+
+/// The keys of a JSON object, in order.
+fn keys(v: &serde_json::Value) -> Vec<String> {
+    v.as_object()
+        .unwrap_or_else(|| panic!("expected an object, got {v}"))
+        .keys()
+        .cloned()
+        .collect()
+}
+
+/// **The document, checked against the body the server actually produces.**
+///
+/// This is the assertion the task exists for. A test that reads only the
+/// generator's own output agrees with the generator's own bug — and that is
+/// precisely what happened here: `openapi_gen` described `{data: array, meta}`
+/// for every endpoint while Task 8's server answered `{status, message, data,
+/// meta}` with `data` keyed by statement name. Every generator-only test in this
+/// file passed throughout.
+///
+/// So both halves are measured in one test: the document is fetched from the
+/// real management route, the SAME two endpoints are driven through the real
+/// serving router, and the top-level keys, the `data` keys and the `meta` keys
+/// are compared. Nothing is compared against a literal the generator could also
+/// be wrong about.
+#[tokio::test]
+async fn the_documented_body_is_the_body_the_endpoint_answers_with() {
+    let Some(f) = fixture().await else { return };
+    let sa = f.create_service_account("body-shape-sa").await;
+    f.grant_ws_admin(sa).await;
+
+    // Distinct columns per statement, installed BEFORE publish: this is the
+    // table publish describes and freezes. First arm wins, so the fallback last.
+    f.port
+        .set_columns_per_sql(&[("count", &["total"][..]), ("", &["id", "name"][..])]);
+    f.publish_statements(
+        "/doc-two",
+        f.database_id,
+        serde_json::json!([
+            { "name": "rows",  "sql": "SELECT id, name FROM t" },
+            { "name": "total", "sql": "SELECT count(*) AS total FROM t" },
+        ]),
+        serde_json::json!({}),
+    )
+    .await;
+    f.publish_statements(
+        "/doc-one",
+        f.database_id,
+        serde_json::json!([{ "name": "rows", "sql": "SELECT id, name FROM t" }]),
+        serde_json::json!({}),
+    )
+    .await;
+
+    let (status, doc) = f
+        .mgmt_get(&format!(
+            "/api/ws/{}/data-api/openapi?service_account_id={sa}",
+            f.ws_slug
+        ))
+        .await;
+    assert_eq!(status, 200, "{doc}");
+
+    // ---- several statements -------------------------------------------------
+    let schema =
+        &operation(&doc, "/doc-two")["responses"]["200"]["content"]["application/json"]["schema"];
+    let res = f.call_as(f.principal_a, "doc-two").await;
+    assert_eq!(res.status.as_u16(), 200, "{}", res.body);
+
+    assert_eq!(
+        schema["required"]
+            .as_array()
+            .unwrap_or_else(|| panic!("no required list in {schema}"))
+            .iter()
+            .map(|v| v.as_str().expect("string").to_string())
+            .collect::<Vec<_>>(),
+        keys(&res.body),
+        "every key the document requires is a key the response carries, and no \
+         other: {schema} vs {}",
+        res.body
+    );
+    assert_eq!(
+        keys(&schema["properties"]["data"]["properties"]),
+        keys(&res.body["data"]),
+        "`data` is documented with exactly the statement names it answers under: \
+         {schema} vs {}",
+        res.body
+    );
+    assert_eq!(
+        keys(&schema["properties"]["meta"]["properties"]["statements"]["properties"]),
+        keys(&res.body["meta"]["statements"]),
+        "`meta.statements` likewise: {schema} vs {}",
+        res.body
+    );
+    assert_eq!(
+        keys(&schema["properties"]["meta"]["properties"]),
+        keys(&res.body["meta"]),
+        "and `meta` itself carries no field the document omits: {schema} vs {}",
+        res.body
+    );
+    assert_eq!(
+        schema["properties"]["data"]["properties"]["total"]["items"]["properties"]
+            .as_object()
+            .map(|_| keys(
+                &schema["properties"]["data"]["properties"]["total"]["items"]["properties"]
+            ))
+            .expect("the total statement's row schema"),
+        keys(&res.body["data"]["total"][0]),
+        "each statement's row schema is its OWN columns: {schema} vs {}",
+        res.body
+    );
+    assert!(
+        schema["properties"]["status"]["enum"]
+            .as_array()
+            .expect("status enum")
+            .contains(&res.body["status"]),
+        "the served `status` is one the document allows: {schema} vs {}",
+        res.body
+    );
+
+    // ---- one statement ------------------------------------------------------
+    let schema =
+        &operation(&doc, "/doc-one")["responses"]["200"]["content"]["application/json"]["schema"];
+    let res = f.call_as(f.principal_a, "doc-one").await;
+    assert_eq!(res.status.as_u16(), 200, "{}", res.body);
+    assert_eq!(
+        schema["properties"]["data"]["type"], "array",
+        "one statement answers with the rows array itself: {schema}"
+    );
+    assert!(res.body["data"].is_array(), "{}", res.body);
+    assert_eq!(
+        keys(&schema["properties"]["data"]["items"]["properties"]),
+        keys(&res.body["data"][0]),
+        "{schema} vs {}",
+        res.body
+    );
+    assert_eq!(
+        keys(&schema["properties"]["meta"]["properties"]),
+        keys(&res.body["meta"]),
+        "one statement's `meta` is the endpoint-wide contract: {schema} vs {}",
+        res.body
+    );
+}
+
+/// §4.5's sentence, on the real operation of a real several-statement endpoint,
+/// and absent from the one-statement endpoint beside it.
+///
+/// The negative half is not decoration: a generator that appended the sentence
+/// unconditionally would satisfy the positive half while telling every
+/// single-statement consumer their one read is inconsistent with itself.
+#[tokio::test]
+async fn a_several_statement_operation_discloses_that_it_shares_no_transaction() {
+    let Some(f) = fixture().await else { return };
+    let sa = f.create_service_account("consistency-sa").await;
+    f.grant_ws_admin(sa).await;
+
+    f.port
+        .set_columns_per_sql(&[("count", &["total"][..]), ("", &["id", "name"][..])]);
+    f.publish_statements(
+        "/disclose-two",
+        f.database_id,
+        serde_json::json!([
+            { "name": "rows",  "sql": "SELECT id, name FROM t" },
+            { "name": "total", "sql": "SELECT count(*) AS total FROM t" },
+        ]),
+        serde_json::json!({}),
+    )
+    .await;
+    f.publish_statements(
+        "/disclose-one",
+        f.database_id,
+        serde_json::json!([{ "name": "rows", "sql": "SELECT id, name FROM t" }]),
+        serde_json::json!({}),
+    )
+    .await;
+
+    let (status, doc) = f
+        .mgmt_get(&format!(
+            "/api/ws/{}/data-api/openapi?service_account_id={sa}",
+            f.ws_slug
+        ))
+        .await;
+    assert_eq!(status, 200, "{doc}");
+
+    let several = operation(&doc, "/disclose-two")["description"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no description in {doc}"))
+        .to_string();
+    assert!(
+        several.contains("no transaction") && several.contains("no snapshot"),
+        "the operation must say the statements share neither: {several}"
+    );
+    assert!(
+        several.contains("may disagree"),
+        "and what that costs the caller, in plain words: {several}"
+    );
+
+    let one = operation(&doc, "/disclose-one")["description"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no description in {doc}"))
+        .to_string();
+    assert!(
+        !one.contains("no transaction"),
+        "a one-statement endpoint has nothing to disclaim: {one}"
+    );
+}
+
+/// A `bare` endpoint is documented as the body it answers with — `data`'s value
+/// alone — while its REFUSALS keep the error envelope, which is what the server
+/// does (`Served::into_response` writes `self.response.data`; the error path is
+/// untouched by `envelope`).
+///
+/// Both halves are read off real responses.
+#[tokio::test]
+async fn a_bare_endpoint_is_documented_as_the_body_it_answers_with() {
+    let Some(f) = fixture().await else { return };
+    let sa = f.create_service_account("bare-doc-sa").await;
+    f.grant_ws_admin(sa).await;
+
+    f.port
+        .set_columns_per_sql(&[("count", &["total"][..]), ("", &["id", "name"][..])]);
+    f.publish_statements_with_output(
+        "/bare-doc",
+        f.database_id,
+        serde_json::json!([
+            { "name": "rows",  "sql": "SELECT id, name FROM t" },
+            { "name": "total", "sql": "SELECT count(*) AS total FROM t" },
+        ]),
+        serde_json::json!({}),
+        serde_json::json!({ "envelope": "bare" }),
+    )
+    .await;
+
+    let (status, doc) = f
+        .mgmt_get(&format!(
+            "/api/ws/{}/data-api/openapi?service_account_id={sa}",
+            f.ws_slug
+        ))
+        .await;
+    assert_eq!(status, 200, "{doc}");
+    let op = operation(&doc, "/bare-doc");
+    let schema = &op["responses"]["200"]["content"]["application/json"]["schema"];
+
+    let res = f.call_as(f.principal_a, "bare-doc").await;
+    assert_eq!(res.status.as_u16(), 200, "{}", res.body);
+    // The served body IS the keyed object — no wrapper at all.
+    assert!(res.body.get("status").is_none(), "{}", res.body);
+    assert_eq!(
+        keys(&schema["properties"]),
+        keys(&res.body),
+        "a bare endpoint's 200 schema is `data`'s value: {schema} vs {}",
+        res.body
+    );
+    assert!(
+        schema["properties"].get("meta").is_none(),
+        "nothing is wrapped around it: {schema}"
+    );
+
+    // The refusal is still the error envelope, under its real status — and the
+    // document's shared `ServingErrorBody` must be that body, not the detail
+    // object it nests. Driven as a principal with no invoke grant.
+    let refused = f.call_as(f.principal_b, "no-such-path-at-all").await;
+    assert_eq!(refused.status.as_u16(), 404, "{}", refused.body);
+    let err = &doc["components"]["schemas"]["ServingErrorBody"];
+    assert_eq!(
+        keys(&err["properties"]),
+        keys(&refused.body),
+        "the documented error body is the error body served: {err} vs {}",
+        refused.body
+    );
+    // `error` is a `$ref`, so its own properties live in the component it names —
+    // reading `err["properties"]["error"]["properties"]` finds null, not the detail.
+    assert_eq!(
+        err["properties"]["error"]["$ref"].as_str(),
+        Some("#/components/schemas/ServingErrorDetail"),
+        "the detail is referenced, not inlined: {err}"
+    );
+    let detail = &doc["components"]["schemas"]["ServingErrorDetail"];
+    assert_eq!(
+        keys(&detail["properties"]),
+        keys(&refused.body["error"]),
+        "including the nested detail: {detail} vs {}",
+        refused.body
+    );
+    assert!(
+        op["responses"]["404"]["content"]["application/json"]["schema"]["$ref"]
+            .as_str()
+            .is_some_and(|r| r.ends_with("ServingErrorBody")),
+        "a bare endpoint's refusals still reference it: {op}"
+    );
+}

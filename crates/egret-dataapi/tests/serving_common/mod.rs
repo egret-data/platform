@@ -25,7 +25,7 @@ use egret_dataapi::{
 };
 use egret_machine_idp::{generate_rsa_key, sign_claims, IdpError, KeyMaterial, SigningKeyStore};
 #[path = "../test_db/mod.rs"]
-mod test_db;
+pub mod test_db;
 
 use egret_metastore::Db;
 use egret_query_api::Param;

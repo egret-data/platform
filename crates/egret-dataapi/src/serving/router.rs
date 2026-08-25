@@ -381,7 +381,7 @@ pub(crate) enum Envelope {
 /// explicitly), so an unrecognised value is reachable. Refusing would make a
 /// published endpoint permanently dead over a cosmetic field, and unlike a drift
 /// it cannot silently lose a column.
-fn envelope_of(output: &OutputSpec) -> Envelope {
+pub(crate) fn envelope_of(output: &OutputSpec) -> Envelope {
     match output.envelope.as_str() {
         "bare" => Envelope::Bare,
         "wrapped" => Envelope::Wrapped,

@@ -44,7 +44,9 @@ const TEMPLATE_DB: &str = "egret_test_template";
 /// `CREATE DATABASE ... TEMPLATE x` is refused while anything is connected to `x`.
 async fn admin_conn(url: &str) -> Option<sqlx::PgConnection> {
     use sqlx::Connection;
-    let admin_url = url.rsplit_once('/').map(|(base, _)| format!("{base}/postgres"))?;
+    let admin_url = url
+        .rsplit_once('/')
+        .map(|(base, _)| format!("{base}/postgres"))?;
     sqlx::PgConnection::connect(&admin_url).await.ok()
 }
 
@@ -58,20 +60,26 @@ async fn ensure_template(url: &str) -> Option<()> {
         .await
         .ok()?;
 
-    let exists: (bool,) = sqlx::query_as("SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)")
-        .bind(TEMPLATE_DB)
-        .fetch_one(&mut admin)
-        .await
-        .ok()?;
+    let exists: (bool,) =
+        sqlx::query_as("SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)")
+            .bind(TEMPLATE_DB)
+            .fetch_one(&mut admin)
+            .await
+            .ok()?;
     if !exists.0 {
         // `AssertSqlSafe` because the only interpolation is `TEMPLATE_DB`, a `const`
         // in this file. `CREATE DATABASE` cannot take a bind parameter for its name.
         let stmt = format!(r#"CREATE DATABASE "{TEMPLATE_DB}""#);
-        sqlx::query(sqlx::AssertSqlSafe(stmt)).execute(&mut admin).await.ok()?;
+        sqlx::query(sqlx::AssertSqlSafe(stmt))
+            .execute(&mut admin)
+            .await
+            .ok()?;
     }
 
     // Migrate the template itself, then drop the connection so it can be cloned.
-    let tmpl_url = url.rsplit_once('/').map(|(b, _)| format!("{b}/{TEMPLATE_DB}"))?;
+    let tmpl_url = url
+        .rsplit_once('/')
+        .map(|(b, _)| format!("{b}/{TEMPLATE_DB}"))?;
     let tmpl = Db::connect(&tmpl_url, 1).await.expect("connect template");
     tmpl.migrate().await.expect(
         "migrate the template — if this fails on a checksum, an applied migration was \
@@ -109,7 +117,9 @@ async fn drop_abandoned_clones(url: &str) {
         // `name` came from `pg_database` one query ago and matched `egret_t_%`, so it
         // is a name Postgres itself produced — not caller input.
         let stmt = format!(r#"DROP DATABASE IF EXISTS "{name}""#);
-        let _ = sqlx::query(sqlx::AssertSqlSafe(stmt)).execute(&mut admin).await;
+        let _ = sqlx::query(sqlx::AssertSqlSafe(stmt))
+            .execute(&mut admin)
+            .await;
     }
 }
 
@@ -124,10 +134,13 @@ async fn process_db_url() -> Option<String> {
     // is a `const`. Neither can carry an identifier break, and `CREATE DATABASE` has no
     // bind form for either position.
     let stmt = format!(r#"CREATE DATABASE "{name}" TEMPLATE "{TEMPLATE_DB}""#);
-    sqlx::query(sqlx::AssertSqlSafe(stmt)).execute(&mut admin).await.ok()?;
-    url.rsplit_once('/').map(|(base, _)| format!("{base}/{name}"))
+    sqlx::query(sqlx::AssertSqlSafe(stmt))
+        .execute(&mut admin)
+        .await
+        .ok()?;
+    url.rsplit_once('/')
+        .map(|(base, _)| format!("{base}/{name}"))
 }
-
 
 /// The URL this process should use. `None` when `DATABASE_URL` is unset, which is how the
 /// DB-gated tests decide to skip.
