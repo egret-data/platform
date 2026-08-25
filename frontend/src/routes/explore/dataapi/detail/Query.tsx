@@ -254,11 +254,28 @@ export default function Query() {
             upgrade. `SqlTab.tsx` uses the same two literals. */}
         <Panel defaultSize="55%" minSize="20%">
           <div className="flex h-full flex-col">
-            <div className="flex shrink-0 items-center gap-2 overflow-x-auto border-b border-border px-1 pb-2">
+            <div className="flex shrink-0 items-center gap-2 border-b border-border px-1 pb-2">
               {/* One statement renders the heading it always rendered; the
                   switcher is what the SECOND statement brings. */}
               {several ? (
-                <div role="tablist" aria-label="Statements" className="flex min-w-0 items-center gap-1">
+                // `overflow-x-auto` lives HERE, on the strip itself, not on this
+                // row. It used to sit on the row (the parent of this and the
+                // button below), which let the strip's own children paint past
+                // ITS box — nothing clipped them — and bleed across the button
+                // beside it; scrolling the row did not help because the button
+                // scrolled along with the strip, so the overlap was identical at
+                // every scroll position. Measured in a real browser at 1600px
+                // with 16 statements: `elementFromPoint` at the button's centre
+                // returned the 13th tab, not the button, at every `scrollLeft`
+                // tried (0, 142, max). `flex-1 min-w-0` lets the strip shrink to
+                // make room for the button (`shrink-0` below) instead of pushing
+                // it; the strip scrolls, the button never moves and is never
+                // covered.
+                <div
+                  role="tablist"
+                  aria-label="Statements"
+                  className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto"
+                >
                   {statements.map((s, i) => (
                     <span
                       // Index keys: this list IS reorderable, but every child
@@ -300,7 +317,24 @@ export default function Query() {
                 type="button"
                 variant="ghost"
                 size="sm"
-                className="ml-auto shrink-0"
+                // `disabled:pointer-events-auto` overrides `Button`'s own
+                // `disabled:pointer-events-none` (`ui/button.tsx`), for this
+                // instance only — `cva`'s own className arg lands after the
+                // base classes and `cn`'s `twMerge` keeps the later one, the
+                // same mechanism `button.tsx`'s doc comment already relies on
+                // for the focus-ring override.
+                //
+                // Required for the `title` below to mean anything: at the cap
+                // this button IS the only thing on screen saying why, and
+                // `pointer-events: none` makes a real browser skip it during
+                // hit-testing — confirmed live, `elementFromPoint` at its own
+                // centre landed on this row's container, not the button, and
+                // Playwright's own hover action timed out with "intercepts
+                // pointer events" naming that same container. `disabled` (the
+                // HTML attribute, untouched below) already blocks the click and
+                // is what the shell's `<fieldset disabled>` reaches — this only
+                // restores hover.
+                className="ml-auto shrink-0 disabled:pointer-events-auto"
                 disabled={atLimit}
                 // Says WHY it is unavailable, and says what to do instead.
                 // Statements run one after another, so the count multiplies the
