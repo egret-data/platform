@@ -119,6 +119,18 @@ fn param_description(p: &egret_dataapi_api::ParamSpec) -> String {
 /// `apply_naming` — the SAME function serving calls — because the document must
 /// name the keys a consumer will actually receive.
 fn data_schema(snap: &EndpointSnapshot, endpoint: &str) -> Result<Value, OpenApiGenError> {
+    // **M2 Task 4 bridge, deleted by Task 9**, which documents `data` as an
+    // object with one property per statement once there is more than one.
+    // Publish freezes exactly one today (`lifecycle::sole_statement`), so the
+    // document is written from that statement's frozen columns.
+    let frozen = &snap
+        .sole_statement()
+        .ok_or_else(|| {
+            OpenApiGenError::Core(egret_core::Error::Internal(anyhow::anyhow!(
+                "published snapshot for endpoint {endpoint} carries no statements"
+            )))
+        })?
+        .columns;
     if snap.output.shape == "arrays" {
         // A positional row: OpenAPI 3.0 has no tuple type, so this is an array
         // of mixed scalars and the column order is documented in the
@@ -127,13 +139,13 @@ fn data_schema(snap: &EndpointSnapshot, endpoint: &str) -> Result<Value, OpenApi
             "type": "array",
             "description": format!(
                 "Positional row. Column order: {}",
-                snap.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(", ")
+                frozen.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(", ")
             ),
             "items": {}
         }));
     }
     let mut props = Map::new();
-    for c in &snap.columns {
+    for c in frozen {
         let key = crate::serving::router::apply_naming(&c.name, &snap.output.naming);
         // Serving answers `output_naming_collision` (503) for this version, so
         // there is no document to write: emitting the surviving column would
@@ -164,8 +176,7 @@ fn data_schema(snap: &EndpointSnapshot, endpoint: &str) -> Result<Value, OpenApi
     // properties must be present), a different thing from `ColumnSpec::required`
     // (which branches guarantee a column) even though the latter feeds the
     // former here.
-    let required: Vec<String> = snap
-        .columns
+    let required: Vec<String> = frozen
         .iter()
         .filter(|c| c.required)
         .map(|c| crate::serving::router::apply_naming(&c.name, &snap.output.naming))
@@ -404,7 +415,11 @@ mod tests {
 
     fn snap_with_columns(columns: Vec<ColumnSpec>, naming: &str) -> EndpointSnapshot {
         EndpointSnapshot {
-            sql: "SELECT 1".into(),
+            statements: vec![egret_dataapi_api::StatementSnapshot {
+                name: "main".into(),
+                sql: "SELECT 1".into(),
+                columns,
+            }],
             method: "GET".into(),
             path: "/x".into(),
             database_id: Uuid::nil(),
@@ -418,7 +433,6 @@ mod tests {
             rate_limit: serde_json::from_value(json!({})).unwrap(),
             delegated: false,
             impersonate: false,
-            columns,
             param_gate: egret_dataapi_api::PARAM_GATE,
         }
     }

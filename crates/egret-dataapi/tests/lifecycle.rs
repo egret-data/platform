@@ -585,7 +585,7 @@ async fn a_published_version_is_unaffected_by_later_draft_edits() {
         .await;
     f.publish(ep).await;
     let v1 = f.live_snapshot(ep).await;
-    assert_eq!(v1.sql, "SELECT 1 AS n");
+    assert_eq!(v1.statements[0].sql, "SELECT 1 AS n");
 
     // Edit the draft afterwards — including the SQL and the parameter list.
     f.patch_endpoint(
@@ -600,7 +600,7 @@ async fn a_published_version_is_unaffected_by_later_draft_edits() {
 
     let still = f.live_snapshot(ep).await;
     assert_eq!(
-        still.sql, "SELECT 1 AS n",
+        still.statements[0].sql, "SELECT 1 AS n",
         "the live version must not follow the draft — this is what makes versioning real"
     );
     // Not only the SQL: every field the snapshot froze must be equal to what was
@@ -625,10 +625,10 @@ async fn rollback_restores_the_previous_snapshot() {
     )
     .await;
     f.publish(ep).await; // v2
-    assert_eq!(f.live_snapshot(ep).await.sql, "SELECT 2 AS n");
+    assert_eq!(f.live_snapshot(ep).await.statements[0].sql, "SELECT 2 AS n");
 
     f.rollback(ep, 1).await;
-    assert_eq!(f.live_snapshot(ep).await.sql, "SELECT 1 AS n");
+    assert_eq!(f.live_snapshot(ep).await.statements[0].sql, "SELECT 1 AS n");
 }
 
 /// A version belongs to exactly one endpoint. Without the `v.endpoint_id = e.id`
@@ -653,7 +653,7 @@ async fn rollback_refuses_a_version_from_another_endpoint() {
         "a version belongs to exactly one endpoint: {body}"
     );
     // And nothing moved.
-    assert_eq!(f.live_snapshot(a).await.sql, "SELECT 1 AS n");
+    assert_eq!(f.live_snapshot(a).await.statements[0].sql, "SELECT 1 AS n");
 }
 
 #[tokio::test]
@@ -701,7 +701,8 @@ async fn publishing_freezes_the_described_columns_and_the_canonical_path() {
 
     let snap = f.live_snapshot(ep).await;
     assert_eq!(
-        snap.columns
+        snap.statements[0]
+            .columns
             .iter()
             .map(|c| (c.name.as_str(), c.ty.as_str()))
             .collect::<Vec<_>>(),
@@ -1082,7 +1083,7 @@ async fn publishing_a_disabled_endpoint_does_not_put_it_back_in_service() {
     )
     .await;
     assert_eq!(f.state_of(ep).await.0, "live");
-    assert_eq!(f.live_snapshot(ep).await.sql, "SELECT 2 AS n");
+    assert_eq!(f.live_snapshot(ep).await.statements[0].sql, "SELECT 2 AS n");
 }
 
 /// A parameterized endpoint has to be describable at all. `WHERE r = {{r}}` is
@@ -1115,7 +1116,7 @@ async fn a_parameterized_endpoint_is_described_through_a_rendered_probe() {
         "and the marker count beside it, or the engine cannot type the statement"
     );
     assert_eq!(
-        f.live_snapshot(ep).await.sql,
+        f.live_snapshot(ep).await.statements[0].sql,
         sql,
         "the snapshot freezes the TEMPLATE — the render is only for describe"
     );
@@ -1321,7 +1322,8 @@ async fn publishing_freezes_the_union_of_every_branch() {
 
     let snap = f.live_snapshot(ep).await;
     assert_eq!(
-        snap.columns
+        snap.statements[0]
+            .columns
             .iter()
             .map(|c| c.name.as_str())
             .collect::<Vec<_>>(),
@@ -1329,7 +1331,8 @@ async fn publishing_freezes_the_union_of_every_branch() {
         "both branches are described, and the union keeps first-seen order"
     );
     let by = |n: &str| {
-        snap.columns
+        snap.statements[0]
+            .columns
             .iter()
             .find(|c| c.name == n)
             .unwrap_or_else(|| panic!("no column {n}"))
@@ -1374,7 +1377,7 @@ async fn the_branch_an_omitted_parameter_takes_is_described() {
 
     let snap = f.live_snapshot(ep).await;
     assert!(
-        !snap
+        !snap.statements[0]
             .columns
             .iter()
             .find(|c| c.name == "region")
@@ -1515,7 +1518,7 @@ async fn a_datetime_column_two_branches_spell_differently_still_publishes() {
         );
 
         let snap = f.live_snapshot(ep).await;
-        let v = snap
+        let v = snap.statements[0]
             .columns
             .iter()
             .find(|c| c.name == "v")
@@ -1725,9 +1728,9 @@ async fn every_allowed_enum_value_is_described_not_only_the_first() {
     f.publish(ep).await;
     let snap = f.live_snapshot(ep).await;
     assert!(
-        snap.columns.iter().any(|c| c.name == "name"),
+        snap.statements[0].columns.iter().any(|c| c.name == "name"),
         "`full` is not allowed[0], and it was never described before M1: {:?}",
-        snap.columns
+        snap.statements[0].columns
     );
 }
 
@@ -2007,7 +2010,7 @@ async fn rollback_does_not_silently_re_enable_a_disabled_endpoint() {
 
     f.rollback(ep, 1).await;
     assert_eq!(f.state_of(ep).await.0, "disabled");
-    assert_eq!(f.live_snapshot(ep).await.sql, "SELECT 1 AS n");
+    assert_eq!(f.live_snapshot(ep).await.statements[0].sql, "SELECT 1 AS n");
 }
 
 // ---------- Authorization and containment ----------
@@ -2344,7 +2347,11 @@ async fn publish_allows_the_same_union_when_naming_keeps_the_names_apart() {
     let (status, body) = f.publish_raw(ep).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let snap = f.live_snapshot(ep).await;
-    let mut names: Vec<&str> = snap.columns.iter().map(|c| c.name.as_str()).collect();
+    let mut names: Vec<&str> = snap.statements[0]
+        .columns
+        .iter()
+        .map(|c| c.name.as_str())
+        .collect();
     names.sort_unstable();
     assert_eq!(names, vec!["totalRevenue", "total_revenue"]);
 }
@@ -2449,7 +2456,8 @@ async fn publish_describes_an_enum_value_past_the_old_candidate_cap() {
 
     let snap = f.live_snapshot(ep).await;
     assert_eq!(
-        snap.columns
+        snap.statements[0]
+            .columns
             .iter()
             .map(|c| c.name.as_str())
             .collect::<Vec<_>>(),
@@ -2458,7 +2466,7 @@ async fn publish_describes_an_enum_value_past_the_old_candidate_cap() {
          only ever be a 503"
     );
     assert!(
-        !snap
+        !snap.statements[0]
             .columns
             .iter()
             .find(|c| c.name == "extra")

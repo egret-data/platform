@@ -228,7 +228,7 @@
 use egret_core::{Error, Result, UserId};
 use egret_dataapi_api::{
     compare_column_types, CacheScope, CacheSpec, ColumnSpec, EndpointSnapshot, ParamLocation,
-    ParamSpec, ParamType, StatementSpec, TypeAgreement, PARAM_GATE,
+    ParamSpec, ParamType, StatementSnapshot, StatementSpec, TypeAgreement, PARAM_GATE,
 };
 use egret_query_api::Param;
 use uuid::Uuid;
@@ -1690,13 +1690,12 @@ fn projection_has_uncast_marker(rest: &str) -> bool {
 /// The one statement publish can still freeze, or a refusal naming the count.
 ///
 /// **A bridge, written to be deleted.** The draft row holds a LIST as of
-/// migration 0129, but the published snapshot still carries a single `sql`
-/// (its shape changes in M2 Task 4) and nothing yet validates or describes more
-/// than one definition (M2 Task 5). Between here and there, the honest answer
-/// for a two-statement endpoint is a refusal: freezing `statements[0]` would
-/// publish a contract missing everything the author wrote after it, and the
-/// endpoint would serve 200s that are simply short a result set — the kind of
-/// failure nobody reports as a bug.
+/// migration 0129 and the published snapshot holds one as of M2 Task 4, but
+/// nothing yet validates or describes more than one definition (M2 Task 5).
+/// Between here and there, the honest answer for a two-statement endpoint is a
+/// refusal: freezing `statements[0]` would publish a contract missing
+/// everything the author wrote after it, and the endpoint would serve 200s that
+/// are simply short a result set — the kind of failure nobody reports as a bug.
 ///
 /// An EMPTY list is not one of the cases this has to explain away: the route
 /// refuses it and `dataapi_endpoints_statements_nonempty` makes it
@@ -2390,7 +2389,9 @@ impl EndpointStore {
 
         // The whole pure validator, against the row actually being frozen. See the
         // doc comment: this is what closes the window, not the identity check above.
-        let sole_sql = sole_statement(&current)?.sql.clone();
+        let sole = sole_statement(&current)?;
+        let sole_name = sole.name.clone();
+        let sole_sql = sole.sql.clone();
         validate_definition(
             &sole_sql,
             &current.params,
@@ -2400,10 +2401,20 @@ impl EndpointStore {
         )?;
 
         let snapshot = EndpointSnapshot {
+            // One element, because `sole_statement` above has already refused
+            // anything else — M2 Task 5 turns this into the loop. The NAME is
+            // carried over from the draft rather than synthesized, so an
+            // endpoint's statement is called the same thing whether it is read
+            // from a snapshot published now or from one migration 0129 named
+            // `main`.
+            statements: vec![StatementSnapshot {
+                name: sole_name,
+                sql: sole_sql,
+                columns,
+            }],
+            method: current.method.clone(),
             // The stored path, which `normalize_path` already canonicalised. The
             // snapshot must never carry a spelling the endpoint row does not have.
-            sql: sole_sql,
-            method: current.method.clone(),
             path: current.path.clone(),
             database_id: current.database_id,
             params: current.params.clone(),
@@ -2417,7 +2428,6 @@ impl EndpointStore {
             // genuinely shared-safe connection forever after.
             delegated,
             impersonate,
-            columns,
             // The stamp, written here and nowhere else, because this is the one
             // place `validate_definition` has just run against the row being
             // frozen. §7 of the parameters spec said "every endpoint with

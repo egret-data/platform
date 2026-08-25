@@ -10,7 +10,7 @@
 //! copied from `crates/egret-dataapi/tests/clients_store.rs`.
 use egret_dataapi_api::{
     CacheScope, CacheSpec, ColumnSpec, EndpointSnapshot, LimitsSpec, OutputSpec, ParamLocation,
-    ParamSpec, ParamType, RateLimitSpec, StatementSpec,
+    ParamSpec, ParamType, RateLimitSpec, StatementSnapshot, StatementSpec,
 };
 use egret_metastore::Db;
 use uuid::Uuid;
@@ -87,7 +87,26 @@ macro_rules! skip_without_db {
 /// that got dropped, renamed, or silently defaulted back.
 fn fixture_snapshot(database_id: Uuid) -> EndpointSnapshot {
     EndpointSnapshot {
-        sql: "SELECT id, status FROM orders WHERE status = :status".to_string(),
+        statements: vec![StatementSnapshot {
+            name: "main".to_string(),
+            sql: "SELECT id, status FROM orders WHERE status = :status".to_string(),
+            columns: vec![
+                ColumnSpec {
+                    name: "id".to_string(),
+                    ty: "uuid".to_string(),
+                    required: true,
+                },
+                // Deliberately `false`, unlike `id` above: a round trip that
+                // dropped `required` or coerced it back to the pre-M1 default of
+                // `true` would leave both columns looking identical and this
+                // assertion would not catch it.
+                ColumnSpec {
+                    name: "status".to_string(),
+                    ty: "varchar".to_string(),
+                    required: false,
+                },
+            ],
+        }],
         method: "GET".to_string(),
         path: "/orders/by-status".to_string(),
         database_id,
@@ -144,22 +163,6 @@ fn fixture_snapshot(database_id: Uuid) -> EndpointSnapshot {
         // being swapped, and swapping them is exactly the mistake that turns a
         // safety check into a coin flip.
         impersonate: false,
-        columns: vec![
-            ColumnSpec {
-                name: "id".to_string(),
-                ty: "uuid".to_string(),
-                required: true,
-            },
-            // Deliberately `false`, unlike `id` above: a round trip that
-            // dropped `required` or coerced it back to the pre-M1 default of
-            // `true` would leave both columns looking identical and this
-            // assertion would not catch it.
-            ColumnSpec {
-                name: "status".to_string(),
-                ty: "varchar".to_string(),
-                required: false,
-            },
-        ],
         // Non-default on purpose, like every other field here: a round trip that
         // dropped this would leave `0`, which is the value the serving path
         // refuses.

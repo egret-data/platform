@@ -29609,9 +29609,9 @@
       },
       "EndpointSnapshot": {
         "type": "object",
-        "description": "What a published version freezes. Self-contained on purpose: P4's serving\npath must be able to answer a request from this alone, without reading the\ndraft row.",
+        "description": "What a published version freezes. Self-contained on purpose: P4's serving\npath must be able to answer a request from this alone, without reading the\ndraft row.\n\n**This type is read back out of an immutable column.** M2 does not migrate\n`dataapi.endpoint_versions.snapshot` and must not: a published version is\nthe contract a live consumer is already coding against, and rewriting frozen\nrows to suit a newer binary is the one thing \"frozen\" is supposed to\nprevent. The compatibility therefore lives in the READER — see\n[`EndpointSnapshotRepr`] — exactly as M1's `#[serde(default =\n\"default_required\")]` on [`ColumnSpec::required`] did.",
         "required": [
-          "sql",
+          "statements",
           "method",
           "path",
           "database_id",
@@ -29620,12 +29620,15 @@
           "cache",
           "limits",
           "rate_limit",
-          "delegated",
-          "columns"
+          "delegated"
         ],
         "properties": {
-          "sql": {
-            "type": "string"
+          "statements": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StatementSnapshot"
+            },
+            "description": "The endpoint's N SQL definitions, in execution order, each with its own\nfrozen columns (M1's per-branch union, now scoped to one statement).\n\nNever empty: [`EndpointSnapshotRepr`] refuses a snapshot that carries\nneither a `statements` list nor the pre-M2 `sql` + `columns` pair, and\nrefuses an explicitly empty list."
           },
           "method": {
             "type": "string"
@@ -29662,13 +29665,6 @@
           "impersonate": {
             "type": "boolean",
             "description": "Whether `query.databases.options.impersonate` was set at the moment this\nversion was published. The other half of the witness pair.\n\n**`delegated` alone does not decide whether the engine runs per\nprincipal, and believing it did was a real leak.** `delegation_for`'s\nNON-delegated arm still returns `Some(principal_email)` as the session\nuser (`egret-query/src/execution/mod.rs:86`), and both connectors act on\n`options.impersonate` independently of `delegated`:\n\n* `connector/trino.rs:43` — `bearer_token.is_some() || options.impersonate\n  == Some(true)` sends `X-Trino-User: <caller>`;\n* `connector/starrocks.rs:129` — `bearer_token.is_none() &&\n  options.impersonate == Some(true)` issues\n  `EXECUTE AS <caller> WITH NO REVERT`.\n\nSo `{delegated: false, options: {impersonate: true}}` — which\n`DatabaseInput` accepts, the two fields being independent and unvalidated\n— runs every query under the caller's own Ranger policy while looking\nnon-delegated to anything that reads `delegated`.\n\n**Both halves must be compared against the live row before serving from a\nshared cache.** Freezing only `delegated` let a `shared` endpoint on such\na connection cache principal A's filtered rows under a principal-less key\nand serve them to principal B: a 200, `meta.cached: true`, nothing in\n`access_log` to distinguish it, and the witness silent because live\n`delegated` still equalled frozen `delegated`.\n\n`#[serde(default)]` so a snapshot written before this field existed\ndeserialises as `false`. That is the fail-closed direction: such a\nsnapshot can only have been published against a connection this check now\nrefuses, so comparing `false` against a live `true` yields\n`cache_scope_stale` and a re-publish, which is the correct outcome."
-          },
-          "columns": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/ColumnSpec"
-            },
-            "description": "Resolved by `describe_as` at publish time and frozen here, so the\npublished contract does not drift when the underlying table changes."
           },
           "param_gate": {
             "type": "integer",
@@ -33809,6 +33805,29 @@
               "null"
             ],
             "description": "Required for a local-auth caller (step-up). OIDC callers re-auth via OIDC."
+          }
+        }
+      },
+      "StatementSnapshot": {
+        "type": "object",
+        "description": "The frozen form of a [`StatementSpec`]: what a publish freezes into\n[`EndpointSnapshot`] for one statement, its own [`ColumnSpec`] union\nincluded (M1's per-branch column union, now scoped to one statement of N).\n\nNo `deny_unknown_fields` — like [`EndpointSnapshot`] and [`ColumnSpec`],\nthe server writes this for itself; a typo here is not possible the way one\nis in a request body.",
+        "required": [
+          "name",
+          "sql",
+          "columns"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "sql": {
+            "type": "string"
+          },
+          "columns": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ColumnSpec"
+            }
           }
         }
       },

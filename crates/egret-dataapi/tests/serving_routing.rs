@@ -977,7 +977,7 @@ async fn a_snapshot_frozen_with_a_stated_datetime_precision_still_serves() {
         async move {
             let touched = sqlx::query(
                 "UPDATE dataapi.endpoint_versions \
-                    SET snapshot = jsonb_set(snapshot, '{columns,0,ty}', $2::jsonb) \
+                    SET snapshot = jsonb_set(snapshot, '{statements,0,columns,0,ty}', $2::jsonb) \
                   WHERE endpoint_id = $1",
             )
             .bind(ep)

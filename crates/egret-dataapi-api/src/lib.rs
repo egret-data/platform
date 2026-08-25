@@ -148,9 +148,24 @@ pub struct RateLimitSpec {
 /// What a published version freezes. Self-contained on purpose: P4's serving
 /// path must be able to answer a request from this alone, without reading the
 /// draft row.
+///
+/// **This type is read back out of an immutable column.** M2 does not migrate
+/// `dataapi.endpoint_versions.snapshot` and must not: a published version is
+/// the contract a live consumer is already coding against, and rewriting frozen
+/// rows to suit a newer binary is the one thing "frozen" is supposed to
+/// prevent. The compatibility therefore lives in the READER — see
+/// [`EndpointSnapshotRepr`] — exactly as M1's `#[serde(default =
+/// "default_required")]` on [`ColumnSpec::required`] did.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+#[serde(try_from = "EndpointSnapshotRepr")]
 pub struct EndpointSnapshot {
-    pub sql: String,
+    /// The endpoint's N SQL definitions, in execution order, each with its own
+    /// frozen columns (M1's per-branch union, now scoped to one statement).
+    ///
+    /// Never empty: [`EndpointSnapshotRepr`] refuses a snapshot that carries
+    /// neither a `statements` list nor the pre-M2 `sql` + `columns` pair, and
+    /// refuses an explicitly empty list.
+    pub statements: Vec<StatementSnapshot>,
     pub method: String,
     pub path: String,
     pub database_id: uuid::Uuid,
@@ -203,9 +218,6 @@ pub struct EndpointSnapshot {
     /// `cache_scope_stale` and a re-publish, which is the correct outcome.
     #[serde(default)]
     pub impersonate: bool,
-    /// Resolved by `describe_as` at publish time and frozen here, so the
-    /// published contract does not drift when the underlying table changes.
-    pub columns: Vec<ColumnSpec>,
     /// Which revision of the publish-time parameter gate this version passed.
     ///
     /// **A stamp, not a note.** P4.5's §7 said "every endpoint with parameters
@@ -227,6 +239,130 @@ pub struct EndpointSnapshot {
     /// and nothing to force a re-publish of.
     #[serde(default)]
     pub param_gate: u32,
+}
+
+impl EndpointSnapshot {
+    /// **M2 BRIDGE. Tasks 6, 7 and 9 delete this** — parameter resolution,
+    /// execution and document generation each become a loop over
+    /// [`Self::statements`], and then nothing calls this.
+    ///
+    /// It exists only so Task 4 can change the persisted shape without also
+    /// changing how a request is served: every caller today assumes exactly one
+    /// statement, and a raw `statements[0]` would spread an index-panic across
+    /// the serving path to say so. `Option` instead of a panic because these
+    /// callers are all fallible already, so "a snapshot with no statements"
+    /// costs one `ok_or_else` and answers 500 rather than killing the task.
+    ///
+    /// `None` is unreachable for anything that came out of the database:
+    /// [`EndpointSnapshotRepr`] refuses an empty list at deserialization.
+    pub fn sole_statement(&self) -> Option<&StatementSnapshot> {
+        self.statements.first()
+    }
+}
+
+/// The name given to the single statement synthesized from a pre-M2 snapshot.
+///
+/// The same name migration 0129 gave every existing DRAFT, so a pre-M2
+/// endpoint reads identically whether it is served from its frozen snapshot or
+/// re-published from its migrated draft — two paths that would otherwise
+/// disagree about what the endpoint's one statement is called.
+///
+/// A caller never sees it. Spec §4.4: `data` is an ARRAY for a one-statement
+/// endpoint, and only becomes an object keyed by statement name once there is
+/// more than one. So naming something that was previously anonymous changes
+/// nothing on the wire for every endpoint this compatibility path exists for.
+pub const LEGACY_STATEMENT_NAME: &str = "main";
+
+/// How an [`EndpointSnapshot`] is READ. Not how it is written.
+///
+/// `dataapi.endpoint_versions.snapshot` is immutable, so the corpus contains
+/// two shapes at once and always will: pre-M2 rows carrying a single `sql`
+/// string with one `columns` list beside it, and M2 rows carrying
+/// `statements`. Migrating the old ones was available and was rejected —
+/// a published version is the frozen contract a live consumer is coding
+/// against, and the precedent is M1's `#[serde(default = "default_required")]`
+/// on [`ColumnSpec::required`], where the reader accommodated an old row
+/// rather than an `UPDATE` rewriting it.
+///
+/// A separate representation type rather than keeping `sql`/`columns` as
+/// `Option` fields on [`EndpointSnapshot`] itself: the legacy pair must be
+/// readable and must never be WRITTEN again, and an `Option` field that
+/// serde can still serialize is one `skip_serializing_if` away from putting
+/// the old shape back into a new row. Here it is unrepresentable — the fields
+/// exist only on the way in.
+#[derive(Deserialize)]
+struct EndpointSnapshotRepr {
+    /// Present on every snapshot published from M2 onwards.
+    #[serde(default)]
+    statements: Option<Vec<StatementSnapshot>>,
+    /// The pre-M2 pair. Required together, exactly as they were required
+    /// before M2 — neither carried a serde default, so a snapshot missing
+    /// either one has never deserialized and does not start now.
+    #[serde(default)]
+    sql: Option<String>,
+    #[serde(default)]
+    columns: Option<Vec<ColumnSpec>>,
+    method: String,
+    path: String,
+    database_id: uuid::Uuid,
+    params: Vec<ParamSpec>,
+    output: OutputSpec,
+    cache: CacheSpec,
+    limits: LimitsSpec,
+    rate_limit: RateLimitSpec,
+    delegated: bool,
+    #[serde(default)]
+    impersonate: bool,
+    #[serde(default)]
+    param_gate: u32,
+}
+
+/// What the reader refuses. A snapshot in neither shape is corrupt data, and
+/// saying so is better than an endpoint that deserializes with nothing to run
+/// and discovers it at request time.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum SnapshotShapeError {
+    #[error(
+        "a published snapshot must carry a non-empty `statements` list, or the pre-M2 `sql` \
+         and `columns` pair it is read as one statement from; this one carries neither"
+    )]
+    NoStatements,
+}
+
+impl TryFrom<EndpointSnapshotRepr> for EndpointSnapshot {
+    type Error = SnapshotShapeError;
+
+    fn try_from(r: EndpointSnapshotRepr) -> Result<Self, Self::Error> {
+        let statements = match (r.statements, r.sql, r.columns) {
+            // M2 and later. The legacy pair is ignored if some future row
+            // somehow carries both: `statements` is the authority, so a
+            // multi-statement endpoint can never be flattened to its first.
+            (Some(s), _, _) if !s.is_empty() => s,
+            // Pre-M2: one anonymous SQL string and the columns frozen beside
+            // it become one named statement. Both halves are required, which
+            // is what the old struct already demanded of them.
+            (_, Some(sql), Some(columns)) => vec![StatementSnapshot {
+                name: LEGACY_STATEMENT_NAME.to_string(),
+                sql,
+                columns,
+            }],
+            _ => return Err(SnapshotShapeError::NoStatements),
+        };
+        Ok(EndpointSnapshot {
+            statements,
+            method: r.method,
+            path: r.path,
+            database_id: r.database_id,
+            params: r.params,
+            output: r.output,
+            cache: r.cache,
+            limits: r.limits,
+            rate_limit: r.rate_limit,
+            delegated: r.delegated,
+            impersonate: r.impersonate,
+            param_gate: r.param_gate,
+        })
+    }
 }
 
 /// The current revision of the publish-time parameter gate — what
@@ -658,6 +794,151 @@ mod tests {
             validate_statements(&statements),
             Err(StatementError::InvalidName("Rows".into()))
         );
+    }
+
+    // --- the snapshot's statement list, and what an old row deserializes to ---
+    //
+    // `dataapi.endpoint_versions.snapshot` is immutable: a published version is
+    // the contract a live consumer is already coding against, so M2 migrates
+    // NOTHING there. The reader accommodates the old shape instead — the same
+    // call M1 made with `#[serde(default = "default_required")]` above.
+
+    /// Exactly the shape rows published before M2 carry: `sql` + `columns`,
+    /// no `statements`.
+    fn a_snapshot_as_published_before_m2() -> String {
+        r#"{
+            "sql": "SELECT 1 AS a",
+            "columns": [{"name":"a","ty":"integer","required":true}],
+            "method": "GET",
+            "path": "old",
+            "database_id": "00000000-0000-0000-0000-000000000001",
+            "params": [],
+            "output": {"shape":"objects","naming":"as_is"},
+            "cache": {"enabled":false,"ttl_seconds":60,"scope":"per_principal"},
+            "limits": {"max_rows":10000,"timeout_seconds":30},
+            "rate_limit": {"per_key_qps":0,"burst":0,"per_endpoint_qps":0},
+            "delegated": false,
+            "param_gate": 1
+        }"#
+        .to_string()
+    }
+
+    #[test]
+    fn a_snapshot_published_before_m2_reads_as_one_statement() {
+        let s: EndpointSnapshot = serde_json::from_str(&a_snapshot_as_published_before_m2())
+            .expect("a snapshot already serving traffic must still deserialize");
+        assert_eq!(
+            s.statements.len(),
+            1,
+            "one `sql` is one statement — not zero, and not a list the serving \
+             path would iterate emptily over"
+        );
+        assert_eq!(s.statements[0].sql, "SELECT 1 AS a");
+        assert_eq!(s.statements[0].columns.len(), 1);
+        assert_eq!(s.statements[0].columns[0].name, "a");
+        assert!(
+            s.statements[0].columns[0].required,
+            "M1's frozen contract must survive the fold, not be re-derived"
+        );
+    }
+
+    /// The synthesized name is `main` — the same name migration 0129 gave every
+    /// existing DRAFT, so a pre-M2 endpoint reads the same whether it is served
+    /// from its frozen snapshot or re-published from its migrated draft.
+    ///
+    /// It is invisible to a caller: spec §4.4 says `data` is an ARRAY for a
+    /// one-statement endpoint and only becomes an object keyed by name once
+    /// there is more than one. Nothing a pre-M2 consumer receives changes.
+    #[test]
+    fn the_synthesized_statement_is_named_main() {
+        let s: EndpointSnapshot =
+            serde_json::from_str(&a_snapshot_as_published_before_m2()).unwrap();
+        assert_eq!(s.statements[0].name, "main");
+    }
+
+    /// A snapshot that carries `statements` is read from `statements`, and the
+    /// legacy fold does not get to overwrite it. Without this the compat path
+    /// could quietly flatten every M2 endpoint to one statement.
+    #[test]
+    fn a_snapshot_carrying_statements_keeps_all_of_them() {
+        let new = r#"{
+            "statements": [
+                {"name":"rows","sql":"SELECT 1 AS a","columns":[{"name":"a","ty":"integer","required":true}]},
+                {"name":"total","sql":"SELECT 2 AS n","columns":[{"name":"n","ty":"bigint","required":true}]}
+            ],
+            "method": "GET",
+            "path": "new",
+            "database_id": "00000000-0000-0000-0000-000000000001",
+            "params": [],
+            "output": {"shape":"objects","naming":"as_is"},
+            "cache": {"enabled":false,"ttl_seconds":60,"scope":"per_principal"},
+            "limits": {"max_rows":10000,"timeout_seconds":30},
+            "rate_limit": {"per_key_qps":0,"burst":0,"per_endpoint_qps":0},
+            "delegated": false,
+            "param_gate": 1
+        }"#;
+        let s: EndpointSnapshot = serde_json::from_str(new).unwrap();
+        let names: Vec<&str> = s.statements.iter().map(|x| x.name.as_str()).collect();
+        assert_eq!(names, ["rows", "total"]);
+        assert_eq!(s.statements[1].columns[0].ty, "bigint");
+    }
+
+    /// Round-trips through its own serialization: what publish writes is what
+    /// serving reads back, with no legacy fields left behind.
+    #[test]
+    fn the_statement_list_round_trips() {
+        let s: EndpointSnapshot =
+            serde_json::from_str(&a_snapshot_as_published_before_m2()).unwrap();
+        let written = serde_json::to_string(&s).unwrap();
+        assert!(
+            !written.contains("\"sql\":\"SELECT 1 AS a\"") || written.contains("\"statements\""),
+            "a re-serialized snapshot must carry `statements`, not a top-level `sql`"
+        );
+        let again: EndpointSnapshot = serde_json::from_str(&written).unwrap();
+        assert_eq!(s, again);
+    }
+
+    /// Neither shape present is corrupt data, and it was an error before M2
+    /// too — `sql` and `columns` had no serde default. It stays a loud refusal
+    /// rather than an endpoint with nothing to run.
+    #[test]
+    fn a_snapshot_with_neither_shape_is_refused() {
+        let broken = r#"{
+            "method": "GET",
+            "path": "broken",
+            "database_id": "00000000-0000-0000-0000-000000000001",
+            "params": [],
+            "output": {"shape":"objects","naming":"as_is"},
+            "cache": {"enabled":false,"ttl_seconds":60,"scope":"per_principal"},
+            "limits": {"max_rows":10000,"timeout_seconds":30},
+            "rate_limit": {"per_key_qps":0,"burst":0,"per_endpoint_qps":0},
+            "delegated": false
+        }"#;
+        let err = serde_json::from_str::<EndpointSnapshot>(broken).unwrap_err();
+        assert!(
+            err.to_string().contains("statements"),
+            "the refusal must name what is missing, got {err}"
+        );
+    }
+
+    /// An explicitly empty list is refused too. The serving path indexes the
+    /// list; a snapshot that deserializes into zero statements would be an
+    /// endpoint with nothing to run, discovered at request time.
+    #[test]
+    fn a_snapshot_with_an_empty_statement_list_is_refused() {
+        let empty = r#"{
+            "statements": [],
+            "method": "GET",
+            "path": "empty",
+            "database_id": "00000000-0000-0000-0000-000000000001",
+            "params": [],
+            "output": {"shape":"objects","naming":"as_is"},
+            "cache": {"enabled":false,"ttl_seconds":60,"scope":"per_principal"},
+            "limits": {"max_rows":10000,"timeout_seconds":30},
+            "rate_limit": {"per_key_qps":0,"burst":0,"per_endpoint_qps":0},
+            "delegated": false
+        }"#;
+        assert!(serde_json::from_str::<EndpointSnapshot>(empty).is_err());
     }
 
     // --- compare_column_types ------------------------------------------------

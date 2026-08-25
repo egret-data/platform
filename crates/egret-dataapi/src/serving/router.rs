@@ -635,6 +635,16 @@ async fn run(
         return Err(ServingError::ParamGateStale);
     }
     let shared = shared_cache_allowed(&st.db, &snap).await?;
+    // **M2 Task 4 bridge, deleted by Tasks 7 and 8.** The snapshot carries a
+    // LIST of statements now; this path still serves exactly one, because
+    // `lifecycle::sole_statement` is still refusing to publish anything else.
+    // Resolved once, here, so the rendered SQL, the shaped rows and both
+    // `meta.columns` all come from the SAME element rather than three
+    // independent `statements[0]`s that a later change could let drift apart.
+    let stmt = snap
+        .sole_statement()
+        .ok_or_else(|| ServingError::internal("published snapshot carries no statements"))?;
+
     // Step 7's first half, and it runs BEFORE the cache lookup on purpose. The
     // key has to describe what this request will RENDER, not what it asked for
     // in the URL — see `params`' module comment. It also means a request that is
@@ -666,7 +676,7 @@ async fn run(
                 // detail into the public wire type.
                 data: (*hit.data).clone(),
                 meta: ServingMeta {
-                    columns: snap.columns.clone(),
+                    columns: stmt.columns.clone(),
                     row_count: hit.row_count,
                     version,
                     cached: true,
@@ -676,7 +686,7 @@ async fn run(
         }
     }
 
-    // Step 7's second half. The statement sent to the engine is NOT `snap.sql`:
+    // Step 7's second half. The statement sent to the engine is NOT `stmt.sql`:
     // every `{{ … }}` in the definition has become a `?`, and `binds` carries
     // the values in the order those markers appear. This is the line that makes
     // `?region=EU` and `?region=US` return different rows — until it landed they
@@ -697,7 +707,7 @@ async fn run(
     // the shape of every bug this phase fixed — but the exposure is real, it is
     // a re-publish away from being visible, and it belongs in the release note
     // rather than in a comment nobody reads after the incident.
-    let (sql, binds) = crate::render::render(&snap.sql, &resolved.values)
+    let (sql, binds) = crate::render::render(&stmt.sql, &resolved.values)
         .map_err(|e| render_error(e, resolved.has_repeats))?;
 
     let limits = execution_limits(&snap);
@@ -741,7 +751,7 @@ async fn run(
     Ok(ServingResponse {
         data,
         meta: ServingMeta {
-            columns: snap.columns.clone(),
+            columns: stmt.columns.clone(),
             row_count: out.row_count,
             version,
             cached: false,
@@ -1179,6 +1189,15 @@ fn shape_rows(
     out: &egret_core::TabularResult,
     snap: &EndpointSnapshot,
 ) -> Result<serde_json::Value, ServingError> {
+    // **M2 Task 4 bridge, deleted by Task 7**, which shapes each statement
+    // against ITS OWN frozen columns. Today publish freezes exactly one
+    // statement (`lifecycle::sole_statement`), so the frozen union is that
+    // element's. Bound once so every clause below judges the same list.
+    let frozen = &snap
+        .sole_statement()
+        .ok_or_else(|| ServingError::internal("published snapshot carries no statements"))?
+        .columns;
+
     // Row arity, checked for BOTH shapes and BEFORE the branch on `shape`.
     //
     // The column LISTS agreeing does not imply each row has that many values —
@@ -1239,11 +1258,11 @@ fn shape_rows(
         // different contract. Task 5 refuses to publish a branching definition
         // under this shape, so there is never a legitimate subset to accept
         // here, and this half of the predicate is the pre-M1 one unchanged.
-        let drifted = out.columns.len() != snap.columns.len()
+        let drifted = out.columns.len() != frozen.len()
             || out
                 .columns
                 .iter()
-                .zip(snap.columns.iter())
+                .zip(frozen.iter())
                 .any(|(live, frozen)| live.name != frozen.name);
         if drifted {
             return Err(drift(snap, out, "the positional column list changed", None));
@@ -1270,7 +1289,7 @@ fn shape_rows(
         if let Some((live, frozen)) = out
             .columns
             .iter()
-            .zip(snap.columns.iter())
+            .zip(frozen.iter())
             .find(|(live, frozen)| !compare_column_types(&frozen.ty, &live.ty).agrees())
         {
             return Err(drift(
@@ -1309,7 +1328,7 @@ fn shape_rows(
     // STATED by `DESCRIBE OUTPUT`, so `timestamp(0)` and `timestamp` are one
     // column, not two types. Two stated precisions still disagree.
     for live in &out.columns {
-        match snap.columns.iter().find(|f| f.name == live.name) {
+        match frozen.iter().find(|f| f.name == live.name) {
             None => return Err(drift(snap, out, "a column that was never declared", None)),
             Some(frozen) if !compare_column_types(&frozen.ty, &live.ty).agrees() => {
                 return Err(drift(
@@ -1326,8 +1345,8 @@ fn shape_rows(
             Some(_) => {}
         }
     }
-    for frozen in snap.columns.iter().filter(|c| c.required) {
-        if !out.columns.iter().any(|l| l.name == frozen.name) {
+    for required in frozen.iter().filter(|c| c.required) {
+        if !out.columns.iter().any(|l| l.name == required.name) {
             return Err(drift(snap, out, "a required column was not returned", None));
         }
     }
@@ -1358,8 +1377,7 @@ fn shape_rows(
     // being served: otherwise the generated document advertises two keys, and
     // the endpoint answers or refuses depending on which parameters it was
     // called with.
-    let names: Vec<String> = snap
-        .columns
+    let names: Vec<String> = frozen
         .iter()
         .map(|c| apply_naming(&c.name, &snap.output.naming))
         .collect();
@@ -1370,7 +1388,7 @@ fn shape_rows(
         tracing::warn!(
             key = %dup,
             naming = %snap.output.naming,
-            frozen = ?snap.columns.iter().map(|c| &c.name).collect::<Vec<_>>(),
+            frozen = ?frozen.iter().map(|c| &c.name).collect::<Vec<_>>(),
             "output.naming maps two frozen columns onto one key"
         );
         return Err(ServingError::OutputNamingCollision);
@@ -1448,7 +1466,15 @@ fn drift(
         returned: "",
     });
     tracing::warn!(
-        frozen = ?snap.columns.iter().map(|c| &c.name).collect::<Vec<_>>(),
+        // `unwrap_or_default` rather than a second refusal: this function's job
+        // is to LOG and return, and a snapshot with no statements has already
+        // been refused by whichever caller got here. An empty list logged as
+        // empty is the honest reading. (M2 Task 4 bridge; Task 7 hands the
+        // statement's columns in.)
+        frozen = ?snap
+            .sole_statement()
+            .map(|s| s.columns.iter().map(|c| &c.name).collect::<Vec<_>>())
+            .unwrap_or_default(),
         live = ?out.columns.iter().map(|c| &c.name).collect::<Vec<_>>(),
         column = %m.column,
         declared = %m.declared,
@@ -1639,9 +1665,13 @@ mod tests {
     /// `snapshot_with_limits` with the frozen columns replaced. The limits are
     /// the clamped-to-1 pair, which `shape_rows` never reads.
     fn snapshot_with_columns(columns: Vec<ColumnSpec>) -> EndpointSnapshot {
+        let base = snapshot_with_limits(1, 1);
         EndpointSnapshot {
-            columns,
-            ..snapshot_with_limits(1, 1)
+            statements: vec![egret_dataapi_api::StatementSnapshot {
+                columns,
+                ..base.statements[0].clone()
+            }],
+            ..base
         }
     }
 
@@ -2233,7 +2263,11 @@ mod tests {
 
     fn snapshot_with_limits(max_rows: u32, timeout_seconds: u32) -> EndpointSnapshot {
         EndpointSnapshot {
-            sql: "SELECT 1".into(),
+            statements: vec![egret_dataapi_api::StatementSnapshot {
+                name: "main".into(),
+                sql: "SELECT 1".into(),
+                columns: vec![],
+            }],
             method: "GET".into(),
             path: "/x".into(),
             database_id: Uuid::nil(),
@@ -2247,7 +2281,6 @@ mod tests {
             rate_limit: serde_json::from_value(serde_json::json!({})).unwrap(),
             delegated: false,
             impersonate: false,
-            columns: vec![],
             param_gate: egret_dataapi_api::PARAM_GATE,
         }
     }

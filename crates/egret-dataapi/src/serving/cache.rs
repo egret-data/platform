@@ -777,7 +777,11 @@ mod tests {
 
     fn snapshot_with_cache(enabled: bool, ttl_seconds: u32) -> EndpointSnapshot {
         EndpointSnapshot {
-            sql: "SELECT 1".into(),
+            statements: vec![egret_dataapi_api::StatementSnapshot {
+                name: "main".into(),
+                sql: "SELECT 1".into(),
+                columns: vec![],
+            }],
             method: "GET".into(),
             path: "/x".into(),
             database_id: Uuid::nil(),
@@ -792,7 +796,6 @@ mod tests {
             rate_limit: serde_json::from_value(serde_json::json!({})).unwrap(),
             delegated: false,
             impersonate: false,
-            columns: vec![],
             param_gate: egret_dataapi_api::PARAM_GATE,
         }
     }

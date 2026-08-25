@@ -105,7 +105,14 @@ pub(crate) fn resolve(
     snap: &EndpointSnapshot,
 ) -> Result<Resolved, ServingError> {
     let supplied = decode(raw_query, snap)?;
-    resolve_supplied(&supplied, &snap.sql, &snap.params)
+    // M2 Task 6 replaces this with the UNION across `snap.statements`, inside
+    // `resolve_supplied` — where preview reaches it too. Until then one
+    // statement is the only shape publish will freeze (`lifecycle::
+    // sole_statement`), so reading the first is reading the only.
+    let stmt = snap
+        .sole_statement()
+        .ok_or_else(|| ServingError::internal("snapshot carries no statements"))?;
+    resolve_supplied(&supplied, &stmt.sql, &snap.params)
 }
 
 /// [`resolve`], from an ALREADY-DECODED map rather than a raw query string.
@@ -424,7 +431,11 @@ mod tests {
 
     fn snap(sql: &str, params: Vec<ParamSpec>) -> EndpointSnapshot {
         EndpointSnapshot {
-            sql: sql.into(),
+            statements: vec![egret_dataapi_api::StatementSnapshot {
+                name: "main".into(),
+                sql: sql.into(),
+                columns: vec![],
+            }],
             method: "GET".into(),
             path: "/x".into(),
             database_id: Uuid::nil(),
@@ -438,7 +449,6 @@ mod tests {
             rate_limit: serde_json::from_value(serde_json::json!({})).unwrap(),
             delegated: false,
             impersonate: false,
-            columns: vec![],
             param_gate: egret_dataapi_api::PARAM_GATE,
         }
     }
@@ -447,7 +457,7 @@ mod tests {
 
     fn rendered(query: &str, s: &EndpointSnapshot) -> (String, Vec<Param>) {
         let r = resolve(Some(query), s).expect("resolve");
-        crate::render::render(&s.sql, &r.values).expect("render")
+        crate::render::render(&s.statements[0].sql, &r.values).expect("render")
     }
 
     /// **Step 2's property, at the level where it is decided.** The percent-
@@ -518,8 +528,8 @@ mod tests {
         assert!(absent.key.is_empty(), "an absent parameter is omitted");
 
         // And the reason it matters: the two DO render differently.
-        let a = crate::render::render(&s.sql, &present.values).expect("render");
-        let b = crate::render::render(&s.sql, &absent.values).expect("render");
+        let a = crate::render::render(&s.statements[0].sql, &present.values).expect("render");
+        let b = crate::render::render(&s.statements[0].sql, &absent.values).expect("render");
         assert_ne!(a, b);
         assert!(b.1.is_empty(), "an absent parameter binds nothing");
     }
@@ -550,8 +560,8 @@ mod tests {
                     continue;
                 }
                 assert_eq!(
-                    crate::render::render(&s.sql, &ra.values).expect("render a"),
-                    crate::render::render(&s.sql, &rb.values).expect("render b"),
+                    crate::render::render(&s.statements[0].sql, &ra.values).expect("render a"),
+                    crate::render::render(&s.statements[0].sql, &rb.values).expect("render b"),
                     "`?{a}` and `?{b}` share a cache key but render differently"
                 );
             }
