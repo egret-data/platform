@@ -44,6 +44,11 @@ export interface UpdateEndpointInput {
      * Replaces the whole list when present. There is no per-statement patch:
      * the order is part of the definition, so "edit statement 2" and "insert a
      * statement" would need an addressing scheme the list itself already is.
+     *
+     * Bounded in the contract the same way `CreateEndpointInput` is, and for
+     * the same reason: this route replaces the whole list, so it is the other
+     * way a client can send one that is too long.
+     * @maxItems 16
      * @nullable
      */
   statements?: StatementSpec[] | null;

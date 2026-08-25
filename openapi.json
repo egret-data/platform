@@ -27584,7 +27584,8 @@
             "items": {
               "$ref": "#/components/schemas/StatementSpec"
             },
-            "description": "The statements this endpoint runs, in order. Required and non-empty:\n[`egret_dataapi_api::validate_statements`] refuses an empty list, a name\nthat is not an identifier, and a repeated name, all as a 400 naming the\nreason — the schema's own `CHECK` behind it means an empty list is not\nmerely refused here but unrepresentable."
+            "description": "The statements this endpoint runs, in order. Required and non-empty:\n[`egret_dataapi_api::validate_statements`] refuses an empty list, a name\nthat is not an identifier, and a repeated name, all as a 400 naming the\nreason — the schema's own `CHECK` behind it means an empty list is not\nmerely refused here but unrepresentable.\n\n`max_items` puts [`MAX_STATEMENTS`] into the generated contract, which is\nthe only place a client can learn it: it is a rule\n`validate_statements` applies, not a column, so nothing else in the\ndocument said the number at all. utoipa's `max_items` takes a LITERAL, so\nit cannot name the constant — the `const _: () = assert!(…)` above this\nstruct is what stops the two drifting, and it does it at compile time.",
+            "maxItems": 16
           },
           "method": {
             "type": [
@@ -34718,7 +34719,8 @@
             "items": {
               "$ref": "#/components/schemas/StatementSpec"
             },
-            "description": "Replaces the whole list when present. There is no per-statement patch:\nthe order is part of the definition, so \"edit statement 2\" and \"insert a\nstatement\" would need an addressing scheme the list itself already is."
+            "description": "Replaces the whole list when present. There is no per-statement patch:\nthe order is part of the definition, so \"edit statement 2\" and \"insert a\nstatement\" would need an addressing scheme the list itself already is.\n\nBounded in the contract the same way `CreateEndpointInput` is, and for\nthe same reason: this route replaces the whole list, so it is the other\nway a client can send one that is too long.",
+            "maxItems": 16
           },
           "params": {
             "type": [

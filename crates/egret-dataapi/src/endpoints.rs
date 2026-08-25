@@ -33,7 +33,7 @@
 use chrono::{DateTime, Utc};
 use egret_core::{Error, Result, UserId};
 use egret_dataapi_api::{
-    CacheSpec, LimitsSpec, OutputSpec, ParamSpec, RateLimitSpec, StatementSpec,
+    CacheSpec, LimitsSpec, OutputSpec, ParamSpec, RateLimitSpec, StatementSpec, MAX_STATEMENTS,
 };
 use egret_metastore::Db;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -206,6 +206,28 @@ impl TryFrom<Row> for DataApiEndpointDto {
     }
 }
 
+// The `max_items = 16` written on both `statements` fields below IS
+// `MAX_STATEMENTS`, and this is what makes that a fact rather than a hope.
+//
+// utoipa's `max_items` parses a LITERAL, so the schema cannot name the constant;
+// without this, raising the limit in `egret-dataapi-api` would leave the
+// published contract advertising the old number and nothing in the workspace
+// would notice. A `const` assertion fails the BUILD, which is the earliest and
+// loudest place to find out — `const _` because it is evaluated for its
+// assertion and never read.
+//
+// The other end of the same number — the frontend's own `MAX_STATEMENTS`, which
+// decides when the "Add statement" control stops offering one — is checked
+// against the committed `openapi.json` by
+// `frontend/src/routes/explore/dataapi/__tests__/Statements.test.tsx`. Between
+// the two, the three copies cannot drift apart in any direction.
+const _: () = assert!(
+    MAX_STATEMENTS == 16,
+    "MAX_STATEMENTS changed: update `#[schema(max_items = ...)]` on \
+     CreateEndpointInput::statements and UpdateEndpointInput::statements, then \
+     regenerate openapi.json"
+);
+
 /// The `POST` body.
 ///
 /// The spec fields are `Option<T>` rather than `#[serde(default)] T` because
@@ -243,6 +265,14 @@ pub struct CreateEndpointInput {
     /// that is not an identifier, and a repeated name, all as a 400 naming the
     /// reason — the schema's own `CHECK` behind it means an empty list is not
     /// merely refused here but unrepresentable.
+    ///
+    /// `max_items` puts [`MAX_STATEMENTS`] into the generated contract, which is
+    /// the only place a client can learn it: it is a rule
+    /// `validate_statements` applies, not a column, so nothing else in the
+    /// document said the number at all. utoipa's `max_items` takes a LITERAL, so
+    /// it cannot name the constant — the `const _: () = assert!(…)` above this
+    /// struct is what stops the two drifting, and it does it at compile time.
+    #[schema(max_items = 16)]
     pub statements: Vec<StatementSpec>,
     #[serde(default)]
     pub method: Option<String>,
@@ -297,7 +327,12 @@ pub struct UpdateEndpointInput {
     /// Replaces the whole list when present. There is no per-statement patch:
     /// the order is part of the definition, so "edit statement 2" and "insert a
     /// statement" would need an addressing scheme the list itself already is.
+    ///
+    /// Bounded in the contract the same way `CreateEndpointInput` is, and for
+    /// the same reason: this route replaces the whole list, so it is the other
+    /// way a client can send one that is too long.
     #[serde(default)]
+    #[schema(max_items = 16)]
     pub statements: Option<Vec<StatementSpec>>,
     #[serde(default)]
     pub params: Option<Vec<ParamSpec>>,

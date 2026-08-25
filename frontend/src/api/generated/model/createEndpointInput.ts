@@ -54,6 +54,14 @@ export interface CreateEndpointInput {
      * that is not an identifier, and a repeated name, all as a 400 naming the
      * reason — the schema's own `CHECK` behind it means an empty list is not
      * merely refused here but unrepresentable.
+     *
+     * `max_items` puts [`MAX_STATEMENTS`] into the generated contract, which is
+     * the only place a client can learn it: it is a rule
+     * `validate_statements` applies, not a column, so nothing else in the
+     * document said the number at all. utoipa's `max_items` takes a LITERAL, so
+     * it cannot name the constant — the `const _: () = assert!(…)` above this
+     * struct is what stops the two drifting, and it does it at compile time.
+     * @maxItems 16
      */
   statements: StatementSpec[];
   /** @nullable */

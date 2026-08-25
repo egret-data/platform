@@ -97,13 +97,20 @@ function statementNameError(name: string, all: string[], index: number): string 
  * `crates/egret-dataapi-api/src/lib.rs`, which is where the number is decided
  * and where the measurements behind it are written down.
  *
- * Repeated here rather than read from the API because it is not in the
- * generated model: it is a rule `validate_statements` applies, not a field. The
- * server is still the authority — create, PATCH and publish all refuse a longer
- * list with a 400 — and this constant only decides when the control stops
- * offering to make one. A stale copy costs a toast, not a bad save.
+ * Still a copy: there is no mechanism in this repo that shares a constant
+ * between Rust and TypeScript, and the number is a rule `validate_statements`
+ * applies rather than a field of any model. The server remains the authority —
+ * create, PATCH and publish all refuse a longer list with a 400 — and this
+ * decides only when the control stops offering to make one, so a stale copy
+ * costs a toast, not a bad save.
+ *
+ * What is no longer missing is the thing that NOTICES the copy going stale.
+ * `statements` now carries `maxItems` in `openapi.json` (a `#[schema(max_items)]`
+ * the Rust side pins to `MAX_STATEMENTS` with a `const` assertion), and
+ * `__tests__/Statements.test.tsx` reads that committed document and compares it
+ * with this constant. Exported for that test alone — nothing else imports it.
  */
-const MAX_STATEMENTS = 16;
+export const MAX_STATEMENTS = 16;
 
 /**
  * A valid, unused name for a statement being added.

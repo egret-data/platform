@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -117,7 +119,7 @@ import * as databasesApi from "@/api/databases";
 import * as dataApi from "@/api/dataApi";
 import type { DataApiEndpointDto, StatementSpec } from "@/api/generated/model";
 import EndpointDetail from "@/routes/explore/dataapi/EndpointDetail";
-import Query from "@/routes/explore/dataapi/detail/Query";
+import Query, { MAX_STATEMENTS } from "@/routes/explore/dataapi/detail/Query";
 
 /**
  * The default is ONE statement named `main` — the shape migration 0129 gave
@@ -573,5 +575,54 @@ describe("Query section — authoring several statements", () => {
     // Read-only, though: the editor and every control that WRITES stays inert.
     expect(screen.getByLabelText("SQL")).toHaveAttribute("readonly");
     expect(screen.getByRole("button", { name: /add statement/i })).toBeDisabled();
+  });
+});
+
+/**
+ * The statement limit exists three times — `MAX_STATEMENTS` in
+ * `crates/egret-dataapi-api/src/lib.rs`, a `#[schema(max_items = 16)]` on the
+ * two request bodies, and `MAX_STATEMENTS` in `detail/Query.tsx` — and nothing
+ * in this repo shares a constant between Rust and TypeScript.
+ *
+ * Two mechanisms close that, and this file owns the second:
+ *
+ * 1. Rust to CONTRACT: a `const _: () = assert!(MAX_STATEMENTS == 16)` beside
+ *    the schema attribute, so raising the limit without editing the attribute
+ *    fails the build.
+ * 2. Contract to FRONTEND: this test, which reads the committed `openapi.json`
+ *    and compares its `maxItems` with the constant the UI actually uses.
+ *
+ * **It derives the number rather than restating it.** A test spelling `16` a
+ * fourth time passes exactly when the other three are wrong in the same way,
+ * which is no gate at all. Nothing below writes the number down: change either
+ * side alone and this fails, naming both values.
+ *
+ * `openapi.json` is committed at the repo root and asserted byte-for-byte
+ * against a fresh emit by `egret-server`, so reading it here is reading the
+ * generated contract and not a stale copy of it.
+ */
+describe("the statement limit does not drift between the contract and the UI", () => {
+  /**
+   * Both request bodies, not one. They carry the limit independently (`create`
+   * and `PATCH` each accept a whole list), so a `max_items` added to one and
+   * forgotten on the other is exactly the drift this is for.
+   */
+  const bodies = ["CreateEndpointInput", "UpdateEndpointInput"] as const;
+
+  function contractMaxItems(schema: (typeof bodies)[number]): unknown {
+    // From this file, not from `process.cwd()`: the suite's `include` also
+    // reaches ../scripts/harness, so the working directory is not a fixed point.
+    const root = path.resolve(import.meta.dirname, "../../../../../..");
+    const doc = JSON.parse(readFileSync(path.join(root, "openapi.json"), "utf8"));
+    return doc.components.schemas[schema].properties.statements.maxItems;
+  }
+
+  it.each(bodies)("%s.statements declares the limit the UI enforces", (schema) => {
+    const declared = contractMaxItems(schema);
+    // Present at all, first: `undefined === undefined` would make the
+    // comparison below vacuous the moment the attribute is dropped, and a
+    // dropped attribute is one of the two ways this drifts.
+    expect(typeof declared).toBe("number");
+    expect(declared).toBe(MAX_STATEMENTS);
   });
 });
