@@ -12,7 +12,6 @@
 //! binaries in parallel safe, which sharing one database never was.
 
 use egret_metastore::Db;
-use uuid::Uuid;
 
 /// The database this test process owns, cloned from a shared migrated template.
 ///
@@ -96,10 +95,19 @@ async fn ensure_template(url: &str) -> Option<()> {
 
 /// Drop clones left behind by processes that were killed before their own cleanup ran.
 /// Without this the accumulation problem simply moves from rows to databases.
-async fn drop_abandoned_clones(url: &str) {
-    let Some(mut admin) = admin_conn(url).await else {
-        return;
-    };
+///
+/// # It runs under the lock, and it takes the caller's connection to say so
+///
+/// "No row in `pg_stat_activity`" is only evidence of abandonment while nothing can be
+/// BETWEEN creating a clone and connecting to it. Process A used to create its database
+/// and connect a moment later; process B starting inside that window saw A's brand-new
+/// database with no sessions on it, dropped it, and A then failed on a missing relation —
+/// which reads exactly like a schema bug and sends the reader to the migrations.
+///
+/// So this takes the admin connection that holds `pg_advisory_lock(8_25_2026)` rather
+/// than opening its own: there is no way to call it outside the lock, and the window it
+/// used to race with is inside the same critical section (see [`process_db_url`]).
+async fn drop_abandoned_clones(admin: &mut sqlx::PgConnection) {
     // A REGEX, not `LIKE`. `_` is a single-character wildcard in `LIKE`, so the obvious
     // pattern `egret_t_%` also matches `egret_test` — and this function dropped the
     // shared database it was written to protect. The anchored pattern below can only
@@ -110,7 +118,7 @@ async fn drop_abandoned_clones(url: &str) {
          WHERE datname ~ '^egret_t_[0-9a-f]{32}$' \
            AND NOT EXISTS (SELECT 1 FROM pg_stat_activity a WHERE a.datid = d.oid)",
     )
-    .fetch_all(&mut admin)
+    .fetch_all(&mut *admin)
     .await
     .unwrap_or_default();
     for (name,) in stale {
@@ -118,52 +126,103 @@ async fn drop_abandoned_clones(url: &str) {
         // is a name Postgres itself produced — not caller input.
         let stmt = format!(r#"DROP DATABASE IF EXISTS "{name}""#);
         let _ = sqlx::query(sqlx::AssertSqlSafe(stmt))
-            .execute(&mut admin)
+            .execute(&mut *admin)
             .await;
     }
 }
 
+/// This process's database name: `egret_t_` and the process id as 32 hex digits.
+///
+/// **Derived rather than random, so two copies of this module in one process reach the
+/// same answer without having to tell each other.** The previous mechanism was an
+/// environment variable written with `unsafe { std::env::set_var }` — under a
+/// multi-threaded tokio runtime, beside a `sqlx` and a `dotenvy` that read the
+/// environment on other threads, which is precisely the data race that `unsafe` marks.
+/// A pure function of `std::process::id()` needs no channel at all.
+///
+/// A live process cannot collide with another live one, because a pid identifies exactly
+/// one running process. A DEAD process's database with the same pid is swept first — it
+/// has no sessions — and the sweep runs under the lock immediately before the create.
+///
+/// 32 hex digits because [`drop_abandoned_clones`]'s anchored pattern requires exactly
+/// that many, which is what keeps the sweep unable to match `egret_test` itself.
+fn process_db_name() -> String {
+    format!("egret_t_{:032x}", std::process::id())
+}
+
+/// A connection to the clone, held open for the life of the process.
+///
+/// It is not for querying — every test opens its own pool. It exists so this process's
+/// database always has a row in `pg_stat_activity`, which is what
+/// [`drop_abandoned_clones`] reads to tell a live clone from an abandoned one. Between
+/// test cases a pool can legitimately hold zero connections, and without this a sweep in
+/// another process would drop a database that is very much in use.
+static SENTINEL: tokio::sync::OnceCell<Option<sqlx::PgConnection>> =
+    tokio::sync::OnceCell::const_new();
+
 async fn process_db_url() -> Option<String> {
     let url = std::env::var("DATABASE_URL").ok()?;
     ensure_template(&url).await?;
-    drop_abandoned_clones(&url).await;
 
-    let name = format!("egret_t_{}", Uuid::new_v4().simple());
     let mut admin = admin_conn(&url).await?;
-    // `name` is `egret_t_` plus a `Uuid::simple()`, which is hex only; `TEMPLATE_DB`
-    // is a `const`. Neither can carry an identifier break, and `CREATE DATABASE` has no
-    // bind form for either position.
-    let stmt = format!(r#"CREATE DATABASE "{name}" TEMPLATE "{TEMPLATE_DB}""#);
-    sqlx::query(sqlx::AssertSqlSafe(stmt))
+    // ONE critical section over sweep-create-connect. Every step below is a step another
+    // process's sweep must not be able to interleave with: it decides what is abandoned
+    // from `pg_stat_activity`, and this process has no session on its database until the
+    // sentinel connects. `ensure_template` takes and releases the same lock above; the
+    // two are sequential, and advisory locks are re-entrant per session anyway.
+    sqlx::query("SELECT pg_advisory_lock(8_25_2026)")
         .execute(&mut admin)
         .await
         .ok()?;
-    url.rsplit_once('/')
-        .map(|(base, _)| format!("{base}/{name}"))
+    drop_abandoned_clones(&mut admin).await;
+
+    let name = process_db_name();
+    // `name` is `egret_t_` plus hex; `TEMPLATE_DB` is a `const`. Neither can carry an
+    // identifier break, and `CREATE DATABASE` has no bind form for either position.
+    //
+    // A failure here is not fatal on its own: a SECOND copy of this module in the same
+    // process reaches the same name and finds the database its sibling already created,
+    // which is the convergence the derived name buys. The connect below is what decides
+    // whether this process has a usable database.
+    let stmt = format!(r#"CREATE DATABASE "{name}" TEMPLATE "{TEMPLATE_DB}""#);
+    let _ = sqlx::query(sqlx::AssertSqlSafe(stmt))
+        .execute(&mut admin)
+        .await;
+
+    let cloned = url
+        .rsplit_once('/')
+        .map(|(base, _)| format!("{base}/{name}"))?;
+    let held = {
+        use sqlx::Connection;
+        sqlx::PgConnection::connect(&cloned).await.ok()
+    };
+    let connected = held.is_some();
+    SENTINEL.get_or_init(|| async { held }).await;
+
+    sqlx::query("SELECT pg_advisory_unlock(8_25_2026)")
+        .execute(&mut admin)
+        .await
+        .ok();
+    connected.then_some(cloned)
 }
 
 /// The URL this process should use. `None` when `DATABASE_URL` is unset, which is how the
 /// DB-gated tests decide to skip.
 ///
-/// # Why the answer is cached in an environment variable and not only in the static
+/// # Two copies of this module converge without communicating
 ///
-/// This module is included by `#[path]` into several test binaries, and one of them also
-/// pulls in `serving_common`, which includes it too. Two copies of a module are two
-/// distinct `static`s — so a per-copy `OnceCell` alone would hand the same process two
-/// different databases, and a fixture built through one path would not see rows written
-/// through the other. An environment variable is process-global no matter how many copies
-/// exist, so every copy converges on the first answer.
+/// This module is included by `#[path]` into several test binaries, and one of them may
+/// also pull in `serving_common`, which includes it too. Two copies of a module are two
+/// distinct `static`s, so a per-copy `OnceCell` cannot hand both copies the same answer —
+/// and a fixture built through one path would then not see rows written through the
+/// other. The answer used to be shared through an environment variable, written with
+/// `unsafe { std::env::set_var }` under a multi-threaded runtime. It does not need
+/// sharing: [`process_db_name`] is a pure function of the process id, so every copy
+/// computes the same name, and the create is written to tolerate the database already
+/// existing.
 pub async fn url() -> Option<String> {
-    const CACHE: &str = "EGRET_TEST_DB_URL";
-    if let Ok(existing) = std::env::var(CACHE) {
-        return Some(existing);
-    }
-    let computed = TEST_DB
+    TEST_DB
         .get_or_init(|| async { process_db_url().await })
         .await
-        .clone()?;
-    // SAFETY-ish: tests are single-process; this runs before any thread reads it, and a
-    // second writer would be writing the identical value it just read back.
-    unsafe { std::env::set_var(CACHE, &computed) };
-    Some(computed)
+        .clone()
 }
