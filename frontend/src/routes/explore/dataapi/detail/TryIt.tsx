@@ -20,13 +20,21 @@ import { useEndpointDetail } from "../EndpointDetail";
 /**
  * Best-effort extraction of the refusal's machine-readable code/message from
  * `TryResponseBody`. Typed as an open map (`{[key: string]: unknown}`)
- * because the route hands the serving path's body back VERBATIM — rows and
- * `meta` on success, an error shape on a refusal — so this file cannot lean
- * on a generated model for it. Handles both the documented top-level
- * `{code, message, request_id}` shape and an `{error: {code, message}}`
+ * because the route hands the serving path's body back VERBATIM — so this file
+ * cannot lean on a generated model for it. Handles both the documented
+ * top-level `{code, message, request_id}` shape and an `{error: {code, message}}`
  * wrapper (the shape `ErrorBody` uses elsewhere in this API), rather than
  * assuming one and silently showing nothing useful if the body arrives
  * shaped the other way.
+ *
+ * A SUCCESS body is now `{status, message, data, meta}` (spec §4.4) or, for an
+ * endpoint published with `output.envelope: "bare"`, `data`'s value on its own.
+ * The wrapper carries a top-level `message`, which is a key this function reads
+ * — and it is safe for two independent reasons, both of which have to stay
+ * true: on success that field is `null`, not a string, so the `typeof` guard
+ * below returns `undefined` for it; and the only caller renders this inside an
+ * `!outcomeOk` branch gated on the HTTP STATUS, never on whether a message was
+ * found. Do not turn that gate into a truthiness check on `refusal`.
  */
 function extractRefusal(body: Record<string, unknown>): { code?: string; message?: string } {
   const err = body.error;

@@ -31192,7 +31192,7 @@
           },
           "envelope": {
             "type": "string",
-            "description": "Whether the response carries the `{status, message, data, meta}` wrapper\n(`\"wrapped\"`, the default) or `data`'s value on its own (`\"bare\"`) —\nspec §4.4.\n\nDefaulted rather than made an `Option`, and defaulted to the WRAPPER, so\nthat every snapshot frozen before this field existed reads back as\n`wrapped`: the migration sets no rows and an unpublished endpoint cannot\nchange shape by being re-read.\n\n`bare` is the success path only. A refusal still answers with\n`ServingErrorBody`, because an unwrapped error would be a bare `null` —\nnothing at all about what went wrong — under a status this toggle does\nnot reach.\n\nA `String` like `shape` and `naming`, and unvalidated like them: spec\n§5.3 freezes `output` with no rule anywhere, so serving falls back to the\ndocumented default and logs rather than refusing (see\n`serving::router::envelope_of`)."
+            "description": "Whether the response carries the `{status, message, data, meta}` wrapper\n(`\"wrapped\"`, the default) or `data`'s value on its own (`\"bare\"`) —\nspec §4.4.\n\nDefaulted rather than made an `Option`, and defaulted to the WRAPPER, so\nthat every snapshot frozen before this field existed reads back as\n`wrapped`: the migration sets no rows and an unpublished endpoint cannot\nchange shape by being re-read.\n\n`bare` is the success path only. A refusal still answers with\n`ServingErrorBody`, because an unwrapped error would be a bare `null` —\nnothing at all about what went wrong — under a status this toggle does\nnot reach.\n\nA `String` like `shape` and `naming`, but — unlike them — **checked\nbefore it is stored**, by [`validate_envelope`]. Serving still falls back\nto the documented default and logs rather than refusing (see\n`serving::router::envelope_of`), because a frozen snapshot must keep\nanswering; the check exists so no new row can reach that fallback. See\n[`validate_envelope`] for why this field and not its two neighbours."
           }
         },
         "additionalProperties": false
@@ -34458,7 +34458,7 @@
           },
           "body": {
             "type": "object",
-            "description": "The serving path's own body, verbatim: rows and `meta` on success, spec\n§7's `{code, message, request_id}` on a refusal. Verbatim because the\npoint of the feature is to show what the consumer gets, and a body this\nroute summarised would be a different answer than the real one."
+            "description": "The serving path's own body, verbatim: on success the spec §4.4 envelope\n`{status, message, data, meta}` — `data` an array for a one-statement\nendpoint and an object keyed by statement name for several — or, for an\nendpoint published with `output.envelope: \"bare\"`, `data`'s value on its\nown. On a refusal, spec §7's `{code, message, request_id}`. Verbatim\nbecause the point of the feature is to show what the consumer gets, and a\nbody this route summarised would be a different answer than the real\none — including about which envelope the endpoint is published in."
           },
           "request": {
             "$ref": "#/components/schemas/TryRequestEcho"

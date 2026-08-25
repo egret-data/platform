@@ -1358,6 +1358,78 @@ async fn a_draft_holds_several_named_statements_in_order() {
     );
 }
 
+/// `output.envelope` is checked on the way IN, not only fallen back to on the
+/// way out.
+///
+/// The serving path answers an unrecognised envelope with the documented default
+/// and a `tracing::warn!`, which is right for a snapshot that is already frozen
+/// and wrong as the only defence: `"Bare"` is stored, echoed back to the author
+/// by the API confirming their choice, and then served WRAPPED — the opposite of
+/// what they asked for — with nothing in the response saying so. The near-miss
+/// spellings are the cases that matter, so both are asserted.
+#[tokio::test]
+async fn an_unrecognised_output_envelope_is_refused_on_the_way_in() {
+    let f = skip_without_db!();
+    let mgr = f.principal_with(Fixture::MANAGER).await;
+
+    for bad in ["Bare", "bare ", "", "wrapped\n"] {
+        let (status, body) = f
+            .post_as(
+                &mgr,
+                &f.collection(),
+                serde_json::json!({
+                    "name": "env", "path": format!("/env/{}", Uuid::new_v4().simple()),
+                    "database_id": f.database_id,
+                    "statements": [{ "name": "rows", "sql": "SELECT 1" }],
+                    "output": { "envelope": bad },
+                }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad:?}: {body}");
+        assert!(
+            body.to_string()
+                .contains("is not one of `wrapped` or `bare`"),
+            "{bad:?}: the message must name the rule: {body}"
+        );
+    }
+
+    // Both spellings that ARE the contract still pass, so the rule above is a
+    // rule and not a field that can no longer be set.
+    let ep = f.create_endpoint("envok", "/envok", "SELECT 1").await;
+    for good in ["wrapped", "bare"] {
+        let (status, body) = f
+            .patch_as(
+                &mgr,
+                &format!("{}/{ep}", f.collection()),
+                serde_json::json!({ "output": { "envelope": good } }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{good:?}: {body}");
+        assert_eq!(body["output"]["envelope"], good, "{body}");
+    }
+
+    // And the PATCH is a second call site: a value that may not be created must
+    // not be reachable by editing a row that holds a legitimate one.
+    let (status, body) = f
+        .patch_as(
+            &mgr,
+            &format!("{}/{ep}", f.collection()),
+            serde_json::json!({ "output": { "envelope": "Bare" } }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    let still: serde_json::Value =
+        sqlx::query_scalar("SELECT output FROM dataapi.endpoints WHERE id = $1")
+            .bind(ep)
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("output");
+    assert_eq!(
+        still["envelope"], "bare",
+        "the refusal must precede the write: {still}"
+    );
+}
+
 /// A statement list that breaks the naming rules is a 400 that names the rule —
 /// not a 500 carrying `dataapi_endpoints_statements_nonempty` at the author,
 /// which is what the schema alone would produce.
@@ -1388,6 +1460,18 @@ async fn a_statement_list_that_breaks_the_rules_is_a_400_naming_the_rule() {
             serde_json::json!([{ "name": "Rows", "sql": "SELECT 1" }]),
             "Rows",
             "a name that is not an identifier",
+        ),
+        // The LENGTH, which the identifier rule says nothing about: every
+        // character below is one the alphabet rule accepts. The name becomes a
+        // JSON key in every response body and a property name in the generated
+        // document, neither of which has a limit of its own.
+        (
+            serde_json::json!([{
+                "name": "r".repeat(egret_dataapi_api::MAX_STATEMENT_NAME_LEN + 1),
+                "sql": "SELECT 1",
+            }]),
+            "and the limit is 64",
+            "a name past the length limit",
         ),
         // The upper bound on the COUNT. Refused on the WRITE route, not only at
         // publish: statements run sequentially, so the count multiplies the

@@ -964,6 +964,14 @@ async fn create_endpoint(
     // is a 400 that names the statement and the rule it broke. Same division of
     // labour as `normalize_path` and the `method` CHECK.
     validate_statements(&body.statements).map_err(|e| Error::InvalidInput(e.to_string()))?;
+    // Same argument one field over: `output.envelope` decides the SHAPE of every
+    // response body, nothing in the schema constrains it, and an unrecognised
+    // value is stored, echoed back to the author as if it were accepted, and
+    // then served as the other shape with only a log line to say so.
+    if let Some(output) = &body.output {
+        egret_dataapi_api::validate_envelope(output)
+            .map_err(|e| Error::InvalidInput(e.to_string()))?;
+    }
     let path = normalize_path(&body.path).map_err(Error::InvalidInput)?;
     let method = checked_method(body.method.as_deref())?;
     // Both before the insert, so a refused reference never reaches its FK — and
@@ -1041,6 +1049,12 @@ async fn update_endpoint(
     // create — an author cannot edit their way to an empty or ambiguous one.
     if let Some(statements) = &body.statements {
         validate_statements(statements).map_err(|e| Error::InvalidInput(e.to_string()))?;
+    }
+    // A PATCH replaces the whole `output` object when it carries one, so the
+    // envelope rule applies here exactly as it does on create.
+    if let Some(output) = &body.output {
+        egret_dataapi_api::validate_envelope(output)
+            .map_err(|e| Error::InvalidInput(e.to_string()))?;
     }
     // A PATCH may repoint the endpoint at a different connection or folder, so
     // the same containment applies here as on create — and it has to run before

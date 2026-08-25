@@ -105,7 +105,7 @@ pub(crate) fn resolve(
     snap: &EndpointSnapshot,
 ) -> Result<Resolved, ServingError> {
     let supplied = decode(raw_query, snap)?;
-    // Every statement, not `sole_statement()`'s first one: one request's
+    // Every statement, not just the first one: one request's
     // parameters are shared by all of them (spec §4.2), and `resolve_supplied`
     // is where the union over `sqls` is computed — see its own comment.
     if snap.statements.is_empty() {
@@ -141,11 +141,30 @@ pub(crate) fn resolve(
 /// silently doing the wrong thing.
 ///
 /// Preview passes a single-element `sqls`, because its draft body carries one
-/// `sql` field, not a statement list — the union of one is itself, so nothing
-/// about preview's behaviour changes here. This function is still the ONLY
-/// place that computes the union: [`resolve`] hands it every statement's SQL
-/// but decides nothing about shape itself, which is what keeps preview and
-/// serving unable to disagree about the same endpoint.
+/// `sql` field, not a statement list — the union of one is itself. **That is a
+/// limitation, and it is the one place the shape question is still asked of one
+/// statement**: previewing the `summary` of a two-statement endpoint whose
+/// `by_region` loops over the same parameter shows a green preview of a
+/// definition publish refuses. Publish sees every statement and is the refusal
+/// that counts; making preview agree needs the sibling statements in the
+/// request body.
+///
+/// [`resolve`] hands this every statement's SQL but decides nothing about shape
+/// itself, so serving has exactly one such decision.
+///
+/// # Publish makes the SAME decision, and now by the same route
+///
+/// Publish infers list-versus-scalar to build its representative values, and it
+/// used to infer it from ONE statement's SQL at a time
+/// ([`crate::render::iterated_params`], called per statement). That agrees with
+/// the union only at N = 1: a `summary` validated as a scalar alongside a
+/// `by_region` that loops the same parameter published green and then answered
+/// 500 on every call, including the no-query-string default the generated
+/// document advertises. Both sides now go through
+/// [`crate::render::iterated_params_union`] — publish via
+/// `lifecycle::IteratedParams`, whose constructor takes a slice of statements
+/// exactly as this one does, so neither side can express "just this one
+/// statement" of several.
 pub(crate) fn resolve_supplied(
     supplied: &BTreeMap<String, Vec<String>>,
     sqls: &[&str],
@@ -154,22 +173,15 @@ pub(crate) fn resolve_supplied(
     // Which declared parameters ANY statement loops over — the union across
     // `sqls`. One scan of each statement's template per request, and only when
     // parameters are declared at all — the render that follows does strictly
-    // more work per statement anyway. It is the same function publish uses (per
-    // statement) to build its representative values, deliberately: the shape a
-    // definition was validated against is the shape it is served.
+    // more work per statement anyway. It is the SAME FUNCTION publish uses, and
+    // publish now asks it the same way: over every statement at once, through
+    // `lifecycle::IteratedParams`. It used to ask per statement, which agrees
+    // with this only at N = 1 — see the doc comment above.
     let iterated: Vec<String> = if specs.is_empty() {
         Vec::new()
     } else {
         let declared: Vec<String> = specs.iter().map(|p| p.name.clone()).collect();
-        let mut out: Vec<String> = Vec::new();
-        for sql in sqls {
-            for name in crate::render::iterated_params(sql, &declared) {
-                if !out.iter().any(|o| o == &name) {
-                    out.push(name);
-                }
-            }
-        }
-        out
+        crate::render::iterated_params_union(sqls, &declared)
     };
 
     let mut values = ParamValues::new();
@@ -487,9 +499,18 @@ mod tests {
 
     /// The canonical pagination pair the brief is shaped around: `total` reads
     /// no parameters at all, `rows` iterates `r` in a `{% for %}` header. `total`
-    /// is listed FIRST — the one `sole_statement` used to read alone — so any
-    /// code path that still looks at only the first statement's SQL sees no
+    /// is listed FIRST — the one a `statements[0]` reader would see alone — so
+    /// any code path that still looks at only the first statement's SQL sees no
     /// trace of `r`.
+    ///
+    /// **What this pair CANNOT catch, recorded because it did not:** `total`
+    /// reads no parameters, so widening `r` to a list is invisible to it. The
+    /// disagreement that matters is a sibling that uses the same parameter as a
+    /// SCALAR — it then fails to render against the union this function
+    /// computes. That is a publish-time rule and it is pinned where publish
+    /// lives, in `lifecycle::tests::publish_infers_the_shape_serving_will_bind`,
+    /// which drives this function and then renders the scalar statement with
+    /// what it returned.
     const PAGINATION_TOTAL_SQL: &str = "SELECT count(*) AS n FROM t";
     const PAGINATION_ROWS_SQL: &str =
         "SELECT x AS n FROM t WHERE r IN ({% for x in r %}{{ x }}{% if not loop.last %},{% endif %}{% endfor %})";
@@ -592,8 +613,8 @@ mod tests {
     }
 
     /// **Step 1's property, at the level where it is decided.** `total` — the
-    /// FIRST statement, and the one `sole_statement` used to read alone before
-    /// Task 6 — never mentions `r`; only `rows`, the SECOND, iterates it in a
+    /// FIRST statement, and the only one a `statements[0]` reader would see —
+    /// never mentions `r`; only `rows`, the SECOND, iterates it in a
     /// `{% for %}` header. A caller supplying ONE value for `r` must still
     /// resolve it as a list of one, because that is the shape `rows` needs to
     /// render at all (Task 7 renders every statement against this same

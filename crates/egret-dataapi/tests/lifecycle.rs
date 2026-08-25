@@ -472,6 +472,20 @@ impl Fixture {
         assert_eq!(touched, 1, "the statement list must actually be stored");
     }
 
+    /// Writes `output` past the routes, the way a second writer of this table
+    /// would — which is the only way an unrecognised envelope can reach a
+    /// publish now that the create and patch routes refuse one.
+    async fn set_output(&self, ep: Uuid, output: serde_json::Value) {
+        let touched = sqlx::query("UPDATE dataapi.endpoints SET output = $2 WHERE id = $1")
+            .bind(ep)
+            .bind(&output)
+            .execute(&self.db.pool)
+            .await
+            .expect("store output")
+            .rows_affected();
+        assert_eq!(touched, 1, "the output spec must actually be stored");
+    }
+
     async fn patch_endpoint(&self, ep: Uuid, body: serde_json::Value) {
         let (status, b) = self
             .send(
@@ -3057,6 +3071,131 @@ async fn a_parameter_only_one_statement_reads_still_publishes() {
     );
 }
 
+/// The envelope rule, against the STORED row rather than the request body.
+///
+/// Same argument as the statement names one statement over: the create and patch
+/// routes refuse an unrecognised `output.envelope`, nothing in the schema does,
+/// and publish is where the value stops being editable. A snapshot frozen with
+/// `"Bare"` serves the WRAPPED shape — the opposite of what its author asked for
+/// and what the API echoed back to them — for the life of that version, with one
+/// `warn!` in a log nobody is reading.
+#[tokio::test]
+async fn publish_refuses_an_output_envelope_the_write_routes_would_have_refused() {
+    let f = skip_without_db!();
+    let ep = f
+        .create_endpoint("env", "reports/env", "SELECT 1 AS n")
+        .await;
+    f.set_output(ep, serde_json::json!({ "envelope": "Bare" }))
+        .await;
+
+    let before = f.port.call_count();
+    let (status, body) = f.publish_raw(ep).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("is not one of `wrapped` or `bare`"),
+        "the message must name the rule: {body}"
+    );
+    assert_eq!(
+        f.port.call_count(),
+        before,
+        "the envelope is a scan, so it must refuse before the engine"
+    );
+    assert!(f.versions(ep).await.is_empty(), "nothing may be published");
+
+    // The documented value publishes, so the rule above is a rule and not a
+    // publish that can no longer happen.
+    f.set_output(ep, serde_json::json!({ "envelope": "bare" }))
+        .await;
+    let (status, body) = f.publish_raw(ep).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+/// **A described column list is frozen onto the statement it was described FOR,
+/// by name.**
+///
+/// `publish` takes `described` from its caller and the statement text from the
+/// locked row, and it used to pair them by INDEX. The identity check guards that
+/// today, so this is not a live bug — it is the difference between a guarantee
+/// held in another function and one held by the data. What a crossing produces
+/// is the worst kind of wrong: `total`'s one-column contract frozen onto `rows`'
+/// SQL, an immutable version that answers `503 schema_drift` forever on an
+/// endpoint whose definition is perfectly correct.
+///
+/// `described` is handed over REVERSED, which is exactly what an index pairing
+/// cannot tell from the right order.
+#[tokio::test]
+async fn publish_freezes_each_statements_own_columns() {
+    let f = skip_without_db!();
+    let ep = f
+        .create_endpoint("paired", "reports/paired", "SELECT 1 AS n")
+        .await;
+    f.set_statements(
+        ep,
+        serde_json::json!([
+            { "name": "rows", "sql": "SELECT id FROM t" },
+            { "name": "total", "sql": "SELECT count(*) AS n FROM t" },
+        ]),
+    )
+    .await;
+
+    let store = EndpointStore::new(f.db.clone());
+    let draft = store.get(f.ws_id, ep).await.expect("draft");
+    let column = |name: &str| egret_dataapi_api::ColumnSpec {
+        name: name.into(),
+        ty: "integer".into(),
+        required: true,
+    };
+    // Reversed, and each entry carries the name it was described for.
+    let described = vec![
+        egret_dataapi_api::StatementSnapshot {
+            name: "total".into(),
+            sql: "SELECT count(*) AS n FROM t".into(),
+            columns: vec![column("n")],
+        },
+        egret_dataapi_api::StatementSnapshot {
+            name: "rows".into(),
+            sql: "SELECT id FROM t".into(),
+            columns: vec![column("id")],
+        },
+    ];
+    store
+        .publish(
+            f.ws_id,
+            ep,
+            egret_core::UserId(f.admin),
+            "",
+            &draft,
+            described,
+        )
+        .await
+        .expect("publish");
+
+    let snap = f.live_snapshot(ep).await;
+    let frozen: Vec<(String, Vec<String>)> = snap
+        .statements
+        .iter()
+        .map(|s| {
+            (
+                s.name.clone(),
+                s.columns.iter().map(|c| c.name.clone()).collect(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        frozen,
+        vec![
+            ("rows".to_string(), vec!["id".to_string()]),
+            ("total".to_string(), vec!["n".to_string()]),
+        ],
+        "each statement must carry the columns described for IT, in the draft's order"
+    );
+    // And the SQL still comes from the locked row, not from `described`.
+    assert_eq!(snap.statements[0].sql, "SELECT id FROM t");
+}
+
 /// **Publish re-checks the statement NAMES, and it is not a duplicate of the
 /// 400 the write routes already give.**
 ///
@@ -3090,6 +3229,17 @@ async fn publish_refuses_a_statement_list_the_write_routes_would_have_refused() 
             ]),
             "is not a valid identifier",
             "a name that is not an identifier",
+        ),
+        // The LENGTH, which the identifier rule does not bound: every character
+        // here is one that rule accepts, and the name becomes a JSON key in
+        // every response of an IMMUTABLE version.
+        (
+            serde_json::json!([{
+                "name": "r".repeat(egret_dataapi_api::MAX_STATEMENT_NAME_LEN + 1),
+                "sql": "SELECT 1 AS n",
+            }]),
+            "and the limit is 64",
+            "a name past the length limit",
         ),
         // The COUNT, which is the one of the four that is about cost rather
         // than about the envelope's keys. `call_count` is asserted unchanged

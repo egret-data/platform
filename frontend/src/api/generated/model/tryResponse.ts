@@ -16,10 +16,14 @@ export interface TryResponse {
      */
   status: number;
   /**
-     * The serving path's own body, verbatim: rows and `meta` on success, spec
-     * §7's `{code, message, request_id}` on a refusal. Verbatim because the
-     * point of the feature is to show what the consumer gets, and a body this
-     * route summarised would be a different answer than the real one.
+     * The serving path's own body, verbatim: on success the spec §4.4 envelope
+     * `{status, message, data, meta}` — `data` an array for a one-statement
+     * endpoint and an object keyed by statement name for several — or, for an
+     * endpoint published with `output.envelope: "bare"`, `data`'s value on its
+     * own. On a refusal, spec §7's `{code, message, request_id}`. Verbatim
+     * because the point of the feature is to show what the consumer gets, and a
+     * body this route summarised would be a different answer than the real
+     * one — including about which envelope the endpoint is published in.
      */
   body: TryResponseBody;
   request: TryRequestEcho;

@@ -24,10 +24,12 @@ export interface OutputSpec {
      * nothing at all about what went wrong — under a status this toggle does
      * not reach.
      *
-     * A `String` like `shape` and `naming`, and unvalidated like them: spec
-     * §5.3 freezes `output` with no rule anywhere, so serving falls back to the
-     * documented default and logs rather than refusing (see
-     * `serving::router::envelope_of`).
+     * A `String` like `shape` and `naming`, but — unlike them — **checked
+     * before it is stored**, by [`validate_envelope`]. Serving still falls back
+     * to the documented default and logs rather than refusing (see
+     * `serving::router::envelope_of`), because a frozen snapshot must keep
+     * answering; the check exists so no new row can reach that fallback. See
+     * [`validate_envelope`] for why this field and not its two neighbours.
      */
   envelope?: string;
 }

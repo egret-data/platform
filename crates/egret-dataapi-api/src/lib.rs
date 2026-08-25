@@ -241,26 +241,6 @@ pub struct EndpointSnapshot {
     pub param_gate: u32,
 }
 
-impl EndpointSnapshot {
-    /// **M2 BRIDGE. Task 9 deletes this** — parameter resolution (Task 6) and
-    /// execution (Task 7) are already loops over [`Self::statements`], and
-    /// `openapi_gen` is the last caller left; once document generation is a loop
-    /// too, nothing calls this.
-    ///
-    /// It exists only so Task 4 can change the persisted shape without also
-    /// changing how a request is served: every caller today assumes exactly one
-    /// statement, and a raw `statements[0]` would spread an index-panic across
-    /// the serving path to say so. `Option` instead of a panic because these
-    /// callers are all fallible already, so "a snapshot with no statements"
-    /// costs one `ok_or_else` and answers 500 rather than killing the task.
-    ///
-    /// `None` is unreachable for anything that came out of the database:
-    /// [`EndpointSnapshotRepr`] refuses an empty list at deserialization.
-    pub fn sole_statement(&self) -> Option<&StatementSnapshot> {
-        self.statements.first()
-    }
-}
-
 /// The name given to the single statement synthesized from a pre-M2 snapshot.
 ///
 /// The same name migration 0129 gave every existing DRAFT, so a pre-M2
@@ -462,12 +442,40 @@ pub enum StatementError {
          statement, so it may not need quoting and may not read as private"
     )]
     InvalidName(String),
+    /// A name longer than [`MAX_STATEMENT_NAME_LEN`].
+    ///
+    /// The identifier rule bounds the ALPHABET a name may use and said nothing
+    /// about its length, so a 4 KB name passed every rule above and then became
+    /// a JSON object key in every response body, an OpenAPI property name in the
+    /// generated document, and a `data.<name>` path in every consumer's code.
+    /// None of those has a length limit either, which is what makes this the
+    /// bound's only home.
+    #[error(
+        "statement name is {len} characters and the limit is {limit}. A name becomes a JSON \
+         object key in every response and a property name in the generated OpenAPI document, \
+         so it is part of the endpoint's public contract rather than a label"
+    )]
+    NameTooLong { len: usize, limit: usize },
     /// Two statements in the same endpoint declared the same name.
     #[error(
         "statement name `{0}` is used by more than one statement in this endpoint; the response \
          envelope keys results by name, so two statements cannot share one"
     )]
     DuplicateName(String),
+    /// `output.envelope` is not one of [`ENVELOPES`].
+    ///
+    /// In [`StatementError`] rather than an error type of its own because it is
+    /// refused by the same three call sites at the same moment — the create
+    /// route, the patch route and publish — and every one of them converts this
+    /// type to a 400 already. A second type would be a second thing each of them
+    /// has to remember to call.
+    #[error(
+        "output.envelope {0:?} is not one of `wrapped` or `bare`. It decides whether the \
+         response carries the {{status, message, data, meta}} wrapper, so a value that is \
+         merely close — a capital letter, a trailing space — would be stored, echoed back, \
+         and then served as the OTHER shape"
+    )]
+    UnknownEnvelope(String),
     /// The list had no statements at all.
     #[error("an endpoint must declare at least one statement")]
     Empty,
@@ -573,9 +581,31 @@ pub enum StatementError {
 /// were each already bounded, and it was itself bounded by nothing.
 pub const MAX_STATEMENTS: usize = 16;
 
-/// `^[a-z][a-z0-9_]*$` — see [`StatementSpec`]'s doc comment for why this
-/// exact shape and not, say, camelCase or a leading underscore for "private".
+/// How long a statement name may be.
+///
+/// Sixty-four characters, which is Postgres's own identifier limit (63) rounded
+/// to the nearest power of two — a number an author will never reach writing
+/// `rows`, `total` or `by_region_last_quarter`, and small enough that the JSON
+/// key it becomes stays readable in a response body. The alphabet rule above
+/// bounds what a name may contain and bounded nothing about its size.
+pub const MAX_STATEMENT_NAME_LEN: usize = 64;
+
+/// `^[a-z][a-z0-9_]*$`, and no longer than [`MAX_STATEMENT_NAME_LEN`] — see
+/// [`StatementSpec`]'s doc comment for why this exact shape and not, say,
+/// camelCase or a leading underscore for "private".
+///
+/// The length is checked FIRST, and by `chars().count()` rather than `len()`:
+/// the alphabet rule below is ASCII-only, so the two agree for every name it
+/// accepts, and a rejected name is measured in characters the author can count
+/// on screen rather than in UTF-8 bytes.
 pub fn validate_statement_name(name: &str) -> Result<(), StatementError> {
+    let len = name.chars().count();
+    if len > MAX_STATEMENT_NAME_LEN {
+        return Err(StatementError::NameTooLong {
+            len,
+            limit: MAX_STATEMENT_NAME_LEN,
+        });
+    }
     let mut chars = name.chars();
     let starts_with_lowercase_letter = matches!(chars.next(), Some(c) if c.is_ascii_lowercase());
     let rest_is_lowercase_alnum_or_underscore =
@@ -802,10 +832,12 @@ pub struct OutputSpec {
     /// nothing at all about what went wrong — under a status this toggle does
     /// not reach.
     ///
-    /// A `String` like `shape` and `naming`, and unvalidated like them: spec
-    /// §5.3 freezes `output` with no rule anywhere, so serving falls back to the
-    /// documented default and logs rather than refusing (see
-    /// `serving::router::envelope_of`).
+    /// A `String` like `shape` and `naming`, but — unlike them — **checked
+    /// before it is stored**, by [`validate_envelope`]. Serving still falls back
+    /// to the documented default and logs rather than refusing (see
+    /// `serving::router::envelope_of`), because a frozen snapshot must keep
+    /// answering; the check exists so no new row can reach that fallback. See
+    /// [`validate_envelope`] for why this field and not its two neighbours.
     #[serde(default = "default_envelope")]
     pub envelope: String, // "wrapped" | "bare"
 }
@@ -817,6 +849,38 @@ fn default_naming() -> String {
 }
 fn default_envelope() -> String {
     "wrapped".into()
+}
+
+/// The two values [`OutputSpec::envelope`] may take.
+pub const ENVELOPES: [&str; 2] = ["wrapped", "bare"];
+
+/// `output.envelope` names an envelope that exists.
+///
+/// # Why this field and not `shape` or `naming`
+///
+/// All three are free `String`s, and only this one decides the **shape of the
+/// wire body**: `"Bare"` or `"bare "` passes create, PATCH, publish and the
+/// migration, and then serves `{status, message, data, meta}` to a client whose
+/// author asked for the value on its own and read `envelope: "Bare"` back from
+/// the API confirming it. The only trace is a `tracing::warn!` on the serving
+/// side, in a log the author does not read. `shape` and `naming` fall back the
+/// same way, but this field is also NEW (M2 Task 8) — there is no corpus of
+/// rows carrying an unrecognised value, so a rule here refuses nothing that was
+/// ever accepted. That is not true of the other two, and retro-fitting a rule to
+/// them is a separate decision about existing drafts.
+///
+/// Not a serde-level rule and not an `enum`: `OutputSpec` is deserialized from a
+/// FROZEN snapshot as well as from a request body, and an enum would make an old
+/// row with an unrecognised value unreadable — a published endpoint that stops
+/// serving entirely rather than serving its documented default. The fallback is
+/// what a reader needs; a validator is what a WRITER needs. They are different
+/// paths and this is the writer's.
+pub fn validate_envelope(output: &OutputSpec) -> Result<(), StatementError> {
+    if ENVELOPES.contains(&output.envelope.as_str()) {
+        Ok(())
+    } else {
+        Err(StatementError::UnknownEnvelope(output.envelope.clone()))
+    }
 }
 
 // Hand-written, not `#[derive(Default)]`: a derive builds each field from
@@ -893,6 +957,75 @@ mod tests {
         for good in ["rows", "row_count", "r2"] {
             assert!(validate_statement_name(good).is_ok(), "refused {good:?}");
         }
+    }
+
+    /// The LENGTH bound, from both sides and by the exact variant.
+    ///
+    /// Every character in the long name below is one the alphabet rule accepts,
+    /// so nothing else in `validate_statement_name` can answer for it — which is
+    /// the point: the identifier rule bounded the alphabet and bounded nothing
+    /// about the size of the JSON key the name becomes.
+    #[test]
+    fn a_statement_name_has_a_length_bound() {
+        let at_limit = "r".repeat(MAX_STATEMENT_NAME_LEN);
+        assert_eq!(
+            validate_statement_name(&at_limit),
+            Ok(()),
+            "the limit itself must be accepted, or the bound is off by one"
+        );
+        let past = "r".repeat(MAX_STATEMENT_NAME_LEN + 1);
+        assert_eq!(
+            validate_statement_name(&past),
+            Err(StatementError::NameTooLong {
+                len: MAX_STATEMENT_NAME_LEN + 1,
+                limit: MAX_STATEMENT_NAME_LEN,
+            })
+        );
+        // And through the list validator, which is what the routes and publish
+        // actually call.
+        assert_eq!(
+            validate_statements(&[StatementSpec {
+                name: past.clone(),
+                sql: "SELECT 1".into(),
+            }]),
+            Err(StatementError::NameTooLong {
+                len: MAX_STATEMENT_NAME_LEN + 1,
+                limit: MAX_STATEMENT_NAME_LEN,
+            })
+        );
+    }
+
+    /// `output.envelope` decides the shape of the wire body, so the values that
+    /// are ALMOST right are the ones worth pinning: each of them would be
+    /// stored, echoed back as accepted, and then served as the other shape.
+    #[test]
+    fn only_the_two_documented_envelopes_are_accepted() {
+        // The two values SPELLED OUT, not iterated from `ENVELOPES`. A loop over
+        // the constant moves with it: narrowing the constant to
+        // `["wrapped", "wrapped"]` — which stops `bare` being publishable at all
+        // — left this test green, and only the two DB-backed tests caught it.
+        assert_eq!(ENVELOPES, ["wrapped", "bare"]);
+        for good in ["wrapped", "bare"] {
+            let output = OutputSpec {
+                envelope: good.into(),
+                ..OutputSpec::default()
+            };
+            assert_eq!(validate_envelope(&output), Ok(()), "refused {good:?}");
+        }
+        for bad in ["Bare", "bare ", " bare", "", "WRAPPED", "none"] {
+            let output = OutputSpec {
+                envelope: bad.to_string(),
+                ..OutputSpec::default()
+            };
+            assert_eq!(
+                validate_envelope(&output),
+                Err(StatementError::UnknownEnvelope(bad.to_string())),
+                "accepted {bad:?}"
+            );
+        }
+        // The DEFAULT — what an absent `output` deserializes to — must pass the
+        // rule it is the default for.
+        assert_eq!(validate_envelope(&OutputSpec::default()), Ok(()));
     }
 
     #[test]

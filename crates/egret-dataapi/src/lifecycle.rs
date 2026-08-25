@@ -228,8 +228,9 @@
 
 use egret_core::{Error, Result, UserId};
 use egret_dataapi_api::{
-    compare_column_types, CacheScope, CacheSpec, ColumnSpec, EndpointSnapshot, ParamLocation,
-    ParamSpec, ParamType, StatementSnapshot, StatementSpec, TypeAgreement, PARAM_GATE,
+    compare_column_types, CacheScope, CacheSpec, ColumnSpec, EndpointSnapshot, OutputSpec,
+    ParamLocation, ParamSpec, ParamType, StatementSnapshot, StatementSpec, TypeAgreement,
+    PARAM_GATE,
 };
 use egret_query_api::Param;
 use uuid::Uuid;
@@ -1243,10 +1244,18 @@ fn validate_endpoint(
     statements: &[StatementSpec],
     params: &[ParamSpec],
     cache: &CacheSpec,
+    output: &OutputSpec,
     delegated: bool,
     impersonate: bool,
-) -> std::result::Result<(), ValidationError> {
+) -> std::result::Result<IteratedParams, ValidationError> {
     egret_dataapi_api::validate_statements(statements)?;
+    // Cheap, and about the whole endpoint rather than any one statement: which
+    // envelope the response is written in. The create and patch routes check it
+    // on the request body; this is the check against the STORED row, for the
+    // same reason `validate_statements` runs twice — publish is where a value
+    // becomes a frozen contract, and nothing in the schema constrains this
+    // column.
+    egret_dataapi_api::validate_envelope(output)?;
     // Every statement through every scan except the contract rule below. The
     // scans come before ANY render for the reason `check_definition_scans`
     // records: they are what bounds the cost of the rendering, and they cost
@@ -1260,11 +1269,18 @@ fn validate_endpoint(
     }
     check_every_parameter_is_read(&read, params)?;
     check_cache_scope(cache, delegated, impersonate)?;
+    // ONE shape decision for the endpoint, made before the first render and
+    // handed to every one of them. See [`IteratedParams`] for what deciding it
+    // per statement cost. Returned rather than recomputed by [`validate`],
+    // which renders the same statements again to describe them: two computations
+    // of the same set are two things that can disagree.
+    let sqls: Vec<&str> = statements.iter().map(|s| s.sql.as_str()).collect();
+    let iterated = IteratedParams::across(&sqls, params);
     // Last, and once per statement: this is the half that renders.
     for statement in statements {
-        check_render_rules(&statement.sql, params)?;
+        check_render_rules(&statement.sql, params, &iterated)?;
     }
-    Ok(())
+    Ok(iterated)
 }
 
 /// Run every shape check over ONE definition. The order is deliberate: the
@@ -1290,7 +1306,9 @@ pub fn validate_definition(
     // between the scans and the renders, as it has always been.
     check_definition_scans(sql, params, ParamRules::Published)?;
     check_cache_scope(cache, delegated, impersonate)?;
-    check_render_rules(sql, params)?;
+    // A slice of one, because this entry point IS one definition: there are no
+    // sibling statements whose `{% for %}` headers could widen the set.
+    check_render_rules(sql, params, &IteratedParams::across(&[sql], params))?;
     Ok(())
 }
 
@@ -1361,7 +1379,15 @@ pub fn validate_preview(
     params: &[ParamSpec],
 ) -> std::result::Result<(), ValidationError> {
     check_definition_scans(sql, params, ParamRules::Draft)?;
-    check_render_rules(sql, params)?;
+    // A slice of one — and this is the one place where that is a LIMITATION
+    // rather than a fact: `POST …/preview` carries a single `sql`, so a preview
+    // of one statement of a several-statement endpoint cannot see its siblings
+    // and will judge a parameter's shape from this statement alone. It agrees
+    // with the endpoint whenever no OTHER statement iterates a parameter this
+    // one uses as a scalar; where they differ, publish (which does see every
+    // statement) is the one that refuses. Making preview honest needs the
+    // sibling statements in the request body.
+    check_render_rules(sql, params, &IteratedParams::across(&[sql], params))?;
     Ok(())
 }
 
@@ -1399,20 +1425,23 @@ fn representative_value(p: &ParamSpec) -> Param {
 ///
 /// # Shape, not just value
 ///
-/// A parameter named as a `{% for %}` iterable is inserted as a one-element
-/// LIST. `ParamSpec` has no multiplicity field — whether a parameter arrives as
-/// a scalar or a list is decided by the request (a repeated query parameter
+/// A parameter named as a `{% for %}` iterable **by any statement of the
+/// endpoint** is inserted as a one-element LIST — see [`IteratedParams`], which
+/// is the only way to obtain that set and cannot be asked about one statement of
+/// several. `ParamSpec` has no multiplicity field — whether a parameter arrives
+/// as a scalar or a list is decided by the request (a repeated query parameter
 /// becomes a list) — so publish has to infer the shape the definition expects,
-/// and it infers it from the definition. A wrong guess makes the render FAIL,
-/// which refuses the publish; it cannot make a bad definition publish.
+/// and it infers it from the whole endpoint, because that is what the serving
+/// path binds. A wrong guess makes the render FAIL, which refuses the publish;
+/// it cannot make a bad definition publish.
 ///
 /// `absent` uses [`ParamValues::insert_absent`], not omission: under Strict
 /// undefined a name that is merely missing is an ERROR even when tested for
 /// truth, and "declared but not supplied" has to be `none` for `{% if %}` to be
 /// false. That is the same distinction the serving path makes, and it is what
 /// makes these renders representative of what will actually be served.
-fn representative(sql: &str, params: &[ParamSpec], absent: &[&str]) -> ParamValues {
-    context_with(sql, params, absent, representative_value)
+fn representative(iterated: &IteratedParams, params: &[ParamSpec], absent: &[&str]) -> ParamValues {
+    context_with(iterated, params, absent, representative_value)
 }
 
 /// The value a parameter carries when the CALLER supplies nothing: its declared
@@ -1436,27 +1465,66 @@ fn resting_value(p: &ParamSpec) -> Param {
 /// This is the context a call with NO query string produces, which is the one
 /// the generated document advertises — see [`branch_renderings`] for why it has
 /// to be described in its own right.
-fn resting(sql: &str, params: &[ParamSpec], absent: &[&str]) -> ParamValues {
-    context_with(sql, params, absent, resting_value)
+fn resting(iterated: &IteratedParams, params: &[ParamSpec], absent: &[&str]) -> ParamValues {
+    context_with(iterated, params, absent, resting_value)
+}
+
+/// Which declared parameters arrive as a LIST, for ONE endpoint.
+///
+/// # Why a type, and why it is built from a slice of statements
+///
+/// Every statement of an endpoint renders against a SINGLE `ParamValues` (Task
+/// 7) built from a SINGLE resolve (Task 6), and `serving::params::resolve`
+/// decides list-versus-scalar from the union across every statement. Publish
+/// used to decide it per statement, from the one SQL it happened to be
+/// validating: [`crate::render::iterated_params`] on `summary` alone reports
+/// nothing about the `by_region` statement beside it that loops over the same
+/// parameter, so publish validated `summary` with a scalar, the endpoint
+/// published green, and the first call — with no repeated query parameter, so
+/// `serving::router::render_error` correctly reads it as an author fault —
+/// answered 500. Including the call with no query string at all, which is the
+/// one the generated document advertises.
+///
+/// So the set is a value with a name, obtained only from
+/// [`IteratedParams::across`], which takes every statement's text the way
+/// `resolve_supplied` does. The per-statement question is still askable — an
+/// endpoint with one statement is a slice of one — but "the shape of THIS
+/// statement's parameters, ignoring its siblings" is not a thing this module can
+/// express any more.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct IteratedParams(Vec<String>);
+
+impl IteratedParams {
+    /// The union across `sqls`, computed by the same function
+    /// [`crate::serving::params::resolve_supplied`] uses — one function, so the
+    /// shape a definition is validated against and the shape it is served
+    /// cannot disagree by construction rather than by two implementations
+    /// agreeing.
+    fn across(sqls: &[&str], params: &[ParamSpec]) -> Self {
+        let declared: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
+        Self(crate::render::iterated_params_union(sqls, &declared))
+    }
+
+    fn contains(&self, name: &str) -> bool {
+        self.0.iter().any(|n| n == name)
+    }
 }
 
 /// The shared body of [`representative`] and [`resting`]: the two differ only in
 /// which value a present parameter carries, and everything else about building
-/// the context — the list/scalar inference, and `insert_absent` rather than
-/// omission — must not be able to drift between them.
+/// the context — `insert_absent` rather than omission, and applying the
+/// endpoint's [`IteratedParams`] — must not be able to drift between them.
 fn context_with(
-    sql: &str,
+    iterated: &IteratedParams,
     params: &[ParamSpec],
     absent: &[&str],
     value: fn(&ParamSpec) -> Param,
 ) -> ParamValues {
-    let declared: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
-    let lists = crate::render::iterated_params(sql, &declared);
     let mut ctx = ParamValues::new();
     for p in params {
         if absent.contains(&p.name.as_str()) {
             ctx.insert_absent(p.name.clone());
-        } else if lists.iter().any(|l| l == &p.name) {
+        } else if iterated.contains(&p.name) {
             ctx.insert_list(p.name.clone(), vec![value(p)]);
         } else {
             ctx.insert_for_spec(p, value(p));
@@ -1506,9 +1574,13 @@ fn context_with(
 /// parameter is rendered absent on its own, and the gate is run once more with
 /// all of them absent: those two extremes are what a caller can actually reach
 /// with no query string at all.
-fn check_render_rules(sql: &str, params: &[ParamSpec]) -> std::result::Result<(), ValidationError> {
-    check_ident_values(sql, params)?;
-    let full = representative(sql, params, &[]);
+fn check_render_rules(
+    sql: &str,
+    params: &[ParamSpec],
+    iterated: &IteratedParams,
+) -> std::result::Result<(), ValidationError> {
+    check_ident_values(sql, params, iterated)?;
+    let full = representative(iterated, params, &[]);
     crate::render::check_publish(sql, &full)?;
     check_rendered(sql, &full)?;
 
@@ -1518,7 +1590,7 @@ fn check_render_rules(sql: &str, params: &[ParamSpec]) -> std::result::Result<()
         .map(|p| p.name.as_str())
         .collect();
     for name in &optional {
-        let ctx = representative(sql, params, &[name]);
+        let ctx = representative(iterated, params, &[name]);
         // The render failing HERE and not above is exactly the T7-7 shape, and
         // the parameter that was taken away is the one to name. The renderer's
         // own error would say `ident` may only be applied to an enum parameter,
@@ -1530,7 +1602,7 @@ fn check_render_rules(sql: &str, params: &[ParamSpec]) -> std::result::Result<()
         }
     }
     if optional.len() > 1 {
-        let none = representative(sql, params, &optional);
+        let none = representative(iterated, params, &optional);
         crate::render::check_publish(sql, &none)?;
         check_rendered(sql, &none)?;
     }
@@ -1572,12 +1644,16 @@ fn check_render_rules(sql: &str, params: &[ParamSpec]) -> std::result::Result<()
 /// * with one entry, or if the entry appears verbatim in the rendered statement,
 ///   assume it reached (over-strict, and safe in that direction);
 /// * if a render fails at all, assume it reached — fail closed.
-fn check_ident_values(sql: &str, params: &[ParamSpec]) -> std::result::Result<(), ValidationError> {
+fn check_ident_values(
+    sql: &str,
+    params: &[ParamSpec],
+    iterated: &IteratedParams,
+) -> std::result::Result<(), ValidationError> {
     for p in params.iter().filter(|p| p.ty == ParamType::Enum) {
         let Some(allowed) = p.allowed.as_ref().filter(|a| !a.is_empty()) else {
             continue;
         };
-        if !enum_reaches_statement_text(sql, params, p, allowed) {
+        if !enum_reaches_statement_text(sql, params, iterated, p, allowed) {
             continue;
         }
         for value in allowed {
@@ -1597,11 +1673,12 @@ fn check_ident_values(sql: &str, params: &[ParamSpec]) -> std::result::Result<()
 fn enum_reaches_statement_text(
     sql: &str,
     params: &[ParamSpec],
+    iterated: &IteratedParams,
     p: &ParamSpec,
     allowed: &[String],
 ) -> bool {
     let render_with = |value: &str| {
-        let mut ctx = representative(sql, params, &[]);
+        let mut ctx = representative(iterated, params, &[]);
         ctx.insert_enum(p.name.clone(), value.to_string(), allowed.to_vec());
         crate::render::render(sql, &ctx).map(|(sql, _)| sql)
     };
@@ -1869,10 +1946,14 @@ pub async fn validate(
     delegated: bool,
     impersonate: bool,
 ) -> Result<Vec<StatementSnapshot>> {
-    validate_endpoint(
+    // The shape decision comes back from the validator that just used it, so the
+    // renders that DESCRIBE each statement below and the renders that VALIDATED
+    // it are against the same `ParamValues` shape.
+    let iterated = validate_endpoint(
         &draft.statements,
         &draft.params,
         &draft.cache,
+        &draft.output,
         delegated,
         impersonate,
     )?;
@@ -1883,7 +1964,7 @@ pub async fn validate(
         Vec::with_capacity(draft.statements.len());
     let mut total = 0usize;
     for statement in &draft.statements {
-        let renderings = renderings_for(&statement.sql, &draft.params)?;
+        let renderings = renderings_for(&statement.sql, &draft.params, &iterated)?;
         total += renderings.len();
         planned.push((statement, renderings));
     }
@@ -2170,18 +2251,22 @@ const MAX_DESCRIBED_BRANCHES: usize = 64;
 /// Deduplicated by the rendered statement across all of them, so a definition
 /// with no branch costs exactly one describe however many parameters it
 /// declares.
-fn branch_renderings(sql: &str, params: &[ParamSpec]) -> Vec<(String, usize)> {
+fn branch_renderings(
+    sql: &str,
+    params: &[ParamSpec],
+    iterated: &IteratedParams,
+) -> Vec<(String, usize)> {
     let optional: Vec<&str> = params
         .iter()
         .filter(|p| !p.required && p.default.is_none())
         .map(|p| p.name.as_str())
         .collect();
-    let mut contexts = vec![representative(sql, params, &[])];
+    let mut contexts = vec![representative(iterated, params, &[])];
     for name in &optional {
-        contexts.push(representative(sql, params, &[name]));
+        contexts.push(representative(iterated, params, &[name]));
     }
     if optional.len() > 1 {
-        contexts.push(representative(sql, params, &optional));
+        contexts.push(representative(iterated, params, &optional));
     }
     // The RESTING contexts: every defaulted parameter at its own `default`.
     //
@@ -2205,11 +2290,11 @@ fn branch_renderings(sql: &str, params: &[ParamSpec]) -> Vec<(String, usize)> {
     // literally the assignment a bare call produces. Guarded on there being a
     // default at all, so the common endpoint pays nothing.
     if params.iter().any(|p| p.default.is_some()) {
-        contexts.push(resting(sql, params, &[]));
+        contexts.push(resting(iterated, params, &[]));
         if !optional.is_empty() {
             // The bare call in full: defaults applied AND every parameter that
             // has no default omitted.
-            contexts.push(resting(sql, params, &optional));
+            contexts.push(resting(iterated, params, &optional));
         }
     }
 
@@ -2238,15 +2323,16 @@ fn branch_renderings(sql: &str, params: &[ParamSpec]) -> Vec<(String, usize)> {
 fn renderings_for(
     sql: &str,
     params: &[ParamSpec],
+    iterated: &IteratedParams,
 ) -> std::result::Result<Vec<(String, usize)>, ValidationError> {
-    let mut renderings = branch_renderings(sql, params);
+    let mut renderings = branch_renderings(sql, params, iterated);
     if renderings.is_empty() {
         // Unreachable while `check_render_rules` has just rendered the
         // representative context, but `render_permutations` SKIPS an assignment
         // that does not render, so an empty result is silence rather than an
         // error. Render the representative context directly: its failure is the
         // one worth reporting, and its success is a branch to describe.
-        let ctx = representative(sql, params, &[]);
+        let ctx = representative(iterated, params, &[]);
         let (rendered, binds) =
             crate::render::render(sql, &ctx).map_err(ValidationError::Render)?;
         renderings.push((rendered, binds.len()));
@@ -2477,16 +2563,19 @@ impl EndpointStore {
     /// is not validated at all".
     ///
     /// **`output` used to be named in that list, and that has been false since
-    /// M1.** There are now two rules that read it —
+    /// M1.** Three rules read it now.
     /// [`ValidationError::BranchingArraysShape`] reads `output.shape` and
-    /// [`ValidationError::OutputNamingCollision`] reads `output.naming` — and
-    /// both run in [`validate`], which happens BEFORE this transaction and
-    /// against the pre-lock draft. Re-running `validate_definition` cannot
-    /// re-check them either: it is the PURE validator and never sees `output`,
-    /// while the two rules that do need the describe results. So `output` is
-    /// handled the way `sql` is instead — by the identity check below, as a
-    /// retryable conflict. Anyone adding a third `output` rule should put it
-    /// beside those two and needs no new machinery here.
+    /// [`ValidationError::OutputNamingCollision`] reads `output.naming`; both
+    /// need the DESCRIBE results, so both run in [`validate`], before this
+    /// transaction and against the pre-lock draft, and the re-run below cannot
+    /// re-check them. They are handled the way `sql` is instead — by the
+    /// identity check below, as a retryable conflict.
+    ///
+    /// The third is [`egret_dataapi_api::validate_envelope`], and it is a pure
+    /// rule, so [`validate_endpoint`] takes `output` and re-checks it HERE
+    /// against the locked row. That is the field that decides the shape of every
+    /// response body, and it is what makes "what is frozen is what was
+    /// validated" true of the envelope as well.
     ///
     /// # State
     ///
@@ -2566,10 +2655,13 @@ impl EndpointStore {
 
         // The whole pure validator, against the row actually being frozen. See the
         // doc comment: this is what closes the window, not the identity check above.
-        validate_endpoint(
+        // Nothing here renders — `described` was computed by `validate` — so the
+        // shape set it returns has no second use on this path.
+        let _iterated = validate_endpoint(
             &current.statements,
             &current.params,
             &current.cache,
+            &current.output,
             delegated,
             impersonate,
         )?;
@@ -2581,24 +2673,46 @@ impl EndpointStore {
         // an assertion rather than a promise, and it is the same reason `path`
         // below is read from `current` rather than echoed back.
         //
-        // A length mismatch is unreachable through that check and is answered
-        // as the conflict it would have to be, not as a panic on an index.
-        if described.len() != current.statements.len() {
+        // Paired by NAME, not by position. `described` carries the name each
+        // column list was resolved for, and a positional zip discards it: the
+        // one thing that could go wrong here — `total`'s columns frozen onto
+        // `rows`' SQL, an endpoint that then answers `503 schema_drift` on
+        // every call it does not answer wrong — is a crossing that pairing by
+        // name cannot express. It is guarded today by the identity check above,
+        // which is a guarantee held in a different function; this is the same
+        // guarantee held by the data.
+        //
+        // A missing name is answered as the conflict it would have to be, not as
+        // a panic on an index. `current.statements` has just been through
+        // `validate_statements`, so its names are unique and the match is
+        // unambiguous.
+        let mut statements: Vec<StatementSnapshot> = Vec::with_capacity(current.statements.len());
+        for statement in &current.statements {
+            let Some(resolved) = described.iter().find(|d| d.name == statement.name) else {
+                return Err(Error::Conflict(
+                    "the endpoint was edited while it was being published; validate and publish \
+                     again"
+                        .into(),
+                ));
+            };
+            statements.push(StatementSnapshot {
+                // The name and the SQL come from `current` — the LOCKED row —
+                // and only the resolved columns come from the caller.
+                name: statement.name.clone(),
+                sql: statement.sql.clone(),
+                columns: resolved.columns.clone(),
+            });
+        }
+        if described.len() != statements.len() {
+            // Every statement of the locked row was matched, so this can only be
+            // `described` carrying MORE than the row does — a describe of a
+            // statement that no longer exists, which is the same edit-during-
+            // publish and gets the same answer.
             return Err(Error::Conflict(
                 "the endpoint was edited while it was being published; validate and publish again"
                     .into(),
             ));
         }
-        let statements: Vec<StatementSnapshot> = current
-            .statements
-            .iter()
-            .zip(described)
-            .map(|(statement, resolved)| StatementSnapshot {
-                name: statement.name.clone(),
-                sql: statement.sql.clone(),
-                columns: resolved.columns,
-            })
-            .collect();
 
         let snapshot = EndpointSnapshot {
             statements,
@@ -2942,6 +3056,7 @@ mod tests {
             &statements,
             &params,
             &cache(CacheScope::PerPrincipal),
+            &OutputSpec::default(),
             false,
             false,
         );
@@ -2983,10 +3098,115 @@ mod tests {
                 &statements,
                 &params,
                 &cache(CacheScope::PerPrincipal),
+                &OutputSpec::default(),
                 false,
                 false
             ),
-            Ok(())
+            // No statement loops over `region`, so it is a scalar for BOTH — the
+            // set is what publish validated each of them against.
+            Ok(IteratedParams(Vec::new()))
+        );
+    }
+
+    /// A parameter's SHAPE is one endpoint-wide decision, and publish has to
+    /// make the same one the serving path will.
+    ///
+    /// `serving::params::resolve_supplied` decides list-versus-scalar from the
+    /// UNION across every statement (spec §4.2, Task 6): every statement renders
+    /// against one `ParamValues`, so a parameter SOME statement iterates is a
+    /// list for ALL of them. Publish inferring it per statement agrees only at
+    /// N = 1 — and where they disagree the endpoint publishes green and then
+    /// answers **500 on every call**, including the no-query-string default the
+    /// generated document advertises: `render_error` sends a `SequenceBind` with
+    /// no repeated parameter down the `internal` arm, correctly, because it is
+    /// an author fault that publish was supposed to have refused.
+    ///
+    /// Both halves are measured here rather than compared as sets, because the
+    /// property is not "the two functions agree" but "what publish validated is
+    /// what a caller reaches".
+    #[test]
+    fn publish_infers_the_shape_serving_will_bind() {
+        const SUMMARY: &str = "SELECT 1 AS n FROM t WHERE region = {{ region }}";
+        const BY_REGION: &str = "SELECT region AS n FROM t WHERE region IN (\
+             {% for x in region %}{{ x }}{% if not loop.last %},{% endif %}{% endfor %})";
+        let params = vec![param("region", ParamType::String)];
+
+        // What a CALLER reaches. `?region=EU` is single-valued, so nothing about
+        // the request makes this a list; `by_region` iterating it does.
+        let mut supplied: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+        supplied.insert("region".into(), vec!["EU".into()]);
+        let resolved =
+            crate::serving::params::resolve_supplied(&supplied, &[SUMMARY, BY_REGION], &params)
+                .expect("the request itself is valid");
+        assert!(
+            !resolved.has_repeats,
+            "a single-valued query parameter — so `render_error` cannot read the \
+             failure below as the caller's fault"
+        );
+        assert_eq!(
+            crate::render::render(SUMMARY, &resolved.values).unwrap_err(),
+            crate::render::RenderError::SequenceBind,
+            "serving binds `region` as a list, and `summary` cannot bind one"
+        );
+
+        // So publish must refuse the endpoint, with THAT failure. Deciding
+        // `summary`'s shape from `summary` alone makes this `Ok(())`.
+        let statements = vec![
+            StatementSpec {
+                name: "summary".into(),
+                sql: SUMMARY.into(),
+            },
+            StatementSpec {
+                name: "by_region".into(),
+                sql: BY_REGION.into(),
+            },
+        ];
+        assert_eq!(
+            validate_endpoint(
+                &statements,
+                &params,
+                &cache(CacheScope::PerPrincipal),
+                &OutputSpec::default(),
+                false,
+                false
+            ),
+            Err(ValidationError::Render(
+                crate::render::RenderError::SequenceBind
+            )),
+            "publish must reach the same conclusion the first call would"
+        );
+    }
+
+    /// The §4.2 pair the union rule exists FOR, from publish's side: `by_region`
+    /// iterates `region` and `summary_all` never mentions it, so the union makes
+    /// `region` a list and the statement that does not read it renders anyway.
+    /// This is what stops the fix above from being "refuse anything mixed".
+    #[test]
+    fn a_statement_that_ignores_an_iterated_parameter_still_publishes() {
+        let statements = vec![
+            StatementSpec {
+                name: "summary_all".into(),
+                sql: "SELECT count(*) AS n FROM t".into(),
+            },
+            StatementSpec {
+                name: "by_region".into(),
+                sql: "SELECT region AS n FROM t WHERE region IN (\
+                     {% for x in region %}{{ x }}{% if not loop.last %},{% endif %}{% endfor %})"
+                    .into(),
+            },
+        ];
+        assert_eq!(
+            validate_endpoint(
+                &statements,
+                &[param("region", ParamType::String)],
+                &cache(CacheScope::PerPrincipal),
+                &OutputSpec::default(),
+                false,
+                false
+            ),
+            // ONE statement loops over `region` and that is enough: the set is
+            // the endpoint's, and `summary_all` was validated against it.
+            Ok(IteratedParams(vec!["region".into()]))
         );
     }
 
@@ -3740,16 +3960,20 @@ mod tests {
         ];
         let sql =
             "SELECT * FROM t WHERE r = {{r}} {% if n %}AND n > {{ n }}{% endif %} AND d < {{d}}";
+        let iterated = IteratedParams::across(&[sql], &params);
         let (rendered, binds) =
-            crate::render::render(sql, &representative(sql, &params, &[])).unwrap();
+            crate::render::render(sql, &representative(&iterated, &params, &[])).unwrap();
         assert_eq!(
             rendered, "SELECT * FROM t WHERE r = ? AND n > ? AND d < ?",
             "every branch a representative value reaches must be in the described statement"
         );
         assert_eq!(binds.len(), 3, "one bind per marker");
         // No parameters is identity.
-        let (plain, none) =
-            crate::render::render("SELECT 1", &representative("SELECT 1", &[], &[])).unwrap();
+        let (plain, none) = crate::render::render(
+            "SELECT 1",
+            &representative(&IteratedParams::across(&["SELECT 1"], &[]), &[], &[]),
+        )
+        .unwrap();
         assert_eq!(plain, "SELECT 1");
         assert!(none.is_empty());
     }

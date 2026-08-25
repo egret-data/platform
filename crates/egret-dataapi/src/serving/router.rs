@@ -3020,7 +3020,7 @@ mod tests {
     /// **A drift is logged against the statement that drifted.**
     ///
     /// The operator reads this one line to decide what moved. While `drift`
-    /// fetched its own columns through `sole_statement()` it would have named
+    /// fetched its own columns from `statements[0]` it would have named
     /// the FIRST statement's contract for a drift in the second — sending them
     /// to a statement that was fine, silently, at exactly the moment they need
     /// the truth. Both statements are exercised, because a line hard-coded to

@@ -1287,23 +1287,47 @@ async fn the_bare_envelope_writes_data_alone() {
     );
 }
 
-/// An unrecognised `envelope` serves the documented default, like `shape` and
-/// `naming` before it.
+/// An unrecognised `envelope` in an ALREADY FROZEN snapshot serves the
+/// documented default, like `shape` and `naming` before it.
 ///
-/// `output` is frozen at publish with no validation rule anywhere
-/// (`lifecycle.rs`'s module comment says so), so an unrecognised value is
-/// reachable. Refusing would make a published endpoint permanently dead over a
-/// cosmetic field; and unlike drift, it cannot silently lose anything.
+/// **This test used to publish the junk value through the route, and it can no
+/// longer be written that way.** `egret_dataapi_api::validate_envelope` now runs
+/// on create, on PATCH and inside `validate_endpoint`, so an unrecognised
+/// envelope is a 400 on the way in and the publish above answered `400`, not
+/// `200`. That rule and this fallback are the two halves of one decision and
+/// neither replaces the other: the WRITER is refused so no new row can carry a
+/// value serving does not understand, and the READER still falls back, because a
+/// snapshot frozen before the rule existed — or written by a second writer of
+/// the table — must keep answering rather than become permanently dead over a
+/// cosmetic field.
+///
+/// So the junk goes straight into the frozen snapshot, the same way
+/// `a_snapshot_frozen_with_a_stated_datetime_precision_still_serves` writes
+/// its pre-rule row, and `rows_affected` is asserted for the reason recorded
+/// there: a `jsonb_set` that changed nothing still reports success, and this
+/// test would then measure a `wrapped` snapshot serving `wrapped`.
 #[tokio::test]
 async fn an_unrecognised_envelope_serves_the_wrapped_default() {
     let f = skip_without_db!();
-    f.publish_endpoint_with_output(
-        "GET",
-        "/envelope-junk",
-        "SELECT 1 AS n",
-        serde_json::json!({ "envelope": "nonsense" }),
+    let ep = f
+        .publish_endpoint_with_output(
+            "GET",
+            "/envelope-junk",
+            "SELECT 1 AS n",
+            serde_json::json!({ "envelope": "wrapped" }),
+        )
+        .await;
+    let touched = sqlx::query(
+        "UPDATE dataapi.endpoint_versions \
+            SET snapshot = jsonb_set(snapshot, '{output,envelope}', '\"nonsense\"') \
+          WHERE endpoint_id = $1",
     )
-    .await;
+    .bind(ep)
+    .execute(&f.db.pool)
+    .await
+    .expect("rewrite the frozen envelope")
+    .rows_affected();
+    assert_eq!(touched, 1, "the frozen snapshot must actually have changed");
 
     let res = f.call("envelope-junk").await;
     assert_eq!(res.status, StatusCode::OK, "{}", res.body);
