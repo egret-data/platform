@@ -321,6 +321,10 @@ This is not a regeneration chore. An endpoint with several statements has to be 
 the editor needs to add, name, reorder and remove statements, and the SQL panel that assumes
 one definition has to become a list.
 
+The request body is not the only thing that moved: `DataApiValidationDto.columns` became
+`.statements`, so the editor's schema preview reads a field that is now `undefined`. Cover
+both.
+
 - [ ] **Step 1: regenerate the orval models**, and keep **only** the files this change requires.
   A full regeneration rewrites 27 files and **silently strips `encodeURIComponent` from every
   URL builder**, because the committed client came from orval 8.20.0 while the pin is 8.24.0
