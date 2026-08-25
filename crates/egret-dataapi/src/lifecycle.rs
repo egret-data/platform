@@ -1227,6 +1227,12 @@ pub(crate) fn type_name(ty: &ParamType) -> &'static str {
 ///   the loop below passes [`ParamRules::Draft`]: it is the same set of rules
 ///   minus this one, which is then applied endpoint-wide immediately after.
 ///
+/// The statement-list rule is also the one that bounds what everything after it
+/// COSTS. Each of the three loops below is per statement, so an unbounded list
+/// multiplies the whole function; [`egret_dataapi_api::MAX_STATEMENTS`] is
+/// checked inside that first call, before the first scan and long before the
+/// first render. See its doc comment for the measurements.
+///
 /// For a ONE-statement endpoint this is the same sequence, in the same order, as
 /// [`validate_definition`] — scans, then the cache rule, then the renders — with
 /// one deliberate difference: `UnreferencedParameter` is now reported after
@@ -1815,7 +1821,8 @@ fn projection_has_uncast_marker(rest: &str) -> bool {
 /// times one statement's budget; checking the sum only as it accumulated would
 /// still hand the engine every branch of every statement up to the one that
 /// tipped it over, which is the cost the limit exists to refuse. Enumerating is
-/// pure CPU and is separately bounded by [`MAX_DECLARED_PARAMS`], already
+/// pure CPU and is separately bounded by [`MAX_DECLARED_PARAMS`] per statement
+/// and by [`egret_dataapi_api::MAX_STATEMENTS`] across them, both already
 /// enforced above.
 ///
 /// `describe_as` runs as `principal`, so a delegated connection resolves under
@@ -1972,6 +1979,10 @@ pub(crate) struct DescribedBranches {
 /// `params.len()` in [`check_definition_scans`], before any render, and it is
 /// what makes the multi-second case unrepresentable rather than merely refused.
 ///
+/// It bounds ONE statement's render. [`egret_dataapi_api::MAX_STATEMENTS`] is
+/// the third of the set and bounds how many of them an endpoint may have, since
+/// the residual below is paid once per statement.
+///
 /// # Where the number comes from
 ///
 /// # The residual, and why it is accepted rather than moved off the runtime
@@ -1982,6 +1993,9 @@ pub(crate) struct DescribedBranches {
 /// The reason is that the cost is **bounded and authenticated** — publish and
 /// preview both sit behind `data_api_endpoint:manage`, and this constant is what
 /// makes the upper bound a number rather than a function of the request. It is
+/// ~122 ms per STATEMENT, and it took
+/// [`egret_dataapi_api::MAX_STATEMENTS`] to make the endpoint's total a number
+/// too: measured at 121 ms × N, it reached 31.6 s at 256 statements. It is
 /// **not** that an engine `describe` of similar duration happens nearby: an
 /// awaited describe RELEASES the worker, so the runtime schedules other tasks
 /// for those milliseconds and only the one caller waits. This rendering OCCUPIES
@@ -2050,10 +2064,13 @@ const MAX_DECLARED_PARAMS: usize = 32;
 /// times per statement (`render::MAX_PROBES` assignments per context) before this
 /// limit can say no. That residual is synchronous CPU on an async task, and it is
 /// bounded by [`MAX_DECLARED_PARAMS`] instead, which is a scan and runs first —
-/// though only per statement, so an endpoint's worst-case render cost is now that
-/// bound times the number of statements, which the spec says to re-measure rather
-/// than carry over. The two limits are halves of one bound, not one limit and a
-/// spare.
+/// though only per statement, so an endpoint's worst-case render cost is that
+/// bound times the number of statements. The spec asked for that to be
+/// re-measured rather than carried over, and it was: **121 ms per statement,
+/// linear in N**, which is why the third bound exists.
+/// [`egret_dataapi_api::MAX_STATEMENTS`] caps N, and it is the only one of the
+/// three that runs before `validate_endpoint`'s first scan. The three are parts
+/// of one bound, not one limit and two spares.
 ///
 /// # Why it refuses rather than truncates
 ///
@@ -2883,6 +2900,93 @@ mod tests {
                 declared: MAX_DECLARED_PARAMS + 1,
                 limit: MAX_DECLARED_PARAMS,
             })
+        );
+    }
+
+    /// The STATEMENT bound, from publish's own gate, and from the side that
+    /// makes it worth having: it must refuse before anything renders.
+    ///
+    /// `validate_endpoint` is what both `POST …/validate` and `publish` go
+    /// through, so this is the publish-time refusal rather than a restatement of
+    /// `validate_statements`' own unit test. The variant is asserted, not just
+    /// the fact of an error: this function has a dozen refusals and several of
+    /// them are reachable from the definition below.
+    ///
+    /// Measured rather than asserted structurally, for the same reason as
+    /// [`the_parameter_bound_is_checked_before_anything_renders`] below. 256
+    /// statements of this shape — 32 boolean parameters each, the most expensive
+    /// statement the other two limits still admit — cost **31.6 s in release**
+    /// (2.6 s of scans and renders, 29.0 s of branch enumeration) before this
+    /// bound existed, and far longer in the debug build this test runs under.
+    /// The budget is two orders of magnitude below that, so a reading inside it
+    /// cannot coincide with the statements having been rendered.
+    #[test]
+    fn the_statement_bound_is_checked_before_anything_renders() {
+        let mut sql = String::from("SELECT id FROM t WHERE 1=1");
+        let mut params = Vec::new();
+        for i in 0..MAX_DECLARED_PARAMS {
+            sql.push_str(&format!(
+                " {{% if p{i} %}} AND a{i} = {{{{ p{i} }}}}{{% endif %}}"
+            ));
+            params.push(param(&format!("p{i}"), ParamType::Boolean));
+        }
+        let statements: Vec<StatementSpec> = (0..256)
+            .map(|i| StatementSpec {
+                name: format!("s{i}"),
+                sql: sql.clone(),
+            })
+            .collect();
+
+        let started = std::time::Instant::now();
+        let got = validate_endpoint(
+            &statements,
+            &params,
+            &cache(CacheScope::PerPrincipal),
+            false,
+            false,
+        );
+        let elapsed = started.elapsed();
+        assert_eq!(
+            got,
+            Err(ValidationError::Statement(
+                egret_dataapi_api::StatementError::TooManyStatements {
+                    count: 256,
+                    limit: egret_dataapi_api::MAX_STATEMENTS,
+                }
+            ))
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "the refusal must precede the rendering; this took {elapsed:?}, which \
+             means 256 statements were rendered before being refused"
+        );
+    }
+
+    /// The other side of the statement bound, and its own test: a legitimate
+    /// several-statement endpoint must still validate. The canonical one is a
+    /// `rows` query and the `total` that paginates it (spec §4.4).
+    #[test]
+    fn the_canonical_two_statement_endpoint_still_validates() {
+        let statements = vec![
+            StatementSpec {
+                name: "rows".into(),
+                sql: "SELECT id FROM t WHERE region = {{ region }}".into(),
+            },
+            StatementSpec {
+                name: "total".into(),
+                sql: "SELECT count(*) AS n FROM t WHERE region = {{ region }}".into(),
+            },
+        ];
+        let params = vec![param("region", ParamType::String)];
+        assert_eq!(
+            validate_endpoint(
+                &statements,
+                &params,
+                &cache(CacheScope::PerPrincipal),
+                false,
+                false
+            ),
+            Ok(())
         );
     }
 

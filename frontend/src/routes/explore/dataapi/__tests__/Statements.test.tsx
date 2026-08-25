@@ -173,6 +173,11 @@ function renderQuery(endpoint: DataApiEndpointDto = makeEndpoint()) {
   );
 }
 
+/** A list of `n` distinctly-named statements, for the tests about the LIMIT. */
+function statementList(n: number) {
+  return Array.from({ length: n }, (_, i) => ({ name: `s${i + 1}`, sql: "SELECT 1" }));
+}
+
 /** The `statements` a Save actually PATCHed, from the one call it made. */
 function savedStatements(): StatementSpec[] {
   expect(updateMutateAsync).toHaveBeenCalledTimes(1);
@@ -419,6 +424,56 @@ describe("Query section — authoring several statements", () => {
 
     await waitFor(() => expect(previewMutateAsync).toHaveBeenCalled());
     expect(previewMutateAsync.mock.calls[0][0].data.sql).toBe("SELECT count(*) FROM t");
+  });
+
+  /**
+   * The upper bound on the list, said on the control rather than by a toast
+   * after the save.
+   *
+   * `MAX_STATEMENTS` is 16 (`crates/egret-dataapi-api/src/lib.rs`), and the
+   * server refuses a longer list on create, on PATCH and at publish. What this
+   * pins is the half a person meets first: the button stops offering to make a
+   * list the save would refuse.
+   *
+   * **Both directions, and the negative one is why the endpoint below has
+   * fifteen statements rather than sixteen.** A control disabled unconditionally
+   * would satisfy the assertion at the limit and nothing else; the first half
+   * fails if the guard is off by one in the direction that costs an author a
+   * statement they were entitled to.
+   *
+   * **`toHaveAttribute("disabled")`, not `toBeDisabled()`.** The section renders
+   * inside the shell's `<fieldset disabled={trashed}>`, and `toBeDisabled` walks
+   * up to an ancestor `fieldset[disabled]` — so on a trashed endpoint it passes
+   * with this guard deleted. This endpoint is not trashed, so the two agree
+   * today; asserting the attribute is what keeps them agreeing.
+   */
+  it("stops offering a new statement at the limit, and says why", async () => {
+    renderQuery(makeEndpoint({ statements: statementList(16) } as Partial<DataApiEndpointDto>));
+    await screen.findByLabelText("SQL");
+    const add = screen.getByRole("button", { name: /add statement/i });
+    expect(add).toHaveAttribute("disabled");
+    // And it says why, and what to do instead — a disabled control with no
+    // explanation reads as a bug.
+    expect(add).toHaveAttribute("title", expect.stringContaining("at most 16 statements"));
+
+    // The click the disabled attribute prevents changes nothing: still 16.
+    fireEvent.click(add);
+    expect(within(screen.getByRole("tablist")).getAllByRole("tab")).toHaveLength(16);
+  });
+
+  /**
+   * The other side, and its own test rather than a second assertion above: a
+   * control disabled unconditionally, or one guard off by one, satisfies the
+   * test above and costs an author a statement they were entitled to.
+   */
+  it("still offers the sixteenth statement, which is the last one allowed", async () => {
+    renderQuery(makeEndpoint({ statements: statementList(15) } as Partial<DataApiEndpointDto>));
+    await screen.findByLabelText("SQL");
+    const add = screen.getByRole("button", { name: /add statement/i });
+    expect(add).not.toHaveAttribute("disabled");
+
+    await userEvent.click(add);
+    expect(within(await screen.findByRole("tablist")).getAllByRole("tab")).toHaveLength(16);
   });
 
   /**

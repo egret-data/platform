@@ -1389,6 +1389,20 @@ async fn a_statement_list_that_breaks_the_rules_is_a_400_naming_the_rule() {
             "Rows",
             "a name that is not an identifier",
         ),
+        // The upper bound on the COUNT. Refused on the WRITE route, not only at
+        // publish: statements run sequentially, so the count multiplies the
+        // endpoint's worst-case wall clock and the CPU publish spends rendering
+        // it, and an author who learns that only when they press Publish has
+        // already written every one of them.
+        (
+            serde_json::Value::Array(
+                (0..=egret_dataapi_api::MAX_STATEMENTS)
+                    .map(|i| serde_json::json!({ "name": format!("s{i}"), "sql": "SELECT 1" }))
+                    .collect(),
+            ),
+            "and the limit is 16",
+            "more statements than the limit",
+        ),
     ] {
         let (status, body) = f
             .post_as(
@@ -1423,6 +1437,25 @@ async fn a_statement_list_that_breaks_the_rules_is_a_400_naming_the_rule() {
     assert!(
         body.to_string().contains("at least one statement"),
         "the PATCH must be refused for the same reason: {body}"
+    );
+
+    // And the count, on the PATCH too: it is a second call site, and a list that
+    // may not be created must not be reachable by editing one that could.
+    let (status, body) = f
+        .patch_as(
+            &mgr,
+            &format!("{}/{ep}", f.collection()),
+            serde_json::json!({
+                "statements": (0..=egret_dataapi_api::MAX_STATEMENTS)
+                    .map(|i| serde_json::json!({ "name": format!("s{i}"), "sql": "SELECT 1" }))
+                    .collect::<Vec<_>>(),
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    assert!(
+        body.to_string().contains("and the limit is 16"),
+        "the PATCH must name the count rule it broke: {body}"
     );
 
     // Anti-triviality: the row still holds what it held, so the refusal above is

@@ -93,6 +93,19 @@ function statementNameError(name: string, all: string[], index: number): string 
 }
 
 /**
+ * How many statements one endpoint may declare — `MAX_STATEMENTS` in
+ * `crates/egret-dataapi-api/src/lib.rs`, which is where the number is decided
+ * and where the measurements behind it are written down.
+ *
+ * Repeated here rather than read from the API because it is not in the
+ * generated model: it is a rule `validate_statements` applies, not a field. The
+ * server is still the authority — create, PATCH and publish all refuse a longer
+ * list with a 400 — and this constant only decides when the control stops
+ * offering to make one. A stale copy costs a toast, not a bad save.
+ */
+const MAX_STATEMENTS = 16;
+
+/**
  * A valid, unused name for a statement being added.
  *
  * Generated rather than left blank because a blank name is not a valid one, and
@@ -136,7 +149,12 @@ export default function Query() {
   const editActive = (patch: { name?: string; sql?: string }) =>
     setStatements(statements.map((s, i) => (i === active ? { ...s, ...patch } : s)));
 
+  const atLimit = statements.length >= MAX_STATEMENTS;
+
   const addStatement = () => {
+    // Guarded as well as disabled: the button is the only caller today, and a
+    // guard here is what makes that stay true.
+    if (atLimit) return;
     setStatements([...statements, { name: nextStatementName(statements.map((s) => s.name)), sql: "" }]);
     // Select the one just added: an author who asks for a statement means to
     // write it, and landing them anywhere else would hide what they created.
@@ -283,6 +301,16 @@ export default function Query() {
                 variant="ghost"
                 size="sm"
                 className="ml-auto shrink-0"
+                disabled={atLimit}
+                // Says WHY it is unavailable, and says what to do instead.
+                // Statements run one after another, so the count multiplies the
+                // endpoint's worst-case response time — a fact nothing else on
+                // this screen shows.
+                title={
+                  atLimit
+                    ? `An endpoint may declare at most ${MAX_STATEMENTS} statements — they run one after another, so the count multiplies how long a call can take. Fold statements a caller always reads together into one query, or split this into two endpoints.`
+                    : undefined
+                }
                 onClick={addStatement}
               >
                 <Plus className="h-4 w-4" aria-hidden="true" />

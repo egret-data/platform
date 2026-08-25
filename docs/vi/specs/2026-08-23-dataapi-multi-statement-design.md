@@ -310,6 +310,38 @@ lần publish. Giới hạn áp cho cả endpoint. `MAX_DECLARED_PARAMS = 32` gi
 endpoint vì tham số dùng chung, nhưng chi phí render trong tiến trình mà nó chặn nay bị
 nhân với N, và ca xấu nhất đã đo (~122 ms) phải **đo lại** chứ không mang sang.
 
+### 4.1.2 Và một trần thứ ba, cho SỐ LƯỢNG câu lệnh
+
+Viết sau khi đã đo lại theo yêu cầu ở §4.1.1. `MAX_STATEMENTS = 16` (`egret-dataapi-api`),
+do `validate_statements` từ chối — nghĩa là ở create, ở PATCH và ở publish, trước lượt scan
+đầu tiên và trước lượt describe đầu tiên rất xa.
+
+**Đã đo, bản release, N = 1…1024.** Chi phí publish trước lượt describe đầu tiên, với câu
+lệnh đắt nhất mà hai trần kia còn cho qua (32 tham số boolean, 530 nhánh): **121 ms mỗi câu
+lệnh, tuyến tính theo N** — 0,99 s ở 8, 1,97 s ở 16, 7,9 s ở 64, **31,6 s ở 256**, toàn bộ
+trả trước khi trần nhánh từ chối endpoint, trên một đường đồng bộ CHIẾM một worker của
+tokio. Phía serving: 42 ms mỗi câu lệnh ở mọi N với engine giả tốn 40 ms (99,0 ms ở N = 2,
+2,7 s ở 64), nên phần của egret chỉ ~2 ms và ca xấu nhất là `N × min(timeout_seconds, 300)`.
+
+`64` là nơi trần nhánh ở §4.1.1 vốn đã chặn N — mỗi câu lệnh tốn ít nhất một lượt describe —
+nhưng chỉ với câu lệnh không có nhánh nào, và chỉ *sau khi* cả N câu đã render xong. `16` là
+8× endpoint chuẩn `rows` + `total`, đúng hệ số mà `MAX_DECLARED_PARAMS` lấy so với bốn tham
+số ở §4.3, và là chỗ hai trần GẶP nhau: 64 / 16 = 4 nhánh mỗi câu lệnh, dưới mức đó thì số
+câu lệnh từ chối, trên mức đó thì trần nhánh từ chối.
+
+**Là một trần đếm, không phải ngân sách thời gian trải trên các câu lệnh.** Ngân sách chỉ có
+thể hỏng GIỮA vòng lặp, và envelope ở §4.4 không diễn đạt được một phản hồi một phần: `data`
+khoá theo tên câu lệnh và `meta.statements` mang một mục cho mỗi câu, nên một body có ba
+trên bốn khoá là client đọc phải một lỗ hổng trong im lặng — đúng kiểu hỏng mà vòng lặp ở
+§4.3 đã từ chối với drift giữa chừng. Chạy hết ngân sách rồi vứt tất cả thì tiêu hết tài
+nguyên trước khi từ chối, và chỉ chạm tới nửa serving; chi phí publish ở trên trả trước khi
+bất kỳ câu lệnh nào chạy. `limits.timeout_seconds` vẫn là núm cho thời gian MỘT câu lệnh.
+
+**Không suy ra từ một mốc thời gian phản hồi.** `Ingress` đang triển khai không đặt
+`proxy-read-timeout`, nên mặc định của ingress-nginx được áp — `proxy_read_timeout 60s`, đọc
+ra từ chính config của controller đang chạy. Mặc định `timeout_seconds` là 30, nên hai câu
+lệnh đã chạm mốc cắt đó trong ca xấu nhất, và không N nào làm ca xấu nhất lọt vào trong đó.
+
 ### 4.2 Tham số dùng chung
 
 Một request mang một bộ tham số. `resolve_supplied` (`serving/params.rs:119`, đi tới từ

@@ -3091,6 +3091,20 @@ async fn publish_refuses_a_statement_list_the_write_routes_would_have_refused() 
             "is not a valid identifier",
             "a name that is not an identifier",
         ),
+        // The COUNT, which is the one of the four that is about cost rather
+        // than about the envelope's keys. `call_count` is asserted unchanged
+        // below for every case, and for this one that is the whole point: the
+        // list is one past `MAX_STATEMENTS`, and publish must refuse it without
+        // rendering a branch of any of them, let alone describing one.
+        (
+            serde_json::Value::Array(
+                (0..=egret_dataapi_api::MAX_STATEMENTS)
+                    .map(|i| serde_json::json!({ "name": format!("s{i}"), "sql": "SELECT 1 AS n" }))
+                    .collect(),
+            ),
+            "and the limit is 16",
+            "more statements than the limit",
+        ),
     ] {
         f.set_statements(ep, statements).await;
         let before = f.port.call_count();

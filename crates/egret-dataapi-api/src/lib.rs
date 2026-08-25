@@ -471,7 +471,107 @@ pub enum StatementError {
     /// The list had no statements at all.
     #[error("an endpoint must declare at least one statement")]
     Empty,
+    /// More statements than [`MAX_STATEMENTS`].
+    ///
+    /// The message names the two costs the count multiplies rather than only
+    /// the number, because neither is visible in the editor: the author sees a
+    /// list of statements and a `timeout_seconds` field, and nothing on that
+    /// screen says the two are multiplied.
+    #[error(
+        "this endpoint declares {count} statements and the limit is {limit}. Statements run \
+         one after another, so an endpoint's worst-case response time is its \
+         `limits.timeout_seconds` MULTIPLIED by how many it has, and publish renders and \
+         describes every branch of every one of them. Fold statements a caller always reads \
+         together into one query with a join or a `UNION ALL`, or split this into two \
+         endpoints"
+    )]
+    TooManyStatements { count: usize, limit: usize },
 }
+
+/// How many SQL statements one endpoint may declare.
+///
+/// # Why a count and not a time budget
+///
+/// The cost this bounds is wall clock, and wall clock is what a budget would
+/// bound directly — but a budget can only fail in the middle of the loop, with
+/// some statements already executed, and **the response envelope cannot express
+/// that**. `data` is an object keyed by statement name and `meta.statements`
+/// reports one `row_count`/`columns` entry per statement; a body carrying three
+/// of four keys is a client silently reading a hole, which is the exact failure
+/// `serving::router`'s execution loop already refuses for a mid-loop drift
+/// ("their rows are discarded rather than served beside a partial failure").
+/// The alternative — run the budget down, then discard everything — spends the
+/// resource in full before refusing, so it bounds nothing an abusive caller
+/// cares about while turning a slow-but-correct endpoint into an intermittent
+/// one. It would also bound only the serving half: the publish cost below is
+/// paid before any statement executes, and no serving budget reaches it.
+///
+/// A count is checkable at publish, refuses once, loudly, to the author who can
+/// fix it, and bounds both halves with one number. `limits.timeout_seconds`
+/// stays the knob for how long ONE statement may take; this is the bound on the
+/// multiplier.
+///
+/// # Where the number comes from
+///
+/// Measured in release, 2026-08-25, at N = 1…1024.
+///
+/// **Publish, before the first describe** — everything `validate_endpoint` and
+/// the branch enumeration do, per statement, for the most expensive statement
+/// the other two limits still admit (32 boolean parameters, 530 branches, which
+/// is `egret_dataapi`'s `MAX_DECLARED_PARAMS` worst case):
+///
+/// | N | scans + render | enumerate | total |
+/// |---|---|---|---|
+/// | 1 | 10.1 ms | 111.3 ms | **121 ms** |
+/// | 8 | 80.3 ms | 913.9 ms | 0.99 s |
+/// | **16** | 166.0 ms | 1.8 s | **1.97 s** |
+/// | 64 | 646.6 ms | 7.3 s | 7.9 s |
+/// | 256 | 2.6 s | 29.0 s | **31.6 s** |
+///
+/// Linear in N, and every one of those is refused afterwards — the branch
+/// budget answers `16 × 530 = 8480 > 64` — so the whole table is time paid for
+/// a `400`, on a synchronous CPU path that OCCUPIES a tokio worker rather than
+/// releasing it. That is the same relationship `MAX_DECLARED_PARAMS` has to
+/// `MAX_DESCRIBED_BRANCHES`: this bound is a SCAN, it runs first, and it makes
+/// the table above unreachable rather than merely refused.
+///
+/// **Serving** — one call to an endpoint of N statements, against a stub engine
+/// costing 40 ms per execution: 99.0 ms at N = 2, 343.2 ms at 8, 682.6 ms at 16,
+/// 2.7 s at 64 — **42 ms per statement at every N**, so egret's own share is
+/// ~2 ms and the rest is the engine. Sequential and linear, exactly as
+/// `serving::router` executes it. The endpoint's worst case is therefore
+/// `N × min(timeout_seconds, TIMEOUT_CEILING_SECS)`, and nothing bounded N.
+///
+/// # So `16`
+///
+/// * **8× the canonical several-statement endpoint** — a `rows` query and the
+///   `total` that paginates it (spec §4.4) — which is the multiplier
+///   `MAX_DECLARED_PARAMS` takes over spec §4.3's four parameters.
+/// * **It is where this bound and the branch budget MEET.** Every statement
+///   costs at least one describe, so `MAX_DESCRIBED_BRANCHES = 64` already
+///   capped N at 64 — but only for statements with no branches at all, and only
+///   *after* all N had been rendered. 64 / 16 = 4 branches per statement: below
+///   that width the statement count is what refuses, above it the branch budget
+///   is. At 8 this bound would fire for lists of cheap statements the branch
+///   budget was happy to describe; at 32 the branch budget binds first for
+///   anything with two or more branches, so the statement count would almost
+///   never speak.
+/// * It takes the worst wall clock one call can buy from `64 × 300 s` (5 h
+///   20 min) to `16 × 300 s`, and the publish CPU from unbounded — nothing
+///   caps the list on the create or PATCH routes — to a measured 1.97 s.
+///
+/// # What it is not derived from
+///
+/// **Not from a target response time.** The deployed ingress gives a Data API
+/// call 60 seconds: egret's `Ingress` sets no `proxy-read-timeout` annotation,
+/// so ingress-nginx's default applies, and the running controller's generated
+/// config reads `proxy_read_timeout 60s` (read out of the live pod, not assumed).
+/// The default `limits.timeout_seconds` is 30, so **two** statements already
+/// reach that cut-off in the worst case. No value of N makes the worst case fit
+/// inside 60 s; keeping a real endpoint inside it is `timeout_seconds`'s job,
+/// per statement. This bound exists because N was a multiplier on two costs that
+/// were each already bounded, and it was itself bounded by nothing.
+pub const MAX_STATEMENTS: usize = 16;
 
 /// `^[a-z][a-z0-9_]*$` — see [`StatementSpec`]'s doc comment for why this
 /// exact shape and not, say, camelCase or a leading underscore for "private".
@@ -493,6 +593,19 @@ pub fn validate_statement_name(name: &str) -> Result<(), StatementError> {
 pub fn validate_statements(statements: &[StatementSpec]) -> Result<(), StatementError> {
     if statements.is_empty() {
         return Err(StatementError::Empty);
+    }
+    // The other end of the same question, and it is asked here — before the
+    // per-name loop, and on every path that writes or publishes a list — for the
+    // reason [`MAX_STATEMENTS`] records: it is the bound that makes the cost of
+    // everything downstream a number rather than a function of the request, so
+    // it has to run before any of it. `egret_dataapi`'s `validate_endpoint`
+    // calls this function first, ahead of every scan and every render, which is
+    // what makes it a publish-time refusal rather than a note.
+    if statements.len() > MAX_STATEMENTS {
+        return Err(StatementError::TooManyStatements {
+            count: statements.len(),
+            limit: MAX_STATEMENTS,
+        });
     }
     let mut seen = std::collections::HashSet::with_capacity(statements.len());
     for statement in statements {
@@ -803,6 +916,49 @@ mod tests {
     #[test]
     fn an_endpoint_needs_at_least_one_statement() {
         assert_eq!(validate_statements(&[]), Err(StatementError::Empty));
+    }
+
+    /// The upper bound, from the side that must be refused.
+    ///
+    /// Reads WHICH refusal fired, not merely that one did: `validate_statements`
+    /// has four now, and three of them are also reachable from a list this long.
+    #[test]
+    fn a_statement_list_past_the_limit_is_refused() {
+        let statements: Vec<StatementSpec> = (0..=MAX_STATEMENTS)
+            .map(|i| StatementSpec {
+                name: format!("s{i}"),
+                sql: "SELECT 1".into(),
+            })
+            .collect();
+        assert_eq!(
+            validate_statements(&statements),
+            Err(StatementError::TooManyStatements {
+                count: MAX_STATEMENTS + 1,
+                limit: MAX_STATEMENTS,
+            })
+        );
+    }
+
+    /// The other side, and deliberately its own test rather than a second
+    /// assertion in the one above: a bound that refuses the work it exists to
+    /// permit is not a bound, it is an outage, and the two failures are
+    /// different mistakes.
+    ///
+    /// Two statements is the canonical several-statement endpoint — a `rows`
+    /// query and the `total` that paginates it (spec §4.4) — and the list AT the
+    /// limit is the widest thing an author may write.
+    #[test]
+    fn the_canonical_two_statement_endpoint_and_a_list_at_the_limit_are_accepted() {
+        let build = |n: usize| -> Vec<StatementSpec> {
+            (0..n)
+                .map(|i| StatementSpec {
+                    name: format!("s{i}"),
+                    sql: "SELECT 1".into(),
+                })
+                .collect()
+        };
+        assert_eq!(validate_statements(&build(2)), Ok(()));
+        assert_eq!(validate_statements(&build(MAX_STATEMENTS)), Ok(()));
     }
 
     #[test]

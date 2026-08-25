@@ -322,6 +322,41 @@ The limit applies across the endpoint. `MAX_DECLARED_PARAMS = 32` stays per endp
 parameters are shared, but the in-process render cost it bounds is now multiplied by N and
 its measured worst case (~122 ms) must be re-measured rather than carried over.
 
+### 4.1.2 And a third bound, on the statement COUNT
+
+Written after §4.1.1's re-measurement was done. `MAX_STATEMENTS = 16`
+(`egret-dataapi-api`), refused by `validate_statements` — so on create, on PATCH and at
+publish, before the first scan and long before the first describe.
+
+**Measured, in release, at N = 1…1024.** Publish's pre-describe cost, for the most
+expensive statement the other two limits still admit (32 boolean parameters, 530 branches):
+**121 ms per statement, linear in N** — 0.99 s at 8, 1.97 s at 16, 7.9 s at 64, **31.6 s at
+256**, all of it paid before the branch budget refuses the endpoint, on a synchronous path
+that occupies a tokio worker. Serving: 42 ms per statement at every N against a 40 ms stub
+engine (99.0 ms at N = 2, 2.7 s at 64), so egret's own share is ~2 ms and the worst case is
+`N × min(timeout_seconds, 300)`.
+
+`64` is where §4.1.1's branch budget already capped N — every statement costs at least one
+describe — but only for statements with no branches at all, and only *after* all N had been
+rendered. `16` is 8× the canonical `rows` + `total` endpoint, the multiplier
+`MAX_DECLARED_PARAMS` takes over §4.3's four parameters, and it is where the two bounds
+meet: 64 / 16 = 4 branches per statement, below which the count refuses and above which the
+branch budget does.
+
+**A count and not a time budget across statements.** A budget can only fail mid-loop, and
+§4.4's envelope cannot express a partial: `data` is keyed by statement name and
+`meta.statements` carries one entry per statement, so a body with three of four keys is a
+client silently reading a hole — the failure §4.3's loop already refuses for a mid-loop
+drift. Running the budget down and then discarding everything spends the resource in full
+before refusing, and reaches only the serving half; the publish cost above is paid before
+any statement executes. `limits.timeout_seconds` stays the knob for one statement's time.
+
+**Not derived from a target response time.** The deployed `Ingress` sets no
+`proxy-read-timeout`, so ingress-nginx's default applies — `proxy_read_timeout 60s`, read
+out of the running controller's own config. The default `timeout_seconds` is 30, so two
+statements already reach that cut-off in the worst case, and no N makes the worst case fit
+inside it.
+
 ### 4.2 Parameters are shared
 
 One request carries one parameter set. `resolve_supplied`
