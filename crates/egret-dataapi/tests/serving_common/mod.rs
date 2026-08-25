@@ -24,6 +24,9 @@ use egret_dataapi::{
     management_router, serving_router, ActivityStore, ClientStore, DataApiState, EndpointStore,
 };
 use egret_machine_idp::{generate_rsa_key, sign_claims, IdpError, KeyMaterial, SigningKeyStore};
+#[path = "../test_db/mod.rs"]
+mod test_db;
+
 use egret_metastore::Db;
 use egret_query_api::Param;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -782,16 +785,9 @@ async fn grant_ws_admin(db: &Db, user: Uuid, ws: Uuid) {
 /// database. `fixture()` is called by every test in the binary, so this binary's
 /// 27 tests were paying ~33s of a 91s run to re-verify migrations that could not
 /// have changed since the process started.
-static MIGRATED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
-
 pub async fn fixture() -> Option<Fixture> {
-    let url = std::env::var("DATABASE_URL").ok()?;
+    let url = test_db::url().await?;
     let db = Db::connect(&url, 5).await.expect("connect");
-    MIGRATED
-        .get_or_init(|| async {
-            db.migrate().await.expect("migrate");
-        })
-        .await;
 
     let admin = insert_user(&db, "t4_admin").await;
     let slug = format!("t4-{}", Uuid::new_v4().simple());

@@ -58,6 +58,8 @@ use uuid::Uuid;
 /// | `88` | the same names in a different position — drift under `arrays`, a rekeyed object under `objects` |
 /// | `99` | the connector fetched `max_rows + 1`, saw the extra row, and set `truncated` |
 ///
+#[path = "test_db/mod.rs"]
+mod test_db;
 /// The three markers are separate because they pin three separate clauses. One
 /// marker would show that *a* check exists, not that each clause is
 /// load-bearing — and the count clause in particular is the only thing standing
@@ -342,9 +344,11 @@ fn build_state(db: &Db, pdp: Arc<dyn egret_core::authz::Pdp>) -> DataApiState {
 }
 
 async fn fixture() -> Option<Fixture> {
-    let url = std::env::var("DATABASE_URL").ok()?;
+    // One private database per test process, cloned from a migrated template.
+    // See tests/test_db/mod.rs for why sharing one database made the suite
+    // slower every time it ran.
+    let url = test_db::url().await?;
     let db = Db::connect(&url, 5).await.expect("connect");
-    db.migrate().await.expect("migrate");
 
     let admin = insert_user(&db, "serving_admin").await;
     let (ws_id, ws_slug) = insert_workspace(&db, admin, "serving").await;

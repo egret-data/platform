@@ -58,6 +58,8 @@ struct Caller {
 
 /// A `QueryExecPort` that must never be consulted. Draft CRUD talks to the
 /// engine at no point — validation and `describe` belong to the publish
+#[path = "test_db/mod.rs"]
+mod test_db;
 /// lifecycle — so a create or a PATCH that reached a coordinator would be a bug
 /// this makes loud instead of slow.
 struct UnreachablePort;
@@ -157,9 +159,11 @@ async fn insert_database(db: &Db, ws: Uuid, owner: Uuid) -> Uuid {
 }
 
 async fn fixture() -> Option<Fixture> {
-    let url = std::env::var("DATABASE_URL").ok()?;
+    // One private database per test process, cloned from a migrated template.
+    // See tests/test_db/mod.rs for why sharing one database made the suite
+    // slower every time it ran.
+    let url = test_db::url().await?;
     let db = Db::connect(&url, 5).await.expect("connect");
-    db.migrate().await.expect("migrate");
     let admin = insert_user(&db, "dataapi_admin").await;
     let (ws_id, ws) = insert_workspace(&db, admin, "dataapi").await;
     let database_id = insert_database(&db, ws_id, admin).await;

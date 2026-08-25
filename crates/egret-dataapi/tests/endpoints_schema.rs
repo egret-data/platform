@@ -14,6 +14,8 @@ use egret_dataapi_api::{
 };
 use egret_metastore::Db;
 use uuid::Uuid;
+#[path = "test_db/mod.rs"]
+mod test_db;
 
 struct Fixture {
     db: Db,
@@ -26,9 +28,11 @@ struct Fixture {
 }
 
 async fn fixture() -> Option<Fixture> {
-    let url = std::env::var("DATABASE_URL").ok()?;
+    // One private database per test process, cloned from a migrated template.
+    // See tests/test_db/mod.rs for why sharing one database made the suite
+    // slower every time it ran.
+    let url = test_db::url().await?;
     let db = Db::connect(&url, 5).await.expect("connect");
-    db.migrate().await.expect("migrate");
 
     let admin: Uuid = sqlx::query_scalar(
         "INSERT INTO users (email, name, provider, status, password_hash) \

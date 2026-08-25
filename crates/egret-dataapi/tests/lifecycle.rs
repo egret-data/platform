@@ -52,6 +52,8 @@ enum Describe {
 /// with a `{{param}}` in it can only be described if the placeholder was
 /// substituted first, and asserting on the SQL the port received is the only way
 /// to see that from outside.
+#[path = "test_db/mod.rs"]
+mod test_db;
 struct FakePort {
     mode: Mutex<Describe>,
     seen: Mutex<Vec<(Uuid, Uuid, Uuid, String)>>,
@@ -300,9 +302,11 @@ async fn insert_database(db: &Db, ws: Uuid, owner: Uuid, delegated: bool) -> Uui
 const MANAGER: &[&str] = &["data_api_endpoint:read", "data_api_endpoint:manage"];
 
 async fn fixture() -> Option<Fixture> {
-    let url = std::env::var("DATABASE_URL").ok()?;
+    // One private database per test process, cloned from a migrated template.
+    // See tests/test_db/mod.rs for why sharing one database made the suite
+    // slower every time it ran.
+    let url = test_db::url().await?;
     let db = Db::connect(&url, 5).await.expect("connect");
-    db.migrate().await.expect("migrate");
     let admin = insert_user(&db, "lifecycle_admin").await;
     let (ws_id, ws) = insert_workspace(&db, admin, "lifecycle").await;
     let database_id = insert_database(&db, ws_id, admin, false).await;

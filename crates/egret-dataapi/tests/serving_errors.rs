@@ -40,6 +40,8 @@ use uuid::Uuid;
 /// file's own `fixture()` (further down) already owns that name, and every
 /// other test in this file is unaffected by and should stay on the local one.
 mod serving_common;
+#[path = "test_db/mod.rs"]
+mod test_db;
 
 /// The host the fake coordinator "lives" on. Asserted as ABSENT from every
 /// body — it is the string a connect failure would carry out with it.
@@ -243,9 +245,11 @@ async fn grant_invoke(db: &Db, user: Uuid, endpoint: Uuid) {
 }
 
 async fn fixture() -> Option<Fixture> {
-    let url = std::env::var("DATABASE_URL").ok()?;
+    // One private database per test process, cloned from a migrated template.
+    // See tests/test_db/mod.rs for why sharing one database made the suite
+    // slower every time it ran.
+    let url = test_db::url().await?;
     let db = Db::connect(&url, 5).await.expect("connect");
-    db.migrate().await.expect("migrate");
 
     let admin = insert_user(&db, "t5_admin").await;
     let ws_slug = format!("t5-{}", Uuid::new_v4().simple());

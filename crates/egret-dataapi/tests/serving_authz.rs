@@ -55,6 +55,8 @@ use uuid::Uuid;
 /// engine does — the whole subject is whether the request reaches it at all, so
 /// a port that can fail would only add ways for a test to be red for the wrong
 /// reason.
+#[path = "test_db/mod.rs"]
+mod test_db;
 struct FakePort;
 
 fn col(name: &str) -> ColumnMeta {
@@ -260,9 +262,11 @@ async fn grant(db: &Db, user: Uuid, ws: Uuid, perms: &[&str]) {
 }
 
 async fn fixture() -> Option<Fixture> {
-    let url = std::env::var("DATABASE_URL").ok()?;
+    // One private database per test process, cloned from a migrated template.
+    // See tests/test_db/mod.rs for why sharing one database made the suite
+    // slower every time it ran.
+    let url = test_db::url().await?;
     let db = Db::connect(&url, 5).await.expect("connect");
-    db.migrate().await.expect("migrate");
 
     let admin = insert_user(&db, "t6_admin").await;
     let (ws_id, ws_slug) = insert_workspace(&db, admin, "t6").await;
