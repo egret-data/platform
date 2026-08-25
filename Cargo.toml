@@ -174,3 +174,10 @@ opt-level = 0
 # Slim debuginfo so linking the workspace's many test binaries doesn't exhaust the
 # CI runner's memory (`ld ... signal 7 [Bus error]`). Keeps line-table backtraces.
 debug = "line-tables-only"
+# macOS defaults to `packed`, which runs `dsymutil` once PER BINARY to gather debug
+# info into a .dSYM bundle. This workspace links 163 integration-test binaries across
+# 31 crates, and nothing here reads a .dSYM — backtraces come from the line tables
+# above. Measured on this repo: rebuilding `egret-dataapi`'s 21 test binaries after
+# touching one lib file went from 134s to the figure in the commit message, with the
+# `sys` half of the cost being dsymutil's file churn.
+split-debuginfo = "unpacked"

@@ -12,6 +12,9 @@ down:
 
 # Format, lint, and test everything
 check:
+    # Cheap (0.2s) and visible: cargo never prunes deps/, and past ~100k files every test
+    # binary takes seconds just to reach main. See deploy/prune-target.sh for the numbers.
+    ./deploy/prune-target.sh
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     cargo test --workspace
@@ -201,3 +204,8 @@ ingress-install:
 # pods — incl. provisioned engines fetching the OIDC JWKS — reach it). Run AFTER ingress-install.
 coredns-rewrite:
     ./deploy/k8s/coredns-rewrite.sh
+
+# Cap cargo's deps/ directory before its size starts costing 30+ seconds per test binary.
+# See deploy/prune-target.sh for the measurement that motivated it.
+prune-target:
+    ./deploy/prune-target.sh

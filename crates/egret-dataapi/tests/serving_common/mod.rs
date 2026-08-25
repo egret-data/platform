@@ -775,10 +775,23 @@ async fn grant_ws_admin(db: &Db, user: Uuid, ws: Uuid) {
     .expect("grant ws_admin");
 }
 
+/// Migrations are applied ONCE per test process, not once per test.
+///
+/// `db.migrate()` is idempotent, but a no-op run still reads and checksums every
+/// migration in `migrations/` — measured at **1.24s** against an already-migrated
+/// database. `fixture()` is called by every test in the binary, so this binary's
+/// 27 tests were paying ~33s of a 91s run to re-verify migrations that could not
+/// have changed since the process started.
+static MIGRATED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+
 pub async fn fixture() -> Option<Fixture> {
     let url = std::env::var("DATABASE_URL").ok()?;
     let db = Db::connect(&url, 5).await.expect("connect");
-    db.migrate().await.expect("migrate");
+    MIGRATED
+        .get_or_init(|| async {
+            db.migrate().await.expect("migrate");
+        })
+        .await;
 
     let admin = insert_user(&db, "t4_admin").await;
     let slug = format!("t4-{}", Uuid::new_v4().simple());
