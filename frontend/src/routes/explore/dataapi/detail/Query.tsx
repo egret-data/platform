@@ -137,6 +137,18 @@ export default function Query() {
   const active = Math.min(selected, Math.max(statements.length - 1, 0));
   const current = statements[active] ?? { name: "", sql: "" };
 
+  /**
+   * Every statement's SQL except the one on screen.
+   *
+   * By INDEX, not by name: two statements may share a name while the author is
+   * mid-edit (`statementNameError` is what says so), and filtering by name would
+   * then drop the wrong one — or drop `current` twice and leave a sibling in.
+   */
+  const siblings = useMemo(
+    () => statements.filter((_, i) => i !== active).map((s) => s.sql),
+    [statements, active],
+  );
+
   const nameError = useMemo(
     () => (several ? statementNameError(current.name, statements.map((s) => s.name), active) : null),
     [several, current.name, statements, active],
@@ -421,12 +433,21 @@ export default function Query() {
         </Panel>
         <PanelSeparator className="my-1 h-1.5 rounded bg-border transition-colors hover:bg-primary/60 active:bg-primary" />
         <Panel defaultSize="45%" minSize="20%">
-          {/* The preview route takes ONE `sql` — it runs a statement, not an
-              endpoint — so it is handed the statement on screen rather than
-              reading `form` for it. `statementName` is `undefined` in the
-              common case, which is what keeps the note below byte-identical to
-              what it said before this feature. */}
-          <PreviewBlock ref={preview} sql={current.sql} statementName={several ? current.name : undefined} />
+          {/* The preview route RUNS one `sql` — a statement, not an endpoint —
+              so it is handed the statement on screen rather than reading `form`
+              for it. It is also handed the other statements' text: a parameter
+              is a list for the whole endpoint as soon as ONE statement loops
+              over it, so a preview that saw only this statement could go green
+              on a definition publish then refuses. They inform that decision and
+              nothing else — the server never runs them. `statementName` is
+              `undefined` in the common case, which is what keeps the note below
+              byte-identical to what it said before this feature. */}
+          <PreviewBlock
+            ref={preview}
+            sql={current.sql}
+            siblings={siblings}
+            statementName={several ? current.name : undefined}
+          />
         </Panel>
       </Group>
     </div>

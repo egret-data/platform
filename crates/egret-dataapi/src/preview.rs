@@ -6,6 +6,16 @@
 //! and render path publish and serving use, capped at 100 rows, with none of the
 //! four consumer-facing side effects.
 //!
+//! # ONE statement runs; the endpoint's OTHER statements are still an input
+//!
+//! An endpoint has N statements (M2) and this route runs exactly one of them —
+//! the `sql` on screen. But whether a parameter arrives as a scalar or a list is
+//! a property of the WHOLE endpoint, so the body also carries the siblings' text
+//! ([`PreviewEndpointInput::siblings`]) purely to decide that. They are never
+//! rendered, bound or executed, and this module cannot read them: the shape
+//! decision is made once by [`crate::lifecycle::validate_preview`], which returns
+//! it, and the text stays inside `lifecycle::SiblingStatements`.
+//!
 //! # Not quite EVERY publish rule — two are about things a preview does not do
 //!
 //! [`crate::lifecycle::validate_preview`] omits the cache-scope rule (preview
@@ -72,8 +82,8 @@
 //!
 //! The serving path reaches `resolve` through `decode`, which enforces
 //! `MAX_PARAM_BYTES` and `MAX_PARAM_REPEATS` on a query string. [`run`] calls
-//! [`crate::serving::params::resolve_supplied`] with the body's already-parsed map
-//! instead, so neither cap applies here. Accepted, deliberately:
+//! `crate::serving::params::resolve_supplied_with` with the body's already-parsed
+//! map instead, so neither cap applies here. Accepted, deliberately:
 //!
 //! * The body is bounded by axum's request body limit, and what reaches the engine
 //!   is bounded by `render`'s `CappedSink` — so neither this process nor the
@@ -118,8 +128,50 @@ pub(crate) const PREVIEW_TIMEOUT_SECS: u64 = 30;
 #[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PreviewEndpointInput {
-    /// What is in the editor right now — not what is stored.
+    /// What is in the editor right now — not what is stored. **The only
+    /// statement this route runs.**
     pub sql: String,
+    /// The SQL text of the endpoint's OTHER statements, as they are on screen.
+    ///
+    /// They decide ONE thing and are used for nothing else: whether a parameter
+    /// arrives as a scalar or a list, which is a property of the endpoint (any
+    /// statement's `{% for %}` header makes it a list) and not of the statement
+    /// being previewed. They are never rendered, bound or executed. Omit the
+    /// field for a one-statement endpoint. At most `MAX_STATEMENTS - 1` of them,
+    /// since `sql` plus its siblings is an endpoint.
+    // # Why the whole endpoint has to be here for one field's shape
+    //
+    // Serving binds a parameter as a list for EVERY statement as soon as one of
+    // them loops over it, and publish validates against that same union. Judging
+    // it from `sql` alone made preview disagree with publish in one direction —
+    // green here, refused there — so the author was told "fine" and then told
+    // "no". `crate::lifecycle::SiblingStatements` is what keeps "informs the
+    // shape and nothing else" structural: its text is private to the module that
+    // computes the union, so this file cannot read a byte of it.
+    //
+    // # `#[serde(default)]`, on a `deny_unknown_fields` struct
+    //
+    // An older client omits the field entirely and must keep working. It also
+    // keeps TODAY'S behaviour exactly: an empty list makes the union
+    // `IteratedParams::across(&[sql], …)`, the slice of one that was there
+    // before.
+    //
+    // # Bounded by COUNT, not by length — and why that is the right pair
+    //
+    // `validate_preview` refuses `1 + siblings.len() > MAX_STATEMENTS`: the same
+    // bound and the same error `validate_statements` gives a publish, so a body
+    // cannot describe an endpoint that could not exist, and there is no new
+    // number to keep in step. The per-text LENGTH gets no bound on purpose —
+    // there is no per-statement SQL length limit anywhere in this feature
+    // (`create` and `PATCH` accept a statement of any length under axum's body
+    // cap), so inventing one here alone would let a preview refuse SQL the
+    // endpoint it belongs to stores happily: the same "told fine, then told no"
+    // defect in the other direction. What each text costs is one linear template
+    // scan (`render::iterated_params`), not the `MAX_DECLARED_PARAMS`-driven
+    // rendering, and the body is bounded by axum's limit exactly as `sql` is.
+    #[serde(default)]
+    #[schema(value_type = Vec<String>)]
+    pub siblings: crate::lifecycle::SiblingStatements,
     /// The parameter declarations as they are on screen right now.
     #[serde(default)]
     pub params: Vec<ParamSpec>,
@@ -267,16 +319,18 @@ pub(crate) async fn run(
         .connection_per_principal_pair(ws, body.database_id)
         .await?;
 
-    crate::lifecycle::validate_preview(&body.sql, &body.params)?;
+    // Returns the shape decision — which parameters arrive as lists — made
+    // across `sql` AND `siblings`, i.e. the endpoint, exactly as publish makes
+    // it. Taking it from here rather than recomputing it below is what stops
+    // this route holding two answers to one question; see `IteratedParams`.
+    let iterated = crate::lifecycle::validate_preview(&body.sql, &body.siblings, &body.params)?;
 
     // The SAME function serving resolves through, so a value that renders one
-    // way here cannot render another way for a consumer. A single-element
-    // slice: THIS request body — preview's own, not the stored draft — carries
-    // one `sql` field rather than a statement list, so the union
-    // `resolve_supplied` computes over `sqls` is a union of one. The stored
-    // draft did become a list in M2; preview's body deliberately did not.
+    // way here cannot render another way for a consumer — `resolve_supplied_with`
+    // is `resolve_supplied` with the union passed in instead of recomputed, and
+    // everything after that line is one implementation.
     let resolved =
-        crate::serving::params::resolve_supplied(&body.values, &[body.sql.as_str()], &body.params)
+        crate::serving::params::resolve_supplied_with(&body.values, iterated.names(), &body.params)
             .map_err(|e| param_error(e, &body.params, &body.values))?;
 
     let (sql, binds) = crate::render::render(&body.sql, &resolved.values)

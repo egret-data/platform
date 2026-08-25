@@ -1374,21 +1374,103 @@ fn check_definition_scans(
 /// is NOT `sqllab:write`. Without this check a role holding only `:manage` would
 /// have arbitrary write access to every engine the workspace can reach. It is
 /// the first check for that reason.
-pub fn validate_preview(
+///
+/// # The shape decision is made across the SIBLINGS, and returned
+///
+/// `sql` is the statement that will RUN; `siblings` is the SQL text of the
+/// other statements of the same endpoint, and it exists for one purpose — the
+/// `{% for %}` scan that decides which parameters arrive as lists. Before it,
+/// preview asked that question of the one statement on screen while publish
+/// asked it of every statement, so previewing the `summary` of a two-statement
+/// endpoint whose `by_region` loops the same parameter went GREEN and then
+/// publish refused. It failed closed, but the author was told "fine" and then
+/// told "no", which is the one thing this route exists not to do.
+///
+/// The union is **returned**, for the same reason [`validate_endpoint`] returns
+/// it: [`crate::preview::run`] needs the same shape to resolve the author's
+/// test values with, and a second computation of it is a second answer that can
+/// disagree. There is no way for a caller to obtain a different one.
+///
+/// [`SiblingStatements`] is what keeps "informs the shape and nothing else"
+/// structural rather than documented: its text is private to this module, so no
+/// caller can render, bind or execute it. See its own comment.
+/// `pub(crate)` rather than `pub`, because it now returns [`IteratedParams`] —
+/// and that type is deliberately crate-private, so that "the shape a definition
+/// is validated against" cannot be constructed, or a second one computed,
+/// outside this module. Nothing outside the crate called this.
+pub(crate) fn validate_preview(
     sql: &str,
+    siblings: &SiblingStatements,
     params: &[ParamSpec],
-) -> std::result::Result<(), ValidationError> {
+) -> std::result::Result<IteratedParams, ValidationError> {
+    // FIRST, before the scan of `sql` and long before any render, and against
+    // the same number publish uses: `siblings` is a list from a request body,
+    // and every statement in it costs a template scan. An endpoint may have
+    // `MAX_STATEMENTS` statements in total, so one of them plus its siblings is
+    // bounded by exactly that — no new number, and a preview body that could not
+    // describe a publishable endpoint is refused with the error publish would
+    // give the same list. See the note in `preview::PreviewEndpointInput` on why
+    // the LENGTH of each text needs no bound of its own here.
+    let count = 1 + siblings.len();
+    if count > egret_dataapi_api::MAX_STATEMENTS {
+        return Err(ValidationError::Statement(
+            egret_dataapi_api::StatementError::TooManyStatements {
+                count,
+                limit: egret_dataapi_api::MAX_STATEMENTS,
+            },
+        ));
+    }
+    // Only `sql` is SCANNED. The siblings are not this preview's statement:
+    // they are already stored, they were scanned when they were written, and
+    // re-refusing one here would block previewing the statement the author is
+    // actually looking at because a different one is mid-edit.
     check_definition_scans(sql, params, ParamRules::Draft)?;
-    // A slice of one — and this is the one place where that is a LIMITATION
-    // rather than a fact: `POST …/preview` carries a single `sql`, so a preview
-    // of one statement of a several-statement endpoint cannot see its siblings
-    // and will judge a parameter's shape from this statement alone. It agrees
-    // with the endpoint whenever no OTHER statement iterates a parameter this
-    // one uses as a scalar; where they differ, publish (which does see every
-    // statement) is the one that refuses. Making preview honest needs the
-    // sibling statements in the request body.
-    check_render_rules(sql, params, &IteratedParams::across(&[sql], params))?;
-    Ok(())
+    let iterated = siblings.union_with(sql, params);
+    check_render_rules(sql, params, &iterated)?;
+    Ok(iterated)
+}
+
+/// The SQL text of the other statements of the endpoint a preview belongs to.
+///
+/// # Why a type and not a `Vec<String>`
+///
+/// These statements inform ONE decision — which parameters a `{% for %}` header
+/// iterates, and therefore which arrive as lists — and they must never be
+/// rendered, bound or executed. A preview runs the statement on screen; a body
+/// that could smuggle a second statement into the engine would turn a
+/// `data_api_endpoint:manage` preview into an arbitrary multi-statement run.
+///
+/// The text is a private field of a type declared in THIS module, and the only
+/// thing reachable from anywhere else is [`Self::union_with`], which returns a
+/// set of parameter names. `crate::preview` deserialises the field, hands it to
+/// [`validate_preview`], and cannot read a single byte of it. So "informs the
+/// shape and nothing else" is a property of the type rather than a rule someone
+/// has to remember — the same move [`IteratedParams`] makes for the shape
+/// itself.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(transparent)]
+pub struct SiblingStatements(Vec<String>);
+
+impl SiblingStatements {
+    /// How many there are. The count is public because the BOUND is a rule
+    /// about the request; the text is not.
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// The iterated-parameter union across `sql` and every sibling — the same
+    /// set [`validate_endpoint`] computes for the whole endpoint, which is the
+    /// point.
+    ///
+    /// `sql` is passed IN rather than the siblings being handed out, so this is
+    /// the only expression that ever sees the texts together and there is no
+    /// accessor to misuse.
+    fn union_with(&self, sql: &str, params: &[ParamSpec]) -> IteratedParams {
+        let mut sqls: Vec<&str> = Vec::with_capacity(1 + self.0.len());
+        sqls.push(sql);
+        sqls.extend(self.0.iter().map(String::as_str));
+        IteratedParams::across(&sqls, params)
+    }
 }
 
 /// A type-correct stand-in value for one parameter, for the renders publish
@@ -1507,6 +1589,18 @@ impl IteratedParams {
 
     fn contains(&self, name: &str) -> bool {
         self.0.iter().any(|n| n == name)
+    }
+
+    /// The names, for the one caller that has to resolve VALUES against this
+    /// set rather than ask about a single name: [`crate::preview::run`], which
+    /// passes them to `serving::params::resolve_supplied_with`.
+    ///
+    /// Read-only and derived — there is still exactly one way to CONSTRUCT the
+    /// set ([`Self::across`], via [`validate_endpoint`] or
+    /// [`validate_preview`]), so handing the names out cannot produce a second
+    /// answer, only a use of the first one.
+    pub(crate) fn names(&self) -> &[String] {
+        &self.0
     }
 }
 
@@ -2971,6 +3065,25 @@ mod tests {
         }
     }
 
+    /// [`validate_preview`] with no siblings.
+    ///
+    /// Two things at once, which is why every existing preview test uses it
+    /// unchanged: a ONE-statement endpoint, and the request an OLD CLIENT sends
+    /// — one that never learnt the `siblings` field and whose body therefore
+    /// deserialises to `SiblingStatements::default()`. So the whole preview
+    /// suite below is also the assertion that the field's arrival changed
+    /// nothing for a body that omits it.
+    fn preview(
+        sql: &str,
+        params: &[ParamSpec],
+    ) -> std::result::Result<IteratedParams, ValidationError> {
+        validate_preview(sql, &SiblingStatements::default(), params)
+    }
+
+    fn siblings(sqls: &[&str]) -> SiblingStatements {
+        SiblingStatements(sqls.iter().map(|s| (*s).to_string()).collect())
+    }
+
     /// The declared-parameter bound, from both sides.
     #[test]
     fn a_definition_declaring_more_parameters_than_the_limit_is_refused() {
@@ -3174,6 +3287,158 @@ mod tests {
                 crate::render::RenderError::SequenceBind
             )),
             "publish must reach the same conclusion the first call would"
+        );
+    }
+
+    /// The same §4.2 pair, through **preview** — the half M2 left open.
+    ///
+    /// `summary` uses `region` as a scalar and `by_region` loops over it, so the
+    /// endpoint does not publish (the test above). Preview judged the shape from
+    /// the statement on screen alone, so it went GREEN on `summary` and the
+    /// author was told "fine" and then told "no" by publish. It failed closed —
+    /// the refusal that counts still happened — which is exactly why this is a
+    /// correctness-of-FEEDBACK bug and why the fix is to make preview see the
+    /// siblings, not to relax anything.
+    #[test]
+    fn preview_judges_a_parameter_shape_across_the_siblings() {
+        const SUMMARY: &str = "SELECT 1 AS n FROM t WHERE region = {{ region }}";
+        const BY_REGION: &str = "SELECT region AS n FROM t WHERE region IN (\
+             {% for x in region %}{{ x }}{% if not loop.last %},{% endif %}{% endfor %})";
+        let params = vec![param("region", ParamType::String)];
+
+        // An OLD CLIENT — no `siblings` field in the body — keeps exactly the
+        // behaviour it had: the union of one, and `summary` green on its own.
+        // That is the compatibility promise, and it is a green the author is
+        // then refused, which is the defect the field exists to remove.
+        assert!(preview(SUMMARY, &params).is_ok());
+
+        // Told the siblings, preview reaches publish's answer — and reaches it
+        // by the SAME route, `IteratedParams` across every statement, so it is
+        // the same conclusion rather than a second rule that agrees today.
+        assert_eq!(
+            validate_preview(SUMMARY, &siblings(&[BY_REGION]), &params),
+            Err(ValidationError::Render(
+                crate::render::RenderError::SequenceBind
+            )),
+        );
+
+        // And the direction the fix must NOT go: previewing `by_region` itself,
+        // with `summary` as its sibling, still passes. The union is a union — a
+        // sibling that uses a parameter as a scalar does not un-iterate it.
+        assert!(validate_preview(BY_REGION, &siblings(&[SUMMARY]), &params).is_ok());
+    }
+
+    /// Preview's shape decision must be the ENDPOINT's, name for name — not a
+    /// second computation that happens to agree on the case above.
+    ///
+    /// `validate_preview` returns the set for the same reason `validate_endpoint`
+    /// does: [`crate::preview::run`] needs it to resolve the author's test values,
+    /// and recomputing it there would be the second answer M2 removed.
+    #[test]
+    fn preview_returns_the_same_shape_the_endpoint_publishes_with() {
+        const SUMMARY_ALL: &str = "SELECT count(*) AS n FROM t";
+        const BY_REGION: &str = "SELECT region AS n FROM t WHERE region IN (\
+             {% for x in region %}{{ x }}{% if not loop.last %},{% endif %}{% endfor %})";
+        let params = vec![param("region", ParamType::String)];
+        let statements = vec![
+            StatementSpec {
+                name: "summary_all".into(),
+                sql: SUMMARY_ALL.into(),
+            },
+            StatementSpec {
+                name: "by_region".into(),
+                sql: BY_REGION.into(),
+            },
+        ];
+        let published = validate_endpoint(
+            &statements,
+            &params,
+            &cache(CacheScope::PerPrincipal),
+            &OutputSpec::default(),
+            false,
+            false,
+        )
+        .expect("the §4.2 pair publishes");
+        // `summary_all` never mentions `region`, so on its own the union is
+        // EMPTY and preview would resolve a scalar where serving binds a list.
+        assert!(preview(SUMMARY_ALL, &params).unwrap().names().is_empty());
+        assert_eq!(
+            validate_preview(SUMMARY_ALL, &siblings(&[BY_REGION]), &params)
+                .unwrap()
+                .names(),
+            published.names(),
+        );
+        assert_eq!(published.names(), ["region"]);
+    }
+
+    /// A sibling is not a definition being validated — it informs the shape and
+    /// nothing else.
+    ///
+    /// It is already stored (it was scanned when it was written) or it is
+    /// mid-edit in another tab of the same form. Re-refusing it here would stop
+    /// an author previewing the statement they are LOOKING at because a
+    /// different one is temporarily broken, which is the same defect as the one
+    /// above. Nothing is executed either way: the text never leaves
+    /// [`SiblingStatements`], whose field is private to this module.
+    #[test]
+    fn a_sibling_that_would_not_publish_does_not_block_the_preview() {
+        const ON_SCREEN: &str = "SELECT count(*) AS n FROM t";
+        let params = vec![param("region", ParamType::String)];
+        // A `;`, a `#` and a DELETE — each of which `check_definition_scans`
+        // refuses outright when it is the statement being previewed.
+        let broken = siblings(&["DELETE FROM t; -- half typed # note"]);
+        assert!(validate_preview(ON_SCREEN, &broken, &params).is_ok());
+        // …while a sibling that DOES loop still counts, so "not scanned" has not
+        // become "not read".
+        let looping = siblings(&["SELECT region AS n FROM t WHERE region IN (\
+             {% for x in region %}{{ x }}{% if not loop.last %},{% endif %}{% endfor %}); # oops"]);
+        assert_eq!(
+            validate_preview(ON_SCREEN, &looping, &params)
+                .unwrap()
+                .names(),
+            ["region"],
+        );
+    }
+
+    /// The bound on the new field, and it is the bound publish already has.
+    ///
+    /// `siblings` is a list of texts from a request body and each one costs a
+    /// template scan, so it needs a number. `MAX_STATEMENTS` is that number
+    /// because an endpoint may not have more statements than that in total —
+    /// `1 + siblings.len()` is exactly the list a publish would refuse, so the
+    /// two cannot drift and no new constant exists to keep in step. Checked
+    /// FIRST, before `sql` is scanned and long before anything renders.
+    #[test]
+    fn preview_bounds_its_siblings_by_the_endpoint_statement_limit() {
+        let sqls: Vec<String> = (0..egret_dataapi_api::MAX_STATEMENTS)
+            .map(|i| format!("SELECT {i} AS n"))
+            .collect();
+        let refs: Vec<&str> = sqls.iter().map(String::as_str).collect();
+        // One statement plus `MAX_STATEMENTS - 1` siblings is a describable
+        // endpoint, and passes.
+        assert!(validate_preview("SELECT 1 AS n", &siblings(&refs[1..]), &[]).is_ok());
+        // One more is an endpoint publish would refuse, refused here with the
+        // same error and the same numbers.
+        assert_eq!(
+            validate_preview("SELECT 1 AS n", &siblings(&refs), &[]),
+            Err(ValidationError::Statement(
+                egret_dataapi_api::StatementError::TooManyStatements {
+                    count: egret_dataapi_api::MAX_STATEMENTS + 1,
+                    limit: egret_dataapi_api::MAX_STATEMENTS,
+                }
+            )),
+        );
+        // And it answers BEFORE the statement scan, the way `validate_endpoint`
+        // does: a body carrying too many siblings is refused for the count even
+        // when the statement on screen is itself unpublishable.
+        assert_eq!(
+            validate_preview("SELECT 1; DROP TABLE t", &siblings(&refs), &[]),
+            Err(ValidationError::Statement(
+                egret_dataapi_api::StatementError::TooManyStatements {
+                    count: egret_dataapi_api::MAX_STATEMENTS + 1,
+                    limit: egret_dataapi_api::MAX_STATEMENTS,
+                }
+            )),
         );
     }
 
@@ -4004,7 +4269,7 @@ mod tests {
         let cache = cache(CacheScope::PerPrincipal);
         // Not a single SELECT — the rule that stops `:manage` becoming engine
         // write access.
-        assert!(validate_preview("SELECT 1; DROP TABLE t", &[]).is_err());
+        assert!(preview("SELECT 1; DROP TABLE t", &[]).is_err());
         assert!(validate_definition("SELECT 1; DROP TABLE t", &[], &cache, false, false).is_err());
 
         // A single statement that is not a SELECT, which is the half of
@@ -4014,7 +4279,7 @@ mod tests {
         // `check_single_select` is still in the bundle. A bare DML statement can:
         // it carries no `;` and no `#`, and the render rules do not care what the
         // head word is.
-        assert!(validate_preview("DELETE FROM t WHERE 1 = 1", &[]).is_err());
+        assert!(preview("DELETE FROM t WHERE 1 = 1", &[]).is_err());
         assert!(
             validate_definition("DELETE FROM t WHERE 1 = 1", &[], &cache, false, false).is_err()
         );
@@ -4029,7 +4294,7 @@ mod tests {
             allowed: None,
             description: String::new(),
         }];
-        assert!(validate_preview("SELECT 1", &bad_enum).is_err());
+        assert!(preview("SELECT 1", &bad_enum).is_err());
 
         // A `location: body` parameter.
         let body_param = vec![ParamSpec {
@@ -4041,7 +4306,7 @@ mod tests {
             allowed: None,
             description: String::new(),
         }];
-        assert!(validate_preview("SELECT 1", &body_param).is_err());
+        assert!(preview("SELECT 1", &body_param).is_err());
 
         // More parameters than the bound. Preview renders `optional + 2`
         // contexts exactly like publish does, so an unbounded preview is the
@@ -4057,7 +4322,7 @@ mod tests {
             )
             .collect();
         assert_eq!(
-            validate_preview(&wide, &too_many),
+            preview(&wide, &too_many),
             Err(ValidationError::TooManyParameters {
                 declared: MAX_DECLARED_PARAMS + 1,
                 limit: MAX_DECLARED_PARAMS,
@@ -4074,7 +4339,7 @@ mod tests {
         );
 
         // And a definition both accept.
-        assert!(validate_preview("SELECT 1 AS n", &[]).is_ok());
+        assert!(preview("SELECT 1 AS n", &[]).is_ok());
     }
 
     /// The second rule preview omits, and the browser finding that put it here.
@@ -4096,7 +4361,7 @@ mod tests {
         let sql = "SELECT 1 AS n";
 
         assert!(
-            validate_preview(sql, &declared).is_ok(),
+            preview(sql, &declared).is_ok(),
             "preview must run the SQL on screen, declarations mid-edit and all"
         );
         // …and the published contract is unchanged: an endpoint may not offer a
@@ -4133,13 +4398,13 @@ mod tests {
         // 1. The SQL reads a name that is not declared. At serve time this is a
         //    render failure or a bind of the wrong thing.
         assert_eq!(
-            validate_preview("SELECT * FROM t WHERE r = {{ nope }}", &[]).unwrap_err(),
+            preview("SELECT * FROM t WHERE r = {{ nope }}", &[]).unwrap_err(),
             ValidationError::UndeclaredPlaceholder("nope".into())
         );
         // Still refused when OTHER parameters are declared, which is the shape
         // the loop above walks.
         assert_eq!(
-            validate_preview(
+            preview(
                 "SELECT * FROM t WHERE r = {{ nope }}",
                 &[param("region", ParamType::String)]
             )
@@ -4148,7 +4413,7 @@ mod tests {
         );
         // 2. A placeholder inside quoted text — the injection-adjacent rule.
         assert_eq!(
-            validate_preview(
+            preview(
                 "SELECT * FROM t WHERE a = 'x{{p}}y'",
                 &[param("p", ParamType::String)]
             )
@@ -4157,7 +4422,7 @@ mod tests {
         );
         // 3. A duplicate declaration, which makes binding ambiguous.
         assert_eq!(
-            validate_preview(
+            preview(
                 "SELECT * FROM t WHERE r = {{ region }}",
                 &[
                     param("region", ParamType::String),
@@ -4169,7 +4434,7 @@ mod tests {
         );
         // 4. `reject_unscannable_bytes`: a `#` comment, which the two dialects
         //    read differently, so the scanner refuses to guess.
-        assert!(validate_preview("SELECT 1 AS n # note", &[]).is_err());
+        assert!(preview("SELECT 1 AS n # note", &[]).is_err());
     }
 
     /// The ONE rule preview deliberately omits, and the reason it is safe to
@@ -4181,7 +4446,7 @@ mod tests {
         // Publish refuses it on a delegated connection…
         assert!(validate_definition("SELECT 1 AS n", &[], &shared, true, false).is_err());
         // …and preview never sees a cache at all, so the same SQL is fine.
-        assert!(validate_preview("SELECT 1 AS n", &[]).is_ok());
+        assert!(preview("SELECT 1 AS n", &[]).is_ok());
     }
 
     /// Every arm is a 400 the author can act on — never a 500.

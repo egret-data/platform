@@ -427,6 +427,62 @@ describe("Query section — authoring several statements", () => {
   });
 
   /**
+   * The preview body carries the OTHER statements too — and only their text.
+   *
+   * Whether a parameter arrives as a scalar or a list is a property of the whole
+   * endpoint: one `{% for %}` anywhere makes it a list for every statement. A
+   * preview body carrying only the statement on screen made the server judge
+   * that from one statement while publish judged it from all of them, so an
+   * author could be shown a green preview of a definition publish then refused.
+   *
+   * Two assertions, and the second is the one that fails if `siblings` is built
+   * by appending rather than by excluding: the statement being RUN must not also
+   * appear in the list, or the server would count it twice — and a preview that
+   * shipped every statement including its own would look identical on the first
+   * assertion alone.
+   */
+  it("sends the other statements' SQL as `siblings`, without the one it runs", async () => {
+    const previewMutateAsync = vi
+      .fn()
+      .mockResolvedValue({ status: 200, data: { columns: [], rows: [], row_count: 0, truncated: false } });
+    vi.mocked(api.useDataApiPreviewEndpoint).mockReturnValue({
+      mutateAsync: previewMutateAsync,
+      isPending: false,
+    } as never);
+    renderQuery(two);
+    await screen.findByLabelText("SQL");
+    await userEvent.click(screen.getByRole("tab", { name: "total" }));
+    await userEvent.click(screen.getByRole("button", { name: /preview unsaved draft/i }));
+
+    await waitFor(() => expect(previewMutateAsync).toHaveBeenCalled());
+    const body = previewMutateAsync.mock.calls[0][0].data;
+    expect(body.siblings).toEqual(["SELECT * FROM t"]);
+    expect(body.siblings).not.toContain(body.sql);
+  });
+
+  /**
+   * The compatibility case, from the client's side: a one-statement endpoint
+   * sends an EMPTY list, which is the union of one the server computed before
+   * this field existed. So the common endpoint's preview is byte-identical in
+   * meaning to what it was.
+   */
+  it("sends an empty `siblings` for a one-statement endpoint", async () => {
+    const previewMutateAsync = vi
+      .fn()
+      .mockResolvedValue({ status: 200, data: { columns: [], rows: [], row_count: 0, truncated: false } });
+    vi.mocked(api.useDataApiPreviewEndpoint).mockReturnValue({
+      mutateAsync: previewMutateAsync,
+      isPending: false,
+    } as never);
+    renderQuery(makeEndpoint({ statements: [{ name: "rows", sql: "SELECT 1" }] } as Partial<DataApiEndpointDto>));
+    await screen.findByLabelText("SQL");
+    await userEvent.click(screen.getByRole("button", { name: /preview unsaved draft/i }));
+
+    await waitFor(() => expect(previewMutateAsync).toHaveBeenCalled());
+    expect(previewMutateAsync.mock.calls[0][0].data.siblings).toEqual([]);
+  });
+
+  /**
    * The upper bound on the list, said on the control rather than by a toast
    * after the save.
    *

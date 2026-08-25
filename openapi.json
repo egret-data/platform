@@ -31434,7 +31434,14 @@
         "properties": {
           "sql": {
             "type": "string",
-            "description": "What is in the editor right now — not what is stored."
+            "description": "What is in the editor right now — not what is stored. **The only\nstatement this route runs.**"
+          },
+          "siblings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The SQL text of the endpoint's OTHER statements, as they are on screen.\n\nThey decide ONE thing and are used for nothing else: whether a parameter\narrives as a scalar or a list, which is a property of the endpoint (any\nstatement's `{% for %}` header makes it a list) and not of the statement\nbeing previewed. They are never rendered, bound or executed. Omit the\nfield for a one-statement endpoint. At most `MAX_STATEMENTS - 1` of them,\nsince `sql` plus its siblings is an endpoint."
           },
           "params": {
             "type": "array",

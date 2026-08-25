@@ -15,9 +15,10 @@ const PREVIEW_MAX_ROWS = 100;
 /**
  * Runs the ON-SCREEN statement and shows the rows, without saving or publishing.
  *
- * ONE statement, not the endpoint: `POST /preview` takes a single `sql`, and an
- * endpoint has N of them since M2. `Query` owns which one is on screen and
- * passes it down — see [`PreviewBlockProps`].
+ * ONE statement RUNS, but the request describes the whole endpoint's SHAPE:
+ * `POST /preview` takes the `sql` on screen plus the other statements' text as
+ * `siblings`, and an endpoint has N of them since M2. `Query` owns which one is
+ * on screen and passes both down — see [`PreviewBlockProps`].
  *
  * **Test values are NOT part of the endpoint.** They live in this component's
  * own state, never in the shared `form`, so they cannot be saved by accident and
@@ -43,12 +44,27 @@ export interface PreviewBlockProps {
    * The statement to run — the SQL as it is on screen right now, handed down
    * rather than read from `form`.
    *
-   * `POST /preview` takes ONE `sql`: it runs a statement, not an endpoint. An
-   * endpoint has N of them (M2), and this component cannot know which one the
-   * author is looking at — `Query` owns that selection, so `Query` supplies the
-   * text.
+   * `POST /preview` runs ONE `sql`: a statement, not an endpoint. An endpoint
+   * has N of them (M2), and this component cannot know which one the author is
+   * looking at — `Query` owns that selection, so `Query` supplies the text.
    */
   sql: string;
+  /**
+   * The OTHER statements' SQL, in any order — empty for a one-statement
+   * endpoint.
+   *
+   * Not a second thing to run. Whether a parameter arrives as a scalar or a
+   * list is a property of the whole endpoint (one `{% for %}` anywhere makes it
+   * a list), so a preview that saw only `sql` judged that from the statement on
+   * screen while publish judged it from all of them: green here, refused there.
+   * The server reads these for that decision alone — it never renders, binds or
+   * executes them.
+   *
+   * Sent unfiltered rather than "only the ones that mention a parameter": the
+   * rule is the server's, and a client that pre-filtered would be a second copy
+   * of it that can go stale.
+   */
+  siblings: string[];
   /**
    * The name of that statement, or `undefined` for a one-statement endpoint.
    *
@@ -62,7 +78,7 @@ export interface PreviewBlockProps {
 }
 
 export const PreviewBlock = forwardRef<PreviewHandle, PreviewBlockProps>(function PreviewBlock(
-  { sql, statementName },
+  { sql, siblings, statementName },
   ref,
 ) {
   const { ws, id, form } = useEndpointDetail();
@@ -107,6 +123,8 @@ export const PreviewBlock = forwardRef<PreviewHandle, PreviewBlockProps>(functio
         id,
         data: {
           sql,
+          // The shape input, not a second statement — see `PreviewBlockProps`.
+          siblings,
           params: form.params,
           values: sent,
           database_id: form.database_id,
