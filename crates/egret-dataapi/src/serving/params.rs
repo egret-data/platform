@@ -106,9 +106,10 @@ pub(crate) fn resolve(
 ) -> Result<Resolved, ServingError> {
     let supplied = decode(raw_query, snap)?;
     // M2 Task 6 replaces this with the UNION across `snap.statements`, inside
-    // `resolve_supplied` — where preview reaches it too. Until then one
-    // statement is the only shape publish will freeze (`lifecycle::
-    // sole_statement`), so reading the first is reading the only.
+    // `resolve_supplied` — where preview reaches it too. Publish freezes the
+    // whole list as of Task 5, so reading the first is NO LONGER reading the
+    // only: a parameter that only a later statement reads publishes green
+    // (spec §4.2) and is dropped here until Task 6 lands.
     let stmt = snap
         .sole_statement()
         .ok_or_else(|| ServingError::internal("snapshot carries no statements"))?;

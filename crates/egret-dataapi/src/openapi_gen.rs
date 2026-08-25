@@ -121,8 +121,9 @@ fn param_description(p: &egret_dataapi_api::ParamSpec) -> String {
 fn data_schema(snap: &EndpointSnapshot, endpoint: &str) -> Result<Value, OpenApiGenError> {
     // **M2 Task 4 bridge, deleted by Task 9**, which documents `data` as an
     // object with one property per statement once there is more than one.
-    // Publish freezes exactly one today (`lifecycle::sole_statement`), so the
-    // document is written from that statement's frozen columns.
+    // Publish freezes a list of them as of Task 5, so for an endpoint with
+    // several this documents only the FIRST — the document is short the others
+    // until Task 9, exactly as this path serves only the first until Task 7.
     let frozen = &snap
         .sole_statement()
         .ok_or_else(|| {

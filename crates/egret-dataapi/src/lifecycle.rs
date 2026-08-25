@@ -220,7 +220,8 @@
 //! `output`, `limits` and `rate_limit` have **no validation rule anywhere** — not
 //! before the lock, not after it, not at serve time. The post-lock re-validation
 //! ([`EndpointStore::publish`]) did not close that, and cannot: it re-runs
-//! [`validate_definition`], which covers `sql`, `params` and `cache` only. What
+//! the endpoint validator, which covers the statements, `params` and `cache`
+//! only. What
 //! those three fields get from the lock is CONSISTENCY — they are frozen from the
 //! same read that was validated — not validation. A nonsensical `max_rows` or an
 //! unknown `output.shape` will be frozen exactly as written.
@@ -251,12 +252,25 @@ pub enum ValidationError {
          engine's lexer, and that agreement is exactly what cannot be assumed"
     )]
     MultipleStatements,
-    #[error(
-        "an endpoint must declare exactly one statement to be published; this one declares {0}. \
-         Publishing several is M2 Task 5 — until then the draft may hold them and publish \
-         refuses, rather than freezing the first and silently dropping the rest"
-    )]
-    SeveralStatements(usize),
+    /// The statement LIST is malformed: an empty list, a name that is not an
+    /// identifier, or two statements sharing one.
+    ///
+    /// # Folded in through `From` rather than surfaced as its own type
+    ///
+    /// [`egret_dataapi_api::validate_statements`] is also run by the create and
+    /// patch routes, which map it to a 400 directly. Publish runs it again, and
+    /// carrying it as an arm here rather than as a second error type at the
+    /// publish boundary is deliberate: everything [`validate`] and
+    /// [`EndpointStore::publish`] can refuse a definition for already converges
+    /// on one `?`-convertible type, and a caller that had to remember a second
+    /// one is a caller that can forget it. `RenderError` is folded in the same
+    /// way one arm below, for the same reason.
+    ///
+    /// It is passed through transparently, so the author reads the rule's own
+    /// message rather than a publish-flavoured paraphrase of it — the same
+    /// sentence they would have got from the route that refused the write.
+    #[error(transparent)]
+    Statement(#[from] egret_dataapi_api::StatementError),
     #[error(
         "`#` may not appear in a published definition — delete it. StarRocks ACCEPTS AND IGNORES \
          `#` (`SELECT 1 #x` returns a column named `x`), so any meaning read into it here is a \
@@ -414,10 +428,22 @@ pub enum ValidationError {
     /// end, and a branch that is not described is a column missing from the
     /// union — which is exactly the `503 schema_drift` this whole gate exists to
     /// remove. A loud publish is the honest failure; a quiet one is the bug.
+    ///
+    /// # `branches` is the ENDPOINT's total, summed across its statements
+    ///
+    /// Spec §4.1.1. Publish describes every branch of every statement, so a
+    /// per-statement limit would let ten statements cost ten times the engine
+    /// round trips one is allowed — the budget would grow with exactly the thing
+    /// it exists to bound. The message says so, because with M2 the two words
+    /// mean different things: a *statement* is one of the endpoint's SQL
+    /// definitions, a *branch* is one rendered permutation of one of them, and
+    /// an author told only "this renders to 114 branches" would go looking for
+    /// 114 in one of their statements and not find it.
     #[error(
-        "this definition renders to {branches} structurally distinct branches, and publish \
-         describes every one of them against the engine so the frozen contract covers every \
-         branch a caller can reach. The limit is {limit}. Each optional parameter with no \
+        "this endpoint renders to {branches} structurally distinct branches across its \
+         statements, and publish describes every one of them against the engine so the frozen \
+         contract covers every branch a caller can reach. The limit is {limit}, and it is the \
+         endpoint's total rather than each statement's. Each optional parameter with no \
          `default` adds the branch its absence takes, and each one whose value can flip an \
          `{{% if %}}` — a boolean especially — multiplies the rest: give some of them a \
          `default` or mark them `required` so absence is not a separate branch, or split this \
@@ -937,11 +963,7 @@ fn check_params_with(
     // `validate_definition` reports for a draft breaking several rules at once is
     // unchanged too.
     if rules == ParamRules::Published {
-        for p in params {
-            if !read.iter().any(|r| r == &p.name) {
-                return Err(ValidationError::UnreferencedParameter(p.name.clone()));
-            }
-        }
+        check_every_parameter_is_read(&read, params)?;
     }
     for backslash_escapes in ESCAPING_READINGS {
         let stripped = strip_comments_and_strings(sql, backslash_escapes)?;
@@ -951,6 +973,31 @@ fn check_params_with(
         let survived = placeholders(&stripped).unwrap_or_default();
         if let Some(name) = first_count_mismatch(&referenced, &survived) {
             return Err(ValidationError::PlaceholderInsideQuotedText(name));
+        }
+    }
+    Ok(())
+}
+
+/// Every declared parameter is read by something, given the names that
+/// something reads.
+///
+/// **The `read` list is the caller's to widen, and that is the whole reason
+/// this is a function rather than four lines inside [`check_params_with`].**
+/// This rule is the one part of the parameter scan that is about the CONTRACT
+/// an endpoint publishes rather than about the statement that runs, so it is
+/// also the one part that an endpoint with several statements has to ask
+/// differently: a `sort` that only the rows query reads is not an unused query
+/// parameter (spec §4.2). [`check_params_with`] passes one statement's names
+/// and [`validate_endpoint`] passes the union across all of them; the
+/// PREDICATE is written once, so the two cannot drift into disagreeing about
+/// what "unreferenced" means.
+fn check_every_parameter_is_read(
+    read: &[String],
+    params: &[ParamSpec],
+) -> std::result::Result<(), ValidationError> {
+    for p in params {
+        if !read.iter().any(|r| r == &p.name) {
+            return Err(ValidationError::UnreferencedParameter(p.name.clone()));
         }
     }
     Ok(())
@@ -1154,18 +1201,77 @@ pub(crate) fn type_name(ty: &ParamType) -> &'static str {
     }
 }
 
-/// Run every shape check over a definition. The order is deliberate: the
-/// statement check first, so a multi-statement string is refused before anything
-/// downstream (including the engine) is asked to look at it.
+/// Run every shape check over an ENDPOINT: each of its statements through the
+/// same rules [`validate_definition`] applies to one, plus the two that are
+/// properties of the endpoint rather than of any single statement.
 ///
 /// **The publish-time gate runs here, which is what makes it real.** This
 /// function is the one both `POST …/validate` and [`EndpointStore::publish`] go
 /// through — publish re-runs it inside its own transaction against the row it is
-/// about to freeze — so "a definition that validates is exactly a definition
-/// that publishes" keeps holding, and neither entry point can acquire the rules
-/// without the other. Everything before [`check_render_rules`] is a scan;
-/// [`check_render_rules`] renders, which is why it is last and why nothing on
-/// the serving path calls it.
+/// about to freeze — so "an endpoint that validates is exactly an endpoint that
+/// publishes" keeps holding, and neither entry point can acquire the rules
+/// without the other.
+///
+/// # The two endpoint-wide rules, and why they cannot be in the loop
+///
+/// * **The statement list itself** — non-empty, every name an identifier, no two
+///   names alike. It is asked once, of the list, and it is asked FIRST: a
+///   duplicate name is cheaper to find than a `;` scan and it makes the rest of
+///   the work pointless. See [`ValidationError::Statement`] for why publish asks
+///   at all when the write routes already did.
+/// * **[`ValidationError::UnreferencedParameter`]** — the one rule in the
+///   parameter scan that is about the published CONTRACT rather than about the
+///   statement that runs (see [`ParamRules`]). A parameter only the rows query
+///   reads is not an unused query parameter, so the question is asked once
+///   against the UNION of names every statement reads (spec §4.2). That is why
+///   the loop below passes [`ParamRules::Draft`]: it is the same set of rules
+///   minus this one, which is then applied endpoint-wide immediately after.
+///
+/// For a ONE-statement endpoint this is the same sequence, in the same order, as
+/// [`validate_definition`] — scans, then the cache rule, then the renders — with
+/// one deliberate difference: `UnreferencedParameter` is now reported after
+/// [`ValidationError::PlaceholderInsideQuotedText`] rather than before it, since
+/// it has moved out of [`check_params_with`]. Only a definition breaking both at
+/// once can tell, and it is refused either way.
+fn validate_endpoint(
+    statements: &[StatementSpec],
+    params: &[ParamSpec],
+    cache: &CacheSpec,
+    delegated: bool,
+    impersonate: bool,
+) -> std::result::Result<(), ValidationError> {
+    egret_dataapi_api::validate_statements(statements)?;
+    // Every statement through every scan except the contract rule below. The
+    // scans come before ANY render for the reason `check_definition_scans`
+    // records: they are what bounds the cost of the rendering, and they cost
+    // nothing themselves.
+    for statement in statements {
+        check_definition_scans(&statement.sql, params, ParamRules::Draft)?;
+    }
+    let mut read: Vec<String> = Vec::new();
+    for statement in statements {
+        read.extend(crate::render::context_names(&statement.sql)?);
+    }
+    check_every_parameter_is_read(&read, params)?;
+    check_cache_scope(cache, delegated, impersonate)?;
+    // Last, and once per statement: this is the half that renders.
+    for statement in statements {
+        check_render_rules(&statement.sql, params)?;
+    }
+    Ok(())
+}
+
+/// Run every shape check over ONE definition. The order is deliberate: the
+/// statement check first, so a multi-statement string is refused before anything
+/// downstream (including the engine) is asked to look at it.
+///
+/// **The per-DEFINITION half of the gate.** [`validate_endpoint`] is what the
+/// two entry points call, and it is built from the same three pieces this is;
+/// this one stays because it is the form every rule in this module is pinned
+/// against, one definition at a time, and because it is what `sql`-shaped
+/// callers outside publish would want. Everything before [`check_render_rules`]
+/// is a scan; [`check_render_rules`] renders, which is why it is last and why
+/// nothing on the serving path calls it.
 pub fn validate_definition(
     sql: &str,
     params: &[ParamSpec],
@@ -1687,32 +1793,30 @@ fn projection_has_uncast_marker(rest: &str) -> bool {
     false
 }
 
-/// The one statement publish can still freeze, or a refusal naming the count.
-///
-/// **A bridge, written to be deleted.** The draft row holds a LIST as of
-/// migration 0129 and the published snapshot holds one as of M2 Task 4, but
-/// nothing yet validates or describes more than one definition (M2 Task 5).
-/// Between here and there, the honest answer for a two-statement endpoint is a
-/// refusal: freezing `statements[0]` would publish a contract missing
-/// everything the author wrote after it, and the endpoint would serve 200s that
-/// are simply short a result set — the kind of failure nobody reports as a bug.
-///
-/// An EMPTY list is not one of the cases this has to explain away: the route
-/// refuses it and `dataapi_endpoints_statements_nonempty` makes it
-/// unrepresentable, so the arm is here to be total, not because it is reachable.
-fn sole_statement(
-    draft: &DataApiEndpointDto,
-) -> std::result::Result<&StatementSpec, ValidationError> {
-    match draft.statements.as_slice() {
-        [only] => Ok(only),
-        several => Err(ValidationError::SeveralStatements(several.len())),
-    }
-}
-
-/// Validate a draft and resolve its output columns against the engine.
+/// Validate a draft and resolve EVERY statement's output columns against the
+/// engine.
 ///
 /// Shared by `POST /validate` and `POST /publish` so the two can never diverge:
-/// a definition that validates is exactly a definition that publishes.
+/// an endpoint that validates is exactly an endpoint that publishes.
+///
+/// # One statement, one frozen column set
+///
+/// Each statement is described in its own right and gets its own union, because
+/// each one is its own result set on the wire (spec §4.4) and its own contract.
+/// The list comes back in the author's order, carrying the author's names, so
+/// the snapshot the caller freezes is positionally and nominally the draft it
+/// validated.
+///
+/// # The describe budget is the ENDPOINT's, and it is spent before the first round trip
+///
+/// Spec §4.1.1. Every statement's renderings are enumerated FIRST, their counts
+/// summed, and the total checked against [`MAX_DESCRIBED_BRANCHES`] before any
+/// statement is described. Checking per statement would let N statements cost N
+/// times one statement's budget; checking the sum only as it accumulated would
+/// still hand the engine every branch of every statement up to the one that
+/// tipped it over, which is the cost the limit exists to refuse. Enumerating is
+/// pure CPU and is separately bounded by [`MAX_DECLARED_PARAMS`], already
+/// enforced above.
 ///
 /// `describe_as` runs as `principal`, so a delegated connection resolves under
 /// THEIR policy. Its error variants are passed through unchanged — a Ranger
@@ -1757,54 +1861,92 @@ pub async fn validate(
     draft: &DataApiEndpointDto,
     delegated: bool,
     impersonate: bool,
-) -> Result<Vec<ColumnSpec>> {
-    validate_definition(
-        &sole_statement(draft)?.sql,
+) -> Result<Vec<StatementSnapshot>> {
+    validate_endpoint(
+        &draft.statements,
         &draft.params,
         &draft.cache,
         delegated,
         impersonate,
     )?;
-    let described = describe_branches(port, workspace, principal, draft).await?;
-    // `arrays` is positional: `shape_rows` zips the live and frozen column
-    // lists by index and `data_schema` documents the order in prose, because
-    // OpenAPI 3.0 has no tuple type. A definition whose branches resolve to
-    // different column lists — different names, different count, or different
-    // order — has no single order to freeze, so it is refused here rather than
-    // served under whichever branch happened to be described first. A
-    // non-branching definition has exactly one entry in `per_branch`, so
-    // this `any` never fires for it — the rule costs it nothing.
-    if draft.output.shape == "arrays"
-        && described
-            .per_branch
-            .iter()
-            .any(|names| names != &described.per_branch[0])
-    {
-        return Err(ValidationError::BranchingArraysShape.into());
+
+    // Enumerate every statement's branches before describing any of them, and
+    // spend the endpoint's whole budget in one decision. See the doc comment.
+    let mut planned: Vec<(&StatementSpec, Vec<(String, usize)>)> =
+        Vec::with_capacity(draft.statements.len());
+    let mut total = 0usize;
+    for statement in &draft.statements {
+        let renderings = renderings_for(&statement.sql, &draft.params)?;
+        total += renderings.len();
+        planned.push((statement, renderings));
     }
-    // The SAME fold `shape_rows` and `data_schema` run, over the SAME frozen
-    // union, run here first — where the author is present and the blast radius
-    // is one endpoint. `draft.output` is already in hand for the check above.
-    //
-    // `describe_branches` refuses duplicates by RAW name; `output.naming` can
-    // collapse two distinct raw names onto one key, and until the union existed
-    // that needed both spellings inside ONE projection, which the raw-name check
-    // already caught. See `ValidationError::OutputNamingCollision`.
-    let mut mapped: Vec<(String, &str)> = Vec::with_capacity(described.union.len());
-    for column in &described.union {
-        let key = crate::serving::router::apply_naming(&column.name, &draft.output.naming);
-        if let Some((_, first)) = mapped.iter().find(|(k, _)| *k == key) {
-            return Err(ValidationError::OutputNamingCollision {
-                key,
-                first: (*first).to_owned(),
-                second: column.name.clone(),
-                naming: draft.output.naming.clone(),
-            }
-            .into());
+    if total > MAX_DESCRIBED_BRANCHES {
+        return Err(ValidationError::TooManyBranches {
+            branches: total,
+            limit: MAX_DESCRIBED_BRANCHES,
         }
-        mapped.push((key, column.name.as_str()));
+        .into());
     }
-    Ok(described.union)
+
+    let mut frozen: Vec<StatementSnapshot> = Vec::with_capacity(planned.len());
+    for (statement, renderings) in planned {
+        let described =
+            describe_branches(port, workspace, principal, draft.database_id, renderings).await?;
+        // `arrays` is positional: `shape_rows` zips the live and frozen column
+        // lists by index and `data_schema` documents the order in prose, because
+        // OpenAPI 3.0 has no tuple type. A definition whose branches resolve to
+        // different column lists — different names, different count, or different
+        // order — has no single order to freeze, so it is refused here rather than
+        // served under whichever branch happened to be described first. A
+        // non-branching definition has exactly one entry in `per_branch`, so
+        // this `any` never fires for it — the rule costs it nothing.
+        //
+        // Per STATEMENT, like every other rule in this loop: `output.shape` is
+        // one setting for the endpoint, but what it cannot express is one
+        // statement's branches disagreeing, and each statement is served as its
+        // own positional result set.
+        if draft.output.shape == "arrays"
+            && described
+                .per_branch
+                .iter()
+                .any(|names| names != &described.per_branch[0])
+        {
+            return Err(ValidationError::BranchingArraysShape.into());
+        }
+        // The SAME fold `shape_rows` and `data_schema` run, over the SAME frozen
+        // union, run here first — where the author is present and the blast radius
+        // is one endpoint. `draft.output` is already in hand for the check above.
+        //
+        // `describe_branches` refuses duplicates by RAW name; `output.naming` can
+        // collapse two distinct raw names onto one key, and until the union existed
+        // that needed both spellings inside ONE projection, which the raw-name check
+        // already caught. See `ValidationError::OutputNamingCollision`.
+        //
+        // Folded per statement and NOT across statements: two statements may
+        // each return a `total`, because §4.4 keys their result sets apart by
+        // statement name and a key collision is only possible inside one JSON
+        // object.
+        let mut mapped: Vec<(String, &str)> = Vec::with_capacity(described.union.len());
+        for column in &described.union {
+            let key = crate::serving::router::apply_naming(&column.name, &draft.output.naming);
+            if let Some((_, first)) = mapped.iter().find(|(k, _)| *k == key) {
+                return Err(ValidationError::OutputNamingCollision {
+                    key,
+                    first: (*first).to_owned(),
+                    second: column.name.clone(),
+                    naming: draft.output.naming.clone(),
+                }
+                .into());
+            }
+            mapped.push((key, column.name.as_str()));
+        }
+        frozen.push(StatementSnapshot {
+            name: statement.name.clone(),
+            sql: statement.sql.clone(),
+            columns: described.union,
+        });
+    }
+    Ok(frozen)
 }
 
 /// What describing every branch of one definition produced.
@@ -1888,18 +2030,30 @@ pub(crate) struct DescribedBranches {
 /// separation the earlier wording promised.
 const MAX_DECLARED_PARAMS: usize = 32;
 
-/// How many structurally distinct branches one definition may publish.
+/// How many structurally distinct branches one ENDPOINT may publish, summed
+/// across its statements.
+///
+/// **Endpoint-wide, not per statement** (spec §4.1.1). Publish describes every
+/// branch of every statement, so a per-statement limit would grow with exactly
+/// the thing it exists to bound: ten statements would license ten times one
+/// statement's engine round trips. [`validate`] enumerates every statement's
+/// renderings, sums the counts and checks the total once, before the first
+/// describe. The table below is still measured per definition, because that is
+/// how an author writes one; the budget is what they add up to.
 ///
 /// # What it bounds, and what it does not
 ///
 /// It bounds the ENGINE half: publish describes every distinct rendering, so
 /// this is the number of round trips one publish may cost. It does **not** bound
 /// the rendering that produces that number — the count has to be known before it
-/// can be refused, so a definition still renders up to `64 × (optional + 2)`
-/// times (`render::MAX_PROBES` assignments per context) before this limit can
-/// say no. That residual is synchronous CPU on an async task, and it is bounded
-/// by [`MAX_DECLARED_PARAMS`] instead, which is a scan and runs first. The two
-/// limits are halves of one bound, not one limit and a spare.
+/// can be refused, so an endpoint still renders up to `64 × (optional + 2)`
+/// times per statement (`render::MAX_PROBES` assignments per context) before this
+/// limit can say no. That residual is synchronous CPU on an async task, and it is
+/// bounded by [`MAX_DECLARED_PARAMS`] instead, which is a scan and runs first —
+/// though only per statement, so an endpoint's worst-case render cost is now that
+/// bound times the number of statements, which the spec says to re-measure rather
+/// than carry over. The two limits are halves of one bound, not one limit and a
+/// spare.
 ///
 /// # Why it refuses rather than truncates
 ///
@@ -2056,7 +2210,35 @@ fn branch_renderings(sql: &str, params: &[ParamSpec]) -> Vec<(String, usize)> {
     renderings
 }
 
-/// Describe every branch and fold the results into one contract.
+/// [`branch_renderings`], guaranteed non-empty.
+///
+/// **Split out of [`describe_branches`] so the budget can be an ENDPOINT's.**
+/// The count has to be known for every statement before the first one is
+/// described (spec §4.1.1), and the fallback below is part of the count: a
+/// statement that reaches it costs one describe like any other. Leaving it
+/// inside the describe loop would have made the sum wrong by one per statement
+/// that took it — invisible at N = 1, where the number was never summed.
+fn renderings_for(
+    sql: &str,
+    params: &[ParamSpec],
+) -> std::result::Result<Vec<(String, usize)>, ValidationError> {
+    let mut renderings = branch_renderings(sql, params);
+    if renderings.is_empty() {
+        // Unreachable while `check_render_rules` has just rendered the
+        // representative context, but `render_permutations` SKIPS an assignment
+        // that does not render, so an empty result is silence rather than an
+        // error. Render the representative context directly: its failure is the
+        // one worth reporting, and its success is a branch to describe.
+        let ctx = representative(sql, params, &[]);
+        let (rendered, binds) =
+            crate::render::render(sql, &ctx).map_err(ValidationError::Render)?;
+        renderings.push((rendered, binds.len()));
+    }
+    Ok(renderings)
+}
+
+/// Describe every branch of ONE statement and fold the results into one
+/// contract.
 ///
 /// A `Vec` accumulator, not a map: the union is a PUBLISHED contract, and a
 /// hash order would make two publishes of byte-identical input declare their
@@ -2065,46 +2247,24 @@ fn branch_renderings(sql: &str, params: &[ParamSpec]) -> Vec<(String, usize)> {
 /// `required` is computed only once every branch has been described. Doing it
 /// incrementally would mark the first branch's columns required before
 /// anything knows whether a later branch omits them.
+///
+/// Takes the renderings rather than computing them, and takes `database_id`
+/// rather than the draft: the caller has already enumerated every statement's
+/// branches to spend the endpoint's describe budget, and handing this the draft
+/// again would leave it able to disagree with the count that budget was checked
+/// against.
 async fn describe_branches(
     port: &dyn egret_query_api::QueryExecPort,
     workspace: Uuid,
     principal: UserId,
-    draft: &DataApiEndpointDto,
+    database_id: Uuid,
+    renderings: Vec<(String, usize)>,
 ) -> Result<DescribedBranches> {
-    let sql = &sole_statement(draft)?.sql;
-    let mut renderings = branch_renderings(sql, &draft.params);
-    if renderings.is_empty() {
-        // Unreachable while `check_render_rules` has just rendered the
-        // representative context, but `render_permutations` SKIPS an assignment
-        // that does not render, so an empty result is silence rather than an
-        // error. Render the representative context directly: its failure is the
-        // one worth reporting, and its success is a branch to describe.
-        let ctx = representative(sql, &draft.params, &[]);
-        let (rendered, binds) =
-            crate::render::render(sql, &ctx).map_err(ValidationError::Render)?;
-        renderings.push((rendered, binds.len()));
-    }
-    // Before the first describe, so an over-wide definition costs the author an
-    // error rather than costing the engine a few hundred round trips.
-    if renderings.len() > MAX_DESCRIBED_BRANCHES {
-        return Err(ValidationError::TooManyBranches {
-            branches: renderings.len(),
-            limit: MAX_DESCRIBED_BRANCHES,
-        }
-        .into());
-    }
-
     let mut union: Vec<ColumnSpec> = Vec::new();
     let mut per_branch: Vec<Vec<String>> = Vec::new();
     for (rendered, bind_count) in &renderings {
         let columns = port
-            .describe_as_with_params(
-                workspace,
-                draft.database_id,
-                principal,
-                rendered,
-                *bind_count,
-            )
+            .describe_as_with_params(workspace, database_id, principal, rendered, *bind_count)
             .await?;
         if columns.is_empty() {
             return Err(ValidationError::DescribeReturnedNoColumns.into());
@@ -2326,7 +2486,7 @@ impl EndpointStore {
         by: UserId,
         note: &str,
         draft: &DataApiEndpointDto,
-        columns: Vec<ColumnSpec>,
+        described: Vec<StatementSnapshot>,
     ) -> Result<DataApiPublishedDto> {
         let mut tx = self.db.pool.begin().await.map_err(db_err)?;
 
@@ -2389,29 +2549,42 @@ impl EndpointStore {
 
         // The whole pure validator, against the row actually being frozen. See the
         // doc comment: this is what closes the window, not the identity check above.
-        let sole = sole_statement(&current)?;
-        let sole_name = sole.name.clone();
-        let sole_sql = sole.sql.clone();
-        validate_definition(
-            &sole_sql,
+        validate_endpoint(
+            &current.statements,
             &current.params,
             &current.cache,
             delegated,
             impersonate,
         )?;
 
+        // The name and the SQL come from `current` — the LOCKED row — and only
+        // the resolved columns come from the caller. `described` was computed
+        // against the pre-lock draft, and the identity check above says the two
+        // agree; taking the text from the locked row anyway is what makes that
+        // an assertion rather than a promise, and it is the same reason `path`
+        // below is read from `current` rather than echoed back.
+        //
+        // A length mismatch is unreachable through that check and is answered
+        // as the conflict it would have to be, not as a panic on an index.
+        if described.len() != current.statements.len() {
+            return Err(Error::Conflict(
+                "the endpoint was edited while it was being published; validate and publish again"
+                    .into(),
+            ));
+        }
+        let statements: Vec<StatementSnapshot> = current
+            .statements
+            .iter()
+            .zip(described)
+            .map(|(statement, resolved)| StatementSnapshot {
+                name: statement.name.clone(),
+                sql: statement.sql.clone(),
+                columns: resolved.columns,
+            })
+            .collect();
+
         let snapshot = EndpointSnapshot {
-            // One element, because `sole_statement` above has already refused
-            // anything else — M2 Task 5 turns this into the loop. The NAME is
-            // carried over from the draft rather than synthesized, so an
-            // endpoint's statement is called the same thing whether it is read
-            // from a snapshot published now or from one migration 0129 named
-            // `main`.
-            statements: vec![StatementSnapshot {
-                name: sole_name,
-                sql: sole_sql,
-                columns,
-            }],
+            statements,
             method: current.method.clone(),
             // The stored path, which `normalize_path` already canonicalised. The
             // snapshot must never carry a spelling the endpoint row does not have.

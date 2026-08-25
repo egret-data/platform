@@ -1359,7 +1359,13 @@ async fn validated_draft(
     ws: Uuid,
     principal: UserId,
     id: Uuid,
-) -> Result<(DataApiEndpointDto, Vec<egret_dataapi_api::ColumnSpec>), DataApiError> {
+) -> Result<
+    (
+        DataApiEndpointDto,
+        Vec<egret_dataapi_api::StatementSnapshot>,
+    ),
+    DataApiError,
+> {
     let draft = st.endpoints.get(ws, id).await?;
     let (delegated, impersonate) = st
         .endpoints
@@ -1368,16 +1374,25 @@ async fn validated_draft(
     // `ctx.principal`, not the service account: `describe_as` resolves under the
     // caller's own identity so a delegated connection applies THEIR policy, and
     // an author cannot publish a contract over a table they cannot themselves see.
-    let columns = validate(&*st.query, ws, principal, &draft, delegated, impersonate).await?;
-    Ok((draft, columns))
+    let described = validate(&*st.query, ws, principal, &draft, delegated, impersonate).await?;
+    Ok((draft, described))
 }
 
 /// What `POST /validate` answers with.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct DataApiValidationDto {
-    /// The output schema `describe` resolved. This is what `publish` would
-    /// freeze, so an author sees the contract before committing to it.
-    pub columns: Vec<egret_dataapi_api::ColumnSpec>,
+    /// Exactly what `publish` would freeze: one entry per statement, in the
+    /// author's order, each carrying the output schema `describe` resolved for
+    /// it — so an author sees the contract before committing to it.
+    ///
+    /// A LIST rather than the single `columns` this carried before M2, because
+    /// an endpoint has one column set per statement and folding them into one
+    /// would report a contract no version will ever hold: two statements each
+    /// returning a `total` are two result sets, not one column declared twice.
+    /// [`egret_dataapi_api::StatementSnapshot`] rather than a new pair type,
+    /// because it IS the frozen shape and reusing it keeps "what validate says"
+    /// and "what publish writes" the same words.
+    pub statements: Vec<egret_dataapi_api::StatementSnapshot>,
 }
 
 #[utoipa::path(
@@ -1405,8 +1420,9 @@ async fn validate_endpoint(
     // `:manage`, not `:read` — this runs a query against the engine under the
     // caller's identity, which is an authoring action and not a read of metadata.
     egret_core::authz::require(&*st.pdp, &ctx, EP_MANAGE).await?;
-    let (_, columns) = validated_draft(&st, ctx.workspace_id.0, ctx.principal.user_id, id).await?;
-    Ok(Json(DataApiValidationDto { columns }))
+    let (_, statements) =
+        validated_draft(&st, ctx.workspace_id.0, ctx.principal.user_id, id).await?;
+    Ok(Json(DataApiValidationDto { statements }))
 }
 
 #[utoipa::path(
@@ -1477,10 +1493,10 @@ async fn publish_endpoint(
     // Validation and the describe both run BEFORE any write — see
     // `EndpointStore::publish` on why that is stronger than wrapping them in the
     // transaction, not weaker.
-    let (draft, columns) = validated_draft(&st, ws, ctx.principal.user_id, id).await?;
+    let (draft, described) = validated_draft(&st, ws, ctx.principal.user_id, id).await?;
     let published = st
         .endpoints
-        .publish(ws, id, ctx.principal.user_id, &note, &draft, columns)
+        .publish(ws, id, ctx.principal.user_id, &note, &draft, described)
         .await?;
     // The version NUMBER is the load-bearing field: `dataapi.endpoint_versions`
     // is immutable, so "who put version N live, and when" is the question the

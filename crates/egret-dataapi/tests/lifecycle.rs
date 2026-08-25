@@ -450,6 +450,24 @@ impl Fixture {
         .expect("insert endpoint draft")
     }
 
+    /// Replace the draft's statement list, straight into the table.
+    ///
+    /// Written rather than PATCHed for the same reason `create_endpoint` is: a
+    /// publish test must not depend on the write route also being correct. The
+    /// affected-row count is asserted because a forge that missed the row would
+    /// otherwise leave the test measuring the ONE-statement endpoint it started
+    /// from and passing for the wrong reason.
+    async fn set_statements(&self, ep: Uuid, statements: serde_json::Value) {
+        let touched = sqlx::query("UPDATE dataapi.endpoints SET statements = $2 WHERE id = $1")
+            .bind(ep)
+            .bind(&statements)
+            .execute(&self.db.pool)
+            .await
+            .expect("store statements")
+            .rows_affected();
+        assert_eq!(touched, 1, "the statement list must actually be stored");
+    }
+
     async fn patch_endpoint(&self, ep: Uuid, body: serde_json::Value) {
         let (status, b) = self
             .send(
@@ -2222,15 +2240,74 @@ async fn validate_reports_the_columns_without_publishing_anything() {
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
+    // The whole answer, not a field of it: `POST /validate` reports exactly what
+    // publish would freeze, and since M2 that is one entry PER STATEMENT. A
+    // single flattened `columns` list could not say which statement a column
+    // belongs to, and two statements each returning a `total` would read as one
+    // column declared twice.
     assert_eq!(
-        body["columns"],
-        serde_json::json!([
-            { "name": "id", "ty": "uuid", "required": true },
-            { "name": "n", "ty": "bigint", "required": true }
-        ])
+        body["statements"],
+        serde_json::json!([{
+            "name": "main",
+            "sql": "SELECT id, n FROM t",
+            "columns": [
+                { "name": "id", "ty": "uuid", "required": true },
+                { "name": "n", "ty": "bigint", "required": true }
+            ]
+        }])
     );
     assert!(f.versions(ep).await.is_empty(), "validate must not publish");
     assert_eq!(f.state_of(ep).await.0, "draft");
+}
+
+/// The same route over several statements, adjacent to the one-statement case
+/// above so the two shapes are read together.
+///
+/// `POST /validate` and `POST /publish` share one function, so this is the
+/// authoring surface of the same loop the publish tests drive: an author must
+/// be able to see both contracts before committing to either.
+#[tokio::test]
+async fn validate_reports_one_column_set_per_statement() {
+    let f = skip_without_db!();
+    f.port.set(Describe::PerSql(vec![
+        ("FROM ledger", vec![("total", "bigint")]),
+        ("FROM sales", vec![("id", "uuid")]),
+    ]));
+    let ep = f.create_endpoint("multi", "multi", "SELECT 1 AS n").await;
+    f.set_statements(
+        ep,
+        serde_json::json!([
+            { "name": "rows", "sql": "SELECT id FROM sales" },
+            { "name": "total", "sql": "SELECT count(*) AS total FROM ledger" },
+        ]),
+    )
+    .await;
+
+    let (status, body) = f
+        .send(
+            &f.manager,
+            "POST",
+            &format!("{}/{ep}/validate", f.collection()),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["statements"],
+        serde_json::json!([
+            {
+                "name": "rows",
+                "sql": "SELECT id FROM sales",
+                "columns": [{ "name": "id", "ty": "uuid", "required": true }]
+            },
+            {
+                "name": "total",
+                "sql": "SELECT count(*) AS total FROM ledger",
+                "columns": [{ "name": "total", "ty": "bigint", "required": true }]
+            }
+        ])
+    );
+    assert!(f.versions(ep).await.is_empty(), "validate must not publish");
 }
 
 // ---------------------------------------------------------------------------
@@ -2476,55 +2553,554 @@ async fn publish_describes_an_enum_value_past_the_old_candidate_cap() {
     );
 }
 
-/// **Delete this with the bridge it pins (M2 Task 5).** Until publish validates
-/// and describes every statement, an endpoint that declares more than one is
-/// refused rather than published with the first one frozen and the rest
-/// silently dropped — which would freeze a contract missing a whole result set
-/// and serve 200s that are simply short of it.
+// ---------------------------------------------------------------------------
+// M2 Task 5 — publish validates and describes EVERY statement
+// ---------------------------------------------------------------------------
+
+/// **The feature this task exists for.** Two statements, described
+/// independently, each freezing its own column set under its own name.
 ///
-/// The message is asserted, not just the status: 400 is the answer to a dozen
-/// definition rules here, so a status alone cannot say which one fired.
+/// The bridge this replaces refused the endpoint outright, because freezing
+/// `statements[0]` would have published a contract short a whole result set —
+/// 200s missing a half nobody reports as a bug. So the assertion is not merely
+/// that it publishes: it is that BOTH column sets are in the snapshot, in the
+/// author's order, with the names they were written under.
+///
+/// `Describe::PerSql` is keyed on the RELATION, not on a parameter name. A
+/// fixture keyed on a placeholder cannot work here — the renderer consumes
+/// `{{name}}` into a bind marker before the port ever sees the statement — and
+/// that mistake silently collapsed a two-branch fixture to one in M1.
 #[tokio::test]
-async fn publishing_more_than_one_statement_is_refused_until_task_5() {
+async fn a_two_statement_endpoint_freezes_a_column_set_for_each() {
     let f = skip_without_db!();
+    f.port.set(Describe::PerSql(vec![
+        ("FROM ledger", vec![("total", "bigint")]),
+        (
+            "FROM sales",
+            vec![("id", "uuid"), ("amount", "decimal(10,2)")],
+        ),
+    ]));
     let ep = f
-        .create_endpoint("several", "several", "SELECT 1 AS n")
+        .create_endpoint("pair", "reports/pair", "SELECT 1 AS n")
         .await;
-    let touched = sqlx::query("UPDATE dataapi.endpoints SET statements = $2 WHERE id = $1")
-        .bind(ep)
-        .bind(serde_json::json!([
-            { "name": "rows", "sql": "SELECT 1 AS n" },
-            { "name": "total", "sql": "SELECT 2 AS n" },
-        ]))
-        .execute(&f.db.pool)
-        .await
-        .expect("store two statements")
-        .rows_affected();
+    f.set_statements(
+        ep,
+        serde_json::json!([
+            { "name": "rows", "sql": "SELECT id, amount FROM sales" },
+            { "name": "total", "sql": "SELECT count(*) AS total FROM ledger" },
+        ]),
+    )
+    .await;
+
+    let before = f.port.call_count();
+    let (status, body) = f.publish_raw(ep).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(
-        touched, 1,
-        "the two-statement draft must actually be stored"
+        f.port.call_count() - before,
+        2,
+        "neither statement branches, so each costs exactly one describe — and \
+         BOTH must have been described, which is the whole point"
     );
 
+    let snap = f.live_snapshot(ep).await;
+    assert_eq!(
+        snap.statements.len(),
+        2,
+        "both statements must be frozen: {snap:?}"
+    );
+    let names: Vec<&str> = snap.statements.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["rows", "total"],
+        "in the author's order, and under the author's names"
+    );
+    assert_eq!(snap.statements[0].sql, "SELECT id, amount FROM sales");
+    assert_eq!(
+        snap.statements[1].sql,
+        "SELECT count(*) AS total FROM ledger"
+    );
+    let columns = |i: usize| -> Vec<&str> {
+        snap.statements[i]
+            .columns
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect()
+    };
+    assert_eq!(
+        columns(0),
+        vec!["id", "amount"],
+        "each statement freezes ITS OWN columns, not the endpoint's first"
+    );
+    assert_eq!(columns(1), vec!["total"]);
+    assert_eq!(
+        snap.statements[0].columns[1].ty, "decimal(10,2)",
+        "the engine's own type string is frozen per statement"
+    );
+    assert!(
+        snap.statements
+            .iter()
+            .all(|s| s.columns.iter().all(|c| c.required)),
+        "neither statement branches, so every column is in every branch of it"
+    );
+}
+
+/// The single-statement gate is untouchable, and it applies to EVERY statement.
+///
+/// A `;` in the second one is the interesting position: the first is perfectly
+/// good SQL, so a loop that validated only until it found something publishable
+/// — or only the first element, as the bridge did — would let this through and
+/// freeze a definition carrying a statement separator into an immutable version.
+///
+/// The message is asserted, not the status: `400` answers a dozen definition
+/// rules here, and reading which refusal fired is the only thing that says the
+/// `;` scan is what stopped it.
+#[tokio::test]
+async fn the_single_statement_gate_still_fires_for_a_later_statement() {
+    let f = skip_without_db!();
+    let ep = f
+        .create_endpoint("gate", "reports/gate", "SELECT 1 AS n")
+        .await;
+    for (sql, needle, why) in [
+        (
+            "SELECT 1; DROP TABLE t",
+            "only one statement may be published",
+            "a separator in the second statement",
+        ),
+        (
+            "SELECT 1 #x",
+            "may not appear in a published definition",
+            "a `#` in the second statement",
+        ),
+        (
+            "INSERT INTO t VALUES (1)",
+            "only SELECT",
+            "a write in the second statement",
+        ),
+    ] {
+        f.set_statements(
+            ep,
+            serde_json::json!([
+                { "name": "rows", "sql": "SELECT 1 AS n" },
+                { "name": "total", "sql": sql },
+            ]),
+        )
+        .await;
+        let before = f.port.call_count();
+        let (status, body) = f.publish_raw(ep).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{why}: {body}");
+        assert!(
+            body["error"].as_str().unwrap_or_default().contains(needle),
+            "{why}: expected the reason to mention {needle:?}, got {body}"
+        );
+        assert_eq!(
+            f.port.call_count(),
+            before,
+            "{why}: a multi-statement string must never reach a coordinator"
+        );
+        assert!(f.versions(ep).await.is_empty(), "{why} must not publish");
+    }
+}
+
+/// **The describe budget belongs to the ENDPOINT, not to each statement**
+/// (spec §4.1.1). Ten statements must not license ten times the engine round
+/// trips.
+///
+/// The expected total is MEASURED rather than written down: the same definition
+/// is published alone first, its describes counted, and the pair is then
+/// required to refuse at exactly twice that. A hard-coded number would still
+/// pass against a per-statement limit if the arithmetic happened to line up;
+/// deriving it from the single-statement cost cannot.
+///
+/// Both halves are under the limit on their own — the first one is PROVEN so,
+/// by publishing — so the only thing that can refuse the pair is a budget that
+/// sums across statements.
+#[tokio::test]
+async fn the_describe_budget_is_the_endpoints_total_not_one_per_statement() {
+    let f = skip_without_db!();
+    f.port.set(Describe::Columns(vec![("id", "uuid")]));
+    // Measured in M1: n independent optional booleans render to 57 distinct
+    // statements at n = 10, against a limit of 64. Two of those is 114.
+    let build = |relation: &str, n: usize| {
+        let mut sql = format!("SELECT id FROM {relation} WHERE 1=1");
+        let mut params = Vec::new();
+        for i in 0..n {
+            sql.push_str(&format!(
+                " {{% if p{i} %}} AND a{i} = {{{{ p{i} }}}}{{% endif %}}"
+            ));
+            params.push(serde_json::json!({
+                "name": format!("p{i}"), "type": "boolean", "location": "query"
+            }));
+        }
+        (sql, serde_json::Value::from(params))
+    };
+    let (sql_a, params) = build("t", 10);
+    let (sql_b, _) = build("u", 10);
+
+    // What ONE of them costs, and proof that it is publishable on its own.
+    let alone = f.create_endpoint("alone", "reports/alone", &sql_a).await;
+    f.patch_endpoint(alone, serde_json::json!({ "params": params.clone() }))
+        .await;
+    let before = f.port.call_count();
+    let (status, body) = f.publish_raw(alone).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "ten optional booleans is under the limit for one statement: {body}"
+    );
+    let per_statement = f.port.call_count() - before;
+    assert!(
+        per_statement > 10 && per_statement <= 64,
+        "and it must have cost real describes, within the budget: {per_statement}"
+    );
+
+    // The same shape twice on ONE endpoint. Neither half is over; the endpoint is.
+    let pair = f.create_endpoint("wide", "reports/wide", &sql_a).await;
+    f.patch_endpoint(pair, serde_json::json!({ "params": params }))
+        .await;
+    f.set_statements(
+        pair,
+        serde_json::json!([
+            { "name": "rows", "sql": sql_a },
+            { "name": "also", "sql": sql_b },
+        ]),
+    )
+    .await;
+    let before = f.port.call_count();
+    let (status, body) = f.publish_raw(pair).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "two statements each just under the cap must refuse TOGETHER: {body}"
+    );
+    let msg = body["error"].as_str().unwrap_or_default();
+    let total = per_statement * 2;
+    assert!(
+        msg.contains(&total.to_string()),
+        "the author needs the ENDPOINT's total ({total}), not one statement's \
+         ({per_statement}): {msg}"
+    );
+    assert!(
+        msg.contains("64"),
+        "and the limit it is measured against: {msg}"
+    );
+    assert!(
+        msg.contains("across its statements"),
+        "and the message must read correctly now that `statement` and `branch` \
+         are two different things: {msg}"
+    );
+    assert!(
+        msg.contains("`default`") && msg.contains("split"),
+        "and what to do about it, not just the number: {msg}"
+    );
+    assert!(
+        !msg.contains("  "),
+        "no run of two spaces belongs in an author-facing message: {msg}"
+    );
+    assert_eq!(
+        f.port.call_count(),
+        before,
+        "the refusal must come BEFORE the first describe — the point of the \
+         limit is that the engine never sees the fan-out, and summing after \
+         describing the first statement would have cost it 57 round trips"
+    );
+    assert!(
+        f.versions(pair).await.is_empty(),
+        "nothing may be published"
+    );
+}
+
+/// Every rule M1 built over ONE definition's branches must still fire when the
+/// definition that breaks it is the SECOND statement.
+///
+/// This is the shape of hole the brief for this task names outright: converting
+/// some of these to per-statement and not others leaves a rule that silently
+/// stops applying to everything after `statements[0]`. Each case here puts a
+/// clean, non-branching statement FIRST, so a loop that stopped at the first
+/// publishable statement would pass every one of them.
+///
+/// The message is read in each case, not just the status.
+#[tokio::test]
+async fn every_branch_rule_still_fires_for_a_later_statement() {
+    let f = skip_without_db!();
+
+    // 1. `output.shape: arrays` over a statement whose branches differ.
+    {
+        f.port.set(Describe::PerSql(vec![
+            ("FROM ledger", vec![("total", "bigint")]),
+            (", name", vec![("id", "uuid"), ("name", "varchar")]),
+            ("", vec![("id", "uuid")]),
+        ]));
+        let ep = f
+            .create_endpoint("arr", "reports/arr", "SELECT 1 AS n")
+            .await;
+        f.patch_endpoint(
+            ep,
+            serde_json::json!({
+                "params": [{ "name": "detail", "type": "boolean", "location": "query" }],
+                "output": { "shape": "arrays" }
+            }),
+        )
+        .await;
+        f.set_statements(
+            ep,
+            serde_json::json!([
+                { "name": "total", "sql": "SELECT count(*) AS total FROM ledger" },
+                { "name": "rows", "sql": "SELECT id {% if detail %}, name {% endif %}FROM t" },
+            ]),
+        )
+        .await;
+        let (status, body) = f.publish_raw(ep).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "arrays: {body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("`output.shape: arrays` cannot express"),
+            "arrays: the positional-row refusal must be the one that fired: {body}"
+        );
+        assert!(f.versions(ep).await.is_empty(), "arrays must not publish");
+    }
+
+    // 2. Two columns of one name inside a single branch of the second statement.
+    {
+        f.port.set(Describe::PerSql(vec![
+            ("JOIN b", vec![("id", "bigint"), ("id", "bigint")]),
+            ("", vec![("total", "bigint")]),
+        ]));
+        let ep = f
+            .create_endpoint("dup", "reports/dup", "SELECT 1 AS n")
+            .await;
+        f.set_statements(
+            ep,
+            serde_json::json!([
+                { "name": "total", "sql": "SELECT count(*) AS total FROM ledger" },
+                { "name": "rows", "sql": "SELECT a.id, b.id FROM a JOIN b ON 1=1" },
+            ]),
+        )
+        .await;
+        let (status, body) = f.publish_raw(ep).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "duplicate: {body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("returns two columns named `id`"),
+            "duplicate: the alias diagnosis must be the one that fired: {body}"
+        );
+        assert!(
+            f.versions(ep).await.is_empty(),
+            "duplicate must not publish"
+        );
+    }
+
+    // 3. `output.naming` collapsing two of the second statement's branch names
+    //    onto one key.
+    {
+        f.port.set(Describe::PerSql(vec![
+            ("total_revenue", vec![("total_revenue", "bigint")]),
+            ("totalRevenue", vec![("totalRevenue", "bigint")]),
+            ("", vec![("id", "uuid")]),
+        ]));
+        let ep = f
+            .create_endpoint("col", "reports/col", "SELECT 1 AS n")
+            .await;
+        f.patch_endpoint(
+            ep,
+            serde_json::json!({
+                "params": [{ "name": "d", "type": "boolean", "location": "query" }],
+                "output": { "shape": "objects", "naming": "camel" }
+            }),
+        )
+        .await;
+        f.set_statements(
+            ep,
+            serde_json::json!([
+                { "name": "rows", "sql": "SELECT id FROM t" },
+                { "name": "rev",
+                  "sql": "SELECT {% if d %}total_revenue{% else %}totalRevenue{% endif %} FROM r" },
+            ]),
+        )
+        .await;
+        let (status, body) = f.publish_raw(ep).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "naming: {body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("both become `totalRevenue` under `output.naming: camel`"),
+            "naming: the collision fold must run over the SECOND statement's \
+             union too: {body}"
+        );
+        assert!(f.versions(ep).await.is_empty(), "naming must not publish");
+    }
+
+    // 4. One name, two types, across the second statement's branches.
+    {
+        f.port.set(Describe::PerSql(vec![
+            ("name AS v", vec![("v", "varchar")]),
+            ("n AS v", vec![("v", "bigint")]),
+            ("", vec![("id", "uuid")]),
+        ]));
+        let ep = f.create_endpoint("ty", "reports/ty", "SELECT 1 AS n").await;
+        f.patch_endpoint(
+            ep,
+            serde_json::json!({
+                "params": [{ "name": "d", "type": "boolean", "location": "query" }]
+            }),
+        )
+        .await;
+        f.set_statements(
+            ep,
+            serde_json::json!([
+                { "name": "rows", "sql": "SELECT id FROM t" },
+                { "name": "v",
+                  "sql": "SELECT {% if d %}name{% else %}n{% endif %} AS v FROM r" },
+            ]),
+        )
+        .await;
+        let (status, body) = f.publish_raw(ep).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "type: {body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("is `varchar` in one branch of this definition and `bigint`"),
+            "type: the union's type comparison must run per statement: {body}"
+        );
+        assert!(f.versions(ep).await.is_empty(), "type must not publish");
+    }
+}
+
+/// **A parameter is declared once for the endpoint and may be read by only one
+/// of its statements** (spec §4.2).
+///
+/// `ValidationError::UnreferencedParameter` is the one rule in the parameter
+/// scan that is about the CONTRACT rather than about the statement, and it is
+/// therefore the one rule that cannot be applied per statement: a `sort` that
+/// only the rows query reads is not an unused query parameter, it is a query
+/// parameter used by one of two statements. Running the scan unchanged over
+/// each statement refuses this endpoint outright, which is a loud refusal of a
+/// shape §4.2 states is legal.
+///
+/// Both directions, because a union computed as "whatever `statements[0]`
+/// reads" would pass the first half and fail the second.
+#[tokio::test]
+async fn a_parameter_only_one_statement_reads_still_publishes() {
+    let f = skip_without_db!();
+    f.port.set(Describe::PerSql(vec![
+        ("FROM ledger", vec![("total", "bigint")]),
+        ("", vec![("id", "uuid")]),
+    ]));
+    let params = serde_json::json!([
+        { "name": "r", "type": "string", "location": "query", "required": true }
+    ]);
+    let rows = "SELECT id FROM t WHERE region = {{ r }}";
+    let total = "SELECT count(*) AS total FROM ledger";
+
+    for (first, second, why) in [
+        (rows, total, "the FIRST statement reads it"),
+        (total, rows, "the SECOND statement reads it"),
+    ] {
+        let ep = f
+            .create_endpoint(
+                "shared",
+                &format!("reports/{}", Uuid::new_v4().simple()),
+                "SELECT 1 AS n",
+            )
+            .await;
+        f.patch_endpoint(ep, serde_json::json!({ "params": params }))
+            .await;
+        f.set_statements(
+            ep,
+            serde_json::json!([
+                { "name": "a", "sql": first },
+                { "name": "b", "sql": second },
+            ]),
+        )
+        .await;
+        let (status, body) = f.publish_raw(ep).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{why}: a parameter one statement reads is declared, not unused: {body}"
+        );
+    }
+
+    // The control: a parameter NO statement reads is still refused, so the rule
+    // became a union rather than disappearing.
+    let ep = f
+        .create_endpoint("unused", "reports/unused", "SELECT 1 AS n")
+        .await;
+    f.patch_endpoint(ep, serde_json::json!({ "params": params }))
+        .await;
+    f.set_statements(
+        ep,
+        serde_json::json!([
+            { "name": "a", "sql": "SELECT id FROM t" },
+            { "name": "b", "sql": total },
+        ]),
+    )
+    .await;
     let (status, body) = f.publish_raw(ep).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(
-        body.to_string().contains("exactly one statement"),
-        "the refusal must name the rule that fired, not some other 400: {body}"
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("declared but never referenced"),
+        "an endpoint may still not offer a query parameter that changes \
+         nothing in any of its statements: {body}"
     );
-    assert!(
-        f.versions(ep).await.is_empty(),
-        "and nothing may have been frozen"
-    );
+}
 
-    // Anti-triviality: the same endpoint publishes the moment it declares one
-    // statement, so the refusal above is about the COUNT and not about the
-    // fixture being unpublishable for some other reason.
-    sqlx::query("UPDATE dataapi.endpoints SET statements = $2 WHERE id = $1")
-        .bind(ep)
-        .bind(serde_json::json!([{ "name": "rows", "sql": "SELECT 1 AS n" }]))
-        .execute(&f.db.pool)
-        .await
-        .expect("store one statement");
-    let (status, body) = f.publish_raw(ep).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
+/// **Publish re-checks the statement NAMES, and it is not a duplicate of the
+/// 400 the write routes already give.**
+///
+/// The create and patch routes run `validate_statements` over the request body
+/// (Task 3), so a list forged like this one cannot arrive through them. It can
+/// arrive anyway: nothing constrains the names in the database — the CHECK
+/// added with migration 0129 covers emptiness only — and this crate is not the
+/// only writer of the table. Publish is where a name stops being editable, so
+/// it is the last place the check is worth anything: a duplicate frozen into an
+/// immutable version keys two result sets onto one JSON key (§4.4), and one of
+/// them can never be served.
+#[tokio::test]
+async fn publish_refuses_a_statement_list_the_write_routes_would_have_refused() {
+    let f = skip_without_db!();
+    let ep = f
+        .create_endpoint("names", "reports/names", "SELECT 1 AS n")
+        .await;
+    for (statements, needle, why) in [
+        (
+            serde_json::json!([
+                { "name": "rows", "sql": "SELECT 1 AS n" },
+                { "name": "rows", "sql": "SELECT 2 AS n" },
+            ]),
+            "used by more than one statement",
+            "two statements sharing a name",
+        ),
+        (
+            serde_json::json!([
+                { "name": "rows", "sql": "SELECT 1 AS n" },
+                { "name": "Total", "sql": "SELECT 2 AS n" },
+            ]),
+            "is not a valid identifier",
+            "a name that is not an identifier",
+        ),
+    ] {
+        f.set_statements(ep, statements).await;
+        let before = f.port.call_count();
+        let (status, body) = f.publish_raw(ep).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{why}: {body}");
+        assert!(
+            body["error"].as_str().unwrap_or_default().contains(needle),
+            "{why}: expected {needle:?}, got {body}"
+        );
+        assert_eq!(
+            f.port.call_count(),
+            before,
+            "{why}: a name is a scan, so it must refuse before the engine"
+        );
+        assert!(f.versions(ep).await.is_empty(), "{why} must not publish");
+    }
 }

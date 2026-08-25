@@ -636,8 +636,10 @@ async fn run(
     }
     let shared = shared_cache_allowed(&st.db, &snap).await?;
     // **M2 Task 4 bridge, deleted by Tasks 7 and 8.** The snapshot carries a
-    // LIST of statements now; this path still serves exactly one, because
-    // `lifecycle::sole_statement` is still refusing to publish anything else.
+    // LIST of statements now, and as of Task 5 publish freezes every one of
+    // them — so this path serving exactly one is a REAL gap and no longer a
+    // no-op: a two-statement endpoint answers 200 carrying only the first
+    // statement's rows until Task 7 executes them all.
     // Resolved once, here, so the rendered SQL, the shaped rows and both
     // `meta.columns` all come from the SAME element rather than three
     // independent `statements[0]`s that a later change could let drift apart.
@@ -1190,9 +1192,11 @@ fn shape_rows(
     snap: &EndpointSnapshot,
 ) -> Result<serde_json::Value, ServingError> {
     // **M2 Task 4 bridge, deleted by Task 7**, which shapes each statement
-    // against ITS OWN frozen columns. Today publish freezes exactly one
-    // statement (`lifecycle::sole_statement`), so the frozen union is that
-    // element's. Bound once so every clause below judges the same list.
+    // against ITS OWN frozen columns. Publish freezes one union per statement
+    // as of Task 5; this reads the first statement's, which is the right list
+    // only while the caller is executing the first statement. Bound once so
+    // every clause below judges the same list — all six must become
+    // per-statement together.
     let frozen = &snap
         .sole_statement()
         .ok_or_else(|| ServingError::internal("published snapshot carries no statements"))?
