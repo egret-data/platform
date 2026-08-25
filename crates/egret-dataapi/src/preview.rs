@@ -270,9 +270,14 @@ pub(crate) async fn run(
     crate::lifecycle::validate_preview(&body.sql, &body.params)?;
 
     // The SAME function serving resolves through, so a value that renders one
-    // way here cannot render another way for a consumer.
-    let resolved = crate::serving::params::resolve_supplied(&body.values, &body.sql, &body.params)
-        .map_err(|e| param_error(e, &body.params, &body.values))?;
+    // way here cannot render another way for a consumer. A single-element
+    // slice: THIS request body — preview's own, not the stored draft — carries
+    // one `sql` field rather than a statement list, so the union
+    // `resolve_supplied` computes over `sqls` is a union of one. The stored
+    // draft did become a list in M2; preview's body deliberately did not.
+    let resolved =
+        crate::serving::params::resolve_supplied(&body.values, &[body.sql.as_str()], &body.params)
+            .map_err(|e| param_error(e, &body.params, &body.values))?;
 
     let (sql, binds) = crate::render::render(&body.sql, &resolved.values)
         .map_err(crate::lifecycle::ValidationError::Render)?;

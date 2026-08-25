@@ -105,15 +105,14 @@ pub(crate) fn resolve(
     snap: &EndpointSnapshot,
 ) -> Result<Resolved, ServingError> {
     let supplied = decode(raw_query, snap)?;
-    // M2 Task 6 replaces this with the UNION across `snap.statements`, inside
-    // `resolve_supplied` — where preview reaches it too. Publish freezes the
-    // whole list as of Task 5, so reading the first is NO LONGER reading the
-    // only: a parameter that only a later statement reads publishes green
-    // (spec §4.2) and is dropped here until Task 6 lands.
-    let stmt = snap
-        .sole_statement()
-        .ok_or_else(|| ServingError::internal("snapshot carries no statements"))?;
-    resolve_supplied(&supplied, &stmt.sql, &snap.params)
+    // Every statement, not `sole_statement()`'s first one: one request's
+    // parameters are shared by all of them (spec §4.2), and `resolve_supplied`
+    // is where the union over `sqls` is computed — see its own comment.
+    if snap.statements.is_empty() {
+        return Err(ServingError::internal("snapshot carries no statements"));
+    }
+    let sqls: Vec<&str> = snap.statements.iter().map(|s| s.sql.as_str()).collect();
+    resolve_supplied(&supplied, &sqls, &snap.params)
 }
 
 /// [`resolve`], from an ALREADY-DECODED map rather than a raw query string.
@@ -124,23 +123,53 @@ pub(crate) fn resolve(
 /// preview would then disagree with the real call about the same value. Serving
 /// still reaches it through [`resolve`], so there is exactly one place where a
 /// declared parameter becomes a [`Param`].
+///
+/// # `sqls` is the UNION source, not one statement
+///
+/// One request's parameters are shared by every statement an endpoint
+/// declares (spec §4.2): a `rows` query may read `sort` and `limit` while a
+/// `total` query alongside it reads neither. `sqls` carries every statement's
+/// text so the shape a parameter takes — a plain value, or a list of one
+/// because SOME statement iterates it in a `{% for %}` header — is decided
+/// from the whole endpoint, not from whichever statement happened to be
+/// first. Deciding it from only one statement is not merely incomplete: every
+/// statement renders against this SAME [`ParamValues`] (Task 7), so a
+/// parameter shaped as a plain value here because the statement that iterates
+/// it went unread fails to render at all where it is actually used — a scalar
+/// [`crate::render::render`] `Cell` is `ObjectRepr::Plain`, and `{% for %}`
+/// over a `Plain` object is not iterable, so the render errors rather than
+/// silently doing the wrong thing.
+///
+/// Preview passes a single-element `sqls`, because its draft body carries one
+/// `sql` field, not a statement list — the union of one is itself, so nothing
+/// about preview's behaviour changes here. This function is still the ONLY
+/// place that computes the union: [`resolve`] hands it every statement's SQL
+/// but decides nothing about shape itself, which is what keeps preview and
+/// serving unable to disagree about the same endpoint.
 pub(crate) fn resolve_supplied(
     supplied: &BTreeMap<String, Vec<String>>,
-    sql: &str,
+    sqls: &[&str],
     specs: &[ParamSpec],
 ) -> Result<Resolved, ServingError> {
-    // Which declared parameters this definition loops over. One scan of the
-    // template per request, and only when it declares parameters at all — the
-    // render that follows does strictly more work. It is the same function
-    // publish uses to build its representative values, deliberately: the shape a
+    // Which declared parameters ANY statement loops over — the union across
+    // `sqls`. One scan of each statement's template per request, and only when
+    // parameters are declared at all — the render that follows does strictly
+    // more work per statement anyway. It is the same function publish uses (per
+    // statement) to build its representative values, deliberately: the shape a
     // definition was validated against is the shape it is served.
     let iterated: Vec<String> = if specs.is_empty() {
         Vec::new()
     } else {
-        crate::render::iterated_params(
-            sql,
-            &specs.iter().map(|p| p.name.clone()).collect::<Vec<_>>(),
-        )
+        let declared: Vec<String> = specs.iter().map(|p| p.name.clone()).collect();
+        let mut out: Vec<String> = Vec::new();
+        for sql in sqls {
+            for name in crate::render::iterated_params(sql, &declared) {
+                if !out.iter().any(|o| o == &name) {
+                    out.push(name);
+                }
+            }
+        }
+        out
     };
 
     let mut values = ParamValues::new();
@@ -456,6 +485,33 @@ mod tests {
 
     const SQL: &str = "SELECT 1 AS n WHERE 1=1 {% if day %} AND day = {{ day }} {% endif %}";
 
+    /// The canonical pagination pair the brief is shaped around: `total` reads
+    /// no parameters at all, `rows` iterates `r` in a `{% for %}` header. `total`
+    /// is listed FIRST — the one `sole_statement` used to read alone — so any
+    /// code path that still looks at only the first statement's SQL sees no
+    /// trace of `r`.
+    const PAGINATION_TOTAL_SQL: &str = "SELECT count(*) AS n FROM t";
+    const PAGINATION_ROWS_SQL: &str =
+        "SELECT x AS n FROM t WHERE r IN ({% for x in r %}{{ x }}{% if not loop.last %},{% endif %}{% endfor %})";
+
+    /// A two-statement snapshot over the pagination pair above, `total` first.
+    fn pagination_snap(params: Vec<ParamSpec>) -> EndpointSnapshot {
+        let mut s = snap(PAGINATION_TOTAL_SQL, params);
+        s.statements = vec![
+            egret_dataapi_api::StatementSnapshot {
+                name: "total".into(),
+                sql: PAGINATION_TOTAL_SQL.into(),
+                columns: vec![],
+            },
+            egret_dataapi_api::StatementSnapshot {
+                name: "rows".into(),
+                sql: PAGINATION_ROWS_SQL.into(),
+                columns: vec![],
+            },
+        ];
+        s
+    }
+
     fn rendered(query: &str, s: &EndpointSnapshot) -> (String, Vec<Param>) {
         let r = resolve(Some(query), s).expect("resolve");
         crate::render::render(&s.statements[0].sql, &r.values).expect("render")
@@ -494,7 +550,7 @@ mod tests {
         };
         let mut supplied: BTreeMap<String, Vec<String>> = BTreeMap::new();
         supplied.insert("q".into(), vec!["a&b=c".into()]);
-        let out = resolve_supplied(&supplied, "SELECT {{ q }}", std::slice::from_ref(&spec))
+        let out = resolve_supplied(&supplied, &["SELECT {{ q }}"], std::slice::from_ref(&spec))
             .expect("resolves");
         // `key` holds `key_text`'s type-tagged form, so the tag is part of the
         // expected string — the property under test is that the separators
@@ -533,6 +589,57 @@ mod tests {
         let b = crate::render::render(&s.statements[0].sql, &absent.values).expect("render");
         assert_ne!(a, b);
         assert!(b.1.is_empty(), "an absent parameter binds nothing");
+    }
+
+    /// **Step 1's property, at the level where it is decided.** `total` — the
+    /// FIRST statement, and the one `sole_statement` used to read alone before
+    /// Task 6 — never mentions `r`; only `rows`, the SECOND, iterates it in a
+    /// `{% for %}` header. A caller supplying ONE value for `r` must still
+    /// resolve it as a list of one, because that is the shape `rows` needs to
+    /// render at all (Task 7 renders every statement against this same
+    /// `ParamValues`). Reading only the first statement's SQL leaves `r` a bare
+    /// scalar, and a scalar `Cell` is `ObjectRepr::Plain` — not iterable — so
+    /// `rows` fails to render with exactly that shape.
+    #[test]
+    fn a_parameter_only_the_second_statement_iterates_still_resolves_as_a_list() {
+        let s = pagination_snap(vec![spec("r", ParamType::String, false)]);
+        let resolved = resolve(Some("r=EU"), &s).expect("resolve");
+        let (_, binds) = crate::render::render(PAGINATION_ROWS_SQL, &resolved.values)
+            .expect("`rows` must render against the values `resolve` produced");
+        assert_eq!(binds, vec![Param::Str("EU".into())]);
+    }
+
+    /// **Step 1's second half**, in the file's own convention (see
+    /// `lifecycle.rs`'s `the_sev_0_payload_is_refused`, which asserts one rule
+    /// through both its entry points in adjacent lines): [`resolve_supplied`] is
+    /// where preview reaches this union directly, bypassing the query-string
+    /// decode `resolve` does first. Handed the SAME statements and the SAME
+    /// supplied value, it must agree with [`resolve`] byte for byte — nothing
+    /// may compute the union anywhere upstream of `resolve_supplied` itself, or
+    /// preview and serving could disagree about one endpoint, which is the
+    /// defect this programme has already shipped once (see the module comment).
+    #[test]
+    fn resolve_supplied_agrees_with_resolve_on_the_same_union() {
+        let s = pagination_snap(vec![spec("r", ParamType::String, false)]);
+        let via_resolve = resolve(Some("r=EU"), &s).expect("resolve");
+
+        let mut supplied: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        supplied.insert("r".into(), vec!["EU".into()]);
+        let sqls = [PAGINATION_TOTAL_SQL, PAGINATION_ROWS_SQL];
+        let via_supplied = resolve_supplied(&supplied, &sqls, &s.params).expect("resolve_supplied");
+
+        assert_eq!(
+            via_resolve.key, via_supplied.key,
+            "the two entry points must key the same request identically"
+        );
+        let want = crate::render::render(PAGINATION_ROWS_SQL, &via_resolve.values)
+            .expect("rows via resolve");
+        let got = crate::render::render(PAGINATION_ROWS_SQL, &via_supplied.values)
+            .expect("rows via resolve_supplied");
+        assert_eq!(
+            want, got,
+            "the two entry points must bind `rows` identically"
+        );
     }
 
     /// The invariant the whole module is shaped around: equal keys imply equal
