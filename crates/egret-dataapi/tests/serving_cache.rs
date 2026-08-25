@@ -413,6 +413,122 @@ async fn an_undeclared_query_param_cannot_mint_cache_entries() {
     );
 }
 
+/// **Task 10.** The obvious guess, pinned wrong: since this package gave an
+/// endpoint several statements, the cache key must now carry the statement
+/// list. It must not — the cached value is the WHOLE response, and
+/// `cache_key`'s `endpoint_id` already makes two endpoints unable to share an
+/// entry, whatever their statement lists say. Two endpoints, otherwise
+/// identical (same database, same cache scope, same params, same principal),
+/// differing only in the SQL their one statement runs.
+///
+/// Mutation-verified: dropping `h.update(endpoint_id.as_bytes())` from
+/// `cache_key` reddens this test — B collapses onto A's entry, comes back
+/// `cached: true`, and `f.port.executions()` stops at `before + 1`.
+#[tokio::test]
+async fn two_endpoints_differing_only_in_statement_list_do_not_collide() {
+    let f = skip_without_db!();
+    f.publish_with_params(
+        "/a",
+        f.database_id,
+        per_principal_cache(),
+        no_limits(),
+        "SELECT 1 AS n",
+        serde_json::json!([]),
+    )
+    .await;
+    f.publish_with_params(
+        "/b",
+        f.database_id,
+        per_principal_cache(),
+        no_limits(),
+        "SELECT 2 AS n",
+        serde_json::json!([]),
+    )
+    .await;
+
+    let before = f.port.executions();
+    let a = f.call_as(f.principal_a, "a").await;
+    assert!(!a.cached(), "A's first call cannot be a hit: {}", a.body);
+    let b = f.call_as(f.principal_a, "b").await;
+    assert!(
+        !b.cached(),
+        "B has never been called; a hit here means the key collapsed two \
+         DIFFERENT endpoints — whose statement lists are the only thing that \
+         differs — onto one entry: {}",
+        b.body
+    );
+    assert_eq!(
+        f.port.executions(),
+        before + 2,
+        "two endpoints must be two cache entries and two executions, never one"
+    );
+}
+
+/// **Task 10, the other half.** The statement list is not IN the key, but it
+/// does not need to be: a changed statement list only ever reaches serving
+/// through a republish, and a republish bumps `version`, which IS in the key.
+/// So the old entry is orphaned, never served stale.
+///
+/// Mutation-verified: dropping `h.update(version.to_le_bytes())` from
+/// `cache_key` reddens this test — the version-2 call collides with the
+/// version-1 entry, comes back `cached: true`, and `f.port.executions()`
+/// stops at `before`.
+#[tokio::test]
+async fn a_republished_endpoint_misses_the_cache() {
+    let f = skip_without_db!();
+    let ep = f
+        .publish_with_params(
+            "/rep",
+            f.database_id,
+            per_principal_cache(),
+            no_limits(),
+            "SELECT 1 AS n",
+            serde_json::json!([]),
+        )
+        .await;
+
+    let first = f.call_as(f.principal_a, "rep").await;
+    assert!(
+        !first.cached(),
+        "the first call cannot be a hit: {}",
+        first.body
+    );
+    let warm = f.call_as(f.principal_a, "rep").await;
+    assert!(
+        warm.cached(),
+        "a repeat call against the SAME version must hit, or this test cannot \
+         tell a real republish-miss from a cache that never hits at all: {}",
+        warm.body
+    );
+
+    f.set_statements(
+        ep,
+        serde_json::json!([{ "name": "main", "sql": "SELECT 2 AS n" }]),
+    )
+    .await;
+    let version = f.republish(ep).await;
+    assert_eq!(
+        version, 2,
+        "the republish must actually have produced version 2, or the miss \
+         asserted below would prove nothing about a version bump"
+    );
+
+    let before = f.port.executions();
+    let after_republish = f.call_as(f.principal_a, "rep").await;
+    assert!(
+        !after_republish.cached(),
+        "a republished endpoint must MISS — the warm entry is keyed under \
+         version 1, and version 2 has never been executed: {}",
+        after_republish.body
+    );
+    assert_eq!(
+        f.port.executions(),
+        before + 1,
+        "the miss must have reached the engine rather than being served from \
+         the stale version-1 entry"
+    );
+}
+
 #[tokio::test]
 async fn a_zero_ttl_does_not_become_a_one_second_cache() {
     // `ttl_seconds: 0` with `enabled: true` is an author saying "do not cache".

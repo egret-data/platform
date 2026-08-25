@@ -1523,4 +1523,39 @@ impl Fixture {
             .await
             .expect("flip delegated");
     }
+
+    /// Replace an already-published endpoint's DRAFT statement list, straight
+    /// into the table — mirrors `lifecycle.rs`'s helper of the same name.
+    /// Written rather than PATCHed so a cache test does not also depend on the
+    /// write route being correct. The affected-row count is asserted because a
+    /// forge that missed the row would leave [`Fixture::republish`] refreezing
+    /// the OLD statement list and the test would measure nothing.
+    pub async fn set_statements(&self, ep: Uuid, statements: serde_json::Value) {
+        let touched = sqlx::query("UPDATE dataapi.endpoints SET statements = $2 WHERE id = $1")
+            .bind(ep)
+            .bind(&statements)
+            .execute(&self.db.pool)
+            .await
+            .expect("store statements")
+            .rows_affected();
+        assert_eq!(touched, 1, "the statement list must actually be stored");
+    }
+
+    /// Publish an EXISTING endpoint id a second time, through the real publish
+    /// route (via [`Fixture::mgmt_post`]), and return the version number it
+    /// reports. [`Fixture::publish`]/[`Fixture::publish_with_params`] always
+    /// insert a fresh endpoint, which cannot produce a version-2 snapshot for a
+    /// test that needs to prove a republish invalidates a warm cache entry.
+    pub async fn republish(&self, ep: Uuid) -> i32 {
+        let (status, body) = self
+            .mgmt_post(
+                &format!("/api/ws/{}/data-api/endpoints/{ep}/publish", self.ws_slug),
+                Some(serde_json::json!({})),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "republish failed: {body}");
+        body["version"]
+            .as_i64()
+            .unwrap_or_else(|| panic!("no version in publish response: {body}")) as i32
+    }
 }
