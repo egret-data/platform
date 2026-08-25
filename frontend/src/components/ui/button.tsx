@@ -42,9 +42,43 @@ import { cn } from "@/lib/utils";
  * the halo was fighting to be seen at half alpha; solid, 2px matches the other
  * ~30 focus rings in the tree, WCAG 2.4.13's reference thickness, and Metabase's
  * own `:focus-visible { outline: 2px solid … }`.
+ *
+ * THIRD, and unrelated to focus: the base carries `disabled:cursor-not-allowed`
+ * and NOT `disabled:pointer-events-none`. It used to carry both, in that order,
+ * and the second cancelled the first. `pointer-events: none` takes the element
+ * out of hit-testing, so a real browser never resolves the pointer onto it —
+ * which means the `cursor` never changes AND the native `title` tooltip never
+ * opens, because both are decided by hit-testing. Sixteen buttons in the tree
+ * pass a `title` that only exists while they are disabled (it is the sentence
+ * saying WHY), and on an icon-only button that sentence is the *only* label
+ * there is. Every one of them was unreachable. Nothing in the Vitest suite could
+ * see it: jsdom has no layout and no hit-testing (`docs/en/ui-conventions.md`
+ * §10). It was found by a real hover, in Chrome, timing out.
+ *
+ * Dropping the class is safe for a real `<button>` — the `disabled` ATTRIBUTE,
+ * not the class, is what blocks click, keyboard activation and focus, and it is
+ * untouched. It is NOT safe for `asChild`; see the note on `inertSlot` below.
+ *
+ * One consequence is deliberate and worth knowing: hit-testing is also what
+ * decides `:hover`, so a disabled button now matches it and a variant's hover
+ * paint applies. Measured in Chrome on the `outline` variant (Config's disabled
+ * Validate): background `oklch(1 0 0)` at rest against `oklch(0.97 0 0)` hovered
+ * — a 3% lightness step, on an element already at `opacity-50`, next to a
+ * `not-allowed` cursor and a tooltip that now open. That is the whole cost.
+ *
+ * It is NOT neutralised here, and the reason is a cascade fact rather than a
+ * preference. `:disabled:hover` scores 0-3-0 and a call site's plain `hover:*`
+ * scores 0-2-0, so any `disabled:hover:*` this component added would outrank the
+ * `hover:` classes 33 call sites pass in — and it could not even compute the
+ * right value to restore, because the resting paint at those call sites is
+ * theirs, not the variant's (`text-current` resolves to the INHERITED colour,
+ * so it would drop a `text-destructive` button's red rather than keep it). A
+ * call site that minds can say `disabled:hover:…` itself, which is exact because
+ * it knows its own resting value — `chart/settings/FieldLabel.tsx` already does,
+ * and `ui/icon-button.tsx` can for the same reason.
  */
 const buttonVariants = cva(
-  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-all cursor-pointer disabled:cursor-not-allowed disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg:not([class*='size-'])]:size-4 shrink-0 [&_svg]:shrink-0 outline-none focus-visible:border-ring focus-visible:ring-ring focus-visible:ring-2 aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive",
+  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-all cursor-pointer disabled:cursor-not-allowed disabled:opacity-50 aria-disabled:cursor-not-allowed aria-disabled:opacity-50 [&_svg]:pointer-events-none [&_svg:not([class*='size-'])]:size-4 shrink-0 [&_svg]:shrink-0 outline-none focus-visible:border-ring focus-visible:ring-ring focus-visible:ring-2 aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive",
   {
     variants: {
       variant: {
@@ -87,12 +121,38 @@ const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
   ({ className, variant, size, asChild = false, ...props }, ref) => {
     const Comp = asChild ? Slot : "button";
 
+    // `disabled` is an attribute of `<button>` (and the other form controls) and
+    // of NOTHING else. Rendered through `Slot` onto an `<a>` or a `<div>` — which
+    // is the entire point of `asChild` — it is inert: React writes no attribute a
+    // browser acts on, the element stays in the tab order, and the click fires.
+    // On that path `pointer-events-none` was not decoration, it was the only
+    // thing holding the button shut, and the base string no longer has it.
+    //
+    // So it is reapplied HERE, for that path only, unconditioned on `:disabled`
+    // (which an `<a>` never matches). `aria-disabled` and `tabIndex={-1}` come
+    // with it: the first is the only way the state reaches assistive tech when
+    // there is no `disabled` attribute to convey it, and the second closes the
+    // hole `pointer-events` cannot — it stops a keyboard reaching an element the
+    // pointer can't, which the class alone never did.
+    //
+    // There are currently zero `<Button asChild disabled>` in `src/` (scanned
+    // brace-aware over all 448 `Button`/`IconButton` tags — 22 use `asChild`,
+    // none of them with `disabled`, none with a spread that could hide one), so
+    // this guards a case that does not exist yet rather than fixing a live bug.
+    // That is the point: without it, the first person to write one gets a control
+    // that looks disabled and works.
+    const inertSlot = asChild && Boolean(props.disabled);
+
     return (
       <Comp
         ref={ref}
         data-slot="button"
-        className={cn(buttonVariants({ variant, size, className }))}
+        className={cn(
+          buttonVariants({ variant, size, className }),
+          inertSlot && "pointer-events-none",
+        )}
         {...props}
+        {...(inertSlot ? { "aria-disabled": true, tabIndex: -1 } : undefined)}
       />
     );
   },

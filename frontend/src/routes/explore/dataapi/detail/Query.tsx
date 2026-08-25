@@ -336,24 +336,14 @@ export default function Query() {
                 type="button"
                 variant="ghost"
                 size="sm"
-                // `disabled:pointer-events-auto` overrides `Button`'s own
-                // `disabled:pointer-events-none` (`ui/button.tsx`), for this
-                // instance only — `cva`'s own className arg lands after the
-                // base classes and `cn`'s `twMerge` keeps the later one, the
-                // same mechanism `button.tsx`'s doc comment already relies on
-                // for the focus-ring override.
-                //
-                // Required for the `title` below to mean anything: at the cap
-                // this button IS the only thing on screen saying why, and
-                // `pointer-events: none` makes a real browser skip it during
-                // hit-testing — confirmed live, `elementFromPoint` at its own
-                // centre landed on this row's container, not the button, and
-                // Playwright's own hover action timed out with "intercepts
-                // pointer events" naming that same container. `disabled` (the
-                // HTML attribute, untouched below) already blocks the click and
-                // is what the shell's `<fieldset disabled>` reaches — this only
-                // restores hover.
-                className="ml-auto shrink-0 disabled:pointer-events-auto"
+                // No `disabled:pointer-events-auto` here any more. This button
+                // used to carry one, to override `Button`'s own
+                // `disabled:pointer-events-none` for this instance alone, so
+                // that the `title` below could be reached by a pointer at all.
+                // `ui/button.tsx` no longer sets that class on ANY button — the
+                // same defect was hiding the `title` on fifteen others — so the
+                // local override has nothing left to override.
+                className="ml-auto shrink-0"
                 disabled={atLimit}
                 // Says WHY it is unavailable, and says what to do instead.
                 // Statements run one after another, so the count multiplies the
