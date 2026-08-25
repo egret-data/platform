@@ -350,6 +350,11 @@ The request body is not the only thing that moved: `DataApiValidationDto.columns
 `.statements`, so the editor's schema preview reads a field that is now `undefined`. Cover
 both.
 
+Task 8 added a third: **`output.envelope: "wrapped" | "bare"` has no UI at all.** The
+editor's Output section offers Shape and Naming only, so `bare` is reachable through the
+API and invisible to the person who publishes the endpoint — the same gap the previous
+package shipped with `required` and had to come back for.
+
 - [ ] **Step 1: regenerate the orval models**, and keep **only** the files this change requires.
   A full regeneration rewrites 27 files and **silently strips `encodeURIComponent` from every
   URL builder**, because the committed client came from orval 8.20.0 while the pin is 8.24.0

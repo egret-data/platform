@@ -366,7 +366,14 @@ writes `data`'s value alone. This is taken from SQLREST's `USE_SYSTEM_RESPONSE_F
 is the one part of its response design worth copying.
 
 **This is a breaking change to a live API.** Today's shape is `{data, meta}`, and P4
-endpoints have served real traffic since 2026-08-16. The decision to break rather than
+endpoints have served real traffic since 2026-08-16.
+
+**Measured on the wire after implementation, and the earlier framing overstated it:** for a
+one-statement endpoint the success body is **purely additive** — `data` and `meta` keep
+their shape and `status`/`message` are new keys — so a lenient consumer does not break at
+all. What breaks is a **strict** one: a client that rejects unknown fields, or that reads
+`meta.row_count` on an endpoint that now has several statements. The decision to break
+rather than version stands; the claim that every consumer breaks does not. The decision to break rather than
 version was taken deliberately: consumers are few and internal, the API is pre-1.0, and
 carrying two envelope shapes forever costs more than one migration now. The migration sets
 `envelope = "wrapped"` on every existing endpoint, and the change must appear in the deploy

@@ -352,7 +352,14 @@ lấy dữ liệu.
 của SQLREST và là phần duy nhất trong thiết kế response của họ đáng chép.
 
 **Đây là breaking change với một API đang sống.** Hình hiện tại là `{data, meta}`, và các
-endpoint P4 đã phục vụ traffic thật từ 2026-08-16. Quyết định phá thay vì version hoá được
+endpoint P4 đã phục vụ traffic thật từ 2026-08-16.
+
+**Đo trên dây sau khi cài đặt, và cách diễn đạt trước đó là nói quá:** với endpoint **một
+câu lệnh**, body thành công là **thuần bổ sung** — `data` và `meta` giữ nguyên hình, chỉ
+thêm khoá `status`/`message` — nên một consumer dễ tính **không hỏng gì cả**. Thứ hỏng là
+consumer **nghiêm ngặt**: client từ chối trường lạ, hoặc client đọc `meta.row_count` trên
+một endpoint nay có nhiều câu lệnh. Quyết định phá thay vì version hoá vẫn giữ; còn lời
+khẳng định rằng mọi consumer đều hỏng thì không. Quyết định phá thay vì version hoá được
 đưa ra có chủ ý: consumer còn ít và nội bộ, API chưa 1.0, và gánh hai hình vỏ mãi mãi đắt
 hơn một lần migrate bây giờ. Migration đặt `envelope = "wrapped"` cho mọi endpoint hiện có,
 và thay đổi này **phải xuất hiện trong ghi chú triển khai**. Nó không im lặng và không được
