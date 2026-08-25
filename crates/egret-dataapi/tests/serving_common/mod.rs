@@ -105,6 +105,17 @@ pub struct FakePort {
     /// [`FakePort::set_columns_per_sql`]. `None` (the default) leaves every
     /// existing assertion in these suites on the two paths above.
     per_sql: Mutex<Option<PerSqlColumns>>,
+    /// The column names EXECUTION returns per rendered statement, when they must
+    /// differ from the ones DESCRIBE reported — see
+    /// [`FakePort::set_execution_columns_per_sql`].
+    exec_per_sql: Mutex<Option<PerSqlColumns>>,
+    /// Every execution's `(max_rows, timeout)`, in order.
+    ///
+    /// [`Self::last_limits`] keeps only the most recent, which cannot answer the
+    /// question M2 asks: whether the SECOND statement of an endpoint was handed
+    /// the same row cap as the first, or a budget the first had already spent.
+    /// One call, several executions, so the answer is a LIST.
+    limits_log: Mutex<Vec<(usize, Duration)>>,
 }
 
 impl FakePort {
@@ -127,6 +138,16 @@ impl FakePort {
             .lock()
             .unwrap()
             .expect("no execution has reached the port")
+    }
+
+    /// The `(max_rows, timeout)` of EVERY execution, in the order they ran.
+    ///
+    /// A per-statement row cap is invisible in the response body — a fake that
+    /// returns one row per statement looks identical whether the second was told
+    /// the endpoint's cap or the cap minus what the first returned — so this
+    /// list is the only instrument that can tell the two apart.
+    pub fn limits_seen(&self) -> Vec<(usize, Duration)> {
+        self.limits_log.lock().unwrap().clone()
     }
 
     /// Make the NEXT `execute_as`/`execute_as_with_params` call fail, carrying
@@ -207,6 +228,48 @@ impl FakePort {
         );
     }
 
+    /// Answer an EXECUTION with different columns than the DESCRIBE that froze
+    /// the contract — the only way to drive a drift into ONE statement of
+    /// several.
+    ///
+    /// [`FakePort::set_columns_per_sql`] drives describe and execute alike, so a
+    /// table installed before publish freezes exactly what it later serves and
+    /// can never drift; [`FakePort::set_columns`] drifts EVERY statement at
+    /// once, since it is keyed on nothing. Neither can express "the second
+    /// statement's table was altered after publish", which is the case M2 has to
+    /// refuse — and refusing it for the wrong statement, or not at all, are both
+    /// silent.
+    ///
+    /// Installed AFTER publish, like `set_columns`. Same first-match-wins arms,
+    /// same panic when none matches.
+    pub fn set_execution_columns_per_sql(&self, table: &[(&str, &[&str])]) {
+        *self.exec_per_sql.lock().unwrap() = Some(
+            table
+                .iter()
+                .map(|(needle, names)| {
+                    (
+                        (*needle).to_string(),
+                        names.iter().map(|n| (*n).to_string()).collect(),
+                    )
+                })
+                .collect(),
+        );
+    }
+
+    /// The execution-only per-statement answer, or `None` when no table was
+    /// installed. Same shape as [`Self::per_sql_columns`], a different table.
+    fn exec_per_sql_columns(&self, sql: &str) -> Option<Vec<ColumnMeta>> {
+        let guard = self.exec_per_sql.lock().unwrap();
+        let table = guard.as_ref()?;
+        let names = table
+            .iter()
+            .find(|(needle, _)| sql.contains(needle.as_str()))
+            .unwrap_or_else(|| panic!("set_execution_columns_per_sql has no arm matching {sql:?}"))
+            .1
+            .clone();
+        Some(names.iter().map(|n| col(n)).collect())
+    }
+
     /// The per-statement answer, or `None` when no table was installed.
     ///
     /// Returns owned columns and drops the guard before it returns, so a caller
@@ -234,6 +297,9 @@ impl FakePort {
     /// What an EXECUTION of `sql` returns: the per-statement table when one is
     /// installed, otherwise the suite's existing sticky/default columns.
     fn out_columns_for(&self, sql: &str) -> Vec<ColumnMeta> {
+        if let Some(c) = self.exec_per_sql_columns(sql) {
+            return c;
+        }
         self.per_sql_columns(sql)
             .unwrap_or_else(|| self.out_columns())
     }
@@ -304,6 +370,10 @@ impl egret_query_api::QueryExecPort for FakePort {
         self.executions.fetch_add(1, Ordering::SeqCst);
         *self.last.lock().unwrap() = Some((sql.to_string(), Vec::new()));
         *self.last_limits.lock().unwrap() = Some((limits.max_rows, limits.timeout));
+        self.limits_log
+            .lock()
+            .unwrap()
+            .push((limits.max_rows, limits.timeout));
         let columns = self.out_columns_for(sql);
         Ok(TabularResult {
             // One cell per column, so a test that asked for extra columns still
@@ -339,6 +409,10 @@ impl egret_query_api::QueryExecPort for FakePort {
         self.executions.fetch_add(1, Ordering::SeqCst);
         *self.last.lock().unwrap() = Some((sql.to_string(), params.to_vec()));
         *self.last_limits.lock().unwrap() = Some((limits.max_rows, limits.timeout));
+        self.limits_log
+            .lock()
+            .unwrap()
+            .push((limits.max_rows, limits.timeout));
         let columns = self.out_columns_for(sql);
         Ok(TabularResult {
             rows: vec![vec![
@@ -1202,6 +1276,55 @@ impl Fixture {
         // Both principals, so a cache or rate-limit test comparing two
         // identities is comparing what it thinks it is rather than one 200
         // against one 403.
+        grant_invoke(&self.db, self.principal_a, ep).await;
+        grant_invoke(&self.db, self.principal_b, ep).await;
+        ep
+    }
+
+    /// Publish an endpoint carrying an arbitrary STATEMENT LIST, and its own
+    /// `limits`, through the real publish route.
+    ///
+    /// [`Fixture::publish_with_params`] builds the one-element list inline and
+    /// takes no `limits`, so it can express neither of the two things M2 Task 7
+    /// is about: an endpoint with several statements, and a row cap a test can
+    /// recognise. `statements` is the jsonb the draft column stores —
+    /// `[{"name": …, "sql": …}, …]` — so a test states the list exactly as an
+    /// author would, and publish validates it exactly as it would theirs.
+    ///
+    /// Caching is off: every assertion here counts EXECUTIONS, and a warm entry
+    /// would answer with none.
+    pub async fn publish_statements(
+        &self,
+        path: &str,
+        database_id: Uuid,
+        statements: serde_json::Value,
+        limits: serde_json::Value,
+    ) -> Uuid {
+        let ep: Uuid = sqlx::query_scalar(
+            "INSERT INTO dataapi.endpoints \
+               (workspace_id, name, path, method, database_id, statements, cache, limits, created_by) \
+             VALUES ($1, $2, $3, 'GET', $4, $5, $6, $7, $8) RETURNING id",
+        )
+        .bind(self.ws_id)
+        .bind(format!("ep-{}", Uuid::new_v4().simple()))
+        .bind(path)
+        .bind(database_id)
+        .bind(&statements)
+        .bind(serde_json::json!({ "enabled": false }))
+        .bind(&limits)
+        .bind(self.admin)
+        .fetch_one(&self.db.pool)
+        .await
+        .expect("insert endpoint draft");
+
+        let (status, body) = self
+            .mgmt_send(
+                "POST",
+                &format!("/api/ws/{}/data-api/endpoints/{ep}/publish", self.ws_slug),
+                Some(serde_json::json!({})),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "publish failed: {body}");
         grant_invoke(&self.db, self.principal_a, ep).await;
         grant_invoke(&self.db, self.principal_b, ep).await;
         ep

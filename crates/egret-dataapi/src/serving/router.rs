@@ -98,12 +98,14 @@
 //!   `ParamSpec.ty`, and produces both the renderer's context and the key's
 //!   bytes from one pass — read its module comment before touching either half.
 //! * [`crate::render::render`] runs after a cache MISS, because a hit needs no
-//!   statement. What goes to the engine is its output, never `snap.sql`: every
-//!   `{{ … }}` has become a `?` and the values travel beside it as binds.
+//!   statement — once per statement, since M2. What goes to the engine is its
+//!   output, never a statement's own `sql`: every `{{ … }}` has become a `?` and
+//!   the values travel beside it as binds.
 //!
-//! **`snap.sql` must not be executed from this module again.** It is the
-//! template, not the statement; sending it would send `{{ region }}` to the
-//! engine verbatim, which is the state P4 shipped in and P4.5 exists to end.
+//! **A `StatementSnapshot`'s `sql` must not be executed from this module
+//! again.** It is the template, not the statement; sending it would send
+//! `{{ region }}` to the engine verbatim, which is the state P4 shipped in and
+//! P4.5 exists to end.
 //!
 //! # What is deliberately NOT here yet
 //!
@@ -158,7 +160,9 @@ use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use egret_dataapi_api::{compare_column_types, ColumnSpec, EndpointSnapshot};
+use egret_dataapi_api::{
+    compare_column_types, ColumnSpec, EndpointSnapshot, OutputSpec, StatementSnapshot,
+};
 use egret_metastore::Db;
 use serde::Serialize;
 use uuid::Uuid;
@@ -635,17 +639,17 @@ async fn run(
         return Err(ServingError::ParamGateStale);
     }
     let shared = shared_cache_allowed(&st.db, &snap).await?;
-    // **M2 Task 4 bridge, deleted by Tasks 7 and 8.** The snapshot carries a
-    // LIST of statements now, and as of Task 5 publish freezes every one of
-    // them — so this path serving exactly one is a REAL gap and no longer a
-    // no-op: a two-statement endpoint answers 200 carrying only the first
-    // statement's rows until Task 7 executes them all.
-    // Resolved once, here, so the rendered SQL, the shaped rows and both
-    // `meta.columns` all come from the SAME element rather than three
-    // independent `statements[0]`s that a later change could let drift apart.
-    let stmt = snap
-        .sole_statement()
-        .ok_or_else(|| ServingError::internal("published snapshot carries no statements"))?;
+    // The list is never empty — `EndpointSnapshotRepr` refuses a snapshot that
+    // carries neither `statements` nor the pre-M2 `sql`+`columns` pair, and
+    // `params::resolve` below refuses an empty list a second time. Checked here
+    // anyway because everything after this point is a LOOP over the list, and a
+    // loop over nothing does not fail: it produces a `200` carrying no statement
+    // at all, which is the one answer this endpoint may never give.
+    if snap.statements.is_empty() {
+        return Err(ServingError::internal(
+            "published snapshot carries no statements",
+        ));
+    }
 
     // Step 7's first half, and it runs BEFORE the cache lookup on purpose. The
     // key has to describe what this request will RENDER, not what it asked for
@@ -678,7 +682,7 @@ async fn run(
                 // detail into the public wire type.
                 data: (*hit.data).clone(),
                 meta: ServingMeta {
-                    columns: stmt.columns.clone(),
+                    columns: contract_columns(&snap),
                     row_count: hit.row_count,
                     version,
                     cached: true,
@@ -688,11 +692,12 @@ async fn run(
         }
     }
 
-    // Step 7's second half. The statement sent to the engine is NOT `stmt.sql`:
-    // every `{{ … }}` in the definition has become a `?`, and `binds` carries
-    // the values in the order those markers appear. This is the line that makes
-    // `?region=EU` and `?region=US` return different rows — until it landed they
-    // returned the same rows, which is the reason P4.5 exists.
+    // Step 7's second half, once per statement. What is sent to the engine is
+    // NOT `stmt.sql`: every `{{ … }}` in the definition has become a `?`, and
+    // `binds` carries the values in the order those markers appear. This is the
+    // line that makes `?region=EU` and `?region=US` return different rows —
+    // until it landed they returned the same rows, which is the reason P4.5
+    // exists.
     //
     // Rendering happens after the cache lookup because a hit needs no statement,
     // and it is the only work on this path that a hit gets to skip.
@@ -709,57 +714,150 @@ async fn run(
     // the shape of every bug this phase fixed — but the exposure is real, it is
     // a re-publish away from being visible, and it belongs in the release note
     // rather than in a comment nobody reads after the incident.
-    let (sql, binds) = crate::render::render(&stmt.sql, &resolved.values)
-        .map_err(|e| render_error(e, resolved.has_repeats))?;
-
     let limits = execution_limits(&snap);
     let cap = limits.max_rows as u32;
-    let out = st
-        .query
-        .execute_as_with_params(
-            ws.id.0,
-            snap.database_id,
-            principal.user_id,
-            &sql,
-            &binds,
-            limits,
-        )
-        .await
-        .map_err(engine_error)?;
 
-    // `truncated`, never `row_count == cap`: the connector fetches `cap + 1` and
-    // sets the flag, so a count equal to the cap cannot distinguish "exactly at"
-    // from "over". Returning a truncated 200 is the worst available failure mode
-    // for a data API — the client believes it has every row.
-    if out.truncated {
-        return Err(ServingError::RowLimitExceeded { cap });
+    // **Sequentially, one `execute_as_with_params` each** (spec §4.3). Not
+    // concurrently: N statements are N reads on ONE engine connection budget,
+    // and the ordering is the author's, stated by the list they published.
+    //
+    // `limits` is CLONED per statement rather than shared, decremented, or
+    // divided. `max_rows` is a cap on what one statement may return, so a
+    // `total` statement answering one row must not spend the `rows` statement's
+    // budget — and the direction that matters is the quiet one: a shared budget
+    // does not fail, it TRUNCATES, and a truncated read is a `200` whose client
+    // believes it has every row.
+    //
+    // §4.5 is the promise that goes with this loop and it is deliberately weak:
+    // the statements share no transaction and no snapshot, so a total and the
+    // rows it counts may disagree if the table moves between them. Task 9 puts
+    // that sentence in the generated document, which is the whole of it.
+    let mut shaped: Vec<(&str, serde_json::Value)> = Vec::with_capacity(snap.statements.len());
+    let mut row_count: u64 = 0;
+    for stmt in &snap.statements {
+        let (sql, binds) = crate::render::render(&stmt.sql, &resolved.values)
+            .map_err(|e| render_error(e, resolved.has_repeats))?;
+
+        let out = st
+            .query
+            .execute_as_with_params(
+                ws.id.0,
+                snap.database_id,
+                principal.user_id,
+                &sql,
+                &binds,
+                limits.clone(),
+            )
+            .await
+            .map_err(engine_error)?;
+
+        // `truncated`, never `row_count == cap`: the connector fetches `cap + 1`
+        // and sets the flag, so a count equal to the cap cannot distinguish
+        // "exactly at" from "over". Returning a truncated 200 is the worst
+        // available failure mode for a data API — the client believes it has
+        // every row.
+        //
+        // The caller is told the cap and nothing else, as before. The STATEMENT
+        // is logged, because with several of them the cap alone does not say
+        // which one to narrow.
+        if out.truncated {
+            tracing::warn!(
+                statement = %stmt.name,
+                cap,
+                "a statement exceeded the endpoint's row cap"
+            );
+            return Err(ServingError::RowLimitExceeded { cap });
+        }
+
+        // Shaped against THIS statement's frozen columns — see `shape_rows`,
+        // which is handed the statement rather than the snapshot precisely so
+        // that it cannot reach a different one's list.
+        //
+        // A refusal here refuses the WHOLE call, including the statements that
+        // already succeeded: their rows are discarded rather than served beside
+        // a partial failure. An endpoint that answers with three of its four
+        // result sets and no error is a client silently reading a hole.
+        shaped.push((stmt.name.as_str(), shape_rows(&out, &snap.output, stmt)?));
+        row_count = row_count.saturating_add(out.row_count);
     }
 
     // Shaped BEFORE it is cached, and the shaped form is what is stored: shaping
     // is where `output.shape`/`naming` and the drift refusal apply, so caching
     // the raw result would let a hit and a miss disagree about whether the
-    // endpoint had drifted.
+    // endpoint had drifted. The cached value is the WHOLE response body, so an
+    // endpoint's several statements are cached and served together or not at
+    // all.
     //
     // Nothing is logged as SERVED before this line. `shape_rows` is the last
     // thing that can refuse the call, and the "served" line used to sit above it
     // — so a drift or naming-collision 503 produced a log saying the request had
     // been served with N rows. That line now lives in `serve`, on the Ok arm.
-    let data = shape_rows(&out, &snap)?;
+    let data = statements_data(shaped);
     if let Some(ttl) = ttl {
         st.cache
-            .put_at(key, Arc::new(data.clone()), out.row_count, ttl, now);
+            .put_at(key, Arc::new(data.clone()), row_count, ttl, now);
     }
 
     Ok(ServingResponse {
         data,
         meta: ServingMeta {
-            columns: stmt.columns.clone(),
-            row_count: out.row_count,
+            columns: contract_columns(&snap),
+            row_count,
             version,
             cached: false,
             request_id: request_id.to_string(),
         },
     })
+}
+
+/// What fills `data`: the rows themselves for a ONE-statement endpoint, an
+/// object keyed by statement name for several (spec §4.4).
+///
+/// The asymmetry is deliberate and is why `LEGACY_STATEMENT_NAME` is invisible:
+/// every endpoint published before M2 has exactly one statement, so its body is
+/// the array its consumers already read, and the synthesized name `main` never
+/// appears on the wire.
+///
+/// No key can be lost to another. Publish refuses two statements of one name
+/// (`validate_statements`, re-run against the STORED row at publish for exactly
+/// this reason), and a `serde_json::Map` keeps the LAST value for a duplicated
+/// key — so a duplicate here would drop a whole result set with no error, the
+/// same failure `shape_rows` refuses one level down for columns.
+fn statements_data(mut shaped: Vec<(&str, serde_json::Value)>) -> serde_json::Value {
+    if shaped.len() == 1 {
+        return shaped.pop().expect("length just checked").1;
+    }
+    serde_json::Value::Object(
+        shaped
+            .into_iter()
+            .map(|(name, data)| (name.to_string(), data))
+            .collect(),
+    )
+}
+
+/// What `ServingMeta.columns` reports: the frozen contract, never this
+/// execution's shape.
+///
+/// One statement — every endpoint published before M2, and most after it — is
+/// that statement's frozen union, byte for byte what this field has always
+/// carried.
+///
+/// **Several statements do not fit in this field, and Task 8 replaces it** with
+/// `meta.statements: {<name>: {row_count, columns}}` (spec §4.4). Until then the
+/// concatenation, in statement order, is the least wrong filling available:
+///
+/// * reporting the FIRST statement's list would describe one statement as if it
+///   were the endpoint — silently, and to a caller who has no way to notice.
+///   That is the exact defect shape this task exists to close;
+/// * an empty list would claim the endpoint declares no columns at all, which no
+///   published endpoint can (publish refuses a statement that describes none).
+///
+/// So: complete but unkeyed, until the field that can key it exists.
+fn contract_columns(snap: &EndpointSnapshot) -> Vec<ColumnSpec> {
+    snap.statements
+        .iter()
+        .flat_map(|s| s.columns.iter().cloned())
+        .collect()
 }
 
 /// Map a [`RenderError`] onto the serving vocabulary.
@@ -1189,18 +1287,23 @@ fn engine_error(e: egret_core::Error) -> ServingError {
 /// is now unrepresentable rather than merely refused.
 fn shape_rows(
     out: &egret_core::TabularResult,
-    snap: &EndpointSnapshot,
+    output: &OutputSpec,
+    stmt: &StatementSnapshot,
 ) -> Result<serde_json::Value, ServingError> {
-    // **M2 Task 4 bridge, deleted by Task 7**, which shapes each statement
-    // against ITS OWN frozen columns. Publish freezes one union per statement
-    // as of Task 5; this reads the first statement's, which is the right list
-    // only while the caller is executing the first statement. Bound once so
-    // every clause below judges the same list — all six must become
-    // per-statement together.
-    let frozen = &snap
-        .sole_statement()
-        .ok_or_else(|| ServingError::internal("published snapshot carries no statements"))?
-        .columns;
+    // **The statement, never the snapshot.** All six clauses below — every live
+    // name is contained, every `required` name is present, every declared type
+    // still agrees, no live name repeats, every row's arity matches, and the
+    // result carries columns at all — are properties of ONE statement's frozen
+    // union, and they had to become per-statement TOGETHER: converting some and
+    // leaving others reading `statements[0]` is a hole no single-statement test
+    // can show, because at N=1 the two readings are the same list.
+    //
+    // Taking the statement rather than the snapshot is what makes that
+    // impossible rather than merely fixed: there is no `snap` in scope here to
+    // fetch another statement's columns from. `output` comes separately because
+    // `shape` and `naming` are endpoint-wide — one contract, not one per
+    // statement.
+    let frozen = &stmt.columns;
 
     // Row arity, checked for BOTH shapes and BEFORE the branch on `shape`.
     //
@@ -1249,14 +1352,14 @@ fn shape_rows(
     // empty and `arrays` reaches this only with a result it would refuse anyway.
     if out.columns.is_empty() {
         return Err(drift(
-            snap,
+            stmt,
             out,
             "the engine returned no columns at all",
             None,
         ));
     }
 
-    if snap.output.shape == "arrays" {
+    if output.shape == "arrays" {
         // Order-sensitive equality: an array row is positional, so the same
         // names in a different order — or one name more, or one fewer — are a
         // different contract. Task 5 refuses to publish a branching definition
@@ -1269,7 +1372,7 @@ fn shape_rows(
                 .zip(frozen.iter())
                 .any(|(live, frozen)| live.name != frozen.name);
         if drifted {
-            return Err(drift(snap, out, "the positional column list changed", None));
+            return Err(drift(stmt, out, "the positional column list changed", None));
         }
         // Types are compared HERE TOO, and this half is new.
         //
@@ -1297,7 +1400,7 @@ fn shape_rows(
             .find(|(live, frozen)| !compare_column_types(&frozen.ty, &live.ty).agrees())
         {
             return Err(drift(
-                snap,
+                stmt,
                 out,
                 "a declared column changed type",
                 Some(TypeMismatch {
@@ -1314,9 +1417,9 @@ fn shape_rows(
                 .collect(),
         ));
     }
-    if snap.output.shape != "objects" {
+    if output.shape != "objects" {
         tracing::warn!(
-            shape = %snap.output.shape,
+            shape = %output.shape,
             "published snapshot carries an unrecognised output.shape; serving the default"
         );
     }
@@ -1333,10 +1436,10 @@ fn shape_rows(
     // column, not two types. Two stated precisions still disagree.
     for live in &out.columns {
         match frozen.iter().find(|f| f.name == live.name) {
-            None => return Err(drift(snap, out, "a column that was never declared", None)),
+            None => return Err(drift(stmt, out, "a column that was never declared", None)),
             Some(frozen) if !compare_column_types(&frozen.ty, &live.ty).agrees() => {
                 return Err(drift(
-                    snap,
+                    stmt,
                     out,
                     "a declared column changed type",
                     Some(TypeMismatch {
@@ -1351,7 +1454,7 @@ fn shape_rows(
     }
     for required in frozen.iter().filter(|c| c.required) {
         if !out.columns.iter().any(|l| l.name == required.name) {
-            return Err(drift(snap, out, "a required column was not returned", None));
+            return Err(drift(stmt, out, "a required column was not returned", None));
         }
     }
     // Two LIVE columns of ONE name — `SELECT *` over a join whose right side
@@ -1372,7 +1475,7 @@ fn shape_rows(
         .iter()
         .any(|c| !live_seen.insert(c.name.as_str()))
     {
-        return Err(drift(snap, out, "two live columns carry one name", None));
+        return Err(drift(stmt, out, "two live columns carry one name", None));
     }
 
     // The collision check runs over the FROZEN union, not over this call's
@@ -1383,7 +1486,7 @@ fn shape_rows(
     // called with.
     let names: Vec<String> = frozen
         .iter()
-        .map(|c| apply_naming(&c.name, &snap.output.naming))
+        .map(|c| apply_naming(&c.name, &output.naming))
         .collect();
     // A `Map` silently keeps the LAST value for a duplicated key, which is how a
     // whole column disappears from every row without a single error.
@@ -1391,7 +1494,7 @@ fn shape_rows(
     if let Some(dup) = names.iter().find(|n| !seen.insert(n.as_str())) {
         tracing::warn!(
             key = %dup,
-            naming = %snap.output.naming,
+            naming = %output.naming,
             frozen = ?frozen.iter().map(|c| &c.name).collect::<Vec<_>>(),
             "output.naming maps two frozen columns onto one key"
         );
@@ -1410,7 +1513,7 @@ fn shape_rows(
     let live_names: Vec<String> = out
         .columns
         .iter()
-        .map(|c| apply_naming(&c.name, &snap.output.naming))
+        .map(|c| apply_naming(&c.name, &output.naming))
         .collect();
 
     // `live_names` is `out.columns` mapped one-to-one, so every row's arity was
@@ -1459,7 +1562,7 @@ struct TypeMismatch<'a> {
 /// already explain, and the fields log empty there rather than absent, so one
 /// log site serves every refusal and the two cannot drift apart.
 fn drift(
-    snap: &EndpointSnapshot,
+    stmt: &StatementSnapshot,
     out: &egret_core::TabularResult,
     why: &str,
     mismatch: Option<TypeMismatch<'_>>,
@@ -1470,15 +1573,16 @@ fn drift(
         returned: "",
     });
     tracing::warn!(
-        // `unwrap_or_default` rather than a second refusal: this function's job
-        // is to LOG and return, and a snapshot with no statements has already
-        // been refused by whichever caller got here. An empty list logged as
-        // empty is the honest reading. (M2 Task 4 bridge; Task 7 hands the
-        // statement's columns in.)
-        frozen = ?snap
-            .sole_statement()
-            .map(|s| s.columns.iter().map(|c| &c.name).collect::<Vec<_>>())
-            .unwrap_or_default(),
+        // **The statement, handed in — never fetched.** This used to read the
+        // snapshot's FIRST statement, which was the right list only while
+        // serving executed only the first. Once execution became a loop, a drift
+        // in the second statement would have logged the first's column names:
+        // the operator reads one line to decide what moved, and it would have
+        // sent them to a statement that was fine. Taking a `StatementSnapshot`
+        // rather than the snapshot is what makes that unrepresentable — there is
+        // no list here to pick the wrong element from.
+        statement = %stmt.name,
+        frozen = ?stmt.columns.iter().map(|c| &c.name).collect::<Vec<_>>(),
         live = ?out.columns.iter().map(|c| &c.name).collect::<Vec<_>>(),
         column = %m.column,
         declared = %m.declared,
@@ -1666,6 +1770,24 @@ mod tests {
         }
     }
 
+    /// [`shape_rows`] against a single-statement snapshot's ONLY statement.
+    ///
+    /// Every test below pins one of the six clauses `shape_rows` judges, and
+    /// each is a property of one statement's frozen columns — so they say
+    /// "snapshot" and mean "the statement it carries". The destructuring is the
+    /// point: a fixture that grew a second statement would otherwise be judged
+    /// against its first silently, which is the very reading this task removed
+    /// from the production path.
+    fn shape_sole(
+        out: &egret_core::TabularResult,
+        snap: &EndpointSnapshot,
+    ) -> Result<serde_json::Value, ServingError> {
+        let [stmt] = &snap.statements[..] else {
+            panic!("this helper is for single-statement fixtures");
+        };
+        shape_rows(out, &snap.output, stmt)
+    }
+
     /// `snapshot_with_limits` with the frozen columns replaced. The limits are
     /// the clamped-to-1 pair, which `shape_rows` never reads.
     fn snapshot_with_columns(columns: Vec<ColumnSpec>) -> EndpointSnapshot {
@@ -1704,7 +1826,7 @@ mod tests {
             vec![vec![serde_json::json!(1)]],
         );
 
-        let v = shape_rows(&out, &snap).expect("an optional column may be absent");
+        let v = shape_sole(&out, &snap).expect("an optional column may be absent");
         assert_eq!(
             v,
             serde_json::json!([{"id": 1}]),
@@ -1745,6 +1867,19 @@ mod tests {
     }
 
     fn logs_from_shaping(out: &egret_core::TabularResult, snap: &EndpointSnapshot) -> String {
+        let [stmt] = &snap.statements[..] else {
+            panic!("this helper is for single-statement fixtures");
+        };
+        logs_from_statement_shaping(out, &snap.output, stmt)
+    }
+
+    /// The same capture, against an explicitly named statement — the only form
+    /// that can ask which statement a refusal was logged AGAINST.
+    fn logs_from_statement_shaping(
+        out: &egret_core::TabularResult,
+        output: &OutputSpec,
+        stmt: &StatementSnapshot,
+    ) -> String {
         let cap = LogCapture::default();
         let sub = tracing_subscriber::fmt()
             .with_max_level(tracing::Level::DEBUG)
@@ -1758,7 +1893,10 @@ mod tests {
         {
             let _guard = tracing::subscriber::set_default(sub);
             assert!(
-                matches!(shape_rows(out, snap), Err(ServingError::SchemaDrift)),
+                matches!(
+                    shape_rows(out, output, stmt),
+                    Err(ServingError::SchemaDrift)
+                ),
                 "expected a refusal so there is a reason to log"
             );
         }
@@ -1866,7 +2004,7 @@ mod tests {
 
             let objects = snapshot_with_columns(vec![spec("c", frozen_ty, true)]);
             assert_eq!(
-                shape_rows(&out, &objects)
+                shape_sole(&out, &objects)
                     .unwrap_or_else(|e| panic!("objects: {frozen_ty} vs {live_ty} refused: {e:?}")),
                 serde_json::json!([{"c": "2020-01-01 10:20:30.000"}]),
             );
@@ -1874,7 +2012,7 @@ mod tests {
             let mut arrays = snapshot_with_columns(vec![spec("c", frozen_ty, true)]);
             arrays.output.shape = "arrays".into();
             assert_eq!(
-                shape_rows(&out, &arrays)
+                shape_sole(&out, &arrays)
                     .unwrap_or_else(|e| panic!("arrays: {frozen_ty} vs {live_ty} refused: {e:?}")),
                 serde_json::json!([["2020-01-01 10:20:30.000"]]),
             );
@@ -1929,14 +2067,14 @@ mod tests {
 
         let first = result(vec![live("a", "integer")], vec![vec![serde_json::json!(1)]]);
         assert_eq!(
-            shape_rows(&first, &snap).expect("the `if` branch must serve"),
+            shape_sole(&first, &snap).expect("the `if` branch must serve"),
             serde_json::json!([{"a": 1}]),
             "exactly the key this branch returned, and no null for the other"
         );
 
         let second = result(vec![live("b", "integer")], vec![vec![serde_json::json!(2)]]);
         assert_eq!(
-            shape_rows(&second, &snap).expect("the `else` branch must serve"),
+            shape_sole(&second, &snap).expect("the `else` branch must serve"),
             serde_json::json!([{"b": 2}]),
             "the other branch of the same union serves too"
         );
@@ -1964,7 +2102,7 @@ mod tests {
             vec![vec![serde_json::json!("x")]],
         );
         assert_eq!(
-            shape_rows(&out, &snap).expect("the optional column is the FIRST one here"),
+            shape_sole(&out, &snap).expect("the optional column is the FIRST one here"),
             serde_json::json!([{"name": "x"}]),
             "the value must be served under the name the ENGINE gave it"
         );
@@ -1981,7 +2119,7 @@ mod tests {
             vec![vec![serde_json::json!("x")]],
         );
         assert!(
-            matches!(shape_rows(&out, &snap), Err(ServingError::SchemaDrift)),
+            matches!(shape_sole(&out, &snap), Err(ServingError::SchemaDrift)),
             "`required` means EVERY branch returns it, so its absence is drift"
         );
     }
@@ -2001,7 +2139,7 @@ mod tests {
             vec![vec![serde_json::json!(1)]],
         );
         assert!(
-            matches!(shape_rows(&out, &snap), Err(ServingError::SchemaDrift)),
+            matches!(shape_sole(&out, &snap), Err(ServingError::SchemaDrift)),
             "subset + all-required is SET equality. Pre-M1 was SEQUENCE equality, \
              so this is that contract minus its order clause and nothing else"
         );
@@ -2015,7 +2153,7 @@ mod tests {
             vec![vec![serde_json::json!(1), serde_json::json!("s")]],
         );
         assert!(
-            matches!(shape_rows(&out, &snap), Err(ServingError::SchemaDrift)),
+            matches!(shape_sole(&out, &snap), Err(ServingError::SchemaDrift)),
             "an undeclared column is a field nobody reviewed at publish reaching a caller"
         );
     }
@@ -2025,7 +2163,7 @@ mod tests {
         let snap = snapshot_with_columns(vec![spec("v", "varchar", true)]);
         let out = result(vec![live("v", "integer")], vec![vec![serde_json::json!(1)]]);
         assert!(
-            matches!(shape_rows(&out, &snap), Err(ServingError::SchemaDrift)),
+            matches!(shape_sole(&out, &snap), Err(ServingError::SchemaDrift)),
             "this is the gap that served 200 with an integer under a declared varchar"
         );
     }
@@ -2053,11 +2191,11 @@ mod tests {
             vec![vec![serde_json::json!(1), serde_json::json!("x")]],
         );
         assert_eq!(
-            shape_rows(&ok, &snap).expect("two distinct declared columns are fine"),
+            shape_sole(&ok, &snap).expect("two distinct declared columns are fine"),
             serde_json::json!([{"id": 1, "name": "x"}])
         );
         assert!(
-            matches!(shape_rows(&out, &snap), Err(ServingError::SchemaDrift)),
+            matches!(shape_sole(&out, &snap), Err(ServingError::SchemaDrift)),
             "one key would keep the last value and the other column would be gone"
         );
     }
@@ -2074,7 +2212,7 @@ mod tests {
             vec![live("b", "integer"), live("a", "integer")],
             vec![vec![serde_json::json!(88), serde_json::json!(89)]],
         );
-        let v = shape_rows(&out, &snap).expect("a reorder is not a different object");
+        let v = shape_sole(&out, &snap).expect("a reorder is not a different object");
         assert_eq!(
             v,
             serde_json::json!([{"b": 88, "a": 89}]),
@@ -2097,7 +2235,7 @@ mod tests {
             vec![vec![serde_json::json!(7)]],
         );
         assert_eq!(
-            shape_rows(&out, &snap).expect("an optional column may be absent"),
+            shape_sole(&out, &snap).expect("an optional column may be absent"),
             serde_json::json!([{"totalRevenue": 7}])
         );
     }
@@ -2119,7 +2257,7 @@ mod tests {
         );
         assert!(
             matches!(
-                shape_rows(&out, &snap),
+                shape_sole(&out, &snap),
                 Err(ServingError::OutputNamingCollision)
             ),
             "the contract collides whichever branch is served"
@@ -2141,7 +2279,7 @@ mod tests {
             vec![vec![serde_json::json!(1)]],
         );
         assert!(
-            matches!(shape_rows(&out, &snap), Err(ServingError::SchemaDrift)),
+            matches!(shape_sole(&out, &snap), Err(ServingError::SchemaDrift)),
             "a positional row that is one member short is not a contract"
         );
 
@@ -2151,7 +2289,7 @@ mod tests {
             vec![vec![serde_json::json!(1), serde_json::json!("x")]],
         );
         assert_eq!(
-            shape_rows(&full, &snap).expect("arrays serves an equal column list"),
+            shape_sole(&full, &snap).expect("arrays serves an equal column list"),
             serde_json::json!([[1, "x"]])
         );
 
@@ -2161,7 +2299,7 @@ mod tests {
             vec![vec![serde_json::json!("x"), serde_json::json!(1)]],
         );
         assert!(
-            matches!(shape_rows(&swapped, &snap), Err(ServingError::SchemaDrift)),
+            matches!(shape_sole(&swapped, &snap), Err(ServingError::SchemaDrift)),
             "a transposed tuple reads as the wrong column at every index"
         );
     }
@@ -2177,7 +2315,7 @@ mod tests {
 
         let drifted = result(vec![live("v", "integer")], vec![vec![serde_json::json!(1)]]);
         assert!(
-            matches!(shape_rows(&drifted, &snap), Err(ServingError::SchemaDrift)),
+            matches!(shape_sole(&drifted, &snap), Err(ServingError::SchemaDrift)),
             "a positional column whose type moved is drift, exactly as under objects"
         );
 
@@ -2189,7 +2327,7 @@ mod tests {
             vec![vec![serde_json::json!("x")]],
         );
         assert_eq!(
-            shape_rows(&ok, &snap).expect("the declared type is served"),
+            shape_sole(&ok, &snap).expect("the declared type is served"),
             serde_json::json!([["x"]])
         );
     }
@@ -2212,7 +2350,7 @@ mod tests {
         ]);
         assert!(
             matches!(
-                shape_rows(&result(vec![], vec![vec![]]), &snap),
+                shape_sole(&result(vec![], vec![vec![]]), &snap),
                 Err(ServingError::SchemaDrift)
             ),
             "an all-optional union must not turn an empty result into 200 [{{}}]"
@@ -2221,7 +2359,7 @@ mod tests {
         // refusal has to come from the column list and not from a row.
         assert!(
             matches!(
-                shape_rows(&result(vec![], vec![]), &snap),
+                shape_sole(&result(vec![], vec![]), &snap),
                 Err(ServingError::SchemaDrift)
             ),
             "no rows is not a reason to stop checking the columns"
@@ -2230,7 +2368,7 @@ mod tests {
         let mut arrays = snapshot_with_columns(vec![spec("a", "integer", false)]);
         arrays.output.shape = "arrays".into();
         assert!(matches!(
-            shape_rows(&result(vec![], vec![vec![]]), &arrays),
+            shape_sole(&result(vec![], vec![vec![]]), &arrays),
             Err(ServingError::SchemaDrift)
         ));
     }
@@ -2246,7 +2384,7 @@ mod tests {
         ]);
         // One live column, one value: correct, and two values wide of the frozen
         // union would be the reading that refuses it.
-        assert!(shape_rows(
+        assert!(shape_sole(
             &result(
                 vec![live("id", "integer")],
                 vec![vec![serde_json::json!(1)]]
@@ -2260,7 +2398,7 @@ mod tests {
             vec![vec![serde_json::json!(1), serde_json::json!(2)]],
         );
         assert!(
-            matches!(shape_rows(&bug, &snap), Err(ServingError::Internal { .. })),
+            matches!(shape_sole(&bug, &snap), Err(ServingError::Internal { .. })),
             "a row that disagrees with the connector's own column list is a fault"
         );
     }
@@ -2287,5 +2425,292 @@ mod tests {
             impersonate: false,
             param_gate: egret_dataapi_api::PARAM_GATE,
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // M2 Task 7 — per-statement shaping, and what fills `data`
+    // -----------------------------------------------------------------------
+
+    fn stmt(name: &str, sql: &str, columns: Vec<ColumnSpec>) -> StatementSnapshot {
+        StatementSnapshot {
+            name: name.into(),
+            sql: sql.into(),
+            columns,
+        }
+    }
+
+    /// **Each statement is judged against ITS OWN frozen columns.**
+    ///
+    /// The crossed case at the end is the defect this task closes, stated at the
+    /// level the six clauses live at: the `total` statement's result, judged
+    /// against the `rows` statement's contract, is a drift — so a serving path
+    /// that shaped everything against `statements[0]` would answer `503` on an
+    /// endpoint nobody had changed. Both directions are asserted, because a
+    /// `shape_rows` that had stopped comparing anything would pass the first two
+    /// alone.
+    #[test]
+    fn each_statement_is_shaped_against_its_own_frozen_columns() {
+        let rows = stmt(
+            "rows",
+            "SELECT id FROM t",
+            vec![spec("id", "integer", true)],
+        );
+        let total = stmt(
+            "total",
+            "SELECT count(*) AS total FROM t",
+            vec![spec("total", "bigint", true)],
+        );
+        let output = OutputSpec::default();
+
+        let rows_out = result(
+            vec![live("id", "integer")],
+            vec![vec![serde_json::json!(1)]],
+        );
+        let total_out = result(
+            vec![live("total", "bigint")],
+            vec![vec![serde_json::json!(9)]],
+        );
+
+        assert_eq!(
+            shape_rows(&rows_out, &output, &rows).expect("its own contract"),
+            serde_json::json!([{"id": 1}]),
+        );
+        assert_eq!(
+            shape_rows(&total_out, &output, &total).expect("its own contract"),
+            serde_json::json!([{"total": 9}]),
+        );
+
+        assert!(
+            matches!(
+                shape_rows(&total_out, &output, &rows),
+                Err(ServingError::SchemaDrift)
+            ),
+            "the second statement's result against the first's contract is a \
+             drift — which is what a path shaping everything against \
+             `statements[0]` would answer for it",
+        );
+    }
+
+    /// `data` is the rows for one statement and an object keyed by name for
+    /// several (spec §4.4).
+    ///
+    /// The one-statement arm is the compatibility claim `LEGACY_STATEMENT_NAME`
+    /// rests on: every endpoint published before M2 has exactly one statement,
+    /// so the synthesized name `main` never reaches the wire.
+    #[test]
+    fn one_statement_is_an_array_and_several_are_keyed_by_name() {
+        let rows = serde_json::json!([{"id": 1}]);
+        assert_eq!(
+            statements_data(vec![("main", rows.clone())]),
+            rows,
+            "one statement's body is the rows themselves, under no name at all",
+        );
+
+        assert_eq!(
+            statements_data(vec![
+                ("rows", rows.clone()),
+                ("total", serde_json::json!([{"total": 9}]))
+            ]),
+            serde_json::json!({"rows": [{"id": 1}], "total": [{"total": 9}]}),
+        );
+    }
+
+    /// `meta.columns` is one statement's frozen union, or every statement's.
+    ///
+    /// **Task 8 replaces this field** with `meta.statements`, so this test is
+    /// meant to redden then — it pins an interim, and the interim's whole point
+    /// is that it never reports one statement's columns as if they were the
+    /// endpoint's.
+    #[test]
+    fn the_reported_contract_covers_every_statement() {
+        let base = snapshot_with_limits(1, 1);
+        let one = EndpointSnapshot {
+            statements: vec![stmt("main", "SELECT 1", vec![spec("id", "integer", true)])],
+            ..base.clone()
+        };
+        assert_eq!(
+            contract_columns(&one),
+            vec![spec("id", "integer", true)],
+            "one statement reports exactly what it froze",
+        );
+
+        let two = EndpointSnapshot {
+            statements: vec![
+                stmt("rows", "SELECT 1", vec![spec("id", "integer", true)]),
+                stmt("total", "SELECT 2", vec![spec("total", "bigint", true)]),
+            ],
+            ..base
+        };
+        assert_eq!(
+            contract_columns(&two),
+            vec![spec("id", "integer", true), spec("total", "bigint", true)],
+            "a second statement's columns are not dropped from the contract the \
+             caller is handed",
+        );
+    }
+
+    /// **Every clause that reads a frozen contract reads the one it was HANDED**,
+    /// stated clause by clause rather than once.
+    ///
+    /// This is the hazard M2 Task 4 recorded for this task: `shape_rows` judged
+    /// six things against one `frozen` binding, and converting some of them to
+    /// per-statement while leaving others reading `statements[0]` is a hole no
+    /// single-statement test can show — at N=1 the two readings ARE the same
+    /// list. So each case below hands the SAME live result to TWO statements and
+    /// requires the verdicts to DISAGREE; a clause still reading a fixed
+    /// statement would answer both the same way.
+    ///
+    /// The three clauses not covered here do not read a frozen list at all:
+    /// row arity and the zero-column refusal judge `out`, and the live-duplicate
+    /// refusal judges `out.columns`. They are pinned in the tests above and
+    /// cannot become per-statement, because there is nothing per-statement in
+    /// them to get wrong.
+    #[test]
+    fn every_clause_judges_the_statement_it_was_given() {
+        let output = OutputSpec::default();
+
+        // 1. Containment. `total` is declared by one statement and not by the
+        //    other, so the same result is served under one and refused under it.
+        let rows = stmt("rows", "SELECT id", vec![spec("id", "integer", true)]);
+        let total = stmt(
+            "total",
+            "SELECT count(*)",
+            vec![spec("total", "bigint", true)],
+        );
+        let total_out = result(
+            vec![live("total", "bigint")],
+            vec![vec![serde_json::json!(9)]],
+        );
+        assert_eq!(
+            shape_rows(&total_out, &output, &total).expect("its own contract"),
+            serde_json::json!([{"total": 9}]),
+        );
+        assert!(
+            matches!(
+                shape_rows(&total_out, &output, &rows),
+                Err(ServingError::SchemaDrift)
+            ),
+            "an undeclared column is judged against the statement handed in",
+        );
+
+        // 2. `required`. One statement requires a column the result omits; the
+        //    other declares the same column optional.
+        let strict = stmt(
+            "strict",
+            "SELECT a, b",
+            vec![spec("a", "integer", true), spec("b", "integer", true)],
+        );
+        let lax = stmt(
+            "lax",
+            "SELECT a, b",
+            vec![spec("a", "integer", true), spec("b", "integer", false)],
+        );
+        let partial = result(vec![live("a", "integer")], vec![vec![serde_json::json!(1)]]);
+        assert_eq!(
+            shape_rows(&partial, &output, &lax).expect("an optional column may be absent"),
+            serde_json::json!([{"a": 1}]),
+        );
+        assert!(
+            matches!(
+                shape_rows(&partial, &output, &strict),
+                Err(ServingError::SchemaDrift)
+            ),
+            "`required` is read from the statement handed in",
+        );
+
+        // 3. Types.
+        let as_varchar = stmt("as_varchar", "SELECT v", vec![spec("v", "varchar", true)]);
+        let as_integer = stmt("as_integer", "SELECT v", vec![spec("v", "integer", true)]);
+        let integer_out = result(vec![live("v", "integer")], vec![vec![serde_json::json!(1)]]);
+        assert_eq!(
+            shape_rows(&integer_out, &output, &as_integer).expect("the declared type is served"),
+            serde_json::json!([{"v": 1}]),
+        );
+        assert!(
+            matches!(
+                shape_rows(&integer_out, &output, &as_varchar),
+                Err(ServingError::SchemaDrift)
+            ),
+            "the declared type is read from the statement handed in",
+        );
+
+        // 4. The `output.naming` collision, which is judged over the FROZEN
+        //    union rather than over this call's columns — so it too is a
+        //    property of one statement, and under `camel` one of these two folds
+        //    its declared names onto one key while the other does not.
+        let camel = OutputSpec {
+            naming: "camel".into(),
+            ..OutputSpec::default()
+        };
+        let colliding = stmt(
+            "colliding",
+            "SELECT total_revenue, totalRevenue",
+            vec![
+                spec("total_revenue", "integer", false),
+                spec("totalRevenue", "integer", false),
+            ],
+        );
+        let clean = stmt("clean", "SELECT id", vec![spec("id", "integer", true)]);
+        let id_out = result(
+            vec![live("id", "integer")],
+            vec![vec![serde_json::json!(1)]],
+        );
+        assert_eq!(
+            shape_rows(&id_out, &camel, &clean).expect("no two frozen names fold together"),
+            serde_json::json!([{"id": 1}]),
+        );
+        let one_of_them = result(
+            vec![live("total_revenue", "integer")],
+            vec![vec![serde_json::json!(1)]],
+        );
+        assert!(
+            matches!(
+                shape_rows(&one_of_them, &camel, &colliding),
+                Err(ServingError::OutputNamingCollision)
+            ),
+            "the collision is judged over the frozen union of the statement \
+             handed in — and it is the OTHER 503, which is why the variant is \
+             matched rather than the status",
+        );
+    }
+
+    /// **A drift is logged against the statement that drifted.**
+    ///
+    /// The operator reads this one line to decide what moved. While `drift`
+    /// fetched its own columns through `sole_statement()` it would have named
+    /// the FIRST statement's contract for a drift in the second — sending them
+    /// to a statement that was fine, silently, at exactly the moment they need
+    /// the truth. Both statements are exercised, because a line hard-coded to
+    /// either one would satisfy a test that only ever drifts the same one.
+    #[test]
+    fn a_drift_is_logged_against_the_statement_that_drifted() {
+        let output = OutputSpec::default();
+        let rows = stmt("rows", "SELECT id", vec![spec("id", "integer", true)]);
+        let total = stmt(
+            "total",
+            "SELECT count(*)",
+            vec![spec("total", "bigint", true)],
+        );
+        let renamed = result(
+            vec![live("grand_total", "bigint")],
+            vec![vec![serde_json::json!(9)]],
+        );
+
+        let logs = logs_from_statement_shaping(&renamed, &output, &total);
+        assert!(logs.contains("statement=total"), "{logs}");
+        assert!(
+            logs.contains(r#"frozen=["total"]"#),
+            "the frozen list logged is the drifting statement's own: {logs}"
+        );
+        assert!(
+            !logs.contains("statement=rows") && !logs.contains(r#"frozen=["id"]"#),
+            "a sibling statement, which is fine, must not appear: {logs}"
+        );
+
+        // The other one, so neither assertion above can be satisfied by a
+        // constant.
+        let logs = logs_from_statement_shaping(&renamed, &output, &rows);
+        assert!(logs.contains("statement=rows"), "{logs}");
+        assert!(logs.contains(r#"frozen=["id"]"#), "{logs}");
     }
 }

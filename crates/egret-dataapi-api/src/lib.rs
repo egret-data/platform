@@ -242,9 +242,10 @@ pub struct EndpointSnapshot {
 }
 
 impl EndpointSnapshot {
-    /// **M2 BRIDGE. Tasks 6, 7 and 9 delete this** — parameter resolution,
-    /// execution and document generation each become a loop over
-    /// [`Self::statements`], and then nothing calls this.
+    /// **M2 BRIDGE. Task 9 deletes this** — parameter resolution (Task 6) and
+    /// execution (Task 7) are already loops over [`Self::statements`], and
+    /// `openapi_gen` is the last caller left; once document generation is a loop
+    /// too, nothing calls this.
     ///
     /// It exists only so Task 4 can change the persisted shape without also
     /// changing how a request is served: every caller today assumes exactly one
