@@ -245,6 +245,31 @@ type predicate intact.
 
 ---
 
+### Task 7b: bound the wall clock a statement list can buy
+
+**Added after Task 7 found nothing owns this.** Execution is sequential, so an endpoint's
+worst-case wall clock is now **N × `timeout_seconds`**, and **nothing caps N at publish**.
+Migration `0129`'s CHECK only refuses an empty list. That is the same shape as the
+fan-out finding in the previous package, where a bound existed for one dimension of cost
+and not for the one that had just been multiplied.
+
+- [ ] **Step 1: measure before choosing a number.** Time a publish and a serve at several
+  statement counts, the way `MAX_DESCRIBED_BRANCHES` and `MAX_DECLARED_PARAMS` were both
+  chosen — by measurement, not by taste. Say what you measured.
+- [ ] **Step 2: decide the shape and say why.** A cap on statement count and a total-time
+  budget across statements are different promises: the first is checkable at publish and
+  refuses loudly; the second bounds the real resource but can only fail mid-response, with
+  some statements already executed. Consider whether a partial response is expressible at
+  all under the envelope Task 8 defines.
+- [ ] **Step 3: refuse at publish**, before the first describe, with a message that tells
+  the author what to do rather than only naming the limit.
+- [ ] **Step 4: mutate in both directions** — the refusal removed must redden a test, and
+  the limit set to 1 must redden a **different** one, proving a legitimate two-statement
+  endpoint still publishes.
+- [ ] **Step 5: Commit**
+
+---
+
 ### Task 8: the envelope
 
 **Files:** `crates/egret-dataapi/src/serving/router.rs`, `crates/egret-dataapi-api/src/lib.rs`
