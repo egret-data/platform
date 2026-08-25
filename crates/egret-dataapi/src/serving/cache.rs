@@ -308,22 +308,36 @@ pub fn cache_ttl(snap: &EndpointSnapshot) -> Option<Duration> {
     ))
 }
 
-/// A cached response body: the SHAPED rows plus the row count that described
+/// A cached response body: the SHAPED rows plus the row counts that described
 /// them.
 ///
 /// Shaped rather than raw, because shaping is where `output.shape`/`naming` and
 /// the drift refusal are applied — caching the raw result would re-run all of
 /// that on every hit, and (worse) let a hit and a miss disagree about whether
 /// the endpoint had drifted.
+///
+/// # Why the counts are a LIST, and positional
+///
+/// `meta` reports a row count PER STATEMENT once an endpoint has several (spec
+/// §4.4), and a hit runs none of them — so a single total cannot rebuild the
+/// body a miss would have produced, and a hit would answer with an empty
+/// `statements` map under a `200`.
+///
+/// Positional rather than keyed by name because the key stream already carries
+/// `version` ([`cache_key`]), and a re-publish is the only thing that can change
+/// the statement list. An entry therefore belongs to exactly one frozen list,
+/// in the order that list was published. The caller still checks the LENGTH
+/// before zipping — see `router::run` — because a silent `zip` truncation would
+/// drop a statement from `meta` rather than fail.
 #[derive(Clone, Debug)]
 pub struct CachedResponse {
     pub data: Arc<serde_json::Value>,
-    pub row_count: u64,
+    pub row_counts: Vec<u64>,
 }
 
 struct Entry {
     data: Arc<serde_json::Value>,
-    row_count: u64,
+    row_counts: Vec<u64>,
     expires: Instant,
     bytes: usize,
     /// Insertion order, for eviction. Not a timestamp: two entries written in
@@ -414,7 +428,7 @@ impl ResponseCache {
         }
         Some(CachedResponse {
             data: e.data.clone(),
-            row_count: e.row_count,
+            row_counts: e.row_counts.clone(),
         })
     }
 
@@ -443,7 +457,7 @@ impl ResponseCache {
         &self,
         key: String,
         data: Arc<serde_json::Value>,
-        row_count: u64,
+        row_counts: Vec<u64>,
         ttl: Duration,
         now: Instant,
     ) -> bool {
@@ -482,7 +496,7 @@ impl ResponseCache {
             key,
             Entry {
                 data,
-                row_count,
+                row_counts,
                 expires: now + ttl,
                 bytes,
                 seq,
@@ -663,7 +677,7 @@ mod tests {
         let c = ResponseCache::new();
         let t0 = Instant::now();
         let data = Arc::new(serde_json::json!([{ "n": 1 }]));
-        assert!(c.put_at("k".into(), data, 1, Duration::from_secs(60), t0));
+        assert!(c.put_at("k".into(), data, vec![1], Duration::from_secs(60), t0));
 
         assert!(c.get_at("k", t0 + Duration::from_secs(59)).is_some());
         assert!(
@@ -677,7 +691,13 @@ mod tests {
     fn an_oversized_response_is_not_cached() {
         let c = ResponseCache::new();
         let big = Arc::new(serde_json::Value::String("x".repeat(MAX_ENTRY_BYTES + 1)));
-        assert!(!c.put_at("k".into(), big, 1, Duration::from_secs(60), Instant::now()));
+        assert!(!c.put_at(
+            "k".into(),
+            big,
+            vec![1],
+            Duration::from_secs(60),
+            Instant::now()
+        ));
         assert_eq!(c.len(), 0);
     }
 
@@ -692,13 +712,13 @@ mod tests {
         let d = || Arc::new(serde_json::json!([{ "n": 1 }]));
         let ttl = Duration::from_secs(600);
         for i in 0..MAX_ENTRIES {
-            assert!(c.put_at(format!("k{i}"), d(), 1, ttl, t0));
+            assert!(c.put_at(format!("k{i}"), d(), vec![1], ttl, t0));
         }
         assert_eq!(c.len(), MAX_ENTRIES);
 
         // One past the cap: stored, and the map has not grown.
         assert!(
-            c.put_at("newest".into(), d(), 1, ttl, t0),
+            c.put_at("newest".into(), d(), vec![1], ttl, t0),
             "a full cache must still store — declining is what starved everyone else"
         );
         assert_eq!(c.len(), MAX_ENTRIES);
@@ -722,18 +742,30 @@ mod tests {
         let t0 = Instant::now();
         let d = || Arc::new(serde_json::json!([{ "n": 1 }]));
         for i in 0..MAX_ENTRIES - 1 {
-            c.put_at(format!("old{i}"), d(), 1, Duration::from_secs(10), t0);
+            c.put_at(format!("old{i}"), d(), vec![1], Duration::from_secs(10), t0);
         }
         // One entry with a long TTL, written last so it is also the NEWEST —
         // eviction by insertion order would keep it anyway. Written first would
         // not distinguish the two rules.
-        c.put_at("survivor".into(), d(), 1, Duration::from_secs(600), t0);
+        c.put_at(
+            "survivor".into(),
+            d(),
+            vec![1],
+            Duration::from_secs(600),
+            t0,
+        );
         assert_eq!(c.len(), MAX_ENTRIES);
 
         // Half a minute later every `old*` entry is dead. The next write must
         // reclaim them wholesale rather than evict one at a time.
         let later = t0 + Duration::from_secs(30);
-        c.put_at("fresh".into(), d(), 1, Duration::from_secs(600), later);
+        c.put_at(
+            "fresh".into(),
+            d(),
+            vec![1],
+            Duration::from_secs(600),
+            later,
+        );
         assert_eq!(c.len(), 2, "only the two live entries remain");
         assert!(c.get_at("survivor", later).is_some());
         assert!(c.get_at("fresh", later).is_some());
@@ -745,9 +777,9 @@ mod tests {
         let t0 = Instant::now();
         let d = || Arc::new(serde_json::json!([{ "n": 1 }]));
         let ttl = Duration::from_secs(60);
-        c.put_at("k".into(), d(), 1, ttl, t0);
+        c.put_at("k".into(), d(), vec![1], ttl, t0);
         let after_first = c.bytes();
-        c.put_at("k".into(), d(), 1, ttl, t0);
+        c.put_at("k".into(), d(), vec![1], ttl, t0);
         assert_eq!(c.len(), 1);
         assert_eq!(
             c.bytes(),

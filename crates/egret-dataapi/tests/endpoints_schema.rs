@@ -137,6 +137,7 @@ fn fixture_snapshot(database_id: Uuid) -> EndpointSnapshot {
         output: OutputSpec {
             shape: "arrays".to_string(),
             naming: "camel".to_string(),
+            envelope: "bare".to_string(),
         },
         cache: CacheSpec {
             enabled: true,

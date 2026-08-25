@@ -1226,6 +1226,9 @@ async fn absent_spec_fields_come_back_as_their_serde_defaults() {
     );
     assert_eq!(created["output"]["shape"].as_str(), Some("objects"));
     assert_eq!(created["output"]["naming"].as_str(), Some("as_is"));
+    // The one default with a WIRE consequence: `bare` here would strip the
+    // envelope off every endpoint anybody creates without asking for it.
+    assert_eq!(created["output"]["envelope"].as_str(), Some("wrapped"));
     assert_eq!(created["cache"]["enabled"].as_bool(), Some(false));
     assert_eq!(created["cache"]["ttl_seconds"].as_u64(), Some(60));
     assert_eq!(created["cache"]["scope"].as_str(), Some("per_principal"));

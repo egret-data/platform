@@ -728,6 +728,18 @@ async fn every_error_carries_the_same_envelope() {
             "no message in {}",
             res.text
         );
+        // M2 Task 8's two additions, asserted here rather than only in
+        // `serving_routing.rs` because THIS is the test about the envelope being
+        // the same one every time — and `status` mirrors the HTTP status, so a
+        // constant would satisfy any single-refusal test while disagreeing with
+        // one of these three.
+        assert_eq!(res.body["status"], "error", "{}", res.text);
+        assert_eq!(
+            res.body["message"], res.body["error"]["message"],
+            "the human-readable half is lifted to the envelope, not reworded \
+             there: {}",
+            res.text
+        );
         assert!(
             Uuid::parse_str(res.request_id()).is_ok(),
             "request_id must be a real id, got {}",
@@ -1514,9 +1526,26 @@ async fn each_statement_is_served_under_its_own_name_and_its_own_contract() {
         "one execution per statement: {}",
         res.body
     );
-    // And the count is the SUM, so a client cannot read one statement's arity
-    // as the call's.
-    assert_eq!(res.body["meta"]["row_count"], 2, "{}", res.body);
+    // And each statement's count is reported under its own name.
+    //
+    // This assertion read `meta.row_count == 2` — the SUM — until M2 Task 8
+    // replaced `meta` with the keyed shape. The sum was the best a single
+    // integer could do; it is not the row count of anything a caller can name,
+    // because the two statements share no transaction and no snapshot (§4.5).
+    // `several_statements_report_their_contract_under_their_own_names` is where
+    // the new shape is pinned in full; this keeps the reading the original
+    // assertion was for — that a client cannot read one statement's arity as
+    // the call's.
+    assert_eq!(
+        res.body["meta"]["statements"]["rows"]["row_count"], 1,
+        "{}",
+        res.body
+    );
+    assert_eq!(
+        res.body["meta"]["statements"]["total"]["row_count"], 1,
+        "{}",
+        res.body
+    );
 }
 
 /// **A drift in the SECOND statement refuses the whole call**, with
@@ -1619,4 +1648,206 @@ async fn the_row_cap_is_charged_per_statement() {
         "every statement gets the endpoint's whole cap, not a share of it and \
          not what the statement before it left over",
     );
+}
+
+// ---------------------------------------------------------------------------
+// M2 Task 8 — the envelope, where it has to say something new (spec §4.4)
+// ---------------------------------------------------------------------------
+
+/// **`meta` keys the contract by statement name once there are several.**
+///
+/// This is the field Task 7 could not express and left as a concatenation:
+/// `meta.columns` reported every statement's frozen columns in one flat list,
+/// so a caller holding `["id","name","total"]` had no way to learn which
+/// statement declared which — and no way to notice that the question was
+/// unanswerable.
+///
+/// The two endpoint-wide fields are asserted ABSENT. A sum of row counts across
+/// independent reads is not the row count of anything, and a flat union of
+/// columns is a contract no statement has; leaving either beside the keyed map
+/// would give a client two readings that can disagree.
+#[tokio::test]
+async fn several_statements_report_their_contract_under_their_own_names() {
+    let Some(f) = serving_common::fixture().await else {
+        eprintln!("DATABASE_URL unset — skipping");
+        return;
+    };
+    // First arm wins, so the fallback goes last. Installed BEFORE publish: this
+    // is what publish describes and freezes.
+    f.port
+        .set_columns_per_sql(&[("count", &["total"][..]), ("", &["id", "name"][..])]);
+
+    f.publish_statements(
+        "/meta-two",
+        f.database_id,
+        serde_json::json!([
+            { "name": "rows",  "sql": "SELECT id, name FROM t" },
+            { "name": "total", "sql": "SELECT count(*) AS total FROM t" },
+        ]),
+        serde_json::json!({}),
+    )
+    .await;
+
+    let res = f.call_as(f.principal_a, "meta-two").await;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.body);
+
+    assert_eq!(
+        keys(&res.body["meta"]["statements"]),
+        vec!["rows", "total"],
+        "the contract is keyed by statement name, in the author's order: {}",
+        res.body
+    );
+    assert_eq!(
+        res.body["meta"]["statements"]["rows"]["row_count"], 1,
+        "{}",
+        res.body
+    );
+    assert_eq!(
+        column_names(&res.body["meta"]["statements"]["rows"]["columns"]),
+        vec!["id", "name"],
+        "the rows statement's own frozen columns: {}",
+        res.body
+    );
+    assert_eq!(
+        column_names(&res.body["meta"]["statements"]["total"]["columns"]),
+        vec!["total"],
+        "the total statement's own frozen column, not the rows statement's and \
+         not the concatenation of both: {}",
+        res.body
+    );
+
+    assert!(
+        res.body["meta"]["row_count"].is_null(),
+        "a sum across independent reads is not the row count of anything: {}",
+        res.body
+    );
+    assert!(
+        res.body["meta"]["columns"].is_null(),
+        "the unkeyed concatenation is gone — it is what this field replaces: {}",
+        res.body
+    );
+
+    // The endpoint-wide half of `meta` is untouched by the split.
+    assert_eq!(res.body["meta"]["version"], 1, "{}", res.body);
+    assert_eq!(res.body["meta"]["cached"], false, "{}", res.body);
+    assert!(res.body["meta"]["request_id"].is_string(), "{}", res.body);
+    assert_eq!(res.body["status"], "ok", "{}", res.body);
+}
+
+/// **`bare` writes `data`'s VALUE**, which for several statements is the object
+/// keyed by name — not "the rows".
+///
+/// Driven with several statements on purpose: with one, `bare` and "the rows
+/// array" are the same body, so a single-statement test cannot tell an
+/// implementation that writes `data` from one that writes the first statement's
+/// rows.
+#[tokio::test]
+async fn bare_with_several_statements_writes_the_keyed_object_alone() {
+    let Some(f) = serving_common::fixture().await else {
+        eprintln!("DATABASE_URL unset — skipping");
+        return;
+    };
+    f.port
+        .set_columns_per_sql(&[("count", &["total"][..]), ("", &["id", "name"][..])]);
+
+    f.publish_statements_with_output(
+        "/bare-two",
+        f.database_id,
+        serde_json::json!([
+            { "name": "rows",  "sql": "SELECT id, name FROM t" },
+            { "name": "total", "sql": "SELECT count(*) AS total FROM t" },
+        ]),
+        serde_json::json!({}),
+        serde_json::json!({ "envelope": "bare" }),
+    )
+    .await;
+
+    let res = f.call_as(f.principal_a, "bare-two").await;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.body);
+    assert_eq!(
+        keys(&res.body),
+        vec!["rows", "total"],
+        "the body IS `data`'s value — the keyed object, with no wrapper: {}",
+        res.body
+    );
+    assert_eq!(keys(&res.body["total"][0]), vec!["total"], "{}", res.body);
+}
+
+/// A cache HIT reports the same `meta` a miss did.
+///
+/// The per-statement row counts are computed while the statements run, so a hit
+/// — which runs none of them — has to carry them. The first version of this
+/// field did not, and a warm several-statement endpoint would have answered
+/// with an empty `statements` map under a `200`.
+#[tokio::test]
+async fn a_cache_hit_reports_the_same_per_statement_meta_as_the_miss() {
+    let Some(f) = serving_common::fixture().await else {
+        eprintln!("DATABASE_URL unset — skipping");
+        return;
+    };
+    f.port
+        .set_columns_per_sql(&[("count", &["total"][..]), ("", &["id", "name"][..])]);
+
+    let ep = f
+        .publish_statements(
+            "/cached-two",
+            f.database_id,
+            serde_json::json!([
+                { "name": "rows",  "sql": "SELECT id, name FROM t" },
+                { "name": "total", "sql": "SELECT count(*) AS total FROM t" },
+            ]),
+            serde_json::json!({}),
+        )
+        .await;
+    // `publish_statements` publishes with caching OFF — every other assertion in
+    // this file counts executions. `rows_affected` is asserted because a
+    // `jsonb_set` down a path that does not exist still reports success, and
+    // this test would then measure a cache that was never on.
+    let touched = sqlx::query(
+        "UPDATE dataapi.endpoint_versions \
+            SET snapshot = jsonb_set(snapshot, '{cache}', \
+                '{\"enabled\":true,\"ttl_seconds\":60,\"scope\":\"per_principal\"}'::jsonb) \
+          WHERE endpoint_id = $1",
+    )
+    .bind(ep)
+    .execute(&f.db.pool)
+    .await
+    .expect("enable caching on the frozen snapshot")
+    .rows_affected();
+    assert_eq!(touched, 1, "the frozen snapshot must actually have changed");
+
+    let miss = f.call_as(f.principal_a, "cached-two").await;
+    assert_eq!(miss.status, StatusCode::OK, "{}", miss.body);
+    assert_eq!(miss.body["meta"]["cached"], false, "{}", miss.body);
+
+    let hit = f.call_as(f.principal_a, "cached-two").await;
+    assert_eq!(hit.status, StatusCode::OK, "{}", hit.body);
+    assert_eq!(hit.body["meta"]["cached"], true, "{}", hit.body);
+    assert!(
+        hit.body["meta"]["statements"].is_object(),
+        "asserted non-null before the comparison below: two absent fields \
+         compare equal, so the equality alone would hold for an implementation \
+         that reported no statements on either side: {}",
+        hit.body
+    );
+    assert_eq!(
+        hit.body["meta"]["statements"], miss.body["meta"]["statements"],
+        "a hit describes the same statements the miss did — it is the same \
+         body, and the only field that may differ is `cached`.\nmiss: {}\nhit:  {}",
+        miss.body, hit.body
+    );
+    assert_eq!(hit.body["data"], miss.body["data"], "{}", hit.body);
+}
+
+/// Column NAMES from a `meta` column list, in order.
+fn column_names(v: &serde_json::Value) -> Vec<&str> {
+    v.as_array()
+        .unwrap_or_else(|| panic!("expected a column array, got {v}"))
+        .iter()
+        .map(|c| {
+            c["name"]
+                .as_str()
+                .unwrap_or_else(|| panic!("a column with no name: {c}"))
+        })
+        .collect()
 }

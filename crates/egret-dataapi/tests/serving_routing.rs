@@ -1197,3 +1197,194 @@ async fn a_row_wider_than_its_own_column_list_is_refused_in_both_shapes() {
         objects.body
     );
 }
+
+// ---------------------------------------------------------------------------
+// M2 Task 8 — the envelope (spec §4.4)
+// ---------------------------------------------------------------------------
+
+/// Top-level keys of a JSON object, in wire order.
+///
+/// Order is asserted rather than membership because `serde_json`'s
+/// `preserve_order` is on across this workspace, so the wire order IS stable —
+/// and `status` before `data` is what makes the envelope readable in a log
+/// excerpt truncated at the first line.
+fn top_keys(v: &serde_json::Value) -> Vec<&str> {
+    v.as_object()
+        .unwrap_or_else(|| panic!("expected a JSON object, got {v}"))
+        .keys()
+        .map(String::as_str)
+        .collect()
+}
+
+/// **The wrapped envelope, which is the default.**
+///
+/// `status` and `message` are new keys, `data` and `meta` are where they always
+/// were. `meta.statements` is asserted ABSENT: a one-statement endpoint reports
+/// `row_count`/`columns` directly, and reporting both would let a client read
+/// one endpoint's contract two ways that could disagree.
+#[tokio::test]
+async fn a_one_statement_body_is_wrapped_and_says_ok() {
+    let f = skip_without_db!();
+    f.publish_endpoint("GET", "/wrapped", "SELECT 1 AS n").await;
+
+    let res = f.call("wrapped").await;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.body);
+    assert_eq!(
+        top_keys(&res.body),
+        vec!["status", "message", "data", "meta"],
+        "the envelope is four keys in this order: {}",
+        res.body
+    );
+    assert_eq!(res.body["status"], "ok", "{}", res.body);
+    assert!(
+        res.body["message"].is_null(),
+        "`message` is null on success — it is the human-readable half of an \
+         error, not a success banner: {}",
+        res.body
+    );
+    assert!(
+        res.body["data"].is_array(),
+        "one statement's `data` is the rows themselves: {}",
+        res.body
+    );
+    assert_eq!(res.body["meta"]["row_count"], 1, "{}", res.body);
+    assert_eq!(res.body["meta"]["columns"][0]["name"], "n", "{}", res.body);
+    assert!(
+        res.body["meta"]["statements"].is_null(),
+        "a one-statement endpoint reports its contract directly, never also \
+         under a name: {}",
+        res.body
+    );
+}
+
+/// **`bare` writes `data`'s value alone**, and nothing else.
+///
+/// The whole body is asserted, not just its type: a `bare` response that still
+/// carried `meta` somewhere would satisfy `is_array` if `data` happened to be
+/// first, and the point of the toggle is that there is no wrapper at all.
+#[tokio::test]
+async fn the_bare_envelope_writes_data_alone() {
+    let f = skip_without_db!();
+    f.publish_endpoint_with_output(
+        "GET",
+        "/bare",
+        "SELECT 1 AS n",
+        serde_json::json!({ "envelope": "bare" }),
+    )
+    .await;
+
+    let res = f.call("bare").await;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.body);
+    assert_eq!(
+        res.body,
+        serde_json::json!([{ "n": 1 }]),
+        "`bare` is the rows and nothing around them: {}",
+        res.body
+    );
+}
+
+/// An unrecognised `envelope` serves the documented default, like `shape` and
+/// `naming` before it.
+///
+/// `output` is frozen at publish with no validation rule anywhere
+/// (`lifecycle.rs`'s module comment says so), so an unrecognised value is
+/// reachable. Refusing would make a published endpoint permanently dead over a
+/// cosmetic field; and unlike drift, it cannot silently lose anything.
+#[tokio::test]
+async fn an_unrecognised_envelope_serves_the_wrapped_default() {
+    let f = skip_without_db!();
+    f.publish_endpoint_with_output(
+        "GET",
+        "/envelope-junk",
+        "SELECT 1 AS n",
+        serde_json::json!({ "envelope": "nonsense" }),
+    )
+    .await;
+
+    let res = f.call("envelope-junk").await;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.body);
+    assert_eq!(res.body["status"], "ok", "{}", res.body);
+    assert!(res.body["data"].is_array(), "{}", res.body);
+}
+
+/// **`status` mirrors the HTTP status; it never replaces it.**
+///
+/// Three different real statuses, because a `status` field hard-coded to
+/// `"error"` on the error path would satisfy a test that only ever drove one
+/// refusal — and the point of "mirrors" is that the body and the status line
+/// cannot disagree.
+///
+/// The CODE is read on every arm, not just the status: `503` covers both
+/// `schema_drift` and `output_naming_collision`, and a test that reads only the
+/// number cannot say which refusal it measured.
+#[tokio::test]
+async fn an_error_body_says_error_under_the_real_http_status() {
+    let f = skip_without_db!();
+
+    // 404 — no such endpoint.
+    let missing = f.call("no-such-endpoint").await;
+    assert_eq!(missing.status, StatusCode::NOT_FOUND, "{}", missing.body);
+    assert_eq!(
+        missing.body["error"]["code"], "not_found",
+        "{}",
+        missing.body
+    );
+    assert_eq!(missing.body["status"], "error", "{}", missing.body);
+    assert_eq!(
+        missing.body["message"], "no such endpoint",
+        "`message` is the human-readable half, and on an error it is not null: {}",
+        missing.body
+    );
+
+    // 401 — no bearer at all.
+    let anon = f.request("GET", &f.ws_slug, "no-such-endpoint", None).await;
+    assert_eq!(anon.status, StatusCode::UNAUTHORIZED, "{}", anon.body);
+    assert_eq!(anon.body["error"]["code"], "key_invalid", "{}", anon.body);
+    assert_eq!(anon.body["status"], "error", "{}", anon.body);
+
+    // 503 — the endpoint exists and its contract has drifted.
+    f.publish_endpoint("GET", "/drifted", "SELECT 55 AS n")
+        .await;
+    let drift = f.call("drifted").await;
+    assert_eq!(
+        drift.status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{}",
+        drift.body
+    );
+    assert_eq!(
+        drift.body["error"]["code"], "schema_drift",
+        "{}",
+        drift.body
+    );
+    assert_eq!(drift.body["status"], "error", "{}", drift.body);
+
+    // And the machine-readable detail every deployed client already branches on
+    // is untouched by the two new keys.
+    assert!(
+        drift.body["error"]["request_id"].is_string(),
+        "{}",
+        drift.body
+    );
+}
+
+/// **`bare` is a SUCCESS-path toggle.** A refused call still answers with the
+/// error body, because an unwrapped error would be a bare `null` — a body that
+/// says nothing at all about what went wrong, under a status the toggle cannot
+/// change.
+#[tokio::test]
+async fn a_bare_endpoint_still_answers_a_refusal_with_the_error_body() {
+    let f = skip_without_db!();
+    f.publish_endpoint_with_output(
+        "GET",
+        "/bare-drift",
+        "SELECT 55 AS n",
+        serde_json::json!({ "envelope": "bare" }),
+    )
+    .await;
+
+    let res = f.call("bare-drift").await;
+    assert_eq!(res.status, StatusCode::SERVICE_UNAVAILABLE, "{}", res.body);
+    assert_eq!(res.body["error"]["code"], "schema_drift", "{}", res.body);
+    assert_eq!(res.body["status"], "error", "{}", res.body);
+}

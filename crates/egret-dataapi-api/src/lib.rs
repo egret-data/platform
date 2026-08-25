@@ -675,12 +675,35 @@ pub struct OutputSpec {
     pub shape: String, // "objects" | "arrays"
     #[serde(default = "default_naming")]
     pub naming: String, // "as_is" | "camel" | "snake"
+    /// Whether the response carries the `{status, message, data, meta}` wrapper
+    /// (`"wrapped"`, the default) or `data`'s value on its own (`"bare"`) —
+    /// spec §4.4.
+    ///
+    /// Defaulted rather than made an `Option`, and defaulted to the WRAPPER, so
+    /// that every snapshot frozen before this field existed reads back as
+    /// `wrapped`: the migration sets no rows and an unpublished endpoint cannot
+    /// change shape by being re-read.
+    ///
+    /// `bare` is the success path only. A refusal still answers with
+    /// `ServingErrorBody`, because an unwrapped error would be a bare `null` —
+    /// nothing at all about what went wrong — under a status this toggle does
+    /// not reach.
+    ///
+    /// A `String` like `shape` and `naming`, and unvalidated like them: spec
+    /// §5.3 freezes `output` with no rule anywhere, so serving falls back to the
+    /// documented default and logs rather than refusing (see
+    /// `serving::router::envelope_of`).
+    #[serde(default = "default_envelope")]
+    pub envelope: String, // "wrapped" | "bare"
 }
 fn default_shape() -> String {
     "objects".into()
 }
 fn default_naming() -> String {
     "as_is".into()
+}
+fn default_envelope() -> String {
+    "wrapped".into()
 }
 
 // Hand-written, not `#[derive(Default)]`: a derive builds each field from
@@ -695,6 +718,7 @@ impl Default for OutputSpec {
         Self {
             shape: default_shape(),
             naming: default_naming(),
+            envelope: default_envelope(),
         }
     }
 }
@@ -713,6 +737,11 @@ mod tests {
         assert_eq!(OutputSpec::default(), from_empty_json);
         assert_eq!(OutputSpec::default().shape, "objects");
         assert_eq!(OutputSpec::default().naming, "as_is");
+        // The one that matters on the WIRE: a snapshot frozen before M2 carries
+        // no `envelope`, and reading it back as anything but `wrapped` would
+        // change the response shape of every endpoint published since
+        // 2026-08-16 without anybody re-publishing.
+        assert_eq!(OutputSpec::default().envelope, "wrapped");
     }
 
     #[test]

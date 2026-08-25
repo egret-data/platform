@@ -26,7 +26,10 @@ pub use auth::{verify_serving_token, ServingPrincipal, DATA_API_AUDIENCE};
 pub use cache::{cache_key, shared_cache_allowed, CachedResponse, ResponseCache};
 pub use error::{ServingErrorBody, ServingErrorDetail};
 pub use ratelimit::{Rate, RateLimitStore, TokenBucket};
-pub use router::{serving_openapi, serving_router, ServingMeta, ServingResponse};
+pub use router::{
+    serving_openapi, serving_router, MetaContract, ServingMeta, ServingResponse, ServingStatus,
+    StatementMeta,
+};
 
 /// A serving-path failure.
 ///
@@ -193,9 +196,10 @@ pub enum ServingError {
     RowLimitExceeded { cap: u32 },
     /// The engine's columns are no longer WITHIN the ones the snapshot froze.
     ///
-    /// Refused rather than reshaped. `ServingMeta::columns` advertises the
-    /// frozen contract — since M1 the union of every branch described at
-    /// publish — so a body may legitimately carry a SUBSET of those columns: a
+    /// Refused rather than reshaped. `meta` advertises the frozen contract —
+    /// since M1 the union of every branch described at publish, and since M2
+    /// under `columns` for a one-statement endpoint and
+    /// `statements.<name>.columns` for several — so a body may legitimately carry a SUBSET of those columns: a
     /// branch that returns fewer is the endpoint's own documented behaviour, and
     /// refusing it was the defect M1 fixed. What it may never carry is a name
     /// that is not in the union, a declared column under a different type, fewer

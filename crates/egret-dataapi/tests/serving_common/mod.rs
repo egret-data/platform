@@ -1300,10 +1300,33 @@ impl Fixture {
         statements: serde_json::Value,
         limits: serde_json::Value,
     ) -> Uuid {
+        self.publish_statements_with_output(
+            path,
+            database_id,
+            statements,
+            limits,
+            serde_json::json!({}),
+        )
+        .await
+    }
+
+    /// The same, with an explicit `output` spec.
+    ///
+    /// Separate from `publish_statements` rather than a fifth argument on it
+    /// because `output.envelope` (M2 Task 8) is the only reason a several-
+    /// statement fixture needs one, and every existing caller wants the default.
+    pub async fn publish_statements_with_output(
+        &self,
+        path: &str,
+        database_id: Uuid,
+        statements: serde_json::Value,
+        limits: serde_json::Value,
+        output: serde_json::Value,
+    ) -> Uuid {
         let ep: Uuid = sqlx::query_scalar(
             "INSERT INTO dataapi.endpoints \
-               (workspace_id, name, path, method, database_id, statements, cache, limits, created_by) \
-             VALUES ($1, $2, $3, 'GET', $4, $5, $6, $7, $8) RETURNING id",
+               (workspace_id, name, path, method, database_id, statements, cache, limits, output, created_by) \
+             VALUES ($1, $2, $3, 'GET', $4, $5, $6, $7, $8, $9) RETURNING id",
         )
         .bind(self.ws_id)
         .bind(format!("ep-{}", Uuid::new_v4().simple()))
@@ -1312,6 +1335,7 @@ impl Fixture {
         .bind(&statements)
         .bind(serde_json::json!({ "enabled": false }))
         .bind(&limits)
+        .bind(&output)
         .bind(self.admin)
         .fetch_one(&self.db.pool)
         .await

@@ -82,8 +82,8 @@ pub use routes::{
     DataApiState, GrantInvokeInput, IssueClientInput, PublishEndpointInput, RollbackEndpointInput,
 };
 pub use serving::{
-    serving_openapi, serving_router, verify_serving_token, ServingError, ServingMeta,
-    ServingPrincipal, ServingResponse, DATA_API_AUDIENCE,
+    serving_openapi, serving_router, verify_serving_token, MetaContract, ServingError, ServingMeta,
+    ServingPrincipal, ServingResponse, ServingStatus, StatementMeta, DATA_API_AUDIENCE,
 };
 pub use try_it::{
     TrialActor, TrialResultTooLarge, TryItError, TryRequest, TryRequestEcho, TryResponse,
