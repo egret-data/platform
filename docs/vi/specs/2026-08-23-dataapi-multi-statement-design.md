@@ -397,6 +397,21 @@ hơn một lần migrate bây giờ. Migration đặt `envelope = "wrapped"` cho
 và thay đổi này **phải xuất hiện trong ghi chú triển khai**. Nó không im lặng và không được
 phép làm cho im lặng.
 
+**Điều thứ hai ghi chú triển khai phải nói, do rà soát toàn nhánh tìm ra chứ không task nào
+thấy: `dataapi.access_log.row_count` ĐỔI Ý NGHĨA mà không đổi kiểu.** Nay nó là TỔNG trên
+mọi câu lệnh của endpoint; trước M2 nó là số dòng của một câu lệnh. Phần tách theo câu lệnh
+đã được trả cho người gọi trong `meta.statements` và một cột integer không chứa nổi phần
+tách đó, nên ghi tổng là đúng — nhưng cột này dùng chung với mọi thứ đọc bảng. Đã đo: **không
+có gì trong egret đọc nó**. `ActivityStore::summary` và `egret_automation::dataapi_metric`
+đo số lời gọi, số lỗi, tỷ lệ lỗi và phân vị thời lượng, còn CHECK
+`schedule_dataapi_metric_valid` của migration 0128 chỉ nhận đúng sáu tên metric, không tên
+nào dựa trên số dòng — nên hôm nay không cảnh báo Z2 nào đọc nó và cũng không tạo được. Thứ
+bị phơi ra là SQL của chính người vận hành trên cột này, và bất kỳ metric dựa trên số dòng
+nào thêm sau này: nó sẽ trộn số dòng của một câu lệnh (trước nâng cấp) với tổng của cả
+endpoint (sau nâng cấp). Ghi chú phải nói: **các dòng trong `dataapi.access_log` ghi trước
+nâng cấp mang số dòng của một câu lệnh; các dòng ghi sau mang tổng trên mọi câu lệnh của
+endpoint. Một ngưỡng đặt trên cột đó sẽ đọc CAO trên mọi endpoint nhiều câu lệnh.**
+
 ### 4.5 Người gọi được nói gì về tính nhất quán
 
 N câu lệnh là N lần đọc độc lập (§1.1). Phần mô tả OpenAPI sinh ra cho bất kỳ endpoint nào

@@ -414,6 +414,22 @@ carrying two envelope shapes forever costs more than one migration now. The migr
 `envelope = "wrapped"` on every existing endpoint, and the change must appear in the deploy
 note. It is not silent and must not be made silent.
 
+**A second thing the deploy note must say, found by the whole-branch review and not by any
+task: `dataapi.access_log.row_count` changed MEANING without changing type.** It is now the
+sum across an endpoint's statements; before M2 it was the one statement's count. The split
+is reported to the caller in `meta.statements` and one integer column cannot hold it, so the
+total is the right thing to log — but the column is shared with everything that reads the
+table. Measured: nothing in egret reads it. `ActivityStore::summary` and
+`egret_automation::dataapi_metric` measure call counts, error counts, error rates and
+duration percentiles, and migration 0128's `schedule_dataapi_metric_valid` admits exactly
+six metric names, none of them rows-based — so no Z2 alert can be reading it today and none
+can be created. What is exposed is an operator's own SQL over the column, and any
+rows-based metric added later, which would be averaging a per-statement count from before
+the upgrade against a per-endpoint sum after it. The note must say: **rows in
+`dataapi.access_log` written before the upgrade carry one statement's row count; rows
+written after carry the sum over all of an endpoint's statements. A threshold set on that
+column reads high on any multi-statement endpoint.**
+
 ### 4.5 What the caller is told about consistency
 
 N statements are N independent reads (§1.1). The generated OpenAPI description for any
