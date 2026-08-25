@@ -9,4 +9,25 @@
 export interface OutputSpec {
   shape?: string;
   naming?: string;
+  /**
+     * Whether the response carries the `{status, message, data, meta}` wrapper
+     * (`"wrapped"`, the default) or `data`'s value on its own (`"bare"`) —
+     * spec §4.4.
+     *
+     * Defaulted rather than made an `Option`, and defaulted to the WRAPPER, so
+     * that every snapshot frozen before this field existed reads back as
+     * `wrapped`: the migration sets no rows and an unpublished endpoint cannot
+     * change shape by being re-read.
+     *
+     * `bare` is the success path only. A refusal still answers with
+     * `ServingErrorBody`, because an unwrapped error would be a bare `null` —
+     * nothing at all about what went wrong — under a status this toggle does
+     * not reach.
+     *
+     * A `String` like `shape` and `naming`, and unvalidated like them: spec
+     * §5.3 freezes `output` with no rule anywhere, so serving falls back to the
+     * documented default and logs rather than refusing (see
+     * `serving::router::envelope_of`).
+     */
+  envelope?: string;
 }

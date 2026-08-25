@@ -13,7 +13,11 @@ import { useEndpointDetail } from "../EndpointDetail";
 const PREVIEW_MAX_ROWS = 100;
 
 /**
- * Runs the ON-SCREEN draft and shows the rows, without saving or publishing.
+ * Runs the ON-SCREEN statement and shows the rows, without saving or publishing.
+ *
+ * ONE statement, not the endpoint: `POST /preview` takes a single `sql`, and an
+ * endpoint has N of them since M2. `Query` owns which one is on screen and
+ * passes it down — see [`PreviewBlockProps`].
  *
  * **Test values are NOT part of the endpoint.** They live in this component's
  * own state, never in the shared `form`, so they cannot be saved by accident and
@@ -34,7 +38,33 @@ export interface PreviewHandle {
   run: () => void;
 }
 
-export const PreviewBlock = forwardRef<PreviewHandle>(function PreviewBlock(_props, ref) {
+export interface PreviewBlockProps {
+  /**
+   * The statement to run — the SQL as it is on screen right now, handed down
+   * rather than read from `form`.
+   *
+   * `POST /preview` takes ONE `sql`: it runs a statement, not an endpoint. An
+   * endpoint has N of them (M2), and this component cannot know which one the
+   * author is looking at — `Query` owns that selection, so `Query` supplies the
+   * text.
+   */
+  sql: string;
+  /**
+   * The name of that statement, or `undefined` for a one-statement endpoint.
+   *
+   * `undefined` is not "unknown" — it means the endpoint has a single statement
+   * whose name no caller ever reads (its `data` is an array, not a keyed
+   * object), so naming it here would put a word on screen that looks like part
+   * of the contract and is not one. With several, the note has to say WHICH of
+   * them the button runs, because the button runs exactly one.
+   */
+  statementName?: string;
+}
+
+export const PreviewBlock = forwardRef<PreviewHandle, PreviewBlockProps>(function PreviewBlock(
+  { sql, statementName },
+  ref,
+) {
   const { ws, id, form } = useEndpointDetail();
   const previewMutation = useDataApiPreviewEndpoint();
   // Keyed by the declaration's POSITION, not by its name — a name is not unique
@@ -76,7 +106,7 @@ export const PreviewBlock = forwardRef<PreviewHandle>(function PreviewBlock(_pro
         workspace: ws,
         id,
         data: {
-          sql: form.sql,
+          sql,
           params: form.params,
           values: sent,
           database_id: form.database_id,
@@ -147,7 +177,8 @@ export const PreviewBlock = forwardRef<PreviewHandle>(function PreviewBlock(_pro
             Activity, and a reader who has to scroll to find that has already
             pressed the button. */}
         <SettingsNote>
-          Preview runs the SQL and parameters as they are on screen right now — including edits you
+          Preview runs the {statementName ? <>statement <span className="font-mono">{statementName}</span></> : "SQL"}{" "}
+          and parameters as they are on screen right now — including edits you
           have not saved — as you, against the database above, and returns up to {PREVIEW_MAX_ROWS}{" "}
           rows. It does not save, publish, spend a rate limit, fill the cache, or appear in Activity.
           Column names come from the engine, not from the published contract — see Response for the names a

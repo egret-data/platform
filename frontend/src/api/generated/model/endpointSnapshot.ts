@@ -6,19 +6,35 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { CacheSpec } from './cacheSpec';
-import type { ColumnSpec } from './columnSpec';
 import type { LimitsSpec } from './limitsSpec';
 import type { OutputSpec } from './outputSpec';
 import type { ParamSpec } from './paramSpec';
 import type { RateLimitSpec } from './rateLimitSpec';
+import type { StatementSnapshot } from './statementSnapshot';
 
 /**
  * What a published version freezes. Self-contained on purpose: P4's serving
  * path must be able to answer a request from this alone, without reading the
  * draft row.
+ *
+ * **This type is read back out of an immutable column.** M2 does not migrate
+ * `dataapi.endpoint_versions.snapshot` and must not: a published version is
+ * the contract a live consumer is already coding against, and rewriting frozen
+ * rows to suit a newer binary is the one thing "frozen" is supposed to
+ * prevent. The compatibility therefore lives in the READER — see
+ * [`EndpointSnapshotRepr`] — exactly as M1's `#[serde(default =
+ * "default_required")]` on [`ColumnSpec::required`] did.
  */
 export interface EndpointSnapshot {
-  sql: string;
+  /**
+     * The endpoint's N SQL definitions, in execution order, each with its own
+     * frozen columns (M1's per-branch union, now scoped to one statement).
+     *
+     * Never empty: [`EndpointSnapshotRepr`] refuses a snapshot that carries
+     * neither a `statements` list nor the pre-M2 `sql` + `columns` pair, and
+     * refuses an explicitly empty list.
+     */
+  statements: StatementSnapshot[];
   method: string;
   path: string;
   database_id: string;
@@ -74,11 +90,6 @@ export interface EndpointSnapshot {
      * `cache_scope_stale` and a re-publish, which is the correct outcome.
      */
   impersonate?: boolean;
-  /**
-     * Resolved by `describe_as` at publish time and frozen here, so the
-     * published contract does not drift when the underlying table changes.
-     */
-  columns: ColumnSpec[];
   /**
      * Which revision of the publish-time parameter gate this version passed.
      *

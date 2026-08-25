@@ -10,6 +10,7 @@ import type { LimitsSpec } from './limitsSpec';
 import type { OutputSpec } from './outputSpec';
 import type { ParamSpec } from './paramSpec';
 import type { RateLimitSpec } from './rateLimitSpec';
+import type { StatementSpec } from './statementSpec';
 
 /**
  * An endpoint draft as the management UI sees it.
@@ -28,7 +29,15 @@ export interface DataApiEndpointDto {
   path: string;
   method: string;
   database_id: string;
-  sql: string;
+  /**
+     * The endpoint's statements, in execution order.
+     *
+     * A LIST, not a string, and a one-statement endpoint is the same shape as
+     * a ten-statement one — there is no "simple" spelling to keep in step with
+     * the general one. Stored as `jsonb`, like every other structured column
+     * on this row.
+     */
+  statements: StatementSpec[];
   params: ParamSpec[];
   output: OutputSpec;
   cache: CacheSpec;

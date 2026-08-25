@@ -6,23 +6,57 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { ServingMeta } from './servingMeta';
-import type { ServingResponseDataItem } from './servingResponseDataItem';
+import type { ServingStatus } from './servingStatus';
 
 /**
- * The success body (spec §5.1.2).
+ * The success body (spec §4.4, §5.1.2).
+ *
+ * ```json
+ * { "status": "ok", "message": null, "data": …, "meta": { … } }
+ * ```
+ *
+ * **This replaced the `{data, meta}` body P4 shipped, in one migration rather
+ * than by carrying two shapes.** Endpoints published under the old envelope
+ * have served real traffic since 2026-08-16; the decision to break rather than
+ * version was taken deliberately (spec §4.4) because consumers are few and
+ * internal, the API is pre-1.0, and two envelopes forever cost more than one
+ * migration. It belongs in the deploy note and must not be made silent.
  *
  * `meta.version` is the published version that served the call, so a
  * client-side bug is reproducible against the exact snapshot that produced it.
  * `meta.cached` is likewise not cosmetic: without it a stale-looking result is
- * indistinguishable from a fresh one while debugging. It is a real value — Task
- * 4 landed the cache and [`run`] sets it `true` on a hit — and this comment
- * said "hard-`false` until Task 4 lands" for three tasks after Task 4 landed.
+ * indistinguishable from a fresh one while debugging.
  */
 export interface ServingResponse {
   /**
-     * Rows, shaped by the snapshot's `output.shape`: an array of objects
-     * (default) or an array of arrays.
+     * Always [`ServingStatus::Ok`] here — this type is only built on the
+     * success path — but read off `StatusCode::OK` rather than written as a
+     * constant, so the two cannot drift apart. See [`ServingStatus`].
      */
-  data: ServingResponseDataItem[];
+  status: ServingStatus;
+  /**
+     * `null` on success. It is the human-readable half of a REFUSAL
+     * ([`ServingErrorBody`](super::error::ServingErrorBody)), not a success
+     * banner, and a client that finds a string here is reading an error.
+     * @nullable
+     */
+  message?: string | null;
+  /**
+     * The rows for a ONE-statement endpoint — an array of objects (default) or
+     * of arrays, per `output.shape` — and an object keyed by statement NAME for
+     * several.
+     *
+     * Not a union at the contract level: `openapi_gen` writes one document per
+     * endpoint and an endpoint's statement count is frozen in its snapshot, so
+     * each generated schema is unambiguous.
+     *
+     * The SHARED serving document below describes every endpoint at once, so it
+     * deliberately carries no `value_type`: utoipa then emits the unconstrained
+     * schema for `serde_json::Value`, which is the only honest answer there.
+     * `value_type = Vec<Object>` — what this field carried until M2 — asserted
+     * "array of objects" about a body that is an OBJECT for a several-statement
+     * endpoint.
+     */
+  data: unknown;
   meta: ServingMeta;
 }

@@ -27,7 +27,8 @@ import { useCreateEndpoint } from "@/api/dataApi";
  * cannot run and whose right-hand tabs are meaningless until the first save.
  *
  * It collects exactly what a row cannot exist without — name, path, method,
- * database, SQL — plus the optional description the dialog had no room for.
+ * database, one statement's SQL — plus the optional description the dialog had
+ * no room for.
  * Cache, limits, rate limit and params are deliberately ABSENT: they belong to
  * the editor the author lands on a moment later, and putting them here would
  * rebuild that editor in a worse place.
@@ -59,7 +60,18 @@ export default function EndpointCreate() {
           path: path.trim(),
           method,
           database_id: databaseId,
-          sql: sql.trim(),
+          // A one-element list named `main` — the shape migration 0129 gave
+          // every endpoint that pre-dated the statement list, so a brand-new
+          // endpoint and a migrated one are indistinguishable from here on.
+          //
+          // The page stays single-SQL deliberately. Naming, reordering and
+          // adding statements is the editor's job, exactly like params, cache
+          // and limits: this page collects only what a row cannot exist
+          // without, and a list UI here would rebuild that editor in a worse
+          // place. `main` is never shown to the author for the same reason it
+          // is not shown in the editor — a one-statement endpoint answers with
+          // an ARRAY, so the name is not a key any caller reads.
+          statements: [{ name: "main", sql: sql.trim() }],
           // Optional, so it is only sent when the author wrote one — an empty
           // string is a value, and would overwrite nothing with something.
           ...(description.trim() !== "" ? { description: description.trim() } : {}),

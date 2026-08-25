@@ -6,6 +6,7 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { ServingErrorDetail } from './servingErrorDetail';
+import type { ServingStatus } from './servingStatus';
 
 /**
  * The serving surface's error envelope (spec §7).
@@ -18,5 +19,23 @@ import type { ServingErrorDetail } from './servingErrorDetail';
  * would then be typed against whichever won.
  */
 export interface ServingErrorBody {
+  /**
+     * Always [`ServingStatus::Error`] here, and DERIVED from the status this
+     * response will actually carry rather than written as a constant — see
+     * [`ServingStatus`]. `status` mirrors the HTTP status; it never replaces
+     * it, and a body saying `"error"` under a `200` is the failure mode the
+     * mirror exists to make unrepresentable.
+     */
+  status: ServingStatus;
+  /**
+     * The same human-readable string as `error.message`, lifted to where the
+     * success envelope carries it (`null` there) so that `status` and
+     * `message` are readable on EVERY serving response without knowing first
+     * which of the two bodies arrived.
+     *
+     * `error.code` is what a client branches on and is untouched; this is the
+     * human half, and it may be reworded.
+     */
+  message: string;
   error: ServingErrorDetail;
 }

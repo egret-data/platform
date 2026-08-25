@@ -29,7 +29,14 @@ export interface EndpointFormState {
   method: string;
   path: string;
   database_id: string;
-  sql: string;
+  /**
+   * The endpoint's SQL definitions, in execution order — a LIST since M2, and a
+   * one-statement endpoint is the same shape as a ten-statement one. There is no
+   * "simple" spelling of this to keep in step with the general one, which is the
+   * whole reason the draft row dropped `sql text` for `statements jsonb`
+   * (migration 0129) rather than carrying both.
+   */
+  statements: DataApiEndpointDto["statements"];
   params: DataApiEndpointDto["params"];
   output: DataApiEndpointDto["output"];
   cache: DataApiEndpointDto["cache"];
@@ -44,7 +51,7 @@ function toForm(e: DataApiEndpointDto): EndpointFormState {
     method: e.method,
     path: e.path,
     database_id: e.database_id,
-    sql: e.sql,
+    statements: e.statements,
     params: e.params,
     output: e.output,
     cache: e.cache,
@@ -68,7 +75,13 @@ function diffToUpdateInput(baseline: EndpointFormState, form: EndpointFormState)
   if (form.method !== baseline.method) out.method = form.method;
   if (form.path !== baseline.path) out.path = form.path;
   if (form.database_id !== baseline.database_id) out.database_id = form.database_id;
-  if (form.sql !== baseline.sql) out.sql = form.sql;
+  // Compared as JSON like the other structured fields, and replaced WHOLE:
+  // `UpdateEndpointInput.statements` has no per-statement patch, because the
+  // ORDER is part of the definition and "edit statement 2" would need an
+  // addressing scheme the list itself already is.
+  if (JSON.stringify(form.statements) !== JSON.stringify(baseline.statements)) {
+    out.statements = form.statements;
+  }
   if (JSON.stringify(form.params) !== JSON.stringify(baseline.params)) out.params = form.params;
   if (JSON.stringify(form.output) !== JSON.stringify(baseline.output)) out.output = form.output;
   if (JSON.stringify(form.cache) !== JSON.stringify(baseline.cache)) out.cache = form.cache;
