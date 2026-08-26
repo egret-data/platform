@@ -178,7 +178,10 @@ pub enum ServingError {
     /// A supplied value that does not satisfy its `ParamSpec.ty` — a `Date` that
     /// is not a date, a `Number` that is not one, an `Enum` value outside
     /// `allowed`, a repeat of an `Enum`, or input past the size caps in
-    /// [`super::params`].
+    /// [`super::params`] — **or** one that satisfies its `ty` but fails a
+    /// declared `minimum`/`maximum`/`min_length`/`max_length` constraint
+    /// (`CoerceError::Constraint`, mapped here with its `constraint`/`bound`
+    /// detail dropped for the same reason as everything else on this line).
     ///
     /// Unit for the same reason as [`Self::ParamMissing`], and additionally
     /// because echoing the VALUE back would reflect caller-controlled bytes into

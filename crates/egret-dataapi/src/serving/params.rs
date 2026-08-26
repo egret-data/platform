@@ -449,7 +449,16 @@ pub(crate) fn coerce(spec: &ParamSpec, text: &str) -> Result<Param, CoerceError>
             // float stops comparing equal to itself on the engine. The grammar
             // is deliberately narrow — no exponent, no `NaN`, no `inf` — so the
             // value is a literal both engines accept as a DECIMAL.
-            let text_value = if text.parse::<i64>().is_ok() || is_plain_decimal(text) {
+            //
+            // `is_plain_decimal` alone, never `text.parse::<i64>().is_ok()` as
+            // a second way in: `i64::from_str` accepts a leading `+` that
+            // `is_plain_decimal` (deliberately) does not, and admitting
+            // through EITHER check would let a `+`-prefixed value back in
+            // through the gap between them — the exact bypass this function
+            // exists to close. `is_plain_decimal` already accepts everything
+            // `i64::from_str` does other than that, including magnitudes
+            // outside `i64`'s range (handled below as `Param::Decimal`).
+            let text_value = if is_plain_decimal(text) {
                 text
             } else {
                 return Err(CoerceError::Invalid);
@@ -507,11 +516,22 @@ pub(crate) fn coerce(spec: &ParamSpec, text: &str) -> Result<Param, CoerceError>
 /// `coerce` validated a resolved value's digits, or because
 /// `lifecycle::check_constraints` validated the author's `minimum`/`maximum`
 /// bound the same way before comparing the pair — so the grammar is
-/// `-?digits[.digits]`.
+/// **exactly** `-?digits[.digits]`, no `+`. `is_plain_decimal` is the only
+/// gate either side ever passes through, and it refuses a leading `+`
+/// precisely so that invariant holds here without this function having to
+/// re-check it: a `+` counted as an integer-part digit would compare as
+/// longer, hence "greater", than a same-magnitude bound with no sign.
 pub(crate) fn compare_decimal_text(a: &str, b: &str) -> std::cmp::Ordering {
     use std::cmp::Ordering;
+    // A magnitude of all zeros (`"0"`, `"0.00"`, …) is arithmetically the
+    // same value whether or not it carries a `-`: `"-0"` is not less than
+    // `"0"`. Without this, the sign-shortcut below would say it is, because
+    // it decides purely from the two signs before ever looking at magnitude.
+    let is_zero_magnitude = |body: &str| body.bytes().all(|b| b == b'0' || b == b'.');
     let (a_neg, a_body) = a.strip_prefix('-').map_or((false, a), |r| (true, r));
     let (b_neg, b_body) = b.strip_prefix('-').map_or((false, b), |r| (true, r));
+    let a_neg = a_neg && !is_zero_magnitude(a_body);
+    let b_neg = b_neg && !is_zero_magnitude(b_body);
     match (a_neg, b_neg) {
         (false, true) => return Ordering::Greater,
         (true, false) => return Ordering::Less,
@@ -579,10 +599,16 @@ pub(crate) fn normalize_temporal_bound(ty: &ParamType, text: &str) -> Option<Str
 /// [`compare_decimal_text`] is asked to compare two of them — see that
 /// function's own doc for why the invariant matters.
 pub(crate) fn is_plain_decimal(s: &str) -> bool {
-    let body = s
-        .strip_prefix('-')
-        .or_else(|| s.strip_prefix('+'))
-        .unwrap_or(s);
+    // No `+`, deliberately: `compare_decimal_text` never strips one, so a
+    // `+`-prefixed value that reached it would have its sign counted as an
+    // integer-part digit and compare as longer (hence "greater") than a
+    // same-magnitude bound with no sign at all — a `minimum` a caller could
+    // step around with `?n=%2B100`. This function is the ONLY gate for both
+    // a caller's value (`coerce`) and an author's bound
+    // (`lifecycle::check_constraints`), so excluding `+` here is what makes
+    // `compare_decimal_text`'s documented grammar actually true rather than
+    // aspirational.
+    let body = s.strip_prefix('-').unwrap_or(s);
     let (int, frac) = match body.split_once('.') {
         Some((i, f)) => (i, Some(f)),
         None => (body, None),
@@ -1065,13 +1091,22 @@ mod tests {
         assert_eq!(compare_decimal_text("1.50", "1.5"), Ordering::Equal);
 
         // A difference below `f64` precision: the whole reason `coerce`
-        // refuses to put a decimal through a float. If this comparison ever
-        // went through `f64`, these two would round to the same value and
-        // compare equal.
+        // refuses to put a decimal through a float. These two digit strings
+        // are independently verified (not merely asserted in prose) to parse
+        // to the identical `f64` — `1.0` — so a pure-float reimplementation
+        // of this function returns `Equal` here, not `Less`; a pair that
+        // still differs under `f64` would let such a reimplementation pass
+        // this assertion by accident.
         assert_eq!(
-            compare_decimal_text("1.0000000000000001", "1.0000000000000002"),
+            compare_decimal_text("1.00000000000000001", "1.00000000000000002"),
             Ordering::Less
         );
+
+        // "-0" is arithmetically "0", not less than it. The sign-only
+        // shortcut above must not fire on a zero magnitude.
+        assert_eq!(compare_decimal_text("-0", "0"), Ordering::Equal);
+        assert_eq!(compare_decimal_text("0", "-0"), Ordering::Equal);
+        assert_eq!(compare_decimal_text("-0.00", "0"), Ordering::Equal);
     }
 
     #[test]
@@ -1098,6 +1133,38 @@ mod tests {
             Err(CoerceError::Constraint { .. })
         ));
         assert!(coerce(&p, "100").is_ok(), "inclusive");
+    }
+
+    /// `is_plain_decimal` is the ONLY gate `coerce` admits a `Number` value
+    /// through — never `text.parse::<i64>().is_ok()` as a second way in — and
+    /// it deliberately refuses a leading `+`, because `compare_decimal_text`
+    /// never strips one. Before this refusal, `+100` was admitted (via the
+    /// `i64` half of the old two-way gate) with its `+` left in `text_value`,
+    /// so the sign counted as an integer-part digit and made `"+100"` compare
+    /// as LONGER — hence "greater" — than a same-magnitude bound with no
+    /// sign at all: `minimum: "500"` accepted `?n=%2B100`, and `maximum: "5"`
+    /// rejected the in-range value `"+5"`. Both are closed the same way: `+`
+    /// is not admitted as a `Number` at all, regardless of any bound.
+    #[test]
+    fn a_leading_plus_is_refused_not_admitted_through_the_i64_gate() {
+        let plain = number_param("n");
+        assert!(
+            matches!(coerce(&plain, "+100"), Err(CoerceError::Invalid)),
+            "a `+`-prefixed value must never reach a constraint check at all"
+        );
+
+        // The exact bypass: a caller-controlled `+100` must not compare as
+        // "at least 500".
+        let mut floor = number_param("n");
+        floor.minimum = Some("500".into());
+        assert!(matches!(coerce(&floor, "+100"), Err(CoerceError::Invalid)));
+
+        // And the mirror image: a `+`-prefixed value that WOULD be in range
+        // if normalised must still be refused outright, not wrongly reported
+        // as out of range.
+        let mut ceiling = number_param("n");
+        ceiling.maximum = Some("5".into());
+        assert!(matches!(coerce(&ceiling, "+5"), Err(CoerceError::Invalid)));
     }
 
     #[test]
@@ -1175,6 +1242,28 @@ mod tests {
         assert_eq!(
             rendered, "ParamInvalid",
             "the constraint's detail leaked into the error: {rendered}"
+        );
+    }
+
+    /// Distinguishes the `(CoerceError::Constraint, from_default: true)` arm
+    /// from the caller-facing one right above it. Before this test, swapping
+    /// that arm to `ServingError::ParamInvalid` (blaming the caller for the
+    /// author's own out-of-bounds `default`) left all other tests in this
+    /// module green, because none of them supplies no value at all and relies
+    /// on a `default` that fails its own declared constraint.
+    #[test]
+    fn a_defaults_own_constraint_violation_is_the_authors_500_not_the_callers_400() {
+        let mut p = number_param("n");
+        p.maximum = Some("100".into());
+        p.default = Some("101".into());
+        let supplied = std::collections::BTreeMap::new();
+        let err = match resolve_supplied_with(&supplied, &[], std::slice::from_ref(&p)) {
+            Err(e) => e,
+            Ok(_) => panic!("expected the author's own default to fail its own maximum"),
+        };
+        assert!(
+            matches!(err, ServingError::Internal(_)),
+            "an author's bad default must be the author's 500, not the caller's 400: {err:?}"
         );
     }
 }
