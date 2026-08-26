@@ -214,6 +214,22 @@ fn eval_probe(src: &str) -> Result<(), TransformError> {
     eval_inner(src, Some(MAX_CALLSTACK))
 }
 
+/// A script source that makes [`eval_inner`] panic from *inside* the caught
+/// region, so the containment can be tested without the 4 GiB it costs to reach
+/// starlark's own panic.
+///
+/// `#[cfg(test)]`, so neither this nor the branch that reads it exists in a
+/// shipped binary. It is a bare identifier, i.e. valid Starlark, so the parse
+/// ahead of the injection point is the same parse any other script gets.
+#[cfg(test)]
+const PANIC_INJECTION_SRC: &str = "__egret_transform_panic_probe__";
+
+/// The message [`PANIC_INJECTION_SRC`] panics with. The test asserts the caller
+/// receives it **verbatim**, which is what makes a panic actionable instead of
+/// merely reported.
+#[cfg(test)]
+const PANIC_INJECTION_MESSAGE: &str = "injected panic: transform containment probe";
+
 /// The body of [`eval_probe`], with the call-stack budget made optional.
 ///
 /// `max_callstack: None` means "install no limit of ours and let starlark fall
@@ -259,6 +275,9 @@ fn eval_inner(src: &str, max_callstack: Option<usize>) -> Result<(), TransformEr
 
     let globals = transform_globals();
 
+    #[cfg(test)]
+    let inject_panic = src == PANIC_INJECTION_SRC;
+
     let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
         // `Module::new` does not exist in starlark 0.14 — a module is handed to
         // a closure so its heap is scoped. Everything the evaluator touches
@@ -279,6 +298,17 @@ fn eval_inner(src: &str, max_callstack: Option<usize>) -> Result<(), TransformEr
                 eval.set_max_callstack_size(frames).map_err(|_| {
                     TransformError::BudgetExceeded("call-stack budget (failed to install)")
                 })?;
+            }
+
+            // Placed here, immediately before evaluation, so the injected
+            // unwind crosses exactly the frames a real starlark panic crosses:
+            // the `with_temp_heap` closure, the live `Evaluator`, and the
+            // `AssertUnwindSafe` boundary. A panic raised anywhere shallower
+            // would be testing a shorter unwind than the one being defended
+            // against.
+            #[cfg(test)]
+            if inject_panic {
+                panic!("{PANIC_INJECTION_MESSAGE}");
             }
 
             eval.eval_module(ast, &globals).map_err(classify)?;
@@ -620,6 +650,23 @@ mod tests {
     /// Starlark at all. A second one — Task 3 is the likely author — fails here
     /// and has to say which dialect it means.
     ///
+    /// # This is a convention-enforcer, not a proof
+    ///
+    /// Read it for what it is before relying on it:
+    ///
+    /// - It greps **text** — the literal `AstModule` immediately followed by
+    ///   `::parse` — so it cannot see a parse reached through an alias, a
+    ///   re-export, or a helper in another crate. (Written in two pieces here
+    ///   for the same reason the needle is: the contiguous spelling in this doc
+    ///   comment would be counted as a second parse site, which is exactly what
+    ///   happened on the first attempt.)
+    /// - It reads `$CARGO_MANIFEST_DIR/src` **at run time**, so it is checking
+    ///   the sources on disk now, not the sources this binary was built from.
+    ///   Those normally agree; they do not have to. A missing or unreadable
+    ///   `src/` therefore makes this test FAIL LOUDLY rather than pass on an
+    ///   empty scan — a green "exactly one parse site" from a directory that was
+    ///   never read would be worse than no test.
+    ///
     /// The needle is assembled at run time rather than written as a literal,
     /// because a literal would match this test's own source and make the count
     /// wrong. Do not "simplify" it.
@@ -628,8 +675,19 @@ mod tests {
         let needle = ["AstModule", "::", "parse"].concat();
         let src_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
 
+        // Fail loudly rather than passing on an empty scan. Everything below
+        // counts occurrences, so an unreadable tree would yield zero hits and a
+        // confidently wrong verdict.
+        assert!(
+            src_dir.is_dir(),
+            "{} is not a readable directory, so this test cannot see the crate's \
+             sources and must not report a verdict about them",
+            src_dir.display()
+        );
+
+        let mut files_scanned = 0usize;
         let mut hits: Vec<String> = Vec::new();
-        let mut stack = vec![src_dir];
+        let mut stack = vec![src_dir.clone()];
         while let Some(dir) = stack.pop() {
             for entry in std::fs::read_dir(&dir).expect("the crate's src/ must be readable") {
                 let path = entry.expect("a readable directory entry").path();
@@ -637,12 +695,22 @@ mod tests {
                     stack.push(path);
                 } else if path.extension().is_some_and(|e| e == "rs") {
                     let text = std::fs::read_to_string(&path).expect("a readable .rs file");
+                    files_scanned += 1;
                     for _ in 0..text.matches(&needle).count() {
                         hits.push(path.display().to_string());
                     }
                 }
             }
         }
+
+        // This module alone guarantees a positive count, so a zero here means the
+        // walk did not reach the sources it claims to have checked.
+        assert!(
+            files_scanned > 0,
+            "no .rs files were scanned under {}, so the count below is \
+             meaningless",
+            src_dir.display()
+        );
 
         assert_eq!(
             hits.len(),
@@ -778,7 +846,73 @@ mod tests {
     /// Expect to see `panicked at ... len overflow` in the test output even when
     /// this passes. That is the panic hook doing its job before the unwind is
     /// converted into a value; catching a panic is not the same as hiding it.
+    /// The containment itself, tested cheaply and run every time.
+    ///
+    /// The test below reaches a REAL starlark panic and is the more convincing
+    /// demonstration, but it costs 4.31 GB and is `#[ignore]`d for that reason —
+    /// which would leave the boundary this module actually owns with no
+    /// unconditional cover at all. So this one injects the panic directly,
+    /// through the same frames, and asserts the three things that make the
+    /// containment worth having:
+    ///
+    /// 1. the call **returns** rather than unwinding into its caller;
+    /// 2. it yields [`TransformError::Evaluator`] and **not**
+    ///    [`TransformError::Runtime`] — the distinction that lets an operator
+    ///    tell "the script was refused" from "the evaluator broke";
+    /// 3. the panic message survives **verbatim**, so the report names the
+    ///    defect instead of merely reporting that one occurred.
+    ///
+    /// No thread or channel here on purpose: with nothing to block on, a lost
+    /// containment can only surface as this test panicking, never as a hang.
+    ///
+    /// It also covers the `String` arm of [`panic_message`] — `panic!` with a
+    /// formatted argument produces a `String` payload, where starlark's
+    /// `assert!` literal produces a `&'static str`.
     #[test]
+    fn an_injected_panic_returns_as_an_error_instead_of_unwinding() {
+        match eval_probe(PANIC_INJECTION_SRC) {
+            Err(TransformError::Evaluator(msg)) => assert_eq!(
+                msg, PANIC_INJECTION_MESSAGE,
+                "the panic message must reach the caller verbatim — a caught \
+                 panic that loses its message tells an operator that something \
+                 broke but not what"
+            ),
+            Err(TransformError::Runtime(msg)) => panic!(
+                "a panic must NOT be folded into Runtime: an operator has to be \
+                 able to tell a refused script from a broken evaluator, and \
+                 Runtime is what a refused script looks like. Got: {msg}"
+            ),
+            other => panic!(
+                "an injected panic must be contained and returned as \
+                 TransformError::Evaluator: {other:?}"
+            ),
+        }
+    }
+
+    // WHY THIS IS IGNORED, since re-enabling it looks harmless.
+    //
+    // Measured: 4,307,374,080 bytes max RSS, ~8 s. The cost is inherent — there
+    // is no cheaper route to this panic. String *repetition* is guarded by
+    // starlark's i32 integer limit (`'x' * 4294967296` fails with
+    // "Integer value is too big to fit in i32" at 12 MB), so only repeated
+    // *concatenation* reaches `StarlarkStr::new`, and that needs 4 GiB of live
+    // strings by construction. Three variants were tried; all were guarded.
+    //
+    // The decisive part is the FAILURE mode, not the cost: under memory
+    // pressure the 4 GiB allocation aborts, which kills the whole test binary
+    // rather than producing one red test. A test that can take the suite down
+    // is worse in CI than a test that is absent — and this repo has an OOM
+    // history. So it stays as what it is: a reproduction of a starlark defect,
+    // run deliberately.
+    //
+    // Nothing is left uncovered by ignoring it.
+    // `an_injected_panic_returns_as_an_error_instead_of_unwinding` runs every
+    // time and tests the boundary this module owns; this one exists to show
+    // that the defect it defends against is real and reachable from four lines
+    // of author Starlark.
+    #[test]
+    #[ignore = "allocates 4.31 GB; run with: cargo test -p egret-dataapi --lib \
+                an_evaluator_panic_is_contained -- --ignored --exact"]
     fn an_evaluator_panic_is_contained_rather_than_unwinding_into_the_caller() {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
