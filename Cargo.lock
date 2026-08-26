@@ -3303,6 +3303,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "egret-test-db"
+version = "0.1.0"
+dependencies = [
+ "egret-metastore",
+ "libc",
+ "sqlx",
+ "tokio",
+]
+
+[[package]]
 name = "egret-workspace"
 version = "0.1.0"
 dependencies = [

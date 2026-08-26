@@ -1,0 +1,18 @@
+[package]
+name = "egret-test-db"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+# Test infrastructure. It is a dev-dependency of other crates and is never
+# linked into a shipped binary, so there is nothing here to publish.
+publish = false
+
+[dependencies]
+# `Db::migrate` — the template is migrated with the SAME embedded migrator the
+# server uses, so a clone cannot drift from production schema.
+egret-metastore.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+# `libc::atexit` only — see `register_exit_drop`. A test process that ends
+# cleanly drops its own clone; the sweep exists for the ones that do not.
+libc.workspace = true
