@@ -74,6 +74,51 @@ fn json_type(engine_ty: &str) -> &'static str {
     }
 }
 
+/// Parse an author's `minimum`/`maximum` text into a JSON-Schema-legal
+/// number, for the document only.
+///
+/// **Why this exists rather than `s.parse::<serde_json::Number>()`
+/// directly.** JSON's own number grammar forbids a leading zero before the
+/// decimal point (anything but a bare `"0"`), but that is NOT the grammar
+/// `check_constraints` enforces at publish, nor the one `coerce` enforces
+/// at request time — both gate through [`crate::serving::params::is_plain_decimal`]
+/// (`-?digits[.digits]`), which allows `"007"`, `"00"`, `"01.5"`. Those
+/// bounds publish today and ARE enforced by `coerce`. Handing them straight
+/// to `serde_json::Number::from_str` would make `minimum: "007"` silently
+/// vanish from the document — the exact failure this task exists to close,
+/// just one step removed: the document would describe a WIDER endpoint
+/// than the one that actually enforces `007`.
+///
+/// So leading zeros are trimmed first. This changes nothing about what is
+/// enforced: `compare_decimal_text` — the ONLY runtime comparison, at both
+/// publish and `coerce` — already treats `"007"` and `"7"` as the same
+/// magnitude (it trims leading zeros before comparing), so the trimmed
+/// spelling is not a different number, only a different way of writing the
+/// same one.
+///
+/// Still returns `None` for text `is_plain_decimal` never accepted in the
+/// first place (a pre-`check_constraints` snapshot), and for a magnitude
+/// too large for `serde_json::Number` to represent (this crate does not
+/// enable serde_json's `arbitrary_precision` feature) — omitting the
+/// keyword rather than emitting a lie in either case.
+fn json_number(text: &str) -> Option<serde_json::Number> {
+    if !crate::serving::params::is_plain_decimal(text) {
+        return None;
+    }
+    let (sign, body) = text.strip_prefix('-').map_or(("", text), |b| ("-", b));
+    let (int, frac) = body
+        .split_once('.')
+        .map_or((body, None), |(i, f)| (i, Some(f)));
+    let int = int.trim_start_matches('0');
+    let int = if int.is_empty() { "0" } else { int };
+    let mut normalised = format!("{sign}{int}");
+    if let Some(f) = frac {
+        normalised.push('.');
+        normalised.push_str(f);
+    }
+    normalised.parse::<serde_json::Number>().ok()
+}
+
 fn param_schema(p: &egret_dataapi_api::ParamSpec) -> Value {
     let mut schema = match p.ty {
         ParamType::Number => json!({ "type": "number" }),
@@ -89,22 +134,14 @@ fn param_schema(p: &egret_dataapi_api::ParamSpec) -> Value {
     }
     // JSON Schema's numeric keywords take a NUMBER. The author's bound is
     // stored as text (so the runtime comparison never goes through a float),
-    // and it is parsed here for the document only. `check_constraints`
-    // accepted it at publish time, so a parse failure here means a snapshot
-    // frozen before that check existed — omit the keyword rather than emit a
-    // lie about what the endpoint accepts.
-    if let Some(v) = p
-        .minimum
-        .as_deref()
-        .and_then(|s| s.parse::<serde_json::Number>().ok())
-    {
+    // and `json_number` parses it here for the document only — normalising
+    // a leading zero rather than treating it as unparseable, because
+    // `is_plain_decimal` accepts one at publish and `coerce` enforces it. See
+    // `json_number` for why that normalisation is truthful.
+    if let Some(v) = p.minimum.as_deref().and_then(json_number) {
         schema["minimum"] = Value::Number(v);
     }
-    if let Some(v) = p
-        .maximum
-        .as_deref()
-        .and_then(|s| s.parse::<serde_json::Number>().ok())
-    {
+    if let Some(v) = p.maximum.as_deref().and_then(json_number) {
         schema["maximum"] = Value::Number(v);
     }
     if let Some(v) = p.min_length {
@@ -798,6 +835,30 @@ mod tests {
                 "unconstrained parameter grew `{k}`: {s}"
             );
         }
+    }
+
+    /// `is_plain_decimal` — the ONLY gate `check_constraints` applies at
+    /// publish, and the same one `coerce` applies to a caller's value —
+    /// accepts a leading zero (`"007"`, `"00"`, `"01.5"`), because it is a
+    /// text-comparison grammar, not JSON's own number grammar. Such a bound
+    /// publishes today and IS enforced. `json_number` must normalise it
+    /// rather than let `str::parse::<serde_json::Number>` reject it and
+    /// silently drop the keyword — the exact failure this task exists to
+    /// close, one step removed: a document that omits `minimum` describes an
+    /// endpoint wider than the one `coerce` actually enforces.
+    #[test]
+    fn a_leading_zero_bound_still_reaches_the_schema() {
+        let mut p = number_param("n");
+        p.minimum = Some("007".into());
+        p.maximum = Some("00".into());
+        let s = param_schema(&p);
+        assert_eq!(s["minimum"], json!(7), "{s}");
+        assert_eq!(s["maximum"], json!(0), "{s}");
+
+        let mut q = number_param("q");
+        q.minimum = Some("01.5".into());
+        let s = param_schema(&q);
+        assert_eq!(s["minimum"], json!(1.5), "{s}");
     }
 
     /// `data_schema` is private to this module and `tests/openapi_gen.rs` only
