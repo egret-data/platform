@@ -1,10 +1,10 @@
 //! DB-gated PolicyStore service tests. Self-skip without DATABASE_URL.
 use egret_metastore::Db;
-use egret_policy::{seed_tag, PolicyStore};
+use egret_policy::{seed_tag, seed_trino, PolicyStore};
 use serde_json::json;
 
 async fn store() -> Option<PolicyStore> {
-    let url = std::env::var("DATABASE_URL").ok()?;
+    let url = egret_test_db::url().await?;
     let db = Db::connect(&url, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
     Some(PolicyStore::new(db))
@@ -71,6 +71,13 @@ async fn tag_def_seeds_and_tag_service_provisions() {
     assert_eq!(s.get_service(&tag_name).await.unwrap().r#type, "tag");
 
     // 3. The bound trino profile's config carries `tagService = <tag service>`.
+    //
+    // `create_service(.., "trino", ..)` has an FK onto `authz_service_defs`, and this
+    // test never seeded that row — it passed only because some OTHER test binary had
+    // left a `trino` def behind in the shared database. A private database per process
+    // turned that into `authz_services_type_fkey` violated, which is the dependency
+    // being made explicit here rather than a new requirement.
+    seed_trino(&s).await.unwrap();
     let trino_name = uniq("eng");
     let trino_svc = s
         .create_service(&trino_name, "trino", &json!({ "tagService": tag_name }))
