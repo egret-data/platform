@@ -131,7 +131,7 @@ mod tests {
     use egret_secrets::Crypto;
 
     async fn test_secrets() -> Option<(Db, SecretStore)> {
-        let url = std::env::var("DATABASE_URL").ok()?;
+        let url = egret_test_db::url().await?;
         let db = Db::connect(&url, 5).await.expect("connect");
         db.migrate().await.expect("migrate");
         let crypto = Crypto::new(&[7u8; 32]).unwrap();

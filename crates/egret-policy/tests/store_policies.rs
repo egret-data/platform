@@ -4,7 +4,7 @@ use egret_policy::PolicyStore;
 use serde_json::json;
 
 async fn store() -> Option<PolicyStore> {
-    let url = std::env::var("DATABASE_URL").ok()?;
+    let url = egret_test_db::url().await?;
     let db = Db::connect(&url, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
     Some(PolicyStore::new(db))

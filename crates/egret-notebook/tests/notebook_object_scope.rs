@@ -156,7 +156,7 @@ async fn update_notebook(
 
 #[tokio::test]
 async fn notebook_per_object_handlers_are_object_scoped() {
-    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+    let Some(url) = egret_test_db::url().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };

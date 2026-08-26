@@ -24,8 +24,6 @@ use egret_dataapi::{
     management_router, serving_router, ActivityStore, ClientStore, DataApiState, EndpointStore,
 };
 use egret_machine_idp::{generate_rsa_key, sign_claims, IdpError, KeyMaterial, SigningKeyStore};
-#[path = "../test_db/mod.rs"]
-pub mod test_db;
 
 use egret_metastore::Db;
 use egret_query_api::Param;
@@ -786,7 +784,7 @@ async fn grant_ws_admin(db: &Db, user: Uuid, ws: Uuid) {
 /// 27 tests were paying ~33s of a 91s run to re-verify migrations that could not
 /// have changed since the process started.
 pub async fn fixture() -> Option<Fixture> {
-    let url = test_db::url().await?;
+    let url = egret_test_db::url().await?;
     let db = Db::connect(&url, 5).await.expect("connect");
 
     let admin = insert_user(&db, "t4_admin").await;

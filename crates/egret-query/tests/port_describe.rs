@@ -139,7 +139,7 @@ struct Fixture {
 
 async fn trino_engine_state() -> Option<Fixture> {
     let trino = std::env::var("EGRET_TEST_TRINO_URL").ok()?;
-    let url = std::env::var("DATABASE_URL").ok()?;
+    let url = egret_test_db::url().await?;
     let trino = url::Url::parse(&trino).expect("EGRET_TEST_TRINO_URL is a URL");
 
     let db = egret_metastore::Db::connect(&url, 5)

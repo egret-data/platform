@@ -40,9 +40,6 @@ use uuid::Uuid;
 /// file's own `fixture()` (further down) already owns that name, and every
 /// other test in this file is unaffected by and should stay on the local one.
 mod serving_common;
-// Reached through `serving_common`, which already loads it: declaring a second
-// `mod` for the same file makes two modules, and two modules are two statics.
-use serving_common::test_db;
 
 /// The host the fake coordinator "lives" on. Asserted as ABSENT from every
 /// body — it is the string a connect failure would carry out with it.
@@ -247,9 +244,9 @@ async fn grant_invoke(db: &Db, user: Uuid, endpoint: Uuid) {
 
 async fn fixture() -> Option<Fixture> {
     // One private database per test process, cloned from a migrated template.
-    // See tests/test_db/mod.rs for why sharing one database made the suite
-    // slower every time it ran.
-    let url = test_db::url().await?;
+    // See the `egret-test-db` crate for why sharing one database made the
+    // suite slower every time it ran.
+    let url = egret_test_db::url().await?;
     let db = Db::connect(&url, 5).await.expect("connect");
 
     let admin = insert_user(&db, "t5_admin").await;

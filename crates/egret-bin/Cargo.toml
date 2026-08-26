@@ -69,6 +69,10 @@ sha1 = "0.10"
 axum-extra = { workspace = true }
 
 [dev-dependencies]
+# One private, already-migrated database per test process, cloned from a
+# shared template. Replaces the shared `DATABASE_URL` database, which
+# nothing cleaned and every fixture paid for.
+egret-test-db.workspace = true
 # Drives the real IdP router in `tests/idp_issuer.rs` (`oneshot`), so the
 # discovery document and the minted token come from the same wiring the binary
 # builds rather than from a hand-made copy of it.

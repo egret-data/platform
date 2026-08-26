@@ -83,7 +83,7 @@ impl ObjectStore for MemStore {
 #[tokio::test]
 async fn per_query_limit_caps_rows() {
     let (Some(url), Some(trino)) = (
-        std::env::var("DATABASE_URL").ok(),
+        egret_test_db::url().await,
         std::env::var("EGRET_TEST_TRINO_URL").ok(),
     ) else {
         eprintln!("skip");

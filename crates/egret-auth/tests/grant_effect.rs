@@ -5,7 +5,7 @@ use egret_metastore::Db;
 use uuid::Uuid;
 
 async fn db() -> Db {
-    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+    let url = egret_test_db::url().await.expect("DATABASE_URL");
     let db = Db::connect(&url, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
     db

@@ -104,7 +104,7 @@ async fn body_string(resp: axum::response::Response) -> String {
 /// An Editor can PUT a `deny` grant; `grant_list` reports it with `effect="deny"`.
 #[tokio::test]
 async fn editor_can_put_deny_grant_and_list_shows_it() {
-    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+    let Some(url) = egret_test_db::url().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -208,7 +208,7 @@ async fn editor_can_put_deny_grant_and_list_shows_it() {
 /// keyed by the user's real UUID; an unknown email → 4xx (NotFound), not 422.
 #[tokio::test]
 async fn grant_put_resolves_principal_by_email() {
-    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+    let Some(url) = egret_test_db::url().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -328,7 +328,7 @@ async fn grant_put_resolves_principal_by_email() {
 /// be admitted as an object-guest (admission filters `effect = 'allow'`).
 #[tokio::test]
 async fn lone_deny_grant_does_not_admit() {
-    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+    let Some(url) = egret_test_db::url().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -400,7 +400,7 @@ async fn lone_deny_grant_does_not_admit() {
 /// `expires_at` NULL (never expires — unchanged default behavior).
 #[tokio::test]
 async fn grant_put_persists_expires_at_when_given_and_null_when_omitted() {
-    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+    let Some(url) = egret_test_db::url().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };

@@ -14,7 +14,7 @@ use uuid::Uuid;
 /// `(CatalogStore, EngineMgmtStore)` pair. Returns `None` (self-skip) when the
 /// env var is unset.
 async fn stores() -> Option<(CatalogStore, EngineMgmtStore)> {
-    let url = std::env::var("DATABASE_URL").ok()?;
+    let url = egret_test_db::url().await?;
     let db = Db::connect(&url, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
     Some((

@@ -109,6 +109,10 @@ url = { workspace = true }
 sqlx = { workspace = true }
 
 [dev-dependencies]
+# One private, already-migrated database per test process, cloned from a
+# shared template. Replaces the shared `DATABASE_URL` database, which
+# nothing cleaned and every fixture paid for.
+egret-test-db.workspace = true
 # Self dev-dependency so the crate's integration tests (`tests/*.rs`) link the
 # library built WITH `test-utils` — that's what compiles the `provision` module
 # (gated on `feature = "test-utils"`) whose `ensure_spike_warehouse` the

@@ -133,7 +133,7 @@ async fn attach_real_pdp(f: &mut Fixture) {
 }
 
 async fn setup() -> Option<Fixture> {
-    let dsn = std::env::var("DATABASE_URL").ok()?;
+    let dsn = egret_test_db::url().await?;
     let db = Db::connect(&dsn, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
     let sessions = SessionService::new(

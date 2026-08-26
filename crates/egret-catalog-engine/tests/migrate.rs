@@ -14,7 +14,7 @@ use sqlx::Row;
 
 #[tokio::test]
 async fn migrate_isolates_schemas() {
-    let Ok(dsn) = std::env::var("DATABASE_URL") else {
+    let Some(dsn) = egret_test_db::url().await else {
         eprintln!("DATABASE_URL not set — skipping migrate_isolates_schemas");
         return;
     };

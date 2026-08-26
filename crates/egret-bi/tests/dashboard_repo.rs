@@ -13,7 +13,7 @@ struct Fixture {
 }
 
 async fn setup() -> Option<Fixture> {
-    let url = std::env::var("DATABASE_URL").ok()?;
+    let url = egret_test_db::url().await?;
     let db = Db::connect(&url, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
 
@@ -195,7 +195,7 @@ async fn dashboard_crud_cards_and_unique_conflict() {
 /// second, required parameter so a caller cannot forget it.
 #[tokio::test]
 async fn get_is_scoped_by_workspace_not_id_alone() {
-    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+    let Some(url) = egret_test_db::url().await else {
         eprintln!("skip");
         return;
     };

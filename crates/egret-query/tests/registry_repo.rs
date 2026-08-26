@@ -33,7 +33,7 @@ fn input(name: &str) -> egret_query::registry::model::DatabaseInput {
 /// Returns the repo, its named-secret store, the raw Db handle, and a freshly
 /// seeded workspace id to own every database created in the test.
 async fn repo_with_db(with_key: bool) -> Option<(DatabaseRepo, WorkspaceSecretStore, Db, Uuid)> {
-    let url = std::env::var("DATABASE_URL").ok()?;
+    let url = egret_test_db::url().await?;
     let db = Db::connect(&url, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
     let crypto = with_key.then(|| Crypto::new(&[3u8; 32]).unwrap());

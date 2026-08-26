@@ -126,7 +126,7 @@ impl ObjectStore for MemStore {
 }
 
 async fn setup(sleep_ms: u64) -> Option<(JobManager, QueryStore, Uuid, Uuid, Arc<FakeFactory>)> {
-    let url = std::env::var("DATABASE_URL").ok()?;
+    let url = egret_test_db::url().await?;
     let db = Db::connect(&url, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
     let wid: Uuid =
@@ -224,7 +224,7 @@ async fn cancel_sets_cancelled() {
 /// `TabularResult`. Skips (does not fail) when `DATABASE_URL` is unset.
 #[tokio::test]
 async fn run_query_returns_tabular_result() {
-    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+    let Some(url) = egret_test_db::url().await else {
         eprintln!("skip");
         return;
     };
@@ -287,7 +287,7 @@ async fn run_query_returns_tabular_result() {
 /// resolvers (Tasks 3/4) pass a real per-user JWT into this same slot.
 #[tokio::test]
 async fn bearer_token_reaches_factory() {
-    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+    let Some(url) = egret_test_db::url().await else {
         eprintln!("skip");
         return;
     };

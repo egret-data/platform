@@ -90,7 +90,7 @@ async fn tag_version(pool: &sqlx::PgPool, service_id: i64) -> i64 {
 
 #[tokio::test]
 async fn assign_and_unassign_bump_bound_service_tag_version() {
-    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+    let Some(url) = egret_test_db::url().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };

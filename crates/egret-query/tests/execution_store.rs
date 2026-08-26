@@ -6,7 +6,7 @@ use egret_query::QueryStore;
 use uuid::Uuid;
 
 async fn setup() -> Option<(QueryStore, Uuid, Uuid, Uuid)> {
-    let url = std::env::var("DATABASE_URL").ok()?;
+    let url = egret_test_db::url().await?;
     let db = Db::connect(&url, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
     let uid: Uuid =

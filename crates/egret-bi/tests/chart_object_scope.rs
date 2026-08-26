@@ -206,7 +206,7 @@ async fn duplicate_chart(app: &axum::Router, slug: &str, ch: Uuid, tok: &str) ->
 
 #[tokio::test]
 async fn chart_per_object_handlers_are_object_scoped() {
-    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+    let Some(url) = egret_test_db::url().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };

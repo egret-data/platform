@@ -5687,7 +5687,7 @@ mod tests {
     /// `DATABASE_URL` isn't set so this suite doesn't fail in environments
     /// without a database.
     async fn test_state() -> Option<CpState> {
-        let dsn = std::env::var("DATABASE_URL").ok()?;
+        let dsn = egret_test_db::url().await?;
         let db = egret_metastore::Db::connect(&dsn, 5)
             .await
             .expect("connect");
@@ -5805,7 +5805,7 @@ mod tests {
             );
             return;
         };
-        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let dsn = egret_test_db::url().await.unwrap();
         let db = egret_metastore::Db::connect(&dsn, 5)
             .await
             .expect("connect");
@@ -5934,7 +5934,7 @@ mod tests {
             eprintln!("skipping ensure_root_password_secret_is_idempotent: DATABASE_URL not set");
             return;
         };
-        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let dsn = egret_test_db::url().await.unwrap();
         let db = egret_metastore::Db::connect(&dsn, 5)
             .await
             .expect("connect");
@@ -6041,7 +6041,7 @@ mod tests {
             eprintln!("skipping resolve_tls_cert_secret_rejects_missing_key: DATABASE_URL not set");
             return;
         };
-        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let dsn = egret_test_db::url().await.unwrap();
         let db = egret_metastore::Db::connect(&dsn, 5)
             .await
             .expect("connect");
@@ -6087,7 +6087,7 @@ mod tests {
             eprintln!("skipping ensure_tls_cert_uses_referenced_secret: DATABASE_URL not set");
             return;
         };
-        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let dsn = egret_test_db::url().await.unwrap();
         let db = egret_metastore::Db::connect(&dsn, 5)
             .await
             .expect("connect");
@@ -6147,7 +6147,7 @@ mod tests {
             eprintln!("skipping create_rejects_ingress_tls_cert_ref_non_tls: DATABASE_URL not set");
             return;
         };
-        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let dsn = egret_test_db::url().await.unwrap();
         let db = egret_metastore::Db::connect(&dsn, 5)
             .await
             .expect("connect");
@@ -6216,7 +6216,7 @@ mod tests {
             return;
         };
         st.engine_provisioner = Some(std::sync::Arc::new(NoopProvisioner));
-        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let dsn = egret_test_db::url().await.unwrap();
         let db = egret_metastore::Db::connect(&dsn, 5)
             .await
             .expect("connect");
@@ -6287,7 +6287,7 @@ mod tests {
         };
         st.engine_provisioner = Some(std::sync::Arc::new(NoopProvisioner));
         // test_state already sets engine_jwks_uri + engine_oidc_issuer.
-        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let dsn = egret_test_db::url().await.unwrap();
         let db = egret_metastore::Db::connect(&dsn, 5)
             .await
             .expect("connect");
@@ -6313,7 +6313,7 @@ mod tests {
         st.engine_provisioner = Some(std::sync::Arc::new(NoopProvisioner));
         st.engine_jwks_uri.clear();
         st.engine_oidc_issuer.clear();
-        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let dsn = egret_test_db::url().await.unwrap();
         let db = egret_metastore::Db::connect(&dsn, 5)
             .await
             .expect("connect");
@@ -6333,7 +6333,7 @@ mod tests {
             return;
         };
         st.engine_provisioner = Some(std::sync::Arc::new(NoopProvisioner));
-        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let dsn = egret_test_db::url().await.unwrap();
         let db = egret_metastore::Db::connect(&dsn, 5)
             .await
             .expect("connect");
@@ -6355,7 +6355,7 @@ mod tests {
         st.engine_provisioner = Some(std::sync::Arc::new(NoopProvisioner));
         st.engine_jwks_uri.clear();
         st.engine_oidc_issuer.clear();
-        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let dsn = egret_test_db::url().await.unwrap();
         let db = egret_metastore::Db::connect(&dsn, 5)
             .await
             .expect("connect");
@@ -6380,7 +6380,7 @@ mod tests {
         };
         st.engine_provisioner = Some(std::sync::Arc::new(NoopProvisioner));
         // JWKS present, but "none" must still win.
-        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let dsn = egret_test_db::url().await.unwrap();
         let db = egret_metastore::Db::connect(&dsn, 5)
             .await
             .expect("connect");
@@ -6405,7 +6405,7 @@ mod tests {
             return;
         };
         st.engine_provisioner = Some(std::sync::Arc::new(NoopProvisioner));
-        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let dsn = egret_test_db::url().await.unwrap();
         let db = egret_metastore::Db::connect(&dsn, 5)
             .await
             .expect("connect");
@@ -6506,7 +6506,7 @@ mod tests {
         };
         st.engine_provisioner = Some(std::sync::Arc::new(NoopProvisioner));
         // test_state already sets engine_jwks_uri + engine_oidc_issuer (JWT-capable).
-        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let dsn = egret_test_db::url().await.unwrap();
         let db = egret_metastore::Db::connect(&dsn, 5)
             .await
             .expect("connect");
@@ -6534,7 +6534,7 @@ mod tests {
         st.engine_provisioner = Some(std::sync::Arc::new(NoopProvisioner));
         st.engine_jwks_uri.clear();
         st.engine_oidc_issuer.clear();
-        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let dsn = egret_test_db::url().await.unwrap();
         let db = egret_metastore::Db::connect(&dsn, 5)
             .await
             .expect("connect");
@@ -6558,7 +6558,7 @@ mod tests {
         };
         st.engine_provisioner = Some(std::sync::Arc::new(NoopProvisioner));
         // JWKS present, but "none" must still win.
-        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let dsn = egret_test_db::url().await.unwrap();
         let db = egret_metastore::Db::connect(&dsn, 5)
             .await
             .expect("connect");
@@ -6584,7 +6584,7 @@ mod tests {
             return;
         };
         st.engine_provisioner = Some(std::sync::Arc::new(NoopProvisioner));
-        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let dsn = egret_test_db::url().await.unwrap();
         let db = egret_metastore::Db::connect(&dsn, 5)
             .await
             .expect("connect");
@@ -6608,7 +6608,7 @@ mod tests {
         st.engine_provisioner = Some(std::sync::Arc::new(NoopProvisioner));
         st.engine_jwks_uri.clear();
         st.engine_oidc_issuer.clear();
-        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let dsn = egret_test_db::url().await.unwrap();
         let db = egret_metastore::Db::connect(&dsn, 5)
             .await
             .expect("connect");
@@ -6645,7 +6645,7 @@ mod tests {
         st.engine_provisioner = Some(std::sync::Arc::new(NoopProvisioner));
         st.engine_jwks_uri.clear();
         st.engine_oidc_issuer.clear();
-        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let dsn = egret_test_db::url().await.unwrap();
         let db = egret_metastore::Db::connect(&dsn, 5)
             .await
             .expect("connect");
@@ -6715,7 +6715,7 @@ mod tests {
             );
             return;
         };
-        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let dsn = egret_test_db::url().await.unwrap();
         let db = egret_metastore::Db::connect(&dsn, 5)
             .await
             .expect("connect");
@@ -6826,7 +6826,7 @@ mod tests {
             eprintln!("skipping update_starrocks_engine_rescales: DATABASE_URL not set");
             return;
         };
-        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let dsn = egret_test_db::url().await.unwrap();
         let db = egret_metastore::Db::connect(&dsn, 5)
             .await
             .expect("connect");
@@ -6871,7 +6871,7 @@ mod tests {
             eprintln!("skipping update_starrocks_engine_preserves_storage: DATABASE_URL not set");
             return;
         };
-        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let dsn = egret_test_db::url().await.unwrap();
         let db = egret_metastore::Db::connect(&dsn, 5)
             .await
             .expect("connect");
@@ -6918,7 +6918,7 @@ mod tests {
             eprintln!("skipping build_provision_req_dispatches_starrocks: DATABASE_URL not set");
             return;
         };
-        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let dsn = egret_test_db::url().await.unwrap();
         let db = egret_metastore::Db::connect(&dsn, 5)
             .await
             .expect("connect");

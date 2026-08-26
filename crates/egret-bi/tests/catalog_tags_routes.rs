@@ -99,7 +99,7 @@ async fn body_string(resp: axum::response::Response) -> String {
 
 #[tokio::test]
 async fn resource_tag_assign_list_unassign_and_gating() {
-    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+    let Some(url) = egret_test_db::url().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };

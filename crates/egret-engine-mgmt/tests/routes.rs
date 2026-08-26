@@ -123,7 +123,7 @@ async fn setup_full(
     engine_provisioner: Option<Arc<dyn EngineProvisioningPort>>,
     kube: Option<Arc<dyn KubeClient>>,
 ) -> Option<Fixture> {
-    let dsn = std::env::var("DATABASE_URL").ok()?;
+    let dsn = egret_test_db::url().await?;
     let db = Db::connect(&dsn, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
 

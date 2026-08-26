@@ -18,7 +18,7 @@ const SYSTEM_USER: &str = "egret-system";
 
 #[tokio::test]
 async fn ensure_bootstrapped_is_idempotent_and_seeds_default_project() {
-    let Ok(dsn) = std::env::var("DATABASE_URL") else {
+    let Some(dsn) = egret_test_db::url().await else {
         eprintln!("DATABASE_URL not set — skipping ensure_bootstrapped_is_idempotent");
         return;
     };

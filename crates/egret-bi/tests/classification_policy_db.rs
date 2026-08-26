@@ -21,7 +21,7 @@ async fn seed_user(db: &Db) -> Uuid {
 
 #[tokio::test]
 async fn set_get_update_clear_and_cascade() {
-    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+    let Some(url) = egret_test_db::url().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -119,7 +119,7 @@ async fn set_get_update_clear_and_cascade() {
 /// rejects the whole call with `BadRequest` (→ HTTP 400); a valid list is Ok.
 #[tokio::test]
 async fn set_policy_rejects_injection_payloads() {
-    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+    let Some(url) = egret_test_db::url().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };

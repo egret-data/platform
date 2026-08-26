@@ -140,7 +140,7 @@ async fn post_chart_data(
 
 #[tokio::test]
 async fn chart_data_endpoint_is_object_scoped() {
-    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+    let Some(url) = egret_test_db::url().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
