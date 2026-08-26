@@ -52,8 +52,6 @@ enum Describe {
 /// with a `{{param}}` in it can only be described if the placeholder was
 /// substituted first, and asserting on the SQL the port received is the only way
 /// to see that from outside.
-#[path = "test_db/mod.rs"]
-mod test_db;
 struct FakePort {
     mode: Mutex<Describe>,
     seen: Mutex<Vec<(Uuid, Uuid, Uuid, String)>>,
@@ -303,9 +301,9 @@ const MANAGER: &[&str] = &["data_api_endpoint:read", "data_api_endpoint:manage"]
 
 async fn fixture() -> Option<Fixture> {
     // One private database per test process, cloned from a migrated template.
-    // See tests/test_db/mod.rs for why sharing one database made the suite
-    // slower every time it ran.
-    let url = test_db::url().await?;
+    // See the `egret-test-db` crate for why sharing one database made the
+    // suite slower every time it ran.
+    let url = egret_test_db::url().await?;
     let db = Db::connect(&url, 5).await.expect("connect");
     let admin = insert_user(&db, "lifecycle_admin").await;
     let (ws_id, ws) = insert_workspace(&db, admin, "lifecycle").await;

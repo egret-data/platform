@@ -36,8 +36,6 @@ struct Caller {
 /// A `QueryExecPort` that must never be consulted: nothing in this file drives
 /// the publish lifecycle, and a route that reached the engine anyway would be
 /// doing something none of these tests asked for.
-#[path = "test_db/mod.rs"]
-mod test_db;
 struct UnreachablePort;
 #[async_trait::async_trait]
 impl egret_query_api::QueryExecPort for UnreachablePort {
@@ -125,9 +123,9 @@ async fn insert_workspace(db: &Db, owner: Uuid, tag: &str) -> (Uuid, String) {
 
 async fn fixture() -> Option<Fixture> {
     // One private database per test process, cloned from a migrated template.
-    // See tests/test_db/mod.rs for why sharing one database made the suite
-    // slower every time it ran.
-    let url = test_db::url().await?;
+    // See the `egret-test-db` crate for why sharing one database made the
+    // suite slower every time it ran.
+    let url = egret_test_db::url().await?;
     let db = Db::connect(&url, 5).await.expect("connect");
     let admin = insert_user(&db, "dataapi_admin").await;
     let (ws_id, ws) = insert_workspace(&db, admin, "dataapi").await;

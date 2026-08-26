@@ -72,6 +72,9 @@ url.workspace = true
 tower.workspace = true
 
 [dev-dependencies]
+# One private, already-migrated database per test process. Replaces the
+# `#[path]`-included `tests/test_db/mod.rs` this crate used to own.
+egret-test-db.workspace = true
 # `serving_auth.rs` asserts that every rejection arm LOGS its reason. The doc on
 # `verify_serving_token` promises an operator can tell a stale token from a
 # replayed catalog one; without a subscriber to capture the events, that promise

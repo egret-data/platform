@@ -208,9 +208,6 @@ fn process_db_name() -> String {
 static SENTINEL: tokio::sync::OnceCell<Option<sqlx::PgConnection>> =
     tokio::sync::OnceCell::const_new();
 
-/// What [`drop_clone_at_exit`] needs, captured while the process is still healthy.
-static OWNED_CLONE: std::sync::OnceLock<(String, String)> = std::sync::OnceLock::new();
-
 /// Drop this process's clone as the process exits.
 ///
 /// # Why an exit hook at all — the sweep was never cleanup
@@ -223,61 +220,125 @@ static OWNED_CLONE: std::sync::OnceLock<(String, String)> = std::sync::OnceLock:
 /// database — it simply had no occasion to run. With test binaries running in parallel the
 /// residue is one per process alive at the end of the run, not one overall.
 ///
-/// # Why `atexit` and not `Drop`
+/// # Why `atexit`, and why it hands the work to a thread
 ///
 /// Nothing in a test binary owns this database in a scope that ends: `main` belongs to
 /// libtest, and Rust does not run destructors for `static`s. `libc::atexit` is the hook
-/// that both exit paths a test binary takes go through — returning from `main`, and the
+/// both of a test binary's exit paths go through — returning from `main`, and the
 /// `std::process::exit` libtest calls when a test fails.
 ///
-/// It is deliberately incapable of failing the test run: the handler catches unwinds,
-/// gives up after ten seconds, and ignores every error. A cleanup that can turn a green
-/// suite red is worse than a leaked database.
+/// The handler itself can do almost nothing, though. By the time `atexit` callbacks run,
+/// the exiting thread's thread-local storage has already been torn down, and the first
+/// version of this — which built a `current_thread` runtime right there — printed
+///
+/// ```text
+/// thread 'main' panicked: use of std::thread::current() is not possible after the
+/// thread's local data has been destroyed
+/// ```
+///
+/// into the test output and dropped nothing. So the runtime lives on a worker thread
+/// spawned while the process is healthy, whose TLS is still intact; the handler only takes
+/// a mutex, signals a condvar, and waits. Mutex and condvar touch no thread-local state.
+///
+/// It is deliberately incapable of failing the test run: the handler gives up after ten
+/// seconds and every error is ignored. A cleanup that can turn a green suite red is worse
+/// than a leaked database.
 fn register_exit_drop(admin_url: String, name: String) {
-    if OWNED_CLONE.set((admin_url, name)).is_err() {
+    use std::sync::{Condvar, Mutex};
+
+    // `'static` because the `atexit` callback takes no argument and outlives every frame.
+    struct Reaper {
+        /// `false` until the exit handler asks for the drop, then `true` again when the
+        /// worker has finished — the handler waits for the second transition.
+        state: Mutex<(bool, bool)>,
+        cv: Condvar,
+    }
+    static REAPER: std::sync::OnceLock<&'static Reaper> = std::sync::OnceLock::new();
+
+    let reaper: &'static Reaper = Box::leak(Box::new(Reaper {
+        state: Mutex::new((false, false)),
+        cv: Condvar::new(),
+    }));
+    if REAPER.set(reaper).is_err() {
         return;
     }
-    // SAFETY: `atexit` requires the callback to be signal-safe only for `_exit`; for
-    // normal termination it runs on the exiting thread with the process otherwise
-    // quiescent, which is where `drop_clone_at_exit` does its work.
+
+    let spawned = std::thread::Builder::new()
+        .name("egret-test-db-reaper".into())
+        .spawn(move || {
+            let mut guard = reaper.state.lock().unwrap_or_else(|e| e.into_inner());
+            while !guard.0 {
+                guard = reaper.cv.wait(guard).unwrap_or_else(|e| e.into_inner());
+            }
+            drop(guard);
+
+            // A fresh current-thread runtime. The runtimes the tests built are gone, and
+            // so is the one the `SENTINEL` connection was made on — its socket is still
+            // open, which is why the drop below has to be `WITH (FORCE)`.
+            if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                rt.block_on(async {
+                    let work = async {
+                        use sqlx::Connection;
+                        let mut admin = sqlx::PgConnection::connect(&admin_url).await.ok()?;
+                        // `name` is `egret_t_` plus hex from `process_db_name`; it cannot
+                        // carry an identifier break, and `DROP DATABASE` has no bind form
+                        // for a name.
+                        let stmt = format!(r#"DROP DATABASE IF EXISTS "{name}" WITH (FORCE)"#);
+                        sqlx::query(sqlx::AssertSqlSafe(stmt))
+                            .execute(&mut admin)
+                            .await
+                            .ok()
+                    };
+                    let _ = tokio::time::timeout(std::time::Duration::from_secs(8), work).await;
+                });
+            }
+
+            let mut guard = reaper.state.lock().unwrap_or_else(|e| e.into_inner());
+            guard.1 = true;
+            reaper.cv.notify_all();
+        })
+        .is_ok();
+
+    if !spawned {
+        return;
+    }
+
+    extern "C" fn drop_clone_at_exit() {
+        // An escape hatch for the developer who wants to open the database and look at it.
+        if std::env::var_os("EGRET_TEST_DB_KEEP").is_some() {
+            return;
+        }
+        let Some(reaper) = REAPER.get() else {
+            return;
+        };
+        let Ok(mut guard) = reaper.state.lock() else {
+            return;
+        };
+        guard.0 = true;
+        reaper.cv.notify_all();
+        while !guard.1 {
+            let Ok((g, timeout)) = reaper
+                .cv
+                .wait_timeout(guard, std::time::Duration::from_secs(10))
+            else {
+                return;
+            };
+            guard = g;
+            if timeout.timed_out() {
+                return;
+            }
+        }
+    }
+
+    // SAFETY: registering a callback. The callback below only takes a mutex and waits on
+    // a condvar, neither of which reads the thread-local state `atexit` has already torn
+    // down; the actual work happens on the thread spawned above.
     unsafe {
         libc::atexit(drop_clone_at_exit);
     }
-}
-
-extern "C" fn drop_clone_at_exit() {
-    // An escape hatch for the developer who wants to open the database and look at it.
-    if std::env::var_os("EGRET_TEST_DB_KEEP").is_some() {
-        return;
-    }
-    let Some((admin_url, name)) = OWNED_CLONE.get() else {
-        return;
-    };
-    let _ = std::panic::catch_unwind(|| {
-        // A fresh current-thread runtime: every runtime the tests built is gone by now,
-        // and so is the `SENTINEL` connection's — the socket is still open, which is why
-        // the drop below has to be `WITH (FORCE)`.
-        let Ok(rt) = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        else {
-            return;
-        };
-        rt.block_on(async {
-            let work = async {
-                use sqlx::Connection;
-                let mut admin = sqlx::PgConnection::connect(admin_url).await.ok()?;
-                // `name` is `egret_t_` plus hex from `process_db_name`; it cannot carry
-                // an identifier break, and `DROP DATABASE` has no bind form for a name.
-                let stmt = format!(r#"DROP DATABASE IF EXISTS "{name}" WITH (FORCE)"#);
-                sqlx::query(sqlx::AssertSqlSafe(stmt))
-                    .execute(&mut admin)
-                    .await
-                    .ok()
-            };
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(10), work).await;
-        });
-    });
 }
 
 async fn process_db_url() -> Option<String> {

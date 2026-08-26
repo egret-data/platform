@@ -2919,6 +2919,7 @@ dependencies = [
  "egret-machine-idp",
  "egret-metastore",
  "egret-query-api",
+ "egret-test-db",
  "egret-workspace",
  "minijinja",
  "rand 0.8.7",

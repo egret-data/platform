@@ -8,8 +8,6 @@ use egret_dataapi::ClientStore;
 use egret_machine_idp::ClientVerifier;
 use egret_metastore::Db;
 use uuid::Uuid;
-#[path = "test_db/mod.rs"]
-mod test_db;
 
 struct Fixture {
     db: Db,
@@ -24,9 +22,9 @@ struct Fixture {
 
 async fn fixture() -> Option<Fixture> {
     // One private database per test process, cloned from a migrated template.
-    // See tests/test_db/mod.rs for why sharing one database made the suite
-    // slower every time it ran.
-    let url = test_db::url().await?;
+    // See the `egret-test-db` crate for why sharing one database made the
+    // suite slower every time it ran.
+    let url = egret_test_db::url().await?;
     let db = Db::connect(&url, 5).await.expect("connect");
 
     let admin_id: Uuid = sqlx::query_scalar(

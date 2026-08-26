@@ -56,8 +56,6 @@ use uuid::Uuid;
 /// as a route bug. Nothing in this file SERVES, so `execute_as` is `unreachable!`: a
 /// query executed from a trash test would mean a handler reached the engine, which
 /// is a finding rather than a nuisance.
-#[path = "test_db/mod.rs"]
-mod test_db;
 struct OkPort;
 
 #[async_trait::async_trait]
@@ -265,9 +263,9 @@ async fn principal_with_in(db: &Db, audit: AuditSink, perms: &[&str], ws: Uuid) 
 
 async fn fixture() -> Option<Fixture> {
     // One private database per test process, cloned from a migrated template.
-    // See tests/test_db/mod.rs for why sharing one database made the suite
-    // slower every time it ran.
-    let url = test_db::url().await?;
+    // See the `egret-test-db` crate for why sharing one database made the
+    // suite slower every time it ran.
+    let url = egret_test_db::url().await?;
     let db = Db::connect(&url, 5).await.expect("connect");
     let admin = insert_user(&db, "dataapi_trash_admin").await;
     let (ws_id, ws) = insert_workspace(&db, admin, "dataapi-trash").await;
