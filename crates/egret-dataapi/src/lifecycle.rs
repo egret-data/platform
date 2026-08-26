@@ -2027,7 +2027,7 @@ fn probe_params(
     params
         .iter()
         .map(|p| {
-            let value = param_json(&representative_value(p));
+            let value = crate::transform::param_json(&representative_value(p));
             let value = if iterated.contains(&p.name) {
                 serde_json::Value::Array(vec![value])
             } else {
@@ -2036,30 +2036,6 @@ fn probe_params(
             (p.name.clone(), value)
         })
         .collect()
-}
-
-/// One [`Param`] as JSON.
-///
-/// Total over the enum rather than over the three variants
-/// [`representative_value`] can produce today: a new `ParamType` mapping to a
-/// new `Param` would otherwise reach a script as whatever the fallback arm
-/// happened to be.
-fn param_json(p: &Param) -> serde_json::Value {
-    match p {
-        Param::Null => serde_json::Value::Null,
-        Param::Bool(b) => serde_json::Value::Bool(*b),
-        Param::I64(i) => serde_json::Value::from(*i),
-        // A non-finite float has no JSON counterpart; `representative_value`
-        // never produces one, and `Null` is the honest answer if it ever does.
-        Param::F64(f) => serde_json::Number::from_f64(*f)
-            .map_or(serde_json::Value::Null, serde_json::Value::Number),
-        // Decimal stays TEXT, like everywhere else in this crate: turning it
-        // into a JSON number is exactly the float rounding the variant exists to
-        // avoid.
-        Param::Decimal(s) | Param::Str(s) | Param::Date(s) | Param::Timestamp(s) => {
-            serde_json::Value::from(s.as_str())
-        }
-    }
 }
 
 /// An author's `default` must satisfy its own declared type (spec §5, T7-6).

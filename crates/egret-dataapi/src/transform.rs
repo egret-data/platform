@@ -723,6 +723,39 @@ pub(crate) fn check_returns(
     }
 }
 
+/// One [`egret_query_api::Param`] as JSON — what a bound parameter looks like
+/// to a script.
+///
+/// **One conversion, two callers**, for the same reason [`check_returns`] is one
+/// rule: `lifecycle::probe_params` builds publish's `params` dict from this, and
+/// `serving::params::resolve_supplied_with` builds the serving one from it. A
+/// second reading would let publish probe a script with a JSON number for a
+/// `decimal` the serving path hands over as a string — a script that passes the
+/// probe and fails on every real call, with nothing naming the difference.
+///
+/// Total over the enum rather than over the three variants
+/// `representative_value` can produce today: a new `ParamType` mapping to a
+/// new `Param` would otherwise reach a script as whatever the fallback arm
+/// happened to be.
+pub(crate) fn param_json(p: &egret_query_api::Param) -> serde_json::Value {
+    use egret_query_api::Param;
+    match p {
+        Param::Null => serde_json::Value::Null,
+        Param::Bool(b) => serde_json::Value::Bool(*b),
+        Param::I64(i) => serde_json::Value::from(*i),
+        // A non-finite float has no JSON counterpart; `representative_value`
+        // never produces one, and `Null` is the honest answer if it ever does.
+        Param::F64(f) => serde_json::Number::from_f64(*f)
+            .map_or(serde_json::Value::Null, serde_json::Value::Number),
+        // Decimal stays TEXT, like everywhere else in this crate: turning it
+        // into a JSON number is exactly the float rounding the variant exists to
+        // avoid.
+        Param::Decimal(s) | Param::Str(s) | Param::Date(s) | Param::Timestamp(s) => {
+            serde_json::Value::from(s.as_str())
+        }
+    }
+}
+
 /// What a JSON value is, in the words an author's error message uses.
 fn json_kind(value: &serde_json::Value) -> &'static str {
     match value {
