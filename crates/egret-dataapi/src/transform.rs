@@ -538,8 +538,20 @@ pub enum TransformError {
 /// transform on top of. It installs every limit `starlark 0.14` offers and
 /// injects **nothing** — no globals beyond [`Globals::standard`], no loader, no
 /// extension values.
-#[allow(dead_code)]
-fn eval_probe(src: &str) -> Result<(), TransformError> {
+///
+/// # Task 4's caller, and why this function and not a second parse
+///
+/// `pub(crate)` since Task 4: `lifecycle::check_transform` calls this at
+/// publish to refuse a script that cannot be honoured, and it is the ONLY
+/// evaluation this performs — it parses the script and runs its module top
+/// level (defining `transform`, evaluating nothing else), and never calls
+/// `transform(params, statements)`. That is deliberate: publish may refuse a
+/// script, it may not run one against data — probing it against `returns` is a
+/// later task's job. Calling through here rather than a second parse site is
+/// what keeps `tests::there_is_exactly_one_place_that_parses_starlark`
+/// meaningful: publish and serving agree about which scripts exist because
+/// they go through the same parse.
+pub(crate) fn eval_probe(src: &str) -> Result<(), TransformError> {
     eval_inner(src, Budgets::default(), None).map(|_| ())
 }
 

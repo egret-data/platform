@@ -656,6 +656,62 @@ pub enum ValidationError {
         second: String,
         naming: String,
     },
+    /// `output.transform.script` exceeds [`MAX_TRANSFORM_SCRIPT_BYTES`].
+    ///
+    /// A response transform reshapes what a statement already returned; it is
+    /// not where an endpoint's business logic belongs. Carries both numbers —
+    /// see every other `…TooLong`/`…TooMany` arm in this enum for why "too
+    /// large" alone tells an author nothing about how much to cut.
+    #[error(
+        "output.transform.script is {bytes} bytes, over the {cap} byte cap. A response \
+         transform reshapes what a statement already returned — it is not where an \
+         endpoint's business logic belongs"
+    )]
+    TransformScriptTooLong { bytes: usize, cap: usize },
+    /// `output.transform` is set alongside a non-default `output.shape` or
+    /// `output.naming`.
+    ///
+    /// Once a script decides the shape of the response, `shape` (which rows the
+    /// wire carries) and `naming` (which key spelling a JSON object gets) are
+    /// either dead — the script's own `return` already fixed both — or
+    /// ambiguous: does `naming: camel` apply to the rows the script SEES, or to
+    /// the keys it WROTE? There is no reading that is obviously right, so this
+    /// refuses rather than picks one.
+    ///
+    /// The field's DEFAULT value (`"objects"` for `shape`, `"as_is"` for
+    /// `naming`) is not refused alongside a transform: an author who never
+    /// touched either field has not asked for a shape, and refusing that would
+    /// make every transform carry two fields it has no opinion about.
+    #[error(
+        "output.{0} may not be set alongside output.transform. A transform script decides \
+         the shape of its own response, so output.{0} would either be dead or ambiguous \
+         about whether it applies before or after the script runs. Remove output.{0}, or \
+         leave it at its default"
+    )]
+    TransformWithShapeOrNaming(&'static str),
+    /// `output.transform.returns` is empty.
+    #[error(
+        "output.transform.returns declares no columns. Serving checks a transform's response \
+         against this list; an empty list is nothing to check against, and serving would fail \
+         OPEN — serving whatever the script returned, unchecked — rather than refuse a \
+         response that disagrees with nothing"
+    )]
+    TransformReturnsEmpty,
+    /// Two entries in `output.transform.returns` declare the same `name`.
+    #[error(
+        "output.transform.returns declares `{0}` more than once. A JSON object has one key \
+         per name, so a duplicate is not a stricter contract, it is an unresolvable one"
+    )]
+    TransformReturnsDuplicateName(String),
+    /// `output.transform.script` does not parse under the transform dialect, or
+    /// fails the same probe evaluation [`crate::transform::run_transform`]
+    /// itself runs the module through.
+    ///
+    /// The author's 400, not the caller's 500: an endpoint publishes only after
+    /// its script has been through the one evaluator serving will use, so a
+    /// script this rejects can never reach a caller as a runtime failure.
+    #[error("the transform script is not valid: {0}")]
+    TransformScriptInvalid(String),
 }
 
 impl From<ValidationError> for Error {
@@ -1534,6 +1590,92 @@ pub fn check_constraints(params: &[ParamSpec]) -> std::result::Result<(), Valida
     Ok(())
 }
 
+/// Ceiling on `output.transform.script`, in bytes.
+///
+/// # Sized against a real script, not a round number
+///
+/// Spec §1's canonical example — read `params["region"]`, index into
+/// `statements["items"]`, return `{region, items, total}` — is about 200
+/// bytes. 8192 (8 KiB) is ~40x that: enough room for the example plus real
+/// comments, a helper `def` or two, and a second statement folded in, while
+/// staying small enough that a script anywhere near the cap is visibly no
+/// longer "reshape this response" — a response transform reshapes what a
+/// statement already returned; it is not where an endpoint's business logic
+/// belongs, and a cap an honest script never approaches is not a cap at all.
+pub const MAX_TRANSFORM_SCRIPT_BYTES: usize = 8192;
+
+/// Refuse an `output.transform` publish cannot honour.
+///
+/// A no-op when `output.transform` is absent — every snapshot frozen before
+/// C2, and every endpoint that has no transform today.
+///
+/// # What this does NOT do
+///
+/// **It never runs the script against data.** It parses the script and
+/// evaluates its module top level — through
+/// [`crate::transform::eval_probe`], the same evaluator
+/// [`crate::transform::run_transform`] is built on, so publish and serving
+/// agree about which scripts exist — and stops there. Probing the script
+/// against `returns` by actually calling `transform(params, statements)` is a
+/// later task's job; this one parses and refuses, it does not run.
+///
+/// # The order, and why
+///
+/// Refusals are checked cheapest-and-most-structural first, so an author
+/// editing a script that is both too long AND missing `returns` sees the
+/// length problem rather than a starlark stack trace for a script that was
+/// going to be refused anyway:
+///
+/// 1. **script length** ([`MAX_TRANSFORM_SCRIPT_BYTES`]) — the cheapest
+///    possible check, and it bounds how expensive every check after it can be;
+/// 2. **`shape`/`naming`** — see [`ValidationError::TransformWithShapeOrNaming`];
+/// 3. **empty `returns`** — see [`ValidationError::TransformReturnsEmpty`];
+/// 4. **duplicate `returns` names** — see
+///    [`ValidationError::TransformReturnsDuplicateName`];
+/// 5. **the script itself, parsed** — last, because it is the only check here
+///    that costs more than a comparison.
+pub fn check_transform(output: &OutputSpec) -> std::result::Result<(), ValidationError> {
+    let Some(transform) = &output.transform else {
+        return Ok(());
+    };
+
+    let bytes = transform.script.len();
+    if bytes > MAX_TRANSFORM_SCRIPT_BYTES {
+        return Err(ValidationError::TransformScriptTooLong {
+            bytes,
+            cap: MAX_TRANSFORM_SCRIPT_BYTES,
+        });
+    }
+
+    // Compared against the field's own default rather than a literal
+    // `"objects"`/`"as_is"` copied here: the two can never drift apart, because
+    // `OutputSpec::default()` is built from the exact same `default_shape`/
+    // `default_naming` functions serde falls back to.
+    let defaults = OutputSpec::default();
+    if output.shape != defaults.shape {
+        return Err(ValidationError::TransformWithShapeOrNaming("shape"));
+    }
+    if output.naming != defaults.naming {
+        return Err(ValidationError::TransformWithShapeOrNaming("naming"));
+    }
+
+    if transform.returns.is_empty() {
+        return Err(ValidationError::TransformReturnsEmpty);
+    }
+
+    let mut seen = std::collections::HashSet::with_capacity(transform.returns.len());
+    for col in &transform.returns {
+        if !seen.insert(col.name.as_str()) {
+            return Err(ValidationError::TransformReturnsDuplicateName(
+                col.name.clone(),
+            ));
+        }
+    }
+
+    crate::transform::eval_probe(&transform.script)
+        .map_err(|e| ValidationError::TransformScriptInvalid(e.to_string()))
+}
+
 /// An author's `default` must satisfy its own declared type (spec §5, T7-6).
 ///
 /// Coerced through the **same function the serving path uses**, deliberately —
@@ -1656,7 +1798,7 @@ fn validate_endpoint(
     // records: they are what bounds the cost of the rendering, and they cost
     // nothing themselves.
     for statement in statements {
-        check_definition_scans(&statement.sql, params, ParamRules::Draft)?;
+        check_definition_scans(&statement.sql, params, output, ParamRules::Draft)?;
     }
     let mut read: Vec<String> = Vec::new();
     for statement in statements {
@@ -1699,7 +1841,14 @@ pub fn validate_definition(
     // Order preserved EXACTLY: `check_single_select` first (pinned by
     // `validate_definition_runs_the_statement_check_first`), the cache rule
     // between the scans and the renders, as it has always been.
-    check_definition_scans(sql, params, ParamRules::Published)?;
+    //
+    // `OutputSpec::default()`, not a real `output`: this function validates one
+    // SQL definition, and `output` is a property of the ENDPOINT it belongs to,
+    // which this signature has never carried (see the module comment — this is
+    // the same reason it "knows nothing about output"). The default carries no
+    // transform, so `check_transform` is a no-op here, exactly as every other
+    // output-shaped rule already is on this path.
+    check_definition_scans(sql, params, &OutputSpec::default(), ParamRules::Published)?;
     check_cache_scope(cache, delegated, impersonate)?;
     // A slice of one, because this entry point IS one definition: there are no
     // sibling statements whose `{% for %}` headers could widen the set.
@@ -1721,6 +1870,7 @@ pub fn validate_definition(
 fn check_definition_scans(
     sql: &str,
     params: &[ParamSpec],
+    output: &OutputSpec,
     rules: ParamRules,
 ) -> std::result::Result<(), ValidationError> {
     check_single_select(sql)?;
@@ -1736,6 +1886,7 @@ fn check_definition_scans(
     check_enum_params(params)?;
     check_param_locations(params)?;
     check_constraints(params)?;
+    check_transform(output)?;
     check_defaults(params)?;
     check_params_with(sql, params, rules)?;
     Ok(())
@@ -1820,7 +1971,13 @@ pub(crate) fn validate_preview(
     // they are already stored, they were scanned when they were written, and
     // re-refusing one here would block previewing the statement the author is
     // actually looking at because a different one is mid-edit.
-    check_definition_scans(sql, params, ParamRules::Draft)?;
+    //
+    // `OutputSpec::default()`: `PreviewEndpointInput` carries no `output` at
+    // all — preview runs the statement on screen and returns its raw rows, it
+    // does not resolve a transform — so there is nothing here for
+    // `check_transform` to check, and the default carries no transform to make
+    // that a no-op rather than an omission.
+    check_definition_scans(sql, params, &OutputSpec::default(), ParamRules::Draft)?;
     let iterated = siblings.union_with(sql, params);
     check_render_rules(sql, params, &iterated)?;
     Ok(iterated)
@@ -3447,7 +3604,7 @@ impl EndpointStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use egret_dataapi_api::{LimitsSpec, ParamLocation, RateLimitSpec};
+    use egret_dataapi_api::{LimitsSpec, ParamLocation, RateLimitSpec, TransformSpec};
 
     fn param(name: &str, ty: ParamType) -> ParamSpec {
         ParamSpec {
@@ -5179,5 +5336,152 @@ mod tests {
         };
         assert_eq!(l.max_rows, 1);
         assert_eq!(r.burst, 1);
+    }
+
+    // -----------------------------------------------------------------
+    // check_transform (C2 Task 4) — publish refuses a transform it cannot
+    // honour
+    // -----------------------------------------------------------------
+
+    /// Build an [`OutputSpec`] carrying `script` as its transform, with one
+    /// declared `total: bigint` return column.
+    ///
+    /// `OutputSpec` does not derive `Default` (see its own doc comment, and
+    /// `check_transform`'s), so this starts from `OutputSpec::default()` —
+    /// the same construction every neighbouring test in this module already
+    /// uses (`the_statement_bound_is_checked_before_anything_renders` and
+    /// its siblings) — rather than naming every field by hand.
+    fn transformed_output(script: &str) -> OutputSpec {
+        OutputSpec {
+            transform: Some(TransformSpec {
+                script: script.into(),
+                returns: vec![ColumnSpec {
+                    name: "total".into(),
+                    ty: "bigint".into(),
+                    required: true,
+                }],
+            }),
+            ..OutputSpec::default()
+        }
+    }
+
+    #[test]
+    fn a_transform_alongside_shape_or_naming_is_refused() {
+        // Once a script decides the shape, `shape` and `naming` are dead or
+        // ambiguous — does `naming: camel` apply before the script sees the
+        // rows, or to the keys the script wrote? Refuse rather than pick.
+        let mut o = transformed_output("def transform(params, statements):\n  return {}");
+        o.shape = "arrays".into();
+        let err = check_transform(&o).expect_err("arrays plus a transform");
+        assert!(err.to_string().contains("shape"), "{err}");
+
+        let mut p = transformed_output("def transform(params, statements):\n  return {}");
+        p.naming = "camel".into();
+        assert!(
+            check_transform(&p).is_err(),
+            "naming plus a transform must be refused too"
+        );
+    }
+
+    #[test]
+    fn a_transform_with_objects_and_as_is_is_accepted() {
+        // The defaults must not be read as "the author asked for a shape".
+        let o = transformed_output("def transform(params, statements):\n  return {}");
+        assert_eq!(o.shape, "objects");
+        assert_eq!(o.naming, "as_is");
+        assert!(check_transform(&o).is_ok());
+    }
+
+    #[test]
+    fn an_empty_returns_is_refused() {
+        // A transform with no declared output has no contract at all, and
+        // serving would have nothing to check against — it would fail OPEN.
+        let mut o = transformed_output("def transform(params, statements):\n  return {}");
+        o.transform.as_mut().unwrap().returns.clear();
+        assert!(check_transform(&o).is_err());
+    }
+
+    #[test]
+    fn two_returns_with_one_name_are_refused() {
+        let mut o = transformed_output("def transform(params, statements):\n  return {}");
+        let r = &mut o.transform.as_mut().unwrap().returns;
+        r.push(ColumnSpec {
+            name: "total".into(),
+            ty: "bigint".into(),
+            required: true,
+        });
+        r.push(ColumnSpec {
+            name: "total".into(),
+            ty: "varchar".into(),
+            required: true,
+        });
+        let err = check_transform(&o).expect_err("duplicate name");
+        assert!(err.to_string().contains("total"), "{err}");
+    }
+
+    #[test]
+    fn a_script_that_does_not_parse_is_the_authors_400_not_the_callers_500() {
+        let o = transformed_output("def transform(params, statements)\n  return {}");
+        assert!(matches!(
+            check_transform(&o),
+            Err(ValidationError::TransformScriptInvalid(_))
+        ));
+    }
+
+    #[test]
+    fn a_script_longer_than_the_cap_is_refused_with_both_numbers() {
+        let long = format!(
+            "def transform(params, statements):\n  # {}\n  return {{}}",
+            "x".repeat(MAX_TRANSFORM_SCRIPT_BYTES)
+        );
+        match check_transform(&transformed_output(&long)) {
+            Err(ValidationError::TransformScriptTooLong { bytes, cap }) => {
+                assert!(
+                    bytes > cap,
+                    "the error must carry both numbers: {bytes} vs {cap}"
+                )
+            }
+            other => panic!("expected TransformScriptTooLong, got {other:?}"),
+        }
+    }
+
+    /// **Proves `check_transform` is reachable from the real publish path,
+    /// not only callable in isolation.**
+    ///
+    /// `validate_endpoint` is the private function both `POST …/validate` and
+    /// `EndpointStore::publish` go through — see its own doc comment. Calling
+    /// it directly here, with one valid statement and a transform declared
+    /// alongside `output.shape: arrays`, is that path minus the database and
+    /// the engine: everything before the first render, which is exactly
+    /// where `check_transform` lives.
+    ///
+    /// A unit test on `check_transform` alone cannot tell whether anything
+    /// still calls it — this is the test the Task 4 plan's Step 5 asks for.
+    /// Commenting out `check_transform`'s call site inside
+    /// `check_definition_scans` and re-running this test is what that step
+    /// is: it must turn the endpoint below GREEN (published) for the missing
+    /// call to be caught, rather than staying red for an unrelated reason.
+    #[test]
+    fn an_endpoint_with_a_transform_and_arrays_shape_is_refused_end_to_end() {
+        let statements = vec![StatementSpec {
+            name: "rows".into(),
+            sql: "SELECT id FROM t".into(),
+        }];
+        let mut output = transformed_output("def transform(params, statements):\n  return {}");
+        output.shape = "arrays".into();
+
+        let got = validate_endpoint(
+            &statements,
+            &[],
+            &cache(CacheScope::PerPrincipal),
+            &output,
+            false,
+            false,
+        );
+        assert!(
+            matches!(got, Err(ValidationError::TransformWithShapeOrNaming(_))),
+            "a transform alongside output.shape: arrays must be refused at the function \
+             both /validate and publish go through, got {got:?}"
+        );
     }
 }
