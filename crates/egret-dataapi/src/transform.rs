@@ -1,7 +1,9 @@
 //! C2: reshaping a Data API response with a small author-supplied script.
 //!
-//! Task 1 establishes nothing but the *floor*: the evaluator, its budgets, and
-//! the tests that pin what a script may not do. The transform itself is Task 3.
+//! Task 1 established the *floor*: the evaluator, its budgets, and the tests that
+//! pin what a script may not do. Task 3 built the transform on it —
+//! [`run_transform`] — and settled the budgets Task 1 left provisional by
+//! measuring them.
 //!
 //! # Why Starlark, and what the sandbox actually rests on
 //!
@@ -43,15 +45,33 @@
 //! 2. **There is no built-in timeout, and the tick budget is not one.** A tick is
 //!    a call or a loop backedge, so a script can burn seconds in a handful of
 //!    ticks: `s = s + s` doubling a string 31 times was measured at **3.2s and
-//!    ~2 GiB for about 31 ticks**. Bounding wall-clock needs
-//!    `Evaluator::set_check_cancelled`, which is available and deliberately NOT
-//!    wired here — see [`MAX_TICKS`].
+//!    ~2 GiB for about 31 ticks**. Task 3 wires the wall-clock bound
+//!    `Evaluator::set_check_cancelled` asks for — see [`MAX_WALL_CLOCK`], which
+//!    also records, measured, the case it still cannot stop.
 //! 3. **The evaluator can panic on author input.** Not "should never happen" — a
 //!    four-line script reaches it. [`eval_inner`] contains it; see there.
+//! 4. **Serialising a value recurses, and nothing bounds its depth.** starlark
+//!    catches a *cycle*, but `for i in range(200000): x = [x]` costs no budget
+//!    this module has and overflows the native stack — an abort, which the
+//!    `catch_unwind` in [`eval_inner`] cannot contain. [`MAX_OUTPUT_DEPTH`] is
+//!    the answer and [`check_output_shape`] is where it lives.
+//!
+//! # Where the transform itself is
+//!
+//! [`run_transform`] — one function, the only one that evaluates anything, the
+//! one publish, preview and serving all reach.
 
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::time::{Duration, Instant};
+
+use egret_dataapi_api::TransformSpec;
 use starlark::environment::{Globals, Module};
 use starlark::eval::Evaluator;
 use starlark::syntax::{AstModule, Dialect, DialectTypes};
+use starlark::values::dict::{AllocDict, DictRef};
+use starlark::values::list::ListRef;
+use starlark::values::tuple::TupleRef;
+use starlark::values::Value;
 
 /// Ceiling on evaluation steps, where a "tick" is one function call or one loop
 /// backedge.
@@ -59,26 +79,69 @@ use starlark::syntax::{AstModule, Dialect, DialectTypes};
 /// **This bounds work, not time.** Because a tick is a call or a backedge and
 /// not an instruction, a script doing enormous work per tick is barely charged:
 /// `s = s + s` repeated 31 times inside one loop ran for 3.2 seconds on ~31
-/// ticks. A wall-clock bound needs `Evaluator::set_check_cancelled`, which takes
-/// a `Box<dyn Fn() -> bool>` and therefore needs a deadline or cancellation
-/// token to consult. Task 1 has nothing to connect one to, so it is left for
-/// Task 3 — which should treat it as the missing bound, not a refinement.
+/// ticks. [`MAX_WALL_CLOCK`] is the bound denominated in time; this one is the
+/// *deterministic* backstop, and that is now its whole job — the same script
+/// gets the same verdict in preview, at publish and in serving, which a clock
+/// cannot promise.
 ///
-/// PROVISIONAL. Task 3 measures a representative transform with
-/// `Evaluator::get_total_tick_count` and sets this from evidence.
-const MAX_TICKS: u64 = 1_000_000;
+/// # Measured, not chosen
+///
+/// Task 1 left this PROVISIONAL at 1 000 000. Task 3 measured, with
+/// `Evaluator::get_total_tick_count` on this crate's own evaluator:
+///
+/// | script | rows | ticks |
+/// |---|---|---|
+/// | the spec §1 example (index and return) | 100 / 1 000 / 10 000 | **0** |
+/// | a per-row reshape (`for r in rows: out.append({...})`) | 100 / 1 000 / 10 000 | **100 / 1 000 / 10 000** |
+///
+/// So a realistic transform costs **about one tick per row**, and a transform
+/// that only re-labels the top level costs *nothing at all* — the tick budget
+/// cannot see the spec's own example. Cost per tick, measured on an optimised
+/// build (this crate's tests run unoptimised, where starlark is ~500x slower, so
+/// the debug number is not the one to set a budget from): **~100M ticks/s** for
+/// a tight loop, **~56M ticks/s** when each iteration calls a `def`.
+///
+/// # Why 20 000 000
+///
+/// The old 1 000 000 was *below the realistic maximum*, which is the failure the
+/// brief warns about: a published endpoint may set `limits.max_rows` as high as
+/// a million, and a plain `for r in statements["rows"]` over it costs a million
+/// ticks before the script has done anything. A budget an honest script can hit
+/// is not a backstop, it is a bug report.
+///
+/// 20 000 000 is ~2 000x the measured 10 000-row reshape, ~7x the largest honest
+/// script the platform's own `max_rows` permits at a few ticks per row, and —
+/// measured — 0.2 s to 0.36 s of optimised CPU, so it stays the same order as
+/// [`MAX_WALL_CLOCK`] rather than becoming a limit in name only.
+const MAX_TICKS: u64 = 20_000_000;
 
 /// Ceiling on the Starlark heap, in bytes.
 ///
 /// **Measured, so that nobody mistakes this for a bound.** starlark checks the
-/// heap periodically rather than on allocation, and the overshoot is not small:
-/// against this 64 MiB limit, a script doubling a string 31 times was refused
-/// only after allocating roughly **2 GiB** — a 32x overshoot — and one more
-/// doubling panics the evaluator outright (see [`eval_inner`]). So this catches
-/// ordinary runaway growth and nothing more; it does not make the process's
-/// memory use bounded, and the library's own documentation says as much.
+/// heap from `run_infrequent_instr_checks`, which runs once every 1000 ticks and
+/// once at the end of an evaluation — never on allocation. Task 3 measured both
+/// sides of that with `Heap::peak_allocated_bytes`, against this same 64 MiB
+/// limit:
 ///
-/// PROVISIONAL, same as [`MAX_TICKS`].
+/// * **when ticks flow, it is exact.** A loop allocating a small list per
+///   iteration was refused at a peak of **67 107 712 bytes** — 64 MiB is
+///   67 108 864 — after 280 000 ticks.
+/// * **when they do not, it is not a limit at all.** The string-doubling script
+///   consumes ~31 ticks, so the check never runs until the loop is over: it
+///   reached a peak of **8 589 932 992 bytes — 8.6 GB, a 128x overshoot**. Task 1
+///   recorded 32x from a shallower probe; this is the same phenomenon measured
+///   further along, and one more doubling panics the evaluator outright (see
+///   [`eval_inner`]).
+///
+/// So: real protection against the runaway growth a loop produces, and no
+/// protection whatever against a script that allocates between ticks. The
+/// library's own documentation says to use OS-level limits in a subprocess if a
+/// hard bound is wanted, and it is right.
+///
+/// The value is retained from Task 1 rather than re-derived: measured, a
+/// 10 000-row per-row reshape peaks at **3 143 232 bytes**, so 64 MiB is ~20x the
+/// realistic case, and the number that would actually need raising for a bigger
+/// input is [`MAX_TRANSFORM_OUTPUT_BYTES`], not this.
 const MAX_HEAP_BYTES: usize = 64 * 1024 * 1024;
 
 /// Ceiling on Starlark call-stack depth.
@@ -121,6 +184,161 @@ const _: () = assert!(
      proves our call-stack budget is the binding one cannot tell our limit from \
      starlark's own fallback"
 );
+
+/// Wall-clock ceiling on a single [`run_transform`] call.
+///
+/// **The bound [`MAX_TICKS`] is not.** A tick is a call or a loop backedge, so a
+/// script that does enormous work per tick is barely charged — Task 1 measured a
+/// string-doubling script running 3.24 s on ~31 ticks. This is the only limit in
+/// this module denominated in the unit an operator actually cares about.
+///
+/// # What it bounds, and what it does not — measured, not reasoned
+///
+/// starlark consults the cancellation callback from
+/// `run_infrequent_instr_checks`, which runs once every
+/// `INFREQUENT_INSTRUCTION_CHECK_PERIOD` (1000) ticks and once more at the end
+/// of each evaluation. So the deadline is enforced at **1000-tick granularity**,
+/// and the honest statement of its guarantee is *"no more than 1000 further
+/// ticks"*, not *"no more than 2 seconds"*. Three measurements make the
+/// difference concrete, all against this 2 s deadline:
+///
+/// | script | ticks used | stopped after |
+/// |---|---|---|
+/// | `for i in range(1e9): n = n + 1` | 406 000 | **2.024 s** |
+/// | `for i in range(2000): sorted(200k-element list)` | 1 000 | **28.8 s** |
+/// | `s = s + s`, 31 times, no loop worth the name | 31 | **6.8 s** |
+///
+/// The first is the ordinary case and the deadline is tight there — 24 ms of
+/// overshoot. The second is the honest limit of this mechanism: 1000 ticks of a
+/// script whose every tick is expensive is 1000 sorts, and no callback is
+/// consulted in between. The third is refused only because
+/// `run_infrequent_instr_checks` also runs *once at the end* of the evaluation —
+/// so a tickless script is refused rather than served, but it is not
+/// interrupted, and its work is done before anyone asks.
+///
+/// This is a large improvement on Task 1, where **nothing** bounded time. It is
+/// not a latency guarantee, and serving must not treat it as one — a request
+/// deadline belongs in the request path. starlark's own documentation says the
+/// same: use OS-level limits in a subprocess if a hard bound is required.
+///
+/// # It shadows the heap refusal
+///
+/// `run_infrequent_instr_checks` tests cancellation *first*, then the heap, then
+/// ticks. A script that blows [`MAX_HEAP_BYTES`] slowly therefore reports
+/// `BudgetExceeded("wall-clock deadline")` rather than the heap. Both are
+/// refusals and both name a budget, so this costs precision in the message and
+/// nothing else — but it is why
+/// `tests::the_heap_budget_refuses_a_script_that_outgrows_it` keeps its probe
+/// small enough to finish in milliseconds.
+const MAX_WALL_CLOCK: Duration = Duration::from_secs(2);
+
+/// The function every transform script must define.
+const ENTRY_POINT: &str = "transform";
+
+/// The number of arguments [`ENTRY_POINT`] must take: `params` and `statements`.
+const ENTRY_POINT_ARITY: usize = 2;
+
+/// Ceiling on the transform's response body, measured on the **serialised**
+/// bytes rather than on any structure count.
+///
+/// Serialised, because that is the number that leaves the process, and because
+/// no cheaper proxy is honest: a list of 10 elements and a list of 10 megabyte
+/// strings have the same length.
+///
+/// 1 MiB, matching `render::MAX_SQL_BYTES` and `render::MAX_BIND_BYTES` — this
+/// crate already draws its "one request may not carry more than this" line
+/// there, and a third number would only invite the question of why.
+///
+/// **This can bite a legitimate endpoint.** A published `limits.max_rows` may be
+/// as high as a million, and a transform that passes rows through will exceed a
+/// megabyte long before that. That is a deliberate consequence: a transform
+/// holds its whole input and its whole output in memory inside the request path,
+/// so an endpoint that wants a million rows should not also want a script over
+/// them. Publish (Task 5) is where an author should learn this, not serving.
+const MAX_TRANSFORM_OUTPUT_BYTES: usize = 1 << 20;
+
+/// Ceiling on how deeply the returned value may nest.
+///
+/// # Why this exists at all, and why it is not decoration
+///
+/// starlark's `Serialize for Value` recurses structurally. It **does** guard
+/// against cycles — measured, not assumed: `x = []` / `x.append(x)` / `return x`
+/// comes back as "Cycle detected when serializing value of type `list` to
+/// JSON", from a thread-local stack of in-progress values. What it does **not**
+/// guard is plain depth, and depth is trivially reachable:
+///
+/// ```text
+/// for i in range(200000): x = [x]
+/// ```
+///
+/// About 200 000 ticks, well inside [`MAX_TICKS`], and a few megabytes, well
+/// inside [`MAX_HEAP_BYTES`] — so no budget in this module comes near it. It
+/// ends in a **native stack overflow**, which is an abort and not an unwind:
+/// [`eval_inner`]'s `catch_unwind` cannot see it and the whole process dies.
+/// Measured, with this constant's check removed:
+///
+/// ```text
+/// thread '...' has overflowed its stack
+/// fatal runtime error: stack overflow, aborting
+/// (signal: 6, SIGABRT: process abort signal)
+/// ```
+///
+/// That is strictly worse than every other failure this module has, and tokio
+/// worker threads run on a 2 MiB stack — smaller than the test thread that
+/// produced the abort above.
+///
+/// 64 is far past any response shape a reshape produces — JSON APIs nest single
+/// digits — and far short of anything that threatens a stack.
+const MAX_OUTPUT_DEPTH: usize = 64;
+
+/// Every budget one evaluation runs under, in one value.
+///
+/// # Why this is a struct and not four arguments
+///
+/// Task 1 already needed one budget to be overridable — `max_callstack`, so that
+/// `tests::recursion_is_refused_at_our_depth_not_the_library_default` could run
+/// the same probe with and without it and prove which limit was binding. Task 3
+/// needs the same of the tick budget, because installing a wall-clock deadline
+/// makes the deadline fire first on any tick-dense script and the tick arm of
+/// [`classify`] would otherwise have nothing left that could reach it.
+///
+/// # Non-test code cannot express a weakened budget
+///
+/// The fields are private and **every mutator is `#[cfg(test)]`**, so the only
+/// `Budgets` a shipped binary can build is [`Budgets::default`] — the module
+/// constants. That is deliberate: a relaxation that is unrepresentable is better
+/// than one a reviewer has to remember to look for.
+#[derive(Clone, Copy)]
+struct Budgets {
+    ticks: u64,
+    /// `None` means "install nothing of ours and let starlark fall back to its
+    /// own private `DEFAULT_STACK_SIZE`". Only tests pass `None`.
+    callstack: Option<usize>,
+    wall_clock: Duration,
+}
+
+impl Default for Budgets {
+    fn default() -> Self {
+        Budgets {
+            ticks: MAX_TICKS,
+            callstack: Some(MAX_CALLSTACK),
+            wall_clock: MAX_WALL_CLOCK,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Budgets {
+    fn with_ticks(mut self, ticks: u64) -> Self {
+        self.ticks = ticks;
+        self
+    }
+
+    fn without_callstack_limit(mut self) -> Self {
+        self.callstack = None;
+        self
+    }
+}
 
 /// The dialect a transform is parsed under.
 ///
@@ -187,10 +405,59 @@ pub enum TransformError {
     /// The script is not valid Starlark under [`transform_dialect`].
     #[error("the transform script did not parse: {0}")]
     Parse(String),
+    /// The script parsed and ran, but never defined a callable named
+    /// [`ENTRY_POINT`].
+    ///
+    /// Also what a *non-callable* `transform` produces — `transform = 1` leaves
+    /// the endpoint with no transform function just as surely as omitting it,
+    /// and the author's next move is the same line either way.
+    #[error("the transform script must define `{ENTRY_POINT}(params, statements)`")]
+    MissingEntryPoint,
+    /// [`ENTRY_POINT`] exists but does not take the two arguments it is called
+    /// with.
+    ///
+    /// Separate from [`TransformError::MissingEntryPoint`] deliberately: "you
+    /// named it wrong" and "you took the wrong arguments" send an author to
+    /// different lines. Without the distinction both arrive as a generic
+    /// call-failed message from starlark.
+    #[error(
+        "`{ENTRY_POINT}` must take exactly {ENTRY_POINT_ARITY} arguments \
+         (params, statements), but takes {found}"
+    )]
+    WrongArity {
+        /// How many parameters the script's `transform` actually declares.
+        found: usize,
+    },
     /// The script parsed but failed while running — an unbound name, a type
     /// error, an explicit `fail()`.
     #[error("the transform script failed while running: {0}")]
     Runtime(String),
+    /// The returned value has no JSON counterpart — a function, a `range`, a
+    /// dict keyed by something that is not a string, a NaN.
+    ///
+    /// An error rather than a lossy conversion: dropping the offending member
+    /// would serve a response missing a field the script demonstrably produced,
+    /// and the endpoint's declared `returns` would be a lie about it.
+    #[error("the transform returned a value that is not JSON: {0}")]
+    NotSerialisable(String),
+    /// The serialised response exceeds [`MAX_TRANSFORM_OUTPUT_BYTES`].
+    ///
+    /// Carries **both** numbers. "Too large" without the size tells an author
+    /// nothing about how much to cut.
+    #[error("the transform returned at least {bytes} bytes, over the {cap} byte cap")]
+    OutputTooLarge {
+        /// The serialised size, counted even though only `cap` bytes of it were
+        /// ever retained.
+        ///
+        /// Exact up to [`OUTPUT_COUNT_CEILING`] and a lower bound beyond it —
+        /// hence "at least" in the message. A return value can serialise to
+        /// exponentially more bytes than it occupies, so counting to the end is
+        /// not something this is allowed to promise.
+        bytes: usize,
+        /// [`MAX_TRANSFORM_OUTPUT_BYTES`], repeated here so the message is
+        /// self-contained.
+        cap: usize,
+    },
     /// The script was cut off for exceeding one of this module's budgets. The
     /// payload names which one.
     #[error("the transform script exceeded its {0}")]
@@ -211,7 +478,76 @@ pub enum TransformError {
 /// extension values.
 #[allow(dead_code)]
 fn eval_probe(src: &str) -> Result<(), TransformError> {
-    eval_inner(src, Some(MAX_CALLSTACK))
+    eval_inner(src, Budgets::default(), None).map(|_| ())
+}
+
+/// The arguments [`ENTRY_POINT`] is called with.
+///
+/// A struct rather than two parameters on [`eval_inner`] so that "evaluate the
+/// module and stop" and "evaluate the module and then call the entry point" are
+/// one function with one argument that is present or absent, instead of two
+/// functions that would each have to remember to install the budgets.
+struct TransformCall<'a> {
+    params: &'a BTreeMap<String, serde_json::Value>,
+    statements: &'a BTreeMap<String, Vec<serde_json::Value>>,
+}
+
+/// Run an endpoint's response transform.
+///
+/// **This is the single evaluator.** Publish, preview and serving all call this
+/// one function; there is no second path that evaluates a script, and the test
+/// `tests::there_is_exactly_one_place_that_parses_starlark` is what keeps it
+/// that way — a second evaluator would need a second parse, and that test fails
+/// on the second parse site rather than on the second evaluator, which is the
+/// cheaper thing to notice.
+///
+/// # The contract a script is held to
+///
+/// * it defines `transform(params, statements)` — [`ENTRY_POINT`], exactly
+///   [`ENTRY_POINT_ARITY`] arguments;
+/// * `params` is a dict of the endpoint's bound parameters, `statements` a dict
+///   from statement name to its list of rows. **Keyed even at N = 1**: a script
+///   that has to be rewritten when the author adds a second statement is a trap,
+///   so the shape does not change with the count;
+/// * whatever it returns must be JSON, must serialise to at most
+///   [`MAX_TRANSFORM_OUTPUT_BYTES`], and must nest at most [`MAX_OUTPUT_DEPTH`]
+///   deep.
+///
+/// # What bounds it
+///
+/// Every limit this module has, all installed on one evaluator:
+/// [`MAX_TICKS`], [`MAX_HEAP_BYTES`], [`MAX_CALLSTACK`] and — new in this task
+/// and the only one denominated in time — [`MAX_WALL_CLOCK`]. The deadline is
+/// taken **once, here**, and covers the module evaluation and the call to
+/// `transform` together, because an author cannot be expected to care which half
+/// of their script was slow.
+///
+/// Two seams where the budgets do not apply themselves, and what covers them:
+///
+/// * **converting `params` and `statements` into starlark values** happens in
+///   Rust, consumes no ticks, and so trips nothing starlark checks. Measured, a
+///   million rows peaked at 335 MB against a 64 MiB limit before anything
+///   noticed. [`poll_input_budgets`] is what covers it now.
+/// * **serialising the result** likewise. [`check_output_shape`] bounds its
+///   stack and its value count before a byte is written, and [`CappedSink`]
+///   bounds the bytes.
+///
+/// And one that is genuinely not bounded, stated rather than implied: **this is
+/// not a latency guarantee.** [`MAX_WALL_CLOCK`] is checked at 1000-tick
+/// granularity, so a script whose every tick is expensive overruns it — measured
+/// at 28.8 s against a 2 s deadline. A request deadline belongs in the request
+/// path; serving must not read this function as one.
+#[allow(dead_code)]
+pub(crate) fn run_transform(
+    spec: &TransformSpec,
+    params: &BTreeMap<String, serde_json::Value>,
+    statements: &BTreeMap<String, Vec<serde_json::Value>>,
+) -> Result<serde_json::Value, TransformError> {
+    eval_inner(
+        &spec.script,
+        Budgets::default(),
+        Some(TransformCall { params, statements }),
+    )
 }
 
 /// A script source that makes [`eval_inner`] panic from *inside* the caught
@@ -230,13 +566,13 @@ const PANIC_INJECTION_SRC: &str = "__egret_transform_panic_probe__";
 #[cfg(test)]
 const PANIC_INJECTION_MESSAGE: &str = "injected panic: transform containment probe";
 
-/// The body of [`eval_probe`], with the call-stack budget made optional.
+/// The one evaluation: parse, install every budget, run the module, and — when
+/// `call` is present — call [`ENTRY_POINT`] and convert what it returned.
 ///
-/// `max_callstack: None` means "install no limit of ours and let starlark fall
-/// back to its own". Nothing outside `#[cfg(test)]` passes `None`; it exists so
-/// the guard test can establish that our budget — and not starlark's private
-/// fallback — is what refuses the recursion probe, by *running* the probe both
-/// ways instead of comparing against a number copied out of the library.
+/// Both [`eval_probe`] and [`run_transform`] come through here, which is the
+/// point: a second entry point would be a second place to forget a budget.
+/// `budgets` is [`Budgets::default`] everywhere outside `#[cfg(test)]` — see
+/// [`Budgets`] for why that is enforced by construction rather than by review.
 ///
 /// # Why the panic is caught here
 ///
@@ -269,11 +605,20 @@ const PANIC_INJECTION_MESSAGE: &str = "injected panic: transform containment pro
 ///   exact condition the assertion exists to express.
 /// - **It is not a swallow.** The panic hook still runs, so the panic is logged
 ///   with its location before this converts it into a value.
-fn eval_inner(src: &str, max_callstack: Option<usize>) -> Result<(), TransformError> {
+fn eval_inner(
+    src: &str,
+    budgets: Budgets,
+    call: Option<TransformCall<'_>>,
+) -> Result<serde_json::Value, TransformError> {
     let ast = AstModule::parse("transform.star", src.to_owned(), &transform_dialect())
         .map_err(|e| TransformError::Parse(e.to_string()))?;
 
     let globals = transform_globals();
+
+    // Taken once, before anything runs, and consulted by the cancellation
+    // callback below. One deadline for the module evaluation and the call
+    // together — see `run_transform`.
+    let deadline = Instant::now() + budgets.wall_clock;
 
     #[cfg(test)]
     let inject_panic = src == PANIC_INJECTION_SRC;
@@ -290,15 +635,21 @@ fn eval_inner(src: &str, max_callstack: Option<usize>) -> Result<(), TransformEr
             // on the same evaluator, i.e. only for a bug in THIS function.
             // Treating that as a budget failure keeps a mis-wired limit from
             // silently evaluating unbounded.
-            eval.set_max_tick_count(MAX_TICKS)
+            eval.set_max_tick_count(budgets.ticks)
                 .map_err(|_| TransformError::BudgetExceeded("tick budget (failed to install)"))?;
             eval.set_max_heap_size(MAX_HEAP_BYTES)
                 .map_err(|_| TransformError::BudgetExceeded("heap budget (failed to install)"))?;
-            if let Some(frames) = max_callstack {
+            if let Some(frames) = budgets.callstack {
                 eval.set_max_callstack_size(frames).map_err(|_| {
                     TransformError::BudgetExceeded("call-stack budget (failed to install)")
                 })?;
             }
+
+            // The wall-clock bound. Unlike the three above this one returns no
+            // `Result`, so there is no mis-install to defend against — but there
+            // is also nothing that would notice it missing except
+            // `tests::the_deadline_stops_a_script_the_tick_budget_would_let_run`.
+            eval.set_check_cancelled(Box::new(move || Instant::now() >= deadline));
 
             // Placed here, immediately before evaluation, so the injected
             // unwind crosses exactly the frames a real starlark panic crosses:
@@ -312,7 +663,50 @@ fn eval_inner(src: &str, max_callstack: Option<usize>) -> Result<(), TransformEr
             }
 
             eval.eval_module(ast, &globals).map_err(classify)?;
-            Ok(())
+
+            let Some(call) = call else {
+                // A sandbox probe: the module ran, and there is nothing to call.
+                return Ok(serde_json::Value::Null);
+            };
+
+            let entry = module
+                .get(ENTRY_POINT)
+                .ok_or(TransformError::MissingEntryPoint)?;
+            check_arity(entry)?;
+
+            // Converting the inputs allocates on the SAME heap the script will
+            // use, but it is Rust code: it consumes no ticks, so nothing starlark
+            // would check ever fires while it runs. Measured, that is not
+            // theoretical — a million rows peaked at **335 540 992 bytes** against
+            // a 64 MiB limit and was refused only afterwards, by the deadline.
+            // So the two budgets that CAN be polled from here are polled from
+            // here, every `INPUT_POLL_ROWS` rows.
+            let heap = module.heap();
+            let mut param_items = Vec::with_capacity(call.params.len());
+            for (name, value) in call.params {
+                param_items.push((heap.alloc(name.as_str()), json_to_starlark(value, heap, 0)?));
+            }
+            poll_input_budgets(heap, deadline)?;
+            let params = heap.alloc(AllocDict(param_items));
+
+            let mut statement_items = Vec::with_capacity(call.statements.len());
+            for (name, rows) in call.statements {
+                let mut converted = Vec::with_capacity(rows.len());
+                for (i, row) in rows.iter().enumerate() {
+                    if i % INPUT_POLL_ROWS == 0 {
+                        poll_input_budgets(heap, deadline)?;
+                    }
+                    converted.push(json_to_starlark(row, heap, 0)?);
+                }
+                statement_items.push((heap.alloc(name.as_str()), heap.alloc(converted)));
+            }
+            let statements = heap.alloc(AllocDict(statement_items));
+
+            let returned = eval
+                .eval_function(entry, &[params, statements], &[])
+                .map_err(classify)?;
+
+            serialise_output(returned)
         })
     }));
 
@@ -354,8 +748,381 @@ fn classify(err: starlark::Error) -> TransformError {
             TransformError::BudgetExceeded("tick budget")
         }
         _ if text.contains("Heap memory limit") => TransformError::BudgetExceeded("heap budget"),
+        _ if text.contains("Evaluation cancelled") => {
+            TransformError::BudgetExceeded("wall-clock deadline")
+        }
         _ => TransformError::Runtime(text),
     }
+}
+
+/// `transform` exists — does it take the arguments it is about to be called
+/// with?
+///
+/// # Why the parameters are read out of the value's documentation
+///
+/// starlark 0.14 keeps a `def`'s `ParametersSpec` `pub(crate)`, so this crate
+/// cannot ask a function how many arguments it takes. `Value::documentation()`
+/// is the one public surface that exposes the parameter list, and it is derived
+/// from that same spec rather than from a docstring, so it is a fact about the
+/// function and not about how it was commented.
+///
+/// The alternative — call it and read the failure — was rejected: starlark's
+/// message for a bad call names the argument it could not fill, which is a fine
+/// message for a *caller* mistake and a confusing one here, where the caller is
+/// egret and the mistake is the author's signature.
+///
+/// [`transform_dialect`] disables positional-only and keyword-only parameters,
+/// so a well-formed `def` puts every parameter in `pos_or_named`; `*args` and
+/// `**kwargs` still parse, and are counted so that `def transform(*args)`
+/// reports what it is rather than reporting zero.
+fn check_arity(entry: Value<'_>) -> Result<(), TransformError> {
+    let params = match entry.documentation() {
+        starlark::docs::DocItem::Member(starlark::docs::DocMember::Function(f)) => f.params,
+        // Not a function at all — `transform = 1`. See `MissingEntryPoint`.
+        _ => return Err(TransformError::MissingEntryPoint),
+    };
+
+    let positional = params.pos_only.len() + params.pos_or_named.len();
+    let found = positional
+        + params.named_only.len()
+        + usize::from(params.args.is_some())
+        + usize::from(params.kwargs.is_some());
+
+    // `positional`, not `found`, decides: the entry point is called with two
+    // positional arguments, so two positional parameters and nothing else is the
+    // only signature that works. `found` is what the message reports, because it
+    // is what the author wrote.
+    if positional == ENTRY_POINT_ARITY && found == ENTRY_POINT_ARITY {
+        Ok(())
+    } else {
+        Err(TransformError::WrongArity { found })
+    }
+}
+
+/// How often the input conversion stops to check the budgets it is spending.
+///
+/// Rows, not bytes, because rows are what the loop counts and because the
+/// endpoint's own `limits.max_rows` is denominated the same way. The check is
+/// two loads and a compare, so the interval is set by how much overshoot is
+/// tolerable rather than by its cost: measured, a million ordinary rows cost
+/// ~335 MB, so 1024 rows bounds a batch at roughly a third of a megabyte.
+const INPUT_POLL_ROWS: usize = 1024;
+
+/// The budgets that Rust-side input conversion can enforce on itself.
+///
+/// # Why the labels differ from the script's own
+///
+/// `"heap budget, converting its input"` rather than `"heap budget"`, and it is
+/// not only better diagnostics — it is the only thing that makes this function's
+/// absence *observable*. starlark re-checks the heap once at the end of the
+/// evaluation, so deleting the calls below still produces a heap refusal, just
+/// after allocating the entire input first; a test asserting `"heap budget"`
+/// passes either way. Measured: removing the poll left
+/// `transform_tests::the_heap_budget_applies_to_the_input_and_not_only_to_the_script`
+/// GREEN until the labels were separated.
+///
+/// [`MAX_TICKS`] is not one of them — conversion earns no ticks — and neither is
+/// [`MAX_CALLSTACK`]. The heap check is spelled out rather than delegated to
+/// `Evaluator::check_heap_size_limit` because that method returns a
+/// `ResourceCheckResult` whose module is not public in starlark 0.14, so its
+/// variants cannot be named from here; `Heap::peak_allocated_bytes` is the same
+/// number the library compares.
+fn poll_input_budgets(
+    heap: starlark::values::Heap<'_>,
+    deadline: Instant,
+) -> Result<(), TransformError> {
+    if Instant::now() >= deadline {
+        return Err(TransformError::BudgetExceeded(
+            "wall-clock deadline, converting its input",
+        ));
+    }
+    if heap.peak_allocated_bytes() > MAX_HEAP_BYTES {
+        return Err(TransformError::BudgetExceeded(
+            "heap budget, converting its input",
+        ));
+    }
+    Ok(())
+}
+
+/// Convert one `serde_json::Value` into a starlark value on `heap`.
+///
+/// Recursive, and bounded by [`MAX_OUTPUT_DEPTH`] on the way in as well as on
+/// the way out. Input nesting is already bounded in practice — everything here
+/// arrives from `serde_json`, whose parser refuses past 128 levels — but "in
+/// practice" is not a bound, and this recursion runs on whatever stack the
+/// serving task happens to have.
+fn json_to_starlark<'v>(
+    value: &serde_json::Value,
+    heap: starlark::values::Heap<'v>,
+    depth: usize,
+) -> Result<Value<'v>, TransformError> {
+    if depth > MAX_OUTPUT_DEPTH {
+        return Err(TransformError::BudgetExceeded("input nesting depth"));
+    }
+    Ok(match value {
+        serde_json::Value::Null => Value::new_none(),
+        serde_json::Value::Bool(b) => Value::new_bool(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                heap.alloc(i)
+            } else if let Some(u) = n.as_u64() {
+                // Above `i64::MAX`. starlark promotes to a big int rather than
+                // wrapping, so this is lossless — `as_f64` here would not be.
+                heap.alloc(u)
+            } else if let Some(f) = n.as_f64() {
+                heap.alloc(f)
+            } else {
+                return Err(TransformError::NotSerialisable(format!(
+                    "the number {n} has no starlark representation"
+                )));
+            }
+        }
+        serde_json::Value::String(s) => heap.alloc(s.as_str()),
+        serde_json::Value::Array(items) => {
+            let mut converted = Vec::with_capacity(items.len());
+            for item in items {
+                converted.push(json_to_starlark(item, heap, depth + 1)?);
+            }
+            heap.alloc(converted)
+        }
+        serde_json::Value::Object(fields) => {
+            let mut converted = Vec::with_capacity(fields.len());
+            for (k, v) in fields {
+                converted.push((
+                    heap.alloc(k.as_str()),
+                    json_to_starlark(v, heap, depth + 1)?,
+                ));
+            }
+            heap.alloc(AllocDict(converted))
+        }
+    })
+}
+
+/// Turn what `transform` returned into JSON, or say why it cannot be.
+///
+/// Refusals, in the order they can be detected:
+///
+/// 1. **too deep, cyclic, or too large once expanded** — [`check_output_shape`],
+///    which must run *first* because everything below recurses over the same
+///    structure and two of those three would not survive it;
+/// 2. **not serialisable** — a function, a `range`, a dict with a non-string
+///    key, a NaN;
+/// 3. **too large in bytes** — [`MAX_TRANSFORM_OUTPUT_BYTES`]. Step 1 bounds the
+///    number of values; this bounds their size, which a single long string can
+///    blow on its own.
+///
+/// The value is serialised straight into a counting sink rather than through
+/// `Value::to_json_value`. `to_json_value` would materialise the entire
+/// `serde_json::Value` tree first — which for a return at the heap limit is
+/// hundreds of megabytes of Rust heap, allocated only to be measured and thrown
+/// away. The sink counts every byte but retains at most the cap, so the refusal
+/// path costs a megabyte no matter how large the return was, and the accepted
+/// path re-parses a buffer that is by definition small.
+fn serialise_output(returned: Value<'_>) -> Result<serde_json::Value, TransformError> {
+    check_output_shape(returned)?;
+
+    let mut sink = CappedSink::new(MAX_TRANSFORM_OUTPUT_BYTES);
+    let serialised = serde_json::to_writer(&mut sink, &returned);
+
+    // Size before serialisability, and deliberately: a sink that stopped at its
+    // ceiling makes `to_writer` return an io error, and reporting THAT as
+    // "not JSON" would send an author to fix a value that is perfectly fine.
+    if sink.stopped || sink.written > sink.cap {
+        return Err(TransformError::OutputTooLarge {
+            bytes: sink.written,
+            cap: sink.cap,
+        });
+    }
+    serialised.map_err(|e| TransformError::NotSerialisable(e.to_string()))?;
+
+    serde_json::from_slice(&sink.buf).map_err(|e| TransformError::NotSerialisable(e.to_string()))
+}
+
+/// How far past the cap the counting is allowed to go before it gives up.
+///
+/// # Why counting cannot simply run to the end
+///
+/// [`check_output_shape`] already bounds the *number* of values, so the
+/// exponential case never reaches here. What it cannot bound is their size: a
+/// list of a thousand ten-megabyte strings is a thousand values and ten
+/// gigabytes of output, and a sink that insisted on counting all of it would
+/// copy ten gigabytes to report a number.
+///
+/// 16x the cap keeps the number in [`TransformError::OutputTooLarge`] exact for
+/// every overshoot an author is likely to make honestly — someone who returns
+/// three megabytes learns they returned three megabytes — while bounding the
+/// work at 16 MiB of bulk writes, which is milliseconds.
+const OUTPUT_COUNT_CEILING: usize = MAX_TRANSFORM_OUTPUT_BYTES * 16;
+
+/// A writer that counts, keeps only the first `cap` bytes, and gives up at
+/// [`OUTPUT_COUNT_CEILING`].
+///
+/// Counting past the cap is the point: [`TransformError::OutputTooLarge`]
+/// carries the real size, and "too large" without a number tells an author
+/// nothing about how much to cut. Retaining past the cap is what we refuse to
+/// do, so an oversized return costs `cap` bytes of memory rather than its own
+/// size — and stopping at the ceiling is what keeps it costing bounded *time*
+/// as well.
+struct CappedSink {
+    buf: Vec<u8>,
+    written: usize,
+    cap: usize,
+    /// True once the ceiling was hit and this sink refused further bytes. The
+    /// resulting `to_writer` error is then ours, not the value's — see
+    /// [`serialise_output`], which checks this before it believes the error.
+    stopped: bool,
+}
+
+impl CappedSink {
+    fn new(cap: usize) -> Self {
+        CappedSink {
+            buf: Vec::new(),
+            written: 0,
+            cap,
+            stopped: false,
+        }
+    }
+}
+
+impl std::io::Write for CappedSink {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        if self.written >= OUTPUT_COUNT_CEILING {
+            self.stopped = true;
+            return Err(std::io::Error::other(
+                "the transform output passed the counting ceiling",
+            ));
+        }
+        self.written += data.len();
+        if self.buf.len() < self.cap {
+            let room = self.cap - self.buf.len();
+            self.buf.extend_from_slice(&data[..data.len().min(room)]);
+        }
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Refuse a return value whose *expanded* shape is unserviceable, before a single
+/// byte of it is serialised.
+///
+/// Two refusals, from one memoised walk over the distinct values:
+///
+/// * **too deep** — [`MAX_OUTPUT_DEPTH`], because serialisation recurses;
+/// * **too large once expanded** — more values than [`MAX_TRANSFORM_OUTPUT_BYTES`]
+///   allows bytes. Sound as a lower bound: every JSON value costs at least one
+///   byte, and every array or object costs at least one more for its brackets,
+///   so a structure with more values than the byte cap cannot fit under it.
+///
+/// The size half exists because starlark values are **shared, not copied**,
+/// while serialisation **expands every reference**: `a = [1]` then `a = [a, a]`
+/// sixty-two times is 63 allocations and a few dozen ticks, and serialises to
+/// 2^62 values. Measured, letting the byte-counting sink discover that instead
+/// took **25 seconds** to reach a 2 MiB ceiling in an unoptimised build; this
+/// walk refuses the same value in **~300 µs**, because it saturates the count at
+/// each node rather than emitting it.
+///
+/// See [`MAX_OUTPUT_DEPTH`] for why the depth half is not decoration:
+/// serialisation recurses, nothing else bounds its depth, and a stack overflow
+/// is an abort that [`eval_inner`]'s `catch_unwind` cannot contain.
+///
+/// # The memoisation is an optimisation, and it is worth being exact about that
+///
+/// A walk that does not remember nodes visits *paths*, not nodes, so on the
+/// structure above it visits 2^62 of them rather than 63. That reads like a hang
+/// — and it is not, because the size check bounds it independently: sizes are
+/// computed bottom-up, so the walk is refused at the first node whose subtree
+/// passes [`MAX_TRANSFORM_OUTPUT_BYTES`], which on a doubling structure is level
+/// 21 and roughly 2^21 visits.
+///
+/// Measured, by deleting both memo lookups: the bomb test stayed GREEN and went
+/// from **0.03 s to 2.39 s** in an unoptimised build. So the memo buys ~80x on
+/// the worst input rather than the difference between terminating and not, and
+/// the claim in an earlier draft of this comment — that a plain walk "never
+/// returns" — was wrong. Keep it for the 80x; do not keep it under the
+/// impression that it is load-bearing for termination.
+///
+/// The `on_stack` set is what catches a genuine cycle (`x = []; x.append(x)`).
+/// It is **not** there because starlark would miss one — measured, starlark
+/// raises "Cycle detected when serializing value of type `list`" on exactly that
+/// script. It is there because *this walk* would otherwise never reach starlark:
+/// a memoised DFS on a cyclic graph never assigns a depth to any node on the
+/// cycle and spins between them. A refusal that hangs is worse than the error it
+/// was trying to improve on.
+fn check_output_shape(root: Value<'_>) -> Result<(), TransformError> {
+    /// The values a container holds. Anything not listed is a leaf for this
+    /// purpose — a starlark `set` can only hold hashable values, so it cannot
+    /// contain a list, a dict or a tuple and cannot deepen a structure.
+    fn children<'v>(value: Value<'v>) -> Option<Vec<Value<'v>>> {
+        if let Some(list) = ListRef::from_value(value) {
+            return Some(list.content().to_vec());
+        }
+        if let Some(tuple) = TupleRef::from_value(value) {
+            return Some(tuple.content().to_vec());
+        }
+        if let Some(dict) = DictRef::from_value(value) {
+            return Some(dict.iter().flat_map(|(k, v)| [k, v]).collect());
+        }
+        None
+    }
+
+    // (value, whether its children have already been pushed)
+    let mut stack: Vec<(Value<'_>, bool)> = vec![(root, false)];
+    // id -> (nesting depth below it, expanded value count including it)
+    let mut known: HashMap<_, (usize, usize)> = HashMap::new();
+    let mut on_stack: HashSet<_> = HashSet::new();
+
+    while let Some((value, expanded)) = stack.pop() {
+        let id = value.identity();
+        if known.contains_key(&id) {
+            continue;
+        }
+
+        let Some(kids) = children(value) else {
+            known.insert(id, (0, 1));
+            continue;
+        };
+
+        if expanded {
+            on_stack.remove(&id);
+            let mut deepest = 0usize;
+            let mut expanded_size = 1usize;
+            for kid in &kids {
+                let (d, n) = known.get(&kid.identity()).copied().unwrap_or((0, 1));
+                deepest = deepest.max(d);
+                expanded_size = expanded_size.saturating_add(n);
+            }
+            let depth = deepest + 1;
+            if depth > MAX_OUTPUT_DEPTH {
+                return Err(TransformError::BudgetExceeded("output nesting depth"));
+            }
+            if expanded_size > MAX_TRANSFORM_OUTPUT_BYTES {
+                return Err(TransformError::OutputTooLarge {
+                    bytes: expanded_size,
+                    cap: MAX_TRANSFORM_OUTPUT_BYTES,
+                });
+            }
+            known.insert(id, (depth, expanded_size));
+            continue;
+        }
+
+        if !on_stack.insert(id) {
+            // Reached a node that is still being expanded: a cycle.
+            return Err(TransformError::NotSerialisable(
+                "the transform returned a structure that contains itself".to_owned(),
+            ));
+        }
+        stack.push((value, true));
+        for kid in kids {
+            if !known.contains_key(&kid.identity()) {
+                stack.push((kid, false));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -482,7 +1249,7 @@ mod tests {
 
         for name in &permitted {
             assert!(
-                eval_inner(name, Some(MAX_CALLSTACK)).is_ok(),
+                eval_inner(name, Budgets::default(), None).is_ok(),
                 "`{name}` is in the snapshot but does not resolve in the \
                  evaluator — the snapshot and the evaluation path have drifted"
             );
@@ -502,7 +1269,7 @@ mod tests {
         );
 
         for name in &beyond {
-            match eval_inner(name, Some(MAX_CALLSTACK)) {
+            match eval_inner(name, Budgets::default(), None) {
                 Err(TransformError::Runtime(msg)) => assert!(
                     msg.contains(&format!("Variable `{name}` not found")),
                     "`{name}` is outside the snapshot and must be unbound: {msg}"
@@ -525,7 +1292,7 @@ mod tests {
     #[test]
     fn the_four_capability_names_are_unbound() {
         for name in ["db", "http", "tx", "cache"] {
-            match eval_inner(&format!("{name}.anything()"), Some(MAX_CALLSTACK)) {
+            match eval_inner(&format!("{name}.anything()"), Budgets::default(), None) {
                 Err(TransformError::Runtime(msg)) => assert!(
                     msg.contains(&format!("Variable `{name}` not found")),
                     "`{name}` must be unbound, and must fail by being unbound: {msg}"
@@ -748,7 +1515,7 @@ mod tests {
         let probe = recursion_probe(RECURSION_PROBE_DEPTH);
 
         assert!(
-            eval_inner(&probe, None).is_ok(),
+            eval_inner(&probe, Budgets::default().without_callstack_limit(), None).is_ok(),
             "recursion {RECURSION_PROBE_DEPTH} deep must COMPLETE under \
              starlark's own fallback limit — if it does not, the refusal below \
              proves nothing about MAX_CALLSTACK, because the library would have \
@@ -757,9 +1524,9 @@ mod tests {
 
         // A `match`, not `expect_err`: that takes a `&str`, so the depths could
         // not be formatted into the message that has to explain the failure.
-        let err = match eval_inner(&probe, Some(MAX_CALLSTACK)) {
+        let err = match eval_inner(&probe, Budgets::default(), None) {
             Err(e) => e,
-            Ok(()) => panic!(
+            Ok(_) => panic!(
                 "recursion {RECURSION_PROBE_DEPTH} deep must be refused once \
                  MAX_CALLSTACK ({MAX_CALLSTACK}) is installed. The line above \
                  just showed the library does NOT refuse it, so completing here \
@@ -944,7 +1711,15 @@ mod tests {
 
     #[test]
     fn an_infinite_loop_is_refused_rather_than_hanging() {
-        // The tick budget IS the defence — starlark has no built-in timeout.
+        // starlark has no built-in timeout, so this is what stands between an
+        // author's `while True` and a wedged worker. Since Task 3 it is the
+        // WALL-CLOCK DEADLINE that fires here, not the tick budget — measured, a
+        // tight loop reaches ~406 000 ticks in the 2 s before the deadline, far
+        // short of MAX_TICKS. The assertion is deliberately on "some budget
+        // refused it", because which one binds is a function of the machine; the
+        // two tests that discriminate are
+        // `transform_tests::the_deadline_stops_a_script_the_tick_budget_would_let_run`
+        // and `the_budget_refusal_is_classified_as_a_budget` below.
         //
         // THIS TEST MUST NOT BE ABLE TO HANG. Rust has no per-test timeout, so a
         // future regression in the budget would stall the whole suite rather than
@@ -959,7 +1734,7 @@ mod tests {
         });
         let outcome = rx
             .recv_timeout(std::time::Duration::from_secs(10))
-            .expect("the tick budget did not stop an unbounded loop within 10s");
+            .expect("no budget stopped an unbounded loop within 10s");
         let err = outcome.expect_err("an unbounded loop must be refused");
         assert!(
             format!("{err:?}").to_lowercase().contains("tick")
@@ -974,23 +1749,492 @@ mod tests {
     /// would quietly demote every budget refusal to [`TransformError::Runtime`]
     /// and the test above would still pass, because the reworded message would
     /// almost certainly still contain the word "tick".
+    ///
+    /// # Why it drives a reduced budget rather than the shipped one
+    ///
+    /// Task 1 ran this on `eval_probe`, i.e. on [`MAX_TICKS`]. Task 3 installed a
+    /// wall-clock deadline, and the deadline now fires first on any tick-dense
+    /// script — measured, ~406 000 ticks of a 20 000 000 budget. Reaching the
+    /// tick arm at the shipped budget would take ~100 s unoptimised, so this
+    /// drives the budget down instead of driving the clock up.
+    ///
+    /// That is not a weaker test of the *installation*: 1000 ticks refuses a loop
+    /// that runs 5000 times only if [`Budgets::ticks`] is actually installed —
+    /// delete `set_max_tick_count` and the loop completes and this goes red. What
+    /// it no longer sees is the shipped *value*, which
+    /// `the_shipped_budgets_are_the_modules_constants` covers instead.
     #[test]
     fn the_budget_refusal_is_classified_as_a_budget() {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(eval_probe(
-                "def f():\n  for i in range(1, 1000000000):\n    pass\nf()",
+            let _ = tx.send(eval_inner(
+                "def f():\n  for i in range(1, 5000):\n    pass\nf()",
+                Budgets::default().with_ticks(1000),
+                None,
             ));
         });
         let err = rx
             .recv_timeout(std::time::Duration::from_secs(10))
-            .expect("the tick budget did not stop an unbounded loop within 10s")
-            .expect_err("an unbounded loop must be refused");
+            .expect("the tick budget did not stop a 5000-iteration loop within 10s")
+            .expect_err("a loop past the tick budget must be refused");
         assert!(
             matches!(err, TransformError::BudgetExceeded("tick budget")),
             "the tick refusal must classify as BudgetExceeded(\"tick budget\"); \
              getting Runtime here means starlark reworded the message that \
              `classify` matches on: {err:?}"
+        );
+    }
+
+    /// The shipped budgets are the module's constants.
+    ///
+    /// **This is a weak test and is documented as one.** It reads the same
+    /// constants the code reads, so it cannot notice a bad *value*; what it
+    /// notices is a `Budgets::default` that has drifted away from them — which is
+    /// exactly the mistake the `#[cfg(test)]` builders above make easy, since a
+    /// test that forgets to reset a field would otherwise be indistinguishable
+    /// from production.
+    ///
+    /// The behaviour of each budget is pinned elsewhere, by tests that watch a
+    /// script get refused: `the_budget_refusal_is_classified_as_a_budget`,
+    /// `recursion_is_refused_at_our_depth_not_the_library_default`,
+    /// `the_heap_budget_refuses_a_script_that_outgrows_it`, and
+    /// `transform_tests::the_deadline_stops_a_script_the_tick_budget_would_let_run`
+    /// — the last of which asserts on the elapsed clock, so it does see the
+    /// shipped value of [`MAX_WALL_CLOCK`].
+    #[test]
+    fn the_shipped_budgets_are_the_modules_constants() {
+        let shipped = Budgets::default();
+        assert_eq!(shipped.ticks, MAX_TICKS);
+        assert_eq!(shipped.callstack, Some(MAX_CALLSTACK));
+        assert_eq!(shipped.wall_clock, MAX_WALL_CLOCK);
+    }
+}
+
+// =========================================================================
+// Task 3: the evaluator's own tests.
+// =========================================================================
+
+#[cfg(test)]
+mod transform_tests {
+    use super::*;
+    use serde_json::json;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn a_transform_receives_params_and_statements_and_returns_json() {
+        let spec = TransformSpec {
+            script: "def transform(params, statements):\n  \
+                     return {\"r\": params[\"region\"], \"n\": len(statements[\"rows\"])}"
+                .into(),
+            returns: vec![],
+        };
+        let params = BTreeMap::from([("region".to_string(), json!("EU"))]);
+        let statements =
+            BTreeMap::from([("rows".to_string(), vec![json!({"a": 1}), json!({"a": 2})])]);
+        let out = run_transform(&spec, &params, &statements).expect("runs");
+        assert_eq!(out, json!({"r": "EU", "n": 2}));
+    }
+
+    #[test]
+    fn statements_are_keyed_even_when_there_is_only_one() {
+        // A script that stops working when the author adds a second statement is a
+        // trap. At N=1 the key is still there.
+        let spec = TransformSpec {
+            script: "def transform(params, statements):\n  return list(statements.keys())".into(),
+            returns: vec![],
+        };
+        let statements = BTreeMap::from([("main".to_string(), vec![json!({"a": 1})])]);
+        let out = run_transform(&spec, &BTreeMap::new(), &statements).expect("runs");
+        assert_eq!(out, json!(["main"]));
+    }
+
+    #[test]
+    fn a_script_without_the_entry_point_is_refused_by_name() {
+        let spec = TransformSpec {
+            script: "x = 1".into(),
+            returns: vec![],
+        };
+        assert!(matches!(
+            run_transform(&spec, &BTreeMap::new(), &BTreeMap::new()),
+            Err(TransformError::MissingEntryPoint)
+        ));
+    }
+
+    #[test]
+    fn a_wrong_arity_entry_point_is_refused_by_name() {
+        // Distinguished from MissingEntryPoint on purpose: "you named it wrong" and
+        // "you took the wrong arguments" send an author to different lines.
+        let spec = TransformSpec {
+            script: "def transform(params):\n  return {}".into(),
+            returns: vec![],
+        };
+        assert!(matches!(
+            run_transform(&spec, &BTreeMap::new(), &BTreeMap::new()),
+            Err(TransformError::WrongArity { found: 1 })
+        ));
+    }
+
+    #[test]
+    fn an_unserialisable_return_is_refused_rather_than_lost() {
+        // Starlark can return values with no JSON counterpart. Silently dropping
+        // one would serve a response missing a field the script produced.
+        let spec = TransformSpec {
+            script: "def transform(params, statements):\n  return transform".into(),
+            returns: vec![],
+        };
+        assert!(matches!(
+            run_transform(&spec, &BTreeMap::new(), &BTreeMap::new()),
+            Err(TransformError::NotSerialisable(_))
+        ));
+    }
+
+    #[test]
+    fn an_oversized_output_is_refused_with_both_numbers() {
+        let spec = TransformSpec {
+            script: format!(
+                "def transform(params, statements):\n  return [\"x\"] * {}",
+                MAX_TRANSFORM_OUTPUT_BYTES
+            ),
+            returns: vec![],
+        };
+        match run_transform(&spec, &BTreeMap::new(), &BTreeMap::new()) {
+            Err(TransformError::OutputTooLarge { bytes, cap }) => {
+                assert!(
+                    bytes > cap,
+                    "the error must carry both numbers: {bytes} vs {cap}"
+                );
+            }
+            other => panic!("expected OutputTooLarge, got {other:?}"),
+        }
+    }
+
+    /// A `transform` that is not a function at all.
+    ///
+    /// `MissingEntryPoint` rather than a new arm: the endpoint has no transform
+    /// function either way, and the author's next move is the same line.
+    #[test]
+    fn a_non_callable_entry_point_reads_as_a_missing_one() {
+        let spec = TransformSpec {
+            script: "transform = 1".into(),
+            returns: vec![],
+        };
+        assert!(matches!(
+            run_transform(&spec, &BTreeMap::new(), &BTreeMap::new()),
+            Err(TransformError::MissingEntryPoint)
+        ));
+    }
+
+    /// `def transform(*args)` can be *called* with two arguments, so a
+    /// call-and-see-what-happens arity check would accept it — and then the
+    /// script's `params` would be a tuple, not a dict, and the failure would
+    /// surface pages later as a type error inside the author's own code.
+    #[test]
+    fn a_varargs_entry_point_is_refused_rather_than_silently_accepted() {
+        let spec = TransformSpec {
+            script: "def transform(*args):\n  return len(args)".into(),
+            returns: vec![],
+        };
+        match run_transform(&spec, &BTreeMap::new(), &BTreeMap::new()) {
+            Err(TransformError::WrongArity { found: 1 }) => {}
+            other => panic!("expected WrongArity {{ found: 1 }}, got {other:?}"),
+        }
+    }
+
+    /// The wall-clock deadline, which is the bound Task 1 did not have.
+    ///
+    /// The script loops forever. Measured, it burns ~406 000 ticks in the 2 s
+    /// before the deadline fires — far short of `MAX_TICKS`, which is the whole
+    /// point: **delete the `set_check_cancelled` line and this test does not
+    /// fail, it runs 50x longer and then reports the tick budget instead.** So
+    /// the assertion is on the classification AND on the clock.
+    ///
+    /// Threaded with a deadline for the reason
+    /// `tests::an_infinite_loop_is_refused_rather_than_hanging` gives: Rust has
+    /// no per-test timeout, and a stalled suite does not look like a broken
+    /// test.
+    #[test]
+    fn the_deadline_stops_a_script_the_tick_budget_would_let_run() {
+        let spec = TransformSpec {
+            script: "def transform(params, statements):\n  n = 0\n  \
+                     for i in range(1000000000):\n    n = n + 1\n  return n"
+                .into(),
+            returns: vec![],
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let out = run_transform(&spec, &BTreeMap::new(), &BTreeMap::new());
+            let _ = tx.send((out, started.elapsed()));
+        });
+        // Generous: the assertion below is the one that discriminates. This
+        // bound only keeps a regression from hanging the suite.
+        let (out, elapsed) = rx
+            .recv_timeout(MAX_WALL_CLOCK * 30)
+            .expect("the deadline did not stop an unbounded loop");
+
+        let err = out.expect_err("an unbounded loop must be refused");
+        assert!(
+            matches!(err, TransformError::BudgetExceeded("wall-clock deadline")),
+            "the refusal must be the DEADLINE, not the tick budget — getting \
+             \"tick budget\" here means `set_check_cancelled` is not installed, \
+             or starlark reworded the message `classify` matches on: {err:?}"
+        );
+        assert!(
+            elapsed >= MAX_WALL_CLOCK,
+            "a refusal before the deadline is not the deadline: {elapsed:?}"
+        );
+    }
+
+    /// A return value that contains itself.
+    ///
+    /// starlark would catch this on its own — measured, "Cycle detected when
+    /// serializing value of type `list` to JSON". What would NOT survive it is
+    /// [`check_output_shape`], which runs first: a memoised depth walk never
+    /// assigns a depth to a node on a cycle, so without its `on_stack` set it
+    /// spins between them forever and no error is ever reached.
+    ///
+    /// Hence the thread and the deadline. The failure this guards against is
+    /// "never returns", and no assertion made on the same thread can observe it.
+    #[test]
+    fn a_self_referential_return_is_refused_rather_than_looping_the_depth_check() {
+        let spec = TransformSpec {
+            script: "def transform(params, statements):\n  x = []\n  x.append(x)\n  return x"
+                .into(),
+            returns: vec![],
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_transform(&spec, &BTreeMap::new(), &BTreeMap::new()));
+        });
+        let out = rx
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("a self-referential return did not resolve in 20s — the depth walk is looping");
+        match out {
+            Err(TransformError::NotSerialisable(m)) => {
+                assert!(
+                    m.contains("contains itself"),
+                    "the message must say what is wrong: {m}"
+                );
+            }
+            other => panic!("expected NotSerialisable, got {other:?}"),
+        }
+    }
+
+    /// The other half of the same hole: no cycle, just depth.
+    ///
+    /// 200 000 nested lists costs ~200 000 ticks and a few megabytes, so neither
+    /// `MAX_TICKS` nor `MAX_HEAP_BYTES` comes near it, and serialising it
+    /// overflows the stack. Tokio worker threads run on 2 MiB, which is smaller
+    /// than the stack this test has.
+    #[test]
+    fn an_absurdly_deep_return_is_refused_rather_than_killing_the_process() {
+        let spec = TransformSpec {
+            script: "def transform(params, statements):\n  x = []\n  \
+                     for i in range(200000):\n    x = [x]\n  return x"
+                .into(),
+            returns: vec![],
+        };
+        match run_transform(&spec, &BTreeMap::new(), &BTreeMap::new()) {
+            Err(TransformError::BudgetExceeded("output nesting depth")) => {}
+            other => panic!("expected BudgetExceeded(\"output nesting depth\"), got {other:?}"),
+        }
+    }
+
+    /// A return exactly at the depth limit is allowed, so the test above is
+    /// discriminating a limit rather than a blanket refusal.
+    #[test]
+    fn a_return_inside_the_depth_limit_is_allowed() {
+        let spec = TransformSpec {
+            script: format!(
+                "def transform(params, statements):\n  x = 1\n  \
+                 for i in range({}):\n    x = [x]\n  return x",
+                MAX_OUTPUT_DEPTH - 1
+            ),
+            returns: vec![],
+        };
+        run_transform(&spec, &BTreeMap::new(), &BTreeMap::new())
+            .expect("a structure inside the depth limit must be served");
+    }
+
+    /// The exponential-expansion bomb, and the two places it could have hung.
+    ///
+    /// `a = [1]` then `a = [a, a]` sixty-two times is **63 allocations, a few
+    /// dozen ticks and a few kilobytes** — no budget in this module is remotely
+    /// near it — and it has 2^62 distinct root-to-leaf paths. Two things have to
+    /// be right for this to come back at all:
+    ///
+    /// * [`check_output_shape`] must count the *expanded* size and refuse on it.
+    ///   Depth alone waves this through — 63 is inside [`MAX_OUTPUT_DEPTH`], and
+    ///   correctly so.
+    /// * it must reach that refusal without serialising anything. Measured,
+    ///   letting the byte-counting sink discover the size instead took **25 s**
+    ///   to reach a 2 MiB ceiling unoptimised; the walk refuses it in ~300 µs.
+    ///
+    /// **This test is the one a mutation caught, twice.** Its first version
+    /// returned `len(a)` — an integer — so nothing deep was ever serialised and
+    /// it passed with the memoisation deleted. Returning `a` made it bite, and
+    /// what it then bit was the design: there was no expanded-size check at all,
+    /// only a byte-counting sink that took 25 s to get there.
+    ///
+    /// Deleting the memoisation still leaves this GREEN, at 2.39 s instead of
+    /// 0.03 s — see [`check_output_shape`], which now says so rather than
+    /// claiming the memo is what makes this terminate.
+    ///
+    /// Threaded, because the failure mode being guarded against is "never
+    /// returns", which no assertion can catch from the same thread.
+    #[test]
+    fn a_shared_structure_terminates_rather_than_expanding_exponentially() {
+        let spec = TransformSpec {
+            script: format!(
+                "def transform(params, statements):\n  a = [1]\n  \
+                 for i in range({}):\n    a = [a, a]\n  return a",
+                MAX_OUTPUT_DEPTH - 2
+            ),
+            returns: vec![],
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_transform(&spec, &BTreeMap::new(), &BTreeMap::new()));
+        });
+        let out = rx.recv_timeout(std::time::Duration::from_secs(20)).expect(
+            "63 shared nodes did not resolve in 20s — either the depth walk is \
+             walking paths rather than nodes, or the output sink has no ceiling",
+        );
+        match out {
+            Err(TransformError::OutputTooLarge { bytes, cap }) => {
+                assert!(bytes > cap, "{bytes} vs {cap}");
+            }
+            other => panic!("expected OutputTooLarge, got {other:?}"),
+        }
+    }
+
+    /// A single value that is small in count and large in bytes.
+    ///
+    /// This is the case `check_output_shape` cannot see: one string is one
+    /// value, so the expanded-size half waves it through and only
+    /// [`CappedSink`] can refuse it. Without this test the byte cap has no
+    /// negative case left — the brief's `["x"] * 1048576` is now refused on the
+    /// value count first.
+    #[test]
+    fn one_oversized_string_is_refused_by_the_byte_cap_not_the_value_count() {
+        let spec = TransformSpec {
+            script: format!(
+                "def transform(params, statements):\n  return \"z\" * {}",
+                MAX_TRANSFORM_OUTPUT_BYTES + 1
+            ),
+            returns: vec![],
+        };
+        match run_transform(&spec, &BTreeMap::new(), &BTreeMap::new()) {
+            Err(TransformError::OutputTooLarge { bytes, cap }) => {
+                assert_eq!(cap, MAX_TRANSFORM_OUTPUT_BYTES);
+                // The two quotes make it three over, so this is the SERIALISED
+                // length and not the value count (which is 1).
+                assert_eq!(bytes, MAX_TRANSFORM_OUTPUT_BYTES + 3);
+            }
+            other => panic!("expected OutputTooLarge, got {other:?}"),
+        }
+    }
+
+    /// Few values, enormous bytes — the case only the sink's ceiling stops.
+    ///
+    /// `["z" * 1 MiB] * 32` is **34 values and one megabyte of heap**, because
+    /// the list holds the same string thirty-two times. `check_output_shape`
+    /// passes it: 34 is nothing. It serialises to ~33 MiB, and without
+    /// [`OUTPUT_COUNT_CEILING`] the sink would copy every one of those bytes to
+    /// report a number nobody needs — for a thousand ten-megabyte strings that is
+    /// ten gigabytes.
+    ///
+    /// The assertion is that `bytes` is a **lower bound**, not the true size:
+    /// that is what distinguishes a sink that stopped from one that ran to the
+    /// end.
+    #[test]
+    fn a_few_enormous_strings_stop_at_the_counting_ceiling() {
+        let spec = TransformSpec {
+            script: format!(
+                "def transform(params, statements):\n  return [\"z\" * {}] * 32",
+                MAX_TRANSFORM_OUTPUT_BYTES
+            ),
+            returns: vec![],
+        };
+        let true_size = 32 * (MAX_TRANSFORM_OUTPUT_BYTES + 2) + 33;
+        match run_transform(&spec, &BTreeMap::new(), &BTreeMap::new()) {
+            Err(TransformError::OutputTooLarge { bytes, cap }) => {
+                assert_eq!(cap, MAX_TRANSFORM_OUTPUT_BYTES);
+                assert!(bytes > cap, "{bytes} vs {cap}");
+                assert!(
+                    bytes < true_size,
+                    "counting must STOP at the ceiling: got {bytes}, which is the \
+                     whole {true_size} bytes, so the sink ran to the end"
+                );
+            }
+            other => panic!("expected OutputTooLarge, got {other:?}"),
+        }
+    }
+
+    /// Shared structure is not itself illegal — the refusal above is about size.
+    ///
+    /// Without this, a `check_output_shape` that refused every repeated node
+    /// would pass the test above for the wrong reason.
+    #[test]
+    fn a_value_referenced_twice_is_served_twice() {
+        let spec = TransformSpec {
+            script: "def transform(params, statements):\n  a = [1, 2]\n  return [a, a]".into(),
+            returns: vec![],
+        };
+        let out = run_transform(&spec, &BTreeMap::new(), &BTreeMap::new()).expect("runs");
+        assert_eq!(out, json!([[1, 2], [1, 2]]));
+    }
+
+    /// The input conversion runs in Rust and earns no ticks, so nothing starlark
+    /// checks fires while it allocates. Measured before the poll existed: a
+    /// million rows reached a peak of 335 540 992 bytes against a 64 MiB limit.
+    ///
+    /// This uses few, fat rows rather than many thin ones so the test costs
+    /// milliseconds rather than seconds while crossing the same line.
+    #[test]
+    fn the_heap_budget_applies_to_the_input_and_not_only_to_the_script() {
+        // Sized so the heap is crossed several `INPUT_POLL_ROWS` batches in:
+        // 2048 rows of 32 KiB is 64 MiB, and the poll before row 3072 is the one
+        // that must see it. Fat rows rather than many thin ones so the test
+        // costs milliseconds and ~96 MiB rather than the seconds a million
+        // ordinary rows would take.
+        let fat = "y".repeat(32 * 1024);
+        let rows: Vec<serde_json::Value> = (0..3072).map(|_| json!({ "v": fat })).collect();
+        let spec = TransformSpec {
+            script: "def transform(params, statements):\n  return len(statements[\"rows\"])".into(),
+            returns: vec![],
+        };
+        let statements = BTreeMap::from([("rows".to_string(), rows)]);
+        match run_transform(&spec, &BTreeMap::new(), &statements) {
+            Err(TransformError::BudgetExceeded("heap budget, converting its input")) => {}
+            other => panic!(
+                "96 MiB of input must be refused while it is being converted, \
+                 not after the whole of it is on the heap — a plain \"heap \
+                 budget\" here means the end-of-evaluation check caught it and \
+                 `poll_input_budgets` did not: {other:?}"
+            ),
+        }
+    }
+
+    /// The cap is on the SERIALISED bytes, and the sink that counts them must
+    /// still produce the value when it fits. A cap enforced by refusing
+    /// everything would pass the oversized test above on its own.
+    #[test]
+    fn an_output_just_inside_the_cap_is_served_intact() {
+        let spec = TransformSpec {
+            script: format!(
+                "def transform(params, statements):\n  return \"z\" * {}",
+                MAX_TRANSFORM_OUTPUT_BYTES - 3
+            ),
+            returns: vec![],
+        };
+        let out = run_transform(&spec, &BTreeMap::new(), &BTreeMap::new())
+            .expect("a payload inside the cap must be served");
+        let text = out.as_str().expect("a string");
+        assert_eq!(text.len(), MAX_TRANSFORM_OUTPUT_BYTES - 3);
+        assert!(
+            text.bytes().all(|b| b == b'z'),
+            "the payload must be intact"
         );
     }
 }
