@@ -226,11 +226,13 @@
 //! same read that was validated — not validation. A nonsensical `max_rows` or an
 //! unknown `output.shape` will be frozen exactly as written.
 
+use std::collections::BTreeMap;
+
 use egret_core::{Error, Result, UserId};
 use egret_dataapi_api::{
-    compare_column_types, CacheScope, CacheSpec, ColumnSpec, EndpointSnapshot, OutputSpec,
-    ParamLocation, ParamSpec, ParamType, StatementSnapshot, StatementSpec, TypeAgreement,
-    PARAM_GATE,
+    compare_column_types, CacheScope, CacheSpec, ColumnSpec, EndpointSnapshot, LimitsSpec,
+    OutputSpec, ParamLocation, ParamSpec, ParamType, StatementSnapshot, StatementSpec,
+    TypeAgreement, PARAM_GATE,
 };
 use egret_query_api::Param;
 use uuid::Uuid;
@@ -712,6 +714,83 @@ pub enum ValidationError {
     /// script this rejects can never reach a caller as a runtime failure.
     #[error("the transform script is not valid: {0}")]
     TransformScriptInvalid(String),
+    /// A publish-time probe ran the script and what came back does not satisfy
+    /// `output.transform.returns` — or the script failed outright on input
+    /// publish knows it will be given.
+    ///
+    /// `context` names **which** probe. There are two ([`probe_transform`]) and
+    /// they differ only in whether the statements carry a row, so a refusal that
+    /// did not say which one an author is being told about would send them
+    /// looking at the wrong half of their script — the `if len(rows) == 0`
+    /// branch is the commonest place the two disagree, and it is invisible in
+    /// the other probe's output.
+    #[error("{context}: {detail}")]
+    TransformOutputMismatch {
+        /// Which probe produced this, in the words the probe is documented
+        /// under: "the single-row probe" or "the empty-rows probe".
+        context: String,
+        /// What was wrong with what came back — from
+        /// [`crate::transform::check_returns`] when the script ran and returned
+        /// something that does not match `returns`, or the
+        /// [`crate::transform::TransformError`] when it did not run at all.
+        detail: String,
+    },
+    /// The transform's output GROWS with the rows it is given, and projecting
+    /// that growth to the endpoint's own `limits.max_rows` puts it over
+    /// [`crate::transform::MAX_TRANSFORM_OUTPUT_BYTES`].
+    ///
+    /// # What this projection proves, and what it does not
+    ///
+    /// It is measured, not assumed: `per_row` is the difference between the two
+    /// probes [`probe_transform`] already runs — the serialised size with one
+    /// row minus the size with none — so a script that aggregates (`return
+    /// {"total": len(rows)}`) measures zero growth and is never refused here,
+    /// however large `max_rows` is.
+    ///
+    /// It is a **lower bound**, twice over, and deliberately so. The probe row
+    /// is built from stand-in values that are as small as the column's type
+    /// permits (`1`, `"x"`), so a real row of the same shape is larger; and
+    /// growth is assumed linear from two points, so a script whose output grows
+    /// faster than its input is under-projected. Both errors point the same way:
+    /// publish refuses only endpoints that overflow even at their *smallest*
+    /// plausible row, and serving still has to fail closed on the rest.
+    ///
+    /// The one direction it can be wrong in is a script that SATURATES —
+    /// `return {"sample": rows[:10]}` grows for the first ten rows and not
+    /// after, and two points cannot see the ceiling. Such an endpoint is
+    /// refused, and the way through is the same as for every other endpoint
+    /// here: `limits.max_rows` is the author's own declaration of how many rows
+    /// this endpoint may return, and `fits` says the largest value that this
+    /// script can actually serve.
+    #[error(
+        "output.transform returns about {per_row} more bytes per row, so at \
+         limits.max_rows = {max_rows} it would return about {projected} bytes, over the \
+         {cap} byte cap — and the caller would get a 500 rather than a truncated \
+         response. Lower limits.max_rows to at most {fits}, or aggregate in the script \
+         instead of passing rows through. This projection is measured from a probe row \
+         built of the smallest values each column's type allows, so a real row is larger, \
+         not smaller"
+    )]
+    TransformOutputExceedsRowLimit {
+        /// Serialised bytes the transform's output grew by when the probe's
+        /// statements went from no rows to one.
+        per_row: usize,
+        /// The endpoint's `limits.max_rows`, **clamped exactly as serving
+        /// clamps it** — see [`probe_transform`]. Projecting against an
+        /// unclamped `u32` would refuse an endpoint over rows serving would
+        /// never fetch.
+        max_rows: u32,
+        /// `base + per_row * max_rows`, where `base` is what the script returns
+        /// with no rows at all.
+        projected: usize,
+        /// [`crate::transform::MAX_TRANSFORM_OUTPUT_BYTES`], repeated so the
+        /// message is self-contained.
+        cap: usize,
+        /// The largest `limits.max_rows` this script's measured growth fits
+        /// under `cap`. Zero when the script is over the cap before it is given
+        /// a single row.
+        fits: u32,
+    },
 }
 
 impl From<ValidationError> for Error {
@@ -1691,6 +1770,239 @@ pub fn check_transform(output: &OutputSpec) -> std::result::Result<(), Validatio
         .map_err(|e| ValidationError::TransformScriptInvalid(e.to_string()))
 }
 
+/// The probe that supplies rows, in the words its refusal names it by.
+const SINGLE_ROW_PROBE: &str = "the single-row probe";
+
+/// The probe that supplies none. See [`probe_transform`] for why it exists.
+const EMPTY_ROWS_PROBE: &str = "the empty-rows probe";
+
+/// Run the transform against synthetic rows and check what it returns against
+/// `output.transform.returns`.
+///
+/// A no-op when `output.transform` is absent, like [`check_transform`].
+///
+/// # What this proves, exactly
+///
+/// That the script RUNS, and that what it returns matches `returns`, for two
+/// specific inputs: one row per statement, and no rows at all. Nothing more. A
+/// script's output shape may depend on the data — that is why `returns` is
+/// declared by the author rather than inferred (see `TransformSpec`) — so a
+/// green probe is not a proof of conformance for every future call. Serving
+/// checks every real response against the same rule
+/// ([`crate::transform::check_returns`], Task 6) and fails closed; this is the
+/// check that stops an author publishing something that was never going to
+/// work, not a substitute for that one.
+///
+/// # Both probes, and why the refusal names which one
+///
+/// `if len(rows) == 0` is the commonest way a script's output shape diverges,
+/// and it is invisible in the populated probe's output — a script can satisfy
+/// `returns` with rows and return a bare list without them. So both are run.
+/// The refusal carries which probe produced it because the two differ only in
+/// their input: told merely "does not match `returns`", an author looking at a
+/// script that demonstrably returns the right object has nowhere to go.
+///
+/// # The rows are SYNTHETIC, and publish makes no extra round trip
+///
+/// `describe_as` gives publish an endpoint's COLUMNS, never its data —
+/// [`StatementSnapshot`] is `{ name, sql, columns }` — so the probe row is
+/// built from those columns with a stand-in value per column type
+/// ([`probe_value`]), the same way [`representative_value`] builds a stand-in
+/// per parameter for M1's branch renders. Nothing here reads a row from an
+/// engine, and no statement is executed.
+///
+/// Parameters are bound as SCALARS, from [`representative_value`], so a script
+/// that indexes into a parameter it expects to be a list is not exercised by
+/// this. Whether a parameter arrives as a scalar or a list is decided by the
+/// REQUEST — a repeated query parameter becomes a list — which publish cannot
+/// know; `IteratedParams` infers the shape each STATEMENT expects, but a
+/// script's expectation is not written in any SQL, so there is nothing to infer
+/// it from.
+///
+/// # Two evaluations, and where they are spent
+///
+/// This adds exactly two `run_transform` calls per endpoint — not per statement
+/// — for the reason [`check_transform`] records at length: an endpoint at
+/// `MAX_STATEMENTS` inside the per-statement loop would pay each of them up to
+/// 16 times, and `transform::MAX_WALL_CLOCK` is a 2 s bound on ticks after
+/// expiry rather than a latency guarantee, so that is not a bounded cost.
+///
+/// They are spent in [`validate`], which runs BEFORE `EndpointStore::publish`
+/// opens its transaction — deliberately, and this is the placement decision, not
+/// an accident of where the described columns happen to be available. Publish's
+/// in-transaction re-validation goes through [`validate_endpoint`], which does
+/// NOT probe: the row it locked has already been through this, and the identity
+/// check that guards that re-validation now covers `limits` as well as the four
+/// inputs the columns depend on, precisely so the projection below cannot be
+/// dodged by a PATCH landing between the two.
+///
+/// So a publish costs four evaluations of an endpoint's script — one module
+/// evaluation from `check_transform` and these two, all outside the
+/// transaction, plus one more module evaluation from the re-validation inside
+/// it — and the count inside the locked transaction is unchanged from Task 4.
+///
+/// # `limits`, and the 1 MiB output cap
+///
+/// See [`ValidationError::TransformOutputExceedsRowLimit`] for what the
+/// projection proves. It costs no additional evaluation: it is the difference
+/// between the two probes that have already run.
+pub(crate) fn probe_transform(
+    output: &OutputSpec,
+    described: &[StatementSnapshot],
+    params: &[ParamSpec],
+    limits: &LimitsSpec,
+) -> std::result::Result<(), ValidationError> {
+    let Some(transform) = &output.transform else {
+        return Ok(());
+    };
+
+    let bound = probe_params(params);
+    let with_rows: BTreeMap<String, Vec<serde_json::Value>> = described
+        .iter()
+        .map(|s| (s.name.clone(), vec![probe_row(&s.columns)]))
+        .collect();
+    let without_rows: BTreeMap<String, Vec<serde_json::Value>> = described
+        .iter()
+        .map(|s| (s.name.clone(), Vec::new()))
+        .collect();
+
+    // The populated probe first: it is the one an author is thinking about
+    // while they write the script, so when both fail it is the one to report.
+    let populated_bytes = one_probe(transform, &bound, &with_rows, SINGLE_ROW_PROBE)?;
+    let empty_bytes = one_probe(transform, &bound, &without_rows, EMPTY_ROWS_PROBE)?;
+
+    // What one row of input cost in output bytes. `saturating_sub`, not a
+    // difference that can go negative: a script that returns MORE without rows
+    // than with them ("no results" prose, say) does not grow with the row count,
+    // and there is nothing to project.
+    let per_row = populated_bytes.saturating_sub(empty_bytes);
+    if per_row == 0 {
+        return Ok(());
+    }
+    // Clamped exactly as `serving::router` clamps it before handing it to the
+    // engine, because that is the number of rows the script can actually be
+    // given. Projecting against the raw `u32` would refuse an endpoint whose
+    // `max_rows: 4000000000` serving would silently cut to a million.
+    let max_rows = limits
+        .max_rows
+        .clamp(1, crate::serving::router::MAX_ROWS_CEILING);
+    let cap = crate::transform::MAX_TRANSFORM_OUTPUT_BYTES;
+    let projected = empty_bytes.saturating_add(per_row.saturating_mul(max_rows as usize));
+    if projected > cap {
+        return Err(ValidationError::TransformOutputExceedsRowLimit {
+            per_row,
+            max_rows,
+            projected,
+            cap,
+            // Integer division, so this is the largest count that FITS rather
+            // than the first that does not. `u32::MAX` is unreachable — `fits`
+            // is below `max_rows`, itself clamped to `MAX_ROWS_CEILING` — but
+            // the conversion is saturating rather than an `as` cast, because a
+            // silent wrap here would print a helpful-looking number that is a
+            // lie.
+            fits: u32::try_from(cap.saturating_sub(empty_bytes) / per_row).unwrap_or(u32::MAX),
+        });
+    }
+    Ok(())
+}
+
+/// One probe: run the script, check what came back against `returns`, and
+/// report how many bytes it serialised to.
+///
+/// The bytes are what [`probe_transform`]'s projection is built from, and they
+/// are measured on the SERIALISED value for the same reason
+/// `MAX_TRANSFORM_OUTPUT_BYTES` is: that is the number that leaves the process.
+fn one_probe(
+    transform: &egret_dataapi_api::TransformSpec,
+    params: &BTreeMap<String, serde_json::Value>,
+    statements: &BTreeMap<String, Vec<serde_json::Value>>,
+    context: &str,
+) -> std::result::Result<usize, ValidationError> {
+    let value = crate::transform::run_transform(transform, params, statements).map_err(|e| {
+        ValidationError::TransformOutputMismatch {
+            context: context.to_owned(),
+            detail: e.to_string(),
+        }
+    })?;
+    crate::transform::check_returns(&value, &transform.returns).map_err(|detail| {
+        ValidationError::TransformOutputMismatch {
+            context: context.to_owned(),
+            detail,
+        }
+    })?;
+    // `run_transform` has already serialised this value once, through the
+    // capped sink that bounds it — so a value that reaches here is one
+    // `serde_json` has written before, and the error arm is unreachable rather
+    // than merely unlikely. Measuring 0 for it costs only the projection below,
+    // which then refuses nothing and leaves the question to serving.
+    Ok(serde_json::to_vec(&value).map_or(0, |bytes| bytes.len()))
+}
+
+/// One synthetic row, keyed by the described column names.
+fn probe_row(columns: &[ColumnSpec]) -> serde_json::Value {
+    serde_json::Value::Object(
+        columns
+            .iter()
+            .map(|c| (c.name.clone(), probe_value(&c.ty)))
+            .collect(),
+    )
+}
+
+/// A stand-in value for one described column, by its engine type.
+///
+/// Routed through [`crate::openapi_gen::json_type`] rather than matching engine
+/// type names here, so the value a script is probed with and the type the
+/// generated document promises a consumer come from ONE reading of
+/// `bigint`/`varchar(10)`/`timestamp(3)`. A second mapping would let publish
+/// probe a script with a string for a column the document calls an integer.
+///
+/// The values are as small as each type allows, and that is load-bearing for
+/// [`ValidationError::TransformOutputExceedsRowLimit`]: it makes the measured
+/// per-row growth a LOWER bound on a real row's, so the projection under-refuses
+/// rather than over-refuses.
+fn probe_value(ty: &str) -> serde_json::Value {
+    match crate::openapi_gen::json_type(ty) {
+        "boolean" => serde_json::Value::Bool(true),
+        "integer" => serde_json::Value::from(1),
+        "number" => serde_json::Value::from(1.0),
+        // Everything `json_type` does not recognise, which it maps to `string`.
+        _ => serde_json::Value::from("x"),
+    }
+}
+
+/// The `params` dict a probe hands the script: every declared parameter at its
+/// [`representative_value`], as JSON.
+fn probe_params(params: &[ParamSpec]) -> BTreeMap<String, serde_json::Value> {
+    params
+        .iter()
+        .map(|p| (p.name.clone(), param_json(&representative_value(p))))
+        .collect()
+}
+
+/// One [`Param`] as JSON.
+///
+/// Total over the enum rather than over the three variants
+/// [`representative_value`] can produce today: a new `ParamType` mapping to a
+/// new `Param` would otherwise reach a script as whatever the fallback arm
+/// happened to be.
+fn param_json(p: &Param) -> serde_json::Value {
+    match p {
+        Param::Null => serde_json::Value::Null,
+        Param::Bool(b) => serde_json::Value::Bool(*b),
+        Param::I64(i) => serde_json::Value::from(*i),
+        // A non-finite float has no JSON counterpart; `representative_value`
+        // never produces one, and `Null` is the honest answer if it ever does.
+        Param::F64(f) => serde_json::Number::from_f64(*f)
+            .map_or(serde_json::Value::Null, serde_json::Value::Number),
+        // Decimal stays TEXT, like everywhere else in this crate: turning it
+        // into a JSON number is exactly the float rounding the variant exists to
+        // avoid.
+        Param::Decimal(s) | Param::Str(s) | Param::Date(s) | Param::Timestamp(s) => {
+            serde_json::Value::from(s.as_str())
+        }
+    }
+}
+
 /// An author's `default` must satisfy its own declared type (spec §5, T7-6).
 ///
 /// Coerced through the **same function the serving path uses**, deliberately —
@@ -2604,6 +2916,14 @@ fn projection_has_uncast_marker(rest: &str) -> bool {
 /// described and their UNION is frozen, each column carrying whether every
 /// branch returns it. See [`branch_renderings`] for which renderings that is and
 /// [`describe_branches`] for how they are folded together.
+///
+/// # And the transform is probe-RUN, after the columns are known
+///
+/// [`validate_endpoint`] has already refused a transform publish cannot parse.
+/// What it could not do is run one: a probe needs rows, rows need columns, and
+/// the columns are what the loop below resolves. So [`probe_transform`] is
+/// called at the end of this function — still exactly once per endpoint, and
+/// still before `EndpointStore::publish` opens its transaction.
 pub async fn validate(
     port: &dyn egret_query_api::QueryExecPort,
     workspace: Uuid,
@@ -2700,6 +3020,12 @@ pub async fn validate(
             columns: described.union,
         });
     }
+    // Last, once for the endpoint, and only now: the probe builds its rows from
+    // the columns the loop above resolved, so it cannot run before them. Two
+    // script evaluations against synthetic rows — see `probe_transform` for why
+    // both, for what a green probe does and does not prove, and for why this is
+    // the right side of `EndpointStore::publish`'s transaction to spend them on.
+    probe_transform(&draft.output, &frozen, &draft.params, &draft.limits)?;
     Ok(frozen)
 }
 
@@ -3263,7 +3589,7 @@ impl EndpointStore {
         let mut tx = self.db.pool.begin().await.map_err(db_err)?;
 
         let current = self.locked(&mut tx, workspace, id).await?;
-        // The four inputs the resolved `columns` depend on. A change to any of
+        // The four inputs the resolved `columns` depend on, plus `limits`. A change to any of
         // them makes `columns` stale, which no amount of re-validation would
         // detect — only a fresh describe would, and that is the caller's to retry.
         //
@@ -3277,10 +3603,23 @@ impl EndpointStore {
         // `shape_rows` zips live against frozen by INDEX, so every branch but
         // the widest is a permanent `503`. Exactly the hole the paragraph above
         // describes closing for `cache.scope`, one field along.
+        //
+        // `limits` is the fifth, and it is here for a different reason: the
+        // resolved `columns` do not depend on it at all. `probe_transform`
+        // does — it projects a transform's measured per-row output growth
+        // against `limits.max_rows` and refuses a publish that cannot fit under
+        // the 1 MiB output cap — and that probe, like the describe, runs before
+        // this transaction. Without this clause an author could validate a
+        // transform at `max_rows: 100`, PATCH it to a million while the
+        // describes were in flight, and freeze a snapshot whose own numbers say
+        // it must fail. The re-validation below cannot catch it:
+        // `probe_transform` deliberately does NOT run inside this transaction —
+        // see its doc comment on where the evaluations are spent.
         if current.statements != draft.statements
             || current.database_id != draft.database_id
             || current.params != draft.params
             || current.output != draft.output
+            || current.limits != draft.limits
         {
             return Err(Error::Conflict(
                 "the endpoint was edited while it was being published; validate and publish again"
@@ -5579,6 +5918,501 @@ mod tests {
             Err(ValidationError::TransformWithShapeOrNaming("shape")),
             "output.shape: arrays AND a duplicate returns name must be refused for the \
              shape, not the duplicate"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // probe_transform (C2 Task 5) — publish RUNS the script against
+    // synthetic rows and checks what comes back against `returns`
+    // -----------------------------------------------------------------
+
+    /// One described statement, as `validate` would hand it over: a name, the
+    /// SQL, and the columns `describe_as` resolved — never any data.
+    fn one_statement(name: &str) -> StatementSnapshot {
+        StatementSnapshot {
+            name: name.into(),
+            sql: "SELECT 1 AS a, 'x' AS b".into(),
+            columns: vec![
+                ColumnSpec {
+                    name: "a".into(),
+                    ty: "bigint".into(),
+                    required: true,
+                },
+                ColumnSpec {
+                    name: "b".into(),
+                    ty: "varchar".into(),
+                    required: true,
+                },
+            ],
+        }
+    }
+
+    /// The DEFAULT limits, spelled as `LimitsSpec`'s own serde defaults do —
+    /// `max_rows: 10_000` — so the probe tests below are about the transform
+    /// rather than about a row cap nobody set.
+    fn probe_limits(max_rows: u32) -> LimitsSpec {
+        LimitsSpec {
+            max_rows,
+            timeout_seconds: 30,
+        }
+    }
+
+    #[test]
+    fn a_script_that_does_not_produce_its_declared_returns_is_refused_at_publish() {
+        let mut o =
+            transformed_output("def transform(params, statements):\n  return {\"wrong\": 1}");
+        o.transform.as_mut().unwrap().returns = vec![ColumnSpec {
+            name: "total".into(),
+            ty: "bigint".into(),
+            required: true,
+        }];
+        let err = probe_transform(&o, &[one_statement("rows")], &[], &probe_limits(10_000))
+            .expect_err("declared `total`, produced `wrong`");
+        assert!(
+            err.to_string().contains("total"),
+            "must name the missing field: {err}"
+        );
+    }
+
+    #[test]
+    fn an_optional_field_may_be_absent_but_an_undeclared_one_may_not() {
+        // M1's `required` flag, unchanged: absent-when-optional is fine, present-
+        // when-undeclared never is.
+        let mut o = transformed_output("def transform(params, statements):\n  return {\"a\": 1}");
+        o.transform.as_mut().unwrap().returns = vec![
+            ColumnSpec {
+                name: "a".into(),
+                ty: "bigint".into(),
+                required: true,
+            },
+            ColumnSpec {
+                name: "b".into(),
+                ty: "bigint".into(),
+                required: false,
+            },
+        ];
+        assert!(
+            probe_transform(&o, &[one_statement("rows")], &[], &probe_limits(10_000)).is_ok(),
+            "optional `b` may be absent"
+        );
+
+        let mut p =
+            transformed_output("def transform(params, statements):\n  return {\"a\": 1, \"z\": 2}");
+        p.transform.as_mut().unwrap().returns = vec![ColumnSpec {
+            name: "a".into(),
+            ty: "bigint".into(),
+            required: true,
+        }];
+        assert!(
+            probe_transform(&p, &[one_statement("rows")], &[], &probe_limits(10_000)).is_err(),
+            "undeclared `z` must be refused"
+        );
+    }
+
+    #[test]
+    fn the_empty_row_set_is_probed_too() {
+        // The commonest way a script's shape diverges. This script conforms with
+        // rows and returns a bare list without them — publish must catch that, and
+        // it can only catch it by running the empty case.
+        let mut o = transformed_output(
+            "def transform(params, statements):\n  \
+             if len(statements[\"rows\"]) == 0:\n    return []\n  \
+             return {\"total\": 1}",
+        );
+        o.transform.as_mut().unwrap().returns = vec![ColumnSpec {
+            name: "total".into(),
+            ty: "bigint".into(),
+            required: true,
+        }];
+        let err = probe_transform(&o, &[one_statement("rows")], &[], &probe_limits(10_000))
+            .expect_err("the empty-rows branch returns a list, not the declared object");
+        assert!(
+            err.to_string().contains("empty"),
+            "the refusal must say WHICH probe failed, or an author cannot find it: {err}"
+        );
+    }
+
+    #[test]
+    fn probe_rows_are_built_from_the_described_columns_not_from_data() {
+        // Publish must not read data. This pins the shape of what the script sees:
+        // one row per statement, keyed by the described column names.
+        //
+        // The row is read through a `for`, not through `statements["rows"][0]`,
+        // and the difference is not cosmetic: the empty probe runs the same
+        // script over no rows at all, where indexing row 0 raises. See
+        // `a_script_that_indexes_row_zero_without_checking_is_refused` — the
+        // subscripting version of this script is one publish must refuse, so it
+        // cannot also be the one that demonstrates the row's shape.
+        let o = transformed_output(
+            "def transform(params, statements):\n  \
+             n = 0\n  \
+             for row in statements[\"rows\"]:\n    n = len(row)\n  \
+             return {\"total\": n}",
+        );
+        // `one_statement("rows")` describes two columns, so the probe row has two keys.
+        assert!(probe_transform(&o, &[one_statement("rows")], &[], &probe_limits(10_000)).is_ok());
+    }
+
+    /// **A script that assumes at least one row is refused, and that is the
+    /// point of the empty probe.**
+    ///
+    /// A query returning nothing is not an error — it is a Tuesday — so
+    /// `statements["rows"][0]` is an endpoint that answers 500 the first time a
+    /// filter matches nothing. Only the empty probe can see it: the script is
+    /// perfectly well-formed, parses, and satisfies `returns` for every input
+    /// that has a row in it.
+    #[test]
+    fn a_script_that_indexes_row_zero_without_checking_is_refused() {
+        let o = transformed_output(
+            "def transform(params, statements):\n  \
+             return {\"total\": len(statements[\"rows\"][0])}",
+        );
+        match probe_transform(&o, &[one_statement("rows")], &[], &probe_limits(10_000)) {
+            Err(ValidationError::TransformOutputMismatch { context, detail }) => {
+                assert_eq!(
+                    context, EMPTY_ROWS_PROBE,
+                    "the populated probe is perfectly happy with this script"
+                );
+                assert!(
+                    detail.contains("out of bound") && detail.contains("transform.star:2"),
+                    "the author needs starlark's own words, and the LINE: {detail}"
+                );
+            }
+            other => panic!("expected the empty probe to refuse this, got {other:?}"),
+        }
+    }
+
+    /// The probe row's KEYS and its VALUES, pinned by a script that fails unless
+    /// both are what the described columns say.
+    ///
+    /// The test above counts the keys, which a row of two keys spelled anything
+    /// at all would satisfy. This one reads them by name and checks the type of
+    /// each stand-in against the column's declared engine type — `a bigint`
+    /// arrives as an integer, `b varchar` as a string — which is what
+    /// `probe_value` promises and what a second, drifting type mapping would
+    /// break.
+    #[test]
+    fn the_stand_in_value_matches_the_columns_declared_type() {
+        let o = transformed_output(
+            "def transform(params, statements):\n  \
+             for row in statements[\"rows\"]:\n    \
+             if type(row[\"a\"]) != \"int\":\n      fail(\"a is \" + type(row[\"a\"]))\n    \
+             if type(row[\"b\"]) != \"string\":\n      fail(\"b is \" + type(row[\"b\"]))\n  \
+             return {\"total\": 1}",
+        );
+        assert_eq!(
+            probe_transform(&o, &[one_statement("rows")], &[], &probe_limits(10_000)),
+            Ok(()),
+            "`a bigint` must arrive as an int and `b varchar` as a string"
+        );
+    }
+
+    /// The exact refusal, as a VALUE — context and detail both.
+    ///
+    /// `assert_eq!` on the whole payload rather than a `contains`, because this
+    /// is the test that pins three separate decisions at once and each of them
+    /// is invisible to an `is_err()`: which probe is named, that a
+    /// `required: false` field missing from the output is NOT reported, and that
+    /// the undeclared names are listed in a sorted order rather than in
+    /// whichever order the script's dict happened to iterate.
+    #[test]
+    fn the_refusal_names_the_probe_and_every_field_that_disagrees() {
+        let mut o =
+            transformed_output("def transform(params, statements):\n  return {\"z\": 1, \"a\": 2}");
+        o.transform.as_mut().unwrap().returns = vec![
+            ColumnSpec {
+                name: "total".into(),
+                ty: "bigint".into(),
+                required: true,
+            },
+            ColumnSpec {
+                name: "opt".into(),
+                ty: "bigint".into(),
+                required: false,
+            },
+        ];
+        assert_eq!(
+            probe_transform(&o, &[one_statement("rows")], &[], &probe_limits(10_000)),
+            Err(ValidationError::TransformOutputMismatch {
+                context: SINGLE_ROW_PROBE.to_owned(),
+                detail: "it does not return the declared field(s) `total`; and it returns the \
+                         undeclared field(s) `a`, `z`"
+                    .to_owned(),
+            }),
+        );
+    }
+
+    /// A script that RAISES is attributed to the probe that ran it, not
+    /// reported as a shape mismatch.
+    #[test]
+    fn a_script_that_fails_while_running_names_the_probe_that_ran_it() {
+        let o = transformed_output(
+            "def transform(params, statements):\n  \
+             if len(statements[\"rows\"]) == 0:\n    fail(\"boom\")\n  \
+             return {\"total\": 1}",
+        );
+        match probe_transform(&o, &[one_statement("rows")], &[], &probe_limits(10_000)) {
+            Err(ValidationError::TransformOutputMismatch { context, detail }) => {
+                assert_eq!(
+                    context, EMPTY_ROWS_PROBE,
+                    "only the empty probe reaches `fail`"
+                );
+                assert!(
+                    detail.contains("boom"),
+                    "the author's own message: {detail}"
+                );
+            }
+            other => panic!("expected the empty probe to report the failure, got {other:?}"),
+        }
+    }
+
+    /// **The 1 MiB output cap, surfaced at publish rather than at serving.**
+    ///
+    /// Task 3 flagged this exact case: `MAX_TRANSFORM_OUTPUT_BYTES` will refuse
+    /// a legitimate pass-through transform on a large `max_rows` endpoint, and
+    /// the author should learn it here — where they can still change something —
+    /// rather than from a caller's 500.
+    ///
+    /// The last assertion is the one that makes the message honest: `fits` is
+    /// not decoration, it is a `max_rows` this endpoint actually publishes at.
+    #[test]
+    fn a_pass_through_transform_over_a_large_max_rows_is_refused_at_publish() {
+        let mut o = transformed_output(
+            "def transform(params, statements):\n  return {\"rows\": statements[\"rows\"]}",
+        );
+        o.transform.as_mut().unwrap().returns = vec![ColumnSpec {
+            name: "rows".into(),
+            ty: "varchar".into(),
+            required: true,
+        }];
+        match probe_transform(&o, &[one_statement("rows")], &[], &probe_limits(1_000_000)) {
+            Err(ValidationError::TransformOutputExceedsRowLimit {
+                per_row,
+                max_rows,
+                projected,
+                cap,
+                fits,
+            }) => {
+                assert_eq!(cap, 1 << 20, "the cap the message quotes is the real one");
+                assert_eq!(max_rows, 1_000_000);
+                // `{"rows":[{"a":1,"b":"x"}]}` minus `{"rows":[]}`.
+                assert_eq!(per_row, 15, "measured, not assumed");
+                assert_eq!(
+                    projected,
+                    11 + 15 * 1_000_000,
+                    "base bytes plus the growth, both measured"
+                );
+                assert!(fits > 0 && fits < max_rows, "a usable number: {fits}");
+                assert_eq!(
+                    probe_transform(&o, &[one_statement("rows")], &[], &probe_limits(fits)),
+                    Ok(()),
+                    "the max_rows the refusal tells the author to use must actually publish"
+                );
+                assert!(
+                    probe_transform(&o, &[one_statement("rows")], &[], &probe_limits(fits + 1))
+                        .is_err(),
+                    "and it must be the LARGEST one that does"
+                );
+            }
+            other => panic!("expected TransformOutputExceedsRowLimit, got {other:?}"),
+        }
+    }
+
+    /// The projection is about GROWTH, so a script that aggregates is untouched
+    /// however large `max_rows` is. Without this, "refuse what cannot fit" could
+    /// be implemented as "refuse a big `max_rows`", which would refuse the one
+    /// thing a response transform is actually for.
+    #[test]
+    fn an_aggregating_transform_is_never_refused_for_its_row_limit() {
+        let o = transformed_output(
+            "def transform(params, statements):\n  \
+             return {\"total\": len(statements[\"rows\"])}",
+        );
+        assert_eq!(
+            probe_transform(&o, &[one_statement("rows")], &[], &probe_limits(u32::MAX)),
+            Ok(()),
+            "output that does not grow with the rows has nothing to project"
+        );
+    }
+
+    /// The projection counts the rows SERVING will fetch, not the number the
+    /// author typed. `serving::router` clamps `max_rows` to `MAX_ROWS_CEILING`
+    /// before the engine ever sees it, so projecting against a raw `u32` would
+    /// quote an author a number of rows their endpoint can never return.
+    #[test]
+    fn the_projection_uses_the_row_count_serving_will_actually_fetch() {
+        let mut o = transformed_output(
+            "def transform(params, statements):\n  return {\"rows\": statements[\"rows\"]}",
+        );
+        o.transform.as_mut().unwrap().returns = vec![ColumnSpec {
+            name: "rows".into(),
+            ty: "varchar".into(),
+            required: true,
+        }];
+        match probe_transform(&o, &[one_statement("rows")], &[], &probe_limits(u32::MAX)) {
+            Err(ValidationError::TransformOutputExceedsRowLimit { max_rows, .. }) => {
+                assert_eq!(
+                    max_rows,
+                    crate::serving::router::MAX_ROWS_CEILING,
+                    "the refusal must quote the clamped count, not u32::MAX"
+                );
+            }
+            other => panic!("expected TransformOutputExceedsRowLimit, got {other:?}"),
+        }
+    }
+
+    /// An endpoint with no transform is not probed at all — the whole feature
+    /// is invisible to every endpoint that does not use it.
+    #[test]
+    fn an_endpoint_without_a_transform_is_not_probed() {
+        assert_eq!(
+            probe_transform(
+                &OutputSpec::default(),
+                &[one_statement("rows")],
+                &[],
+                &probe_limits(u32::MAX)
+            ),
+            Ok(())
+        );
+    }
+
+    /// A `QueryExecPort` that describes two columns and can do nothing else.
+    ///
+    /// `execute_as` is unreachable by construction: publish DESCRIBES, it never
+    /// executes, and the probe rows are built from the description. If this
+    /// panic ever fires, publish has started reading data.
+    struct DescribeOnlyPort;
+
+    #[async_trait::async_trait]
+    impl egret_query_api::QueryExecPort for DescribeOnlyPort {
+        async fn describe_as(
+            &self,
+            _ws: Uuid,
+            _database_id: Uuid,
+            _principal: UserId,
+            _sql: &str,
+        ) -> std::result::Result<Vec<egret_core::ColumnMeta>, Error> {
+            Ok(vec![
+                egret_core::ColumnMeta {
+                    name: "a".into(),
+                    ty: "bigint".into(),
+                },
+                egret_core::ColumnMeta {
+                    name: "b".into(),
+                    ty: "varchar".into(),
+                },
+            ])
+        }
+
+        async fn execute_as(
+            &self,
+            _ws: Uuid,
+            _database_id: Uuid,
+            _principal: UserId,
+            _sql: &str,
+            _limits: egret_query_api::Limits,
+        ) -> std::result::Result<egret_core::TabularResult, Error> {
+            unreachable!("publish must not execute a statement to probe a transform")
+        }
+    }
+
+    /// A draft carrying `output`, with one statement and no parameters.
+    fn draft_with(output: OutputSpec, limits: LimitsSpec) -> DataApiEndpointDto {
+        DataApiEndpointDto {
+            id: Uuid::new_v4(),
+            folder_id: None,
+            name: "probe".into(),
+            description: String::new(),
+            path: "probe".into(),
+            method: "GET".into(),
+            database_id: Uuid::new_v4(),
+            statements: vec![StatementSpec {
+                name: "rows".into(),
+                sql: "SELECT 1 AS a, 'x' AS b FROM t".into(),
+            }],
+            params: vec![],
+            output,
+            cache: cache(CacheScope::PerPrincipal),
+            limits,
+            rate_limit: RateLimitSpec {
+                per_key_qps: 0,
+                burst: 0,
+                per_endpoint_qps: 0,
+            },
+            source_kind: "manual".into(),
+            source_ref: None,
+            live_version_id: None,
+            state: "draft".into(),
+            created_by: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            deleted_at: None,
+        }
+    }
+
+    /// **Proves the probe is reachable from the real publish path, not only
+    /// callable in isolation** — the Task 4 test one function along, for the
+    /// check that costs an evaluation rather than a comparison.
+    ///
+    /// `validate` is what `POST …/validate` and `EndpointStore::publish` both go
+    /// through (via `validated_draft`), and it is where the described columns
+    /// exist, so it is the only place this check can be wired. Deleting the
+    /// `probe_transform` call at the end of `validate` must turn this test
+    /// green-with-a-published-endpoint — that is the mutation, and a unit test
+    /// on `probe_transform` alone cannot see it.
+    #[tokio::test]
+    async fn the_probe_runs_on_the_path_validate_and_publish_share() {
+        let draft = draft_with(
+            transformed_output("def transform(params, statements):\n  return {\"wrong\": 1}"),
+            probe_limits(10_000),
+        );
+        let err = validate(
+            &DescribeOnlyPort,
+            Uuid::new_v4(),
+            UserId::new(),
+            &draft,
+            false,
+            false,
+        )
+        .await
+        .expect_err("the script declares `total` and returns `wrong`");
+        let message = err.to_string();
+        assert!(
+            message.contains("total") && message.contains(SINGLE_ROW_PROBE),
+            "the publish path must carry the probe's own refusal: {message}"
+        );
+    }
+
+    /// The same path, with a script that conforms: it publishes, and the frozen
+    /// snapshot is unchanged by the probe.
+    #[tokio::test]
+    async fn a_conforming_script_validates_and_freezes_the_described_columns() {
+        let draft = draft_with(
+            transformed_output(
+                "def transform(params, statements):\n  \
+                 return {\"total\": len(statements[\"rows\"])}",
+            ),
+            probe_limits(10_000),
+        );
+        let frozen = validate(
+            &DescribeOnlyPort,
+            Uuid::new_v4(),
+            UserId::new(),
+            &draft,
+            false,
+            false,
+        )
+        .await
+        .expect("a conforming transform publishes");
+        assert_eq!(frozen.len(), 1);
+        assert_eq!(
+            frozen[0]
+                .columns
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b"],
+            "the probe must not change what publish freezes"
         );
     }
 }

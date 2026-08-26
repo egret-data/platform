@@ -287,7 +287,14 @@ const ENTRY_POINT_ARITY: usize = 2;
 /// holds its whole input and its whole output in memory inside the request path,
 /// so an endpoint that wants a million rows should not also want a script over
 /// them. Publish (Task 5) is where an author should learn this, not serving.
-const MAX_TRANSFORM_OUTPUT_BYTES: usize = 1 << 20;
+///
+/// `pub(crate)` since Task 5: [`crate::lifecycle::probe_transform`] projects a
+/// probe's measured per-row growth to the endpoint's own `limits.max_rows` and
+/// refuses a publish that cannot fit under this number, so the author meets it
+/// while they can still change something. See
+/// [`crate::lifecycle::ValidationError::TransformOutputExceedsRowLimit`] for
+/// what that projection can and cannot prove.
+pub(crate) const MAX_TRANSFORM_OUTPUT_BYTES: usize = 1 << 20;
 
 /// Ceiling on how deeply JSON may nest, **in both directions**.
 ///
@@ -619,7 +626,6 @@ struct TransformCall<'a> {
 /// granularity, so a script whose every tick is expensive overruns it — measured
 /// at 28.8 s against a 2 s deadline. A request deadline belongs in the request
 /// path; serving must not read this function as one.
-#[allow(dead_code)]
 pub(crate) fn run_transform(
     spec: &TransformSpec,
     params: &BTreeMap<String, serde_json::Value>,
@@ -630,6 +636,112 @@ pub(crate) fn run_transform(
         Budgets::default(),
         Some(TransformCall { params, statements }),
     )
+}
+
+/// Does `value` satisfy the endpoint's declared `returns`?
+///
+/// **One rule, two callers.** Publish runs it against synthetic probe rows
+/// ([`crate::lifecycle::probe_transform`]); serving runs it against the real
+/// response before that response reaches a caller (Task 6). It lives here, next
+/// to the single evaluator, for the same reason `eval_probe` does: a second
+/// implementation of "does this match `returns`" could accept at publish what
+/// serving refuses, and the endpoint would then publish green and 500 in
+/// production — the exact failure the declaration exists to prevent.
+///
+/// # What is checked, and what deliberately is not
+///
+/// * the value is a JSON **object** — `returns` is a list of named fields, and
+///   a list or a scalar has no field to match one;
+/// * every `required` field is present — M1's flag, unchanged: `required` means
+///   "present in every permutation", so a `required: false` field may be
+///   absent;
+/// * no field is present that `returns` does not declare — an undeclared field
+///   is a response the published contract (and the generated OpenAPI document
+///   built from `returns`) does not describe.
+///
+/// **Types are not checked.** `ColumnSpec.ty` is whatever the engine called the
+/// column — `bigint`, `varchar(10)`, `timestamp(3)` — and a Starlark value has
+/// no engine type to compare it against. `openapi_gen::json_type` maps such a
+/// string onto one of four JSON types *conservatively*, mapping everything it
+/// does not recognise to `string`; enforcing that mapping here would refuse a
+/// script returning a number for a `decimal` column (JSON-typed `number`, but
+/// the engine spelling is not in the list) while accepting anything at all for
+/// the many types that fall through to `string`. That is a rule that refuses
+/// honest scripts and passes dishonest ones, so this checks the question it can
+/// answer exactly — which fields are there — and leaves the type question to
+/// the author's own declaration.
+///
+/// The detail is a message an author reads, and it names **every** problem
+/// rather than the first: fixing a missing field only to be told about an
+/// undeclared one is two publish attempts for one edit.
+pub(crate) fn check_returns(
+    value: &serde_json::Value,
+    returns: &[egret_dataapi_api::ColumnSpec],
+) -> Result<(), String> {
+    let serde_json::Value::Object(fields) = value else {
+        return Err(format!(
+            "the transform returned {}, but `returns` declares named fields, which only a \
+             JSON object has",
+            json_kind(value)
+        ));
+    };
+
+    let mut problems: Vec<String> = Vec::new();
+
+    let missing: Vec<&str> = returns
+        .iter()
+        .filter(|c| c.required && !fields.contains_key(&c.name))
+        .map(|c| c.name.as_str())
+        .collect();
+    if !missing.is_empty() {
+        problems.push(format!(
+            "it does not return the declared field(s) {}",
+            quoted_list(&missing)
+        ));
+    }
+
+    // Sorted, so the message does not depend on `serde_json::Map`'s ordering —
+    // which is BTree today and insertion-ordered under `preserve_order`, i.e. a
+    // feature flag away from making this text depend on the script's key order.
+    let mut undeclared: Vec<&str> = fields
+        .keys()
+        .filter(|k| !returns.iter().any(|c| &c.name == *k))
+        .map(String::as_str)
+        .collect();
+    undeclared.sort_unstable();
+    if !undeclared.is_empty() {
+        problems.push(format!(
+            "it returns the undeclared field(s) {}",
+            quoted_list(&undeclared)
+        ));
+    }
+
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems.join("; and "))
+    }
+}
+
+/// What a JSON value is, in the words an author's error message uses.
+fn json_kind(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "`None`",
+        serde_json::Value::Bool(_) => "a boolean",
+        serde_json::Value::Number(_) => "a number",
+        serde_json::Value::String(_) => "a string",
+        serde_json::Value::Array(_) => "a list",
+        serde_json::Value::Object(_) => "an object",
+    }
+}
+
+/// `` `a`, `b` `` — names an author can paste back into their script.
+fn quoted_list(names: &[&str]) -> String {
+    names
+        .iter()
+        .map(|n| format!("`{n}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// A script source that makes [`eval_inner`] panic from *inside* the caught
@@ -1322,6 +1434,40 @@ fn check_output_shape(root: Value<'_>, deadline: Instant) -> Result<(), Transfor
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `check_returns` over the shapes that are not an object at all.
+    ///
+    /// The rule has two callers — publish's probe and, from Task 6, serving —
+    /// so it is pinned here rather than only through whichever of them happens
+    /// to exercise it. The message must name what DID come back: "does not
+    /// match `returns`" over a script that returned a list sends an author
+    /// looking for a missing field.
+    #[test]
+    fn only_a_json_object_can_satisfy_returns() {
+        let declared = vec![egret_dataapi_api::ColumnSpec {
+            name: "total".into(),
+            ty: "bigint".into(),
+            required: true,
+        }];
+        for (value, expected) in [
+            (serde_json::json!([]), "a list"),
+            (serde_json::json!(1), "a number"),
+            (serde_json::json!("total"), "a string"),
+            (serde_json::json!(true), "a boolean"),
+            (serde_json::Value::Null, "`None`"),
+        ] {
+            let detail =
+                check_returns(&value, &declared).expect_err("only an object has named fields");
+            assert!(
+                detail.contains(expected),
+                "the refusal must name what came back ({expected}): {detail}"
+            );
+        }
+        assert_eq!(
+            check_returns(&serde_json::json!({ "total": 1 }), &declared),
+            Ok(())
+        );
+    }
 
     /// Build a script that recurses exactly `depth` times and then returns.
     fn recursion_probe(depth: usize) -> String {

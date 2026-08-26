@@ -185,7 +185,7 @@ use crate::try_it::TrialActor;
 /// in memory. Clamping is the honest reading of spec §7's "the serving path must
 /// sanity-check `limits.max_rows` and `limits.timeout_seconds` before acting on
 /// them".
-const MAX_ROWS_CEILING: u32 = 1_000_000;
+pub(crate) const MAX_ROWS_CEILING: u32 = 1_000_000;
 
 /// Upper bound applied to a snapshot's `limits.timeout_seconds`. Same reasoning
 /// as [`MAX_ROWS_CEILING`]; a 0 would make every call time out instantly and an

@@ -63,7 +63,7 @@ pub enum OpenApiGenError {
 /// not agree. Anything unrecognised becomes `string` and keeps its original
 /// spelling in `x-egret-engine-type`: a confident wrong mapping sends a client
 /// to parse a number that is not one, while `string` is merely imprecise.
-fn json_type(engine_ty: &str) -> &'static str {
+pub(crate) fn json_type(engine_ty: &str) -> &'static str {
     let t = engine_ty.trim().to_ascii_lowercase();
     let head = t.split(['(', '<']).next().unwrap_or("").trim();
     match head {

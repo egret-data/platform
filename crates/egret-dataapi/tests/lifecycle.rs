@@ -1026,6 +1026,41 @@ async fn an_sql_edit_during_describe_is_a_conflict() {
     assert!(f.versions(ep).await.is_empty());
 }
 
+/// **`limits` is covered too, and it is the one field that is not there for the
+/// columns' sake.**
+///
+/// The resolved `columns` do not depend on `limits` at all — but
+/// `lifecycle::probe_transform` does: it projects a transform's measured
+/// per-row output growth against `limits.max_rows` and refuses a publish that
+/// cannot fit under the 1 MiB output cap. That probe runs BEFORE this
+/// transaction, and the in-transaction re-validation deliberately does not
+/// repeat it (two more Starlark evaluations inside a locked row is what Task 4
+/// removed). So without `limits` in the identity check, an author could
+/// validate a pass-through transform at a small `max_rows` and have a PATCH
+/// land a million while the describes were in flight — freezing a snapshot
+/// whose own numbers say every full-sized call must fail.
+#[tokio::test]
+async fn a_limits_edit_during_describe_is_a_conflict() {
+    let f = skip_without_db!();
+    let ep = f
+        .create_endpoint("toctou3", "toctou3", "SELECT 1 AS n")
+        .await;
+    f.port.patch_during_next_describe(
+        &f.db,
+        "UPDATE dataapi.endpoints SET limits = $2 WHERE id = $1",
+        ep,
+        serde_json::json!({ "max_rows": 1_000_000, "timeout_seconds": 30 }),
+    );
+
+    let (status, body) = f.publish_raw(ep).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "a limits edit mid-publish must not be frozen behind a probe that never saw it: {body}"
+    );
+    assert!(f.versions(ep).await.is_empty());
+}
+
 /// `query.databases.delegated` is mutable and lives OUTSIDE the snapshot, so a
 /// legitimately published `scope = shared` version becomes a cross-principal
 /// leak the moment its connection is flipped to delegated — with no
