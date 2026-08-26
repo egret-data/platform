@@ -285,8 +285,25 @@ fn check_constraints_runs_before_check_defaults() {
     p.minimum = Some("100".into());
     p.maximum = Some("10".into());
     p.default = Some("50".into());
-    let err = validate_definition("SELECT {{ n }}", std::slice::from_ref(&p), ParamRules::Publish)
-        .expect_err("inverted bounds");
+    // `validate_definition`'s real signature is
+    //   (sql, params, cache: &CacheSpec, delegated: bool, impersonate: bool)
+    // — copy the cache argument from the neighbouring test
+    // `validate_definition_runs_the_statement_check_first` (lifecycle.rs:4261),
+    // which is the precedent for asserting WHICH check fires first.
+    // `validate_definition`'s real signature is
+    //   (sql, params, cache: &CacheSpec, delegated: bool, impersonate: bool)
+    // `CacheSpec` does NOT derive `Default`. The test module already has a
+    // helper — `fn cache(scope: CacheScope) -> CacheSpec` at lifecycle.rs:3527 —
+    // and `validate_definition_runs_the_statement_check_first` (lifecycle.rs:4261)
+    // is the precedent for asserting WHICH check fires first. Follow both.
+    let err = validate_definition(
+        "SELECT {{ n }}",
+        std::slice::from_ref(&p),
+        &cache(CacheScope::PerPrincipal),
+        false,
+        false,
+    )
+    .expect_err("inverted bounds");
     let msg = err.to_string();
     assert!(
         !msg.contains("default"),
