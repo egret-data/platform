@@ -96,11 +96,24 @@ fn json_type(engine_ty: &str) -> &'static str {
 /// spelling is not a different number, only a different way of writing the
 /// same one.
 ///
+/// **What keeps this LOSSLESS is a cap at publish, not anything here.**
+/// serde_json without `arbitrary_precision` puts any magnitude past `u64`
+/// through an `f64`, which rounds — a 40-digit `minimum` reaches the document
+/// as a visibly different, HIGHER number — and past `f64`'s range the keyword
+/// cannot be represented at all. Neither is fixable in this function: it is
+/// handed text and asked for a JSON number. So
+/// [`crate::lifecycle::MAX_BOUND_DIGITS`] refuses such a bound at publish
+/// instead, where the author can still change it. Every bound that reaches
+/// here through `check_constraints` is therefore narrow enough to state
+/// exactly, which `openapi_gen`'s
+/// `every_bound_check_constraints_accepts_is_stated_faithfully` pins as a
+/// seam rather than leaving to either side to assume.
+///
 /// Still returns `None` for text `is_plain_decimal` never accepted in the
-/// first place (a pre-`check_constraints` snapshot), and for a magnitude
-/// too large for `serde_json::Number` to represent (this crate does not
-/// enable serde_json's `arbitrary_precision` feature) — omitting the
-/// keyword rather than emitting a lie in either case.
+/// first place, and for a magnitude `serde_json::Number` cannot represent —
+/// both unreachable for a spec `check_constraints` has passed, but this
+/// function is also reachable from a snapshot written before those checks
+/// existed, and omitting the keyword beats emitting a lie.
 fn json_number(text: &str) -> Option<serde_json::Number> {
     if !crate::serving::params::is_plain_decimal(text) {
         return None;
@@ -783,6 +796,9 @@ mod tests {
             s["minimum"].is_number(),
             "minimum must be a JSON number: {s}"
         );
+        // And the RIGHT number. `is_number()` alone holds for any parse at
+        // all, including one that lost the fraction.
+        assert_eq!(s["minimum"], json!(0.5), "{s}");
     }
 
     #[test]
@@ -819,21 +835,32 @@ mod tests {
         let d = param_description(&p);
         assert!(d.contains("2020-01-01"), "{d}");
         assert!(d.contains("2030-12-31"), "{d}");
+        // `param_schema` writes no `description` key for ANY input, so
+        // asserting its absence is green whatever the bounds do. Assert what
+        // can actually fail instead: neither bound may appear ANYWHERE in the
+        // schema, under any key a future edit might reach for.
+        let schema = param_schema(&p).to_string();
         assert!(
-            param_schema(&p).get("description").is_none(),
-            "the bounds must not also be duplicated into the schema"
+            !schema.contains("2020-01-01") && !schema.contains("2030-12-31"),
+            "the bounds must not also be duplicated into the schema: {schema}"
         );
     }
 
+    /// Both types, because a `String` cannot carry `minimum`/`maximum` at all
+    /// (`check_constraints` refuses the combination), so on a string param
+    /// that half of the assertion could never fail however `param_schema`
+    /// changed. The number param is the one that can.
     #[test]
     fn an_unconstrained_parameter_gains_no_keys() {
-        let p = string_param("s");
-        let s = param_schema(&p);
-        for k in ["minimum", "maximum", "minLength", "maxLength", "pattern"] {
-            assert!(
-                s.get(k).is_none(),
-                "unconstrained parameter grew `{k}`: {s}"
-            );
+        for p in [string_param("s"), number_param("n")] {
+            let s = param_schema(&p);
+            for k in ["minimum", "maximum", "minLength", "maxLength", "pattern"] {
+                assert!(
+                    s.get(k).is_none(),
+                    "unconstrained `{}` parameter grew `{k}`: {s}",
+                    p.name
+                );
+            }
         }
     }
 
@@ -859,6 +886,163 @@ mod tests {
         q.minimum = Some("01.5".into());
         let s = param_schema(&q);
         assert_eq!(s["minimum"], json!(1.5), "{s}");
+    }
+
+    /// A `serde_json::Number` written out as plain `-?digits[.digits]`, with
+    /// any exponent expanded — WITHOUT going through a float.
+    ///
+    /// serde_json prints a small-magnitude float in exponent form (`1e-14`),
+    /// which `compare_decimal_text` has no grammar for. Reading the number
+    /// back as an `f64` to compare would defeat the point of the test, which
+    /// is to check that no float rounding happened; so the printed digits are
+    /// shifted as text instead.
+    fn plain_decimal_of(n: &serde_json::Number) -> String {
+        let printed = n.to_string();
+        let (mantissa, exponent) = match printed.split_once(['e', 'E']) {
+            Some((m, e)) => (m, e.parse::<i32>().expect("serde_json printed an exponent")),
+            None => (printed.as_str(), 0),
+        };
+        let (sign, body) = mantissa
+            .strip_prefix('-')
+            .map_or(("", mantissa), |b| ("-", b));
+        let (int, frac) = body.split_once('.').map_or((body, ""), |(i, f)| (i, f));
+        let mut digits: Vec<u8> = int.bytes().chain(frac.bytes()).collect();
+        // Where the decimal point sits, counted from the left of `digits`.
+        let mut point = int.len() as i32 + exponent;
+        while point < 1 {
+            digits.insert(0, b'0');
+            point += 1;
+        }
+        while point as usize > digits.len() {
+            digits.push(b'0');
+        }
+        let (i, f) = digits.split_at(point as usize);
+        let int = String::from_utf8(i.to_vec()).expect("digits");
+        let frac = String::from_utf8(f.to_vec()).expect("digits");
+        if frac.is_empty() {
+            format!("{sign}{int}")
+        } else {
+            format!("{sign}{int}.{frac}")
+        }
+    }
+
+    /// **The seam.** Every other test here pins ONE hand-written bound, which
+    /// is why a bound that `check_constraints` accepted and `param_schema`
+    /// then ROUNDED survived a task review: no test asked the two halves to
+    /// agree, only that each behaved as its own author expected.
+    ///
+    /// This one asks, as one total statement over both halves: for every
+    /// bound, publish either refuses it, or the document states that same
+    /// number — never a rounded one, and never nothing. Both outcomes are
+    /// pinned per bound, so neither "accept everything and round" nor "refuse
+    /// everything" passes.
+    #[test]
+    fn every_bound_check_constraints_accepts_is_stated_faithfully() {
+        // Ordinary bounds, the leading-zero spellings `is_plain_decimal`
+        // admits, both sides of zero, the widest bounds the cap allows (as an
+        // integer, a fraction and a mixed spelling), one small enough that
+        // serde_json prints it in exponent form — and, on the far side of the
+        // cap, one digit past it in each spelling plus the measured 40-digit
+        // case that made this test necessary.
+        // Past `f64`'s range entirely — built rather than typed, because 401
+        // characters in a table is unreadable.
+        let past_f64_range = format!("1{}", "0".repeat(400));
+        let bounds: [(&str, bool); 22] = [
+            ("0", true),
+            ("-0", true),
+            ("1", true),
+            ("-1", true),
+            ("100", true),
+            ("0.5", true),
+            ("-0.5", true),
+            ("1.50", true),
+            ("007", true),
+            ("00", true),
+            ("01.5", true),
+            // The cap, exactly.
+            ("999999999999999", true),
+            ("-999999999999999", true),
+            ("0.99999999999999", true),
+            ("123456789012.345", true),
+            ("0.00000000000001", true),
+            // One digit past it.
+            ("1000000000000000", false),
+            ("-1000000000000000", false),
+            ("0.000000000000001", false),
+            ("123456789012.3456", false),
+            // Measured: through an `f64` this reached the document as the
+            // double nearest to it, exactly
+            // 1234567890123456846996462118072609669120 (serde_json prints its
+            // shortest form, 1234567890123456700000000000000000000000) — a
+            // HIGHER minimum than `coerce` enforces, so a generated client
+            // would refuse values the server accepts.
+            ("1234567890123456789012345678901234567890", false),
+            // Past `f64`'s range entirely, where the keyword did not round —
+            // it disappeared, leaving a document describing a wider endpoint
+            // than exists.
+            (past_f64_range.as_str(), false),
+        ];
+
+        for (text, publishes) in bounds {
+            for constraint in ["minimum", "maximum"] {
+                let mut p = number_param("n");
+                if constraint == "minimum" {
+                    p.minimum = Some(text.into());
+                } else {
+                    p.maximum = Some(text.into());
+                }
+
+                let accepted = crate::lifecycle::check_constraints(std::slice::from_ref(&p));
+                assert_eq!(
+                    accepted.is_ok(),
+                    publishes,
+                    "`{constraint}: {text}` — publish disagreed with the table: {accepted:?}"
+                );
+                if !publishes {
+                    // Refused, so nothing is documented and there is nothing
+                    // to be faithful about.
+                    continue;
+                }
+
+                let schema = param_schema(&p);
+                let stated = schema
+                    .get(constraint)
+                    .unwrap_or_else(|| panic!("`{constraint}: {text}` vanished from {schema}"))
+                    .as_number()
+                    .unwrap_or_else(|| panic!("`{constraint}: {text}` is not a number: {schema}"));
+
+                let round_tripped = plain_decimal_of(stated);
+                assert_eq!(
+                    crate::serving::params::compare_decimal_text(&round_tripped, text),
+                    std::cmp::Ordering::Equal,
+                    "`{constraint}: {text}` reached the document as {round_tripped} — the \
+                     contract states a bound the author never wrote"
+                );
+            }
+        }
+    }
+
+    /// The refusal the seam test counts on, read as PROSE rather than as a
+    /// boolean: an author who cannot publish has to be able to tell which
+    /// bound to change and what to change it to.
+    #[test]
+    fn a_bound_too_wide_for_the_document_is_refused_by_name() {
+        let too_wide = "1234567890123456789012345678901234567890";
+        let mut p = number_param("n");
+        p.minimum = Some(too_wide.into());
+        let err = crate::lifecycle::check_constraints(std::slice::from_ref(&p))
+            .expect_err("a bound the document cannot state must not publish");
+        let msg = err.to_string();
+        assert!(msg.contains("`minimum`"), "must name the constraint: {msg}");
+        assert!(msg.contains("`n`"), "must name the parameter: {msg}");
+        assert!(
+            msg.contains("Round the bound"),
+            "must tell the author what to do: {msg}"
+        );
+        assert!(
+            msg.contains(&crate::lifecycle::MAX_BOUND_DIGITS.to_string()),
+            "must say what the limit is: {msg}"
+        );
     }
 
     /// `data_schema` is private to this module and `tests/openapi_gen.rs` only

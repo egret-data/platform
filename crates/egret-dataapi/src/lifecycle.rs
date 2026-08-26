@@ -420,6 +420,45 @@ pub enum ValidationError {
         /// number"`, `"a valid date"`, `"a valid timestamp"`.
         expected: &'static str,
     },
+    /// A `minimum`/`maximum` written with more digits than the generated
+    /// contract can state exactly — refused at publish, where the author can
+    /// still change it, rather than published as a bound nobody wrote.
+    ///
+    /// # Why a digit cap exists at all
+    ///
+    /// The bound is stored and compared as TEXT, so egret itself enforces it
+    /// exactly at any width. The generated OpenAPI document cannot: JSON
+    /// Schema's `minimum`/`maximum` take a JSON NUMBER, and this crate does
+    /// not enable serde_json's `arbitrary_precision`, so a magnitude past
+    /// `u64` goes through an `f64` on the way into the document. Measured:
+    /// `minimum: "1234567890123456789012345678901234567890"` reaches the
+    /// document as the nearest double, exactly
+    /// `1234567890123456846996462118072609669120` — a HIGHER minimum than
+    /// `coerce` enforces, so a generated client refuses values the server
+    /// accepts. The same rounding on `maximum` goes the other way
+    /// and makes the published contract more permissive than the code. Past
+    /// `f64`'s range the keyword cannot be represented at all and vanishes,
+    /// leaving a document that describes a wider endpoint than exists.
+    ///
+    /// Refusing here is the cheap correct fix: the document stays lossless by
+    /// construction, and no runtime comparison is touched — in particular
+    /// [`crate::serving::params::is_plain_decimal`] is unchanged, so this
+    /// changes nothing about what a CALLER may send.
+    #[error(
+        "parameter `{param}` declares a `{constraint}` of `{value}`, which is {digits} digits \
+         wide; at most {max} are accepted. The generated OpenAPI document states this bound as \
+         a JSON number, and past that width a JSON number cannot hold it exactly — the \
+         published contract would name a bound you never wrote, and a generated client would \
+         disagree with the endpoint about which values are legal. Round the bound to {max} \
+         digits or fewer"
+    )]
+    ConstraintBoundTooManyDigits {
+        param: String,
+        constraint: &'static str,
+        value: String,
+        digits: usize,
+        max: usize,
+    },
     /// A `pattern` that does not compile as a regex at all — the author's typo,
     /// not the caller's problem, so it is refused at publish rather than on
     /// whichever request happens to hit `coerce` first.
@@ -1261,6 +1300,49 @@ pub fn check_param_locations(params: &[ParamSpec]) -> std::result::Result<(), Va
 /// cap is here rather than at serve time so an author learns at publish.
 pub const MAX_PATTERN_PROGRAM_BYTES: usize = 64 * 1024;
 
+/// How many digits a `minimum`/`maximum` bound may carry.
+///
+/// **Why 15, and why a cap at all.** The bound is stored and compared as text,
+/// so egret enforces it exactly at any width; the generated OpenAPI document
+/// cannot, because JSON Schema's `minimum`/`maximum` take a JSON NUMBER and
+/// this crate does not enable serde_json's `arbitrary_precision`. A magnitude
+/// past `u64` therefore lands in the document via an `f64`, which rounds — and
+/// past `f64`'s range the keyword cannot be represented at all and disappears.
+/// Either way the published contract stops matching the code, which is the one
+/// thing a generated contract must never do (spec §4).
+///
+/// 15 is `f64`'s guaranteed decimal width (`DBL_DIG`): every decimal of at most
+/// 15 significant digits survives the round trip through an `f64` unchanged, and
+/// every integer of at most 15 digits is below 2^53 so it is exact as an integer
+/// too. At 16 digits neither guarantee holds. A bound wider than that is not a
+/// bound an endpoint parameter needs, so it is refused at publish — where the
+/// author can still act — rather than quietly restated as a different number.
+///
+/// Not enforced through [`crate::serving::params::is_plain_decimal`], and
+/// deliberately: that function gates a CALLER's value as well as an author's
+/// bound, so widening or narrowing it would change what callers may send. This
+/// cap applies to the author's bound only.
+pub const MAX_BOUND_DIGITS: usize = 15;
+
+/// How many digits a bound is written with, ignoring the sign and the leading
+/// zeros `compare_decimal_text` already ignores.
+///
+/// `"007"` is one digit, not three: it compares as `7` at both publish and
+/// serve time, and reaches the document as `7`. The integer part counts as at
+/// least one digit (`"0.5"` is two), which is what makes the count agree with
+/// the width the document actually has to hold.
+///
+/// Expects text that has already passed
+/// [`crate::serving::params::is_plain_decimal`] — every remaining byte is a
+/// digit or the single `.`.
+fn bound_digit_width(text: &str) -> usize {
+    let body = text.strip_prefix('-').unwrap_or(text);
+    let (int, frac) = body.split_once('.').map_or((body, ""), |(i, f)| (i, f));
+    let int = int.trim_start_matches('0');
+    let int_digits = if int.is_empty() { 1 } else { int.len() };
+    int_digits + frac.len()
+}
+
 /// Compile a `pattern` the way `coerce` will, so publish and serving cannot
 /// disagree about which patterns exist.
 ///
@@ -1360,6 +1442,20 @@ pub fn check_constraints(params: &[ParamSpec]) -> std::result::Result<(), Valida
                         constraint,
                         value: text.clone(),
                         expected: "a valid decimal number",
+                    });
+                }
+                // And it must be narrow enough for the generated contract to
+                // state it exactly — see `MAX_BOUND_DIGITS`. Checked here, at
+                // publish, rather than left for `openapi_gen` to round or drop
+                // silently at document-build time, when the author is gone.
+                let digits = bound_digit_width(text);
+                if digits > MAX_BOUND_DIGITS {
+                    return Err(ValidationError::ConstraintBoundTooManyDigits {
+                        param: p.name.clone(),
+                        constraint,
+                        value: text.clone(),
+                        digits,
+                        max: MAX_BOUND_DIGITS,
                     });
                 }
             }
@@ -4595,6 +4691,33 @@ mod tests {
         q.minimum = Some("1".into());
         q.maximum = Some("zzz".into());
         assert!(check_constraints(std::slice::from_ref(&q)).is_err());
+    }
+
+    /// The cap counts the digits the DOCUMENT has to hold, not the bytes the
+    /// author typed: `compare_decimal_text` already ignores leading zeros and
+    /// `json_number` strips them, so a padded `"0…01"` is one digit wide
+    /// however long the string is. Counting bytes instead would refuse a bound
+    /// that publishes perfectly.
+    #[test]
+    fn the_digit_cap_counts_significant_digits_not_bytes() {
+        let mut p = param("n", ParamType::Number);
+        p.minimum = Some(format!("{}1", "0".repeat(40)));
+        assert!(
+            check_constraints(std::slice::from_ref(&p)).is_ok(),
+            "a zero-padded `1` is one digit wide, not 41"
+        );
+
+        // And the message says how wide the bound actually was, so an author
+        // who has to shorten one knows by how much.
+        let mut q = param("n", ParamType::Number);
+        q.maximum = Some("1".repeat(MAX_BOUND_DIGITS + 1));
+        let err = check_constraints(std::slice::from_ref(&q)).expect_err("one digit past the cap");
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&format!("{} digits", MAX_BOUND_DIGITS + 1)),
+            "must say how wide the bound is: {msg}"
+        );
+        assert!(msg.contains("`maximum`"), "must name the constraint: {msg}");
     }
 
     #[test]
