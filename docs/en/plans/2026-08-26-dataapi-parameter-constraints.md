@@ -267,13 +267,19 @@ fn a_pattern_that_does_not_compile_is_the_authors_400_not_the_callers_500() {
 
 #[test]
 fn a_pattern_that_compiles_too_large_is_refused() {
-    // `regex`'s own default cap is 10 MB of compiled program. We set a much
-    // smaller one, so this must be refused HERE rather than compiled per request.
+    // The pattern must discriminate OUR 64 KiB cap from `regex`'s own 10 MB
+    // default, or the test passes with `size_limit` deleted and proves nothing.
+    // Measured against regex 1.13.1: `a{1000}{1000}` is `CompiledTooBig` at the
+    // DEFAULT limit already — useless here. `a{5000}` compiles fine by default
+    // and is too big at 64 KiB, which is exactly the discrimination wanted.
     let mut p = string_param("s");
-    p.pattern = Some("a{1000}{1000}".into());
+    p.pattern = Some("a{5000}".into());
     assert!(
-        check_constraints(std::slice::from_ref(&p)).is_err(),
-        "an oversized pattern must not reach the serving path"
+        matches!(
+            check_constraints(std::slice::from_ref(&p)),
+            Err(ValidationError::PatternTooLarge { .. })
+        ),
+        "an oversized pattern must be refused as TooLarge, not merely as some error"
     );
 }
 
@@ -296,8 +302,11 @@ fn check_constraints_runs_before_check_defaults() {
     // helper — `fn cache(scope: CacheScope) -> CacheSpec` at lifecycle.rs:3527 —
     // and `validate_definition_runs_the_statement_check_first` (lifecycle.rs:4261)
     // is the precedent for asserting WHICH check fires first. Follow both.
+    // NOT `"SELECT {{ n }}"` — that trips an unrelated `UncastParameterInProjection`
+    // check, so `expect_err` succeeds whether or not `check_constraints` ran and
+    // the test passes vacuously. Measured: this exact false pass happened once.
     let err = validate_definition(
-        "SELECT {{ n }}",
+        "SELECT CAST({{ n }} AS INTEGER) AS out",
         std::slice::from_ref(&p),
         &cache(CacheScope::PerPrincipal),
         false,
