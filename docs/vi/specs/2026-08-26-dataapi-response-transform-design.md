@@ -138,9 +138,21 @@ các câu lệnh chạy (M2, theo thứ tự, không chung transaction, không c
   giả thêm câu lệnh thứ hai là một cái bẫy.
 - **`meta.statements` vẫn mô tả SQL**, không mô tả đầu ra của transform. Hai sự thật khác
   nhau, giữ tách nhau: engine trả về gì, và endpoint hứa gì.
-- **`meta.row_count` trở nên vô nghĩa** với endpoint có transform, và phải **bỏ đi** chứ
-  không được đoán. M2 đã đổi ý nghĩa của trường đó một lần mà không đổi kiểu; làm lại lần
-  nữa một cách âm thầm là không chấp nhận được.
+- **`meta.row_count` là quyết định thật sự còn mở duy nhất ở đây.** Đã kiểm khi viết
+  spec này: nó được tính bởi `MetaContract::total_row_count()`, cộng dồn các câu lệnh.
+  Nên nó **nhất quán** với `meta.statements` — cả hai đều mô tả SQL — và nói "nó trở nên
+  vô nghĩa" là quá mạnh. Vấn đề thật là người tiêu thụ sẽ đọc `row_count` như thể nó mô
+  tả **`data`**, mà sau transform thì `data` có thể là một object đơn. Hai câu trả lời
+  đều biện hộ được:
+
+  - **Giữ lại**, và bắt hợp đồng sinh ra nói thẳng rằng nó đếm số hàng SQL đã tạo ra,
+    không phải hình dạng mà `data` mang.
+  - **Bỏ đi** với endpoint có transform, để không mời gọi cách đọc sai.
+
+  **Đề xuất: bỏ đi.** M2 đã đổi ý nghĩa trường đó mà không đổi kiểu — đo được là một rủi
+  ro với SQL vận hành và ngưỡng cảnh báo — và một trường *đúng về mặt kỹ thuật* nhưng
+  **luôn bị đọc sai** chính là cùng một mối nguy lần thứ hai. Chốt việc này lúc lên kế
+  hoạch, và dù chọn hướng nào cũng phải nói ra trong hợp đồng.
 - **Envelope không đụng tới.** Script tạo ra *giá trị* của `data`; `wrapped` và `bare`
   hành xử y như bây giờ.
 
