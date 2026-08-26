@@ -58,7 +58,8 @@ For **every** test in this plan: stub the thing it targets, **confirm the file B
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: the `starlark` dependency at a pinned version, and a `transform` module. Later tasks depend on the evaluator API you establish here — **record the exact method names and signatures in your report**, because this plan does not assume them.
+- Produces: the `starlark` dependency at a pinned version, a `transform` module, and a **minimal `TransformError`** carrying at least `Parse(String)`, `Runtime(String)` and `BudgetExceeded(&'static str)`. Task 3 elaborates that enum; it does not create it. (Caught in the pre-flight scan: this task's test signature uses `TransformError`, so a plan that first defined it in Task 3 would not compile here.)
+- Later tasks depend on the evaluator API you establish here — **record the exact method names and signatures in your report**, because this plan does not assume them.
 
 **About the API.** The spec records that `Evaluator` has `set_max_tick_count`, `set_max_heap_size`, `set_max_callstack_size` and `set_check_cancelled`, and that there is **no built-in timeout**. Those were measured during design, against whatever version was current then. **Verify each against the version you actually add**, and if any differs, report the real name rather than working around it silently.
 
@@ -113,11 +114,23 @@ fn a_script_cannot_reach_the_filesystem_or_the_clock() {
 
 #[test]
 fn an_infinite_loop_is_refused_rather_than_hanging() {
-    // No built-in timeout exists, so the tick budget IS the defence. A test
-    // that hangs here does not fail — it stalls the suite, which is why this
-    // one is written before anything depends on the evaluator.
-    let err = eval_probe("def f():\n  for i in range(1, 1000000000):\n    pass\nf()")
-        .expect_err("an unbounded loop must be refused");
+    // The tick budget IS the defence — starlark has no built-in timeout.
+    //
+    // THIS TEST MUST NOT BE ABLE TO HANG. Rust has no per-test timeout, so a
+    // future regression in the budget would stall the whole suite rather than
+    // fail one test, and a stalled suite does not look like a broken test.
+    // Run the evaluation on its own thread and join with a deadline, so the
+    // failure mode is a red test with a clear message.
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(eval_probe(
+            "def f():\n  for i in range(1, 1000000000):\n    pass\nf()",
+        ));
+    });
+    let outcome = rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("the tick budget did not stop an unbounded loop within 10s");
+    let err = outcome.expect_err("an unbounded loop must be refused");
     assert!(
         format!("{err:?}").to_lowercase().contains("tick")
             || format!("{err:?}").to_lowercase().contains("budget"),
@@ -151,13 +164,15 @@ Expected: both tests pass, clippy clean.
 
 - [ ] **Step 8: Prove the loop test bites**
 
-Remove the tick-budget line, **confirm the file builds**, and run `an_infinite_loop_is_refused_rather_than_hanging` **with a timeout**:
+Remove the tick-budget line, **confirm the file builds**, and run:
 
 ```bash
-timeout 30 cargo test -p egret-dataapi --lib an_infinite_loop_is_refused
+cargo test -p egret-dataapi --lib an_infinite_loop_is_refused
 ```
 
-Expected: it hangs and `timeout` kills it (exit 124). That is the mutation succeeding — the test cannot pass without the budget. Restore the line.
+Expected: it **FAILS** within ~10 seconds with `the tick budget did not stop an unbounded loop within 10s` — not a hang. The `recv_timeout` in the test is what converts the regression into a red test instead of a stalled suite. Restore the line and confirm it passes again.
+
+If it hangs anyway, the thread guard is not working and that is a finding, not something to work around with an outer `timeout`.
 
 - [ ] **Step 9: Commit**
 
