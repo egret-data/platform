@@ -1182,7 +1182,16 @@ fn a_default_of_the_wrong_type_still_reports_a_type_failure() {
     let mut p = date_param("d");
     p.default = Some("yesterday".into());
     let err = check_defaults(std::slice::from_ref(&p)).expect_err("not a date");
-    assert!(err.to_string().contains("type"), "{err}");
+    // MEASURED: `DefaultNotValidForType`'s message does NOT contain the
+    // substring "type" — the variant is named for the concept, the prose is
+    // not. `contains("type")` fails against the CORRECT implementation, which
+    // is the same wrong-instrument mistake as the earlier `!contains('n')`.
+    // Assert the variant, and assert the constraint wording is ABSENT.
+    assert!(matches!(err, ValidationError::DefaultNotValidForType(..)), "{err}");
+    assert!(
+        !err.to_string().contains("violates its own"),
+        "a type failure must not be reported as a constraint failure: {err}"
+    );
 }
 ```
 
