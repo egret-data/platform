@@ -43,7 +43,7 @@
 
 **Files:**
 - Modify: `crates/egret-dataapi-api/src/lib.rs:79-94` (the `ParamSpec` struct)
-- Modify: `crates/egret-dataapi-api/Cargo.toml`
+- Modify: `crates/egret-dataapi/Cargo.toml` (the `regex` dependency — **not** `egret-dataapi-api`, which never calls it)
 - Test: `crates/egret-dataapi-api/src/lib.rs` (in-crate `#[cfg(test)]` module)
 
 **Interfaces:**
@@ -151,11 +151,13 @@ In `crates/egret-dataapi-api/src/lib.rs`, inside `pub struct ParamSpec`, after `
     pub not_after: Option<String>,
 ```
 
-In `crates/egret-dataapi-api/Cargo.toml`, add under `[dependencies]`:
+Add `regex` under `[dependencies]` in **`crates/egret-dataapi/Cargo.toml`** — NOT in `egret-dataapi-api`:
 
 ```toml
 regex = { workspace = true }
 ```
+
+**Which crate, and why it matters.** The only consumer is `compile_pattern`, which Task 2 puts in `crates/egret-dataapi/src/lifecycle.rs`. `egret-dataapi-api` holds the data types and never calls `regex` at all — declaring it there would be a compile-time dependency the crate has no use for, and the real consumer would still need its own line.
 
 `regex` is **not** currently a workspace dependency — I checked. Add it to the root `Cargo.toml` under `[workspace.dependencies]` (it is already resolved at 1.13.1 in `Cargo.lock` as a transitive dependency, so this adds no new compilation):
 
