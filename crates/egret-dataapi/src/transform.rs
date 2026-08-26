@@ -53,7 +53,7 @@
 //! 4. **Serialising a value recurses, and nothing bounds its depth.** starlark
 //!    catches a *cycle*, but `for i in range(200000): x = [x]` costs no budget
 //!    this module has and overflows the native stack — an abort, which the
-//!    `catch_unwind` in [`eval_inner`] cannot contain. [`MAX_OUTPUT_DEPTH`] is
+//!    `catch_unwind` in [`eval_inner`] cannot contain. [`MAX_JSON_DEPTH`] is
 //!    the answer and [`check_output_shape`] is where it lives.
 //!
 //! # Where the transform itself is
@@ -80,9 +80,19 @@ use starlark::values::Value;
 /// not an instruction, a script doing enormous work per tick is barely charged:
 /// `s = s + s` repeated 31 times inside one loop ran for 3.2 seconds on ~31
 /// ticks. [`MAX_WALL_CLOCK`] is the bound denominated in time; this one is the
-/// *deterministic* backstop, and that is now its whole job — the same script
-/// gets the same verdict in preview, at publish and in serving, which a clock
-/// cannot promise.
+/// *deterministic* backstop, and that is now its whole job.
+///
+/// # The determinism is conditional, and the condition is the build
+///
+/// "The same script gets the same verdict in preview, at publish and in
+/// serving" holds only where this budget binds **before** the clock does, and
+/// measured that depends on optimisation: 20M ticks is 0.2-0.36 s optimised —
+/// inside [`MAX_WALL_CLOCK`], so ticks decide — and ~100 s unoptimised, where
+/// the deadline preempts and the verdict becomes a property of the machine.
+/// Same shape as the shadowing recorded under [`MAX_WALL_CLOCK`]. Shipped
+/// binaries are optimised, so the claim holds where it matters; a debug-build
+/// preview would not reproduce a serving refusal, and that is worth knowing
+/// before someone debugs one.
 ///
 /// # Measured, not chosen
 ///
@@ -154,8 +164,12 @@ const MAX_HEAP_BYTES: usize = 64 * 1024 * 1024;
 /// establishes the relationship by measurement rather than by quoting a number
 /// this crate cannot see.
 ///
-/// 24 frames is generous for a response reshape; PROVISIONAL like [`MAX_TICKS`],
-/// and Task 3 revisits it against a real transform.
+/// 24 frames is generous for a response reshape. **Still unmeasured, and
+/// deliberately so:** Task 3 was to settle this against a real transform and
+/// found no evidence to settle it with — not one script in the benchmark
+/// recursed at all, because a response reshape iterates rather than recurses.
+/// A number moved without evidence is not less provisional than one left alone,
+/// so it is left alone. The const-assert below is what keeps it honest.
 const MAX_CALLSTACK: usize = 24;
 
 /// Recursion depth used by the test that proves [`MAX_CALLSTACK`] is the limit
@@ -221,6 +235,24 @@ const _: () = assert!(
 /// deadline belongs in the request path. starlark's own documentation says the
 /// same: use OS-level limits in a subprocess if a hard bound is required.
 ///
+/// # It covers the whole call, not just the evaluation
+///
+/// The deadline is taken once in [`eval_inner`] and consulted from four places,
+/// because only one of them is starlark's:
+///
+/// | phase | what polls it |
+/// |---|---|
+/// | converting the input | [`poll_input_budgets`], every [`INPUT_POLL_ROWS`] rows |
+/// | evaluating the module and calling `transform` | starlark, every 1000 ticks |
+/// | walking the returned shape | [`check_output_shape`], every [`OUTPUT_POLL_STEPS`] steps |
+/// | serialising it | [`CappedSink`], every [`OUTPUT_POLL_STEPS`] writes |
+///
+/// The first, third and fourth are Rust code that earns **no ticks**, so without
+/// those polls a script could spend the whole budget in a phase nothing was
+/// watching — which is exactly what a million input rows did before
+/// [`poll_input_budgets`] existed (335 MB, unwatched). A script does not get a
+/// fresh deadline for its output.
+///
 /// # It shadows the heap refusal
 ///
 /// `run_infrequent_instr_checks` tests cancellation *first*, then the heap, then
@@ -257,7 +289,7 @@ const ENTRY_POINT_ARITY: usize = 2;
 /// them. Publish (Task 5) is where an author should learn this, not serving.
 const MAX_TRANSFORM_OUTPUT_BYTES: usize = 1 << 20;
 
-/// Ceiling on how deeply the returned value may nest.
+/// Ceiling on how deeply JSON may nest, **in both directions**.
 ///
 /// # Why this exists at all, and why it is not decoration
 ///
@@ -287,9 +319,39 @@ const MAX_TRANSFORM_OUTPUT_BYTES: usize = 1 << 20;
 /// worker threads run on a 2 MiB stack — smaller than the test thread that
 /// produced the abort above.
 ///
-/// 64 is far past any response shape a reshape produces — JSON APIs nest single
-/// digits — and far short of anything that threatens a stack.
-const MAX_OUTPUT_DEPTH: usize = 64;
+/// # Why 64, measured on the stack this actually runs on
+///
+/// The obvious number is 128 — `serde_json`'s `Deserializer` starts at
+/// `remaining_depth: 128`, so 128 is the deepest JSON that can reach this crate
+/// at all, and matching it would mean never refusing anything that parsed.
+/// **Measured, 128 aborts the process.** One `run_transform` per subprocess,
+/// exit codes read directly, unoptimised:
+///
+/// | thread stack | 64 | 96 | 104 | 128 | 300 |
+/// |---|---|---|---|---|---|
+/// | **2 MiB** (a tokio worker) | ok | ok | **SIGABRT** | **SIGABRT** | SIGABRT |
+/// | 8 MiB (a libtest thread) | ok | ok | ok | ok | **SIGABRT** |
+///
+/// About 20 KB of stack per level, and serving runs on the 2 MiB row. So the
+/// safe ceiling on the stack that matters is ~96, and 64 is that with a 1.5x
+/// margin — in the *fattest* build, which is the conservative direction.
+///
+/// # The cost, stated rather than buried
+///
+/// This constant is applied to the **input** in [`json_to_starlark`] as well as
+/// to the output in [`check_output_shape`], because a value that arrives has to
+/// be able to leave. The consequence is real: **engine JSON nested 65-128 deep
+/// is refused by an endpoint that has a transform, and served by one that does
+/// not.** That is a genuine narrowing, and it is the right way round — the
+/// alternative measured above is not "serve it", it is "abort the worker". The
+/// refusal is a clear `BudgetExceeded("input nesting depth")`, and a `jsonb`
+/// column 65 levels deep is the only thing that can reach it.
+///
+/// `transform_tests::our_depth_limit_survives_a_tokio_sized_stack` is the guard:
+/// raise this constant past what the stack can take and that test does not go
+/// red, it takes the suite out with SIGABRT — which is exactly the signal, since
+/// that is what production would do.
+const MAX_JSON_DEPTH: usize = 64;
 
 /// Every budget one evaluation runs under, in one value.
 ///
@@ -510,7 +572,7 @@ struct TransformCall<'a> {
 ///   that has to be rewritten when the author adds a second statement is a trap,
 ///   so the shape does not change with the count;
 /// * whatever it returns must be JSON, must serialise to at most
-///   [`MAX_TRANSFORM_OUTPUT_BYTES`], and must nest at most [`MAX_OUTPUT_DEPTH`]
+///   [`MAX_TRANSFORM_OUTPUT_BYTES`], and must nest at most [`MAX_JSON_DEPTH`]
 ///   deep.
 ///
 /// # What bounds it
@@ -522,15 +584,23 @@ struct TransformCall<'a> {
 /// `transform` together, because an author cannot be expected to care which half
 /// of their script was slow.
 ///
-/// Two seams where the budgets do not apply themselves, and what covers them:
+/// Three phases, only one of which starlark watches, and what covers the other
+/// two:
 ///
 /// * **converting `params` and `statements` into starlark values** happens in
 ///   Rust, consumes no ticks, and so trips nothing starlark checks. Measured, a
 ///   million rows peaked at 335 MB against a 64 MiB limit before anything
-///   noticed. [`poll_input_budgets`] is what covers it now.
-/// * **serialising the result** likewise. [`check_output_shape`] bounds its
-///   stack and its value count before a byte is written, and [`CappedSink`]
-///   bounds the bytes.
+///   noticed. [`poll_input_budgets`] covers it: the deadline and the heap, every
+///   [`INPUT_POLL_ROWS`] rows.
+/// * **evaluating** — starlark's own budgets, checked every 1000 ticks.
+/// * **walking and serialising the result** likewise earns no ticks.
+///   [`check_output_shape`] bounds the stack ([`MAX_JSON_DEPTH`]) and the
+///   expanded value count before a byte is written, [`CappedSink`] bounds the
+///   bytes, and **both poll the same deadline** every [`OUTPUT_POLL_STEPS`]
+///   steps. Without that last part the output path was outside every budget:
+///   `MAX_HEAP_BYTES` permits millions of nodes, so a walk over them is bounded
+///   but not quick, and a script would have got a fresh unbounded phase after
+///   its evaluation was cut off.
 ///
 /// And one that is genuinely not bounded, stated rather than implied: **this is
 /// not a latency guarantee.** [`MAX_WALL_CLOCK`] is checked at 1000-tick
@@ -706,7 +776,7 @@ fn eval_inner(
                 .eval_function(entry, &[params, statements], &[])
                 .map_err(classify)?;
 
-            serialise_output(returned)
+            serialise_output(returned, deadline)
         })
     }));
 
@@ -804,9 +874,58 @@ fn check_arity(entry: Value<'_>) -> Result<(), TransformError> {
 /// Rows, not bytes, because rows are what the loop counts and because the
 /// endpoint's own `limits.max_rows` is denominated the same way. The check is
 /// two loads and a compare, so the interval is set by how much overshoot is
-/// tolerable rather than by its cost: measured, a million ordinary rows cost
-/// ~335 MB, so 1024 rows bounds a batch at roughly a third of a megabyte.
+/// tolerable rather than by its cost.
+///
+/// **A batch is 1024 rows, not a fixed number of bytes, and the difference is
+/// large.** Measured: a million ordinary rows cost ~335 MB — 335 B/row, so a
+/// batch is ~343 KB. But `transform_tests::the_heap_budget_applies_to_the_input_and_not_only_to_the_script`
+/// deliberately uses 32 KiB rows, where the same 1024 rows is **32 MiB — half of
+/// [`MAX_HEAP_BYTES`]**. So the overshoot this bounds is `1024 x row width`, and
+/// a wide-row endpoint overshoots proportionally. Bytes would be the better
+/// unit; rows are what the loop has without measuring each row, and the poll is
+/// still the difference between 335 MB unwatched and one batch.
 const INPUT_POLL_ROWS: usize = 1024;
+
+/// How often the output path stops to check the clock, in walk steps or writes.
+///
+/// The output half of [`INPUT_POLL_ROWS`], and it exists for the same reason:
+/// everything after `eval_function` returns is Rust code that earns no ticks, so
+/// nothing starlark checks fires for any of it. Both [`check_output_shape`] and
+/// [`CappedSink`] poll on this counter.
+///
+/// 4096 rather than 1024 because a step here is far smaller than a row there —
+/// one node visit, or one `serde_json` token, which for a scalar is a single
+/// byte. At the measured ~1.1 µs per visit unoptimised, 4096 steps is ~4.5 ms of
+/// overshoot; reading `Instant::now()` per token instead would be a real cost on
+/// the ordinary path, which is the one that must stay cheap.
+const OUTPUT_POLL_STEPS: usize = 4096;
+
+/// Consult the deadline once every [`OUTPUT_POLL_STEPS`] steps, resetting the
+/// counter.
+///
+/// One function, because the output path polls from three places — the walk's
+/// outer loop, the walk's child loops, and [`CappedSink::write`] — and three
+/// hand-rolled counters is three chances to get the reset wrong.
+fn poll_output_deadline(
+    since_poll: &mut usize,
+    deadline: Instant,
+    refusal: &'static str,
+) -> Result<(), TransformError> {
+    if *since_poll < OUTPUT_POLL_STEPS {
+        return Ok(());
+    }
+    *since_poll = 0;
+    if Instant::now() >= deadline {
+        return Err(TransformError::BudgetExceeded(refusal));
+    }
+    Ok(())
+}
+
+/// The refusal [`check_output_shape`] reports when the deadline passes under it.
+const SHAPE_DEADLINE: &str = "wall-clock deadline, checking the shape of its output";
+
+/// The refusal [`CappedSink`] reports when the deadline passes under it.
+const SINK_DEADLINE: &str = "wall-clock deadline, serialising its output";
 
 /// The budgets that Rust-side input conversion can enforce on itself.
 ///
@@ -846,7 +965,7 @@ fn poll_input_budgets(
 
 /// Convert one `serde_json::Value` into a starlark value on `heap`.
 ///
-/// Recursive, and bounded by [`MAX_OUTPUT_DEPTH`] on the way in as well as on
+/// Recursive, and bounded by [`MAX_JSON_DEPTH`] on the way in as well as on
 /// the way out. Input nesting is already bounded in practice — everything here
 /// arrives from `serde_json`, whose parser refuses past 128 levels — but "in
 /// practice" is not a bound, and this recursion runs on whatever stack the
@@ -856,7 +975,7 @@ fn json_to_starlark<'v>(
     heap: starlark::values::Heap<'v>,
     depth: usize,
 ) -> Result<Value<'v>, TransformError> {
-    if depth > MAX_OUTPUT_DEPTH {
+    if depth > MAX_JSON_DEPTH {
         return Err(TransformError::BudgetExceeded("input nesting depth"));
     }
     Ok(match value {
@@ -918,16 +1037,22 @@ fn json_to_starlark<'v>(
 /// away. The sink counts every byte but retains at most the cap, so the refusal
 /// path costs a megabyte no matter how large the return was, and the accepted
 /// path re-parses a buffer that is by definition small.
-fn serialise_output(returned: Value<'_>) -> Result<serde_json::Value, TransformError> {
-    check_output_shape(returned)?;
+fn serialise_output(
+    returned: Value<'_>,
+    deadline: Instant,
+) -> Result<serde_json::Value, TransformError> {
+    check_output_shape(returned, deadline)?;
 
-    let mut sink = CappedSink::new(MAX_TRANSFORM_OUTPUT_BYTES);
+    let mut sink = CappedSink::new(MAX_TRANSFORM_OUTPUT_BYTES, deadline);
     let serialised = serde_json::to_writer(&mut sink, &returned);
 
-    // Size before serialisability, and deliberately: a sink that stopped at its
-    // ceiling makes `to_writer` return an io error, and reporting THAT as
-    // "not JSON" would send an author to fix a value that is perfectly fine.
-    if sink.stopped || sink.written > sink.cap {
+    // Our own refusals before the value's, and deliberately: a sink that stopped
+    // makes `to_writer` return an io error, and reporting THAT as "not JSON"
+    // would send an author to fix a value that is perfectly fine.
+    if sink.stopped == Some(Stop::Deadline) {
+        return Err(TransformError::BudgetExceeded(SINK_DEADLINE));
+    }
+    if sink.stopped == Some(Stop::Ceiling) || sink.written > sink.cap {
         return Err(TransformError::OutputTooLarge {
             bytes: sink.written,
             cap: sink.cap,
@@ -963,23 +1088,38 @@ const OUTPUT_COUNT_CEILING: usize = MAX_TRANSFORM_OUTPUT_BYTES * 16;
 /// do, so an oversized return costs `cap` bytes of memory rather than its own
 /// size — and stopping at the ceiling is what keeps it costing bounded *time*
 /// as well.
+/// Why a [`CappedSink`] gave up. Two reasons, and they are different refusals —
+/// one is "your response is too big", the other is "your script ran too long".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stop {
+    Ceiling,
+    Deadline,
+}
+
 struct CappedSink {
     buf: Vec<u8>,
     written: usize,
     cap: usize,
-    /// True once the ceiling was hit and this sink refused further bytes. The
-    /// resulting `to_writer` error is then ours, not the value's — see
-    /// [`serialise_output`], which checks this before it believes the error.
-    stopped: bool,
+    /// Set once this sink refused further bytes. The resulting `to_writer` error
+    /// is then ours, not the value's — see [`serialise_output`], which checks
+    /// this before it believes the error.
+    stopped: Option<Stop>,
+    deadline: Instant,
+    /// Writes since the deadline was last consulted. `Instant::now()` per write
+    /// would be per *token* — serde_json writes `[` with its own call — so the
+    /// clock is read once per [`OUTPUT_POLL_STEPS`] instead.
+    since_poll: usize,
 }
 
 impl CappedSink {
-    fn new(cap: usize) -> Self {
+    fn new(cap: usize, deadline: Instant) -> Self {
         CappedSink {
             buf: Vec::new(),
             written: 0,
             cap,
-            stopped: false,
+            stopped: None,
+            deadline,
+            since_poll: 0,
         }
     }
 }
@@ -987,10 +1127,15 @@ impl CappedSink {
 impl std::io::Write for CappedSink {
     fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
         if self.written >= OUTPUT_COUNT_CEILING {
-            self.stopped = true;
+            self.stopped = Some(Stop::Ceiling);
             return Err(std::io::Error::other(
                 "the transform output passed the counting ceiling",
             ));
+        }
+        self.since_poll += 1;
+        if poll_output_deadline(&mut self.since_poll, self.deadline, SINK_DEADLINE).is_err() {
+            self.stopped = Some(Stop::Deadline);
+            return Err(std::io::Error::other(SINK_DEADLINE));
         }
         self.written += data.len();
         if self.buf.len() < self.cap {
@@ -1010,7 +1155,7 @@ impl std::io::Write for CappedSink {
 ///
 /// Two refusals, from one memoised walk over the distinct values:
 ///
-/// * **too deep** — [`MAX_OUTPUT_DEPTH`], because serialisation recurses;
+/// * **too deep** — [`MAX_JSON_DEPTH`], because serialisation recurses;
 /// * **too large once expanded** — more values than [`MAX_TRANSFORM_OUTPUT_BYTES`]
 ///   allows bytes. Sound as a lower bound: every JSON value costs at least one
 ///   byte, and every array or object costs at least one more for its brackets,
@@ -1024,25 +1169,42 @@ impl std::io::Write for CappedSink {
 /// walk refuses the same value in **~300 µs**, because it saturates the count at
 /// each node rather than emitting it.
 ///
-/// See [`MAX_OUTPUT_DEPTH`] for why the depth half is not decoration:
+/// See [`MAX_JSON_DEPTH`] for why the depth half is not decoration:
 /// serialisation recurses, nothing else bounds its depth, and a stack overflow
 /// is an abort that [`eval_inner`]'s `catch_unwind` cannot contain.
 ///
-/// # The memoisation is an optimisation, and it is worth being exact about that
+/// # The memoisation is load-bearing for termination. Do not delete it.
 ///
-/// A walk that does not remember nodes visits *paths*, not nodes, so on the
-/// structure above it visits 2^62 of them rather than 63. That reads like a hang
-/// — and it is not, because the size check bounds it independently: sizes are
-/// computed bottom-up, so the walk is refused at the first node whose subtree
-/// passes [`MAX_TRANSFORM_OUTPUT_BYTES`], which on a doubling structure is level
-/// 21 and roughly 2^21 visits.
+/// A walk that does not remember nodes visits *paths*, not nodes. On a pure
+/// doubling structure that is survivable, and measuring only that shape is how
+/// this comment came to say the opposite for one revision: deleting both memo
+/// lookups left the doubling test GREEN, at 2.39 s instead of 0.03 s, because
+/// sizes are computed bottom-up and the walk is refused at the first node whose
+/// subtree passes [`MAX_TRANSFORM_OUTPUT_BYTES`] — level 21, ~2^21 visits.
 ///
-/// Measured, by deleting both memo lookups: the bomb test stayed GREEN and went
-/// from **0.03 s to 2.39 s** in an unoptimised build. So the memo buys ~80x on
-/// the worst input rather than the difference between terminating and not, and
-/// the claim in an earlier draft of this comment — that a plain walk "never
-/// returns" — was wrong. Keep it for the 80x; do not keep it under the
-/// impression that it is load-bearing for termination.
+/// **That inference was wrong, and one shape is why.** Keep every shared subtree
+/// *under* every cap and then fan out, and the bottom-up refusal never gets a
+/// chance to fire:
+///
+/// ```text
+/// c = [1]
+/// for i in range(18):
+///     c = [c, c]
+/// return [c] * 100000
+/// ```
+///
+/// ~19 ticks and under a megabyte — beneath every budget in this module. `c`
+/// expands to 786 431 values, which is *inside* the cap, so it is accepted; only
+/// the root exceeds it, and the root cannot complete until all 100 000 copies of
+/// `c` have been walked. Memo-less that is ~7.9e10 visits, which at the ~1.1 µs
+/// per visit measured above is **hours**. With the memo it is ~100 058 and
+/// returns in milliseconds.
+///
+/// So: the memo is the difference between a refusal and a hang, on a script that
+/// costs its author nineteen ticks to write.
+/// `transform_tests::a_fanned_out_shared_subtree_terminates_rather_than_hanging`
+/// is that shape, and it is what makes deleting either memo lookup fail a test
+/// rather than merely slow one down.
 ///
 /// The `on_stack` set is what catches a genuine cycle (`x = []; x.append(x)`).
 /// It is **not** there because starlark would miss one — measured, starlark
@@ -1051,7 +1213,7 @@ impl std::io::Write for CappedSink {
 /// a memoised DFS on a cyclic graph never assigns a depth to any node on the
 /// cycle and spins between them. A refusal that hangs is worse than the error it
 /// was trying to improve on.
-fn check_output_shape(root: Value<'_>) -> Result<(), TransformError> {
+fn check_output_shape(root: Value<'_>, deadline: Instant) -> Result<(), TransformError> {
     /// The values a container holds. Anything not listed is a leaf for this
     /// purpose — a starlark `set` can only hold hashable values, so it cannot
     /// contain a list, a dict or a tuple and cannot deepen a structure.
@@ -1073,8 +1235,17 @@ fn check_output_shape(root: Value<'_>) -> Result<(), TransformError> {
     // id -> (nesting depth below it, expanded value count including it)
     let mut known: HashMap<_, (usize, usize)> = HashMap::new();
     let mut on_stack: HashSet<_> = HashSet::new();
+    let mut since_poll = 0usize;
 
     while let Some((value, expanded)) = stack.pop() {
+        // This walk runs after `eval_function` has returned, so it earns no
+        // ticks and starlark checks nothing for it. Bounded by the heap it walks
+        // — but `MAX_HEAP_BYTES` allows millions of nodes, so "bounded" is not
+        // the same as "quick". The deadline is the same one the evaluation ran
+        // under: a script does not get a fresh two seconds for its output.
+        since_poll += 1;
+        poll_output_deadline(&mut since_poll, deadline, SHAPE_DEADLINE)?;
+
         let id = value.identity();
         if known.contains_key(&id) {
             continue;
@@ -1090,12 +1261,21 @@ fn check_output_shape(root: Value<'_>) -> Result<(), TransformError> {
             let mut deepest = 0usize;
             let mut expanded_size = 1usize;
             for kid in &kids {
+                // Polled INSIDE the child loop, not once per outer turn. A node
+                // whose children are all already known costs one outer turn and
+                // `kids.len()` work, so an outer-turn counter never reaches its
+                // threshold — measured, removing an equivalent batch poll left
+                // the fan-out test green because a *different* shape happened to
+                // generate enough outer turns to trip it. Bounded overshoot: one
+                // `OUTPUT_POLL_STEPS` of children.
+                since_poll += 1;
+                poll_output_deadline(&mut since_poll, deadline, SHAPE_DEADLINE)?;
                 let (d, n) = known.get(&kid.identity()).copied().unwrap_or((0, 1));
                 deepest = deepest.max(d);
                 expanded_size = expanded_size.saturating_add(n);
             }
             let depth = deepest + 1;
-            if depth > MAX_OUTPUT_DEPTH {
+            if depth > MAX_JSON_DEPTH {
                 return Err(TransformError::BudgetExceeded("output nesting depth"));
             }
             if expanded_size > MAX_TRANSFORM_OUTPUT_BYTES {
@@ -1116,6 +1296,8 @@ fn check_output_shape(root: Value<'_>) -> Result<(), TransformError> {
         }
         stack.push((value, true));
         for kid in kids {
+            since_poll += 1;
+            poll_output_deadline(&mut since_poll, deadline, SHAPE_DEADLINE)?;
             if !known.contains_key(&kid.identity()) {
                 stack.push((kid, false));
             }
@@ -1736,10 +1918,20 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(10))
             .expect("no budget stopped an unbounded loop within 10s");
         let err = outcome.expect_err("an unbounded loop must be refused");
+        // Not a substring probe. `format!("{err:?}").contains("budget")` is
+        // satisfied by the WORD `BudgetExceeded` no matter what payload it
+        // carries, and `contains("tick")` by any message mentioning one, so the
+        // old version of this assertion passed for every variant it was meant to
+        // discriminate between. Match the variant and enumerate the two payloads
+        // that are legitimate here, so a refusal that is really a Runtime error,
+        // an evaluator panic or the heap goes red.
         assert!(
-            format!("{err:?}").to_lowercase().contains("tick")
-                || format!("{err:?}").to_lowercase().contains("budget"),
-            "the refusal must name the budget it hit: {err:?}"
+            matches!(
+                err,
+                TransformError::BudgetExceeded("tick budget" | "wall-clock deadline")
+            ),
+            "an unbounded loop must be refused by the tick budget or the \
+             deadline, and by nothing else: {err:?}"
         );
     }
 
@@ -2048,7 +2240,7 @@ mod transform_tests {
             script: format!(
                 "def transform(params, statements):\n  x = 1\n  \
                  for i in range({}):\n    x = [x]\n  return x",
-                MAX_OUTPUT_DEPTH - 1
+                MAX_JSON_DEPTH - 1
             ),
             returns: vec![],
         };
@@ -2064,7 +2256,7 @@ mod transform_tests {
     /// be right for this to come back at all:
     ///
     /// * [`check_output_shape`] must count the *expanded* size and refuse on it.
-    ///   Depth alone waves this through — 63 is inside [`MAX_OUTPUT_DEPTH`], and
+    ///   Depth alone waves this through — 63 is inside [`MAX_JSON_DEPTH`], and
     ///   correctly so.
     /// * it must reach that refusal without serialising anything. Measured,
     ///   letting the byte-counting sink discover the size instead took **25 s**
@@ -2076,9 +2268,13 @@ mod transform_tests {
     /// what it then bit was the design: there was no expanded-size check at all,
     /// only a byte-counting sink that took 25 s to get there.
     ///
-    /// Deleting the memoisation still leaves this GREEN, at 2.39 s instead of
-    /// 0.03 s — see [`check_output_shape`], which now says so rather than
-    /// claiming the memo is what makes this terminate.
+    /// Deleting the memoisation still leaves **this** test green, at 2.39 s
+    /// instead of 0.03 s, because on a pure doubling structure the bottom-up
+    /// size refusal fires at level 21 regardless. That is a fact about this
+    /// shape and not about the memo — see
+    /// `a_fanned_out_shared_subtree_terminates_rather_than_hanging`, which is
+    /// the shape where the memo is the difference between a refusal and a hang,
+    /// and [`check_output_shape`] for why generalising from this one was wrong.
     ///
     /// Threaded, because the failure mode being guarded against is "never
     /// returns", which no assertion can catch from the same thread.
@@ -2088,7 +2284,7 @@ mod transform_tests {
             script: format!(
                 "def transform(params, statements):\n  a = [1]\n  \
                  for i in range({}):\n    a = [a, a]\n  return a",
-                MAX_OUTPUT_DEPTH - 2
+                MAX_JSON_DEPTH - 2
             ),
             returns: vec![],
         };
@@ -2105,6 +2301,174 @@ mod transform_tests {
                 assert!(bytes > cap, "{bytes} vs {cap}");
             }
             other => panic!("expected OutputTooLarge, got {other:?}"),
+        }
+    }
+
+    /// Cheap to build, and a hang without the memoisation.
+    ///
+    /// Each shared subtree stays **under** every cap, so the bottom-up size
+    /// refusal that saves the doubling bomb above never gets to fire: `c`
+    /// expands to 786 431 values, inside [`MAX_TRANSFORM_OUTPUT_BYTES`], and only
+    /// the root exceeds it. A memo-less walk must therefore finish all 100 000
+    /// copies of `c` before it can refuse anything — ~7.9e10 visits, hours at
+    /// the measured ~1.1 µs each.
+    ///
+    /// The script costs **~19 ticks and under a megabyte**. No budget in this
+    /// module is anywhere near it; the memo in [`check_output_shape`] is the
+    /// only thing standing between it and a wedged worker.
+    ///
+    /// Threaded with a deadline, because the failure being guarded against is
+    /// "never returns".
+    #[test]
+    fn a_fanned_out_shared_subtree_terminates_rather_than_hanging() {
+        let spec = TransformSpec {
+            script: "def transform(params, statements):\n  c = [1]\n  \
+                     for i in range(18):\n    c = [c, c]\n  return [c] * 100000"
+                .into(),
+            returns: vec![],
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_transform(&spec, &BTreeMap::new(), &BTreeMap::new()));
+        });
+        let out = rx.recv_timeout(std::time::Duration::from_secs(20)).expect(
+            "a fanned-out shared subtree did not resolve in 20s — the output walk \
+             is visiting paths rather than nodes",
+        );
+        match out {
+            Err(TransformError::OutputTooLarge { bytes, cap }) => {
+                assert!(bytes > cap, "{bytes} vs {cap}");
+            }
+            other => panic!("expected OutputTooLarge, got {other:?}"),
+        }
+    }
+
+    /// The output SHAPE WALK is inside the deadline.
+    ///
+    /// **Four distinct values and forty megabytes**, and ten million child
+    /// iterations. `d = [c, c]` is there to make `c` *finish* before `e` is
+    /// walked — `[e, d]` pops `d` first — so every one of `e`'s five million
+    /// children is already known by the time `e` is reached. That is the point:
+    /// `e` then costs **two outer turns** and five million child iterations in
+    /// the push loop, and five million more in the sum loop.
+    ///
+    /// An earlier version of this test used `[[1]] * 5000000`, which does not
+    /// discriminate: there the children are *not* yet known, so all five million
+    /// get pushed and pop as five million outer turns, and a poll counting only
+    /// outer turns catches it anyway. **Measured — that version stayed green
+    /// with the child polls deleted.** This shape is the one where the poll has
+    /// to be inside the child loops.
+    ///
+    /// The walk runs after `eval_function` has returned, so it earns no ticks
+    /// and starlark checks nothing for it. Without the polls it eventually
+    /// refuses with `OutputTooLarge` — correct, and arrived at outside every
+    /// budget — so the assertion is on which refusal.
+    #[test]
+    fn a_wide_shared_fan_out_is_stopped_by_the_output_deadline() {
+        let spec = TransformSpec {
+            script: "def transform(params, statements):\n  c = [1]\n  \
+                     d = [c, c]\n  e = [c] * 5000000\n  return [e, d]"
+                .into(),
+            returns: vec![],
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_transform(&spec, &BTreeMap::new(), &BTreeMap::new()));
+        });
+        // Long enough that the UNPOLLED walk finishes and fails the assertion
+        // below, rather than timing out and blaming the harness.
+        let out = rx
+            .recv_timeout(MAX_WALL_CLOCK * 60)
+            .expect("the output walk never returned at all");
+
+        // `assert_eq!` on the payload, NOT `matches!(err,
+        // BudgetExceeded(SHAPE_DEADLINE))`. Measured: that version passed with
+        // the poll below it deleted, because the walk then overran into the
+        // SINK's poll and the sink's different label satisfied the pattern
+        // anyway. Comparing the string is what makes this name one phase.
+        match out.expect_err("a walk past its deadline must be refused") {
+            TransformError::BudgetExceeded(which) => assert_eq!(
+                which, SHAPE_DEADLINE,
+                "the SHAPE WALK must be what refuses; the sink's own deadline \
+                 catching it later means the walk itself ran unpolled"
+            ),
+            other => panic!(
+                "an OutputTooLarge or a success here means the walk ran to \
+                 completion outside every budget: {other:?}"
+            ),
+        }
+    }
+
+    /// The SERIALISATION is inside the deadline too, and it is a separate poll.
+    ///
+    /// This shape is chosen so the walk above cannot be what refuses it: `c`
+    /// has 37 distinct values and expands to 786 431, which is **inside**
+    /// [`MAX_TRANSFORM_OUTPUT_BYTES`], so `check_output_shape` passes it in
+    /// microseconds. Serialising it emits ~1.5 million tokens, and measured, a
+    /// `serde_json` token through this sink costs ~12 µs unoptimised — about 18
+    /// seconds.
+    ///
+    /// [`OUTPUT_COUNT_CEILING`] does not help: 1.5 million tokens is well under
+    /// 16 MiB of bytes. Time and size are different axes and this is the one
+    /// only the clock catches.
+    #[test]
+    fn a_slow_serialisation_is_stopped_by_the_output_deadline() {
+        let spec = TransformSpec {
+            script: "def transform(params, statements):\n  c = [1]\n  \
+                     for i in range(18):\n    c = [c, c]\n  return c"
+                .into(),
+            returns: vec![],
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_transform(&spec, &BTreeMap::new(), &BTreeMap::new()));
+        });
+        let out = rx
+            .recv_timeout(MAX_WALL_CLOCK * 60)
+            .expect("the serialisation never returned at all");
+
+        match out.expect_err("a serialisation past its deadline must be refused") {
+            TransformError::BudgetExceeded(which) => assert_eq!(which, SINK_DEADLINE),
+            other => panic!(
+                "the sink must refuse on the deadline; an OutputTooLarge here \
+                 means it counted all ~1.5M tokens first, outside every \
+                 budget: {other:?}"
+            ),
+        }
+    }
+
+    /// [`MAX_JSON_DEPTH`] is applied on the way IN, not only on the way out.
+    ///
+    /// The input half has its own call site in [`json_to_starlark`] and its own
+    /// refusal, and without a test that feeds deep *input* it is invisible:
+    /// deleting the check leaves every other depth test green, because a script
+    /// that builds its own deep value never goes through it. Measured — that
+    /// mutation survived until this test existed.
+    ///
+    /// The two refusals are named differently for the same reason. Deleting the
+    /// input check does not make this pass with a different message; it makes it
+    /// report `"output nesting depth"`, which is a different line for the author
+    /// to look at and the wrong one.
+    #[test]
+    fn deep_input_is_refused_on_the_way_in_and_says_so() {
+        let deeper = MAX_JSON_DEPTH + 1;
+        let mut row = json!(1);
+        for _ in 0..deeper {
+            row = serde_json::Value::Array(vec![row]);
+        }
+        let spec = TransformSpec {
+            script: "def transform(params, statements):\n  return statements[\"rows\"][0]".into(),
+            returns: vec![],
+        };
+        let statements = BTreeMap::from([("rows".to_string(), vec![row])]);
+        match run_transform(&spec, &BTreeMap::new(), &statements) {
+            Err(TransformError::BudgetExceeded("input nesting depth")) => {}
+            other => panic!(
+                "input nested past the limit must be refused as INPUT — \
+                 an \"output nesting depth\" here means json_to_starlark let it \
+                 through and check_output_shape caught it on the way back: \
+                 {other:?}"
+            ),
         }
     }
 
@@ -2168,6 +2532,64 @@ mod transform_tests {
                 );
             }
             other => panic!("expected OutputTooLarge, got {other:?}"),
+        }
+    }
+
+    /// [`MAX_JSON_DEPTH`] must survive the stack serving actually runs on.
+    ///
+    /// Not a style point. Measured, ~20 KB of stack goes per level of nesting,
+    /// and a tokio worker gets 2 MiB — so the abort threshold is ~104 and the
+    /// libtest thread this would otherwise run on (8 MiB) is four times more
+    /// forgiving than production. Testing on the default thread would therefore
+    /// pass at a depth that kills a worker.
+    ///
+    /// If someone raises [`MAX_JSON_DEPTH`] past what 2 MiB can take, this does
+    /// not go red — it aborts the test binary with SIGABRT, because that is what
+    /// a stack overflow is and what production would do with it.
+    #[test]
+    fn our_depth_limit_survives_a_tokio_sized_stack() {
+        let spec = TransformSpec {
+            script: format!(
+                "def transform(params, statements):\n  x = 1\n  \
+                 for i in range({MAX_JSON_DEPTH}):\n    x = [x]\n  return x"
+            ),
+            returns: vec![],
+        };
+        let done = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(move || run_transform(&spec, &BTreeMap::new(), &BTreeMap::new()))
+            .expect("spawn")
+            .join()
+            .expect("the depth limit must not overflow a 2 MiB stack");
+        done.expect("a return exactly at the depth limit must be served");
+    }
+
+    /// The gap between our limit and `serde_json`'s is deliberate, and this is
+    /// where a future reader learns it did not happen by accident.
+    ///
+    /// `serde_json` accepts 128 levels; we accept [`MAX_JSON_DEPTH`]. Everything
+    /// in between parses fine and is refused here — see that constant for the
+    /// measurement that says why the alternative is an abort, not a wider limit.
+    #[test]
+    fn serde_json_accepts_deeper_json_than_this_module_will_carry() {
+        let deeper = MAX_JSON_DEPTH + 1;
+        let text = format!("{}1{}", "[".repeat(deeper), "]".repeat(deeper));
+        serde_json::from_str::<serde_json::Value>(&text).expect(
+            "serde_json must still accept nesting past our limit — if it stops, \
+             the gap this documents has closed and MAX_JSON_DEPTH could be \
+             revisited",
+        );
+
+        let spec = TransformSpec {
+            script: format!(
+                "def transform(params, statements):\n  x = 1\n  \
+                 for i in range({deeper}):\n    x = [x]\n  return x"
+            ),
+            returns: vec![],
+        };
+        match run_transform(&spec, &BTreeMap::new(), &BTreeMap::new()) {
+            Err(TransformError::BudgetExceeded("output nesting depth")) => {}
+            other => panic!("expected the depth refusal, got {other:?}"),
         }
     }
 
