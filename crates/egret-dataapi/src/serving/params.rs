@@ -282,6 +282,11 @@ pub(crate) fn resolve_supplied_with(
                         "string parameter published with a `pattern` that does not compile",
                     )
                 }
+                (CoerceError::Malformed(MalformedReason::TemporalBoundDoesNotParse), _) => {
+                    ServingError::internal(
+                        "date/timestamp parameter published with a `not_before`/`not_after` that does not parse",
+                    )
+                }
             })?);
         }
 
@@ -394,6 +399,16 @@ pub(crate) enum MalformedReason {
     /// A `String` parameter's `pattern` does not compile through
     /// [`crate::lifecycle::compile_pattern`].
     PatternDoesNotCompile,
+    /// A `Date`/`Timestamp` parameter's `not_before` or `not_after` does not
+    /// parse through [`normalize_temporal_bound`].
+    ///
+    /// `lifecycle::check_constraints` already refuses a bound that fails to
+    /// parse (spec §5), so reaching this arm means a snapshot published
+    /// before that check existed, or a hand-edited row — the exact situation
+    /// `PatternDoesNotCompile` is already the precedent for: the spec itself
+    /// is unhonourable, not the caller's request, so this is `Malformed`
+    /// rather than `Constraint` or `Invalid`.
+    TemporalBoundDoesNotParse,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -558,18 +573,69 @@ pub(crate) fn coerce(spec: &ParamSpec, text: &str) -> Result<Param, CoerceError>
         // same statement and bind the same value. A value chrono cannot read at
         // all never reaches the engine to be interpreted (or not) by whatever
         // that engine's own parser happens to accept.
-        ParamType::Date => chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d")
-            .map(|d| Param::Date(d.format("%Y-%m-%d").to_string()))
-            .map_err(|_| CoerceError::Invalid),
-        ParamType::Timestamp => ["%Y-%m-%d %H:%M:%S%.f", "%Y-%m-%dT%H:%M:%S%.f"]
-            .iter()
-            .find_map(|f| chrono::NaiveDateTime::parse_from_str(text, f).ok())
-            // One spelling reaches the engine whichever the caller used: `%.f`
-            // prints nothing when the fraction is zero, so a plain second-
-            // resolution timestamp stays plain.
-            .map(|t| Param::Timestamp(t.format("%Y-%m-%d %H:%M:%S%.f").to_string()))
-            .ok_or(CoerceError::Invalid),
+        //
+        // `normalize_temporal_bound` — not an inline `chrono::NaiveDate::parse_from_str`
+        // — because `check_temporal_bounds` below has to normalise the SPEC's
+        // own `not_before`/`not_after` through the identical grammar, and a
+        // second inline copy of this parse is the exact duplication a review
+        // already caught once in this package (see that function's doc).
+        ParamType::Date => {
+            let normalised =
+                normalize_temporal_bound(&spec.ty, text).ok_or(CoerceError::Invalid)?;
+            check_temporal_bounds(spec, &normalised)?;
+            Ok(Param::Date(normalised))
+        }
+        ParamType::Timestamp => {
+            let normalised =
+                normalize_temporal_bound(&spec.ty, text).ok_or(CoerceError::Invalid)?;
+            check_temporal_bounds(spec, &normalised)?;
+            Ok(Param::Timestamp(normalised))
+        }
     }
+}
+
+/// Bounds for a `Date` or `Timestamp`, compared as normalised text.
+///
+/// Lexical comparison is correct here and only here: both sides are in the
+/// ONE spelling [`normalize_temporal_bound`] produces (`%Y-%m-%d`, zero-
+/// padded, big-endian), and that format sorts chronologically as text.
+///
+/// **The bound is normalised too, not compared as `spec.not_before` raw.**
+/// `lifecycle::check_constraints` validates that an author's bound PARSES; it
+/// does not rewrite the stored text into the normalised spelling. An author
+/// who wrote `not_before: "2026-1-1"` publishes clean, and that string sits in
+/// the snapshot unpadded forever. Comparing a normalised caller value like
+/// `"2026-01-02"` against that raw bound gets the wrong answer: byte for byte,
+/// `"2026-01-02"` is LESS than `"2026-1-1"` (`'0' < '1'` at the fifth byte),
+/// so a legitimately later date would be refused. Both sides go through
+/// [`normalize_temporal_bound`] for exactly the reason the caller's value
+/// does — see this module's `bounds_compare_the_normalised_value_not_the_callers_spelling`
+/// and `the_bound_itself_is_normalised_before_it_is_compared` tests, which pin
+/// each side of this separately.
+fn check_temporal_bounds(spec: &ParamSpec, normalised: &str) -> Result<(), CoerceError> {
+    if let Some(lo) = &spec.not_before {
+        let lo_n = normalize_temporal_bound(&spec.ty, lo).ok_or(CoerceError::Malformed(
+            MalformedReason::TemporalBoundDoesNotParse,
+        ))?;
+        if normalised < lo_n.as_str() {
+            return Err(CoerceError::Constraint {
+                constraint: "not_before",
+                bound: lo_n,
+            });
+        }
+    }
+    if let Some(hi) = &spec.not_after {
+        let hi_n = normalize_temporal_bound(&spec.ty, hi).ok_or(CoerceError::Malformed(
+            MalformedReason::TemporalBoundDoesNotParse,
+        ))?;
+        if normalised > hi_n.as_str() {
+            return Err(CoerceError::Constraint {
+                constraint: "not_after",
+                bound: hi_n,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Compare two decimal texts without going through a float.
@@ -739,6 +805,20 @@ mod tests {
 
     fn string_param(name: &str) -> ParamSpec {
         spec(name, ParamType::String, false)
+    }
+
+    fn date_param(name: &str) -> ParamSpec {
+        ParamSpec {
+            ty: ParamType::Date,
+            ..number_param(name)
+        }
+    }
+
+    fn timestamp_param(name: &str) -> ParamSpec {
+        ParamSpec {
+            ty: ParamType::Timestamp,
+            ..number_param(name)
+        }
     }
 
     fn snap(sql: &str, params: Vec<ParamSpec>) -> EndpointSnapshot {
@@ -1483,6 +1563,143 @@ mod tests {
         assert!(
             matches!(err, ServingError::Internal(_)),
             "an author's bad default must be the author's 500, not the caller's 400: {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_date_before_not_before_is_refused() {
+        let mut p = date_param("d");
+        p.not_before = Some("2020-01-01".into());
+        assert!(matches!(
+            coerce(&p, "2019-12-31"),
+            Err(CoerceError::Constraint { .. })
+        ));
+        assert!(coerce(&p, "2020-01-01").is_ok(), "inclusive");
+    }
+
+    #[test]
+    fn a_date_after_not_after_is_refused() {
+        let mut p = date_param("d");
+        p.not_after = Some("2030-12-31".into());
+        assert!(matches!(
+            coerce(&p, "2031-01-01"),
+            Err(CoerceError::Constraint { .. })
+        ));
+        assert!(coerce(&p, "2030-12-31").is_ok(), "inclusive");
+    }
+
+    /// **The test that actually carries this discrimination** — the brief's
+    /// own example (`not_before: "2026-01-01"`, value `"2026-1-2"`) turns out
+    /// NOT to: `"2026-1-2"` already sorts AFTER `"2026-01-01"` as raw bytes
+    /// (unpadded `'1'` at the fifth byte beats padded `'0'`), so a broken
+    /// implementation that compared the caller's raw text would still accept
+    /// it, for the wrong reason. Verified by hand before writing this.
+    ///
+    /// The case that truly requires normalisation is the one
+    /// `lifecycle::check_constraints`'s own doc names: an unpadded SINGLE
+    /// digit that is lexically larger than a PADDED double digit's leading
+    /// character. `"2026-9-30"` (Sept 30) vs a `"2026-10-01"` (Oct 1) bound —
+    /// raw bytes put `'9'` ahead of `'1'` at the fifth byte, so a raw-text
+    /// comparison sorts Sept 30 AFTER Oct 1 despite it being chronologically
+    /// EARLIER, and would wrongly ACCEPT a date the bound exists to refuse.
+    /// Comparing the normalised `"2026-09-30"` against `"2026-10-01"` gets it
+    /// right.
+    #[test]
+    fn bounds_compare_the_normalised_value_not_the_callers_spelling() {
+        let mut p = date_param("d");
+        p.not_before = Some("2026-10-01".into());
+        assert!(
+            matches!(coerce(&p, "2026-9-30"), Err(CoerceError::Constraint { .. })),
+            "Sept 30 is chronologically before the Oct 1 bound and must be \
+             refused, even though its unpadded spelling sorts AFTER the \
+             bound as raw text"
+        );
+        assert!(
+            coerce(&p, "2026-10-2").is_ok(),
+            "and an unpadded date genuinely after the bound must still be accepted"
+        );
+    }
+
+    /// The other half of the same normalisation rule, aimed at the BOUND
+    /// rather than the value: `check_constraints` validates that an author's
+    /// `not_before`/`not_after` PARSES, but does not rewrite the stored text
+    /// into the padded spelling. `not_before: "2026-1-1"` publishes clean and
+    /// sits in the snapshot unpadded. Comparing a normalised caller value
+    /// against that RAW bound gets the wrong answer: `"2026-01-02"` is
+    /// lexically LESS than `"2026-1-1"` (unpadded `'1'` beats padded `'0'` at
+    /// the fifth byte), which would wrongly refuse a date that is
+    /// chronologically one day AFTER the bound.
+    #[test]
+    fn the_bound_itself_is_normalised_before_it_is_compared() {
+        let mut p = date_param("d");
+        p.not_before = Some("2026-1-1".into());
+        assert!(
+            coerce(&p, "2026-01-02").is_ok(),
+            "Jan 2 is after the Jan 1 bound even though the bound's own raw \
+             spelling is unpadded"
+        );
+    }
+
+    #[test]
+    fn a_timestamp_bound_is_enforced() {
+        let mut p = timestamp_param("t");
+        p.not_before = Some("2020-01-01 00:00:00".into());
+        assert!(matches!(
+            coerce(&p, "2019-12-31 23:59:59"),
+            Err(CoerceError::Constraint { .. })
+        ));
+        assert!(coerce(&p, "2020-01-01 00:00:00").is_ok());
+        assert!(
+            coerce(&p, "2020-01-01T00:00:01").is_ok(),
+            "the T spelling too"
+        );
+    }
+
+    /// Same precedent as `a_pattern_that_does_not_compile_is_malformed_with_its_own_reason`:
+    /// `check_constraints` already refuses a `not_before`/`not_after` that
+    /// fails to parse (spec §5), so reaching `coerce` at all means a snapshot
+    /// published before that gate existed, or a hand-edited row — the
+    /// author's problem, not the caller's, hence `Malformed` rather than
+    /// `Constraint` or `Invalid`.
+    #[test]
+    fn an_unparseable_bound_is_malformed_with_its_own_reason() {
+        let mut p = date_param("d");
+        p.not_before = Some("not-a-date".into());
+        assert_eq!(
+            coerce(&p, "2026-01-01"),
+            Err(CoerceError::Malformed(
+                MalformedReason::TemporalBoundDoesNotParse
+            ))
+        );
+    }
+
+    /// Same shape as `a_non_compiling_patterns_diagnostic_does_not_blame_a_missing_enum_list`:
+    /// the wire response is unaffected either way (`ServingError::internal`
+    /// redacts to `"internal error"`), so this checks only the internal
+    /// diagnosis a future edit could accidentally collapse into one of the
+    /// other two `Malformed` messages.
+    #[test]
+    fn an_unparseable_bounds_diagnostic_names_itself() {
+        let mut p = date_param("d");
+        p.not_after = Some("not-a-date".into());
+        let supplied =
+            std::collections::BTreeMap::from([("d".to_string(), vec!["2026-01-01".to_string()])]);
+        let err = match resolve_supplied_with(&supplied, &[], std::slice::from_ref(&p)) {
+            Err(e) => e,
+            Ok(_) => panic!("expected an unparseable bound to refuse as internal"),
+        };
+        assert!(
+            matches!(err, ServingError::Internal(_)),
+            "an unparseable published bound is the author's 500, not the caller's 400: {err:?}"
+        );
+        let rendered = format!("{err:?}");
+        assert!(
+            rendered.contains("not_before") && rendered.contains("does not parse"),
+            "the log line must name the temporal bound as the cause: {rendered}"
+        );
+        assert!(
+            !rendered.contains("pattern") && !rendered.contains("enum"),
+            "the log line must not borrow an UNRELATED `Malformed` diagnosis: {rendered}"
         );
     }
 }
