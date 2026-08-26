@@ -999,15 +999,27 @@ fn a_date_after_not_after_is_refused() {
 
 #[test]
 fn bounds_compare_the_normalised_value_not_the_callers_spelling() {
-    // chrono accepts an unpadded `2026-1-2`, and `coerce` re-formats it to
-    // `2026-01-02`. Comparing the RAW text would sort "2026-1-2" BEFORE
-    // "2026-01-01" as a string, and wrongly refuse it.
+    // MEASURED: the obvious example does NOT discriminate. `"2026-1-2"` against
+    // a bound of `"2026-01-01"` sorts correctly even as raw text, so a test
+    // built on it passes with the normalisation deleted.
+    //
+    // The discriminating shape is an unpadded SINGLE-digit month against a
+    // padded DOUBLE-digit one, which is the same example
+    // `lifecycle::check_constraints`'s own doc comment uses: as text
+    // `"2026-9-1"` > `"2026-10-1"`, while as dates September precedes October.
     let mut p = date_param("d");
-    p.not_before = Some("2026-01-01".into());
+    p.not_after = Some("2026-10-01".into());
     assert!(
-        coerce(&p, "2026-1-2").is_ok(),
-        "an unpadded date after the bound must be accepted"
+        coerce(&p, "2026-9-1").is_ok(),
+        "September precedes October; only a raw-text compare would refuse this"
     );
+
+    // And the bound itself may be unpadded — `check_constraints` verifies a
+    // bound PARSES but does not rewrite it, so both sides must be normalised
+    // before they are compared.
+    let mut q = date_param("d");
+    q.not_after = Some("2026-10-1".into());
+    assert!(coerce(&q, "2026-09-01").is_ok(), "an unpadded BOUND must normalise too");
 }
 
 #[test]
