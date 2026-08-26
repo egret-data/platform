@@ -624,7 +624,7 @@ fn a_constraint_refusal_reaches_the_caller_as_a_bare_param_invalid() {
 }
 ```
 
-**`resolve_one` above is wrong on purpose-of-illustration only — it does not exist.** I checked while reviewing this plan: the mapping at `params.rs:263` is inline in
+**The test above drives the real mapping site, and this is its real signature** — I checked. There is no per-parameter helper to call; the `CoerceError → ServingError` mapping is inline in
 
 ```rust
 pub(crate) fn resolve_supplied_with(
