@@ -969,6 +969,10 @@ git commit -m "feat(dataapi): a transformed endpoint documents what it declares"
 
 **This is the seam that has failed twice.** Preview was shape-blind for one release and told authors "fine" where publish said "no"; M2's Critical was publish and serving disagreeing about a parameter's shape. Preview must reach the **same** `run_transform`, not a second path.
 
+**PREREQUISITE, found during Task 4's review and load-bearing for this task.** `PreviewEndpointInput` (`preview.rs:130`) has **no `output` field at all**, so `check_definition_scans` is currently called from the preview path with `OutputSpec::default()` (`lifecycle.rs:1980`). That is correct today — there is no transform to refuse, so no disagreement can exist. The hazard is that **the call site now type-checks with a placeholder**: when you add `output` to preview, nothing in the compiler will force you to thread it through, and a preview that silently keeps the default would accept a transform publish refuses. Thread it deliberately, and add a test that fails if someone reverts to the placeholder.
+
+**Also corrected here:** an earlier note in this plan called `check_definition_scans` "what all three entry points reach". `validate_definition` (`lifecycle.rs:1851`) has **no production callers anywhere in the repo** — it is test-only. The real entry points are `validate_endpoint` (reached by both `/validate` and `publish`) and the preview path.
+
 Preview currently runs one `sql`, not an endpoint. Establish by reading how it composes `statements` for the script — if it cannot, **that is a finding: report it rather than papering over it**, because a preview that cannot show the transform is a preview that will disagree with publish.
 
 - [ ] **Step 1: Write the failing test**
