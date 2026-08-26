@@ -747,29 +747,42 @@ pub enum ValidationError {
     /// {"total": len(rows)}`) measures zero growth and is never refused here,
     /// however large `max_rows` is.
     ///
-    /// It is a **lower bound**, twice over, and deliberately so. The probe row
-    /// is built from stand-in values that are as small as the column's type
-    /// permits (`1`, `"x"`), so a real row of the same shape is larger; and
-    /// growth is assumed linear from two points, so a script whose output grows
-    /// faster than its input is under-projected. Both errors point the same way:
-    /// publish refuses only endpoints that overflow even at their *smallest*
-    /// plausible row, and serving still has to fail closed on the rest.
+    /// It is an **estimate**, and it can be wrong in both directions. Saying so
+    /// precisely matters more than the number:
     ///
-    /// The one direction it can be wrong in is a script that SATURATES —
-    /// `return {"sample": rows[:10]}` grows for the first ten rows and not
-    /// after, and two points cannot see the ceiling. Such an endpoint is
-    /// refused, and the way through is the same as for every other endpoint
-    /// here: `limits.max_rows` is the author's own declaration of how many rows
-    /// this endpoint may return, and `fits` says the largest value that this
-    /// script can actually serve.
+    /// * **it can under-project.** Growth is assumed linear from two points, so
+    ///   a script whose output grows faster than its input — a cross join, a
+    ///   nested expansion — is projected too small and reaches serving anyway.
+    /// * **it can over-project.** The probe row carries **every** column of the
+    ///   branch UNION at a stand-in value as small as the column's type permits.
+    ///   A real row can therefore be SMALLER than the probe row rather than
+    ///   larger: `serving::router::shape_rows` omits a `required: false` column
+    ///   from an `objects` row when the branch that ran did not return it, so a
+    ///   response can carry a strict subset of the union the probe assumed. It
+    ///   was previously claimed here that a real row is "larger, not smaller" —
+    ///   that was wrong under M1, and this arm is not allowed to justify itself
+    ///   with it.
+    /// * **it cannot see saturation.** `return {"sample": rows[:10]}` grows for
+    ///   the first ten rows and not after; two points have no way to find the
+    ///   ceiling above them. Such an endpoint is refused although it would have
+    ///   served.
+    ///
+    /// What remains true is the thing the refusal rests on: an endpoint whose
+    /// own `limits.max_rows` says it may return N rows, carrying a script that
+    /// measurably grows with rows, cannot honour both that number and the cap.
+    /// `limits.max_rows` is the author's own declaration, and `fits` is the
+    /// largest value of it this script can actually serve.
     #[error(
         "output.transform returns about {per_row} more bytes per row, so at \
          limits.max_rows = {max_rows} it would return about {projected} bytes, over the \
          {cap} byte cap — and the caller would get a 500 rather than a truncated \
          response. Lower limits.max_rows to at most {fits}, or aggregate in the script \
-         instead of passing rows through. This projection is measured from a probe row \
-         built of the smallest values each column's type allows, so a real row is larger, \
-         not smaller"
+         instead of passing rows through; both change WHAT the endpoint returns and not \
+         only how much of it — a lower limit truncates the result set, and aggregating \
+         replaces the rows with a summary. The size is projected from ONE synthetic row \
+         carrying every column of the union, not measured on your data, so a response \
+         that omits an optional column can be smaller than this and a script that \
+         expands its input larger"
     )]
     TransformOutputExceedsRowLimit {
         /// Serialised bytes the transform's output grew by when the probe's
@@ -787,8 +800,15 @@ pub enum ValidationError {
         /// message is self-contained.
         cap: usize,
         /// The largest `limits.max_rows` this script's measured growth fits
-        /// under `cap`. Zero when the script is over the cap before it is given
-        /// a single row.
+        /// under `cap`.
+        ///
+        /// **At least 1, never 0.** `run_transform` refuses an output over
+        /// `cap` outright (`CappedSink`), so a probe that RETURNED a value
+        /// satisfies `populated <= cap`; therefore
+        /// `cap - empty >= populated - empty = per_row` and the division below
+        /// is at least one. A zero here would also be advice an author cannot
+        /// take — `serving::router` clamps `max_rows` to a minimum of 1, so
+        /// "lower it to 0" names a value the endpoint cannot hold.
         fits: u32,
     },
 }
@@ -1811,13 +1831,23 @@ const EMPTY_ROWS_PROBE: &str = "the empty-rows probe";
 /// per parameter for M1's branch renders. Nothing here reads a row from an
 /// engine, and no statement is executed.
 ///
-/// Parameters are bound as SCALARS, from [`representative_value`], so a script
-/// that indexes into a parameter it expects to be a list is not exercised by
-/// this. Whether a parameter arrives as a scalar or a list is decided by the
-/// REQUEST — a repeated query parameter becomes a list — which publish cannot
-/// know; `IteratedParams` infers the shape each STATEMENT expects, but a
-/// script's expectation is not written in any SQL, so there is nothing to infer
-/// it from.
+/// Parameters carry [`representative_value`]s, in the SHAPE publish already
+/// binds them in for its own SQL probes: a parameter the endpoint's SQL
+/// iterates (`{% for x in region %}`) is a one-element LIST, every other one is
+/// a scalar. That half is not inferred, it is known — [`IteratedParams`] is
+/// computed once per endpoint by [`validate_endpoint`] and handed here by
+/// [`validate`], and [`context_with`] wraps exactly the same set for the render
+/// probes. Two probes of one endpoint disagreeing about whether `region` is a
+/// list would be a defect on its own.
+///
+/// **The other half is genuinely uninferable, and this is its limit.** Whether
+/// a parameter that NO statement iterates arrives as a scalar or a list is
+/// decided by the REQUEST — a repeated query parameter becomes a list — and a
+/// script's own expectation is written in no SQL, so there is nothing to read
+/// it from. A script that iterates a parameter its SQL treats as a scalar is
+/// therefore probed with a scalar and can still fail at serving. Task 6 owns
+/// the serving-side shape; if it ever binds such a parameter as a list, this
+/// must follow it.
 ///
 /// # Two evaluations, and where they are spent
 ///
@@ -1850,13 +1880,14 @@ pub(crate) fn probe_transform(
     output: &OutputSpec,
     described: &[StatementSnapshot],
     params: &[ParamSpec],
+    iterated: &IteratedParams,
     limits: &LimitsSpec,
 ) -> std::result::Result<(), ValidationError> {
     let Some(transform) = &output.transform else {
         return Ok(());
     };
 
-    let bound = probe_params(params);
+    let bound = probe_params(iterated, params);
     let with_rows: BTreeMap<String, Vec<serde_json::Value>> = described
         .iter()
         .map(|s| (s.name.clone(), vec![probe_row(&s.columns)]))
@@ -1895,9 +1926,14 @@ pub(crate) fn probe_transform(
             projected,
             cap,
             // Integer division, so this is the largest count that FITS rather
-            // than the first that does not. `u32::MAX` is unreachable — `fits`
-            // is below `max_rows`, itself clamped to `MAX_ROWS_CEILING` — but
-            // the conversion is saturating rather than an `as` cast, because a
+            // than the first that does not, and it is at least 1 — see the
+            // field's own doc, which is where that is argued from `CappedSink`.
+            // `saturating_sub` cannot fire for the same reason (`empty <= cap`);
+            // it is there so that if the sink's guarantee ever changed this
+            // computes a wrong number rather than panicking in one build
+            // profile and wrapping in the other. `u32::MAX` is likewise
+            // unreachable — `fits < max_rows <= MAX_ROWS_CEILING` — but the
+            // conversion is saturating rather than an `as` cast, because a
             // silent wrap here would print a helpful-looking number that is a
             // lie.
             fits: u32::try_from(cap.saturating_sub(empty_bytes) / per_row).unwrap_or(u32::MAX),
@@ -1956,10 +1992,13 @@ fn probe_row(columns: &[ColumnSpec]) -> serde_json::Value {
 /// `bigint`/`varchar(10)`/`timestamp(3)`. A second mapping would let publish
 /// probe a script with a string for a column the document calls an integer.
 ///
-/// The values are as small as each type allows, and that is load-bearing for
-/// [`ValidationError::TransformOutputExceedsRowLimit`]: it makes the measured
-/// per-row growth a LOWER bound on a real row's, so the projection under-refuses
-/// rather than over-refuses.
+/// The values are as small as each type allows, which keeps the measured
+/// per-row growth of [`ValidationError::TransformOutputExceedsRowLimit`] small
+/// for a row of this SHAPE. It does not make that projection a lower bound on a
+/// real row, and the arm no longer claims it does: the probe row carries every
+/// column of the branch union, while `serving::router::shape_rows` omits a
+/// `required: false` column that the branch which actually ran did not return.
+/// A real row can be narrower than this one.
 fn probe_value(ty: &str) -> serde_json::Value {
     match crate::openapi_gen::json_type(ty) {
         "boolean" => serde_json::Value::Bool(true),
@@ -1971,11 +2010,31 @@ fn probe_value(ty: &str) -> serde_json::Value {
 }
 
 /// The `params` dict a probe hands the script: every declared parameter at its
-/// [`representative_value`], as JSON.
-fn probe_params(params: &[ParamSpec]) -> BTreeMap<String, serde_json::Value> {
+/// [`representative_value`], as JSON, in the shape publish's SQL probes already
+/// bind it in.
+///
+/// The `iterated` branch is [`context_with`]'s, one type along: that function
+/// inserts a one-element LIST for a parameter any statement of the endpoint
+/// iterates and a scalar for every other, and it is handed the same
+/// [`IteratedParams`] this is. Asking the set rather than guessing is what stops
+/// publish's two probes of ONE endpoint disagreeing about whether `region` is a
+/// list — the script would then be probed against a shape the rendered SQL says
+/// it is not.
+fn probe_params(
+    iterated: &IteratedParams,
+    params: &[ParamSpec],
+) -> BTreeMap<String, serde_json::Value> {
     params
         .iter()
-        .map(|p| (p.name.clone(), param_json(&representative_value(p))))
+        .map(|p| {
+            let value = param_json(&representative_value(p));
+            let value = if iterated.contains(&p.name) {
+                serde_json::Value::Array(vec![value])
+            } else {
+                value
+            };
+            (p.name.clone(), value)
+        })
         .collect()
 }
 
@@ -3025,7 +3084,13 @@ pub async fn validate(
     // script evaluations against synthetic rows — see `probe_transform` for why
     // both, for what a green probe does and does not prove, and for why this is
     // the right side of `EndpointStore::publish`'s transaction to spend them on.
-    probe_transform(&draft.output, &frozen, &draft.params, &draft.limits)?;
+    probe_transform(
+        &draft.output,
+        &frozen,
+        &draft.params,
+        &iterated,
+        &draft.limits,
+    )?;
     Ok(frozen)
 }
 
@@ -5947,6 +6012,16 @@ mod tests {
         }
     }
 
+    /// No statement of the endpoint iterates any parameter — the shape every
+    /// probe test below wants except the one that is about the shape.
+    ///
+    /// Built through `IteratedParams::across`, the ONLY constructor, rather than
+    /// a hand-made empty value: a test that built the set a second way would
+    /// stop being a statement about the set publish actually computes.
+    fn not_iterated() -> IteratedParams {
+        IteratedParams::across(&[], &[])
+    }
+
     /// The DEFAULT limits, spelled as `LimitsSpec`'s own serde defaults do —
     /// `max_rows: 10_000` — so the probe tests below are about the transform
     /// rather than about a row cap nobody set.
@@ -5966,8 +6041,14 @@ mod tests {
             ty: "bigint".into(),
             required: true,
         }];
-        let err = probe_transform(&o, &[one_statement("rows")], &[], &probe_limits(10_000))
-            .expect_err("declared `total`, produced `wrong`");
+        let err = probe_transform(
+            &o,
+            &[one_statement("rows")],
+            &[],
+            &not_iterated(),
+            &probe_limits(10_000),
+        )
+        .expect_err("declared `total`, produced `wrong`");
         assert!(
             err.to_string().contains("total"),
             "must name the missing field: {err}"
@@ -5992,7 +6073,14 @@ mod tests {
             },
         ];
         assert!(
-            probe_transform(&o, &[one_statement("rows")], &[], &probe_limits(10_000)).is_ok(),
+            probe_transform(
+                &o,
+                &[one_statement("rows")],
+                &[],
+                &not_iterated(),
+                &probe_limits(10_000)
+            )
+            .is_ok(),
             "optional `b` may be absent"
         );
 
@@ -6004,7 +6092,14 @@ mod tests {
             required: true,
         }];
         assert!(
-            probe_transform(&p, &[one_statement("rows")], &[], &probe_limits(10_000)).is_err(),
+            probe_transform(
+                &p,
+                &[one_statement("rows")],
+                &[],
+                &not_iterated(),
+                &probe_limits(10_000)
+            )
+            .is_err(),
             "undeclared `z` must be refused"
         );
     }
@@ -6024,33 +6119,73 @@ mod tests {
             ty: "bigint".into(),
             required: true,
         }];
-        let err = probe_transform(&o, &[one_statement("rows")], &[], &probe_limits(10_000))
-            .expect_err("the empty-rows branch returns a list, not the declared object");
+        let err = probe_transform(
+            &o,
+            &[one_statement("rows")],
+            &[],
+            &not_iterated(),
+            &probe_limits(10_000),
+        )
+        .expect_err("the empty-rows branch returns a list, not the declared object");
         assert!(
             err.to_string().contains("empty"),
             "the refusal must say WHICH probe failed, or an author cannot find it: {err}"
         );
     }
 
+    /// **What the populated probe supplies: exactly one row, keyed by the
+    /// described column names.**
+    ///
+    /// Asserted through a REFUSAL, not a success, and that is the whole design
+    /// of this test. The obvious version — a script that reads the row through
+    /// a `for` and returns something conformant — is **vacuous**: every
+    /// assertion inside the loop is conditional on a row existing, so stubbing
+    /// `probe_row` to `{}` leaves it green and supplying the populated probe
+    /// with NO rows leaves it green too. Measured, both times.
+    ///
+    /// No script can distinguish "the populated probe was given no rows" from
+    /// "this is the empty probe" — the two inputs would be identical — so the
+    /// only construction that pins row PRESENCE is one where seeing a row is
+    /// what produces the observable outcome. This script raises when it sees
+    /// one, carrying the count and the keys in its message; the empty probe
+    /// returns the declared object and stays silent. So:
+    ///
+    /// * populated probe empty → no failure at all → `expect_err` fires;
+    /// * `probe_row` stubbed to `{}` → the keys in the message change;
+    /// * more than one row → the count in the message changes.
     #[test]
     fn probe_rows_are_built_from_the_described_columns_not_from_data() {
-        // Publish must not read data. This pins the shape of what the script sees:
-        // one row per statement, keyed by the described column names.
-        //
-        // The row is read through a `for`, not through `statements["rows"][0]`,
-        // and the difference is not cosmetic: the empty probe runs the same
-        // script over no rows at all, where indexing row 0 raises. See
-        // `a_script_that_indexes_row_zero_without_checking_is_refused` — the
-        // subscripting version of this script is one publish must refuse, so it
-        // cannot also be the one that demonstrates the row's shape.
         let o = transformed_output(
             "def transform(params, statements):\n  \
-             n = 0\n  \
-             for row in statements[\"rows\"]:\n    n = len(row)\n  \
-             return {\"total\": n}",
+             rows = statements[\"rows\"]\n  \
+             if len(rows) > 0:\n    \
+             fail(\"saw \" + str(len(rows)) + \" row(s) keyed \" + str(sorted(rows[0].keys())))\n  \
+             return {\"total\": 0}",
         );
-        // `one_statement("rows")` describes two columns, so the probe row has two keys.
-        assert!(probe_transform(&o, &[one_statement("rows")], &[], &probe_limits(10_000)).is_ok());
+        match probe_transform(
+            &o,
+            &[one_statement("rows")],
+            &[],
+            &not_iterated(),
+            &probe_limits(10_000),
+        ) {
+            Err(ValidationError::TransformOutputMismatch { context, detail }) => {
+                assert_eq!(
+                    context, SINGLE_ROW_PROBE,
+                    "the empty probe returns the declared object and cannot be what failed"
+                );
+                // `one_statement("rows")` describes exactly `a` and `b`, and the
+                // probe supplies exactly one row of them.
+                assert!(
+                    detail.contains("saw 1 row(s) keyed [\"a\", \"b\"]"),
+                    "the probe row must be ONE row keyed by the described columns: {detail}"
+                );
+            }
+            other => panic!(
+                "the populated probe must have supplied a row for the script to see, got \
+                 {other:?}"
+            ),
+        }
     }
 
     /// **A script that assumes at least one row is refused, and that is the
@@ -6067,7 +6202,13 @@ mod tests {
             "def transform(params, statements):\n  \
              return {\"total\": len(statements[\"rows\"][0])}",
         );
-        match probe_transform(&o, &[one_statement("rows")], &[], &probe_limits(10_000)) {
+        match probe_transform(
+            &o,
+            &[one_statement("rows")],
+            &[],
+            &not_iterated(),
+            &probe_limits(10_000),
+        ) {
             Err(ValidationError::TransformOutputMismatch { context, detail }) => {
                 assert_eq!(
                     context, EMPTY_ROWS_PROBE,
@@ -6082,29 +6223,91 @@ mod tests {
         }
     }
 
-    /// The probe row's KEYS and its VALUES, pinned by a script that fails unless
-    /// both are what the described columns say.
+    /// The probe row's VALUES: `a bigint` arrives as an int, `b varchar` as a
+    /// string — what `probe_value` promises through `openapi_gen::json_type`,
+    /// and what a second, drifting type mapping would break.
     ///
-    /// The test above counts the keys, which a row of two keys spelled anything
-    /// at all would satisfy. This one reads them by name and checks the type of
-    /// each stand-in against the column's declared engine type — `a bigint`
-    /// arrives as an integer, `b varchar` as a string — which is what
-    /// `probe_value` promises and what a second, drifting type mapping would
-    /// break.
+    /// Reported the same way as the test above, and for the same reason: a
+    /// script that checks the types INSIDE a `for` asserts nothing when there
+    /// is no row, so it passes with `probe_row` stubbed to `{}` and passes with
+    /// the populated probe emptied. Raising with the types in the message means
+    /// the absence of a row is a failed `expect_err`, not a silent pass.
     #[test]
     fn the_stand_in_value_matches_the_columns_declared_type() {
         let o = transformed_output(
             "def transform(params, statements):\n  \
-             for row in statements[\"rows\"]:\n    \
-             if type(row[\"a\"]) != \"int\":\n      fail(\"a is \" + type(row[\"a\"]))\n    \
-             if type(row[\"b\"]) != \"string\":\n      fail(\"b is \" + type(row[\"b\"]))\n  \
-             return {\"total\": 1}",
+             rows = statements[\"rows\"]\n  \
+             if len(rows) > 0:\n    \
+             fail(\"a=\" + type(rows[0][\"a\"]) + \" b=\" + type(rows[0][\"b\"]))\n  \
+             return {\"total\": 0}",
         );
-        assert_eq!(
-            probe_transform(&o, &[one_statement("rows")], &[], &probe_limits(10_000)),
-            Ok(()),
-            "`a bigint` must arrive as an int and `b varchar` as a string"
+        match probe_transform(
+            &o,
+            &[one_statement("rows")],
+            &[],
+            &not_iterated(),
+            &probe_limits(10_000),
+        ) {
+            Err(ValidationError::TransformOutputMismatch { context, detail }) => {
+                assert_eq!(context, SINGLE_ROW_PROBE);
+                assert!(
+                    detail.contains("a=int b=string"),
+                    "`a bigint` must arrive as an int and `b varchar` as a string: {detail}"
+                );
+            }
+            other => panic!("the populated probe must have supplied a row, got {other:?}"),
+        }
+    }
+
+    /// **A parameter the endpoint's SQL iterates reaches the script as a
+    /// one-element LIST; every other one reaches it as a scalar.**
+    ///
+    /// Not a preference — an agreement. `context_with` already binds exactly
+    /// this set as a one-element list for the renders that DESCRIBE the
+    /// statement, from the same `IteratedParams`, so a probe that handed the
+    /// script a bare string for `region` would be probing it against a shape
+    /// the rendered SQL says the endpoint does not have. Two probes of one
+    /// endpoint, one publish, two answers.
+    ///
+    /// `since` is in the same list of declared parameters and is NOT iterated
+    /// by any statement, which is what makes this a test about the set rather
+    /// than about wrapping everything.
+    #[test]
+    fn a_parameter_the_sql_iterates_reaches_the_script_as_a_list() {
+        const SQL: &str = "SELECT 1 AS a FROM t WHERE r IN (\
+             {% for x in region %}{{ x }}{% if not loop.last %},{% endif %}{% endfor %}) \
+             AND d > {{ since }}";
+        let params = vec![
+            param("region", ParamType::String),
+            param("since", ParamType::String),
+        ];
+        let iterated = IteratedParams::across(&[SQL], &params);
+        assert!(
+            iterated.contains("region") && !iterated.contains("since"),
+            "the premise: this SQL iterates `region` and binds `since` as a scalar"
         );
+
+        let o = transformed_output(
+            "def transform(params, statements):\n  \
+             fail(\"region=\" + type(params[\"region\"]) + \" since=\" + type(params[\"since\"]))",
+        );
+        match probe_transform(
+            &o,
+            &[one_statement("rows")],
+            &params,
+            &iterated,
+            &probe_limits(10_000),
+        ) {
+            Err(ValidationError::TransformOutputMismatch { context, detail }) => {
+                assert_eq!(context, SINGLE_ROW_PROBE);
+                assert!(
+                    detail.contains("region=list since=string"),
+                    "the iterated parameter must arrive as a list and the scalar one as a \
+                     scalar: {detail}"
+                );
+            }
+            other => panic!("the script raises on every input, got {other:?}"),
+        }
     }
 
     /// The exact refusal, as a VALUE — context and detail both.
@@ -6132,7 +6335,13 @@ mod tests {
             },
         ];
         assert_eq!(
-            probe_transform(&o, &[one_statement("rows")], &[], &probe_limits(10_000)),
+            probe_transform(
+                &o,
+                &[one_statement("rows")],
+                &[],
+                &not_iterated(),
+                &probe_limits(10_000)
+            ),
             Err(ValidationError::TransformOutputMismatch {
                 context: SINGLE_ROW_PROBE.to_owned(),
                 detail: "it does not return the declared field(s) `total`; and it returns the \
@@ -6151,7 +6360,13 @@ mod tests {
              if len(statements[\"rows\"]) == 0:\n    fail(\"boom\")\n  \
              return {\"total\": 1}",
         );
-        match probe_transform(&o, &[one_statement("rows")], &[], &probe_limits(10_000)) {
+        match probe_transform(
+            &o,
+            &[one_statement("rows")],
+            &[],
+            &not_iterated(),
+            &probe_limits(10_000),
+        ) {
             Err(ValidationError::TransformOutputMismatch { context, detail }) => {
                 assert_eq!(
                     context, EMPTY_ROWS_PROBE,
@@ -6185,7 +6400,13 @@ mod tests {
             ty: "varchar".into(),
             required: true,
         }];
-        match probe_transform(&o, &[one_statement("rows")], &[], &probe_limits(1_000_000)) {
+        match probe_transform(
+            &o,
+            &[one_statement("rows")],
+            &[],
+            &not_iterated(),
+            &probe_limits(1_000_000),
+        ) {
             Err(ValidationError::TransformOutputExceedsRowLimit {
                 per_row,
                 max_rows,
@@ -6204,13 +6425,25 @@ mod tests {
                 );
                 assert!(fits > 0 && fits < max_rows, "a usable number: {fits}");
                 assert_eq!(
-                    probe_transform(&o, &[one_statement("rows")], &[], &probe_limits(fits)),
+                    probe_transform(
+                        &o,
+                        &[one_statement("rows")],
+                        &[],
+                        &not_iterated(),
+                        &probe_limits(fits)
+                    ),
                     Ok(()),
                     "the max_rows the refusal tells the author to use must actually publish"
                 );
                 assert!(
-                    probe_transform(&o, &[one_statement("rows")], &[], &probe_limits(fits + 1))
-                        .is_err(),
+                    probe_transform(
+                        &o,
+                        &[one_statement("rows")],
+                        &[],
+                        &not_iterated(),
+                        &probe_limits(fits + 1)
+                    )
+                    .is_err(),
                     "and it must be the LARGEST one that does"
                 );
             }
@@ -6229,7 +6462,13 @@ mod tests {
              return {\"total\": len(statements[\"rows\"])}",
         );
         assert_eq!(
-            probe_transform(&o, &[one_statement("rows")], &[], &probe_limits(u32::MAX)),
+            probe_transform(
+                &o,
+                &[one_statement("rows")],
+                &[],
+                &not_iterated(),
+                &probe_limits(u32::MAX)
+            ),
             Ok(()),
             "output that does not grow with the rows has nothing to project"
         );
@@ -6249,7 +6488,13 @@ mod tests {
             ty: "varchar".into(),
             required: true,
         }];
-        match probe_transform(&o, &[one_statement("rows")], &[], &probe_limits(u32::MAX)) {
+        match probe_transform(
+            &o,
+            &[one_statement("rows")],
+            &[],
+            &not_iterated(),
+            &probe_limits(u32::MAX),
+        ) {
             Err(ValidationError::TransformOutputExceedsRowLimit { max_rows, .. }) => {
                 assert_eq!(
                     max_rows,
@@ -6270,6 +6515,7 @@ mod tests {
                 &OutputSpec::default(),
                 &[one_statement("rows")],
                 &[],
+                &not_iterated(),
                 &probe_limits(u32::MAX)
             ),
             Ok(())
@@ -6302,6 +6548,22 @@ mod tests {
                     ty: "varchar".into(),
                 },
             ])
+        }
+
+        /// Overridden rather than left to the trait default, which REFUSES a
+        /// parameterised describe — and a conditional statement renders to one.
+        /// The default's refusal would reach a test as an `Internal`, which is
+        /// indistinguishable from the probe failing for a reason the test is
+        /// about.
+        async fn describe_as_with_params(
+            &self,
+            ws: Uuid,
+            database_id: Uuid,
+            principal: UserId,
+            sql: &str,
+            _param_count: usize,
+        ) -> std::result::Result<Vec<egret_core::ColumnMeta>, Error> {
+            self.describe_as(ws, database_id, principal, sql).await
         }
 
         async fn execute_as(
@@ -6380,6 +6642,49 @@ mod tests {
         assert!(
             message.contains("total") && message.contains(SINGLE_ROW_PROBE),
             "the publish path must carry the probe's own refusal: {message}"
+        );
+    }
+
+    /// **The shape the probe binds comes from the ENDPOINT's own
+    /// `IteratedParams`, not from a set the probe made up.**
+    ///
+    /// `a_parameter_the_sql_iterates_reaches_the_script_as_a_list` builds that
+    /// set itself, so it cannot see a `validate` that passes a fresh empty one
+    /// to `probe_transform` — the shape would then be decided twice, once for
+    /// the renders and once, differently, for the script. This drives the real
+    /// `validate`, whose SQL iterates `region`, and asserts the script saw a
+    /// list.
+    #[tokio::test]
+    async fn the_probe_binds_the_shape_the_endpoints_own_sql_decided() {
+        let mut draft = draft_with(
+            transformed_output(
+                "def transform(params, statements):\n  \
+                 fail(\"region=\" + type(params[\"region\"]))",
+            ),
+            probe_limits(10_000),
+        );
+        draft.params = vec![param("region", ParamType::String)];
+        draft.statements = vec![StatementSpec {
+            name: "rows".into(),
+            sql: "SELECT 1 AS a FROM t WHERE r IN (\
+                  {% for x in region %}{{ x }}{% if not loop.last %},{% endif %}{% endfor %})"
+                .into(),
+        }];
+
+        let err = validate(
+            &DescribeOnlyPort,
+            Uuid::new_v4(),
+            UserId::new(),
+            &draft,
+            false,
+            false,
+        )
+        .await
+        .expect_err("the script raises on every input");
+        assert!(
+            err.to_string().contains("region=list"),
+            "publish renders this statement with `region` as a one-element list, so the \
+             script must see one too: {err}"
         );
     }
 
