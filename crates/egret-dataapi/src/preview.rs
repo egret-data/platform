@@ -251,10 +251,11 @@ fn param_error(
                 None => "a parameter declared required has no test value".into(),
             })
         }
-        // Two different mistakes share this variant, and they have two different
-        // fixes: a value the declared type cannot read, and more than one value
-        // for an enum (which is a single choice — `serving::params` refuses a
-        // repeat so `| ident` can only ever see one).
+        // THREE different mistakes share this variant, and they have three
+        // different fixes: a value the declared type cannot read, a value that
+        // is well-typed and fails a declared constraint (C1), and more than one
+        // value for an enum (which is a single choice — `serving::params`
+        // refuses a repeat so `| ident` can only ever see one).
         E::ParamInvalid => {
             let repeated = specs
                 .iter()
@@ -271,15 +272,38 @@ fn param_error(
             let uncoercible = || {
                 specs.iter().find_map(|s| {
                     let v = supplied(s)?;
-                    v.iter()
-                        .any(|t| crate::serving::params::coerce(s, t).is_err())
-                        .then(|| {
+                    // The FIRST error, not merely "one of them errored":
+                    // `ParamInvalid` covers two different author mistakes now
+                    // that `coerce` enforces constraints, and they send the
+                    // author to two different fields.
+                    let err = v
+                        .iter()
+                        .find_map(|t| crate::serving::params::coerce(s, t).err())?;
+                    Some(match err {
+                        // Well-typed, out of range. Saying "not a valid number"
+                        // about `5` is a type failure that did not happen: it
+                        // points at the `type` column while the field that
+                        // refused it is the `minimum` beside it. The detail is
+                        // allowed out HERE and nowhere on the serving path —
+                        // see this function's own doc comment, and
+                        // `lifecycle::DefaultViolatesConstraint`, which is the
+                        // same sentence for the same person at publish.
+                        crate::serving::params::CoerceError::Constraint { constraint, bound } => {
                             format!(
-                                "the test value for `{}` is not a valid {}",
-                                s.name,
-                                crate::lifecycle::type_name(&s.ty)
+                                "the test value for `{}` violates its `{constraint}` of `{bound}`",
+                                s.name
                             )
-                        })
+                        }
+                        // A genuine type failure, and — unreachably through
+                        // this route — a `Malformed` spec, which
+                        // `resolve_supplied_with` answers as a 500 before this
+                        // pass is ever entered.
+                        _ => format!(
+                            "the test value for `{}` is not a valid {}",
+                            s.name,
+                            crate::lifecycle::type_name(&s.ty)
+                        ),
+                    })
                 })
             };
             egret_core::Error::InvalidInput(
