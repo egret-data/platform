@@ -346,6 +346,25 @@ pub enum ValidationError {
          so nothing points back at the endpoint"
     )]
     DefaultNotValidForType(String, &'static str),
+    /// The `default` is well-typed and the constraint set is sound (spec §5:
+    /// `check_constraints` already refused an unsound set before this is ever
+    /// reached), and the default still fails one of its own declared
+    /// constraints — `minimum`, `pattern`, `not_before`, and so on.
+    ///
+    /// Kept separate from [`Self::DefaultNotValidForType`] because the two
+    /// point an author at different fields: a type failure says "your
+    /// `default` isn't a `{ty}`", which is false here and sends them looking
+    /// in the wrong place for a `minimum` problem.
+    #[error(
+        "parameter `{param}` has a `default` that violates its own `{constraint}` \
+         of `{bound}`. A default that the endpoint would refuse means every call \
+         omitting the parameter is a 400"
+    )]
+    DefaultViolatesConstraint {
+        param: String,
+        constraint: &'static str,
+        bound: String,
+    },
     /// A constraint field present on a `ParamSpec` whose declared `ty` cannot
     /// carry it — `pattern` on a `Boolean`, `minimum` on a `String`, and so on.
     ///
@@ -1431,11 +1450,36 @@ pub fn check_constraints(params: &[ParamSpec]) -> std::result::Result<(), Valida
 pub fn check_defaults(params: &[ParamSpec]) -> std::result::Result<(), ValidationError> {
     for p in params {
         let Some(default) = &p.default else { continue };
-        if crate::serving::params::coerce(p, default).is_err() {
-            return Err(ValidationError::DefaultNotValidForType(
-                p.name.clone(),
-                type_name(&p.ty),
-            ));
+        match crate::serving::params::coerce(p, default) {
+            Ok(_) => {}
+            // The AUTHOR'S problem, not the type field: `coerce` already
+            // enforced every constraint (Tasks 3-5), so this is the one place
+            // the detail is allowed out — the serving mapping in
+            // `resolve_supplied_with` throws away the same fields on purpose.
+            Err(crate::serving::params::CoerceError::Constraint { constraint, bound }) => {
+                return Err(ValidationError::DefaultViolatesConstraint {
+                    param: p.name.clone(),
+                    constraint,
+                    bound,
+                });
+            }
+            // `Invalid` is genuinely a type failure. `Malformed` reaching this
+            // match would mean an unsound spec — no `allowed` list, a pattern
+            // that doesn't compile, a temporal bound that doesn't parse — but
+            // `check_definition_scans` runs `check_enum_params` and
+            // `check_constraints` before `check_defaults`, and both already
+            // refuse every `MalformedReason` this function's own `coerce` call
+            // could hit. So `Malformed` is unreachable through the real
+            // publish path; calling `check_defaults` directly (as a unit test
+            // can) is the only way to reach it, and reporting it as a type
+            // failure there is a lesser inaccuracy than inventing a message
+            // for a case production can never produce.
+            Err(_) => {
+                return Err(ValidationError::DefaultNotValidForType(
+                    p.name.clone(),
+                    type_name(&p.ty),
+                ));
+            }
         }
     }
     Ok(())
@@ -4619,6 +4663,64 @@ mod tests {
         assert!(
             !msg.contains("default"),
             "the bounds are the problem, not the default: {msg}"
+        );
+    }
+
+    /// The detail Task 3 put on [`crate::serving::params::CoerceError::Constraint`]
+    /// is discarded by the serving path on purpose — `check_defaults` is the
+    /// ONE place it is allowed to reach an author, because the author is
+    /// reading about their own endpoint and there is no oracle to protect.
+    #[test]
+    fn a_default_below_its_own_minimum_names_the_constraint_and_the_bound() {
+        let mut p = param("n", ParamType::Number);
+        p.minimum = Some("10".into());
+        p.default = Some("5".into());
+        let err = check_defaults(std::slice::from_ref(&p)).expect_err("default below minimum");
+        let msg = err.to_string();
+        assert!(msg.contains('n'), "must name the parameter: {msg}");
+        assert!(msg.contains("minimum"), "must name the constraint: {msg}");
+        assert!(msg.contains("10"), "must name the bound: {msg}");
+        assert!(
+            !msg.contains("declared type"),
+            "a constraint failure must not be reported as a TYPE failure: {msg}"
+        );
+        assert_eq!(
+            err,
+            ValidationError::DefaultViolatesConstraint {
+                param: "n".into(),
+                constraint: "minimum",
+                bound: "10".into(),
+            },
+            "the variant itself must discriminate, not just its message: {msg}"
+        );
+    }
+
+    /// The pre-C1 message must survive: `default: "yesterday"` on a `Date` is a
+    /// TYPE problem, not a constraint problem, and conflating them sends the
+    /// author to the wrong field. This is the test most likely to pass for the
+    /// wrong reason, so it pins the exact variant rather than a substring —
+    /// `DefaultNotValidForType`'s own message never contains the word "type"
+    /// (it says "is not a valid `date`"), so a naive `contains("type")` check
+    /// fails against the correct, unchanged message just as readily as it
+    /// would pass vacuously against a wrong one; the variant is what actually
+    /// discriminates, and the message assertion below adds the same
+    /// discrimination in words instead of matching one that means nothing on
+    /// its own.
+    #[test]
+    fn a_default_of_the_wrong_type_still_reports_a_type_failure() {
+        let mut p = param("d", ParamType::Date);
+        p.default = Some("yesterday".into());
+        let err = check_defaults(std::slice::from_ref(&p)).expect_err("not a date");
+        assert_eq!(
+            err,
+            ValidationError::DefaultNotValidForType("d".into(), "date"),
+            "{err}"
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("not a valid"), "{msg}");
+        assert!(
+            !msg.contains("violates its own"),
+            "a type failure must not be reported as a CONSTRAINT failure: {msg}"
         );
     }
 
