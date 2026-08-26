@@ -117,8 +117,20 @@ pub struct ParamSpec {
     /// rule means. An author who writes their own `^…$` gets the same answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pattern: Option<String>,
-    /// Inclusive earliest value for a `Date` or `Timestamp`, in the same
-    /// spelling `coerce` produces (`%Y-%m-%d`, or `%Y-%m-%d %H:%M:%S%.f`).
+    /// Inclusive earliest value for a `Date` or `Timestamp`.
+    ///
+    /// **Stored exactly as the author wrote it**, in any spelling the declared
+    /// type parses — an unpadded `"2026-1-1"` is the same instant as
+    /// `"2026-01-01"` and is enforced identically, because publish and `coerce`
+    /// both normalise the bound before comparing it. This field is therefore
+    /// NOT guaranteed to hold the spelling `coerce` produces.
+    ///
+    /// The spelling still reaches one reader unchanged: the generated OpenAPI
+    /// document quotes this string RAW in the parameter's description, so
+    /// `"2026-1-1"` is what a caller is shown — the right instant in a shape
+    /// the endpoint never answers with. Prefer the canonical `%Y-%m-%d` (or
+    /// `%Y-%m-%d %H:%M:%S%.f`) spelling so the published contract reads the way
+    /// the endpoint replies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub not_before: Option<String>,
     /// Inclusive latest value for a `Date` or `Timestamp`. See

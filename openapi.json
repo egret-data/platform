@@ -31302,7 +31302,7 @@
               "string",
               "null"
             ],
-            "description": "Inclusive earliest value for a `Date` or `Timestamp`, in the same\nspelling `coerce` produces (`%Y-%m-%d`, or `%Y-%m-%d %H:%M:%S%.f`)."
+            "description": "Inclusive earliest value for a `Date` or `Timestamp`.\n\n**Stored exactly as the author wrote it**, in any spelling the declared\ntype parses — an unpadded `\"2026-1-1\"` is the same instant as\n`\"2026-01-01\"` and is enforced identically, because publish and `coerce`\nboth normalise the bound before comparing it. This field is therefore\nNOT guaranteed to hold the spelling `coerce` produces.\n\nThe spelling still reaches one reader unchanged: the generated OpenAPI\ndocument quotes this string RAW in the parameter's description, so\n`\"2026-1-1\"` is what a caller is shown — the right instant in a shape\nthe endpoint never answers with. Prefer the canonical `%Y-%m-%d` (or\n`%Y-%m-%d %H:%M:%S%.f`) spelling so the published contract reads the way\nthe endpoint replies."
           },
           "not_after": {
             "type": [
