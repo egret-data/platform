@@ -2930,6 +2930,7 @@ dependencies = [
  "egret-workspace",
  "minijinja",
  "rand 0.8.7",
+ "regex",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -2950,7 +2951,6 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "egret-core",
- "regex",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
