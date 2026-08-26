@@ -969,7 +969,11 @@ git commit -m "feat(dataapi): a transformed endpoint documents what it declares"
 
 **This is the seam that has failed twice.** Preview was shape-blind for one release and told authors "fine" where publish said "no"; M2's Critical was publish and serving disagreeing about a parameter's shape. Preview must reach the **same** `run_transform`, not a second path.
 
-**PREREQUISITE, found during Task 4's review and load-bearing for this task.** `PreviewEndpointInput` (`preview.rs:130`) has **no `output` field at all**, so `check_definition_scans` is currently called from the preview path with `OutputSpec::default()` (`lifecycle.rs:1980`). That is correct today — there is no transform to refuse, so no disagreement can exist. The hazard is that **the call site now type-checks with a placeholder**: when you add `output` to preview, nothing in the compiler will force you to thread it through, and a preview that silently keeps the default would accept a transform publish refuses. Thread it deliberately, and add a test that fails if someone reverts to the placeholder.
+**PREREQUISITE, found during Task 4's review and load-bearing for this task.** `PreviewEndpointInput` (`preview.rs:130`) has **no `output` field at all**, so preview cannot see a transform, cannot refuse one, and cannot run one.
+
+Task 4's review first found this as a `OutputSpec::default()` placeholder threaded into the preview path — a call site that would keep type-checking after someone added `output` to preview, so the compiler would not force the thread-through. **Task 4's fix removed that plumbing entirely** when it hoisted `check_transform` to `validate_endpoint`, which is a better starting point than the one the finding described: there is no placeholder left to silently keep.
+
+What remains for you: adding `output` to preview is a real API change, and every consumer must be made to care. Thread it deliberately, and **add a test that fails if a later edit lets preview fall back to a default `OutputSpec`** — a preview that accepts what publish refuses is the seam this programme has opened twice.
 
 **Also corrected here:** an earlier note in this plan called `check_definition_scans` "what all three entry points reach". `validate_definition` (`lifecycle.rs:1851`) has **no production callers anywhere in the repo** — it is test-only. The real entry points are `validate_endpoint` (reached by both `/validate` and `publish`) and the preview path.
 
