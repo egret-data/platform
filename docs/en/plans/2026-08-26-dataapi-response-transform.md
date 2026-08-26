@@ -310,6 +310,12 @@ git commit -m "feat(dataapi): an endpoint may declare a response transform"
 
 **Interfaces:**
 - Consumes: `TransformSpec` from Task 2; the limits API established in Task 1.
+
+**Three things Task 1 measured that this task must not re-guess:**
+
+- **`Module::new()` does not exist in starlark 0.14.** It is `Module::with_temp_heap(|module| …)`, a closure, and that changes the shape of every evaluating function. An async variant exists.
+- **`ErrorKind` has no budget variant.** A tick or heap refusal arrives as `Other` wrapping a private enum, so classifying it means matching message text. That is fragile — write the classifier once, in one place, and test it, rather than matching strings at three call sites.
+- **`MAX_HEAP_BYTES` is installed but untested**, and starlark's own docs call the limit best-effort. **Either test it or say plainly in your report that it is not a real bound** — an untested limit that reads like a guarantee is worse than a documented absence. Likewise `set_check_cancelled` is wired up but not driven: a script doing few ticks and slow native calls is bounded by neither budget today, and this task is where a wall-clock deadline belongs.
 - Produces:
 
 ```rust
