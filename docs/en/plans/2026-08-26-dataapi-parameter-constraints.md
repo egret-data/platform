@@ -473,7 +473,13 @@ Wire it in `validate_definition` (~line 1341), **before** `check_defaults`:
     check_params_with(sql, params, rules)?;
 ```
 
-`compare_decimal_text` does not exist yet — Task 3 produces it. For this task, add it as a private helper in `lifecycle.rs` and **move it in Task 3**; or, preferably, write it in `serving::params` now and call it from both. Pick the second: put it in `crates/egret-dataapi/src/serving/params.rs` as `pub(crate) fn compare_decimal_text(a: &str, b: &str) -> std::cmp::Ordering` with the body Task 3 specifies, and call it from here.
+**`compare_decimal_text` is YOURS to write, in this task.** Put it in `crates/egret-dataapi/src/serving/params.rs` as
+
+```rust
+pub(crate) fn compare_decimal_text(a: &str, b: &str) -> std::cmp::Ordering
+```
+
+with the body given in **Task 3, Step 3** (copy it verbatim from there — it is written out in full), and call it from `check_constraints`. Task 3 consumes it and does not redefine it. Do not put a private copy in `lifecycle.rs`: two implementations of the same comparison is precisely the drift this design exists to prevent.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
@@ -505,7 +511,7 @@ git commit -m "feat(dataapi): publish refuses a constraint set it cannot honour"
 - Test: `crates/egret-dataapi/src/serving/params.rs` (in-crate `#[cfg(test)]` module)
 
 **Interfaces:**
-- Consumes: the `ParamSpec` fields from Task 1; `compare_decimal_text` from Task 2.
+- Consumes: the `ParamSpec` fields from Task 1. `compare_decimal_text` was **already written by Task 2** in this same file, from the body given below — do not write a second one, and do not move it.
 - Produces: `CoerceError::Constraint { constraint: &'static str, bound: String }`. `coerce`'s signature is unchanged.
 
 **The mapping must discard the detail.** `ServingError::ParamInvalid` stays a unit variant. See the Global Constraints and `serving/error.rs`'s own doc comment — the parameter name and its bounds are the author's, and a 400 that carries them turns the serving path into a directory of the endpoint's parameters.
@@ -634,7 +640,7 @@ pub(crate) enum CoerceError {
 }
 ```
 
-Add the comparison helper (also called by Task 2's `check_constraints`):
+The comparison helper below was **added by Task 2** in this file. It is reproduced here because Task 2 was told to copy it from here — if it is already present and identical, leave it alone; if it is missing, add it.
 
 ```rust
 /// Compare two decimal texts without going through a float.
