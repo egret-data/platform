@@ -452,3 +452,75 @@ pub async fn url() -> Option<String> {
         .await
         .clone()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{process_db_name, CLONE_PATTERN};
+
+    /// The invariant that keeps [`super::drop_abandoned_clones`] unable to reach the
+    /// shared database: a clone name is the prefix plus **exactly** 32 lowercase hex
+    /// digits, and `egret_test` is not of that shape by three orders of magnitude.
+    ///
+    /// Stated here in Rust as well as in the SQL pattern because the two have to agree,
+    /// and only one of them is checked by the compiler.
+    #[test]
+    fn a_clone_name_is_the_prefix_and_exactly_32_hex_digits() {
+        let name = process_db_name();
+        let hex = name
+            .strip_prefix("egret_t_")
+            .expect("clone names start with the prefix the sweep anchors on");
+        assert_eq!(hex.len(), 32, "{name}");
+        assert!(
+            hex.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "{name} must be lowercase hex — the sweep's character class is [0-9a-f]"
+        );
+
+        // And the shape of the bug this replaced. `egret_t_` is not literally a prefix
+        // of `egret_test` at all — the eighth character is `e`, not `_`. `LIKE
+        // 'egret_t_%'` matched anyway because `_` is a single-character wildcard there,
+        // so it consumed that `e`. A regex `_` is literal, which is the whole reason the
+        // sweep uses one.
+        assert_eq!("egret_test".strip_prefix("egret_t_"), None);
+    }
+
+    /// The same claim, asked of Postgres — because it is Postgres' regex engine that
+    /// decides, not Rust's reading of the string. Self-skips without `DATABASE_URL`.
+    ///
+    /// Deliberately does NOT go through [`super::url`]: it needs no clone, only an
+    /// evaluation of the pattern, and cloning here would make the test that guards the
+    /// sweep depend on the machinery the sweep protects.
+    #[tokio::test]
+    async fn postgres_matches_a_clone_and_never_the_shared_database() {
+        use sqlx::Connection;
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skip: DATABASE_URL unset");
+            return;
+        };
+        let Ok(mut conn) = sqlx::PgConnection::connect(&url).await else {
+            eprintln!("skip: no database");
+            return;
+        };
+        let mine = process_db_name();
+        let cases: [(&str, bool); 7] = [
+            (mine.as_str(), true),
+            ("egret_test", false),
+            ("egret", false),
+            ("egret_test_template", false),
+            // 16 hex digits is not 32.
+            ("egret_t_0123456789abcdef", false),
+            // Anchored at both ends.
+            ("xegret_t_00000000000000000000000000000001", false),
+            ("egret_t_00000000000000000000000000000001x", false),
+        ];
+        for (name, expected) in cases {
+            let (matched,): (bool,) = sqlx::query_as("SELECT $1 ~ $2")
+                .bind(name)
+                .bind(CLONE_PATTERN)
+                .fetch_one(&mut conn)
+                .await
+                .expect("evaluate the pattern");
+            assert_eq!(matched, expected, "{name} against {CLONE_PATTERN}");
+        }
+    }
+}
