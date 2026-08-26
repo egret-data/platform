@@ -1747,11 +1747,15 @@ mod tests {
     /// the single `as_list` decision in [`resolve_supplied_with`], and this is
     /// what says so by measurement rather than by comment.
     ///
-    /// Every case asserts BOTH sides. A `json` built by a second reading of the
-    /// same request would agree with `values` in the easy first case and diverge
-    /// in exactly the two after it — and those two are the shapes publish's
-    /// probe cannot show an author, so a disagreement there is invisible until a
-    /// real call makes it.
+    /// **Every case asserts BOTH sides**, including the two repeat cases: a
+    /// `json` built by a second reading of the same request would agree with
+    /// `values` in the easy first case and diverge in the ones after it — and
+    /// those are the shapes publish's probe cannot show an author, so a
+    /// disagreement there is invisible until a real call makes it.
+    ///
+    /// 3a and 3b are the probe's blind spot split into the half that is already
+    /// closed and the half that is not, which is what makes "the gap is narrow"
+    /// a measurement instead of a claim in a doc comment.
     #[test]
     fn the_script_reads_the_parameters_the_sql_bound() {
         // 1. One value for a parameter nothing iterates: a scalar on both sides.
@@ -1779,17 +1783,47 @@ mod tests {
             "the `{{% if day %}}` block did not render"
         );
 
-        // 3. A REPEAT of a parameter no statement iterates. This is the gap
-        //    publish's probe cannot close — it binds a scalar, and the request
-        //    decides otherwise — so the script sees the list, uncollapsed, and
-        //    the two sides still agree about what the caller sent.
-        let s = snap("SELECT 1 AS n", vec![number_param("day")]);
+        // 3a. A REPEAT of a parameter a statement uses as a SCALAR. Both sides
+        //     see the list — and the SQL side is a REFUSAL, which is the 400
+        //     that means no script ever runs for this request. This is the half
+        //     of the probe's blind spot that is already closed one layer up, and
+        //     it is asserted here so that "the gap is narrow" is a measurement
+        //     rather than a claim in a doc comment.
         let r = resolve(Some("day=3&day=4"), &s).expect("resolve");
         assert!(r.has_repeats);
         assert_eq!(
             r.json["day"],
             serde_json::json!([3, 4]),
-            "both values, in the order the caller sent them"
+            "the script's side: both values, in the order the caller sent them"
+        );
+        assert_eq!(
+            crate::render::render(&s.statements[0].sql, &r.values).unwrap_err(),
+            crate::render::RenderError::SequenceBind,
+            "the SQL's side: `{{{{ day }}}}` cannot bind a sequence, so this \
+             request is refused before a transform is reached",
+        );
+
+        // 3b. The RESIDUAL gap, stated exactly: a repeat of a parameter no
+        //     statement uses at all. Nothing refuses it, the SQL binds nothing,
+        //     and the script is handed the list publish probed as a scalar. Both
+        //     sides asserted, because this is the one case where they legitimately
+        //     say different things — and what they say is still one reading of
+        //     the request, not two.
+        let unused = snap("SELECT 1 AS n", vec![number_param("day")]);
+        let r = resolve(Some("day=3&day=4"), &unused).expect("resolve");
+        assert!(r.has_repeats);
+        assert_eq!(
+            r.json["day"],
+            serde_json::json!([3, 4]),
+            "uncollapsed — the script is told what the caller actually sent"
+        );
+        let (sql, binds) =
+            crate::render::render(&unused.statements[0].sql, &r.values).expect("render");
+        assert_eq!(sql, "SELECT 1 AS n", "the statement never mentions it");
+        assert!(
+            binds.is_empty(),
+            "so the SQL binds nothing, and the script's list is the only place \
+             the repeat is visible: {binds:?}"
         );
 
         // 4. A parameter a statement ITERATES is a list even at one value —

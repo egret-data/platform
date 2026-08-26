@@ -1330,6 +1330,33 @@ impl Fixture {
         limits: serde_json::Value,
         output: serde_json::Value,
     ) -> Uuid {
+        self.publish_statements_with_output_and_cache(
+            path,
+            database_id,
+            statements,
+            limits,
+            output,
+            serde_json::json!({ "enabled": false }),
+        )
+        .await
+    }
+
+    /// The same, with the CACHE config spelled out too.
+    ///
+    /// Exists for one assertion the two above cannot make: that a response a
+    /// serving-side check REFUSED is not stored. Caching has to be on for that
+    /// question to mean anything, and every existing caller of the two wrappers
+    /// above wants it off because they count executions.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn publish_statements_with_output_and_cache(
+        &self,
+        path: &str,
+        database_id: Uuid,
+        statements: serde_json::Value,
+        limits: serde_json::Value,
+        output: serde_json::Value,
+        cache: serde_json::Value,
+    ) -> Uuid {
         let ep: Uuid = sqlx::query_scalar(
             "INSERT INTO dataapi.endpoints \
                (workspace_id, name, path, method, database_id, statements, cache, limits, output, created_by) \
@@ -1340,7 +1367,7 @@ impl Fixture {
         .bind(path)
         .bind(database_id)
         .bind(&statements)
-        .bind(serde_json::json!({ "enabled": false }))
+        .bind(&cache)
         .bind(&limits)
         .bind(&output)
         .bind(self.admin)

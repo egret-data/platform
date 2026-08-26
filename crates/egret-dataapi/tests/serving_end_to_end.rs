@@ -580,3 +580,92 @@ async fn a_response_that_contradicts_returns_is_refused_after_publish_accepted_i
     // not about the endpoint failing earlier.
     assert_eq!(f.port.executions(), 1);
 }
+
+/// **A response the serving-side check REFUSED is not cached.**
+///
+/// Correct today only by where the `?` sits — the transform runs, and is checked,
+/// above `cache.put_at`. Nothing pinned that, so an edit that moved the caching a
+/// few lines up would store a body the endpoint had just refused to serve and
+/// then answer it from the cache, with `check_returns` never consulted again.
+///
+/// The control endpoint is what makes this non-vacuous. Both are published with
+/// the SAME cache config; the conforming one must be a warm `cached: true` on its
+/// second call, so a suite where caching was simply off cannot be what passed.
+#[tokio::test]
+async fn a_refused_transform_is_not_cached() {
+    let f = skip_without_db!();
+    assert_ne!(marker(f.principal_a), 1, "see the test above");
+
+    let warm = serde_json::json!({ "enabled": true, "ttl_seconds": 60, "scope": "per_principal" });
+
+    // The control: conforming, cached, and it really does warm.
+    f.publish_statements_with_output_and_cache(
+        "/cached-ok",
+        f.database_id,
+        serde_json::json!([{ "name": "main", "sql": "SELECT n FROM t" }]),
+        serde_json::json!({}),
+        transform_output(
+            "def transform(params, statements):\n  \
+             return {\"total\": len(statements[\"main\"])}",
+        ),
+        warm.clone(),
+    )
+    .await;
+
+    let first = f.call_as(f.principal_a, "cached-ok").await;
+    assert_eq!(first.status, StatusCode::OK, "{}", first.body);
+    assert_eq!(first.body["meta"]["cached"], false, "{}", first.body);
+    let second = f.call_as(f.principal_a, "cached-ok").await;
+    assert_eq!(second.status, StatusCode::OK, "{}", second.body);
+    assert_eq!(
+        second.body["meta"]["cached"], true,
+        "the control must actually cache, or the subject below proves nothing: {}",
+        second.body
+    );
+    assert_eq!(
+        second.body["data"], first.body["data"],
+        "and the warm answer is the transformed value: {}",
+        second.body
+    );
+    assert_eq!(
+        f.port.executions(),
+        1,
+        "one execution across two calls — the second was served warm"
+    );
+
+    // The subject: the same cache config, a script that is refused at serving.
+    f.publish_statements_with_output_and_cache(
+        "/cached-liar",
+        f.database_id,
+        serde_json::json!([{ "name": "main", "sql": "SELECT n FROM t" }]),
+        serde_json::json!({}),
+        transform_output(DATA_DEPENDENT),
+        warm,
+    )
+    .await;
+
+    let before = f.port.executions();
+    let first = f.call_as(f.principal_a, "cached-liar").await;
+    assert_eq!(
+        first.status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "{}",
+        first.body
+    );
+
+    let second = f.call_as(f.principal_a, "cached-liar").await;
+    assert_eq!(
+        second.status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a refused response must not be stored — a cached one would come back \
+         as a 200 carrying the undeclared field, with `check_returns` never \
+         consulted again: {}",
+        second.body
+    );
+    assert_eq!(
+        f.port.executions() - before,
+        2,
+        "and there was nothing warm to answer either call: a stored entry would \
+         have skipped the second execution"
+    );
+}

@@ -262,7 +262,7 @@ const _: () = assert!(
 /// nothing else — but it is why
 /// `tests::the_heap_budget_refuses_a_script_that_outgrows_it` keeps its probe
 /// small enough to finish in milliseconds.
-const MAX_WALL_CLOCK: Duration = Duration::from_secs(2);
+pub(crate) const MAX_WALL_CLOCK: Duration = Duration::from_secs(2);
 
 /// The function every transform script must define.
 const ENTRY_POINT: &str = "transform";

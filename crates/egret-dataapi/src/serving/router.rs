@@ -35,9 +35,9 @@
 //! # Cancellation: decided, not deferred
 //!
 //! `QueryExecPort::execute_as_with_params` takes no `CancellationToken`
-//! parameter, so `limits.timeout` is this handler's whole budget. **The decision
-//! is not to add one**, because the port already owns the mechanism a
-//! caller-supplied token would duplicate:
+//! parameter, and for the ENGINE half of a request `limits.timeout` is this
+//! handler's whole budget. **The decision is not to add one**, because the port
+//! already owns the mechanism a caller-supplied token would duplicate:
 //!
 //! * `port_impl::run_bounded` — shared by `execute_as` and
 //!   `execute_as_with_params`, which is why the wrapper cannot be present on one
@@ -52,6 +52,38 @@
 //!   with no token threaded anywhere.
 //! * Trino additionally bounds the coordinator with `query_max_run_time`,
 //!   derived from the same `limits.timeout`.
+//!
+//! # A transform is the ONE piece of this handler the paragraph above does not
+//! # cover, and it is not covered by anything else either
+//!
+//! Two sentences up there were true of every request until C2 and are not true
+//! of a request whose endpoint carries a response transform. Stated here rather
+//! than left to be inferred from [`TRANSFORM_REQUEST_DEADLINE`], because this is
+//! the text a reader meets first:
+//!
+//! * **`limits.timeout` is not the whole budget.** A transformed request costs
+//!   N statement timeouts *plus* up to [`TRANSFORM_REQUEST_DEADLINE`].
+//! * **Dropping the handler's future does not release the transform.** The
+//!   evaluation runs on `tokio::task::spawn_blocking`; dropping the `JoinHandle`
+//!   DETACHES the task, and `JoinHandle::abort` cannot stop a blocking task that
+//!   has started either. So a client disconnect — and the deadline itself —
+//!   stops the WAITING, never the work.
+//!
+//! **What a detached transform keeps holding**, which is the part that decides
+//! how the 5 s should be read: one of the blocking pool's 512 default threads,
+//! the statement rows MOVED into it (up to `limits.max_rows`, ceiling
+//! [`MAX_ROWS_CEILING`]), and its starlark heap — until `transform::MAX_TICKS`
+//! or `transform::MAX_WALL_CLOCK` fires, measured at **28.8 s** for a
+//! tick-expensive script and not bounded at all for a tickless loop.
+//!
+//! **And the consequence nobody states when they pick a short deadline:
+//! answering at 5 s invites the retry.** The caller gets a fast 500 and can
+//! re-issue immediately, which re-runs the SQL and stacks a SECOND uncancellable
+//! thread on top of the first; the endpoint's published rate limit is then the
+//! only admission bound on how many pile up. The honest 28.8 s wait would have
+//! self-throttled by simply not answering. The 5 s is still the right trade —
+//! see [`TRANSFORM_REQUEST_DEADLINE`] for why it is not 2 s — but it is a trade,
+//! and this is the half of it that is invisible from the constant.
 //!
 //! **Note what is NOT the mechanism, because it reads like it is.**
 //! `port_impl::execute_as` does create a `CancellationToken` and call
@@ -232,6 +264,43 @@ const TIMEOUT_CEILING_SECS: u64 = 300;
 ///   `transform::MAX_JSON_DEPTH` is calibrated against the 2 MiB stack tokio
 ///   gives worker AND blocking threads alike.
 const TRANSFORM_REQUEST_DEADLINE: Duration = Duration::from_secs(5);
+
+/// The deadline one request gives its transform, as a value rather than as a
+/// constant read at the call site.
+///
+/// # Why this exists at all
+///
+/// Exactly the reason `transform::Budgets` is a struct: **a limit with no
+/// injection point cannot be tested.** With [`TRANSFORM_REQUEST_DEADLINE`] read
+/// directly inside [`transformed_data`], the only way to reach the timeout arm
+/// was to wait five seconds of real time, so nothing did — and *deleting the
+/// `tokio::time::timeout` wrapper entirely killed no test at all*. That is the
+/// same shape as a budget that is never binding: present in the source, absent
+/// from the guarantees.
+///
+/// # Non-test code cannot express a weakened deadline
+///
+/// The field is private and the only constructor that takes a value is
+/// `#[cfg(test)]`, so the sole `TransformDeadline` a shipped binary can build is
+/// [`TransformDeadline::default`] — the constant above. A relaxation that is
+/// unrepresentable is better than one a reviewer has to remember to look for,
+/// which is the argument `Budgets` already makes for itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TransformDeadline(Duration);
+
+impl Default for TransformDeadline {
+    fn default() -> Self {
+        Self(TRANSFORM_REQUEST_DEADLINE)
+    }
+}
+
+#[cfg(test)]
+impl TransformDeadline {
+    /// A deadline a test can actually reach. Not available to a shipped build.
+    fn of(d: Duration) -> Self {
+        Self(d)
+    }
+}
 
 /// `status` in the envelope (spec §4.4).
 ///
@@ -1077,7 +1146,9 @@ async fn run(
     // a refused response returns above this line and is never stored.
     let data = match &snap.output.transform {
         None => statements_data(shaped),
-        Some(spec) => transformed_data(spec, shaped, &resolved).await?,
+        Some(spec) => {
+            transformed_data(spec, shaped, &resolved, TransformDeadline::default()).await?
+        }
     };
     if let Some(ttl) = ttl {
         st.cache
@@ -1213,6 +1284,7 @@ async fn transformed_data(
     spec: &TransformSpec,
     shaped: Vec<(&str, serde_json::Value)>,
     resolved: &params::Resolved,
+    deadline: TransformDeadline,
 ) -> Result<serde_json::Value, ServingError> {
     let mut statements: BTreeMap<String, Vec<serde_json::Value>> = BTreeMap::new();
     for (name, value) in shaped {
@@ -1226,11 +1298,56 @@ async fn transformed_data(
     let spec = spec.clone();
     let params = resolved.json.clone();
     let has_repeats = resolved.has_repeats;
-    let handle = tokio::task::spawn_blocking(move || {
+    run_under_deadline(deadline, move || {
         transform_response(&spec, &params, &statements, has_repeats)
-    });
+    })
+    .await
+}
 
-    match tokio::time::timeout(TRANSFORM_REQUEST_DEADLINE, handle).await {
+/// Run `work` on a blocking thread and stop WAITING for it at `deadline`.
+///
+/// Generic over the work for one reason, and it is a testing reason stated
+/// plainly: with `transform_response` called inline here, the only way to reach
+/// the `Elapsed` arm was to give a real starlark script real work to be too slow
+/// at — and that work then ran, detached, on a core the rest of the test binary
+/// was using. It took `transform::a_wide_shared_fan_out_is_stopped_by_the_output_deadline`
+/// from a measured 1-in-12 flake to 3-in-12. A seam here lets the test park a
+/// thread on a channel instead, which costs no CPU at all and is not a race.
+///
+/// Nothing else may use this seam. The one production caller is
+/// [`transformed_data`] directly above, and the closure it passes is the only
+/// thing this crate ever evaluates on a blocking thread.
+async fn run_under_deadline<F>(
+    deadline: TransformDeadline,
+    work: F,
+) -> Result<serde_json::Value, ServingError>
+where
+    F: FnOnce() -> Result<serde_json::Value, ServingError> + Send + 'static,
+{
+    let handle = tokio::task::spawn_blocking(work);
+    transform_outcome(tokio::time::timeout(deadline.0, handle).await, deadline)
+}
+
+/// What [`tokio::time::timeout`] over the join handle means, decided apart from
+/// the awaiting so that both refusal arms can be driven with REAL values.
+///
+/// The three nested `Result`s are exactly what `timeout(_, handle)` yields, and
+/// they are deliberately not flattened: `Elapsed` and `JoinError` are different
+/// facts about a request and the operator reads them differently, so collapsing
+/// them into one would be the second spelling of one outcome this file argues
+/// against everywhere else.
+///
+/// Both are [`ServingError::internal`]. A transform that did not finish is the
+/// endpoint failing to answer, not the caller failing to ask — the same reading
+/// [`transform_response`] argues for a script that raised.
+fn transform_outcome(
+    joined: Result<
+        Result<Result<serde_json::Value, ServingError>, tokio::task::JoinError>,
+        tokio::time::error::Elapsed,
+    >,
+    deadline: TransformDeadline,
+) -> Result<serde_json::Value, ServingError> {
+    match joined {
         Ok(Ok(result)) => result,
         // `run_transform` catches an evaluator unwind itself
         // (`TransformError::Evaluator`), so this is a panic in the plumbing
@@ -1238,11 +1355,16 @@ async fn transformed_data(
         Ok(Err(join)) => Err(ServingError::internal(format!(
             "the response transform did not complete: {join}"
         ))),
+        // The WAITING stopped here; the work did not. See the module comment —
+        // the blocking task is detached, keeps a pool thread and the rows it was
+        // handed, and this answer is what invites the caller to stack a second
+        // one on top of it.
         Err(_) => Err(ServingError::internal(format!(
-            "the response transform exceeded the {} s request deadline; the \
+            "the response transform exceeded the {} ms request deadline; the \
              evaluator's own budget bounds ticks rather than time, so a script \
-             whose every tick is expensive can overrun it",
-            TRANSFORM_REQUEST_DEADLINE.as_secs()
+             whose every tick is expensive can overrun it, and the run this \
+             stopped waiting for is still holding a blocking thread",
+            deadline.0.as_millis()
         ))),
     }
 }
@@ -3441,6 +3563,18 @@ mod tests {
         vec![serde_json::json!({"n": 7})]
     }
 
+    /// What `params::resolve` returns for a request, carrying an
+    /// already-resolved `params` dict. Built through the real struct so a field
+    /// added to it is a compile error here rather than a default nobody chose.
+    fn resolved_with(json: BTreeMap<String, serde_json::Value>) -> params::Resolved {
+        params::Resolved {
+            values: crate::render::ParamValues::new(),
+            key: BTreeMap::new(),
+            has_repeats: false,
+            json,
+        }
+    }
+
     /// **The real guarantee.**
     ///
     /// Publish's probe cannot prove a script always conforms — it runs against
@@ -3821,6 +3955,327 @@ mod tests {
                     Err(ServingError::SchemaDrift)
                 ),
                 "{why} must be refused before the script runs",
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // C2 Task 6, fix round 1 — the request deadline, and the two arms that
+    // answer when the script does not
+    // -----------------------------------------------------------------------
+
+    /// The two facts a refusal is judged on: the status a caller sees and the
+    /// code that lands in `access_log`. Read off the REAL wire mapping rather
+    /// than matched on the variant, because those two are the payload and the
+    /// variant is only how it is spelled.
+    fn wire_of(err: &ServingError) -> (StatusCode, &'static str) {
+        let w = to_wire(err);
+        (w.status, w.code)
+    }
+
+    /// **What [`transformed_data`] hands the script**: every statement keyed by
+    /// its own NAME, and the request's resolved parameters.
+    ///
+    /// Driven with TWO statements, because at N = 1 a path that keyed by index,
+    /// or that handed over only the first statement, is indistinguishable from
+    /// the correct one — the same reading M2 had to remove from `shape_rows`.
+    /// The script reads from both keys and from `params`, so an assembly that
+    /// dropped any of the three fails rather than returning a plausible object.
+    ///
+    /// Note what `data` does NOT do here: `statements_data` unwraps a single
+    /// statement's rows onto the wire under no name, and a script never sees
+    /// that unwrapping — its dict is keyed at every count.
+    #[tokio::test]
+    async fn a_transform_is_handed_every_statement_by_name_and_the_request_s_parameters() {
+        let snap = transformed_snapshot(
+            "def transform(params, statements):\n  \
+             return {\"total\": statements[\"total\"][0][\"n\"] + len(statements[\"rows\"]), \
+             \"region\": params[\"region\"]}",
+            vec![
+                spec("total", "bigint", true),
+                spec("region", "varchar", true),
+            ],
+        );
+        let resolved = resolved_with(BTreeMap::from([(
+            "region".to_string(),
+            serde_json::json!("EU"),
+        )]));
+
+        assert_eq!(
+            transformed_data(
+                snap.output.transform.as_ref().expect("transformed fixture"),
+                vec![
+                    ("rows", serde_json::json!([{"n": 1}, {"n": 2}])),
+                    ("total", serde_json::json!([{"n": 40}])),
+                ],
+                &resolved,
+                TransformDeadline::default(),
+            )
+            .await
+            .expect("the script reads both statements and the parameter"),
+            serde_json::json!({"total": 42, "region": "EU"}),
+        );
+    }
+
+    /// **The request's own deadline is what refuses work that has not
+    /// finished — and it stops the WAITING, not the work.**
+    ///
+    /// This is the test that did not exist. `transformed_data`'s
+    /// `tokio::time::timeout` could be deleted outright and nothing went red,
+    /// because the only way to reach the arm was to wait five real seconds.
+    /// [`TransformDeadline`] is the injection point that makes it reachable, the
+    /// same way `transform::Budgets` makes a tick budget reachable.
+    ///
+    /// # Two dead ends, recorded because each looked correct
+    ///
+    /// **A slow script.** An unbounded starlark loop with a 50 ms deadline
+    /// works, and it reddened
+    /// `transform::a_wide_shared_fan_out_is_stopped_by_the_output_deadline` in
+    /// the same binary about half the time: that test asserts which of two
+    /// output-deadline pollers fires first inside one evaluation, so it loses to
+    /// any concurrent CPU, and libtest runs the two in parallel. The load came
+    /// from the run this test stops waiting for — detached, still burning a core
+    /// for the full `transform::MAX_WALL_CLOCK` after the answer. Shrinking it
+    /// to a ~39 ms loop still measured 3 failures in 12 runs.
+    ///
+    /// The neighbour is load-sensitive **on its own** — 2 failures in 24 runs on
+    /// the commit before Task 6 existed, so it is genuinely pre-existing — and
+    /// that is not licence to make it worse. The version below measures **2 in
+    /// 24, the same rate**, which is the check that this test is not a
+    /// contributor; the 12-run numbers above are too small to separate 1 from 3
+    /// and are quoted as the signal that sent this looking, not as a rate.
+    ///
+    /// **A trivial script with a `Duration::ZERO` deadline.** The reasoning said
+    /// the poll must win, since there is no yield point between `spawn_blocking`
+    /// and the first poll. Measured, **the blocking task completes first and
+    /// `timeout` returns `Ok`** — it polls the inner future before it looks at
+    /// the clock, and a one-line parse on an already-warm pool thread is faster
+    /// than that reasoning assumed.
+    ///
+    /// # What works: park the thread instead of burning it
+    ///
+    /// [`run_under_deadline`] is the seam. The closure below blocks on a channel
+    /// this test owns, so it consumes no CPU, cannot finish early, and is
+    /// released deliberately at the end — deterministic in any build profile.
+    ///
+    /// The `finished` flag is the part worth having beyond the arm itself: it is
+    /// still `false` when the caller has been answered, which is the module
+    /// comment's central claim about detachment turned into a measurement.
+    #[tokio::test]
+    async fn the_request_deadline_stops_the_waiting_and_not_the_work() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        // 1. Work that finishes is served, so the refusal below is not "every
+        //    transform times out".
+        assert_eq!(
+            run_under_deadline(TransformDeadline::default(), || Ok(
+                serde_json::json!({"total": 1})
+            ))
+            .await
+            .expect("work that returns at once is served"),
+            serde_json::json!({"total": 1}),
+        );
+
+        // 2. Work that has not finished when the deadline is up is refused.
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
+        let finished = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&finished);
+
+        // The OUTER timeout is the test's own, and it is not redundant: with the
+        // production wrapper deleted this await never returns, and a mutation
+        // that HANGS the suite is indistinguishable from a slow machine. It
+        // turns that into a named failure. Panicking here still drops
+        // `release`, so the parked thread is not leaked either.
+        let err = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_under_deadline(
+                TransformDeadline::of(Duration::from_millis(20)),
+                move || {
+                    // Parks. `recv` returns `Err` once the sender is dropped,
+                    // which is how the thread is released at the end of this
+                    // test rather than leaked.
+                    let _ = blocked.recv();
+                    flag.store(true, Ordering::SeqCst);
+                    Ok(serde_json::json!({"total": 1}))
+                },
+            ),
+        )
+        .await
+        .expect("the request deadline must answer — a hang here is the production timeout gone")
+        .expect_err("the work had not finished");
+
+        assert_eq!(
+            wire_of(&err),
+            (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
+            "work that did not finish is the endpoint failing to answer: {err:?}"
+        );
+        let detail = format!("{err:?}");
+        assert!(
+            detail.contains("20 ms request deadline"),
+            "the detail names the deadline that fired, in the units it was set \
+             in — and it is the INJECTED one, not the shipped constant: {detail}"
+        );
+        assert!(
+            !detail.contains("wall-clock"),
+            "and it is the REQUEST's deadline, not `transform::MAX_WALL_CLOCK`: \
+             {detail}"
+        );
+
+        // The claim the module comment makes, measured: the caller has its
+        // answer and the work is still running.
+        assert!(
+            !finished.load(Ordering::SeqCst),
+            "the deadline stops the WAITING; a `spawn_blocking` task cannot be \
+             cancelled, and this is what the module comment means by the run \
+             still holding a thread after the 500"
+        );
+
+        // Release it, and confirm it really was only parked — so "not finished"
+        // above cannot have been a closure that never ran at all.
+        drop(release);
+        for _ in 0..1000 {
+            if finished.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert!(
+            finished.load(Ordering::SeqCst),
+            "the detached work resumes and completes once it is unblocked"
+        );
+    }
+
+    /// **Both refusal arms of [`transform_outcome`], driven with REAL values.**
+    ///
+    /// A fabricated `JoinError` is not a thing that can be constructed, and that
+    /// is the point: the one below comes from a task that actually panicked, and
+    /// the `Elapsed` from a timeout that actually elapsed. The `Ok` arm is
+    /// asserted on its PAYLOAD, so a mapping that swallowed the value and
+    /// answered a default would redden here.
+    #[tokio::test]
+    async fn every_arm_of_the_join_outcome_is_decided() {
+        // The value path.
+        assert_eq!(
+            transform_outcome(
+                Ok(Ok(Ok(serde_json::json!({"total": 1})))),
+                TransformDeadline::default(),
+            )
+            .expect("a completed run is served"),
+            serde_json::json!({"total": 1}),
+            "the script's value reaches the caller unaltered",
+        );
+
+        // A refusal the script itself produced travels through unchanged, so
+        // this function cannot be what turns a 500 into something else.
+        let refused = transform_outcome(
+            Ok(Ok(Err(ServingError::internal("the script said no")))),
+            TransformDeadline::default(),
+        )
+        .expect_err("a refusal stays a refusal");
+        assert_eq!(
+            wire_of(&refused),
+            (StatusCode::INTERNAL_SERVER_ERROR, "internal")
+        );
+        assert!(
+            format!("{refused:?}").contains("the script said no"),
+            "and it is the SAME refusal, not a re-worded one: {refused:?}"
+        );
+
+        // A real `JoinError`, from a task that really panicked.
+        let join = tokio::spawn(async { panic!("plumbing") })
+            .await
+            .expect_err("the task panicked");
+        assert!(
+            join.is_panic(),
+            "the fixture must be a real panic: {join:?}"
+        );
+        let err = transform_outcome(Ok(Err(join)), TransformDeadline::default())
+            .expect_err("a task that did not complete is a refusal");
+        assert_eq!(
+            wire_of(&err),
+            (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
+            "a panic in the plumbing is not the caller's doing: {err:?}"
+        );
+        assert!(
+            format!("{err:?}").contains("did not complete"),
+            "and it is diagnosable as one: {err:?}"
+        );
+
+        // A real `Elapsed`, from a timeout that really elapsed.
+        let elapsed = tokio::time::timeout(Duration::ZERO, std::future::pending::<()>())
+            .await
+            .expect_err("zero is already up");
+        let err = transform_outcome(
+            Err(elapsed),
+            TransformDeadline::of(Duration::from_millis(7)),
+        )
+        .expect_err("the deadline is a refusal");
+        assert_eq!(
+            wire_of(&err),
+            (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
+            "not a 400 and not a 503: {err:?}"
+        );
+        let detail = format!("{err:?}");
+        assert!(
+            detail.contains("7 ms request deadline"),
+            "the detail states the deadline that was actually applied, not the \
+             shipped constant: {detail}"
+        );
+        assert!(
+            detail.contains("still holding a blocking thread"),
+            "and it says what answering did NOT stop — see the module comment: \
+             {detail}"
+        );
+    }
+
+    /// The shipped deadline is the only one a non-test build can express.
+    ///
+    /// `TransformDeadline::of` is `#[cfg(test)]`, so this pins the DEFAULT
+    /// against the constant; a relaxation would have to change the constant,
+    /// which is the thing a reviewer reads.
+    #[test]
+    fn the_shipped_deadline_is_the_constant() {
+        assert_eq!(
+            TransformDeadline::default(),
+            TransformDeadline::of(TRANSFORM_REQUEST_DEADLINE)
+        );
+        assert_eq!(TRANSFORM_REQUEST_DEADLINE, Duration::from_secs(5));
+        assert!(
+            TRANSFORM_REQUEST_DEADLINE > crate::transform::MAX_WALL_CLOCK,
+            "the request deadline must not be TIGHTER than the evaluator's own \
+             budget, or a script that legitimately runs close to it and \
+             finishes is cut off by a race between two clocks measuring one \
+             piece of work",
+        );
+    }
+
+    /// A statement that did not shape to an array is a fault, not a panic.
+    ///
+    /// `shape_rows` returns an array on every `Ok` path, so this arm is
+    /// unreachable today — which is exactly why it is asserted rather than
+    /// written as an `expect`: the cost of being wrong about "unreachable"
+    /// inside a request handler is a panicking worker.
+    #[test]
+    fn a_statement_that_did_not_shape_to_rows_is_a_fault() {
+        assert_eq!(
+            rows_of("main", serde_json::json!([{"n": 1}])).expect("an array is rows"),
+            vec![serde_json::json!({"n": 1})],
+        );
+
+        for (value, named) in [
+            (serde_json::json!({"n": 1}), "an object"),
+            (serde_json::json!(null), "null"),
+            (serde_json::json!(7), "a scalar"),
+        ] {
+            let err = rows_of("main", value).expect_err("not an array of rows");
+            assert_eq!(
+                wire_of(&err),
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal")
+            );
+            let detail = format!("{err:?}");
+            assert!(
+                detail.contains("`main`") && detail.contains(named),
+                "the detail names the statement and what it was: {detail}"
             );
         }
     }
