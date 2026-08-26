@@ -264,6 +264,16 @@ pub(crate) fn resolve_supplied_with(
                 (CoerceError::Invalid, true) => ServingError::internal(
                     "a published `default` does not satisfy its own declared type",
                 ),
+                // The constraint and its bound are DELIBERATELY dropped here.
+                // `serving/error.rs` keeps `ParamInvalid` a unit variant so a
+                // 400 cannot become a directory of an endpoint's parameters;
+                // the detail exists for `check_defaults`, which the author
+                // reads about their own endpoint. Widening this is a decision,
+                // not a tidy-up.
+                (CoerceError::Constraint { .. }, false) => ServingError::ParamInvalid,
+                (CoerceError::Constraint { .. }, true) => ServingError::internal(
+                    "a published `default` does not satisfy its own declared constraints",
+                ),
                 (CoerceError::Malformed, _) => {
                     ServingError::internal("enum parameter published with no `allowed` list")
                 }
@@ -361,12 +371,23 @@ fn decode(
 /// the caller's text, `Malformed` is the published definition. The caller-facing
 /// mapping is the caller's alone — see [`resolve`], which is also where the
 /// author's own `default` failing is turned into a 500 rather than a 400.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum CoerceError {
     /// The text does not satisfy the declared `ty`.
     Invalid,
     /// The `ParamSpec` itself cannot be honoured — an `Enum` with no `allowed`.
     Malformed,
+    /// The value is well-typed and the spec is sound, and the value still fails
+    /// a declared constraint.
+    ///
+    /// **The detail here is for the AUTHOR, at publish.** The serving mapping
+    /// throws it away deliberately: `serving/error.rs` keeps `ParamInvalid` a
+    /// unit variant so a 400 cannot become a directory of an endpoint's
+    /// parameters. `check_defaults` is what reads these fields.
+    Constraint {
+        constraint: &'static str,
+        bound: String,
+    },
 }
 
 /// **Shared with publish**, which is the entire point.
@@ -378,7 +399,29 @@ pub(crate) enum CoerceError {
 /// publishes green and then answers 400 on every call that omits the parameter.
 pub(crate) fn coerce(spec: &ParamSpec, text: &str) -> Result<Param, CoerceError> {
     match spec.ty {
-        ParamType::String => Ok(Param::Str(text.to_string())),
+        ParamType::String => {
+            // `chars().count()`, never `len()`: `len()` is BYTES, and a
+            // `max_length: 10` that fails a Vietnamese name at seven letters is
+            // a bug the author cannot see from the declaration.
+            let chars = text.chars().count() as u32;
+            if let Some(lo) = spec.min_length {
+                if chars < lo {
+                    return Err(CoerceError::Constraint {
+                        constraint: "min_length",
+                        bound: lo.to_string(),
+                    });
+                }
+            }
+            if let Some(hi) = spec.max_length {
+                if chars > hi {
+                    return Err(CoerceError::Constraint {
+                        constraint: "max_length",
+                        bound: hi.to_string(),
+                    });
+                }
+            }
+            Ok(Param::Str(text.to_string()))
+        }
         ParamType::Enum => {
             let allowed = spec
                 .allowed
@@ -402,17 +445,35 @@ pub(crate) fn coerce(spec: &ParamSpec, text: &str) -> Result<Param, CoerceError>
             _ => Err(CoerceError::Invalid),
         },
         ParamType::Number => {
-            if let Ok(i) = text.parse::<i64>() {
-                return Ok(Param::I64(i));
-            }
             // Exact text, never an `f64`: a decimal that round-trips through a
             // float stops comparing equal to itself on the engine. The grammar
             // is deliberately narrow — no exponent, no `NaN`, no `inf` — so the
             // value is a literal both engines accept as a DECIMAL.
-            if is_plain_decimal(text) {
-                return Ok(Param::Decimal(text.to_string()));
+            let text_value = if text.parse::<i64>().is_ok() || is_plain_decimal(text) {
+                text
+            } else {
+                return Err(CoerceError::Invalid);
+            };
+            if let Some(lo) = &spec.minimum {
+                if compare_decimal_text(text_value, lo) == std::cmp::Ordering::Less {
+                    return Err(CoerceError::Constraint {
+                        constraint: "minimum",
+                        bound: lo.clone(),
+                    });
+                }
             }
-            Err(CoerceError::Invalid)
+            if let Some(hi) = &spec.maximum {
+                if compare_decimal_text(text_value, hi) == std::cmp::Ordering::Greater {
+                    return Err(CoerceError::Constraint {
+                        constraint: "maximum",
+                        bound: hi.clone(),
+                    });
+                }
+            }
+            if let Ok(i) = text_value.parse::<i64>() {
+                return Ok(Param::I64(i));
+            }
+            Ok(Param::Decimal(text_value.to_string()))
         }
         // Parsed and re-formatted rather than passed through, so ONE spelling
         // reaches the engine. chrono accepts an unpadded `2026-1-2`; it comes
@@ -577,6 +638,14 @@ mod tests {
             not_after: None,
             description: String::new(),
         }
+    }
+
+    fn number_param(name: &str) -> ParamSpec {
+        spec(name, ParamType::Number, false)
+    }
+
+    fn string_param(name: &str) -> ParamSpec {
+        spec(name, ParamType::String, false)
     }
 
     fn snap(sql: &str, params: Vec<ParamSpec>) -> EndpointSnapshot {
@@ -1002,6 +1071,110 @@ mod tests {
         assert_eq!(
             compare_decimal_text("1.0000000000000001", "1.0000000000000002"),
             Ordering::Less
+        );
+    }
+
+    #[test]
+    fn a_number_below_minimum_is_refused_and_says_which_constraint() {
+        let mut p = number_param("n");
+        p.minimum = Some("10".into());
+        match coerce(&p, "9") {
+            Err(CoerceError::Constraint { constraint, bound }) => {
+                assert_eq!(constraint, "minimum");
+                assert_eq!(bound, "10");
+            }
+            other => panic!("expected a constraint refusal, got {other:?}"),
+        }
+        assert!(coerce(&p, "10").is_ok(), "the bound itself is inclusive");
+        assert!(coerce(&p, "11").is_ok());
+    }
+
+    #[test]
+    fn a_number_above_maximum_is_refused() {
+        let mut p = number_param("n");
+        p.maximum = Some("100".into());
+        assert!(matches!(
+            coerce(&p, "101"),
+            Err(CoerceError::Constraint { .. })
+        ));
+        assert!(coerce(&p, "100").is_ok(), "inclusive");
+    }
+
+    #[test]
+    fn bounds_compare_decimals_without_going_through_a_float() {
+        // 0.1 + 0.2 != 0.3 in binary floating point. If the comparison round-trips
+        // through an f64, a bound of "0.3" rejects the value "0.3".
+        let mut p = number_param("n");
+        p.minimum = Some("0.3".into());
+        assert!(coerce(&p, "0.3").is_ok(), "a decimal must equal itself");
+
+        // And a long decimal must not be truncated into equality. Both of these
+        // parse to the exact same `f64` (`1.0`) — verified independently, not
+        // merely asserted in prose — so an implementation that compares through
+        // a float cannot tell them apart and this refusal is the only place
+        // that fact can be caught.
+        let mut q = number_param("n");
+        q.maximum = Some("1.00000000000000001".into());
+        assert!(
+            matches!(
+                coerce(&q, "1.00000000000000002"),
+                Err(CoerceError::Constraint { .. })
+            ),
+            "a difference below f64 precision must still be a difference"
+        );
+    }
+
+    #[test]
+    fn length_is_counted_in_characters_not_bytes() {
+        // "Nguyễn" is 6 characters and 8 bytes. A max_length of 6 must accept it.
+        let mut p = string_param("s");
+        p.max_length = Some(6);
+        assert!(
+            coerce(&p, "Nguyễn").is_ok(),
+            "6 characters must fit in max_length 6; String::len() would say 8 bytes"
+        );
+        assert!(matches!(
+            coerce(&p, "Nguyễnn"),
+            Err(CoerceError::Constraint { .. })
+        ));
+    }
+
+    #[test]
+    fn min_length_is_enforced() {
+        let mut p = string_param("s");
+        p.min_length = Some(3);
+        assert!(matches!(
+            coerce(&p, "ab"),
+            Err(CoerceError::Constraint { .. })
+        ));
+        assert!(coerce(&p, "abc").is_ok(), "inclusive");
+    }
+
+    #[test]
+    fn a_constraint_refusal_reaches_the_caller_as_a_bare_param_invalid() {
+        // The whole point of §2.1: the caller learns "send something else" and
+        // NOTHING about the endpoint's parameters. If this test ever needs the
+        // bound, the change is wrong — read `serving/error.rs`'s doc comment first.
+        let mut p = number_param("n");
+        p.maximum = Some("100".into());
+        let supplied =
+            std::collections::BTreeMap::from([("n".to_string(), vec!["101".to_string()])]);
+        let err = match resolve_supplied_with(&supplied, &[], std::slice::from_ref(&p)) {
+            Err(e) => e,
+            Ok(_) => panic!("expected a constraint refusal over the maximum"),
+        };
+        assert!(matches!(err, ServingError::ParamInvalid));
+        // `ParamInvalid` is a unit variant, so its `Debug` rendering is exactly
+        // its own name — nothing can be appended to it. Checking for a
+        // substring like the bound ("100") or the parameter name ("n") is not
+        // this test: "n" and even a two-digit bound can occur by coincidence
+        // inside "ParamInvalid" itself (it contains an "n" in "Invalid"), which
+        // would fail this test on a CORRECT implementation. The exact-equality
+        // check below is what actually proves nothing was attached.
+        let rendered = format!("{err:?}");
+        assert_eq!(
+            rendered, "ParamInvalid",
+            "the constraint's detail leaked into the error: {rendered}"
         );
     }
 }
