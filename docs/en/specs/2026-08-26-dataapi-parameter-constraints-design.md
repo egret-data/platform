@@ -64,19 +64,41 @@ side effects:
 3. **A constraint cannot be added to serving without publish seeing it**, because
    there is only one function.
 
-### 2.1 `CoerceError` needs a third variant
+### 2.1 The detail goes to the author, never into a 400
 
-Today: `Invalid` (the caller's value does not satisfy the type → 400) and
-`Malformed` (the *spec* cannot be honoured, e.g. an `Enum` with no `allowed` → not
-the caller's fault, so not a 400).
+**Corrected 2026-08-26, after reading `serving/error.rs`.** An earlier draft of this
+section proposed a new `ServingError` variant carrying which constraint failed, so a
+caller exceeding a `maximum` by one would be told so. That is wrong here, and the
+file says why.
 
-A constraint violation is a third thing: the value is well-typed and the spec is
-sound, and the value is still refused. It must be reportable with **which
-constraint** it failed, because "invalid" alone tells a caller nothing about a
-`maximum` they exceeded by one. Add a variant carrying that, and surface it in the
-400 body.
+`serving/error.rs` enforces a rule: **no parameter name appears in a 400.** The name
+belongs to the endpoint's author, not to its caller, and putting it in an error turns
+the error surface into a directory of the parameters an endpoint declares — the same
+class of oracle that a single `Unauthorized` and a single `NotFound` exist to close.
+It is enforced by shape, not by discipline: `ParamInvalid` and `ParamMissing` are unit
+variants carrying nothing, so there is no field for a later edit to interpolate out of
+habit, and widening the type is a decision someone has to take deliberately.
 
-This is the only user-visible error-shape change in C1.
+So the resolution is smaller than the draft's:
+
+- **Serving keeps `ParamInvalid` exactly as it is** — unit variant, no name, no bound,
+  no constraint kind. A constraint violation and a type violation ask the caller for
+  the same thing: *send a different value*. That is already what `ParamInvalid` means,
+  and the existing 400 vocabulary ("send it" vs "send something else") already covers it.
+- **`CoerceError` does gain a variant** carrying which constraint failed and its bound
+  — but only so **publish** can report it. Publish is the author reading an error about
+  their own endpoint; there is no oracle there, and "your `default` of 5 is below the
+  `minimum` of 10 you declared" is exactly the message that saves them a round trip.
+- **Serving discards that detail** at the `CoerceError → ServingError` mapping
+  (`params.rs:263`), deliberately and with a comment saying so.
+
+There is therefore **no user-visible error-shape change in C1** for callers, and a
+better error at publish for authors.
+
+The bound is not secret from a legitimate client, which is why this costs nothing: §4
+publishes `minimum`/`maximum`/`pattern` in the generated OpenAPI document. The rule is
+about not turning the *serving* path into a discovery channel for people who cannot
+read that contract.
 
 ### 2.2 Publish's probe values deliberately ignore these constraints
 
