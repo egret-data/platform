@@ -140,14 +140,14 @@ pub(crate) fn resolve(
 /// over a `Plain` object is not iterable, so the render errors rather than
 /// silently doing the wrong thing.
 ///
-/// Preview passes a single-element `sqls`, because its draft body carries one
-/// `sql` field, not a statement list — the union of one is itself. **That is a
-/// limitation, and it is the one place the shape question is still asked of one
-/// statement**: previewing the `summary` of a two-statement endpoint whose
-/// `by_region` loops over the same parameter shows a green preview of a
-/// definition publish refuses. Publish sees every statement and is the refusal
-/// that counts; making preview agree needs the sibling statements in the
-/// request body.
+/// Preview does not call this one at all — it calls [`resolve_supplied_with`],
+/// because its shape decision was already made (and already refused a draft
+/// that fails it) by `lifecycle::validate_preview`, across the statement on
+/// screen AND the siblings its request body now carries. It used to pass a
+/// single-element `sqls` here, which was the one place the shape question was
+/// still asked of one statement of several: previewing the `summary` of a
+/// two-statement endpoint whose `by_region` loops over the same parameter
+/// showed a green preview of a definition publish refuses. That is closed.
 ///
 /// [`resolve`] hands this every statement's SQL but decides nothing about shape
 /// itself, so serving has exactly one such decision.
@@ -183,7 +183,27 @@ pub(crate) fn resolve_supplied(
         let declared: Vec<String> = specs.iter().map(|p| p.name.clone()).collect();
         crate::render::iterated_params_union(sqls, &declared)
     };
+    resolve_supplied_with(supplied, &iterated, specs)
+}
 
+/// [`resolve_supplied`] with the shape decision ALREADY made.
+///
+/// The serving path computes it from the statements it is about to run, which
+/// is what [`resolve_supplied`] does. Preview cannot: the statement it runs is
+/// one of several and the shape is a property of the endpoint, so the union is
+/// computed once by [`crate::lifecycle::validate_preview`] — which is also the
+/// function that refuses the draft when that shape does not render — and handed
+/// here as a `lifecycle::IteratedParams`' names.
+///
+/// Split for that caller alone, and split rather than duplicated: preview
+/// computing its own union would be the second answer the M2 fix removed. The
+/// two entry points differ only in where the set comes from; everything below
+/// this line is one implementation.
+pub(crate) fn resolve_supplied_with(
+    supplied: &BTreeMap<String, Vec<String>>,
+    iterated: &[String],
+    specs: &[ParamSpec],
+) -> Result<Resolved, ServingError> {
     let mut values = ParamValues::new();
     let mut key: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut has_repeats = false;

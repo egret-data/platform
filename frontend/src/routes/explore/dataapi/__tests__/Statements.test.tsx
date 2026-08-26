@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -117,7 +119,7 @@ import * as databasesApi from "@/api/databases";
 import * as dataApi from "@/api/dataApi";
 import type { DataApiEndpointDto, StatementSpec } from "@/api/generated/model";
 import EndpointDetail from "@/routes/explore/dataapi/EndpointDetail";
-import Query from "@/routes/explore/dataapi/detail/Query";
+import Query, { MAX_STATEMENTS } from "@/routes/explore/dataapi/detail/Query";
 
 /**
  * The default is ONE statement named `main` — the shape migration 0129 gave
@@ -427,6 +429,62 @@ describe("Query section — authoring several statements", () => {
   });
 
   /**
+   * The preview body carries the OTHER statements too — and only their text.
+   *
+   * Whether a parameter arrives as a scalar or a list is a property of the whole
+   * endpoint: one `{% for %}` anywhere makes it a list for every statement. A
+   * preview body carrying only the statement on screen made the server judge
+   * that from one statement while publish judged it from all of them, so an
+   * author could be shown a green preview of a definition publish then refused.
+   *
+   * Two assertions, and the second is the one that fails if `siblings` is built
+   * by appending rather than by excluding: the statement being RUN must not also
+   * appear in the list, or the server would count it twice — and a preview that
+   * shipped every statement including its own would look identical on the first
+   * assertion alone.
+   */
+  it("sends the other statements' SQL as `siblings`, without the one it runs", async () => {
+    const previewMutateAsync = vi
+      .fn()
+      .mockResolvedValue({ status: 200, data: { columns: [], rows: [], row_count: 0, truncated: false } });
+    vi.mocked(api.useDataApiPreviewEndpoint).mockReturnValue({
+      mutateAsync: previewMutateAsync,
+      isPending: false,
+    } as never);
+    renderQuery(two);
+    await screen.findByLabelText("SQL");
+    await userEvent.click(screen.getByRole("tab", { name: "total" }));
+    await userEvent.click(screen.getByRole("button", { name: /preview unsaved draft/i }));
+
+    await waitFor(() => expect(previewMutateAsync).toHaveBeenCalled());
+    const body = previewMutateAsync.mock.calls[0][0].data;
+    expect(body.siblings).toEqual(["SELECT * FROM t"]);
+    expect(body.siblings).not.toContain(body.sql);
+  });
+
+  /**
+   * The compatibility case, from the client's side: a one-statement endpoint
+   * sends an EMPTY list, which is the union of one the server computed before
+   * this field existed. So the common endpoint's preview is byte-identical in
+   * meaning to what it was.
+   */
+  it("sends an empty `siblings` for a one-statement endpoint", async () => {
+    const previewMutateAsync = vi
+      .fn()
+      .mockResolvedValue({ status: 200, data: { columns: [], rows: [], row_count: 0, truncated: false } });
+    vi.mocked(api.useDataApiPreviewEndpoint).mockReturnValue({
+      mutateAsync: previewMutateAsync,
+      isPending: false,
+    } as never);
+    renderQuery(makeEndpoint({ statements: [{ name: "rows", sql: "SELECT 1" }] } as Partial<DataApiEndpointDto>));
+    await screen.findByLabelText("SQL");
+    await userEvent.click(screen.getByRole("button", { name: /preview unsaved draft/i }));
+
+    await waitFor(() => expect(previewMutateAsync).toHaveBeenCalled());
+    expect(previewMutateAsync.mock.calls[0][0].data.siblings).toEqual([]);
+  });
+
+  /**
    * The upper bound on the list, said on the control rather than by a toast
    * after the save.
    *
@@ -517,5 +575,54 @@ describe("Query section — authoring several statements", () => {
     // Read-only, though: the editor and every control that WRITES stays inert.
     expect(screen.getByLabelText("SQL")).toHaveAttribute("readonly");
     expect(screen.getByRole("button", { name: /add statement/i })).toBeDisabled();
+  });
+});
+
+/**
+ * The statement limit exists three times — `MAX_STATEMENTS` in
+ * `crates/egret-dataapi-api/src/lib.rs`, a `#[schema(max_items = 16)]` on the
+ * two request bodies, and `MAX_STATEMENTS` in `detail/Query.tsx` — and nothing
+ * in this repo shares a constant between Rust and TypeScript.
+ *
+ * Two mechanisms close that, and this file owns the second:
+ *
+ * 1. Rust to CONTRACT: a `const _: () = assert!(MAX_STATEMENTS == 16)` beside
+ *    the schema attribute, so raising the limit without editing the attribute
+ *    fails the build.
+ * 2. Contract to FRONTEND: this test, which reads the committed `openapi.json`
+ *    and compares its `maxItems` with the constant the UI actually uses.
+ *
+ * **It derives the number rather than restating it.** A test spelling `16` a
+ * fourth time passes exactly when the other three are wrong in the same way,
+ * which is no gate at all. Nothing below writes the number down: change either
+ * side alone and this fails, naming both values.
+ *
+ * `openapi.json` is committed at the repo root and asserted byte-for-byte
+ * against a fresh emit by `egret-server`, so reading it here is reading the
+ * generated contract and not a stale copy of it.
+ */
+describe("the statement limit does not drift between the contract and the UI", () => {
+  /**
+   * Both request bodies, not one. They carry the limit independently (`create`
+   * and `PATCH` each accept a whole list), so a `max_items` added to one and
+   * forgotten on the other is exactly the drift this is for.
+   */
+  const bodies = ["CreateEndpointInput", "UpdateEndpointInput"] as const;
+
+  function contractMaxItems(schema: (typeof bodies)[number]): unknown {
+    // From this file, not from `process.cwd()`: the suite's `include` also
+    // reaches ../scripts/harness, so the working directory is not a fixed point.
+    const root = path.resolve(import.meta.dirname, "../../../../../..");
+    const doc = JSON.parse(readFileSync(path.join(root, "openapi.json"), "utf8"));
+    return doc.components.schemas[schema].properties.statements.maxItems;
+  }
+
+  it.each(bodies)("%s.statements declares the limit the UI enforces", (schema) => {
+    const declared = contractMaxItems(schema);
+    // Present at all, first: `undefined === undefined` would make the
+    // comparison below vacuous the moment the attribute is dropped, and a
+    // dropped attribute is one of the two ways this drifts.
+    expect(typeof declared).toBe("number");
+    expect(declared).toBe(MAX_STATEMENTS);
   });
 });

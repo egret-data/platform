@@ -27584,7 +27584,8 @@
             "items": {
               "$ref": "#/components/schemas/StatementSpec"
             },
-            "description": "The statements this endpoint runs, in order. Required and non-empty:\n[`egret_dataapi_api::validate_statements`] refuses an empty list, a name\nthat is not an identifier, and a repeated name, all as a 400 naming the\nreason — the schema's own `CHECK` behind it means an empty list is not\nmerely refused here but unrepresentable."
+            "description": "The statements this endpoint runs, in order. Required and non-empty:\n[`egret_dataapi_api::validate_statements`] refuses an empty list, a name\nthat is not an identifier, and a repeated name, all as a 400 naming the\nreason — the schema's own `CHECK` behind it means an empty list is not\nmerely refused here but unrepresentable.\n\n`max_items` puts [`MAX_STATEMENTS`] into the generated contract, which is\nthe only place a client can learn it: it is a rule\n`validate_statements` applies, not a column, so nothing else in the\ndocument said the number at all. utoipa's `max_items` takes a LITERAL, so\nit cannot name the constant — the `const _: () = assert!(…)` above this\nstruct is what stops the two drifting, and it does it at compile time.",
+            "maxItems": 16
           },
           "method": {
             "type": [
@@ -31434,7 +31435,14 @@
         "properties": {
           "sql": {
             "type": "string",
-            "description": "What is in the editor right now — not what is stored."
+            "description": "What is in the editor right now — not what is stored. **The only\nstatement this route runs.**"
+          },
+          "siblings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The SQL text of the endpoint's OTHER statements, as they are on screen.\n\nThey decide ONE thing and are used for nothing else: whether a parameter\narrives as a scalar or a list, which is a property of the endpoint (any\nstatement's `{% for %}` header makes it a list) and not of the statement\nbeing previewed. They are never rendered, bound or executed. Omit the\nfield for a one-statement endpoint. At most `MAX_STATEMENTS - 1` of them,\nsince `sql` plus its siblings is an endpoint."
           },
           "params": {
             "type": "array",
@@ -34711,7 +34719,8 @@
             "items": {
               "$ref": "#/components/schemas/StatementSpec"
             },
-            "description": "Replaces the whole list when present. There is no per-statement patch:\nthe order is part of the definition, so \"edit statement 2\" and \"insert a\nstatement\" would need an addressing scheme the list itself already is."
+            "description": "Replaces the whole list when present. There is no per-statement patch:\nthe order is part of the definition, so \"edit statement 2\" and \"insert a\nstatement\" would need an addressing scheme the list itself already is.\n\nBounded in the contract the same way `CreateEndpointInput` is, and for\nthe same reason: this route replaces the whole list, so it is the other\nway a client can send one that is too long.",
+            "maxItems": 16
           },
           "params": {
             "type": [

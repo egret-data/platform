@@ -15,8 +15,22 @@ import type { PreviewEndpointInputValues } from './previewEndpointInputValues';
  * and accepting fields it ignores would invite the reader to think it did.
  */
 export interface PreviewEndpointInput {
-  /** What is in the editor right now — not what is stored. */
+  /**
+     * What is in the editor right now — not what is stored. **The only
+     * statement this route runs.**
+     */
   sql: string;
+  /**
+     * The SQL text of the endpoint's OTHER statements, as they are on screen.
+     *
+     * They decide ONE thing and are used for nothing else: whether a parameter
+     * arrives as a scalar or a list, which is a property of the endpoint (any
+     * statement's `{% for %}` header makes it a list) and not of the statement
+     * being previewed. They are never rendered, bound or executed. Omit the
+     * field for a one-statement endpoint. At most `MAX_STATEMENTS - 1` of them,
+     * since `sql` plus its siblings is an endpoint.
+     */
+  siblings?: string[];
   /** The parameter declarations as they are on screen right now. */
   params?: ParamSpec[];
   /**

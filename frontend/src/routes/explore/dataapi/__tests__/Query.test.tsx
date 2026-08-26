@@ -291,6 +291,10 @@ describe("Query section — preview", () => {
     // so an added, dropped or renamed field cannot pass unnoticed.
     expect(mutateAsync.mock.calls[0][0].data).toEqual({
       sql: "SELECT 1",
+      // The one-statement endpoint this fixture is: nothing else to inform the
+      // shape decision with. `Statements.test.tsx` is where a NON-empty list is
+      // pinned, and where the statement being run is asserted absent from it.
+      siblings: [],
       params,
       values: { region: ["EU"] },
       database_id: "db-1",

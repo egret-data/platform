@@ -97,13 +97,20 @@ function statementNameError(name: string, all: string[], index: number): string 
  * `crates/egret-dataapi-api/src/lib.rs`, which is where the number is decided
  * and where the measurements behind it are written down.
  *
- * Repeated here rather than read from the API because it is not in the
- * generated model: it is a rule `validate_statements` applies, not a field. The
- * server is still the authority — create, PATCH and publish all refuse a longer
- * list with a 400 — and this constant only decides when the control stops
- * offering to make one. A stale copy costs a toast, not a bad save.
+ * Still a copy: there is no mechanism in this repo that shares a constant
+ * between Rust and TypeScript, and the number is a rule `validate_statements`
+ * applies rather than a field of any model. The server remains the authority —
+ * create, PATCH and publish all refuse a longer list with a 400 — and this
+ * decides only when the control stops offering to make one, so a stale copy
+ * costs a toast, not a bad save.
+ *
+ * What is no longer missing is the thing that NOTICES the copy going stale.
+ * `statements` now carries `maxItems` in `openapi.json` (a `#[schema(max_items)]`
+ * the Rust side pins to `MAX_STATEMENTS` with a `const` assertion), and
+ * `__tests__/Statements.test.tsx` reads that committed document and compares it
+ * with this constant. Exported for that test alone — nothing else imports it.
  */
-const MAX_STATEMENTS = 16;
+export const MAX_STATEMENTS = 16;
 
 /**
  * A valid, unused name for a statement being added.
@@ -136,6 +143,18 @@ export default function Query() {
   const [selected, setSelected] = useState(0);
   const active = Math.min(selected, Math.max(statements.length - 1, 0));
   const current = statements[active] ?? { name: "", sql: "" };
+
+  /**
+   * Every statement's SQL except the one on screen.
+   *
+   * By INDEX, not by name: two statements may share a name while the author is
+   * mid-edit (`statementNameError` is what says so), and filtering by name would
+   * then drop the wrong one — or drop `current` twice and leave a sibling in.
+   */
+  const siblings = useMemo(
+    () => statements.filter((_, i) => i !== active).map((s) => s.sql),
+    [statements, active],
+  );
 
   const nameError = useMemo(
     () => (several ? statementNameError(current.name, statements.map((s) => s.name), active) : null),
@@ -317,24 +336,14 @@ export default function Query() {
                 type="button"
                 variant="ghost"
                 size="sm"
-                // `disabled:pointer-events-auto` overrides `Button`'s own
-                // `disabled:pointer-events-none` (`ui/button.tsx`), for this
-                // instance only — `cva`'s own className arg lands after the
-                // base classes and `cn`'s `twMerge` keeps the later one, the
-                // same mechanism `button.tsx`'s doc comment already relies on
-                // for the focus-ring override.
-                //
-                // Required for the `title` below to mean anything: at the cap
-                // this button IS the only thing on screen saying why, and
-                // `pointer-events: none` makes a real browser skip it during
-                // hit-testing — confirmed live, `elementFromPoint` at its own
-                // centre landed on this row's container, not the button, and
-                // Playwright's own hover action timed out with "intercepts
-                // pointer events" naming that same container. `disabled` (the
-                // HTML attribute, untouched below) already blocks the click and
-                // is what the shell's `<fieldset disabled>` reaches — this only
-                // restores hover.
-                className="ml-auto shrink-0 disabled:pointer-events-auto"
+                // No `disabled:pointer-events-auto` here any more. This button
+                // used to carry one, to override `Button`'s own
+                // `disabled:pointer-events-none` for this instance alone, so
+                // that the `title` below could be reached by a pointer at all.
+                // `ui/button.tsx` no longer sets that class on ANY button — the
+                // same defect was hiding the `title` on fifteen others — so the
+                // local override has nothing left to override.
+                className="ml-auto shrink-0"
                 disabled={atLimit}
                 // Says WHY it is unavailable, and says what to do instead.
                 // Statements run one after another, so the count multiplies the
@@ -421,12 +430,21 @@ export default function Query() {
         </Panel>
         <PanelSeparator className="my-1 h-1.5 rounded bg-border transition-colors hover:bg-primary/60 active:bg-primary" />
         <Panel defaultSize="45%" minSize="20%">
-          {/* The preview route takes ONE `sql` — it runs a statement, not an
-              endpoint — so it is handed the statement on screen rather than
-              reading `form` for it. `statementName` is `undefined` in the
-              common case, which is what keeps the note below byte-identical to
-              what it said before this feature. */}
-          <PreviewBlock ref={preview} sql={current.sql} statementName={several ? current.name : undefined} />
+          {/* The preview route RUNS one `sql` — a statement, not an endpoint —
+              so it is handed the statement on screen rather than reading `form`
+              for it. It is also handed the other statements' text: a parameter
+              is a list for the whole endpoint as soon as ONE statement loops
+              over it, so a preview that saw only this statement could go green
+              on a definition publish then refuses. They inform that decision and
+              nothing else — the server never runs them. `statementName` is
+              `undefined` in the common case, which is what keeps the note below
+              byte-identical to what it said before this feature. */}
+          <PreviewBlock
+            ref={preview}
+            sql={current.sql}
+            siblings={siblings}
+            statementName={several ? current.name : undefined}
+          />
         </Panel>
       </Group>
     </div>

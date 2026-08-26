@@ -175,6 +175,141 @@ async fn preview_refuses_a_definition_publish_refuses() {
     assert_eq!(f.port.executions(), 0, "nothing may reach the engine");
 }
 
+/// M2 debt: a preview must judge a parameter's SHAPE from the whole endpoint.
+///
+/// Whether a parameter arrives as a scalar or a list is decided by the endpoint —
+/// one `{% for %}` header anywhere makes it a list for every statement, and both
+/// publish and serving read it that way. Preview saw only the statement on
+/// screen, so `summary` (a scalar use) previewed GREEN beside a `by_region` that
+/// loops the same parameter, and then publish refused it. It failed closed, so
+/// nothing unsafe ran; what the author got was "fine", then "no".
+///
+/// Both halves in one test, because the property is the DIFFERENCE: the
+/// identical body without `siblings` still returns 200, which is both the
+/// old-client compatibility promise and the proof that the refusal below comes
+/// from the new field rather than from anything else in the draft.
+#[tokio::test]
+async fn preview_judges_a_parameter_shape_across_its_siblings() {
+    let Some(f) = fixture().await else { return };
+    let body = |siblings: serde_json::Value| {
+        serde_json::json!({
+            "sql": "SELECT 1 AS n WHERE region = {{ region }}",
+            "siblings": siblings,
+            "params": [{
+                "name": "region",
+                "type": "string",
+                "location": "query",
+                "required": true,
+            }],
+            "values": { "region": ["EU"] },
+            "database_id": f.database_id,
+        })
+    };
+
+    // A sibling that LOOPS over `region` makes it a list for the endpoint, and
+    // this statement cannot bind a list — the same `SequenceBind` publish gives.
+    let looping = serde_json::json!([
+        "SELECT region AS n FROM t WHERE region IN (         {% for x in region %}{{ x }}{% if not loop.last %},{% endif %}{% endfor %})"
+    ]);
+    let (status, out) = f.mgmt_post(&preview_path(&f), Some(body(looping))).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "preview must reach the conclusion publish reaches — {out}"
+    );
+    assert_eq!(f.port.executions(), 0, "nothing may reach the engine");
+
+    // The control, and the compatibility promise: no `siblings` key at all —
+    // the body an older client sends — is the union of one, and green.
+    let (status, out) = f
+        .mgmt_post(&preview_path(&f), Some(draft_with_region(&f)))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+}
+
+/// A body that omits `siblings` entirely, for the control above.
+///
+/// Spelled as its own function rather than `body(json!([]))` on purpose: an
+/// EMPTY list and an ABSENT field are two different wire shapes, and it is the
+/// absent one that an old client sends and `#[serde(default)]` has to accept on
+/// a `deny_unknown_fields` struct.
+fn draft_with_region(f: &serving_common::Fixture) -> serde_json::Value {
+    serde_json::json!({
+        "sql": "SELECT 1 AS n WHERE region = {{ region }}",
+        "params": [{
+            "name": "region",
+            "type": "string",
+            "location": "query",
+            "required": true,
+        }],
+        "values": { "region": ["EU"] },
+        "database_id": f.database_id,
+    })
+}
+
+/// The siblings inform the shape and nothing else — they never reach the engine.
+///
+/// The risk the field creates is precisely this one: a `data_api_endpoint:manage`
+/// route that accepts N SQL texts and runs the one on screen would become an
+/// arbitrary multi-statement run if any of them were ever executed. Asserted
+/// three ways, because one alone is weak — exactly ONE execution, and the SQL it
+/// carried is the statement on screen, and the sibling's own marker is nowhere in
+/// it.
+///
+/// A sibling that would be REFUSED as a definition (a `;`, a `DROP`) is used on
+/// purpose: it is both the dangerous case and the ordinary one, since a sibling
+/// is routinely mid-edit in another tab of the same form while the author
+/// previews this statement.
+#[tokio::test]
+async fn preview_executes_only_the_statement_on_screen() {
+    let Some(f) = fixture().await else { return };
+    let mut body = draft(&f, "SELECT 1 AS n");
+    body["siblings"] = serde_json::json!(["SELECT 2 AS sibling_marker", "DROP TABLE t; -- typing"]);
+    let (status, out) = f.mgmt_post(&preview_path(&f), Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    assert_eq!(f.port.executions(), 1, "one statement runs, not three");
+    let (sql, _) = f.port.last();
+    assert_eq!(sql, "SELECT 1 AS n");
+    assert!(
+        !sql.contains("sibling_marker") && !sql.contains("DROP"),
+        "no sibling text may reach the engine, got {sql:?}"
+    );
+}
+
+/// The bound on the new field, at the route.
+///
+/// `siblings` is an unbounded list of texts from a request body until something
+/// says otherwise, and each one costs a template scan. The bound is the one
+/// publish already has — `1 + siblings.len()` may not exceed `MAX_STATEMENTS`,
+/// so a preview body cannot describe an endpoint that could not exist — and it
+/// answers before the statement is scanned or anything is rendered.
+#[tokio::test]
+async fn preview_refuses_more_siblings_than_an_endpoint_may_have_statements() {
+    let Some(f) = fixture().await else { return };
+    let sqls: Vec<String> = (0..egret_dataapi_api::MAX_STATEMENTS)
+        .map(|i| format!("SELECT {i} AS n"))
+        .collect();
+
+    let mut ok = draft(&f, "SELECT 1 AS n");
+    ok["siblings"] = serde_json::json!(sqls[1..]);
+    let (status, out) = f.mgmt_post(&preview_path(&f), Some(ok)).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "one statement plus its siblings is exactly an endpoint — {out}"
+    );
+
+    let mut too_many = draft(&f, "SELECT 1 AS n");
+    too_many["siblings"] = serde_json::json!(sqls);
+    let (status, out) = f.mgmt_post(&preview_path(&f), Some(too_many)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{out}");
+    assert!(
+        out.to_string()
+            .contains(&egret_dataapi_api::MAX_STATEMENTS.to_string()),
+        "the refusal must name the limit, got {out}"
+    );
+}
+
 /// The other half of that rule, and the half nothing else re-runs: a single
 /// statement that is not a SELECT.
 ///
