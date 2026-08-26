@@ -22,6 +22,52 @@ function newParam(): ParamSpec {
   return { name: "", type: ParamType.string, location: ParamLocation.query, required: false };
 }
 
+/** The seven optional constraint fields `check_constraints` validates at
+ *  publish time — see `ParamSpec`'s generated doc comments for what each one
+ *  means and why `minimum`/`maximum` are strings. */
+const CONSTRAINT_FIELDS = [
+  "minimum",
+  "maximum",
+  "min_length",
+  "max_length",
+  "pattern",
+  "not_before",
+  "not_after",
+] as const;
+type ConstraintField = (typeof CONSTRAINT_FIELDS)[number];
+
+/** Which constraint fields apply to a given parameter type — the same
+ *  pairing the backend's `ConstraintNotForType` enforces at publish time.
+ *  `boolean` and `enum` take none: `allowed` is already the enum's
+ *  constraint, and the type is the boolean's. */
+function constraintFieldsFor(type: ParamType): ConstraintField[] {
+  switch (type) {
+    case ParamType.string:
+      return ["min_length", "max_length", "pattern"];
+    case ParamType.number:
+      return ["minimum", "maximum"];
+    case ParamType.date:
+    case ParamType.timestamp:
+      return ["not_before", "not_after"];
+    default:
+      return [];
+  }
+}
+
+/** A patch clearing every constraint field the new type does not use.
+ *  Without this, a `max_length` set while the row was `string` survives a
+ *  switch to `number` and publish refuses the whole spec with
+ *  `ConstraintNotForType` — an error about a field the editor no longer
+ *  shows the author, since it is scoped to `newType`'s applicable set. */
+function clearInapplicableConstraints(newType: ParamType): Partial<ParamSpec> {
+  const keep = new Set<ConstraintField>(constraintFieldsFor(newType));
+  const patch: Partial<ParamSpec> = {};
+  for (const field of CONSTRAINT_FIELDS) {
+    if (!keep.has(field)) patch[field] = undefined;
+  }
+  return patch;
+}
+
 /**
  * The comma-separated "allowed values" field for an `enum` parameter.
  *
@@ -97,6 +143,112 @@ function AllowedValuesField({
 }
 
 /**
+ * The constraint inputs for `string`, `number`, `date` and `timestamp` — the
+ * types that have any (see `constraintFieldsFor`). Placed and named the same
+ * way as `AllowedValuesField`: no visible label of its own, an `aria-label`
+ * per input, and a plain controlled value straight off `p` with no local
+ * draft. The draft trick `AllowedValuesField` needs exists because it
+ * reformats text on blur (`"a,b"` → `"a, b"`); nothing here reformats what
+ * the author typed, so there is no re-render to fight.
+ */
+function ConstraintFields({
+  id,
+  row,
+  param,
+  onChange,
+}: {
+  id: string;
+  /** Row label, e.g. "Parameter 2" — carried into every input's `aria-label`
+   *  for the same reason every other cell's controls do (see the table's
+   *  module doc: a visible `<th>` cannot say which row a control belongs to). */
+  row: string;
+  param: ParamSpec;
+  onChange: (patch: Partial<ParamSpec>) => void;
+}) {
+  switch (param.type) {
+    case ParamType.string:
+      return (
+        <div className="mt-1.5 space-y-1.5">
+          <Input
+            id={`${id}-min-length`}
+            aria-label={`${row} min length`}
+            type="number"
+            min={0}
+            placeholder="min length"
+            value={param.min_length ?? ""}
+            onChange={(e) =>
+              onChange({ min_length: e.target.value === "" ? undefined : Number(e.target.value) })
+            }
+          />
+          <Input
+            id={`${id}-max-length`}
+            aria-label={`${row} max length`}
+            type="number"
+            min={0}
+            placeholder="max length"
+            value={param.max_length ?? ""}
+            onChange={(e) =>
+              onChange({ max_length: e.target.value === "" ? undefined : Number(e.target.value) })
+            }
+          />
+          <Input
+            id={`${id}-pattern`}
+            aria-label={`${row} pattern`}
+            placeholder="pattern (regex)"
+            value={param.pattern ?? ""}
+            onChange={(e) => onChange({ pattern: e.target.value === "" ? undefined : e.target.value })}
+          />
+        </div>
+      );
+    case ParamType.number:
+      return (
+        // Text inputs, deliberately not `type="number"` — `minimum`/`maximum`
+        // are strings on the wire because a decimal that round-trips through
+        // a float stops comparing equal to itself on the engine, and a
+        // numeric input would round-trip it through the browser's float too.
+        <div className="mt-1.5 space-y-1.5">
+          <Input
+            id={`${id}-minimum`}
+            aria-label={`${row} minimum`}
+            placeholder="minimum"
+            value={param.minimum ?? ""}
+            onChange={(e) => onChange({ minimum: e.target.value === "" ? undefined : e.target.value })}
+          />
+          <Input
+            id={`${id}-maximum`}
+            aria-label={`${row} maximum`}
+            placeholder="maximum"
+            value={param.maximum ?? ""}
+            onChange={(e) => onChange({ maximum: e.target.value === "" ? undefined : e.target.value })}
+          />
+        </div>
+      );
+    case ParamType.date:
+    case ParamType.timestamp:
+      return (
+        <div className="mt-1.5 space-y-1.5">
+          <Input
+            id={`${id}-not-before`}
+            aria-label={`${row} not before`}
+            placeholder="not before"
+            value={param.not_before ?? ""}
+            onChange={(e) => onChange({ not_before: e.target.value === "" ? undefined : e.target.value })}
+          />
+          <Input
+            id={`${id}-not-after`}
+            aria-label={`${row} not after`}
+            placeholder="not after"
+            value={param.not_after ?? ""}
+            onChange={(e) => onChange({ not_after: e.target.value === "" ? undefined : e.target.value })}
+          />
+        </div>
+      );
+    default:
+      return null;
+  }
+}
+
+/**
  * The `:name` parameters a caller supplies on the query string — **one table
  * row per declaration**, not one card per declaration.
  *
@@ -127,13 +279,17 @@ function AllowedValuesField({
  * can drift out of sync with the refusal it's describing — omitting the
  * control keeps the two impossible to disagree.
  *
- * **`allowed` lives under Type, not in a column of its own.** It exists only
- * for `enum` — a sixth column would be empty on every other row, and under
- * `table-fixed` it would cost that width whether or not any row is an enum.
- * It sits in the Type cell because that is what it qualifies: it is the list
- * the type is drawn from, and reading down the Type column shows
- * `enum` with its members directly beneath, still inside the row it belongs
- * to. That row anchoring is the same reason it is not lifted out to a
+ * **`allowed`, and the seven constraint fields, live under Type, not in a
+ * column of their own.** Between them these cover every type but `boolean`
+ * — a column each would mean up to seven more columns, empty on every row
+ * whose type doesn't use them, and under `table-fixed` each would cost that
+ * width whether or not any row needs it. They sit in the Type cell because
+ * that is what they qualify: `allowed` is the list `enum` draws from,
+ * `min_length`/`max_length`/`pattern` bound a `string`, `minimum`/`maximum`
+ * bound a `number`, `not_before`/`not_after` bound a `date` or `timestamp`
+ * — and reading down the Type column shows each type with its own
+ * constraints directly beneath, still inside the row they belong to. That
+ * row anchoring is the same reason none of this is lifted out to a
  * per-table area below.
  *
  * **No test value here, and this is the one field the table must NOT gain.**
@@ -235,7 +391,16 @@ export function ParamEditor({
                   />
                 </TableCell>
                 <TableCell className="align-top">
-                  <Select value={p.type} onValueChange={(v) => update(i, { type: v as ParamType })}>
+                  <Select
+                    value={p.type}
+                    onValueChange={(v) => {
+                      const type = v as ParamType;
+                      // Clear whatever constraints the OLD type left set that
+                      // the new type doesn't use, in the same `update` that
+                      // changes the type — see `clearInapplicableConstraints`.
+                      update(i, { type, ...clearInapplicableConstraints(type) });
+                    }}
+                  >
                     <SelectTrigger id={`param-type-${rowId}`} className="w-full" aria-label={`${row} type`}>
                       <SelectValue />
                     </SelectTrigger>
@@ -258,6 +423,12 @@ export function ParamEditor({
                       onChange={(allowed) => update(i, { allowed })}
                     />
                   )}
+                  <ConstraintFields
+                    id={`param-constraint-${rowId}`}
+                    row={row}
+                    param={p}
+                    onChange={(patch) => update(i, patch)}
+                  />
                 </TableCell>
                 <TableCell className="align-top">
                   {/* `mt-2.5` rather than centred: the row's height is set by

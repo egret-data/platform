@@ -31258,6 +31258,59 @@
             },
             "description": "Required when `ty` is `Enum`. The ONLY safe form for anything that\nreaches an identifier position — see spec §3."
           },
+          "minimum": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Inclusive lower bound for a `Number`. Ignored for every other type, and\npublish refuses it there (see `check_constraints`).\n\n**A string, not an `i64` or `f64`, and deliberately.** `coerce` already\nrefuses to put a decimal through an `f64`, because a decimal that\nround-trips through a float stops comparing equal to itself on the\nengine. A bound stored as a float would reintroduce that on the\ncomparison side."
+          },
+          "maximum": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Inclusive upper bound for a `Number`. See [`ParamSpec::minimum`]."
+          },
+          "min_length": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Minimum length for a `String`, in **Unicode scalars, not bytes**. A\n`max_length: 10` that fails a Vietnamese name at seven letters is a bug\nthe author cannot see from the declaration.",
+            "minimum": 0
+          },
+          "max_length": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Maximum length for a `String`. See [`ParamSpec::min_length`].",
+            "minimum": 0
+          },
+          "pattern": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A regex the **whole** value must match, for a `String`.\n\nAnchored implicitly: `is_match` is a search, so an unanchored `\"abc\"`\nwould accept `xxabcxx`, which is not what an author writing a validation\nrule means. An author who writes their own `^…$` gets the same answer."
+          },
+          "not_before": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Inclusive earliest value for a `Date` or `Timestamp`.\n\n**Stored exactly as the author wrote it**, in any spelling the declared\ntype parses — an unpadded `\"2026-1-1\"` is the same instant as\n`\"2026-01-01\"` and is enforced identically, because publish and `coerce`\nboth normalise the bound before comparing it. This field is therefore\nNOT guaranteed to hold the spelling `coerce` produces.\n\nThe spelling still reaches one reader unchanged: the generated OpenAPI\ndocument quotes this string RAW in the parameter's description, so\n`\"2026-1-1\"` is what a caller is shown — the right instant in a shape\nthe endpoint never answers with. Prefer the canonical `%Y-%m-%d` (or\n`%Y-%m-%d %H:%M:%S%.f`) spelling so the published contract reads the way\nthe endpoint replies."
+          },
+          "not_after": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Inclusive latest value for a `Date` or `Timestamp`. See\n[`ParamSpec::not_before`]."
+          },
           "description": {
             "type": "string"
           }

@@ -346,6 +346,135 @@ pub enum ValidationError {
          so nothing points back at the endpoint"
     )]
     DefaultNotValidForType(String, &'static str),
+    /// The `default` is well-typed and the constraint set is sound (spec §5:
+    /// `check_constraints` already refused an unsound set before this is ever
+    /// reached), and the default still fails one of its own declared
+    /// constraints — `minimum`, `pattern`, `not_before`, and so on.
+    ///
+    /// Kept separate from [`Self::DefaultNotValidForType`] because the two
+    /// point an author at different fields: a type failure says "your
+    /// `default` isn't a `{ty}`", which is false here and sends them looking
+    /// in the wrong place for a `minimum` problem.
+    #[error(
+        "parameter `{param}` has a `default` that violates its own `{constraint}` \
+         of `{bound}`. A default that the endpoint would refuse means every call \
+         omitting the parameter is a 400"
+    )]
+    DefaultViolatesConstraint {
+        param: String,
+        constraint: &'static str,
+        bound: String,
+    },
+    /// A constraint field present on a `ParamSpec` whose declared `ty` cannot
+    /// carry it — `pattern` on a `Boolean`, `minimum` on a `String`, and so on.
+    ///
+    /// Refused rather than ignored: a `pattern` that silently does nothing
+    /// teaches the author a model where constraints apply everywhere, and the
+    /// next one they write silently does nothing too.
+    #[error(
+        "parameter `{param}` declares `{constraint}`, which does not apply to a \
+         `{ty}` parameter. Remove it, or change the parameter's type"
+    )]
+    ConstraintNotForType {
+        param: String,
+        constraint: &'static str,
+        ty: &'static str,
+    },
+    /// A lower bound strictly above its own upper bound — `minimum > maximum`,
+    /// `min_length > max_length`, or `not_before > not_after`.
+    ///
+    /// Strictly greater, never "not less": a parameter pinned to exactly one
+    /// value (`minimum == maximum`) is a real thing an author writes.
+    #[error("parameter `{param}` declares a `{constraint}` above its upper bound")]
+    BoundsInverted {
+        param: String,
+        constraint: &'static str,
+    },
+    /// A `minimum`/`maximum`/`not_before`/`not_after` that does not parse in
+    /// the shape its own constraint requires.
+    ///
+    /// # Why this exists, and why it is not folded into [`ValidationError::BoundsInverted`]
+    ///
+    /// Every one of these four is compared as TEXT (see `check_constraints`),
+    /// and every one of those comparisons is sound only against a normalised
+    /// spelling: `minimum`/`maximum` through
+    /// [`crate::serving::params::compare_decimal_text`]'s digit-by-digit
+    /// grammar, `not_before`/`not_after` through the zero-padded, big-endian
+    /// spelling `coerce` produces (the restriction
+    /// `check_temporal_bounds` documents for the serving side). The author's
+    /// raw string has not been through either normalisation: an unpadded
+    /// `"2026-9-1"` sorts AFTER `"2026-10-1"` as text despite being
+    /// chronologically earlier, and a string that is not a decimal or a date
+    /// at all (`"abc"`, `"not-a-date"`) sorts by Unicode code point, telling
+    /// the author nothing about their actual bounds. So each bound is
+    /// validated (and, for `not_before`/`not_after`, normalised) the same way
+    /// `coerce` would before the pair is compared, and a bound that fails is
+    /// refused HERE, naming which one, rather than compared as arbitrary
+    /// bytes.
+    #[error("parameter `{param}` declares `{constraint}` as `{value}`, which is not {expected}")]
+    ConstraintBoundUnparseable {
+        param: String,
+        constraint: &'static str,
+        value: String,
+        /// A noun phrase completing "which is not …" — `"a valid decimal
+        /// number"`, `"a valid date"`, `"a valid timestamp"`.
+        expected: &'static str,
+    },
+    /// A `minimum`/`maximum` written with more digits than the generated
+    /// contract can state exactly — refused at publish, where the author can
+    /// still change it, rather than published as a bound nobody wrote.
+    ///
+    /// # Why a digit cap exists at all
+    ///
+    /// The bound is stored and compared as TEXT, so egret itself enforces it
+    /// exactly at any width. The generated OpenAPI document cannot: JSON
+    /// Schema's `minimum`/`maximum` take a JSON NUMBER, and this crate does
+    /// not enable serde_json's `arbitrary_precision`, so a magnitude past
+    /// `u64` goes through an `f64` on the way into the document. Measured:
+    /// `minimum: "1234567890123456789012345678901234567890"` reaches the
+    /// document as the nearest double, exactly
+    /// `1234567890123456846996462118072609669120` — a HIGHER minimum than
+    /// `coerce` enforces, so a generated client refuses values the server
+    /// accepts. The same rounding on `maximum` goes the other way
+    /// and makes the published contract more permissive than the code. Past
+    /// `f64`'s range the keyword cannot be represented at all and vanishes,
+    /// leaving a document that describes a wider endpoint than exists.
+    ///
+    /// Refusing here is the cheap correct fix: the document stays lossless by
+    /// construction, and no runtime comparison is touched — in particular
+    /// [`crate::serving::params::is_plain_decimal`] is unchanged, so this
+    /// changes nothing about what a CALLER may send.
+    #[error(
+        "parameter `{param}` declares a `{constraint}` of `{value}`, which is {digits} digits \
+         wide; at most {max} are accepted. The generated OpenAPI document states this bound as \
+         a JSON number, and past that width a JSON number cannot hold it exactly — the \
+         published contract would name a bound you never wrote, and a generated client would \
+         disagree with the endpoint about which values are legal. Round the bound to {max} \
+         digits or fewer"
+    )]
+    ConstraintBoundTooManyDigits {
+        param: String,
+        constraint: &'static str,
+        value: String,
+        digits: usize,
+        max: usize,
+    },
+    /// A `pattern` that does not compile as a regex at all — the author's typo,
+    /// not the caller's problem, so it is refused at publish rather than on
+    /// whichever request happens to hit `coerce` first.
+    #[error("parameter `{param}` declares a `pattern` that is not a valid regex: {detail}")]
+    PatternInvalid { param: String, detail: String },
+    /// A `pattern` that compiles, but past [`MAX_PATTERN_PROGRAM_BYTES`].
+    ///
+    /// `regex`'s own default cap is 10 MB of compiled program. A validation
+    /// rule on an endpoint parameter that needs megabytes of compiled program
+    /// is not a validation rule, and the cap is checked here — at publish —
+    /// rather than compiled per request.
+    #[error(
+        "parameter `{param}` declares a `pattern` too large to compile. A validation \
+         rule that needs this much compiled program is not a validation rule"
+    )]
+    PatternTooLarge { param: String },
     #[error(
         "parameter `{0}` is optional with no `default`, and the definition does not render without \
          it. An absent parameter is `none` in the template, so a construct that INSPECTS it — \
@@ -1164,6 +1293,247 @@ pub fn check_param_locations(params: &[ParamSpec]) -> std::result::Result<(), Va
     Ok(())
 }
 
+/// The compiled size a parameter's `pattern` may reach.
+///
+/// `regex`'s own default is 10 MB. A validation rule on an endpoint parameter
+/// that needs megabytes of compiled program is not a validation rule, and the
+/// cap is here rather than at serve time so an author learns at publish.
+pub const MAX_PATTERN_PROGRAM_BYTES: usize = 64 * 1024;
+
+/// How many digits a `minimum`/`maximum` bound may carry.
+///
+/// **Why 15, and why a cap at all.** The bound is stored and compared as text,
+/// so egret enforces it exactly at any width; the generated OpenAPI document
+/// cannot, because JSON Schema's `minimum`/`maximum` take a JSON NUMBER and
+/// this crate does not enable serde_json's `arbitrary_precision`. A magnitude
+/// past `u64` therefore lands in the document via an `f64`, which rounds — and
+/// past `f64`'s range the keyword cannot be represented at all and disappears.
+/// Either way the published contract stops matching the code, which is the one
+/// thing a generated contract must never do (spec §4).
+///
+/// 15 is `f64`'s guaranteed decimal width (`DBL_DIG`): every decimal of at most
+/// 15 significant digits survives the round trip through an `f64` unchanged, and
+/// every integer of at most 15 digits is below 2^53 so it is exact as an integer
+/// too. At 16 digits neither guarantee holds. A bound wider than that is not a
+/// bound an endpoint parameter needs, so it is refused at publish — where the
+/// author can still act — rather than quietly restated as a different number.
+///
+/// Not enforced through [`crate::serving::params::is_plain_decimal`], and
+/// deliberately: that function gates a CALLER's value as well as an author's
+/// bound, so widening or narrowing it would change what callers may send. This
+/// cap applies to the author's bound only.
+pub const MAX_BOUND_DIGITS: usize = 15;
+
+/// How many digits a bound is written with, ignoring the sign and the leading
+/// zeros `compare_decimal_text` already ignores.
+///
+/// `"007"` is one digit, not three: it compares as `7` at both publish and
+/// serve time, and reaches the document as `7`. The integer part counts as at
+/// least one digit (`"0.5"` is two), which is what makes the count agree with
+/// the width the document actually has to hold.
+///
+/// Expects text that has already passed
+/// [`crate::serving::params::is_plain_decimal`] — every remaining byte is a
+/// digit or the single `.`.
+fn bound_digit_width(text: &str) -> usize {
+    let body = text.strip_prefix('-').unwrap_or(text);
+    let (int, frac) = body.split_once('.').map_or((body, ""), |(i, f)| (i, f));
+    let int = int.trim_start_matches('0');
+    let int_digits = if int.is_empty() { 1 } else { int.len() };
+    int_digits + frac.len()
+}
+
+/// Compile a `pattern` the way `coerce` will, so publish and serving cannot
+/// disagree about which patterns exist.
+///
+/// **Anchored here, once.** The anchors are added in this one function, so a
+/// pattern accepted at publish is byte-identical to the one matched at serve.
+/// An author's own `^…$` is idempotent under it.
+pub fn compile_pattern(pattern: &str) -> std::result::Result<regex::Regex, regex::Error> {
+    regex::RegexBuilder::new(&format!("^(?:{pattern})$"))
+        .size_limit(MAX_PATTERN_PROGRAM_BYTES)
+        .build()
+}
+
+/// The noun phrase completing "which is not …" for a `not_before`/`not_after`
+/// bound, matched to the parameter's own declared type so the message says
+/// which spelling was expected.
+fn temporal_expected(ty: &ParamType) -> &'static str {
+    match ty {
+        ParamType::Timestamp => "a valid timestamp",
+        // `Date` and the unreachable default (see
+        // `serving::params::normalize_temporal_bound`) both read as "date" —
+        // `check_constraints` has already refused a temporal constraint on
+        // any other type before this is ever called.
+        _ => "a valid date",
+    }
+}
+
+/// Refuse a constraint set that cannot be honoured, before anything tries to.
+///
+/// # Why this runs before `check_defaults`
+///
+/// `check_defaults` validates the author's `default` through `coerce`, and
+/// `coerce` enforces these constraints. If the set itself is malformed — a
+/// `minimum` above its `maximum` — the author would be told their `default` is
+/// wrong when the default is the one part that is fine.
+///
+/// # Every bound is validated in its OWN grammar before it is compared
+///
+/// `min_length`/`max_length` are already `u32`, so there is nothing to
+/// validate. The other two pairs are text, and comparing text directly is
+/// unsound for both of them in the same way, for the same reason: a
+/// comparison that is only correct against a NORMALISED spelling is asked of
+/// the author's raw string instead.
+///
+/// * `minimum`/`maximum` go through
+///   [`crate::serving::params::compare_decimal_text`], whose digit-by-digit
+///   grammar assumes `-?digits[.digits]` — so each bound is checked against
+///   [`crate::serving::params::is_plain_decimal`] first. Skipping this made
+///   `minimum: "abc"` publish clean and compare as arbitrary bytes at serve
+///   time forever after.
+/// * `not_before`/`not_after` are meant to be the zero-padded, big-endian
+///   spelling `coerce` produces, and THAT spelling sorts correctly as text —
+///   but the author's raw string has not been through `coerce` yet. An
+///   unpadded `"2026-9-1"` sorts AFTER `"2026-10-1"` lexically despite being
+///   chronologically earlier, and nothing has yet confirmed either string is
+///   even a valid date. So each bound is parsed and normalised through
+///   [`crate::serving::params::normalize_temporal_bound`] first.
+///
+/// Either way, a bound that fails its own grammar is refused HERE, naming
+/// which one, rather than compared as arbitrary bytes.
+pub fn check_constraints(params: &[ParamSpec]) -> std::result::Result<(), ValidationError> {
+    for p in params {
+        let ty = type_name(&p.ty);
+
+        // Which constraints this type can carry at all. A `pattern` on a
+        // `Boolean` is not harmless noise: it teaches the author a model where
+        // constraints apply everywhere, and the next one they write silently
+        // does nothing.
+        let numeric = matches!(p.ty, ParamType::Number);
+        let textual = matches!(p.ty, ParamType::String);
+        let temporal = matches!(p.ty, ParamType::Date | ParamType::Timestamp);
+
+        for (present, allowed_here, name) in [
+            (p.minimum.is_some(), numeric, "minimum"),
+            (p.maximum.is_some(), numeric, "maximum"),
+            (p.min_length.is_some(), textual, "min_length"),
+            (p.max_length.is_some(), textual, "max_length"),
+            (p.pattern.is_some(), textual, "pattern"),
+            (p.not_before.is_some(), temporal, "not_before"),
+            (p.not_after.is_some(), temporal, "not_after"),
+        ] {
+            if present && !allowed_here {
+                return Err(ValidationError::ConstraintNotForType {
+                    param: p.name.clone(),
+                    constraint: name,
+                    ty,
+                });
+            }
+        }
+
+        // `minimum`/`maximum`: each bound must be a valid decimal in its own
+        // right before the pair is compared as one — see the function doc.
+        for (bound, constraint) in [(&p.minimum, "minimum"), (&p.maximum, "maximum")] {
+            if let Some(text) = bound {
+                if !crate::serving::params::is_plain_decimal(text) {
+                    return Err(ValidationError::ConstraintBoundUnparseable {
+                        param: p.name.clone(),
+                        constraint,
+                        value: text.clone(),
+                        expected: "a valid decimal number",
+                    });
+                }
+                // And it must be narrow enough for the generated contract to
+                // state it exactly — see `MAX_BOUND_DIGITS`. Checked here, at
+                // publish, rather than left for `openapi_gen` to round or drop
+                // silently at document-build time, when the author is gone.
+                let digits = bound_digit_width(text);
+                if digits > MAX_BOUND_DIGITS {
+                    return Err(ValidationError::ConstraintBoundTooManyDigits {
+                        param: p.name.clone(),
+                        constraint,
+                        value: text.clone(),
+                        digits,
+                        max: MAX_BOUND_DIGITS,
+                    });
+                }
+            }
+        }
+        // Inverted bounds. Equal bounds are legitimate — a parameter pinned to
+        // one value — so this is strictly greater, never "not less".
+        if let (Some(lo), Some(hi)) = (&p.minimum, &p.maximum) {
+            if crate::serving::params::compare_decimal_text(lo, hi) == std::cmp::Ordering::Greater {
+                return Err(ValidationError::BoundsInverted {
+                    param: p.name.clone(),
+                    constraint: "minimum",
+                });
+            }
+        }
+        if let (Some(lo), Some(hi)) = (p.min_length, p.max_length) {
+            if lo > hi {
+                return Err(ValidationError::BoundsInverted {
+                    param: p.name.clone(),
+                    constraint: "min_length",
+                });
+            }
+        }
+        // `not_before`/`not_after`: parse and normalise each bound ONCE, and
+        // reuse the normalised value for the comparison below rather than
+        // parsing it a second time — see the function doc.
+        let mut not_before_n = None;
+        if let Some(lo) = &p.not_before {
+            not_before_n = crate::serving::params::normalize_temporal_bound(&p.ty, lo);
+            if not_before_n.is_none() {
+                return Err(ValidationError::ConstraintBoundUnparseable {
+                    param: p.name.clone(),
+                    constraint: "not_before",
+                    value: lo.clone(),
+                    expected: temporal_expected(&p.ty),
+                });
+            }
+        }
+        let mut not_after_n = None;
+        if let Some(hi) = &p.not_after {
+            not_after_n = crate::serving::params::normalize_temporal_bound(&p.ty, hi);
+            if not_after_n.is_none() {
+                return Err(ValidationError::ConstraintBoundUnparseable {
+                    param: p.name.clone(),
+                    constraint: "not_after",
+                    value: hi.clone(),
+                    expected: temporal_expected(&p.ty),
+                });
+            }
+        }
+        if let (Some(lo_n), Some(hi_n)) = (&not_before_n, &not_after_n) {
+            if lo_n > hi_n {
+                return Err(ValidationError::BoundsInverted {
+                    param: p.name.clone(),
+                    constraint: "not_before",
+                });
+            }
+        }
+
+        if let Some(pattern) = &p.pattern {
+            match compile_pattern(pattern) {
+                Ok(_) => {}
+                Err(regex::Error::CompiledTooBig(_)) => {
+                    return Err(ValidationError::PatternTooLarge {
+                        param: p.name.clone(),
+                    })
+                }
+                Err(e) => {
+                    return Err(ValidationError::PatternInvalid {
+                        param: p.name.clone(),
+                        detail: e.to_string(),
+                    })
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// An author's `default` must satisfy its own declared type (spec §5, T7-6).
 ///
 /// Coerced through the **same function the serving path uses**, deliberately —
@@ -1176,11 +1546,36 @@ pub fn check_param_locations(params: &[ParamSpec]) -> std::result::Result<(), Va
 pub fn check_defaults(params: &[ParamSpec]) -> std::result::Result<(), ValidationError> {
     for p in params {
         let Some(default) = &p.default else { continue };
-        if crate::serving::params::coerce(p, default).is_err() {
-            return Err(ValidationError::DefaultNotValidForType(
-                p.name.clone(),
-                type_name(&p.ty),
-            ));
+        match crate::serving::params::coerce(p, default) {
+            Ok(_) => {}
+            // The AUTHOR'S problem, not the type field: `coerce` already
+            // enforced every constraint (Tasks 3-5), so this is the one place
+            // the detail is allowed out — the serving mapping in
+            // `resolve_supplied_with` throws away the same fields on purpose.
+            Err(crate::serving::params::CoerceError::Constraint { constraint, bound }) => {
+                return Err(ValidationError::DefaultViolatesConstraint {
+                    param: p.name.clone(),
+                    constraint,
+                    bound,
+                });
+            }
+            // `Invalid` is genuinely a type failure. `Malformed` reaching this
+            // match would mean an unsound spec — no `allowed` list, a pattern
+            // that doesn't compile, a temporal bound that doesn't parse — but
+            // `check_definition_scans` runs `check_enum_params` and
+            // `check_constraints` before `check_defaults`, and both already
+            // refuse every `MalformedReason` this function's own `coerce` call
+            // could hit. So `Malformed` is unreachable through the real
+            // publish path; calling `check_defaults` directly (as a unit test
+            // can) is the only way to reach it, and reporting it as a type
+            // failure there is a lesser inaccuracy than inventing a message
+            // for a case production can never produce.
+            Err(_) => {
+                return Err(ValidationError::DefaultNotValidForType(
+                    p.name.clone(),
+                    type_name(&p.ty),
+                ));
+            }
         }
     }
     Ok(())
@@ -1340,6 +1735,7 @@ fn check_definition_scans(
     }
     check_enum_params(params)?;
     check_param_locations(params)?;
+    check_constraints(params)?;
     check_defaults(params)?;
     check_params_with(sql, params, rules)?;
     Ok(())
@@ -3061,6 +3457,13 @@ mod tests {
             required: false,
             default: None,
             allowed: None,
+            minimum: None,
+            maximum: None,
+            min_length: None,
+            max_length: None,
+            pattern: None,
+            not_before: None,
+            not_after: None,
             description: String::new(),
         }
     }
@@ -4079,6 +4482,13 @@ mod tests {
             required: true,
             default: None,
             allowed: Some(vec!["region".into(), "total".into()]),
+            minimum: None,
+            maximum: None,
+            min_length: None,
+            max_length: None,
+            pattern: None,
+            not_before: None,
+            not_after: None,
             description: String::new(),
         };
         // `{{ sort | ident }}` — the whole inside used to become the NAME.
@@ -4207,6 +4617,274 @@ mod tests {
         assert!(check_enum_params(&[param("region", ParamType::String)]).is_ok());
     }
 
+    #[test]
+    fn a_constraint_on_the_wrong_type_is_refused() {
+        let mut p = param("flag", ParamType::Boolean);
+        p.pattern = Some("^x$".into());
+        let err = check_constraints(std::slice::from_ref(&p)).expect_err("pattern on a boolean");
+        let msg = err.to_string();
+        assert!(msg.contains("pattern"), "must name the constraint: {msg}");
+        assert!(msg.contains("flag"), "must name the parameter: {msg}");
+    }
+
+    #[test]
+    fn inverted_bounds_are_refused() {
+        let mut p = param("n", ParamType::Number);
+        p.minimum = Some("100".into());
+        p.maximum = Some("10".into());
+        let err = check_constraints(std::slice::from_ref(&p)).expect_err("minimum above maximum");
+        assert!(err.to_string().contains("minimum"), "{err}");
+
+        let mut q = param("s", ParamType::String);
+        q.min_length = Some(10);
+        q.max_length = Some(2);
+        assert!(
+            check_constraints(std::slice::from_ref(&q)).is_err(),
+            "min_length above max_length must be refused too"
+        );
+    }
+
+    #[test]
+    fn equal_bounds_are_allowed() {
+        // A parameter pinned to exactly one value is a real thing an author writes;
+        // "inverted" must mean strictly greater, not "not less".
+        let mut p = param("n", ParamType::Number);
+        p.minimum = Some("5".into());
+        p.maximum = Some("5".into());
+        assert!(check_constraints(std::slice::from_ref(&p)).is_ok());
+    }
+
+    /// The numeric twin of `unpadded_month_bounds_compare_chronologically_not_lexically`:
+    /// `"9"` sorts AFTER `"10"` as bytes (`'9' > '1'`) despite being the
+    /// smaller number. If `check_constraints` ever regressed to comparing
+    /// `minimum`/`maximum` as raw text instead of through
+    /// `compare_decimal_text`, this legitimate pair would be wrongly refused
+    /// as inverted.
+    #[test]
+    fn numeric_bounds_compare_decimal_not_lexical() {
+        let mut p = param("n", ParamType::Number);
+        p.minimum = Some("9".into());
+        p.maximum = Some("10".into());
+        assert!(
+            check_constraints(std::slice::from_ref(&p)).is_ok(),
+            "9 before 10 must not be reported as inverted bounds"
+        );
+    }
+
+    /// The numeric twin of `an_unparseable_temporal_bound_is_refused_by_name_not_compared_as_bytes`.
+    /// Nothing validated `minimum`/`maximum` against `is_plain_decimal` before
+    /// this fix, so `minimum: "abc"` published clean and was compared as
+    /// arbitrary bytes at serve time forever after — this is the same class
+    /// of gap the temporal bound closes, just on the other pair.
+    #[test]
+    fn an_unparseable_numeric_bound_is_refused_by_name_not_compared_as_bytes() {
+        let mut p = param("n", ParamType::Number);
+        p.minimum = Some("abc".into());
+        let err = check_constraints(std::slice::from_ref(&p)).expect_err("minimum is not a number");
+        let msg = err.to_string();
+        assert!(msg.contains("`minimum`"), "must name the constraint: {msg}");
+        assert!(msg.contains("`n`"), "must name the parameter: {msg}");
+
+        // The same bound, unparseable, on the OTHER side of the pair — this
+        // must not be silently compared against a valid `minimum` either.
+        let mut q = param("n", ParamType::Number);
+        q.minimum = Some("1".into());
+        q.maximum = Some("zzz".into());
+        assert!(check_constraints(std::slice::from_ref(&q)).is_err());
+    }
+
+    /// The cap counts the digits the DOCUMENT has to hold, not the bytes the
+    /// author typed: `compare_decimal_text` already ignores leading zeros and
+    /// `json_number` strips them, so a padded `"0…01"` is one digit wide
+    /// however long the string is. Counting bytes instead would refuse a bound
+    /// that publishes perfectly.
+    #[test]
+    fn the_digit_cap_counts_significant_digits_not_bytes() {
+        let mut p = param("n", ParamType::Number);
+        p.minimum = Some(format!("{}1", "0".repeat(40)));
+        assert!(
+            check_constraints(std::slice::from_ref(&p)).is_ok(),
+            "a zero-padded `1` is one digit wide, not 41"
+        );
+
+        // And the message says how wide the bound actually was, so an author
+        // who has to shorten one knows by how much.
+        let mut q = param("n", ParamType::Number);
+        q.maximum = Some("1".repeat(MAX_BOUND_DIGITS + 1));
+        let err = check_constraints(std::slice::from_ref(&q)).expect_err("one digit past the cap");
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&format!("{} digits", MAX_BOUND_DIGITS + 1)),
+            "must say how wide the bound is: {msg}"
+        );
+        assert!(msg.contains("`maximum`"), "must name the constraint: {msg}");
+    }
+
+    #[test]
+    fn a_pattern_that_does_not_compile_is_the_authors_400_not_the_callers_500() {
+        let mut p = param("s", ParamType::String);
+        p.pattern = Some("([".into());
+        let err = check_constraints(std::slice::from_ref(&p)).expect_err("unclosed class");
+        let msg = err.to_string();
+        // "valid regex" is unique to `PatternInvalid` — `PatternTooLarge` says
+        // "too large to compile" instead — so this also proves the RIGHT
+        // variant fired, not merely that something did.
+        assert!(msg.contains("valid regex"), "wrong refusal reason: {msg}");
+        assert!(msg.contains("`s`"), "must name the parameter: {msg}");
+    }
+
+    #[test]
+    fn a_pattern_that_compiles_too_large_is_refused() {
+        // `regex`'s own default cap is 10 MB of compiled program, and
+        // `a{1000}{1000}` is too big even at THAT — measured with
+        // `RegexBuilder::size_limit(10 * 1024 * 1024)` directly: it fails
+        // before our own cap is ever consulted. That made the original
+        // version of this test a false pass: it would still hold with
+        // `.size_limit(MAX_PATTERN_PROGRAM_BYTES)` deleted from
+        // `compile_pattern`, and would have verified nothing about the 64 KiB
+        // cap. `a{5000}` is the discriminator: measured `default_ok=true,
+        // small_ok=false` — it compiles fine under `regex`'s own 10 MB
+        // default and only fails under our smaller one.
+        let mut p = param("s", ParamType::String);
+        p.pattern = Some("a{5000}".into());
+        assert!(
+            regex::RegexBuilder::new(&format!("^(?:{})$", p.pattern.as_ref().unwrap()))
+                .size_limit(10 * 1024 * 1024)
+                .build()
+                .is_ok(),
+            "sanity: this pattern must compile under regex's own default cap, \
+             or it no longer discriminates our 64 KiB cap from that one"
+        );
+        match check_constraints(std::slice::from_ref(&p)) {
+            Err(ValidationError::PatternTooLarge { param }) => assert_eq!(param, "s"),
+            other => panic!("expected PatternTooLarge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn check_constraints_runs_before_check_defaults() {
+        // The author's default is FINE. Their bounds are inverted. The error they
+        // read must be about the bounds, or they will go looking in the wrong place.
+        let mut p = param("n", ParamType::Number);
+        p.minimum = Some("100".into());
+        p.maximum = Some("10".into());
+        p.default = Some("50".into());
+        // `CAST` because a bare `{{ n }}` in the select list fails
+        // `UncastParameterInProjection` regardless of `check_constraints` —
+        // that unrelated failure would mask a missing ordering check just as
+        // effectively as deleting the line would, so this SQL must publish
+        // cleanly on its own before the inverted bounds are added.
+        let err = validate_definition(
+            "SELECT CAST({{ n }} AS INTEGER) AS out",
+            std::slice::from_ref(&p),
+            &cache(CacheScope::PerPrincipal),
+            false,
+            false,
+        )
+        .expect_err("inverted bounds");
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("default"),
+            "the bounds are the problem, not the default: {msg}"
+        );
+    }
+
+    /// The detail Task 3 put on [`crate::serving::params::CoerceError::Constraint`]
+    /// is discarded by the serving path on purpose — `check_defaults` is the
+    /// ONE place it is allowed to reach an author, because the author is
+    /// reading about their own endpoint and there is no oracle to protect.
+    #[test]
+    fn a_default_below_its_own_minimum_names_the_constraint_and_the_bound() {
+        let mut p = param("n", ParamType::Number);
+        p.minimum = Some("10".into());
+        p.default = Some("5".into());
+        let err = check_defaults(std::slice::from_ref(&p)).expect_err("default below minimum");
+        let msg = err.to_string();
+        assert!(msg.contains('n'), "must name the parameter: {msg}");
+        assert!(msg.contains("minimum"), "must name the constraint: {msg}");
+        assert!(msg.contains("10"), "must name the bound: {msg}");
+        assert!(
+            !msg.contains("declared type"),
+            "a constraint failure must not be reported as a TYPE failure: {msg}"
+        );
+        assert_eq!(
+            err,
+            ValidationError::DefaultViolatesConstraint {
+                param: "n".into(),
+                constraint: "minimum",
+                bound: "10".into(),
+            },
+            "the variant itself must discriminate, not just its message: {msg}"
+        );
+    }
+
+    /// The pre-C1 message must survive: `default: "yesterday"` on a `Date` is a
+    /// TYPE problem, not a constraint problem, and conflating them sends the
+    /// author to the wrong field. This is the test most likely to pass for the
+    /// wrong reason, so it pins the exact variant rather than a substring —
+    /// `DefaultNotValidForType`'s own message never contains the word "type"
+    /// (it says "is not a valid `date`"), so a naive `contains("type")` check
+    /// fails against the correct, unchanged message just as readily as it
+    /// would pass vacuously against a wrong one; the variant is what actually
+    /// discriminates, and the message assertion below adds the same
+    /// discrimination in words instead of matching one that means nothing on
+    /// its own.
+    #[test]
+    fn a_default_of_the_wrong_type_still_reports_a_type_failure() {
+        let mut p = param("d", ParamType::Date);
+        p.default = Some("yesterday".into());
+        let err = check_defaults(std::slice::from_ref(&p)).expect_err("not a date");
+        assert_eq!(
+            err,
+            ValidationError::DefaultNotValidForType("d".into(), "date"),
+            "{err}"
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("not a valid"), "{msg}");
+        assert!(
+            !msg.contains("violates its own"),
+            "a type failure must not be reported as a CONSTRAINT failure: {msg}"
+        );
+    }
+
+    /// The unsoundness `ConstraintBoundUnparseable` exists to close: comparing
+    /// the author's RAW `not_before`/`not_after` text as bytes gets an unpadded
+    /// month backwards. September (`"2026-9-1"`) sorts AFTER October
+    /// (`"2026-10-1"`) as text — `'9' > '1'` — despite being chronologically
+    /// earlier. If `check_constraints` compared raw text, this legitimate,
+    /// correctly-ordered pair would be refused as "inverted".
+    #[test]
+    fn unpadded_month_bounds_compare_chronologically_not_lexically() {
+        let mut p = param("d", ParamType::Date);
+        p.not_before = Some("2026-9-1".into());
+        p.not_after = Some("2026-10-1".into());
+        assert!(
+            check_constraints(std::slice::from_ref(&p)).is_ok(),
+            "September before October must not be reported as inverted bounds"
+        );
+    }
+
+    #[test]
+    fn an_unparseable_temporal_bound_is_refused_by_name_not_compared_as_bytes() {
+        let mut p = param("d", ParamType::Date);
+        p.not_before = Some("not-a-date".into());
+        let err =
+            check_constraints(std::slice::from_ref(&p)).expect_err("not_before is not a date");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("`not_before`"),
+            "must name the constraint: {msg}"
+        );
+        assert!(msg.contains("`d`"), "must name the parameter: {msg}");
+
+        // The same bound, unparseable, on the OTHER side of the pair — this
+        // must not be silently compared against a valid `not_before` either.
+        let mut q = param("d", ParamType::Date);
+        q.not_before = Some("2020-01-01".into());
+        q.not_after = Some("garbage".into());
+        assert!(check_constraints(std::slice::from_ref(&q)).is_err());
+    }
+
     /// The render is what lets a PARAMETERIZED endpoint be described at all: an
     /// engine cannot plan `WHERE r = {{region}}`.
     ///
@@ -4292,6 +4970,13 @@ mod tests {
             required: false,
             default: None,
             allowed: None,
+            minimum: None,
+            maximum: None,
+            min_length: None,
+            max_length: None,
+            pattern: None,
+            not_before: None,
+            not_after: None,
             description: String::new(),
         }];
         assert!(preview("SELECT 1", &bad_enum).is_err());
@@ -4304,6 +4989,13 @@ mod tests {
             required: false,
             default: None,
             allowed: None,
+            minimum: None,
+            maximum: None,
+            min_length: None,
+            max_length: None,
+            pattern: None,
+            not_before: None,
+            not_after: None,
             description: String::new(),
         }];
         assert!(preview("SELECT 1", &body_param).is_err());

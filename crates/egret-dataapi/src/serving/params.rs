@@ -264,8 +264,28 @@ pub(crate) fn resolve_supplied_with(
                 (CoerceError::Invalid, true) => ServingError::internal(
                     "a published `default` does not satisfy its own declared type",
                 ),
-                (CoerceError::Malformed, _) => {
+                // The constraint and its bound are DELIBERATELY dropped here.
+                // `serving/error.rs` keeps `ParamInvalid` a unit variant so a
+                // 400 cannot become a directory of an endpoint's parameters;
+                // the detail exists for `check_defaults`, which the author
+                // reads about their own endpoint. Widening this is a decision,
+                // not a tidy-up.
+                (CoerceError::Constraint { .. }, false) => ServingError::ParamInvalid,
+                (CoerceError::Constraint { .. }, true) => ServingError::internal(
+                    "a published `default` does not satisfy its own declared constraints",
+                ),
+                (CoerceError::Malformed(MalformedReason::EnumHasNoAllowedList), _) => {
                     ServingError::internal("enum parameter published with no `allowed` list")
+                }
+                (CoerceError::Malformed(MalformedReason::PatternDoesNotCompile), _) => {
+                    ServingError::internal(
+                        "string parameter published with a `pattern` that does not compile",
+                    )
+                }
+                (CoerceError::Malformed(MalformedReason::TemporalBoundDoesNotParse), _) => {
+                    ServingError::internal(
+                        "date/timestamp parameter published with a `not_before`/`not_after` that does not parse",
+                    )
                 }
             })?);
         }
@@ -361,12 +381,59 @@ fn decode(
 /// the caller's text, `Malformed` is the published definition. The caller-facing
 /// mapping is the caller's alone — see [`resolve`], which is also where the
 /// author's own `default` failing is turned into a 500 rather than a 400.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// Which way a [`CoerceError::Malformed`] spec is broken.
+///
+/// Both `ParamType::Enum` and `ParamType::String` can fail to be honourable,
+/// for unrelated reasons on unrelated types — and a single `Malformed` unit
+/// variant made them indistinguishable at the one place that logs the
+/// message. Before this existed, a non-compiling `pattern` produced a 500
+/// whose log line said "enum parameter published with no `allowed` list",
+/// because that was the only message `Malformed` had ever needed. Wire
+/// response is unaffected either way (`ServingError::internal` redacts to
+/// `"internal error"`); this is purely so an operator reading the log is told
+/// the truth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MalformedReason {
+    /// An `Enum` parameter published with no non-empty `allowed` list.
+    EnumHasNoAllowedList,
+    /// A `String` parameter's `pattern` does not compile through
+    /// [`crate::lifecycle::compile_pattern`].
+    PatternDoesNotCompile,
+    /// A `Date`/`Timestamp` parameter's `not_before` or `not_after` does not
+    /// parse through [`normalize_temporal_bound`].
+    ///
+    /// `lifecycle::check_constraints` already refuses a bound that fails to
+    /// parse (spec §5), so reaching this arm means a snapshot published
+    /// before that check existed, or a hand-edited row — the exact situation
+    /// `PatternDoesNotCompile` is already the precedent for: the spec itself
+    /// is unhonourable, not the caller's request, so this is `Malformed`
+    /// rather than `Constraint` or `Invalid`.
+    TemporalBoundDoesNotParse,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum CoerceError {
     /// The text does not satisfy the declared `ty`.
     Invalid,
-    /// The `ParamSpec` itself cannot be honoured — an `Enum` with no `allowed`.
-    Malformed,
+    /// The `ParamSpec` itself cannot be honoured — an `Enum` with no `allowed`,
+    /// or a `pattern` that does not compile.
+    ///
+    /// Carries [`MalformedReason`] so the two causes stay distinguishable at
+    /// the point `resolve` turns this into a logged [`ServingError::internal`]
+    /// message. Both reach the caller identically (`"internal error"`) — this
+    /// detail is for whoever reads the log, not the wire.
+    Malformed(MalformedReason),
+    /// The value is well-typed and the spec is sound, and the value still fails
+    /// a declared constraint.
+    ///
+    /// **The detail here is for the AUTHOR, at publish.** The serving mapping
+    /// throws it away deliberately: `serving/error.rs` keeps `ParamInvalid` a
+    /// unit variant so a 400 cannot become a directory of an endpoint's
+    /// parameters. `check_defaults` is what reads these fields.
+    Constraint {
+        constraint: &'static str,
+        bound: String,
+    },
 }
 
 /// **Shared with publish**, which is the entire point.
@@ -378,7 +445,63 @@ pub(crate) enum CoerceError {
 /// publishes green and then answers 400 on every call that omits the parameter.
 pub(crate) fn coerce(spec: &ParamSpec, text: &str) -> Result<Param, CoerceError> {
     match spec.ty {
-        ParamType::String => Ok(Param::Str(text.to_string())),
+        ParamType::String => {
+            // `chars().count()`, never `len()`: `len()` is BYTES, and a
+            // `max_length: 10` that fails a Vietnamese name at seven letters is
+            // a bug the author cannot see from the declaration.
+            let chars = text.chars().count() as u32;
+            if let Some(lo) = spec.min_length {
+                if chars < lo {
+                    return Err(CoerceError::Constraint {
+                        constraint: "min_length",
+                        bound: lo.to_string(),
+                    });
+                }
+            }
+            if let Some(hi) = spec.max_length {
+                if chars > hi {
+                    return Err(CoerceError::Constraint {
+                        constraint: "max_length",
+                        bound: hi.to_string(),
+                    });
+                }
+            }
+            if let Some(pattern) = &spec.pattern {
+                // Compiled through the SAME function publish used, so a pattern
+                // that published can always be matched, and the anchors are
+                // added in exactly one place.
+                //
+                // `check_constraints` already refused a pattern that does not
+                // compile, so a failure here means a snapshot published before
+                // this check existed, or a hand-edited row. Treat it as the
+                // spec being unhonourable rather than the caller being wrong —
+                // `Malformed` is the variant that already means that.
+                //
+                // Compiled fresh on every call rather than cached: measured
+                // (release build, 1,000-iteration throwaway benchmarks,
+                // deleted after measuring, on 2026-08-26) at ~60
+                // microseconds/call for a typical email-shaped pattern, and
+                // ~650 microseconds/call for a pattern engineered to sit at
+                // `MAX_PATTERN_PROGRAM_BYTES` (a 164-branch literal
+                // alternation, the worst of several 64-KiB-cap shapes tried —
+                // nested bounded repetition, Unicode-property alternation,
+                // Unicode-aware `.` repetition all compiled faster). Both are
+                // microseconds, not milliseconds, and the worst case is still
+                // far below the cost of the request it is part of. A cache
+                // would be complexity bought with nothing; if that changes,
+                // it belongs beside the snapshot cache (router.rs:1289), not
+                // here.
+                let re = crate::lifecycle::compile_pattern(pattern)
+                    .map_err(|_| CoerceError::Malformed(MalformedReason::PatternDoesNotCompile))?;
+                if !re.is_match(text) {
+                    return Err(CoerceError::Constraint {
+                        constraint: "pattern",
+                        bound: pattern.clone(),
+                    });
+                }
+            }
+            Ok(Param::Str(text.to_string()))
+        }
         ParamType::Enum => {
             let allowed = spec
                 .allowed
@@ -386,7 +509,9 @@ pub(crate) fn coerce(spec: &ParamSpec, text: &str) -> Result<Param, CoerceError>
                 .filter(|a| !a.is_empty())
                 // An enum with no `allowed` is an author mistake publish
                 // refuses (spec §5). Not the caller's fault, so not a 400.
-                .ok_or(CoerceError::Malformed)?;
+                .ok_or(CoerceError::Malformed(
+                    MalformedReason::EnumHasNoAllowedList,
+                ))?;
             // The AUTHOR's entry is what is kept, never the caller's bytes —
             // the same provenance rule `ident_filter` enforces. Two equal
             // strings, and the one that survives is always the author's.
@@ -402,17 +527,44 @@ pub(crate) fn coerce(spec: &ParamSpec, text: &str) -> Result<Param, CoerceError>
             _ => Err(CoerceError::Invalid),
         },
         ParamType::Number => {
-            if let Ok(i) = text.parse::<i64>() {
-                return Ok(Param::I64(i));
-            }
             // Exact text, never an `f64`: a decimal that round-trips through a
             // float stops comparing equal to itself on the engine. The grammar
             // is deliberately narrow — no exponent, no `NaN`, no `inf` — so the
             // value is a literal both engines accept as a DECIMAL.
-            if is_plain_decimal(text) {
-                return Ok(Param::Decimal(text.to_string()));
+            //
+            // `is_plain_decimal` alone, never `text.parse::<i64>().is_ok()` as
+            // a second way in: `i64::from_str` accepts a leading `+` that
+            // `is_plain_decimal` (deliberately) does not, and admitting
+            // through EITHER check would let a `+`-prefixed value back in
+            // through the gap between them — the exact bypass this function
+            // exists to close. `is_plain_decimal` already accepts everything
+            // `i64::from_str` does other than that, including magnitudes
+            // outside `i64`'s range (handled below as `Param::Decimal`).
+            let text_value = if is_plain_decimal(text) {
+                text
+            } else {
+                return Err(CoerceError::Invalid);
+            };
+            if let Some(lo) = &spec.minimum {
+                if compare_decimal_text(text_value, lo) == std::cmp::Ordering::Less {
+                    return Err(CoerceError::Constraint {
+                        constraint: "minimum",
+                        bound: lo.clone(),
+                    });
+                }
             }
-            Err(CoerceError::Invalid)
+            if let Some(hi) = &spec.maximum {
+                if compare_decimal_text(text_value, hi) == std::cmp::Ordering::Greater {
+                    return Err(CoerceError::Constraint {
+                        constraint: "maximum",
+                        bound: hi.clone(),
+                    });
+                }
+            }
+            if let Ok(i) = text_value.parse::<i64>() {
+                return Ok(Param::I64(i));
+            }
+            Ok(Param::Decimal(text_value.to_string()))
         }
         // Parsed and re-formatted rather than passed through, so ONE spelling
         // reaches the engine. chrono accepts an unpadded `2026-1-2`; it comes
@@ -421,26 +573,175 @@ pub(crate) fn coerce(spec: &ParamSpec, text: &str) -> Result<Param, CoerceError>
         // same statement and bind the same value. A value chrono cannot read at
         // all never reaches the engine to be interpreted (or not) by whatever
         // that engine's own parser happens to accept.
+        //
+        // `normalize_temporal_bound` — not an inline `chrono::NaiveDate::parse_from_str`
+        // — because `check_temporal_bounds` below has to normalise the SPEC's
+        // own `not_before`/`not_after` through the identical grammar, and a
+        // second inline copy of this parse is the exact duplication a review
+        // already caught once in this package (see that function's doc).
+        ParamType::Date => {
+            let normalised =
+                normalize_temporal_bound(&spec.ty, text).ok_or(CoerceError::Invalid)?;
+            check_temporal_bounds(spec, &normalised)?;
+            Ok(Param::Date(normalised))
+        }
+        ParamType::Timestamp => {
+            let normalised =
+                normalize_temporal_bound(&spec.ty, text).ok_or(CoerceError::Invalid)?;
+            check_temporal_bounds(spec, &normalised)?;
+            Ok(Param::Timestamp(normalised))
+        }
+    }
+}
+
+/// Bounds for a `Date` or `Timestamp`, compared as normalised text.
+///
+/// Lexical comparison is correct here and only here: both sides are in the
+/// ONE spelling [`normalize_temporal_bound`] produces (`%Y-%m-%d`, zero-
+/// padded, big-endian), and that format sorts chronologically as text.
+///
+/// **The bound is normalised too, not compared as `spec.not_before` raw.**
+/// `lifecycle::check_constraints` validates that an author's bound PARSES; it
+/// does not rewrite the stored text into the normalised spelling. An author
+/// who wrote `not_before: "2026-1-1"` publishes clean, and that string sits in
+/// the snapshot unpadded forever. Comparing a normalised caller value like
+/// `"2026-01-02"` against that raw bound gets the wrong answer: byte for byte,
+/// `"2026-01-02"` is LESS than `"2026-1-1"` (`'0' < '1'` at the fifth byte),
+/// so a legitimately later date would be refused. Both sides go through
+/// [`normalize_temporal_bound`] for exactly the reason the caller's value
+/// does — see this module's `bounds_compare_the_normalised_value_not_the_callers_spelling`
+/// and `the_bound_itself_is_normalised_before_it_is_compared` tests, which pin
+/// each side of this separately.
+fn check_temporal_bounds(spec: &ParamSpec, normalised: &str) -> Result<(), CoerceError> {
+    if let Some(lo) = &spec.not_before {
+        let lo_n = normalize_temporal_bound(&spec.ty, lo).ok_or(CoerceError::Malformed(
+            MalformedReason::TemporalBoundDoesNotParse,
+        ))?;
+        if normalised < lo_n.as_str() {
+            return Err(CoerceError::Constraint {
+                constraint: "not_before",
+                bound: lo_n,
+            });
+        }
+    }
+    if let Some(hi) = &spec.not_after {
+        let hi_n = normalize_temporal_bound(&spec.ty, hi).ok_or(CoerceError::Malformed(
+            MalformedReason::TemporalBoundDoesNotParse,
+        ))?;
+        if normalised > hi_n.as_str() {
+            return Err(CoerceError::Constraint {
+                constraint: "not_after",
+                bound: hi_n,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Compare two decimal texts without going through a float.
+///
+/// `coerce` refuses to put a decimal through an `f64` because a decimal that
+/// round-trips through a float stops comparing equal to itself on the engine.
+/// A bound compared as a float would reintroduce that on this side: a `minimum`
+/// of `"0.3"` would reject the value `"0.3"`.
+///
+/// Both sides have already passed [`is_plain_decimal`] — either because
+/// `coerce` validated a resolved value's digits, or because
+/// `lifecycle::check_constraints` validated the author's `minimum`/`maximum`
+/// bound the same way before comparing the pair — so the grammar is
+/// **exactly** `-?digits[.digits]`, no `+`. `is_plain_decimal` is the only
+/// gate either side ever passes through, and it refuses a leading `+`
+/// precisely so that invariant holds here without this function having to
+/// re-check it: a `+` counted as an integer-part digit would compare as
+/// longer, hence "greater", than a same-magnitude bound with no sign.
+pub(crate) fn compare_decimal_text(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    // A magnitude of all zeros (`"0"`, `"0.00"`, …) is arithmetically the
+    // same value whether or not it carries a `-`: `"-0"` is not less than
+    // `"0"`. Without this, the sign-shortcut below would say it is, because
+    // it decides purely from the two signs before ever looking at magnitude.
+    let is_zero_magnitude = |body: &str| body.bytes().all(|b| b == b'0' || b == b'.');
+    let (a_neg, a_body) = a.strip_prefix('-').map_or((false, a), |r| (true, r));
+    let (b_neg, b_body) = b.strip_prefix('-').map_or((false, b), |r| (true, r));
+    let a_neg = a_neg && !is_zero_magnitude(a_body);
+    let b_neg = b_neg && !is_zero_magnitude(b_body);
+    match (a_neg, b_neg) {
+        (false, true) => return Ordering::Greater,
+        (true, false) => return Ordering::Less,
+        _ => {}
+    }
+    let flip = |o: Ordering| if a_neg { o.reverse() } else { o };
+
+    let split = |s: &str| {
+        let mut it = s.splitn(2, '.');
+        let int = it.next().unwrap_or("0").to_string();
+        let frac = it.next().unwrap_or("").to_string();
+        (int, frac)
+    };
+    let (a_int, a_frac) = split(a_body);
+    let (b_int, b_frac) = split(b_body);
+
+    // Integer part: longer (after stripping leading zeros) wins, else lexical.
+    let a_i = a_int.trim_start_matches('0');
+    let b_i = b_int.trim_start_matches('0');
+    let by_int = a_i.len().cmp(&b_i.len()).then_with(|| a_i.cmp(b_i));
+    if by_int != Ordering::Equal {
+        return flip(by_int);
+    }
+
+    // Fraction: pad to equal length so "1.5" vs "1.45" compares digit by digit.
+    let width = a_frac.len().max(b_frac.len());
+    let pad = |s: &str| format!("{s:0<width$}");
+    flip(pad(&a_frac).cmp(&pad(&b_frac)))
+}
+
+/// Parse and normalise a `not_before`/`not_after` bound the same way `coerce`
+/// parses a caller's VALUE of the declared type.
+///
+/// Shared with `lifecycle::check_constraints`, which validates (and, for the
+/// pair, compares) an author's bound this way at publish — the same rule that
+/// put [`compare_decimal_text`] here rather than in `lifecycle.rs`: one
+/// normalisation, used by publish and (from Task 5) by `coerce` itself, so
+/// the two cannot drift apart about which spellings are valid.
+///
+/// **Never routed through `coerce` itself.** From Task 5 onward, `coerce`'s
+/// `Date`/`Timestamp` arms enforce a spec's OWN `not_before`/`not_after`
+/// against the value being coerced. Asking `coerce` to coerce a BOUND as a
+/// value would check that bound against itself.
+///
+/// Returns `None` for anything not `Date`/`Timestamp` — unreachable through
+/// `check_constraints`, which has already refused a temporal constraint on
+/// any other type before this is ever called.
+pub(crate) fn normalize_temporal_bound(ty: &ParamType, text: &str) -> Option<String> {
+    match ty {
         ParamType::Date => chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d")
-            .map(|d| Param::Date(d.format("%Y-%m-%d").to_string()))
-            .map_err(|_| CoerceError::Invalid),
+            .ok()
+            .map(|d| d.format("%Y-%m-%d").to_string()),
         ParamType::Timestamp => ["%Y-%m-%d %H:%M:%S%.f", "%Y-%m-%dT%H:%M:%S%.f"]
             .iter()
             .find_map(|f| chrono::NaiveDateTime::parse_from_str(text, f).ok())
-            // One spelling reaches the engine whichever the caller used: `%.f`
-            // prints nothing when the fraction is zero, so a plain second-
-            // resolution timestamp stays plain.
-            .map(|t| Param::Timestamp(t.format("%Y-%m-%d %H:%M:%S%.f").to_string()))
-            .ok_or(CoerceError::Invalid),
+            .map(|t| t.format("%Y-%m-%d %H:%M:%S%.f").to_string()),
+        _ => None,
     }
 }
 
 /// `-?digits[.digits]`, and nothing else.
-fn is_plain_decimal(s: &str) -> bool {
-    let body = s
-        .strip_prefix('-')
-        .or_else(|| s.strip_prefix('+'))
-        .unwrap_or(s);
+///
+/// `pub(crate)` for `lifecycle::check_constraints`, which validates an
+/// author's `minimum`/`maximum` bound against this same grammar before
+/// [`compare_decimal_text`] is asked to compare two of them — see that
+/// function's own doc for why the invariant matters.
+pub(crate) fn is_plain_decimal(s: &str) -> bool {
+    // No `+`, deliberately: `compare_decimal_text` never strips one, so a
+    // `+`-prefixed value that reached it would have its sign counted as an
+    // integer-part digit and compare as longer (hence "greater") than a
+    // same-magnitude bound with no sign at all — a `minimum` a caller could
+    // step around with `?n=%2B100`. This function is the ONLY gate for both
+    // a caller's value (`coerce`) and an author's bound
+    // (`lifecycle::check_constraints`), so excluding `+` here is what makes
+    // `compare_decimal_text`'s documented grammar actually true rather than
+    // aspirational.
+    let body = s.strip_prefix('-').unwrap_or(s);
     let (int, frac) = match body.split_once('.') {
         Some((i, f)) => (i, Some(f)),
         None => (body, None),
@@ -487,7 +788,36 @@ mod tests {
             required,
             default: None,
             allowed: None,
+            minimum: None,
+            maximum: None,
+            min_length: None,
+            max_length: None,
+            pattern: None,
+            not_before: None,
+            not_after: None,
             description: String::new(),
+        }
+    }
+
+    fn number_param(name: &str) -> ParamSpec {
+        spec(name, ParamType::Number, false)
+    }
+
+    fn string_param(name: &str) -> ParamSpec {
+        spec(name, ParamType::String, false)
+    }
+
+    fn date_param(name: &str) -> ParamSpec {
+        ParamSpec {
+            ty: ParamType::Date,
+            ..number_param(name)
+        }
+    }
+
+    fn timestamp_param(name: &str) -> ParamSpec {
+        ParamSpec {
+            ty: ParamType::Timestamp,
+            ..number_param(name)
         }
     }
 
@@ -587,6 +917,13 @@ mod tests {
             required: false,
             default: None,
             allowed: None,
+            minimum: None,
+            maximum: None,
+            min_length: None,
+            max_length: None,
+            pattern: None,
+            not_before: None,
+            not_after: None,
             description: String::new(),
         };
         let mut supplied: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -870,5 +1207,499 @@ mod tests {
             resolve(Some(&many), &s),
             Err(ServingError::ParamInvalid)
         ));
+    }
+
+    /// `compare_decimal_text` has no caller in this crate's public surface —
+    /// `lifecycle::check_constraints` and (from Task 3) `coerce` are its only
+    /// two, and both exercise it only indirectly, through inputs shaped to
+    /// pass their OWN grammar checks first. This is the direct test: the
+    /// digit-by-digit algorithm itself, including the case a naive `str`
+    /// `>` would get backwards.
+    #[test]
+    fn compare_decimal_text_orders_by_value_not_by_bytes() {
+        use std::cmp::Ordering;
+        // The whole reason this function exists rather than `str::cmp`:
+        // `"9" > "10"` as bytes (`'9' > '1'`), but 9 < 10.
+        assert_eq!(compare_decimal_text("9", "10"), Ordering::Less);
+        assert_eq!(compare_decimal_text("10", "9"), Ordering::Greater);
+        assert_eq!(compare_decimal_text("9", "9"), Ordering::Equal);
+
+        // Negatives: more negative is smaller, and a bare `-` prefix flips
+        // the rest of the comparison.
+        assert_eq!(compare_decimal_text("-5", "-1"), Ordering::Less);
+        assert_eq!(compare_decimal_text("-1", "-5"), Ordering::Greater);
+        assert_eq!(compare_decimal_text("-1", "1"), Ordering::Less);
+        assert_eq!(compare_decimal_text("1", "-1"), Ordering::Greater);
+
+        // Differing fraction widths: padded to compare digit by digit, not
+        // truncated or compared as strings of different lengths.
+        assert_eq!(compare_decimal_text("1.5", "1.45"), Ordering::Greater);
+        assert_eq!(compare_decimal_text("1.45", "1.5"), Ordering::Less);
+        assert_eq!(compare_decimal_text("1.50", "1.5"), Ordering::Equal);
+
+        // A difference below `f64` precision: the whole reason `coerce`
+        // refuses to put a decimal through a float. These two digit strings
+        // are independently verified (not merely asserted in prose) to parse
+        // to the identical `f64` — `1.0` — so a pure-float reimplementation
+        // of this function returns `Equal` here, not `Less`; a pair that
+        // still differs under `f64` would let such a reimplementation pass
+        // this assertion by accident.
+        assert_eq!(
+            compare_decimal_text("1.00000000000000001", "1.00000000000000002"),
+            Ordering::Less
+        );
+
+        // "-0" is arithmetically "0", not less than it. The sign-only
+        // shortcut above must not fire on a zero magnitude.
+        assert_eq!(compare_decimal_text("-0", "0"), Ordering::Equal);
+        assert_eq!(compare_decimal_text("0", "-0"), Ordering::Equal);
+        assert_eq!(compare_decimal_text("-0.00", "0"), Ordering::Equal);
+    }
+
+    #[test]
+    fn a_number_below_minimum_is_refused_and_says_which_constraint() {
+        let mut p = number_param("n");
+        p.minimum = Some("10".into());
+        match coerce(&p, "9") {
+            Err(CoerceError::Constraint { constraint, bound }) => {
+                assert_eq!(constraint, "minimum");
+                assert_eq!(bound, "10");
+            }
+            other => panic!("expected a constraint refusal, got {other:?}"),
+        }
+        assert!(coerce(&p, "10").is_ok(), "the bound itself is inclusive");
+        assert!(coerce(&p, "11").is_ok());
+    }
+
+    #[test]
+    fn a_number_above_maximum_is_refused() {
+        let mut p = number_param("n");
+        p.maximum = Some("100".into());
+        assert!(matches!(
+            coerce(&p, "101"),
+            Err(CoerceError::Constraint { .. })
+        ));
+        assert!(coerce(&p, "100").is_ok(), "inclusive");
+    }
+
+    /// `is_plain_decimal` is the ONLY gate `coerce` admits a `Number` value
+    /// through — never `text.parse::<i64>().is_ok()` as a second way in — and
+    /// it deliberately refuses a leading `+`, because `compare_decimal_text`
+    /// never strips one. Before this refusal, `+100` was admitted (via the
+    /// `i64` half of the old two-way gate) with its `+` left in `text_value`,
+    /// so the sign counted as an integer-part digit and made `"+100"` compare
+    /// as LONGER — hence "greater" — than a same-magnitude bound with no
+    /// sign at all: `minimum: "500"` accepted `?n=%2B100`, and `maximum: "5"`
+    /// rejected the in-range value `"+5"`. Both are closed the same way: `+`
+    /// is not admitted as a `Number` at all, regardless of any bound.
+    #[test]
+    fn a_leading_plus_is_refused_not_admitted_through_the_i64_gate() {
+        let plain = number_param("n");
+        assert!(
+            matches!(coerce(&plain, "+100"), Err(CoerceError::Invalid)),
+            "a `+`-prefixed value must never reach a constraint check at all"
+        );
+
+        // The exact bypass: a caller-controlled `+100` must not compare as
+        // "at least 500".
+        let mut floor = number_param("n");
+        floor.minimum = Some("500".into());
+        assert!(matches!(coerce(&floor, "+100"), Err(CoerceError::Invalid)));
+
+        // And the mirror image: a `+`-prefixed value that WOULD be in range
+        // if normalised must still be refused outright, not wrongly reported
+        // as out of range.
+        let mut ceiling = number_param("n");
+        ceiling.maximum = Some("5".into());
+        assert!(matches!(coerce(&ceiling, "+5"), Err(CoerceError::Invalid)));
+    }
+
+    #[test]
+    fn bounds_compare_decimals_without_going_through_a_float() {
+        // 0.1 + 0.2 != 0.3 in binary floating point. If the comparison round-trips
+        // through an f64, a bound of "0.3" rejects the value "0.3".
+        let mut p = number_param("n");
+        p.minimum = Some("0.3".into());
+        assert!(coerce(&p, "0.3").is_ok(), "a decimal must equal itself");
+
+        // And a long decimal must not be truncated into equality. Both of these
+        // parse to the exact same `f64` (`1.0`) — verified independently, not
+        // merely asserted in prose — so an implementation that compares through
+        // a float cannot tell them apart and this refusal is the only place
+        // that fact can be caught.
+        let mut q = number_param("n");
+        q.maximum = Some("1.00000000000000001".into());
+        assert!(
+            matches!(
+                coerce(&q, "1.00000000000000002"),
+                Err(CoerceError::Constraint { .. })
+            ),
+            "a difference below f64 precision must still be a difference"
+        );
+    }
+
+    #[test]
+    fn length_is_counted_in_characters_not_bytes() {
+        // "Nguyễn" is 6 characters and 8 bytes. A max_length of 6 must accept it.
+        let mut p = string_param("s");
+        p.max_length = Some(6);
+        assert!(
+            coerce(&p, "Nguyễn").is_ok(),
+            "6 characters must fit in max_length 6; String::len() would say 8 bytes"
+        );
+        assert!(matches!(
+            coerce(&p, "Nguyễnn"),
+            Err(CoerceError::Constraint { .. })
+        ));
+    }
+
+    #[test]
+    fn min_length_is_enforced() {
+        let mut p = string_param("s");
+        p.min_length = Some(3);
+        assert!(matches!(
+            coerce(&p, "ab"),
+            Err(CoerceError::Constraint { .. })
+        ));
+        assert!(coerce(&p, "abc").is_ok(), "inclusive");
+    }
+
+    #[test]
+    fn a_pattern_must_match_the_whole_value() {
+        // `is_match` is a SEARCH. Without anchoring, "abc" accepts "xxabcxx",
+        // which is not what an author writing a validation rule means.
+        let mut p = string_param("s");
+        p.pattern = Some("abc".into());
+        assert!(coerce(&p, "abc").is_ok());
+        assert!(matches!(
+            coerce(&p, "xxabcxx"),
+            Err(CoerceError::Constraint { .. })
+        ));
+    }
+
+    #[test]
+    fn an_authors_own_anchors_give_the_same_answer() {
+        let mut p = string_param("s");
+        p.pattern = Some("^abc$".into());
+        assert!(coerce(&p, "abc").is_ok());
+        assert!(matches!(
+            coerce(&p, "xxabcxx"),
+            Err(CoerceError::Constraint { .. })
+        ));
+    }
+
+    #[test]
+    fn alternation_is_anchored_as_a_whole_not_just_its_first_branch() {
+        // The trap in anchoring by concatenation: "^a|b$" parses as "(^a)|(b$)",
+        // which accepts "zzzb". Wrapping in a non-capturing group is what makes
+        // the anchors apply to the whole alternation.
+        let mut p = string_param("s");
+        p.pattern = Some("a|b".into());
+        assert!(coerce(&p, "a").is_ok());
+        assert!(coerce(&p, "b").is_ok());
+        assert!(matches!(
+            coerce(&p, "zzzb"),
+            Err(CoerceError::Constraint { .. })
+        ));
+        assert!(matches!(
+            coerce(&p, "azzz"),
+            Err(CoerceError::Constraint { .. })
+        ));
+    }
+
+    #[test]
+    fn a_pattern_names_itself_in_the_coerce_error() {
+        let mut p = string_param("s");
+        p.pattern = Some("^[0-9]+$".into());
+        match coerce(&p, "abc") {
+            Err(CoerceError::Constraint { constraint, .. }) => {
+                assert_eq!(constraint, "pattern")
+            }
+            other => panic!("expected a pattern refusal, got {other:?}"),
+        }
+    }
+
+    /// A non-compiling `pattern` is `check_constraints`' job to have already
+    /// refused — reaching `coerce` at all means a snapshot published before
+    /// that gate existed, or a hand-edited row. Either way this is
+    /// [`CoerceError::Malformed`], carrying [`MalformedReason::PatternDoesNotCompile`]
+    /// rather than the pre-existing [`MalformedReason::EnumHasNoAllowedList`]
+    /// the two used to share as one unlabelled variant.
+    #[test]
+    fn a_pattern_that_does_not_compile_is_malformed_with_its_own_reason() {
+        let mut p = string_param("s");
+        // Unbalanced: `compile_pattern` wraps this as `^(?:()$`, which never
+        // closes the outer non-capturing group.
+        p.pattern = Some("(".into());
+        assert_eq!(
+            coerce(&p, "anything"),
+            Err(CoerceError::Malformed(
+                MalformedReason::PatternDoesNotCompile
+            ))
+        );
+    }
+
+    /// **The regression this pins**: before `MalformedReason` existed, both
+    /// `Enum`'s missing `allowed` and `String`'s non-compiling `pattern`
+    /// collapsed into one `CoerceError::Malformed` unit variant, so `resolve`'s
+    /// mapping used a single fixed log message — "enum parameter published
+    /// with no `allowed` list" — for BOTH causes. A hand-edited row with an
+    /// uncompilable `pattern` produced a 500 whose logged diagnosis blamed a
+    /// missing enum list on an endpoint that has no enum parameter at all.
+    ///
+    /// The wire response was never wrong (`ServingError::internal` redacts to
+    /// `"internal error"` regardless), so this only checks the internal
+    /// diagnosis — the `Debug` rendering of the returned [`ServingError`],
+    /// which is exactly the field `router::serve` logs as `error = ?e`
+    /// (`router.rs`'s `THE ONLY place the internal detail is allowed to
+    /// appear` comment).
+    #[test]
+    fn a_non_compiling_patterns_diagnostic_does_not_blame_a_missing_enum_list() {
+        let mut p = string_param("s");
+        p.pattern = Some("(".into());
+        let supplied =
+            std::collections::BTreeMap::from([("s".to_string(), vec!["anything".to_string()])]);
+        let err = match resolve_supplied_with(&supplied, &[], std::slice::from_ref(&p)) {
+            Err(e) => e,
+            Ok(_) => panic!("expected a non-compiling pattern to refuse as internal"),
+        };
+        assert!(
+            matches!(err, ServingError::Internal(_)),
+            "a malformed spec is the author's 500, not the caller's 400: {err:?}"
+        );
+        let rendered = format!("{err:?}");
+        assert!(
+            rendered.contains("pattern") && rendered.contains("does not compile"),
+            "the log line must name the pattern as the cause: {rendered}"
+        );
+        assert!(
+            !rendered.contains("enum") && !rendered.contains("allowed"),
+            "the log line must not repeat the UNRELATED enum diagnosis: {rendered}"
+        );
+    }
+
+    /// The companion case, so a future edit that swaps the two match arms'
+    /// message strings is still caught: an enum published with no `allowed`
+    /// must keep naming itself, not borrow the pattern's message.
+    #[test]
+    fn an_enum_with_no_allowed_lists_diagnostic_does_not_blame_a_pattern() {
+        let p = spec("e", ParamType::Enum, false);
+        let supplied = std::collections::BTreeMap::from([("e".to_string(), vec!["x".to_string()])]);
+        let err = match resolve_supplied_with(&supplied, &[], std::slice::from_ref(&p)) {
+            Err(e) => e,
+            Ok(_) => panic!("expected an enum with no allowed list to refuse as internal"),
+        };
+        let rendered = format!("{err:?}");
+        assert!(
+            rendered.contains("enum") && rendered.contains("allowed"),
+            "the log line must name the missing allowed list as the cause: {rendered}"
+        );
+        assert!(
+            !rendered.contains("pattern"),
+            "the log line must not borrow the UNRELATED pattern diagnosis: {rendered}"
+        );
+    }
+
+    #[test]
+    fn length_is_checked_before_the_pattern() {
+        // Cheap rejection first: a 10 MB value against a pattern is work that a
+        // max_length would have avoided. Order is observable through which
+        // constraint the error names.
+        let mut p = string_param("s");
+        p.max_length = Some(3);
+        p.pattern = Some("^[a-z]+$".into());
+        match coerce(&p, "abcdefgh") {
+            Err(CoerceError::Constraint { constraint, .. }) => {
+                assert_eq!(constraint, "max_length")
+            }
+            other => panic!("expected max_length to fire first, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_constraint_refusal_reaches_the_caller_as_a_bare_param_invalid() {
+        // The whole point of §2.1: the caller learns "send something else" and
+        // NOTHING about the endpoint's parameters. If this test ever needs the
+        // bound, the change is wrong — read `serving/error.rs`'s doc comment first.
+        let mut p = number_param("n");
+        p.maximum = Some("100".into());
+        let supplied =
+            std::collections::BTreeMap::from([("n".to_string(), vec!["101".to_string()])]);
+        let err = match resolve_supplied_with(&supplied, &[], std::slice::from_ref(&p)) {
+            Err(e) => e,
+            Ok(_) => panic!("expected a constraint refusal over the maximum"),
+        };
+        assert!(matches!(err, ServingError::ParamInvalid));
+        // `ParamInvalid` is a unit variant, so its `Debug` rendering is exactly
+        // its own name — nothing can be appended to it. Checking for a
+        // substring like the bound ("100") or the parameter name ("n") is not
+        // this test: "n" and even a two-digit bound can occur by coincidence
+        // inside "ParamInvalid" itself (it contains an "n" in "Invalid"), which
+        // would fail this test on a CORRECT implementation. The exact-equality
+        // check below is what actually proves nothing was attached.
+        let rendered = format!("{err:?}");
+        assert_eq!(
+            rendered, "ParamInvalid",
+            "the constraint's detail leaked into the error: {rendered}"
+        );
+    }
+
+    /// Distinguishes the `(CoerceError::Constraint, from_default: true)` arm
+    /// from the caller-facing one right above it. Before this test, swapping
+    /// that arm to `ServingError::ParamInvalid` (blaming the caller for the
+    /// author's own out-of-bounds `default`) left all other tests in this
+    /// module green, because none of them supplies no value at all and relies
+    /// on a `default` that fails its own declared constraint.
+    #[test]
+    fn a_defaults_own_constraint_violation_is_the_authors_500_not_the_callers_400() {
+        let mut p = number_param("n");
+        p.maximum = Some("100".into());
+        p.default = Some("101".into());
+        let supplied = std::collections::BTreeMap::new();
+        let err = match resolve_supplied_with(&supplied, &[], std::slice::from_ref(&p)) {
+            Err(e) => e,
+            Ok(_) => panic!("expected the author's own default to fail its own maximum"),
+        };
+        assert!(
+            matches!(err, ServingError::Internal(_)),
+            "an author's bad default must be the author's 500, not the caller's 400: {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_date_before_not_before_is_refused() {
+        let mut p = date_param("d");
+        p.not_before = Some("2020-01-01".into());
+        assert!(matches!(
+            coerce(&p, "2019-12-31"),
+            Err(CoerceError::Constraint { .. })
+        ));
+        assert!(coerce(&p, "2020-01-01").is_ok(), "inclusive");
+    }
+
+    #[test]
+    fn a_date_after_not_after_is_refused() {
+        let mut p = date_param("d");
+        p.not_after = Some("2030-12-31".into());
+        assert!(matches!(
+            coerce(&p, "2031-01-01"),
+            Err(CoerceError::Constraint { .. })
+        ));
+        assert!(coerce(&p, "2030-12-31").is_ok(), "inclusive");
+    }
+
+    /// **The test that actually carries this discrimination** — the brief's
+    /// own example (`not_before: "2026-01-01"`, value `"2026-1-2"`) turns out
+    /// NOT to: `"2026-1-2"` already sorts AFTER `"2026-01-01"` as raw bytes
+    /// (unpadded `'1'` at the fifth byte beats padded `'0'`), so a broken
+    /// implementation that compared the caller's raw text would still accept
+    /// it, for the wrong reason. Verified by hand before writing this.
+    ///
+    /// The case that truly requires normalisation is the one
+    /// `lifecycle::check_constraints`'s own doc names: an unpadded SINGLE
+    /// digit that is lexically larger than a PADDED double digit's leading
+    /// character. `"2026-9-30"` (Sept 30) vs a `"2026-10-01"` (Oct 1) bound —
+    /// raw bytes put `'9'` ahead of `'1'` at the fifth byte, so a raw-text
+    /// comparison sorts Sept 30 AFTER Oct 1 despite it being chronologically
+    /// EARLIER, and would wrongly ACCEPT a date the bound exists to refuse.
+    /// Comparing the normalised `"2026-09-30"` against `"2026-10-01"` gets it
+    /// right.
+    #[test]
+    fn bounds_compare_the_normalised_value_not_the_callers_spelling() {
+        let mut p = date_param("d");
+        p.not_before = Some("2026-10-01".into());
+        assert!(
+            matches!(coerce(&p, "2026-9-30"), Err(CoerceError::Constraint { .. })),
+            "Sept 30 is chronologically before the Oct 1 bound and must be \
+             refused, even though its unpadded spelling sorts AFTER the \
+             bound as raw text"
+        );
+        assert!(
+            coerce(&p, "2026-10-2").is_ok(),
+            "and an unpadded date genuinely after the bound must still be accepted"
+        );
+    }
+
+    /// The other half of the same normalisation rule, aimed at the BOUND
+    /// rather than the value: `check_constraints` validates that an author's
+    /// `not_before`/`not_after` PARSES, but does not rewrite the stored text
+    /// into the padded spelling. `not_before: "2026-1-1"` publishes clean and
+    /// sits in the snapshot unpadded. Comparing a normalised caller value
+    /// against that RAW bound gets the wrong answer: `"2026-01-02"` is
+    /// lexically LESS than `"2026-1-1"` (unpadded `'1'` beats padded `'0'` at
+    /// the fifth byte), which would wrongly refuse a date that is
+    /// chronologically one day AFTER the bound.
+    #[test]
+    fn the_bound_itself_is_normalised_before_it_is_compared() {
+        let mut p = date_param("d");
+        p.not_before = Some("2026-1-1".into());
+        assert!(
+            coerce(&p, "2026-01-02").is_ok(),
+            "Jan 2 is after the Jan 1 bound even though the bound's own raw \
+             spelling is unpadded"
+        );
+    }
+
+    #[test]
+    fn a_timestamp_bound_is_enforced() {
+        let mut p = timestamp_param("t");
+        p.not_before = Some("2020-01-01 00:00:00".into());
+        assert!(matches!(
+            coerce(&p, "2019-12-31 23:59:59"),
+            Err(CoerceError::Constraint { .. })
+        ));
+        assert!(coerce(&p, "2020-01-01 00:00:00").is_ok());
+        assert!(
+            coerce(&p, "2020-01-01T00:00:01").is_ok(),
+            "the T spelling too"
+        );
+    }
+
+    /// Same precedent as `a_pattern_that_does_not_compile_is_malformed_with_its_own_reason`:
+    /// `check_constraints` already refuses a `not_before`/`not_after` that
+    /// fails to parse (spec §5), so reaching `coerce` at all means a snapshot
+    /// published before that gate existed, or a hand-edited row — the
+    /// author's problem, not the caller's, hence `Malformed` rather than
+    /// `Constraint` or `Invalid`.
+    #[test]
+    fn an_unparseable_bound_is_malformed_with_its_own_reason() {
+        let mut p = date_param("d");
+        p.not_before = Some("not-a-date".into());
+        assert_eq!(
+            coerce(&p, "2026-01-01"),
+            Err(CoerceError::Malformed(
+                MalformedReason::TemporalBoundDoesNotParse
+            ))
+        );
+    }
+
+    /// Same shape as `a_non_compiling_patterns_diagnostic_does_not_blame_a_missing_enum_list`:
+    /// the wire response is unaffected either way (`ServingError::internal`
+    /// redacts to `"internal error"`), so this checks only the internal
+    /// diagnosis a future edit could accidentally collapse into one of the
+    /// other two `Malformed` messages.
+    #[test]
+    fn an_unparseable_bounds_diagnostic_names_itself() {
+        let mut p = date_param("d");
+        p.not_after = Some("not-a-date".into());
+        let supplied =
+            std::collections::BTreeMap::from([("d".to_string(), vec!["2026-01-01".to_string()])]);
+        let err = match resolve_supplied_with(&supplied, &[], std::slice::from_ref(&p)) {
+            Err(e) => e,
+            Ok(_) => panic!("expected an unparseable bound to refuse as internal"),
+        };
+        assert!(
+            matches!(err, ServingError::Internal(_)),
+            "an unparseable published bound is the author's 500, not the caller's 400: {err:?}"
+        );
+        let rendered = format!("{err:?}");
+        assert!(
+            rendered.contains("not_before") && rendered.contains("does not parse"),
+            "the log line must name the temporal bound as the cause: {rendered}"
+        );
+        assert!(
+            !rendered.contains("pattern") && !rendered.contains("enum"),
+            "the log line must not borrow an UNRELATED `Malformed` diagnosis: {rendered}"
+        );
     }
 }

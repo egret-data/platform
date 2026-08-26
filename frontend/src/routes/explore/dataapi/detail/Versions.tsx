@@ -303,6 +303,8 @@ function PublishDialog({
   onPublished: () => void;
 }) {
   const [note, setNote] = useState("");
+  // The refusal, kept on screen until the author acts on it. See `submit`.
+  const [refusal, setRefusal] = useState<string | null>(null);
 
   // Cleared on CLOSE, not on open: the dialog instance persists across opens
   // (it is not remounted), so a note left over from a previous publish must
@@ -312,11 +314,15 @@ function PublishDialog({
   // Escape, overlay click, and a successful submit — since they all funnel
   // through Radix's `onOpenChange`).
   const handleOpenChange = (o: boolean) => {
-    if (!o) setNote("");
+    if (!o) {
+      setNote("");
+      setRefusal(null);
+    }
     onOpenChange(o);
   };
 
   async function submit() {
+    setRefusal(null);
     try {
       const trimmed = note.trim();
       const res = await publish.mutateAsync({
@@ -325,14 +331,17 @@ function PublishDialog({
         data: trimmed ? { note: trimmed } : {},
       });
       if (res.status !== 200) {
-        toast.error("Could not publish.");
+        setRefusal("Could not publish.");
         return;
       }
       handleOpenChange(false);
       onPublished();
       toast.success(`Published v${res.data.version}`);
     } catch (e) {
-      toast.error(String(e));
+      // `e.message`, not `String(e)`: `ApiError` (api/client.ts) carries the
+      // body's `error` sentence as its message, and `String(e)` prefixes it
+      // with a bare `Error: ` that says nothing.
+      setRefusal(e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -353,6 +362,24 @@ function PublishDialog({
             connection, under whatever the engine enforces — so an admin must also grant that service
             account on the underlying tables in Ranger, or this contract has nothing to serve.
           </SettingsNote>
+          {/* Inline and persistent, not a toast — the same rule `Config`'s
+              Validate block states, for the same class of message and the same
+              reader. Measured in Chrome on this branch before this changed: a
+              `default` of `5` against a `minimum` of `10` answered with a
+              bottom-right toast that lived 4.3 s and could not be paused,
+              because the publish dialog stays open on a refusal and its
+              overlay (`z-50`, `data-slot="dialog-overlay"`) takes the pointer
+              — `elementFromPoint` at the toast's own centre resolved to the
+              overlay, so sonner's pause-on-hover could never fire. The author
+              was left looking at the dialog with no trace of why it refused,
+              and had to press Publish again to read the sentence. It is the
+              refusal that names the parameter, the constraint and the bound,
+              so it is the one message that must not expire. */}
+          {refusal && (
+            <Alert variant="destructive">
+              <AlertDescription>{refusal}</AlertDescription>
+            </Alert>
+          )}
           <div className="space-y-1.5">
             <Label htmlFor="publish-note">Note (optional)</Label>
             <Textarea

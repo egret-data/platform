@@ -634,3 +634,137 @@ async fn manage_permission_can_preview() {
         "the preview runs as whoever asked for it"
     );
 }
+
+/// Spec §5: **preview judges a supplied value the way serving will.**
+///
+/// Preview reaches `serving::params::coerce` through `resolve_supplied_with` —
+/// the same function serving resolves through — so every constraint Tasks 3-5
+/// put inside `coerce` is inherited here for free. "For free" is a property to
+/// TEST, not to assume: this seam has already failed twice in this programme,
+/// most recently when preview judged a parameter's SHAPE from the one statement
+/// on screen while publish judged it across the endpoint, so an author was told
+/// "fine" and then told "no".
+///
+/// Both directions are measured, because only one of them is a gate: `5` against
+/// `minimum: 10` must be refused **without reaching the engine**, and `10` must
+/// go through. Without the second half this test passes just as well against a
+/// preview route that refuses everything.
+#[tokio::test]
+async fn preview_refuses_a_value_its_endpoint_would_refuse() {
+    let Some(f) = fixture().await else { return };
+    let body = |v: &str| {
+        serde_json::json!({
+            "sql": "SELECT 1 AS n WHERE n >= {{ n }}",
+            "params": [{
+                "name": "n",
+                "type": "number",
+                "location": "query",
+                "required": true,
+                "minimum": "10",
+            }],
+            "values": { "n": [v] },
+            "database_id": f.database_id,
+        })
+    };
+
+    let before = f.port.executions();
+    let (status, out) = f.mgmt_post(&preview_path(&f), Some(body("5"))).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a value the published endpoint would refuse must be refused in preview too — {out}"
+    );
+    assert_eq!(
+        f.port.executions(),
+        before,
+        "a value that fails a constraint must not reach the engine"
+    );
+
+    // The refusal has to send the author to the right field. `5` IS a valid
+    // number, so the pre-C1 sentence — "the test value for `n` is not a valid
+    // number" — is a type failure that did not happen, and it points at the
+    // `type` column instead of at the `minimum` the author just typed. This
+    // route is `:manage`-gated and the author owns the declarations, which is
+    // why the §2.1 payload-free rule that governs a consumer's 400 does not
+    // govern this message; `preview::param_error`'s own doc comment is the
+    // authority on that inversion.
+    let msg = out["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains('n') && msg.contains("minimum") && msg.contains("10"),
+        "the refusal must name the parameter, the constraint it broke and the bound: {msg}"
+    );
+    assert!(
+        !msg.contains("not a valid"),
+        "a value that is well-typed and out of range is not a type failure: {msg}"
+    );
+
+    // The other side of the gate, on the same declaration.
+    let (status, out) = f.mgmt_post(&preview_path(&f), Some(body("10"))).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a value that satisfies the constraint must preview — {out}"
+    );
+    assert_eq!(
+        f.port.executions(),
+        before + 1,
+        "the satisfying value must have reached the engine"
+    );
+}
+
+/// The same inheritance for a constraint that is not a number, so the test above
+/// cannot be passing because one `if` happens to sit on the numeric branch.
+///
+/// A `pattern` is the constraint most likely to be enforced in only one place:
+/// it is the only one that has to COMPILE, and publish compiles it separately
+/// (`lifecycle::compile_pattern`). Anchoring is what is actually pinned here —
+/// `"EU-1x"` matches `^EU-\d$` nowhere, but an UNANCHORED `EU-\d` finds `EU-1`
+/// inside it and passes.
+#[tokio::test]
+async fn preview_enforces_a_pattern_the_way_serving_does() {
+    let Some(f) = fixture().await else { return };
+    let body = |v: &str| {
+        serde_json::json!({
+            "sql": "SELECT 1 AS n WHERE region = {{ region }}",
+            "params": [{
+                "name": "region",
+                "type": "string",
+                "location": "query",
+                "required": true,
+                "pattern": "EU-\\d",
+            }],
+            "values": { "region": [v] },
+            "database_id": f.database_id,
+        })
+    };
+
+    let before = f.port.executions();
+    let (status, out) = f.mgmt_post(&preview_path(&f), Some(body("EU-1x"))).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a value that only matches the pattern as a substring must be refused — {out}"
+    );
+    assert_eq!(
+        f.port.executions(),
+        before,
+        "a value that fails a pattern must not reach the engine"
+    );
+    let msg = out["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("region") && msg.contains("pattern"),
+        "the refusal must name the parameter and the constraint it broke: {msg}"
+    );
+
+    let (status, out) = f.mgmt_post(&preview_path(&f), Some(body("EU-1"))).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a matching value must preview — {out}"
+    );
+    assert_eq!(
+        f.port.executions(),
+        before + 1,
+        "the matching value must have reached the engine"
+    );
+}

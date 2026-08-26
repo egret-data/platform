@@ -59,18 +59,40 @@ Cụ thể, điều đó cho ba hệ quả, và chúng là **yêu cầu** chứ 
 2. **Giá trị của người gọi bị từ chối bằng cùng một luật**, miễn phí, cùng lý do.
 3. **Không thể thêm ràng buộc vào serving mà publish không thấy**, vì chỉ có một hàm.
 
-### 2.1 `CoerceError` cần biến thể thứ ba
+### 2.1 Chi tiết đi tới TÁC GIẢ, không bao giờ vào một 400
 
-Hiện tại: `Invalid` (giá trị người gọi không thoả kiểu → 400) và `Malformed` (bản thân
-*spec* không thể thực hiện được, ví dụ `Enum` không có `allowed` → không phải lỗi người
-gọi, nên không phải 400).
+**Đã sửa 2026-08-26, sau khi đọc `serving/error.rs`.** Bản nháp trước của mục này đề
+xuất thêm một biến thể `ServingError` mang thông tin ràng buộc nào hỏng, để người gọi vượt
+`maximum` đúng một đơn vị được biết điều đó. Ở đây điều đó **sai**, và chính file kia nói
+rõ vì sao.
 
-Vi phạm ràng buộc là thứ thứ ba: giá trị **đúng kiểu**, spec **lành lặn**, mà giá trị vẫn
-bị từ chối. Nó phải báo được **ràng buộc nào** đã hỏng, vì chữ "invalid" trơ trọi không
-nói gì cho người gọi vượt `maximum` đúng một đơn vị. Thêm một biến thể mang thông tin đó,
-và đưa nó ra thân 400.
+`serving/error.rs` cưỡng chế một luật: **không tên tham số nào xuất hiện trong một 400.**
+Cái tên thuộc về **tác giả** endpoint, không thuộc về người gọi, và đưa nó vào lỗi sẽ biến
+bề mặt lỗi thành **danh bạ các tham số mà endpoint khai báo** — cùng loại oracle mà một
+`Unauthorized` duy nhất và một `NotFound` duy nhất tồn tại để đóng. Nó được cưỡng chế bằng
+**hình dạng**, không bằng kỷ luật: `ParamInvalid` và `ParamMissing` là unit variant không
+mang gì, nên không có trường nào để một lần sửa sau này nội suy vào theo thói quen, và mở
+rộng kiểu là việc ai đó phải quyết định một cách có ý thức.
 
-Đây là thay đổi hình dạng lỗi duy nhất mà người dùng nhìn thấy trong C1.
+Vậy cách giải nhỏ hơn bản nháp:
+
+- **Serving giữ `ParamInvalid` y nguyên** — unit variant, không tên, không biên, không
+  loại ràng buộc. Vi phạm ràng buộc và vi phạm kiểu đều đòi người gọi làm cùng một việc:
+  *gửi giá trị khác*. Đó vốn đã là nghĩa của `ParamInvalid`, và bộ từ vựng 400 sẵn có
+  ("gửi đi" so với "gửi cái khác") đã bao trùm.
+- **`CoerceError` thì CÓ thêm biến thể** mang ràng buộc nào hỏng và biên của nó — nhưng
+  chỉ để **publish** báo lại. Publish là lúc tác giả đọc lỗi về endpoint của chính mình;
+  không có oracle nào ở đó, và câu "`default` của bạn là 5, thấp hơn `minimum` 10 mà bạn
+  khai" đúng là thông điệp tiết kiệm cho họ một vòng thử.
+- **Serving vứt bỏ chi tiết đó** ngay tại chỗ ánh xạ `CoerceError → ServingError`
+  (`params.rs:263`), có chủ ý và có comment nói rõ.
+
+Vì vậy C1 **không đổi hình dạng lỗi mà người gọi nhìn thấy**, và cho tác giả một lỗi tốt
+hơn lúc publish.
+
+Biên **không phải bí mật** với một client hợp lệ, và đó là lý do việc này không mất gì: §4
+publish `minimum`/`maximum`/`pattern` vào tài liệu OpenAPI sinh ra. Luật này nói về việc
+không biến đường **serving** thành kênh dò tìm cho người không đọc được hợp đồng đó.
 
 ### 2.2 Giá trị thăm dò của publish CỐ Ý bỏ qua các ràng buộc này
 

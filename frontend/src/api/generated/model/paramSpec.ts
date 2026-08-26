@@ -44,5 +44,57 @@ export interface ParamSpec {
      * @nullable
      */
   allowed?: string[] | null;
+  /**
+     * Inclusive lower bound for a `Number`. Ignored for every other type, and
+     * publish refuses it there (see `check_constraints`).
+     *
+     * **A string, not an `i64` or `f64`, and deliberately.** `coerce` already
+     * refuses to put a decimal through an `f64`, because a decimal that
+     * round-trips through a float stops comparing equal to itself on the
+     * engine. A bound stored as a float would reintroduce that on the
+     * comparison side.
+     * @nullable
+     */
+  minimum?: string | null;
+  /**
+     * Inclusive upper bound for a `Number`. See [`ParamSpec::minimum`].
+     * @nullable
+     */
+  maximum?: string | null;
+  /**
+     * Minimum length for a `String`, in **Unicode scalars, not bytes**. A
+     * `max_length: 10` that fails a Vietnamese name at seven letters is a bug
+     * the author cannot see from the declaration.
+     * @minimum 0
+     * @nullable
+     */
+  min_length?: number | null;
+  /**
+     * Maximum length for a `String`. See [`ParamSpec::min_length`].
+     * @minimum 0
+     * @nullable
+     */
+  max_length?: number | null;
+  /**
+     * A regex the **whole** value must match, for a `String`.
+     *
+     * Anchored implicitly: `is_match` is a search, so an unanchored `"abc"`
+     * would accept `xxabcxx`, which is not what an author writing a validation
+     * rule means. An author who writes their own `^…$` gets the same answer.
+     * @nullable
+     */
+  pattern?: string | null;
+  /**
+     * Inclusive earliest value for a `Date` or `Timestamp`, in the same
+     * spelling `coerce` produces (`%Y-%m-%d`, or `%Y-%m-%d %H:%M:%S%.f`).
+     * @nullable
+     */
+  not_before?: string | null;
+  /**
+     * Inclusive latest value for a `Date` or `Timestamp`. See
+     * [`ParamSpec::not_before`].
+     * @nullable
+     */
+  not_after?: string | null;
   description?: string;
 }
