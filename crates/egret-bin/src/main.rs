@@ -2074,7 +2074,7 @@ mod catalog_guard_audience_tests {
     use egret_machine_idp::SigningKeyStore as _;
 
     async fn guard() -> Option<EgretCatalogGuard> {
-        let url = std::env::var("DATABASE_URL").ok()?;
+        let url = egret_test_db::url().await?;
         let db = egret_metastore::Db::connect(&url, 5)
             .await
             .expect("connect");
