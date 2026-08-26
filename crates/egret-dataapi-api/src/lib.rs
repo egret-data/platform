@@ -89,6 +89,42 @@ pub struct ParamSpec {
     /// reaches an identifier position — see spec §3.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed: Option<Vec<String>>,
+    /// Inclusive lower bound for a `Number`. Ignored for every other type, and
+    /// publish refuses it there (see `check_constraints`).
+    ///
+    /// **A string, not an `i64` or `f64`, and deliberately.** `coerce` already
+    /// refuses to put a decimal through an `f64`, because a decimal that
+    /// round-trips through a float stops comparing equal to itself on the
+    /// engine. A bound stored as a float would reintroduce that on the
+    /// comparison side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minimum: Option<String>,
+    /// Inclusive upper bound for a `Number`. See [`ParamSpec::minimum`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maximum: Option<String>,
+    /// Minimum length for a `String`, in **Unicode scalars, not bytes**. A
+    /// `max_length: 10` that fails a Vietnamese name at seven letters is a bug
+    /// the author cannot see from the declaration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_length: Option<u32>,
+    /// Maximum length for a `String`. See [`ParamSpec::min_length`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_length: Option<u32>,
+    /// A regex the **whole** value must match, for a `String`.
+    ///
+    /// Anchored implicitly: `is_match` is a search, so an unanchored `"abc"`
+    /// would accept `xxabcxx`, which is not what an author writing a validation
+    /// rule means. An author who writes their own `^…$` gets the same answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pattern: Option<String>,
+    /// Inclusive earliest value for a `Date` or `Timestamp`, in the same
+    /// spelling `coerce` produces (`%Y-%m-%d`, or `%Y-%m-%d %H:%M:%S%.f`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_before: Option<String>,
+    /// Inclusive latest value for a `Date` or `Timestamp`. See
+    /// [`ParamSpec::not_before`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_after: Option<String>,
     #[serde(default)]
     pub description: String,
 }
@@ -903,6 +939,54 @@ impl Default for OutputSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn param_spec_without_constraints_round_trips_and_means_unconstrained() {
+        // A snapshot written before C1 has none of these keys. Reading it back must
+        // produce `None` everywhere, which is what "absent means today's behaviour"
+        // has to mean in practice — `deny_unknown_fields` makes the opposite failure
+        // loud, but a WRONG DEFAULT would be silent.
+        let json = r#"{"name":"region","type":"string","location":"query"}"#;
+        let spec: ParamSpec = serde_json::from_str(json).expect("pre-C1 spec must still read");
+        assert_eq!(spec.minimum, None);
+        assert_eq!(spec.maximum, None);
+        assert_eq!(spec.min_length, None);
+        assert_eq!(spec.max_length, None);
+        assert_eq!(spec.pattern, None);
+        assert_eq!(spec.not_before, None);
+        assert_eq!(spec.not_after, None);
+
+        // And it must not GROW keys on the way out: a snapshot rewritten by a newer
+        // binary should stay byte-comparable for an unconstrained parameter.
+        let back = serde_json::to_string(&spec).expect("serialize");
+        assert!(
+            !back.contains("minimum"),
+            "unconstrained spec grew keys: {back}"
+        );
+        assert!(
+            !back.contains("pattern"),
+            "unconstrained spec grew keys: {back}"
+        );
+    }
+
+    #[test]
+    fn param_spec_round_trips_every_constraint() {
+        let json = r#"{"name":"n","type":"number","location":"query",
+                       "minimum":"1","maximum":"100","min_length":2,"max_length":10,
+                       "pattern":"^[a-z]+$","not_before":"2020-01-01","not_after":"2030-12-31"}"#;
+        let spec: ParamSpec = serde_json::from_str(json).expect("full spec must read");
+        assert_eq!(spec.minimum.as_deref(), Some("1"));
+        assert_eq!(spec.maximum.as_deref(), Some("100"));
+        assert_eq!(spec.min_length, Some(2));
+        assert_eq!(spec.max_length, Some(10));
+        assert_eq!(spec.pattern.as_deref(), Some("^[a-z]+$"));
+        assert_eq!(spec.not_before.as_deref(), Some("2020-01-01"));
+        assert_eq!(spec.not_after.as_deref(), Some("2030-12-31"));
+
+        let round: ParamSpec =
+            serde_json::from_str(&serde_json::to_string(&spec).unwrap()).unwrap();
+        assert_eq!(round, spec, "round trip must be lossless");
+    }
 
     /// Pins `OutputSpec::default()` to agree with what an absent `output`
     /// field deserializes to. A `#[derive(Default)]` here would pass every

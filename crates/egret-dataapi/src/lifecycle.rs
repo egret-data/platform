@@ -3061,6 +3061,13 @@ mod tests {
             required: false,
             default: None,
             allowed: None,
+            minimum: None,
+            maximum: None,
+            min_length: None,
+            max_length: None,
+            pattern: None,
+            not_before: None,
+            not_after: None,
             description: String::new(),
         }
     }
@@ -4079,6 +4086,13 @@ mod tests {
             required: true,
             default: None,
             allowed: Some(vec!["region".into(), "total".into()]),
+            minimum: None,
+            maximum: None,
+            min_length: None,
+            max_length: None,
+            pattern: None,
+            not_before: None,
+            not_after: None,
             description: String::new(),
         };
         // `{{ sort | ident }}` — the whole inside used to become the NAME.
@@ -4292,6 +4306,13 @@ mod tests {
             required: false,
             default: None,
             allowed: None,
+            minimum: None,
+            maximum: None,
+            min_length: None,
+            max_length: None,
+            pattern: None,
+            not_before: None,
+            not_after: None,
             description: String::new(),
         }];
         assert!(preview("SELECT 1", &bad_enum).is_err());
@@ -4304,6 +4325,13 @@ mod tests {
             required: false,
             default: None,
             allowed: None,
+            minimum: None,
+            maximum: None,
+            min_length: None,
+            max_length: None,
+            pattern: None,
+            not_before: None,
+            not_after: None,
             description: String::new(),
         }];
         assert!(preview("SELECT 1", &body_param).is_err());

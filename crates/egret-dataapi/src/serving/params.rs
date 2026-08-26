@@ -487,6 +487,13 @@ mod tests {
             required,
             default: None,
             allowed: None,
+            minimum: None,
+            maximum: None,
+            min_length: None,
+            max_length: None,
+            pattern: None,
+            not_before: None,
+            not_after: None,
             description: String::new(),
         }
     }
@@ -587,6 +594,13 @@ mod tests {
             required: false,
             default: None,
             allowed: None,
+            minimum: None,
+            maximum: None,
+            min_length: None,
+            max_length: None,
+            pattern: None,
+            not_before: None,
+            not_after: None,
             description: String::new(),
         };
         let mut supplied: BTreeMap<String, Vec<String>> = BTreeMap::new();

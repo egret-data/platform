@@ -111,6 +111,10 @@ rand = "0.8"
 sha2 = "0.10"
 base64 = "0.22"
 hex = "0.4"
+# C1: ParamSpec::pattern (egret-dataapi-api) and its enforcement in
+# egret-dataapi's publish-time check_constraints. Already resolved at 1.13.1
+# as a transitive dependency, so this adds no new compilation.
+regex = "1.13"
 # The Data API's endpoint-SQL renderer (P4.5). `default-features = false` with an
 # explicit list: `macros` and `multi_template` are dropped so `{% macro %}`,
 # `{% call %}`, `{% include %}` and `{% extends %}` do not parse at all, and

@@ -20,6 +20,10 @@ async-trait.workspace = true
 # M2 Task 2: StatementError's Display impl, matching egret-dataapi's
 # ValidationError and egret-catalog-api's CatalogApiError.
 thiserror.workspace = true
+# C1 Task 1: not used in this crate yet -- egret-dataapi's lifecycle.rs
+# (Task 2) needs `regex` to enforce ParamSpec::pattern, and this crate is
+# where `regex` needs to become a workspace dependency.
+regex.workspace = true
 
 [dev-dependencies]
 # Unit-test only: proves `OutputSpec::default()` cannot diverge from
