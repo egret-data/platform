@@ -31258,6 +31258,59 @@
             },
             "description": "Required when `ty` is `Enum`. The ONLY safe form for anything that\nreaches an identifier position — see spec §3."
           },
+          "minimum": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Inclusive lower bound for a `Number`. Ignored for every other type, and\npublish refuses it there (see `check_constraints`).\n\n**A string, not an `i64` or `f64`, and deliberately.** `coerce` already\nrefuses to put a decimal through an `f64`, because a decimal that\nround-trips through a float stops comparing equal to itself on the\nengine. A bound stored as a float would reintroduce that on the\ncomparison side."
+          },
+          "maximum": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Inclusive upper bound for a `Number`. See [`ParamSpec::minimum`]."
+          },
+          "min_length": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Minimum length for a `String`, in **Unicode scalars, not bytes**. A\n`max_length: 10` that fails a Vietnamese name at seven letters is a bug\nthe author cannot see from the declaration.",
+            "minimum": 0
+          },
+          "max_length": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Maximum length for a `String`. See [`ParamSpec::min_length`].",
+            "minimum": 0
+          },
+          "pattern": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A regex the **whole** value must match, for a `String`.\n\nAnchored implicitly: `is_match` is a search, so an unanchored `\"abc\"`\nwould accept `xxabcxx`, which is not what an author writing a validation\nrule means. An author who writes their own `^…$` gets the same answer."
+          },
+          "not_before": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Inclusive earliest value for a `Date` or `Timestamp`, in the same\nspelling `coerce` produces (`%Y-%m-%d`, or `%Y-%m-%d %H:%M:%S%.f`)."
+          },
+          "not_after": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Inclusive latest value for a `Date` or `Timestamp`. See\n[`ParamSpec::not_before`]."
+          },
           "description": {
             "type": "string"
           }

@@ -87,6 +87,39 @@ fn param_schema(p: &egret_dataapi_api::ParamSpec) -> Value {
             schema["enum"] = json!(allowed);
         }
     }
+    // JSON Schema's numeric keywords take a NUMBER. The author's bound is
+    // stored as text (so the runtime comparison never goes through a float),
+    // and it is parsed here for the document only. `check_constraints`
+    // accepted it at publish time, so a parse failure here means a snapshot
+    // frozen before that check existed — omit the keyword rather than emit a
+    // lie about what the endpoint accepts.
+    if let Some(v) = p
+        .minimum
+        .as_deref()
+        .and_then(|s| s.parse::<serde_json::Number>().ok())
+    {
+        schema["minimum"] = Value::Number(v);
+    }
+    if let Some(v) = p
+        .maximum
+        .as_deref()
+        .and_then(|s| s.parse::<serde_json::Number>().ok())
+    {
+        schema["maximum"] = Value::Number(v);
+    }
+    if let Some(v) = p.min_length {
+        schema["minLength"] = json!(v);
+    }
+    if let Some(v) = p.max_length {
+        schema["maxLength"] = json!(v);
+    }
+    if let Some(pattern) = &p.pattern {
+        // The AUTHOR's pattern, not the anchored form `compile_pattern`
+        // builds. The anchors are an implementation detail of how egret
+        // matches; a client validating locally against `^(?:…)$` would be
+        // validating a pattern its author never wrote.
+        schema["pattern"] = json!(pattern);
+    }
     schema
 }
 
@@ -104,6 +137,20 @@ fn param_description(p: &egret_dataapi_api::ParamSpec) -> String {
     let mut d = p.description.clone();
     if !d.is_empty() {
         d.push_str("\n\n");
+    }
+    // JSON Schema has no date-range keyword, so a Date/Timestamp parameter's
+    // `not_before`/`not_after` have nowhere to go in `param_schema`. Dropping
+    // them would make the document describe a wider endpoint than exists,
+    // which is the one thing a generated contract must never do.
+    let mut bounds = Vec::new();
+    if let Some(lo) = &p.not_before {
+        bounds.push(format!("not before {lo}"));
+    }
+    if let Some(hi) = &p.not_after {
+        bounds.push(format!("not after {hi}"));
+    }
+    if !bounds.is_empty() {
+        d.push_str(&format!("Accepted range: {}.\n\n", bounds.join(", ")));
     }
     d.push_str(
         "Repeating this parameter supplies a list (`?x=a&x=b`), one bound value per \
@@ -644,7 +691,114 @@ pub async fn build(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use egret_dataapi_api::ColumnSpec;
+    use egret_dataapi_api::{ColumnSpec, ParamSpec};
+
+    fn spec(name: &str, ty: ParamType) -> ParamSpec {
+        ParamSpec {
+            name: name.into(),
+            ty,
+            location: ParamLocation::Query,
+            required: false,
+            default: None,
+            allowed: None,
+            minimum: None,
+            maximum: None,
+            min_length: None,
+            max_length: None,
+            pattern: None,
+            not_before: None,
+            not_after: None,
+            description: String::new(),
+        }
+    }
+
+    fn number_param(name: &str) -> ParamSpec {
+        spec(name, ParamType::Number)
+    }
+
+    fn string_param(name: &str) -> ParamSpec {
+        spec(name, ParamType::String)
+    }
+
+    fn date_param(name: &str) -> ParamSpec {
+        spec(name, ParamType::Date)
+    }
+
+    /// A numeric bound lands in the schema as a JSON NUMBER, both keywords.
+    #[test]
+    fn a_numeric_bound_reaches_the_schema() {
+        let mut p = number_param("n");
+        p.minimum = Some("1".into());
+        p.maximum = Some("100".into());
+        let s = param_schema(&p);
+        assert_eq!(s["minimum"], json!(1), "{s}");
+        assert_eq!(s["maximum"], json!(100), "{s}");
+    }
+
+    /// JSON Schema's `minimum` is a NUMBER, not a string. The author's text is
+    /// parsed for the document even though it is compared as text at runtime.
+    #[test]
+    fn a_decimal_bound_stays_a_number_in_the_schema() {
+        let mut p = number_param("n");
+        p.minimum = Some("0.5".into());
+        let s = param_schema(&p);
+        assert!(
+            s["minimum"].is_number(),
+            "minimum must be a JSON number: {s}"
+        );
+    }
+
+    #[test]
+    fn string_constraints_reach_the_schema() {
+        let mut p = string_param("s");
+        p.min_length = Some(2);
+        p.max_length = Some(10);
+        p.pattern = Some("^[a-z]+$".into());
+        let s = param_schema(&p);
+        assert_eq!(s["minLength"], json!(2), "{s}");
+        assert_eq!(s["maxLength"], json!(10), "{s}");
+        assert_eq!(s["pattern"], json!("^[a-z]+$"), "{s}");
+    }
+
+    /// The anchors `compile_pattern` adds are ours, not the author's.
+    /// Publishing `"^(?:^[a-z]+$)$"` would be confusing and would not
+    /// round-trip if a client used it to validate locally.
+    #[test]
+    fn the_schema_publishes_the_authors_pattern_not_the_anchored_one() {
+        let mut p = string_param("s");
+        p.pattern = Some("[a-z]+".into());
+        let s = param_schema(&p);
+        assert_eq!(s["pattern"], json!("[a-z]+"), "{s}");
+    }
+
+    /// NOT the schema: JSON Schema has no date-range keyword, and the caller
+    /// already emits `param_description(p)` beside `param_schema(p)`. A
+    /// second description inside the schema would sit where no reader looks.
+    #[test]
+    fn temporal_bounds_reach_the_parameter_description() {
+        let mut p = date_param("d");
+        p.not_before = Some("2020-01-01".into());
+        p.not_after = Some("2030-12-31".into());
+        let d = param_description(&p);
+        assert!(d.contains("2020-01-01"), "{d}");
+        assert!(d.contains("2030-12-31"), "{d}");
+        assert!(
+            param_schema(&p).get("description").is_none(),
+            "the bounds must not also be duplicated into the schema"
+        );
+    }
+
+    #[test]
+    fn an_unconstrained_parameter_gains_no_keys() {
+        let p = string_param("s");
+        let s = param_schema(&p);
+        for k in ["minimum", "maximum", "minLength", "maxLength", "pattern"] {
+            assert!(
+                s.get(k).is_none(),
+                "unconstrained parameter grew `{k}`: {s}"
+            );
+        }
+    }
 
     /// `data_schema` is private to this module and `tests/openapi_gen.rs` only
     /// reaches the public, DB-gated `build` — so this pins the fragment
