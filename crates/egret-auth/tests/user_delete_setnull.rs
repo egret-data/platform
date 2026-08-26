@@ -45,3 +45,12 @@ async fn deleting_user_nulls_dashboard_created_by(pool: sqlx::PgPool) {
         "dashboard.created_by must be SET NULL after owning user is deleted"
     );
 }
+
+/// `#[sqlx::test]` resolves `DATABASE_URL` through dotenvy, so an unexported
+/// variable does not skip these tests — it silently points them at the database
+/// `.env` names, which is the DEV one. See
+/// `egret_test_db::assert_database_url_is_exported`.
+#[test]
+fn database_url_is_exported_rather_than_read_from_dotenv() {
+    egret_test_db::assert_database_url_is_exported();
+}

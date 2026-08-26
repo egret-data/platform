@@ -1494,3 +1494,12 @@ async fn engine_token_disabled_engine_is_404(pool: sqlx::PgPool) {
         "disabled engine → 404"
     );
 }
+
+/// `#[sqlx::test]` resolves `DATABASE_URL` through dotenvy, so an unexported
+/// variable does not skip these tests — it silently points them at the database
+/// `.env` names, which is the DEV one. See
+/// `egret_test_db::assert_database_url_is_exported`.
+#[test]
+fn database_url_is_exported_rather_than_read_from_dotenv() {
+    egret_test_db::assert_database_url_is_exported();
+}

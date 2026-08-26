@@ -93,3 +93,12 @@ async fn minted_token_carries_user_groups_from_db(pool: sqlx::PgPool) {
     assert_eq!(claims["groups"], serde_json::json!(["data-team"]));
     assert_eq!(claims["preferred_username"], "dana");
 }
+
+/// `#[sqlx::test]` resolves `DATABASE_URL` through dotenvy, so an unexported
+/// variable does not skip these tests — it silently points them at the database
+/// `.env` names, which is the DEV one. See
+/// `egret_test_db::assert_database_url_is_exported`.
+#[test]
+fn database_url_is_exported_rather_than_read_from_dotenv() {
+    egret_test_db::assert_database_url_is_exported();
+}

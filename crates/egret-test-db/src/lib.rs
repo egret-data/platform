@@ -394,6 +394,53 @@ async fn process_db_url() -> Option<String> {
     connected.then_some(cloned)
 }
 
+/// Fail loudly when `#[sqlx::test]` would silently fall back to the dev database.
+///
+/// `#[sqlx::test]` does not use anything in this crate — it creates its own scratch
+/// database per test, which is a stronger isolation than a clone per process, so those
+/// tests were deliberately left alone. It does, however, resolve `DATABASE_URL`
+/// **through dotenvy, unconditionally**. An unexported variable therefore does not make
+/// those tests skip: it makes them read `.env`, and this repo's `.env` (like its
+/// `.env.example`) points `DATABASE_URL` at the **dev** database. The scratch databases
+/// land on the dev server and a `_sqlx_test` bookkeeping schema is created inside the dev
+/// database itself — which is how this was found: 2026-08-26, `SELECT nspname FROM
+/// pg_namespace WHERE nspname LIKE '\_sqlx%'` returned a row in `egret`, not only in
+/// `egret_test`.
+///
+/// The check is narrow on purpose. It complains only about the *silent* case — no
+/// exported variable, but a `.env` at or above the working directory that supplies one.
+/// With no `.env` there is nothing to fall back to and sqlx fails on its own with a clear
+/// message, so this stays quiet rather than duplicating it.
+///
+/// # Panics
+///
+/// When `DATABASE_URL` is unset and a `.env` would supply one.
+pub fn assert_database_url_is_exported() {
+    if std::env::var_os("DATABASE_URL").is_some() {
+        return;
+    }
+    let Ok(cwd) = std::env::current_dir() else {
+        return;
+    };
+    let dotenv = cwd.ancestors().map(|d| d.join(".env")).find(|p| {
+        std::fs::read_to_string(p).is_ok_and(|t| {
+            t.lines()
+                .any(|l| l.trim_start().starts_with("DATABASE_URL="))
+        })
+    });
+    assert!(
+        dotenv.is_none(),
+        "DATABASE_URL is not exported, and {} sets it. `#[sqlx::test]` reads it through \
+         dotenvy, so this run would create its scratch databases against the DEV database \
+         instead of skipping. Export it first:\n  \
+         export DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test",
+        dotenv
+            .as_deref()
+            .unwrap_or(std::path::Path::new(""))
+            .display()
+    );
+}
+
 /// The URL this process should use. `None` when `DATABASE_URL` is unset, which is how the
 /// DB-gated tests decide to skip.
 ///
