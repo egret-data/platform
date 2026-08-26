@@ -578,11 +578,15 @@ fn bounds_compare_decimals_without_going_through_a_float() {
     p.minimum = Some("0.3".into());
     assert!(coerce(&p, "0.3").is_ok(), "a decimal must equal itself");
 
-    // And a long decimal must not be truncated into equality.
+    // And a long decimal must not be truncated into equality. These two must
+    // parse to the SAME `f64` or the test cannot catch a float comparison at
+    // all. `1.0000000000000001` / `...002` (16 decimal places) do NOT collide
+    // near 1.0 — measured with a standalone `rustc` check, and a float-based
+    // mutation passed against them. One more digit does collide:
     let mut q = number_param("n");
-    q.maximum = Some("1.0000000000000001".into());
+    q.maximum = Some("1.00000000000000001".into());
     assert!(
-        matches!(coerce(&q, "1.0000000000000002"), Err(CoerceError::Constraint { .. })),
+        matches!(coerce(&q, "1.00000000000000002"), Err(CoerceError::Constraint { .. })),
         "a difference below f64 precision must still be a difference"
     );
 }
@@ -618,9 +622,16 @@ fn a_constraint_refusal_reaches_the_caller_as_a_bare_param_invalid() {
     let err = resolve_supplied_with(&supplied, &[], std::slice::from_ref(&p))
         .expect_err("over the maximum");
     assert!(matches!(err, ServingError::ParamInvalid));
+    // Exact equality, NOT `!contains(...)`. `ParamInvalid`'s own `Debug` output
+    // is the string "ParamInvalid", which contains an `n` (in "Invalid") — so
+    // `!rendered.contains('n')` fails against the CORRECT implementation. A
+    // substring check is the wrong instrument here; equality is what proves
+    // nothing was attached to the unit variant.
     let rendered = format!("{err:?}");
-    assert!(!rendered.contains("100"), "the bound leaked into the error: {rendered}");
-    assert!(!rendered.contains('n'), "the parameter name leaked: {rendered}");
+    assert_eq!(
+        rendered, "ParamInvalid",
+        "the constraint's detail leaked into the error: {rendered}"
+    );
 }
 ```
 
