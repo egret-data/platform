@@ -1634,6 +1634,21 @@ pub const MAX_TRANSFORM_SCRIPT_BYTES: usize = 8192;
 ///    [`ValidationError::TransformReturnsDuplicateName`];
 /// 5. **the script itself, parsed** — last, because it is the only check here
 ///    that costs more than a comparison.
+///
+/// # Called once per ENDPOINT, not once per statement
+///
+/// `output` is a property of the endpoint, not of any one statement, so
+/// [`validate_endpoint`] calls this exactly once — beside
+/// `egret_dataapi_api::validate_envelope`, the other endpoint-wide rule over
+/// `output` — rather than from inside [`check_definition_scans`], which runs
+/// once per statement. The distinction is cost, not correctness: parsing the
+/// script also EVALUATES its module top level (see the section above), which
+/// runs a real Starlark interpreter bounded only by
+/// [`crate::transform::MAX_WALL_CLOCK`] (2s) per call. Called from the
+/// per-statement loop, an endpoint at `MAX_STATEMENTS` would pay that up to
+/// 16 times — worst case ~32s of evaluation held open inside `publish`'s
+/// locked transaction. Called once, the whole endpoint's transform cost is
+/// bounded by ONE evaluation, matching every other endpoint-wide rule.
 pub fn check_transform(output: &OutputSpec) -> std::result::Result<(), ValidationError> {
     let Some(transform) = &output.transform else {
         return Ok(());
@@ -1793,12 +1808,25 @@ fn validate_endpoint(
     // becomes a frozen contract, and nothing in the schema constrains this
     // column.
     egret_dataapi_api::validate_envelope(output)?;
+    // `output.transform`, checked ONCE here rather than once per statement in
+    // the loop below. `output` is a property of the ENDPOINT, not of any one
+    // statement — and unlike `check_constraints` over `params` (a pure
+    // comparison, cheap to repeat), this runs a Starlark interpreter over the
+    // script's module top level. Inside the loop, an endpoint at
+    // `MAX_STATEMENTS` would parse-and-evaluate the same script up to 16
+    // times, each bounded only by `transform::MAX_WALL_CLOCK` (2s) — worst
+    // case ~32s of evaluation held open inside `publish`'s locked transaction
+    // (`EndpointStore::publish`) and again on every `/validate` call. Once
+    // here bounds the whole endpoint's transform cost by ONE evaluation,
+    // matching `validate_envelope` right above it — both are endpoint-wide
+    // properties of `output`, not per-statement rules.
+    check_transform(output)?;
     // Every statement through every scan except the contract rule below. The
     // scans come before ANY render for the reason `check_definition_scans`
     // records: they are what bounds the cost of the rendering, and they cost
     // nothing themselves.
     for statement in statements {
-        check_definition_scans(&statement.sql, params, output, ParamRules::Draft)?;
+        check_definition_scans(&statement.sql, params, ParamRules::Draft)?;
     }
     let mut read: Vec<String> = Vec::new();
     for statement in statements {
@@ -1841,14 +1869,7 @@ pub fn validate_definition(
     // Order preserved EXACTLY: `check_single_select` first (pinned by
     // `validate_definition_runs_the_statement_check_first`), the cache rule
     // between the scans and the renders, as it has always been.
-    //
-    // `OutputSpec::default()`, not a real `output`: this function validates one
-    // SQL definition, and `output` is a property of the ENDPOINT it belongs to,
-    // which this signature has never carried (see the module comment — this is
-    // the same reason it "knows nothing about output"). The default carries no
-    // transform, so `check_transform` is a no-op here, exactly as every other
-    // output-shaped rule already is on this path.
-    check_definition_scans(sql, params, &OutputSpec::default(), ParamRules::Published)?;
+    check_definition_scans(sql, params, ParamRules::Published)?;
     check_cache_scope(cache, delegated, impersonate)?;
     // A slice of one, because this entry point IS one definition: there are no
     // sibling statements whose `{% for %}` headers could widen the set.
@@ -1870,7 +1891,6 @@ pub fn validate_definition(
 fn check_definition_scans(
     sql: &str,
     params: &[ParamSpec],
-    output: &OutputSpec,
     rules: ParamRules,
 ) -> std::result::Result<(), ValidationError> {
     check_single_select(sql)?;
@@ -1886,7 +1906,6 @@ fn check_definition_scans(
     check_enum_params(params)?;
     check_param_locations(params)?;
     check_constraints(params)?;
-    check_transform(output)?;
     check_defaults(params)?;
     check_params_with(sql, params, rules)?;
     Ok(())
@@ -1972,12 +1991,12 @@ pub(crate) fn validate_preview(
     // re-refusing one here would block previewing the statement the author is
     // actually looking at because a different one is mid-edit.
     //
-    // `OutputSpec::default()`: `PreviewEndpointInput` carries no `output` at
-    // all — preview runs the statement on screen and returns its raw rows, it
-    // does not resolve a transform — so there is nothing here for
-    // `check_transform` to check, and the default carries no transform to make
-    // that a no-op rather than an omission.
-    check_definition_scans(sql, params, &OutputSpec::default(), ParamRules::Draft)?;
+    // No `output.transform` check here: `PreviewEndpointInput` carries no
+    // `output` at all — preview runs the statement on screen and returns its
+    // raw rows, it does not resolve a transform. `check_transform` is an
+    // endpoint-wide rule, checked once in `validate_endpoint`; it was never a
+    // per-statement scan and does not belong in `check_definition_scans`.
+    check_definition_scans(sql, params, ParamRules::Draft)?;
     let iterated = siblings.union_with(sql, params);
     check_render_rules(sql, params, &iterated)?;
     Ok(iterated)
@@ -5478,10 +5497,88 @@ mod tests {
             false,
             false,
         );
-        assert!(
-            matches!(got, Err(ValidationError::TransformWithShapeOrNaming(_))),
+        assert_eq!(
+            got,
+            Err(ValidationError::TransformWithShapeOrNaming("shape")),
             "a transform alongside output.shape: arrays must be refused at the function \
-             both /validate and publish go through, got {got:?}"
+             both /validate and publish go through"
+        );
+    }
+
+    /// **Pins the refusal ORDER `check_transform` documents.** Each rule is
+    /// mutation-proven individually by the tests above, but none of them says
+    /// anything about ORDER: swapping two `if` blocks inside `check_transform`
+    /// would still make every one of those tests pass, because each feeds a
+    /// definition that violates exactly one rule. Order is load-bearing for
+    /// the same reason C1's was — an author whose script breaks two rules at
+    /// once should be told the one they can act on FIRST, per the function's
+    /// own doc comment — so this feeds definitions that violate TWO rules at
+    /// once and asserts which refusal comes back, with `assert_eq!` on the
+    /// exact payload rather than `matches!` with a wildcard, so a swap is
+    /// caught by a value mismatch rather than merely an `is_err()`.
+    #[test]
+    fn the_documented_refusal_order_holds_when_multiple_rules_are_violated() {
+        // Rule 1 (script length) vs rule 5 (parse), the two bookends of the
+        // documented order. This script is BOTH over the cap AND unparseable
+        // (missing the `:` after the `def` header) — length must still win.
+        let unparseable_and_long = format!(
+            "def transform(params, statements)
+  # {}
+  return {{}}",
+            "x".repeat(MAX_TRANSFORM_SCRIPT_BYTES)
+        );
+        let bytes = unparseable_and_long.len();
+        assert_eq!(
+            check_transform(&transformed_output(&unparseable_and_long)),
+            Err(ValidationError::TransformScriptTooLong {
+                bytes,
+                cap: MAX_TRANSFORM_SCRIPT_BYTES,
+            }),
+            "too long AND unparseable must be refused for its length, not its syntax"
+        );
+
+        // Rule 2 (shape/naming) vs rule 3 (empty returns): both violated at
+        // once — shape/naming must win.
+        let mut shape_and_empty_returns = transformed_output(
+            "def transform(params, statements):
+  return {}",
+        );
+        shape_and_empty_returns.shape = "arrays".into();
+        shape_and_empty_returns
+            .transform
+            .as_mut()
+            .unwrap()
+            .returns
+            .clear();
+        assert_eq!(
+            check_transform(&shape_and_empty_returns),
+            Err(ValidationError::TransformWithShapeOrNaming("shape")),
+            "output.shape: arrays AND an empty returns must be refused for the shape, \
+             not the empty list"
+        );
+
+        // Rule 2 (shape/naming) vs rule 4 (duplicate returns names): both
+        // violated at once — shape/naming must still win.
+        let mut shape_and_duplicate_returns = transformed_output(
+            "def transform(params, statements):
+  return {}",
+        );
+        shape_and_duplicate_returns.shape = "arrays".into();
+        shape_and_duplicate_returns
+            .transform
+            .as_mut()
+            .unwrap()
+            .returns
+            .push(ColumnSpec {
+                name: "total".into(),
+                ty: "varchar".into(),
+                required: true,
+            });
+        assert_eq!(
+            check_transform(&shape_and_duplicate_returns),
+            Err(ValidationError::TransformWithShapeOrNaming("shape")),
+            "output.shape: arrays AND a duplicate returns name must be refused for the \
+             shape, not the duplicate"
         );
     }
 }
