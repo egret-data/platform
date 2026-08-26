@@ -420,6 +420,33 @@ pub(crate) fn coerce(spec: &ParamSpec, text: &str) -> Result<Param, CoerceError>
                     });
                 }
             }
+            if let Some(pattern) = &spec.pattern {
+                // Compiled through the SAME function publish used, so a pattern
+                // that published can always be matched, and the anchors are
+                // added in exactly one place.
+                //
+                // `check_constraints` already refused a pattern that does not
+                // compile, so a failure here means a snapshot published before
+                // this check existed, or a hand-edited row. Treat it as the
+                // spec being unhonourable rather than the caller being wrong —
+                // `Malformed` is the variant that already means that.
+                //
+                // Compiled fresh on every call rather than cached: measured at
+                // ~60 microseconds/call (release build, 1,000-iteration
+                // throwaway benchmark, deleted after measuring) for an
+                // email-shaped pattern, on 2026-08-26 — far below the cost of
+                // the request it is part of. A cache would be complexity
+                // bought with nothing; if that changes, it belongs beside the
+                // snapshot cache (router.rs:1289), not here.
+                let re = crate::lifecycle::compile_pattern(pattern)
+                    .map_err(|_| CoerceError::Malformed)?;
+                if !re.is_match(text) {
+                    return Err(CoerceError::Constraint {
+                        constraint: "pattern",
+                        bound: pattern.clone(),
+                    });
+                }
+            }
             Ok(Param::Str(text.to_string()))
         }
         ParamType::Enum => {
@@ -1215,6 +1242,77 @@ mod tests {
             Err(CoerceError::Constraint { .. })
         ));
         assert!(coerce(&p, "abc").is_ok(), "inclusive");
+    }
+
+    #[test]
+    fn a_pattern_must_match_the_whole_value() {
+        // `is_match` is a SEARCH. Without anchoring, "abc" accepts "xxabcxx",
+        // which is not what an author writing a validation rule means.
+        let mut p = string_param("s");
+        p.pattern = Some("abc".into());
+        assert!(coerce(&p, "abc").is_ok());
+        assert!(matches!(
+            coerce(&p, "xxabcxx"),
+            Err(CoerceError::Constraint { .. })
+        ));
+    }
+
+    #[test]
+    fn an_authors_own_anchors_give_the_same_answer() {
+        let mut p = string_param("s");
+        p.pattern = Some("^abc$".into());
+        assert!(coerce(&p, "abc").is_ok());
+        assert!(matches!(
+            coerce(&p, "xxabcxx"),
+            Err(CoerceError::Constraint { .. })
+        ));
+    }
+
+    #[test]
+    fn alternation_is_anchored_as_a_whole_not_just_its_first_branch() {
+        // The trap in anchoring by concatenation: "^a|b$" parses as "(^a)|(b$)",
+        // which accepts "zzzb". Wrapping in a non-capturing group is what makes
+        // the anchors apply to the whole alternation.
+        let mut p = string_param("s");
+        p.pattern = Some("a|b".into());
+        assert!(coerce(&p, "a").is_ok());
+        assert!(coerce(&p, "b").is_ok());
+        assert!(matches!(
+            coerce(&p, "zzzb"),
+            Err(CoerceError::Constraint { .. })
+        ));
+        assert!(matches!(
+            coerce(&p, "azzz"),
+            Err(CoerceError::Constraint { .. })
+        ));
+    }
+
+    #[test]
+    fn a_pattern_names_itself_in_the_coerce_error() {
+        let mut p = string_param("s");
+        p.pattern = Some("^[0-9]+$".into());
+        match coerce(&p, "abc") {
+            Err(CoerceError::Constraint { constraint, .. }) => {
+                assert_eq!(constraint, "pattern")
+            }
+            other => panic!("expected a pattern refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn length_is_checked_before_the_pattern() {
+        // Cheap rejection first: a 10 MB value against a pattern is work that a
+        // max_length would have avoided. Order is observable through which
+        // constraint the error names.
+        let mut p = string_param("s");
+        p.max_length = Some(3);
+        p.pattern = Some("^[a-z]+$".into());
+        match coerce(&p, "abcdefgh") {
+            Err(CoerceError::Constraint { constraint, .. }) => {
+                assert_eq!(constraint, "max_length")
+            }
+            other => panic!("expected max_length to fire first, got {other:?}"),
+        }
     }
 
     #[test]
