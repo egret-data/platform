@@ -1336,6 +1336,69 @@ describe("VersionsSection", () => {
     );
   });
 
+  /**
+   * A refused publish must leave its reason on screen, and the dialog open.
+   *
+   * The C1 refusal ("parameter `n` has a `default` that violates its own
+   * `minimum` of `10`") is the only thing that tells the author which FIELD to
+   * change, and it used to be a `toast.error(String(e))`. Measured in Chrome on
+   * this branch: that toast lived 4.3 s and could not be paused, because a
+   * refused publish leaves this dialog OPEN and its overlay takes the pointer
+   * — `elementFromPoint` at the toast's own centre resolved to
+   * `[data-slot="dialog-overlay"]`, so sonner's pause-on-hover never fired.
+   * The author was left looking at the dialog with no trace of the reason.
+   * `Config`'s Validate block already states the rule this now follows.
+   *
+   * jsdom cannot judge that 4.3 s or that hit-test — this pins the part it CAN
+   * judge, which is the part that was actually changed: the sentence is
+   * rendered into the dialog, it is not a toast, and it survives an arbitrary
+   * wait rather than being torn down on a timer.
+   */
+  it("keeps a refused publish's reason on screen, in the dialog, rather than in a toast", async () => {
+    publishMutateAsync.mockRejectedValue(
+      new Error("invalid input: parameter `n` has a `default` that violates its own `minimum` of `10`"),
+    );
+    renderVersions(makeEndpoint({ live_version_id: "v-2", state: "live" }), versionsRefetchSpy);
+    await userEvent.click(await screen.findByRole("button", { name: /publish saved draft/i }));
+    const dialog = await screen.findByRole("dialog");
+
+    await userEvent.click(within(dialog).getByRole("button", { name: "Publish" }));
+
+    const alert = await within(dialog).findByRole("alert");
+    // Names the parameter, the constraint and the bound — the three things the
+    // author needs and the serving path's 400 deliberately withholds.
+    expect(alert).toHaveTextContent(/`n`/);
+    expect(alert).toHaveTextContent(/minimum/);
+    expect(alert).toHaveTextContent(/10/);
+    // `String(e)` on an `ApiError` prefixed the sentence with a bare `Error: `.
+    expect(alert).not.toHaveTextContent(/^Error:/);
+
+    // Still there, and still inside the dialog, after the toast's own lifetime
+    // would have expired. A `toast.error` here would have been torn down.
+    await new Promise((r) => setTimeout(r, 50));
+    expect(within(screen.getByRole("dialog")).getByRole("alert")).toBeInTheDocument();
+    expect(versionsRefetchSpy).not.toHaveBeenCalled();
+  });
+
+  // The other half: a refusal the author has FIXED must not leave its sentence
+  // behind. Without this, a second Publish that succeeds would close the dialog
+  // over a stale alert that reappears the next time it is opened — the same
+  // defect `handleOpenChange` clears the note for.
+  it("clears a previous refusal when the dialog is reopened", async () => {
+    publishMutateAsync.mockRejectedValue(new Error("invalid input: something the author must fix"));
+    renderVersions(makeEndpoint({ live_version_id: "v-2", state: "live" }), versionsRefetchSpy);
+    await userEvent.click(await screen.findByRole("button", { name: /publish saved draft/i }));
+    await userEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Publish" }));
+    await within(screen.getByRole("dialog")).findByRole("alert");
+
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+
+    await userEvent.click(screen.getByRole("button", { name: /publish saved draft/i }));
+    const reopened = await screen.findByRole("dialog");
+    expect(within(reopened).queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("rolls back only after typing the confirming word, naming the version by id, and refetches the endpoint afterward", async () => {
     vi.mocked(api.useDataApiListEndpointVersions).mockReturnValue(
       {
