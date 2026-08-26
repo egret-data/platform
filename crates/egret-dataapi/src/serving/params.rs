@@ -435,6 +435,49 @@ pub(crate) fn coerce(spec: &ParamSpec, text: &str) -> Result<Param, CoerceError>
     }
 }
 
+/// Compare two decimal texts without going through a float.
+///
+/// `coerce` refuses to put a decimal through an `f64` because a decimal that
+/// round-trips through a float stops comparing equal to itself on the engine.
+/// A bound compared as a float would reintroduce that on this side: a `minimum`
+/// of `"0.3"` would reject the value `"0.3"`.
+///
+/// Both sides have already passed `is_plain_decimal` or are an author's bound
+/// that `check_constraints` accepted, so the grammar is `-?digits[.digits]`.
+pub(crate) fn compare_decimal_text(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let (a_neg, a_body) = a.strip_prefix('-').map_or((false, a), |r| (true, r));
+    let (b_neg, b_body) = b.strip_prefix('-').map_or((false, b), |r| (true, r));
+    match (a_neg, b_neg) {
+        (false, true) => return Ordering::Greater,
+        (true, false) => return Ordering::Less,
+        _ => {}
+    }
+    let flip = |o: Ordering| if a_neg { o.reverse() } else { o };
+
+    let split = |s: &str| {
+        let mut it = s.splitn(2, '.');
+        let int = it.next().unwrap_or("0").to_string();
+        let frac = it.next().unwrap_or("").to_string();
+        (int, frac)
+    };
+    let (a_int, a_frac) = split(a_body);
+    let (b_int, b_frac) = split(b_body);
+
+    // Integer part: longer (after stripping leading zeros) wins, else lexical.
+    let a_i = a_int.trim_start_matches('0');
+    let b_i = b_int.trim_start_matches('0');
+    let by_int = a_i.len().cmp(&b_i.len()).then_with(|| a_i.cmp(b_i));
+    if by_int != Ordering::Equal {
+        return flip(by_int);
+    }
+
+    // Fraction: pad to equal length so "1.5" vs "1.45" compares digit by digit.
+    let width = a_frac.len().max(b_frac.len());
+    let pad = |s: &str| format!("{s:0<width$}");
+    flip(pad(&a_frac).cmp(&pad(&b_frac)))
+}
+
 /// `-?digits[.digits]`, and nothing else.
 fn is_plain_decimal(s: &str) -> bool {
     let body = s
