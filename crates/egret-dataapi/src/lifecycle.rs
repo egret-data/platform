@@ -371,31 +371,35 @@ pub enum ValidationError {
         param: String,
         constraint: &'static str,
     },
-    /// A `not_before` or `not_after` that does not parse as the parameter's own
-    /// declared type (`Date` or `Timestamp`).
+    /// A `minimum`/`maximum`/`not_before`/`not_after` that does not parse in
+    /// the shape its own constraint requires.
     ///
     /// # Why this exists, and why it is not folded into [`ValidationError::BoundsInverted`]
     ///
-    /// `not_before`/`not_after` are compared as TEXT (see `check_constraints`),
-    /// and that lexical comparison is sound only against the zero-padded,
-    /// big-endian spelling `coerce` produces — the same restriction
-    /// `check_temporal_bounds` documents for the serving side. The author's raw
-    /// string has not been through `coerce` yet: an unpadded `"2026-9-1"` sorts
-    /// AFTER `"2026-10-1"` as text despite being chronologically earlier, and a
-    /// string that is not a date at all (`"not-a-date"`) sorts by Unicode code
-    /// point, telling the author nothing about their actual bounds. So each
-    /// bound is parsed and normalised the same way `coerce` would before the
-    /// two are compared, and a bound that fails to parse is refused HERE,
-    /// naming which one, rather than compared as arbitrary bytes.
-    #[error(
-        "parameter `{param}` declares `{constraint}` as `{value}`, which is not a valid \
-         `{ty}`. Write it in the same spelling `coerce` accepts for this parameter's type"
-    )]
-    TemporalBoundUnparseable {
+    /// Every one of these four is compared as TEXT (see `check_constraints`),
+    /// and every one of those comparisons is sound only against a normalised
+    /// spelling: `minimum`/`maximum` through
+    /// [`crate::serving::params::compare_decimal_text`]'s digit-by-digit
+    /// grammar, `not_before`/`not_after` through the zero-padded, big-endian
+    /// spelling `coerce` produces (the restriction
+    /// `check_temporal_bounds` documents for the serving side). The author's
+    /// raw string has not been through either normalisation: an unpadded
+    /// `"2026-9-1"` sorts AFTER `"2026-10-1"` as text despite being
+    /// chronologically earlier, and a string that is not a decimal or a date
+    /// at all (`"abc"`, `"not-a-date"`) sorts by Unicode code point, telling
+    /// the author nothing about their actual bounds. So each bound is
+    /// validated (and, for `not_before`/`not_after`, normalised) the same way
+    /// `coerce` would before the pair is compared, and a bound that fails is
+    /// refused HERE, naming which one, rather than compared as arbitrary
+    /// bytes.
+    #[error("parameter `{param}` declares `{constraint}` as `{value}`, which is not {expected}")]
+    ConstraintBoundUnparseable {
         param: String,
         constraint: &'static str,
         value: String,
-        ty: &'static str,
+        /// A noun phrase completing "which is not …" — `"a valid decimal
+        /// number"`, `"a valid date"`, `"a valid timestamp"`.
+        expected: &'static str,
     },
     /// A `pattern` that does not compile as a regex at all — the author's typo,
     /// not the caller's problem, so it is refused at publish rather than on
@@ -1250,25 +1254,17 @@ pub fn compile_pattern(pattern: &str) -> std::result::Result<regex::Regex, regex
         .build()
 }
 
-/// Parse and normalise a `not_before`/`not_after` bound the same way `coerce`
-/// would parse a caller's VALUE of the declared type — but never through
-/// `coerce` itself, because from Task 5 onward `coerce`'s `Date`/`Timestamp`
-/// arms enforce these same bounds, and asking it to coerce a bound AS a value
-/// would check the bound against itself.
-///
-/// Returns `None` for anything not `Date`/`Timestamp` — unreachable in
-/// practice, because [`check_constraints`] has already refused a temporal
-/// constraint on any other type before this is called.
-fn normalize_temporal_bound(ty: &ParamType, text: &str) -> Option<String> {
+/// The noun phrase completing "which is not …" for a `not_before`/`not_after`
+/// bound, matched to the parameter's own declared type so the message says
+/// which spelling was expected.
+fn temporal_expected(ty: &ParamType) -> &'static str {
     match ty {
-        ParamType::Date => chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d")
-            .ok()
-            .map(|d| d.format("%Y-%m-%d").to_string()),
-        ParamType::Timestamp => ["%Y-%m-%d %H:%M:%S%.f", "%Y-%m-%dT%H:%M:%S%.f"]
-            .iter()
-            .find_map(|f| chrono::NaiveDateTime::parse_from_str(text, f).ok())
-            .map(|t| t.format("%Y-%m-%d %H:%M:%S%.f").to_string()),
-        _ => None,
+        ParamType::Timestamp => "a valid timestamp",
+        // `Date` and the unreachable default (see
+        // `serving::params::normalize_temporal_bound`) both read as "date" —
+        // `check_constraints` has already refused a temporal constraint on
+        // any other type before this is ever called.
+        _ => "a valid date",
     }
 }
 
@@ -1281,22 +1277,30 @@ fn normalize_temporal_bound(ty: &ParamType, text: &str) -> Option<String> {
 /// `minimum` above its `maximum` — the author would be told their `default` is
 /// wrong when the default is the one part that is fine.
 ///
-/// # `not_before`/`not_after` are normalised before they are compared
+/// # Every bound is validated in its OWN grammar before it is compared
 ///
-/// Every other bound pair here compares the author's raw text directly:
-/// `min_length`/`max_length` are already `u32`, and `minimum`/`maximum` go
-/// through [`crate::serving::params::compare_decimal_text`], which parses
-/// digit-by-digit rather than comparing bytes. `not_before`/`not_after` look
-/// like they could take the same shortcut as pure text — both are meant to be
-/// the zero-padded, big-endian spelling `coerce` produces, and THAT spelling
-/// does sort correctly as text. But these are the author's raw strings, not
-/// values `coerce` has normalised yet: an unpadded `"2026-9-1"` sorts AFTER
-/// `"2026-10-1"` lexically despite being chronologically earlier, and nothing
-/// here has yet confirmed either string is even a valid date. So each bound is
-/// parsed and normalised through [`normalize_temporal_bound`] first — the
-/// unpadded month case above compares correctly once normalised, and a bound
-/// that fails to parse at all is refused by name rather than compared as
-/// arbitrary bytes.
+/// `min_length`/`max_length` are already `u32`, so there is nothing to
+/// validate. The other two pairs are text, and comparing text directly is
+/// unsound for both of them in the same way, for the same reason: a
+/// comparison that is only correct against a NORMALISED spelling is asked of
+/// the author's raw string instead.
+///
+/// * `minimum`/`maximum` go through
+///   [`crate::serving::params::compare_decimal_text`], whose digit-by-digit
+///   grammar assumes `-?digits[.digits]` — so each bound is checked against
+///   [`crate::serving::params::is_plain_decimal`] first. Skipping this made
+///   `minimum: "abc"` publish clean and compare as arbitrary bytes at serve
+///   time forever after.
+/// * `not_before`/`not_after` are meant to be the zero-padded, big-endian
+///   spelling `coerce` produces, and THAT spelling sorts correctly as text —
+///   but the author's raw string has not been through `coerce` yet. An
+///   unpadded `"2026-9-1"` sorts AFTER `"2026-10-1"` lexically despite being
+///   chronologically earlier, and nothing has yet confirmed either string is
+///   even a valid date. So each bound is parsed and normalised through
+///   [`crate::serving::params::normalize_temporal_bound`] first.
+///
+/// Either way, a bound that fails its own grammar is refused HERE, naming
+/// which one, rather than compared as arbitrary bytes.
 pub fn check_constraints(params: &[ParamSpec]) -> std::result::Result<(), ValidationError> {
     for p in params {
         let ty = type_name(&p.ty);
@@ -1327,6 +1331,20 @@ pub fn check_constraints(params: &[ParamSpec]) -> std::result::Result<(), Valida
             }
         }
 
+        // `minimum`/`maximum`: each bound must be a valid decimal in its own
+        // right before the pair is compared as one — see the function doc.
+        for (bound, constraint) in [(&p.minimum, "minimum"), (&p.maximum, "maximum")] {
+            if let Some(text) = bound {
+                if !crate::serving::params::is_plain_decimal(text) {
+                    return Err(ValidationError::ConstraintBoundUnparseable {
+                        param: p.name.clone(),
+                        constraint,
+                        value: text.clone(),
+                        expected: "a valid decimal number",
+                    });
+                }
+            }
+        }
         // Inverted bounds. Equal bounds are legitimate — a parameter pinned to
         // one value — so this is strictly greater, never "not less".
         if let (Some(lo), Some(hi)) = (&p.minimum, &p.maximum) {
@@ -1345,33 +1363,34 @@ pub fn check_constraints(params: &[ParamSpec]) -> std::result::Result<(), Valida
                 });
             }
         }
-        // See the function doc: each bound is normalised before comparison,
-        // and refused by name if it does not parse as this parameter's own
-        // declared type.
+        // `not_before`/`not_after`: parse and normalise each bound ONCE, and
+        // reuse the normalised value for the comparison below rather than
+        // parsing it a second time — see the function doc.
+        let mut not_before_n = None;
         if let Some(lo) = &p.not_before {
-            if normalize_temporal_bound(&p.ty, lo).is_none() {
-                return Err(ValidationError::TemporalBoundUnparseable {
+            not_before_n = crate::serving::params::normalize_temporal_bound(&p.ty, lo);
+            if not_before_n.is_none() {
+                return Err(ValidationError::ConstraintBoundUnparseable {
                     param: p.name.clone(),
                     constraint: "not_before",
                     value: lo.clone(),
-                    ty,
+                    expected: temporal_expected(&p.ty),
                 });
             }
         }
+        let mut not_after_n = None;
         if let Some(hi) = &p.not_after {
-            if normalize_temporal_bound(&p.ty, hi).is_none() {
-                return Err(ValidationError::TemporalBoundUnparseable {
+            not_after_n = crate::serving::params::normalize_temporal_bound(&p.ty, hi);
+            if not_after_n.is_none() {
+                return Err(ValidationError::ConstraintBoundUnparseable {
                     param: p.name.clone(),
                     constraint: "not_after",
                     value: hi.clone(),
-                    ty,
+                    expected: temporal_expected(&p.ty),
                 });
             }
         }
-        if let (Some(lo), Some(hi)) = (&p.not_before, &p.not_after) {
-            // Both already proven to parse, immediately above.
-            let lo_n = normalize_temporal_bound(&p.ty, lo).expect("validated above");
-            let hi_n = normalize_temporal_bound(&p.ty, hi).expect("validated above");
+        if let (Some(lo_n), Some(hi_n)) = (&not_before_n, &not_after_n) {
             if lo_n > hi_n {
                 return Err(ValidationError::BoundsInverted {
                     param: p.name.clone(),
@@ -4495,27 +4514,84 @@ mod tests {
         assert!(check_constraints(std::slice::from_ref(&p)).is_ok());
     }
 
+    /// The numeric twin of `unpadded_month_bounds_compare_chronologically_not_lexically`:
+    /// `"9"` sorts AFTER `"10"` as bytes (`'9' > '1'`) despite being the
+    /// smaller number. If `check_constraints` ever regressed to comparing
+    /// `minimum`/`maximum` as raw text instead of through
+    /// `compare_decimal_text`, this legitimate pair would be wrongly refused
+    /// as inverted.
+    #[test]
+    fn numeric_bounds_compare_decimal_not_lexical() {
+        let mut p = param("n", ParamType::Number);
+        p.minimum = Some("9".into());
+        p.maximum = Some("10".into());
+        assert!(
+            check_constraints(std::slice::from_ref(&p)).is_ok(),
+            "9 before 10 must not be reported as inverted bounds"
+        );
+    }
+
+    /// The numeric twin of `an_unparseable_temporal_bound_is_refused_by_name_not_compared_as_bytes`.
+    /// Nothing validated `minimum`/`maximum` against `is_plain_decimal` before
+    /// this fix, so `minimum: "abc"` published clean and was compared as
+    /// arbitrary bytes at serve time forever after — this is the same class
+    /// of gap the temporal bound closes, just on the other pair.
+    #[test]
+    fn an_unparseable_numeric_bound_is_refused_by_name_not_compared_as_bytes() {
+        let mut p = param("n", ParamType::Number);
+        p.minimum = Some("abc".into());
+        let err = check_constraints(std::slice::from_ref(&p)).expect_err("minimum is not a number");
+        let msg = err.to_string();
+        assert!(msg.contains("`minimum`"), "must name the constraint: {msg}");
+        assert!(msg.contains("`n`"), "must name the parameter: {msg}");
+
+        // The same bound, unparseable, on the OTHER side of the pair — this
+        // must not be silently compared against a valid `minimum` either.
+        let mut q = param("n", ParamType::Number);
+        q.minimum = Some("1".into());
+        q.maximum = Some("zzz".into());
+        assert!(check_constraints(std::slice::from_ref(&q)).is_err());
+    }
+
     #[test]
     fn a_pattern_that_does_not_compile_is_the_authors_400_not_the_callers_500() {
         let mut p = param("s", ParamType::String);
         p.pattern = Some("([".into());
         let err = check_constraints(std::slice::from_ref(&p)).expect_err("unclosed class");
-        assert!(
-            err.to_string().contains('s'),
-            "must name the parameter: {err}"
-        );
+        let msg = err.to_string();
+        // "valid regex" is unique to `PatternInvalid` — `PatternTooLarge` says
+        // "too large to compile" instead — so this also proves the RIGHT
+        // variant fired, not merely that something did.
+        assert!(msg.contains("valid regex"), "wrong refusal reason: {msg}");
+        assert!(msg.contains("`s`"), "must name the parameter: {msg}");
     }
 
     #[test]
     fn a_pattern_that_compiles_too_large_is_refused() {
-        // `regex`'s own default cap is 10 MB of compiled program. We set a much
-        // smaller one, so this must be refused HERE rather than compiled per request.
+        // `regex`'s own default cap is 10 MB of compiled program, and
+        // `a{1000}{1000}` is too big even at THAT — measured with
+        // `RegexBuilder::size_limit(10 * 1024 * 1024)` directly: it fails
+        // before our own cap is ever consulted. That made the original
+        // version of this test a false pass: it would still hold with
+        // `.size_limit(MAX_PATTERN_PROGRAM_BYTES)` deleted from
+        // `compile_pattern`, and would have verified nothing about the 64 KiB
+        // cap. `a{5000}` is the discriminator: measured `default_ok=true,
+        // small_ok=false` — it compiles fine under `regex`'s own 10 MB
+        // default and only fails under our smaller one.
         let mut p = param("s", ParamType::String);
-        p.pattern = Some("a{1000}{1000}".into());
+        p.pattern = Some("a{5000}".into());
         assert!(
-            check_constraints(std::slice::from_ref(&p)).is_err(),
-            "an oversized pattern must not reach the serving path"
+            regex::RegexBuilder::new(&format!("^(?:{})$", p.pattern.as_ref().unwrap()))
+                .size_limit(10 * 1024 * 1024)
+                .build()
+                .is_ok(),
+            "sanity: this pattern must compile under regex's own default cap, \
+             or it no longer discriminates our 64 KiB cap from that one"
         );
+        match check_constraints(std::slice::from_ref(&p)) {
+            Err(ValidationError::PatternTooLarge { param }) => assert_eq!(param, "s"),
+            other => panic!("expected PatternTooLarge, got {other:?}"),
+        }
     }
 
     #[test]
@@ -4546,7 +4622,7 @@ mod tests {
         );
     }
 
-    /// The unsoundness `TemporalBoundUnparseable` exists to close: comparing
+    /// The unsoundness `ConstraintBoundUnparseable` exists to close: comparing
     /// the author's RAW `not_before`/`not_after` text as bytes gets an unpadded
     /// month backwards. September (`"2026-9-1"`) sorts AFTER October
     /// (`"2026-10-1"`) as text — `'9' > '1'` — despite being chronologically
@@ -4571,10 +4647,10 @@ mod tests {
             check_constraints(std::slice::from_ref(&p)).expect_err("not_before is not a date");
         let msg = err.to_string();
         assert!(
-            msg.contains("not_before"),
+            msg.contains("`not_before`"),
             "must name the constraint: {msg}"
         );
-        assert!(msg.contains('d'), "must name the parameter: {msg}");
+        assert!(msg.contains("`d`"), "must name the parameter: {msg}");
 
         // The same bound, unparseable, on the OTHER side of the pair — this
         // must not be silently compared against a valid `not_before` either.

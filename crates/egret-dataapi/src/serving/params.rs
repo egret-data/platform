@@ -442,8 +442,11 @@ pub(crate) fn coerce(spec: &ParamSpec, text: &str) -> Result<Param, CoerceError>
 /// A bound compared as a float would reintroduce that on this side: a `minimum`
 /// of `"0.3"` would reject the value `"0.3"`.
 ///
-/// Both sides have already passed `is_plain_decimal` or are an author's bound
-/// that `check_constraints` accepted, so the grammar is `-?digits[.digits]`.
+/// Both sides have already passed [`is_plain_decimal`] — either because
+/// `coerce` validated a resolved value's digits, or because
+/// `lifecycle::check_constraints` validated the author's `minimum`/`maximum`
+/// bound the same way before comparing the pair — so the grammar is
+/// `-?digits[.digits]`.
 pub(crate) fn compare_decimal_text(a: &str, b: &str) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     let (a_neg, a_body) = a.strip_prefix('-').map_or((false, a), |r| (true, r));
@@ -478,8 +481,43 @@ pub(crate) fn compare_decimal_text(a: &str, b: &str) -> std::cmp::Ordering {
     flip(pad(&a_frac).cmp(&pad(&b_frac)))
 }
 
+/// Parse and normalise a `not_before`/`not_after` bound the same way `coerce`
+/// parses a caller's VALUE of the declared type.
+///
+/// Shared with `lifecycle::check_constraints`, which validates (and, for the
+/// pair, compares) an author's bound this way at publish — the same rule that
+/// put [`compare_decimal_text`] here rather than in `lifecycle.rs`: one
+/// normalisation, used by publish and (from Task 5) by `coerce` itself, so
+/// the two cannot drift apart about which spellings are valid.
+///
+/// **Never routed through `coerce` itself.** From Task 5 onward, `coerce`'s
+/// `Date`/`Timestamp` arms enforce a spec's OWN `not_before`/`not_after`
+/// against the value being coerced. Asking `coerce` to coerce a BOUND as a
+/// value would check that bound against itself.
+///
+/// Returns `None` for anything not `Date`/`Timestamp` — unreachable through
+/// `check_constraints`, which has already refused a temporal constraint on
+/// any other type before this is ever called.
+pub(crate) fn normalize_temporal_bound(ty: &ParamType, text: &str) -> Option<String> {
+    match ty {
+        ParamType::Date => chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d")
+            .ok()
+            .map(|d| d.format("%Y-%m-%d").to_string()),
+        ParamType::Timestamp => ["%Y-%m-%d %H:%M:%S%.f", "%Y-%m-%dT%H:%M:%S%.f"]
+            .iter()
+            .find_map(|f| chrono::NaiveDateTime::parse_from_str(text, f).ok())
+            .map(|t| t.format("%Y-%m-%d %H:%M:%S%.f").to_string()),
+        _ => None,
+    }
+}
+
 /// `-?digits[.digits]`, and nothing else.
-fn is_plain_decimal(s: &str) -> bool {
+///
+/// `pub(crate)` for `lifecycle::check_constraints`, which validates an
+/// author's `minimum`/`maximum` bound against this same grammar before
+/// [`compare_decimal_text`] is asked to compare two of them — see that
+/// function's own doc for why the invariant matters.
+pub(crate) fn is_plain_decimal(s: &str) -> bool {
     let body = s
         .strip_prefix('-')
         .or_else(|| s.strip_prefix('+'))
@@ -927,5 +965,43 @@ mod tests {
             resolve(Some(&many), &s),
             Err(ServingError::ParamInvalid)
         ));
+    }
+
+    /// `compare_decimal_text` has no caller in this crate's public surface —
+    /// `lifecycle::check_constraints` and (from Task 3) `coerce` are its only
+    /// two, and both exercise it only indirectly, through inputs shaped to
+    /// pass their OWN grammar checks first. This is the direct test: the
+    /// digit-by-digit algorithm itself, including the case a naive `str`
+    /// `>` would get backwards.
+    #[test]
+    fn compare_decimal_text_orders_by_value_not_by_bytes() {
+        use std::cmp::Ordering;
+        // The whole reason this function exists rather than `str::cmp`:
+        // `"9" > "10"` as bytes (`'9' > '1'`), but 9 < 10.
+        assert_eq!(compare_decimal_text("9", "10"), Ordering::Less);
+        assert_eq!(compare_decimal_text("10", "9"), Ordering::Greater);
+        assert_eq!(compare_decimal_text("9", "9"), Ordering::Equal);
+
+        // Negatives: more negative is smaller, and a bare `-` prefix flips
+        // the rest of the comparison.
+        assert_eq!(compare_decimal_text("-5", "-1"), Ordering::Less);
+        assert_eq!(compare_decimal_text("-1", "-5"), Ordering::Greater);
+        assert_eq!(compare_decimal_text("-1", "1"), Ordering::Less);
+        assert_eq!(compare_decimal_text("1", "-1"), Ordering::Greater);
+
+        // Differing fraction widths: padded to compare digit by digit, not
+        // truncated or compared as strings of different lengths.
+        assert_eq!(compare_decimal_text("1.5", "1.45"), Ordering::Greater);
+        assert_eq!(compare_decimal_text("1.45", "1.5"), Ordering::Less);
+        assert_eq!(compare_decimal_text("1.50", "1.5"), Ordering::Equal);
+
+        // A difference below `f64` precision: the whole reason `coerce`
+        // refuses to put a decimal through a float. If this comparison ever
+        // went through `f64`, these two would round to the same value and
+        // compare equal.
+        assert_eq!(
+            compare_decimal_text("1.0000000000000001", "1.0000000000000002"),
+            Ordering::Less
+        );
     }
 }
