@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Cap target/ after every commit.
+#
+# WHY A HOOK AND NOT `just check`. The pruner already existed and was wired only into
+# `just check`. Nobody in this workflow runs `just check` — builds and tests are driven
+# as bare `cargo test`/`cargo build`, so the pruner had never once fired on its own.
+# Measured 2026-08-26, the day this hook was added: `target` had reached 93 G with
+# 339,356 files in `debug/deps` (cap: 80,000) and 37 G of `incremental`.
+#
+# A commit is the right moment: it happens often, it happens AFTER a build rather than
+# during one, and the pruner exits in well under a second when both directories are
+# under their caps.
+#
+# It never fails a commit — the commit is already made by the time this runs, and a
+# cleanup problem must not look like a source problem.
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+[ -x "$repo_root/deploy/prune-target.sh" ] || exit 0
+(cd "$repo_root" && ./deploy/prune-target.sh) 2>&1 | grep -v "nothing to do" || true
+exit 0
