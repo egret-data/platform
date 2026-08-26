@@ -154,6 +154,7 @@ fn fixture_snapshot(database_id: Uuid) -> EndpointSnapshot {
             shape: "arrays".to_string(),
             naming: "camel".to_string(),
             envelope: "bare".to_string(),
+            transform: None,
         },
         cache: CacheSpec {
             enabled: true,
