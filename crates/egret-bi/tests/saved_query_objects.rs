@@ -210,7 +210,7 @@ async fn build_pdp(db: &Db) -> Arc<dyn egret_core::authz::Pdp> {
 ///    NOT the ws_b row. `resolve()` NotFounds on the workspace mismatch.
 #[tokio::test]
 async fn load_rejects_cross_workspace_saved_query() {
-    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+    let Some(url) = egret_test_db::url().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -263,7 +263,7 @@ async fn load_rejects_cross_workspace_saved_query() {
 ///    is denied its sibling q2 (403 — no grant on q2).
 #[tokio::test]
 async fn object_guest_can_load_granted_saved_query_only() {
-    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+    let Some(url) = egret_test_db::url().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -334,7 +334,7 @@ async fn object_guest_can_load_granted_saved_query_only() {
 ///    name persists (re-fetch and assert).
 #[tokio::test]
 async fn ws_editor_can_edit_others_saved_query() {
-    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+    let Some(url) = egret_test_db::url().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -399,7 +399,7 @@ async fn ws_editor_can_edit_others_saved_query() {
 ///    be 404 — the folder does not belong to ws_a.
 #[tokio::test]
 async fn set_folder_rejects_foreign_folder() {
-    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+    let Some(url) = egret_test_db::url().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };

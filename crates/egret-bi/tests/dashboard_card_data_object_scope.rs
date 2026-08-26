@@ -201,7 +201,7 @@ async fn post_card_data_with_body(
 
 #[tokio::test]
 async fn dashboard_card_data_is_transitively_object_scoped() {
-    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+    let Some(url) = egret_test_db::url().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -371,7 +371,7 @@ async fn dashboard_card_data_is_transitively_object_scoped() {
 ///    BEFORE the query engine is touched — no predicate injection on arbitrary columns.
 #[tokio::test]
 async fn dashboard_card_data_merges_and_validates_filters() {
-    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+    let Some(url) = egret_test_db::url().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -517,7 +517,7 @@ async fn dashboard_card_data_merges_and_validates_filters() {
 ///    into SQL.
 #[tokio::test]
 async fn dashboard_card_data_merges_and_validates_temporal_units() {
-    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+    let Some(url) = egret_test_db::url().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };

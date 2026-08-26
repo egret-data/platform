@@ -108,7 +108,7 @@ async fn body_string(resp: axum::response::Response) -> String {
 
 #[tokio::test]
 async fn object_share_grant_read_revoke() {
-    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+    let Some(url) = egret_test_db::url().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -381,7 +381,7 @@ async fn object_share_grant_read_revoke() {
 /// on a notebook; a `ws_viewer` (holds notebook:read but NOT notebook:write) cannot.
 #[tokio::test]
 async fn notebook_share_requires_editor() {
-    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+    let Some(url) = egret_test_db::url().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };

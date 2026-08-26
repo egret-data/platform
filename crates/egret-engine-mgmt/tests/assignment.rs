@@ -20,7 +20,7 @@ use uuid::Uuid;
 /// when `DATABASE_URL` is unset. The `DatabaseRepo` binds no crypto key (the
 /// materialized connection seals no secret — `secret_id` is NULL).
 async fn harness() -> Option<(CatalogStore, EngineMgmtStore, EngineAssignmentService)> {
-    let url = std::env::var("DATABASE_URL").ok()?;
+    let url = egret_test_db::url().await?;
     let db = Db::connect(&url, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
     let catalog = CatalogStore::new(db.clone());
@@ -259,7 +259,7 @@ async fn rematerialize_updates_conn_opts() {
 async fn svc_databases(
     ws: &Uuid,
 ) -> Result<Vec<egret_query::Database>, egret_query::DatabaseError> {
-    let url = std::env::var("DATABASE_URL").unwrap();
+    let url = egret_test_db::url().await.unwrap();
     let db = Db::connect(&url, 5).await.expect("connect");
     let secrets = SecretStore::new(db.clone(), None);
     let workspace_secrets = WorkspaceSecretStore::new(db.clone(), secrets.clone());

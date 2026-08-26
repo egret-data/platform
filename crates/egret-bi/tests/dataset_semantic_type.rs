@@ -125,7 +125,7 @@ async fn put_semantic_type(
 
 #[tokio::test]
 async fn semantic_type_writes_are_checked_against_the_allow_list() {
-    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+    let Some(url) = egret_test_db::url().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -231,7 +231,7 @@ async fn semantic_type_writes_are_checked_against_the_allow_list() {
 
 #[tokio::test]
 async fn migration_0104_constrains_the_column_in_the_database() {
-    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+    let Some(url) = egret_test_db::url().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };

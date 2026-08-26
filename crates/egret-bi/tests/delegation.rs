@@ -132,7 +132,7 @@ fn ctx_for(ws: Uuid, uid: Uuid, email: &str) -> egret_core::WorkspaceContext {
 
 #[tokio::test]
 async fn resolve_delegation_covers_all_three_branches() {
-    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+    let Some(url) = egret_test_db::url().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -219,7 +219,7 @@ async fn resolve_delegation_covers_all_three_branches() {
 /// `engine: forbidden` even though query execution (which delegates) worked.
 #[tokio::test]
 async fn schema_browse_conn_spec_applies_delegation() {
-    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+    let Some(url) = egret_test_db::url().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };

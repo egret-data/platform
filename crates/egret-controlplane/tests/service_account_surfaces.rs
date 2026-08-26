@@ -41,7 +41,7 @@ impl egret_core::authz::Pdp for AllowAllPdp {
 }
 
 async fn setup() -> Option<Fixture> {
-    let dsn = std::env::var("DATABASE_URL").ok()?;
+    let dsn = egret_test_db::url().await?;
     let db = Db::connect(&dsn, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
 

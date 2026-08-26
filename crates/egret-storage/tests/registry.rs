@@ -7,7 +7,7 @@ use uuid::Uuid;
 /// Connect to the database named by `DATABASE_URL` and return a ready
 /// `StorageRegistry`. Returns `None` (self-skip) when the env var is unset.
 async fn store() -> Option<StorageRegistry> {
-    let url = std::env::var("DATABASE_URL").ok()?;
+    let url = egret_test_db::url().await?;
     let db = Db::connect(&url, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
     Some(StorageRegistry::new(db))

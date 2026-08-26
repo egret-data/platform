@@ -202,7 +202,7 @@ fn build_state(
 }
 
 async fn state() -> Option<EngineState> {
-    let url = std::env::var("DATABASE_URL").ok()?;
+    let url = egret_test_db::url().await?;
     let db = egret_metastore::Db::connect(&url, 5)
         .await
         .expect("connect");
@@ -298,7 +298,7 @@ async fn member_session(
 /// fires on the handler's first line, exercising the migrated decision point.
 #[tokio::test]
 async fn pdp_backed_history_query_run_gate() {
-    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+    let Some(url) = egret_test_db::url().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -401,7 +401,7 @@ async fn wait_capture(m: &CapturedArgs) -> (Option<String>, Option<String>) {
 ///    identical to the prior shared-service behavior.
 #[tokio::test]
 async fn submit_delegation_branches() {
-    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+    let Some(url) = egret_test_db::url().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -584,7 +584,7 @@ async fn submit_delegation_branches() {
 /// None`, even though a working minter is wired (proving no mint happens).
 #[tokio::test]
 async fn submit_impersonate_runs_as_caller_no_mint() {
-    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+    let Some(url) = egret_test_db::url().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };

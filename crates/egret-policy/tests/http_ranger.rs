@@ -18,7 +18,7 @@ const TOKEN: &str = "devtoken";
 /// A bearer-gated Ranger app with the Trino def seeded and one service created.
 /// Returns the router, the service name, and a store handle for further seeding.
 async fn app() -> Option<(axum::Router, String, PolicyStore)> {
-    let url = std::env::var("DATABASE_URL").ok()?;
+    let url = egret_test_db::url().await?;
     let db = Db::connect(&url, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
     let store = PolicyStore::new(db);
@@ -53,7 +53,7 @@ fn req(method: &str, uri: &str, token: Option<&str>, body: Option<Value>) -> Req
 #[tokio::test]
 async fn anonymous_mode_allows_download_without_bearer() {
     // Empty token = anonymous /service so stock Ranger plugins (no bearer) can download.
-    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+    let Some(url) = egret_test_db::url().await else {
         eprintln!("skip");
         return;
     };

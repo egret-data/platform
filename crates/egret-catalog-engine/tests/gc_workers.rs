@@ -11,7 +11,7 @@ const SYSTEM_USER: &str = "egret-system";
 
 #[tokio::test]
 async fn build_state_registers_builtin_gc_queues() {
-    let Ok(dsn) = std::env::var("DATABASE_URL") else {
+    let Some(dsn) = egret_test_db::url().await else {
         eprintln!("DATABASE_URL not set — skipping build_state_registers_builtin_gc_queues");
         return;
     };

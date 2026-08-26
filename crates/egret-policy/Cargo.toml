@@ -30,6 +30,10 @@ axum.workspace = true
 utoipa.workspace = true
 
 [dev-dependencies]
+# One private, already-migrated database per test process, cloned from a
+# shared template. Replaces the shared `DATABASE_URL` database, which
+# nothing cleaned and every fixture paid for.
+egret-test-db.workspace = true
 tokio.workspace = true
 tower.workspace = true
 http-body-util = "0.1"

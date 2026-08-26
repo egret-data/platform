@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 /// Returns (repo, workspace_id, database_id, user_id).
 async fn setup() -> Option<(DatasetRepo, Uuid, Uuid, Uuid)> {
-    let url = std::env::var("DATABASE_URL").ok()?;
+    let url = egret_test_db::url().await?;
     let db = Db::connect(&url, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
 

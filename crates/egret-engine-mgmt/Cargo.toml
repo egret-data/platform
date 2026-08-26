@@ -68,6 +68,10 @@ rcgen.workspace = true
 mysql_async.workspace = true
 
 [dev-dependencies]
+# One private, already-migrated database per test process, cloned from a
+# shared template. Replaces the shared `DATABASE_URL` database, which
+# nothing cleaned and every fixture paid for.
+egret-test-db.workspace = true
 # Concrete Policy/Ranger store — only test state construction builds it directly
 # (production wires it in egret-bin behind `PolicyPort`).
 egret-policy.workspace = true

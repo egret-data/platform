@@ -17,7 +17,7 @@ use uuid::Uuid;
 const TOKEN: &str = "devtoken";
 
 async fn db() -> Option<Db> {
-    let url = std::env::var("DATABASE_URL").ok()?;
+    let url = egret_test_db::url().await?;
     let db = Db::connect(&url, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
     Some(db)

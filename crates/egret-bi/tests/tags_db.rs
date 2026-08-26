@@ -19,7 +19,7 @@ async fn seed_user(db: &Db) -> Uuid {
 
 #[tokio::test]
 async fn create_dup_conflict_count_assign_cascade() {
-    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+    let Some(url) = egret_test_db::url().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };

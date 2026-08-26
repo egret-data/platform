@@ -78,7 +78,7 @@ fn build_state(db: Db, pdp: Arc<dyn egret_core::authz::Pdp>) -> BiState {
 }
 
 async fn state() -> Option<BiState> {
-    let url = std::env::var("DATABASE_URL").ok()?;
+    let url = egret_test_db::url().await?;
     let db = Db::connect(&url, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
     Some(build_state(db, Arc::new(AllowAllPdp)))
@@ -243,7 +243,7 @@ async fn member_session(
 /// `CedarPdp`, must be able to list its (empty) folders.
 #[tokio::test]
 async fn data_api_endpoint_folders_are_a_known_kind() {
-    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+    let Some(url) = egret_test_db::url().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -304,7 +304,7 @@ async fn data_api_endpoint_folders_are_a_known_kind() {
 /// decision point (an allow-all stub would falsely 200 it).
 #[tokio::test]
 async fn pdp_backed_dashboard_read_gate() {
-    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+    let Some(url) = egret_test_db::url().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
