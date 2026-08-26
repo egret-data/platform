@@ -274,8 +274,13 @@ pub(crate) fn resolve_supplied_with(
                 (CoerceError::Constraint { .. }, true) => ServingError::internal(
                     "a published `default` does not satisfy its own declared constraints",
                 ),
-                (CoerceError::Malformed, _) => {
+                (CoerceError::Malformed(MalformedReason::EnumHasNoAllowedList), _) => {
                     ServingError::internal("enum parameter published with no `allowed` list")
+                }
+                (CoerceError::Malformed(MalformedReason::PatternDoesNotCompile), _) => {
+                    ServingError::internal(
+                        "string parameter published with a `pattern` that does not compile",
+                    )
                 }
             })?);
         }
@@ -371,12 +376,38 @@ fn decode(
 /// the caller's text, `Malformed` is the published definition. The caller-facing
 /// mapping is the caller's alone — see [`resolve`], which is also where the
 /// author's own `default` failing is turned into a 500 rather than a 400.
+/// Which way a [`CoerceError::Malformed`] spec is broken.
+///
+/// Both `ParamType::Enum` and `ParamType::String` can fail to be honourable,
+/// for unrelated reasons on unrelated types — and a single `Malformed` unit
+/// variant made them indistinguishable at the one place that logs the
+/// message. Before this existed, a non-compiling `pattern` produced a 500
+/// whose log line said "enum parameter published with no `allowed` list",
+/// because that was the only message `Malformed` had ever needed. Wire
+/// response is unaffected either way (`ServingError::internal` redacts to
+/// `"internal error"`); this is purely so an operator reading the log is told
+/// the truth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MalformedReason {
+    /// An `Enum` parameter published with no non-empty `allowed` list.
+    EnumHasNoAllowedList,
+    /// A `String` parameter's `pattern` does not compile through
+    /// [`crate::lifecycle::compile_pattern`].
+    PatternDoesNotCompile,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum CoerceError {
     /// The text does not satisfy the declared `ty`.
     Invalid,
-    /// The `ParamSpec` itself cannot be honoured — an `Enum` with no `allowed`.
-    Malformed,
+    /// The `ParamSpec` itself cannot be honoured — an `Enum` with no `allowed`,
+    /// or a `pattern` that does not compile.
+    ///
+    /// Carries [`MalformedReason`] so the two causes stay distinguishable at
+    /// the point `resolve` turns this into a logged [`ServingError::internal`]
+    /// message. Both reach the caller identically (`"internal error"`) — this
+    /// detail is for whoever reads the log, not the wire.
+    Malformed(MalformedReason),
     /// The value is well-typed and the spec is sound, and the value still fails
     /// a declared constraint.
     ///
@@ -431,15 +462,22 @@ pub(crate) fn coerce(spec: &ParamSpec, text: &str) -> Result<Param, CoerceError>
                 // spec being unhonourable rather than the caller being wrong —
                 // `Malformed` is the variant that already means that.
                 //
-                // Compiled fresh on every call rather than cached: measured at
-                // ~60 microseconds/call (release build, 1,000-iteration
-                // throwaway benchmark, deleted after measuring) for an
-                // email-shaped pattern, on 2026-08-26 — far below the cost of
-                // the request it is part of. A cache would be complexity
-                // bought with nothing; if that changes, it belongs beside the
-                // snapshot cache (router.rs:1289), not here.
+                // Compiled fresh on every call rather than cached: measured
+                // (release build, 1,000-iteration throwaway benchmarks,
+                // deleted after measuring, on 2026-08-26) at ~60
+                // microseconds/call for a typical email-shaped pattern, and
+                // ~650 microseconds/call for a pattern engineered to sit at
+                // `MAX_PATTERN_PROGRAM_BYTES` (a 164-branch literal
+                // alternation, the worst of several 64-KiB-cap shapes tried —
+                // nested bounded repetition, Unicode-property alternation,
+                // Unicode-aware `.` repetition all compiled faster). Both are
+                // microseconds, not milliseconds, and the worst case is still
+                // far below the cost of the request it is part of. A cache
+                // would be complexity bought with nothing; if that changes,
+                // it belongs beside the snapshot cache (router.rs:1289), not
+                // here.
                 let re = crate::lifecycle::compile_pattern(pattern)
-                    .map_err(|_| CoerceError::Malformed)?;
+                    .map_err(|_| CoerceError::Malformed(MalformedReason::PatternDoesNotCompile))?;
                 if !re.is_match(text) {
                     return Err(CoerceError::Constraint {
                         constraint: "pattern",
@@ -456,7 +494,9 @@ pub(crate) fn coerce(spec: &ParamSpec, text: &str) -> Result<Param, CoerceError>
                 .filter(|a| !a.is_empty())
                 // An enum with no `allowed` is an author mistake publish
                 // refuses (spec §5). Not the caller's fault, so not a 400.
-                .ok_or(CoerceError::Malformed)?;
+                .ok_or(CoerceError::Malformed(
+                    MalformedReason::EnumHasNoAllowedList,
+                ))?;
             // The AUTHOR's entry is what is kept, never the caller's bytes —
             // the same provenance rule `ident_filter` enforces. Two equal
             // strings, and the one that survives is always the author's.
@@ -1297,6 +1337,87 @@ mod tests {
             }
             other => panic!("expected a pattern refusal, got {other:?}"),
         }
+    }
+
+    /// A non-compiling `pattern` is `check_constraints`' job to have already
+    /// refused — reaching `coerce` at all means a snapshot published before
+    /// that gate existed, or a hand-edited row. Either way this is
+    /// [`CoerceError::Malformed`], carrying [`MalformedReason::PatternDoesNotCompile`]
+    /// rather than the pre-existing [`MalformedReason::EnumHasNoAllowedList`]
+    /// the two used to share as one unlabelled variant.
+    #[test]
+    fn a_pattern_that_does_not_compile_is_malformed_with_its_own_reason() {
+        let mut p = string_param("s");
+        // Unbalanced: `compile_pattern` wraps this as `^(?:()$`, which never
+        // closes the outer non-capturing group.
+        p.pattern = Some("(".into());
+        assert_eq!(
+            coerce(&p, "anything"),
+            Err(CoerceError::Malformed(
+                MalformedReason::PatternDoesNotCompile
+            ))
+        );
+    }
+
+    /// **The regression this pins**: before `MalformedReason` existed, both
+    /// `Enum`'s missing `allowed` and `String`'s non-compiling `pattern`
+    /// collapsed into one `CoerceError::Malformed` unit variant, so `resolve`'s
+    /// mapping used a single fixed log message — "enum parameter published
+    /// with no `allowed` list" — for BOTH causes. A hand-edited row with an
+    /// uncompilable `pattern` produced a 500 whose logged diagnosis blamed a
+    /// missing enum list on an endpoint that has no enum parameter at all.
+    ///
+    /// The wire response was never wrong (`ServingError::internal` redacts to
+    /// `"internal error"` regardless), so this only checks the internal
+    /// diagnosis — the `Debug` rendering of the returned [`ServingError`],
+    /// which is exactly the field `router::serve` logs as `error = ?e`
+    /// (`router.rs`'s `THE ONLY place the internal detail is allowed to
+    /// appear` comment).
+    #[test]
+    fn a_non_compiling_patterns_diagnostic_does_not_blame_a_missing_enum_list() {
+        let mut p = string_param("s");
+        p.pattern = Some("(".into());
+        let supplied =
+            std::collections::BTreeMap::from([("s".to_string(), vec!["anything".to_string()])]);
+        let err = match resolve_supplied_with(&supplied, &[], std::slice::from_ref(&p)) {
+            Err(e) => e,
+            Ok(_) => panic!("expected a non-compiling pattern to refuse as internal"),
+        };
+        assert!(
+            matches!(err, ServingError::Internal(_)),
+            "a malformed spec is the author's 500, not the caller's 400: {err:?}"
+        );
+        let rendered = format!("{err:?}");
+        assert!(
+            rendered.contains("pattern") && rendered.contains("does not compile"),
+            "the log line must name the pattern as the cause: {rendered}"
+        );
+        assert!(
+            !rendered.contains("enum") && !rendered.contains("allowed"),
+            "the log line must not repeat the UNRELATED enum diagnosis: {rendered}"
+        );
+    }
+
+    /// The companion case, so a future edit that swaps the two match arms'
+    /// message strings is still caught: an enum published with no `allowed`
+    /// must keep naming itself, not borrow the pattern's message.
+    #[test]
+    fn an_enum_with_no_allowed_lists_diagnostic_does_not_blame_a_pattern() {
+        let p = spec("e", ParamType::Enum, false);
+        let supplied = std::collections::BTreeMap::from([("e".to_string(), vec!["x".to_string()])]);
+        let err = match resolve_supplied_with(&supplied, &[], std::slice::from_ref(&p)) {
+            Err(e) => e,
+            Ok(_) => panic!("expected an enum with no allowed list to refuse as internal"),
+        };
+        let rendered = format!("{err:?}");
+        assert!(
+            rendered.contains("enum") && rendered.contains("allowed"),
+            "the log line must name the missing allowed list as the cause: {rendered}"
+        );
+        assert!(
+            !rendered.contains("pattern"),
+            "the log line must not borrow the UNRELATED pattern diagnosis: {rendered}"
+        );
     }
 
     #[test]
