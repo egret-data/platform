@@ -808,6 +808,20 @@ pub enum StatementError {
          and then served as the OTHER shape"
     )]
     UnknownEnvelope(String),
+    /// A statement's `script` exceeds [`MAX_STATEMENT_SCRIPT_BYTES`].
+    ///
+    /// Named after the statement rather than reported bare, because an endpoint
+    /// may carry up to [`MAX_STATEMENTS`] of them and "a script is too long"
+    /// does not say which editor to open. Carries both numbers for the reason
+    /// every other `…TooLong` arm here does.
+    #[error(
+        "statement `{statement}`'s script is {bytes} bytes, over the {cap} byte cap. A          statement's script decides that statement's SQL — it is not where an endpoint's          application belongs, and publish parses it once per branch probe, so its length          multiplies across every declared parameter"
+    )]
+    ScriptTooLong {
+        statement: String,
+        bytes: usize,
+        cap: usize,
+    },
     /// The list had no statements at all.
     #[error("an endpoint must declare at least one statement")]
     Empty,
@@ -930,6 +944,44 @@ pub enum StatementError {
 /// no change.
 pub const MAX_STATEMENTS: usize = 16;
 
+/// Ceiling on a statement's `script`, in bytes.
+///
+/// # The other script cap already existed, and this one was missing
+///
+/// `egret_dataapi::lifecycle::MAX_TRANSFORM_SCRIPT_BYTES` (8 KiB) bounds
+/// `output.transform.script`. A statement's `script` — package S — had nothing
+/// of its own: axum's default 2 MB body limit was the only thing between an
+/// author and a publish, which is bounded but is not a cap anybody chose.
+///
+/// # Why it is not simply the transform's number, and why not 40x either
+///
+/// The transform's 8 KiB is ~40x spec §1's ~200-byte example. Applying the same
+/// multiple here would give ~74 KiB, because a generating script's realistic
+/// instance is already ~1.9 KB — the analytics example measured in
+/// `egret_dataapi::transform`'s `a_realistic_generating_script_fits_the_cap`,
+/// asserted at 1800..1950 bytes so the sample cannot drift out from under this
+/// number. A generating script legitimately holds more than a response
+/// transform (structure is what it decides), so it gets MORE than 8 KiB — but
+/// 40x is the wrong multiple here, because this cap has a second job the
+/// transform's does not.
+///
+/// **It is the multiplier on publish's parses.** `GeneratedSql::build_after`
+/// evaluates a scripted statement once for its baseline and twice per declared
+/// parameter for the sentinel probes, so an endpoint at both limits is
+/// `MAX_STATEMENTS × (1 + 2 × MAX_DECLARED_PARAMS)` = 16 × 65 = **1040
+/// evaluations**, each re-running `AstModule::parse` over an owned copy of the
+/// script. At 16 KiB that is ~16.6 MiB of parse-and-copy for one publish, a
+/// number an operator can name. At axum's 2 MB it is ~2 GB, and at a 40x cap it
+/// would be ~76 MiB. The parse happens BEFORE the evaluator's deadline is taken
+/// (`transform::eval_inner`), so nothing downstream bounds it — this constant
+/// is what does.
+///
+/// 16384 is therefore 2x the transform's cap and ~8.8x the measured realistic
+/// script. The band the measurement actually decides is 4x..16x — stated in the
+/// two-sided test rather than implied, and nothing measured distinguishes 16384
+/// from 12 KiB or 24 KiB inside it.
+pub const MAX_STATEMENT_SCRIPT_BYTES: usize = 16384;
+
 /// How long a statement name may be.
 ///
 /// Sixty-four characters, which is Postgres's own identifier limit (63) rounded
@@ -989,6 +1041,21 @@ pub fn validate_statements(statements: &[StatementSpec]) -> Result<(), Statement
     let mut seen = std::collections::HashSet::with_capacity(statements.len());
     for statement in statements {
         validate_statement_name(&statement.name)?;
+        // After the name rule so the refusal can name a statement whose name is
+        // itself valid, and before everything downstream for the reason
+        // [`MAX_STATEMENT_SCRIPT_BYTES`] gives: a `script` is parsed once per
+        // branch probe, so its length is a multiplier and this comparison is
+        // what bounds it. It runs on the create and PATCH routes too, so an
+        // oversized script cannot even be STORED as a draft.
+        if let Some(script) = statement.source.script() {
+            if script.len() > MAX_STATEMENT_SCRIPT_BYTES {
+                return Err(StatementError::ScriptTooLong {
+                    statement: statement.name.clone(),
+                    bytes: script.len(),
+                    cap: MAX_STATEMENT_SCRIPT_BYTES,
+                });
+            }
+        }
         if !seen.insert(statement.name.as_str()) {
             return Err(StatementError::DuplicateName(statement.name.clone()));
         }
@@ -1413,6 +1480,48 @@ mod tests {
                 len: MAX_STATEMENT_NAME_LEN + 1,
                 limit: MAX_STATEMENT_NAME_LEN,
             })
+        );
+    }
+
+    /// A statement's `script` has a length bound of its own, and a statement's
+    /// `sql` does not get it.
+    ///
+    /// The three assertions are three different things, and dropping any one of
+    /// them leaves a test that passes with the rule broken:
+    ///
+    /// * exactly the cap is ACCEPTED — a rule written `>=` refuses the number it
+    ///   advertises;
+    /// * one byte past it is refused, naming the statement and both numbers, so
+    ///   an author with sixteen statements knows which editor to open;
+    /// * the same bytes as `sql` are ACCEPTED. `MAX_STATEMENT_SCRIPT_BYTES`
+    ///   exists because publish PARSES a script once per branch probe, and
+    ///   written SQL is parsed by nothing — capping it here would refuse
+    ///   definitions that publish fine today, and a test that only checked the
+    ///   refusal could not see that.
+    #[test]
+    fn a_statement_script_has_a_length_bound_and_sql_does_not() {
+        let at_cap = "#".repeat(MAX_STATEMENT_SCRIPT_BYTES);
+        assert_eq!(
+            validate_statements(&[StatementSpec::from_script("rows", &at_cap)]),
+            Ok(()),
+            "the cap itself must be accepted, or the bound is off by one"
+        );
+
+        let past = "#".repeat(MAX_STATEMENT_SCRIPT_BYTES + 1);
+        assert_eq!(
+            validate_statements(&[StatementSpec::from_script("rows", &past)]),
+            Err(StatementError::ScriptTooLong {
+                statement: "rows".into(),
+                bytes: MAX_STATEMENT_SCRIPT_BYTES + 1,
+                cap: MAX_STATEMENT_SCRIPT_BYTES,
+            })
+        );
+
+        assert_eq!(
+            validate_statements(&[StatementSpec::from_sql("rows", &past)]),
+            Ok(()),
+            "written SQL is parsed by no evaluator, and this cap is about the \
+             parses — capping it here would refuse definitions that publish today"
         );
     }
 

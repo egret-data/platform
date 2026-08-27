@@ -3761,6 +3761,41 @@ def build_sql(params):
              render::MAX_SQL_BYTES again",
             sql.len()
         );
+
+        // The SCRIPT's own cap, sized against the same fixture in the same
+        // call, because the two numbers are decided by the same measurement and
+        // splitting them across two tests is how a fixture drifts under one of
+        // them. Two-sided for the reason above: a floor alone is satisfied by
+        // axum's 2 MB, which is exactly the state this cap was added to leave.
+        //
+        // A DIFFERENT band from `MAX_GENERATED_SQL_BYTES`', and deliberately:
+        // this cap is also the multiplier on publish's 1040 parses, so the
+        // ceiling is what stops those becoming gigabytes. See
+        // `egret_dataapi_api::MAX_STATEMENT_SCRIPT_BYTES`.
+        const SCRIPT_HEADROOM_MIN: usize = 4;
+        const SCRIPT_HEADROOM_MAX: usize = 16;
+        assert!(
+            egret_dataapi_api::MAX_STATEMENT_SCRIPT_BYTES >= SCRIPT_HEADROOM_MIN * script.len(),
+            "the script cap ({}) leaves a realistic generating script ({}) less \
+             than {SCRIPT_HEADROOM_MIN}x room for comments, a helper `def` and \
+             a second branch",
+            egret_dataapi_api::MAX_STATEMENT_SCRIPT_BYTES,
+            script.len()
+        );
+        assert!(
+            egret_dataapi_api::MAX_STATEMENT_SCRIPT_BYTES <= SCRIPT_HEADROOM_MAX * script.len(),
+            "the script cap ({}) is more than {SCRIPT_HEADROOM_MAX}x a realistic \
+             generating script ({}) — and this one multiplies: publish parses a \
+             statement's script up to 1040 times",
+            egret_dataapi_api::MAX_STATEMENT_SCRIPT_BYTES,
+            script.len()
+        );
+        assert!(
+            egret_dataapi_api::MAX_STATEMENT_SCRIPT_BYTES
+                >= crate::lifecycle::MAX_TRANSFORM_SCRIPT_BYTES,
+            "a generating script decides a statement's structure, so it may not \
+             be capped tighter than a response transform"
+        );
     }
 
     /// A template past [`MAX_GENERATED_SQL_BYTES`] is refused, with both
