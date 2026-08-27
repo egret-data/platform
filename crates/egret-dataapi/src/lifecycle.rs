@@ -5678,6 +5678,51 @@ mod tests {
         }
     }
 
+    /// **Publish inherits the emitted template's length cap without owning it**
+    /// (package S Task 8.5, spec S5).
+    ///
+    /// `crate::transform::MAX_GENERATED_SQL_BYTES` is enforced inside
+    /// `build_sql`, the one generator publish, preview and serving all reach —
+    /// so there is no length check in this file to keep in step, and this test
+    /// is what says the inheritance is real rather than assumed. It asserts the
+    /// rule's own sentence arrives, because `StatementScriptFailed` passing the
+    /// message through is the whole mechanism: an author over the cap must read
+    /// how much to cut, not "the script failed".
+    ///
+    /// The endpoint is otherwise publishable — no parameters, one statement, a
+    /// script that runs — so the refusal is about the template's size and
+    /// nothing else.
+    #[test]
+    fn a_generated_template_over_the_cap_is_an_authors_refusal_at_publish() {
+        let over = crate::transform::MAX_GENERATED_SQL_BYTES + 1;
+        let statements = vec![StatementSpec::from_script(
+            "rows",
+            format!("def build_sql(params):\n  return \"SELECT \" + \"z\" * {over}"),
+        )];
+        let err = validate_endpoint(
+            &statements,
+            &[],
+            &cache(CacheScope::PerPrincipal),
+            &OutputSpec::default(),
+            false,
+            false,
+            ScriptEval::Here,
+        )
+        .expect_err("the script emits more than the cap");
+        match &err {
+            ValidationError::StatementScriptFailed { statement, error } => {
+                assert_eq!(statement, "rows");
+                assert!(
+                    error.contains(&crate::transform::MAX_GENERATED_SQL_BYTES.to_string())
+                        && error.contains("byte template"),
+                    "the cap's own sentence, with both numbers, must reach the \
+                     author: {error}"
+                );
+            }
+            other => panic!("expected StatementScriptFailed, got {other:?}"),
+        }
+    }
+
     // ---- Package S Task 4: the sentinel probe -----------------------------
 
     fn string_param(name: &str) -> ParamSpec {

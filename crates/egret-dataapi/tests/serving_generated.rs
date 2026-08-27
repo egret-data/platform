@@ -394,6 +394,61 @@ async fn a_script_cannot_emit_dml_on_a_branch_publish_never_probed() {
     );
 }
 
+/// **A template past the length cap is refused on the branch that emits it, and
+/// the engine is never asked to plan it** (package S Task 8.5, spec S5).
+///
+/// The same asymmetry as the DML test above, on a different rule and reached a
+/// different way. Publish sees the baseline plus what two sentinel probes per
+/// parameter emitted, and neither of those values is `XX` — so the megabyte arm
+/// is invisible to it and the endpoint publishes green. `MAX_GENERATED_SQL_BYTES`
+/// lives inside `build_sql`, which serving calls per request, so the branch is
+/// refused when it is finally built.
+///
+/// **A 500 rather than a 400, and that is the answer this rule wants.** The
+/// caller's request is valid — the `region=EU` call proves the endpoint is
+/// otherwise perfectly serviceable — and what failed is the author's script.
+/// The alternative to failing here is handing an engine a statement four orders
+/// of magnitude past anything it was meant to plan.
+///
+/// The publish succeeding is half the test, for the reason the DML test gives:
+/// if a future publish rule learnt to refuse this script, this would fail at the
+/// publish rather than at the call, and that is the right failure.
+#[tokio::test]
+async fn a_generated_template_over_the_length_cap_is_refused_at_serve() {
+    let f = skip_without_db!();
+    publish_scripted(
+        &f,
+        "/toolong",
+        "def build_sql(params):\n    if params[\"region\"] == \"XX\":\n        \
+         return \"SELECT \" + \"z\" * 200000\n    return \"SELECT n FROM t WHERE \
+         region = {{ region }}\"\n",
+    )
+    .await;
+
+    let ok = f.call_as(f.principal_a, "toolong?region=EU").await;
+    assert_eq!(ok.status, StatusCode::OK, "{}", ok.body);
+
+    let before = f.port.executions();
+    let res = f.call_as(f.principal_a, "toolong?region=XX").await;
+    assert_eq!(
+        res.status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a generated statement over the byte cap is refused: {}",
+        res.body
+    );
+    assert_eq!(res.body["error"]["code"], "internal", "{}", res.body);
+    assert_eq!(
+        f.port.executions(),
+        before,
+        "the oversized statement must not reach the engine"
+    );
+    assert!(
+        !res.body.to_string().contains("region"),
+        "a serving refusal names no parameter of the endpoint: {}",
+        res.body
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Where generation sits: after the cache, and against the frozen shape.
 // ---------------------------------------------------------------------------

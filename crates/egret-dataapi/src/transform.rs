@@ -363,6 +363,68 @@ impl EntryPoint {
 /// what that projection can and cannot prove.
 pub(crate) const MAX_TRANSFORM_OUTPUT_BYTES: usize = 1 << 20;
 
+/// Ceiling on the template a [`build_sql`] script emits, in bytes (spec §5).
+///
+/// # Sized against a real generated statement, not a round number
+///
+/// `tests::a_realistic_branching_statement_sizes_the_generated_sql_cap` holds
+/// the measurement, so the number below is checked by the suite rather than
+/// asserted in a report: spec §1's shape scaled to an honest analytics query —
+/// four optional dimensions, six metrics, two CTEs, three joins, a grain
+/// chosen from a dict and two optional filters — is an **1862-byte script that
+/// emits 948 bytes**. 65536 (64 KiB) is ~69x that, the same order of headroom
+/// [`crate::lifecycle::MAX_TRANSFORM_SCRIPT_BYTES`] gave C2's ~200-byte example
+/// at ~40x.
+///
+/// # Why not 1 MiB, which is this crate's other answer
+///
+/// [`MAX_TRANSFORM_OUTPUT_BYTES`]'s doc says a third number "would only invite
+/// the question of why", so here is why. 1 MiB is `render::MAX_SQL_BYTES`, and
+/// that is a **backstop** — the point past which a string has stopped being SQL
+/// — reached at render time, after the text has been built, stored and
+/// described. It is not a budget an author should be able to sit inside: a
+/// statement an engine is asked to *plan* is a few KB, and by the time a
+/// generated one is a megabyte the author's mistake is several screens behind
+/// them.
+///
+/// The two numbers are related rather than rival. An endpoint freezes at most
+/// [`egret_dataapi_api::MAX_STATEMENTS`] generated templates
+/// ([`crate::lifecycle::ValidationError::TooManyGeneratedTemplates`] is what
+/// bounds the count), so `16 x 64 KiB` is exactly 1 MiB: the whole endpoint's
+/// generated text is held to the number ONE render is held to.
+///
+/// # Where it is enforced, and why there is only one place
+///
+/// Inside [`eval_inner`]'s [`EntryPoint::BuildSql`] arm, on the value the
+/// script returned, before it is copied off the starlark heap. That arm is
+/// reachable only through [`build_sql`], and [`build_sql`] is the only
+/// generator in the crate — publish
+/// ([`crate::lifecycle::GeneratedSql::build_after`], and its sentinel probes),
+/// preview (both of those) and per-request serving
+/// (`crate::serving::router::generate_one`) all pass through it. Three
+/// call-site checks would be three chances to drift; this is one site none of
+/// them can go around.
+///
+/// # What a refusal looks like on each path, including the case publish misses
+///
+/// On publish and preview it is an author-facing 400
+/// ([`crate::lifecycle::ValidationError::StatementScriptFailed`], which carries
+/// this rule's own sentence). On serving it is a 500, and that is the right
+/// answer rather than an oversight: a script may emit its long template only on
+/// a branch no sentinel probe reached, so an endpoint CAN publish green and
+/// then fail per request. The caller's request was valid and the ENDPOINT
+/// failed — the identical judgement `generate_one` already makes for a
+/// generated `DELETE` on an unprobed branch. Nothing else could be true of a
+/// text that does not exist until the request supplies its value.
+///
+/// One consequence is worth writing down rather than leaving to be found:
+/// [`crate::lifecycle::GeneratedSql::probe`] reads a failed evaluation as
+/// *inconclusive* (`Err(_) => varied = true`), so an ALTERNATE branch that
+/// exceeds this cap is not a publish refusal either — it is simply not
+/// collected as an alternate. That is the existing probe rule, unchanged here
+/// on purpose, and the serving refusal above is its backstop.
+pub(crate) const MAX_GENERATED_SQL_BYTES: usize = 64 * 1024;
+
 /// Ceiling on how deeply JSON may nest, **in both directions**.
 ///
 /// # Why this exists at all, and why it is not decoration
@@ -641,6 +703,28 @@ pub enum TransformError {
     /// dump of the value.
     #[error("build_sql must return a string template, but returned a {0}")]
     BuildSqlNotAString(String),
+    /// [`BUILD_SQL_ENTRY_POINT`] returned a string longer than
+    /// [`MAX_GENERATED_SQL_BYTES`].
+    ///
+    /// Carries **both** numbers, for the reason
+    /// [`TransformError::OutputTooLarge`] does: "too large" without the size
+    /// tells an author nothing about how much to cut. Exact rather than "at
+    /// least" — the template is one string already in hand, so counting it
+    /// costs nothing and promises nothing this cannot keep.
+    ///
+    /// **The message names no parameter and no value.** It reaches a caller
+    /// only through `ServingError::Internal`, which does not surface its
+    /// source, but the rule this crate holds itself to is that a serving
+    /// refusal never spells out an endpoint's own shape — so this sentence is
+    /// safe wherever it lands.
+    #[error("build_sql returned a {bytes} byte template, over the {cap} byte cap")]
+    GeneratedSqlTooLarge {
+        /// The emitted template's length in bytes.
+        bytes: usize,
+        /// [`MAX_GENERATED_SQL_BYTES`], repeated here so the message is
+        /// self-contained.
+        cap: usize,
+    },
     /// The script parsed but failed while running — an unbound name, a type
     /// error, an explicit `fail()`.
     #[error("the transform script failed while running: {0}")]
@@ -852,6 +936,23 @@ pub(crate) fn run_transform(
 /// text would hand the renderer something that was never meant to be SQL and
 /// let the failure surface far from its cause — see
 /// [`TransformError::BuildSqlNotAString`].
+///
+/// # The one thing this checks about the template, and where every caller
+/// inherits it
+///
+/// Its LENGTH, against [`MAX_GENERATED_SQL_BYTES`] — nothing else. This
+/// function does not scan the text, and must not: a byte scanner guarding a
+/// template language is the mistake P4.5 paid for five times over, which is why
+/// the identifier rule is a behavioural probe
+/// ([`crate::lifecycle::GeneratedSql::probe`]) and the head-word and
+/// comparison rules are re-applied by their own owners
+/// (`crate::serving::router::generate_one`).
+///
+/// The length is different in kind: it is a fact about the string rather than a
+/// judgement about its content, so it is decided once, here, by the only
+/// generator the crate has. Publish, preview and serving reach generation
+/// through this function, so none of them has to remember the cap and none of
+/// them can drift off it.
 pub(crate) fn build_sql(
     script: &str,
     params: &BTreeMap<String, serde_json::Value>,
@@ -1195,14 +1296,29 @@ fn eval_inner(
             };
 
             if contract == EntryPoint::BuildSql {
-                // A template, not JSON: `serialise_output`'s shape/byte walk
-                // is for a transform's structured return and does not apply
-                // here. What the deadline above still bounds is the one thing
-                // that could be slow before this point — the evaluation that
-                // produced `returned` — which is exactly what
+                // A template, not JSON: `serialise_output`'s shape walk is for
+                // a transform's structured return and does not apply here —
+                // there is no tree to descend, no depth to bound and nothing to
+                // serialise. What the deadline above still bounds is the one
+                // thing that could be slow before this point, the evaluation
+                // that produced `returned`, which is exactly what
                 // `build_sql_is_bounded_by_the_same_budgets_as_a_transform`
                 // exercises.
+                //
+                // The BYTE half of that walk does apply, and this is where it
+                // is taken (package S Task 8.5, spec S5). Measured before the
+                // copy off the starlark heap, so a script that emitted a
+                // megabyte is refused without this process allocating a second
+                // one. `MAX_GENERATED_SQL_BYTES` carries why the number is what
+                // it is, why this is the only site, and what each caller does
+                // with the refusal.
                 match returned.unpack_str() {
+                    Some(s) if s.len() > MAX_GENERATED_SQL_BYTES => {
+                        Err(TransformError::GeneratedSqlTooLarge {
+                            bytes: s.len(),
+                            cap: MAX_GENERATED_SQL_BYTES,
+                        })
+                    }
                     Some(s) => Ok(serde_json::Value::String(s.to_owned())),
                     None => Err(TransformError::BuildSqlNotAString(
                         returned.get_type().to_owned(),
@@ -3409,6 +3525,176 @@ mod transform_tests {
                 .to_string(),
             "`transform` must take exactly 2 arguments (params, statements), but takes 1"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // Package S Task 8.5: the emitted template's length (spec S5).
+    // ---------------------------------------------------------------------
+
+    /// **The measurement behind [`MAX_GENERATED_SQL_BYTES`], in the code.**
+    ///
+    /// Spec S5 says this cap needs measuring rather than choosing, so the
+    /// measurement lives here where the suite re-takes it, not only in a
+    /// report. The script is spec S1's shape scaled to a statement an analyst
+    /// would actually publish: four optional dimensions, six metrics, two CTEs,
+    /// three joins, a grain chosen from a dict, two optional filters, and every
+    /// caller value left as `{{ }}` for the renderer.
+    ///
+    /// The band is narrow on purpose. This is a fixture, so its size is a
+    /// constant — a test that only asserted "under the cap" would keep passing
+    /// while the thing being measured drifted, and the ratio below would then
+    /// be a ratio to nothing.
+    #[test]
+    fn a_realistic_branching_statement_sizes_the_generated_sql_cap() {
+        let script = r#"
+DIMENSIONS = {
+    "region": "c.region",
+    "segment": "c.segment",
+    "channel": "b.channel",
+    "category": "p.category",
+}
+METRICS = {
+    "revenue": "sum(b.total)",
+    "orders": "count(*)",
+    "customers": "count(distinct b.customer_id)",
+    "aov": "sum(b.total) / nullif(count(*), 0)",
+    "refunds": "sum(b.refund_total)",
+    "units": "sum(l.quantity)",
+}
+GRAIN = {
+    "day": "date_trunc('day', o.ordered_at)",
+    "week": "date_trunc('week', o.ordered_at)",
+    "month": "date_trunc('month', o.ordered_at)",
+}
+
+def build_sql(params):
+    dims = [DIMENSIONS[d] for d in sorted(DIMENSIONS) if params.get("by_" + d)]
+    metrics = [METRICS[m] + " AS " + m for m in sorted(METRICS)]
+    where = ["o.ordered_at >= {{ from_date }}", "o.ordered_at < {{ to_date }}"]
+    if params.get("channel"):
+        where.append("o.channel = {{ channel }}")
+    if params.get("min_total"):
+        where.append("o.total >= {{ min_total }}")
+    select = ["b.bucket"] + dims + metrics
+    group = ["b.bucket"] + dims
+    return ("WITH base AS (\n" +
+        "  SELECT o.id, o.customer_id, o.channel, o.total, o.refund_total,\n" +
+        "         " + GRAIN[params["grain"]] + " AS bucket\n" +
+        "  FROM sales.orders o\n" +
+        "  WHERE " + "\n    AND ".join(where) + "\n" +
+        "    AND o.status IN ('complete', 'shipped')\n" +
+        "), enriched AS (\n" +
+        "  SELECT b.*, l.quantity, c.region, c.segment, p.category\n" +
+        "  FROM base b\n" +
+        "  JOIN sales.order_lines l ON l.order_id = b.id\n" +
+        "  JOIN sales.customers c ON c.id = b.customer_id\n" +
+        "  JOIN sales.products p ON p.id = l.product_id\n" +
+        ")\n" +
+        "SELECT " + ", ".join(select) + "\n" +
+        "FROM enriched b\n" +
+        "GROUP BY " + ", ".join(group) + "\n" +
+        "ORDER BY b.bucket\n" +
+        "LIMIT {{ row_limit }}")
+"#;
+        let params = BTreeMap::from([
+            ("grain".to_string(), json!("month")),
+            ("by_region".to_string(), json!(true)),
+            ("by_segment".to_string(), json!(true)),
+            ("by_channel".to_string(), json!(true)),
+            ("by_category".to_string(), json!(true)),
+            ("channel".to_string(), json!("web")),
+            ("min_total".to_string(), json!(10)),
+        ]);
+        let sql = build_sql(script, &params).expect("a realistic script runs");
+
+        // The script is itself a quarter of `MAX_TRANSFORM_SCRIPT_BYTES`, which
+        // is what makes it a fair sample of the upper end rather than a toy.
+        assert!(
+            (1800..1950).contains(&script.len()),
+            "the fixture drifted: {} bytes",
+            script.len()
+        );
+        assert!(
+            (900..1000).contains(&sql.len()),
+            "the emitted template drifted: {} bytes",
+            sql.len()
+        );
+        assert!(
+            sql.contains("{{ region }}") || sql.contains("{{ channel }}"),
+            "the caller's values must still be unrendered placeholders: {sql}"
+        );
+        assert!(
+            MAX_GENERATED_SQL_BYTES >= 40 * sql.len(),
+            "the cap ({MAX_GENERATED_SQL_BYTES}) must leave a realistic \
+             statement ({}) the same order of headroom \
+             MAX_TRANSFORM_SCRIPT_BYTES leaves C2's example",
+            sql.len()
+        );
+    }
+
+    /// A template past [`MAX_GENERATED_SQL_BYTES`] is refused, with both
+    /// numbers.
+    ///
+    /// The evaluator's existing budgets do not reach this: `"z" * 70000` is one
+    /// instruction and a few tens of kilobytes against a 64 MiB heap, so a
+    /// script can emit a megabyte well inside every limit C2 installed. The
+    /// only backstop before this rule was `render::MAX_SQL_BYTES`, a downstream
+    /// error at render time rather than the author-facing cap spec S5 asks for.
+    #[test]
+    fn a_template_over_the_cap_is_refused_by_the_cap_not_by_a_budget() {
+        let over = MAX_GENERATED_SQL_BYTES + 1;
+        let script = format!("def build_sql(params):\n  return \"z\" * {over}");
+        let err = build_sql(&script, &BTreeMap::new()).expect_err("over the cap");
+        match &err {
+            TransformError::GeneratedSqlTooLarge { bytes, cap } => {
+                assert_eq!(*bytes, over, "the exact size, not a lower bound");
+                assert_eq!(*cap, MAX_GENERATED_SQL_BYTES);
+            }
+            other => panic!("expected a length refusal, not a budget one: {other:?}"),
+        }
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "build_sql returned a {over} byte template, over the \
+                 {MAX_GENERATED_SQL_BYTES} byte cap"
+            ),
+            "both numbers, so an author knows how much to cut"
+        );
+    }
+
+    /// The boundary is inclusive: exactly the cap is a template, one more is
+    /// not.
+    ///
+    /// Two assertions rather than one because an off-by-one here is invisible
+    /// to a test that only pushes something obviously huge through — and this
+    /// cap is the sole reason the size of a generated statement is bounded at
+    /// all, so its edge is worth naming.
+    #[test]
+    fn a_template_of_exactly_the_cap_is_accepted() {
+        let script = format!("def build_sql(params):\n  return \"z\" * {MAX_GENERATED_SQL_BYTES}");
+        let sql = build_sql(&script, &BTreeMap::new()).expect("exactly the cap fits");
+        assert_eq!(sql.len(), MAX_GENERATED_SQL_BYTES);
+    }
+
+    /// The cap counts BYTES, not characters.
+    ///
+    /// `MAX_TRANSFORM_SCRIPT_BYTES` and `render::MAX_SQL_BYTES` are both byte
+    /// counts, and a `.chars().count()` here would let a script emitting
+    /// multi-byte text produce up to four times the memory those numbers
+    /// bound. Starlark strings are UTF-8, so this is `str::len` and the test
+    /// says which one it is.
+    #[test]
+    fn the_cap_counts_bytes_rather_than_characters() {
+        // Two bytes each, so half the cap in characters is exactly the cap in
+        // bytes, and one character more is over it.
+        let chars = MAX_GENERATED_SQL_BYTES / 2 + 1;
+        let script = format!("def build_sql(params):\n  return \"\\u00e9\" * {chars}");
+        match build_sql(&script, &BTreeMap::new()).expect_err("over the cap in BYTES") {
+            TransformError::GeneratedSqlTooLarge { bytes, .. } => {
+                assert_eq!(bytes, chars * 2, "a character count would say {chars}");
+            }
+            other => panic!("expected a length refusal: {other:?}"),
+        }
     }
 
     /// A script returning a dict or a list is an author mistake. Coercing it
