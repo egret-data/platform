@@ -384,6 +384,34 @@ struct Budgets {
     /// own private `DEFAULT_STACK_SIZE`". Only tests pass `None`.
     callstack: Option<usize>,
     wall_clock: Duration,
+    /// A SECOND deadline, taken fresh when the output phase begins.
+    ///
+    /// `None` — the only value a shipped binary can produce — means the output
+    /// phase shares the one deadline taken at the top of [`eval_inner`], which
+    /// is the production rule and the one `run_transform` argues for: a script
+    /// does not get a fresh two seconds for its output.
+    ///
+    /// # Why the seam exists, measured
+    ///
+    /// One deadline across three phases means the EARLIER phase can spend it,
+    /// and then the later phase's own guard is unreachable — not because it is
+    /// missing, but because nothing gets that far. That is correct in
+    /// production and fatal in a test that names a specific guard, and it is
+    /// not hypothetical: with 8 spinner processes on 8 cores,
+    /// `an_absurdly_deep_return_is_refused_rather_than_killing_the_process`,
+    /// `an_oversized_output_is_refused_with_both_numbers` and
+    /// `a_wide_shared_fan_out_is_stopped_by_the_output_deadline` failed **3 runs
+    /// out of 3**, all three reporting a `"wall-clock deadline"` raised by the
+    /// phase BEFORE the one under test. Idle, all three passed.
+    ///
+    /// The fix a reviewer will reach for first — relax the assertion to
+    /// `matches!(err, BudgetExceeded(_))` — is the wrong one and was measured to
+    /// be: see the comment in
+    /// `a_wide_shared_fan_out_is_stopped_by_the_output_deadline`, where that
+    /// version passed **with the poll it exists to pin deleted**. So the tests
+    /// keep their exact assertions and get a budget in which only the phase
+    /// under test can overrun.
+    output_wall_clock: Option<Duration>,
 }
 
 impl Default for Budgets {
@@ -392,6 +420,8 @@ impl Default for Budgets {
             ticks: MAX_TICKS,
             callstack: Some(MAX_CALLSTACK),
             wall_clock: MAX_WALL_CLOCK,
+            // One deadline across every phase. See the field.
+            output_wall_clock: None,
         }
     }
 }
@@ -405,6 +435,26 @@ impl Budgets {
 
     fn without_callstack_limit(mut self) -> Self {
         self.callstack = None;
+        self
+    }
+
+    /// Enlarge the deadline the EVALUATION runs under.
+    ///
+    /// For a test whose subject is a guard in the OUTPUT phase and whose script
+    /// is slow to evaluate: without this the evaluation eats the budget on a
+    /// contended machine and the guard under test never runs.
+    fn with_wall_clock(mut self, wall_clock: Duration) -> Self {
+        self.wall_clock = wall_clock;
+        self
+    }
+
+    /// Give the OUTPUT phase a deadline of its own, taken when it begins.
+    ///
+    /// Always paired with [`Budgets::with_wall_clock`]: enlarging the evaluation
+    /// deadline alone would enlarge the output phase's too, since they are the
+    /// same instant.
+    fn with_output_wall_clock(mut self, output_wall_clock: Duration) -> Self {
+        self.output_wall_clock = Some(output_wall_clock);
         self
     }
 }
@@ -700,12 +750,19 @@ pub(crate) fn check_returns(
         ));
     }
 
+    // Through a SET, not `returns.iter().any(...)` per field. This function
+    // runs against every response of every request, and the linear form was
+    // O(fields x returns) — with `returns` unbounded until
+    // `lifecycle::MAX_TRANSFORM_RETURNS` and `fields` bounded only by
+    // `MAX_TRANSFORM_OUTPUT_BYTES`, that product was a request-path cost nobody
+    // could name. One pass to build, one lookup per field.
+    let declared: HashSet<&str> = returns.iter().map(|c| c.name.as_str()).collect();
     // Sorted, so the message does not depend on `serde_json::Map`'s ordering —
     // which is BTree today and insertion-ordered under `preserve_order`, i.e. a
     // feature flag away from making this text depend on the script's key order.
     let mut undeclared: Vec<&str> = fields
         .keys()
-        .filter(|k| !returns.iter().any(|c| &c.name == *k))
+        .filter(|k| !declared.contains(k.as_str()))
         .map(String::as_str)
         .collect();
     undeclared.sort_unstable();
@@ -933,7 +990,18 @@ fn eval_inner(
                 .eval_function(entry, &[params, statements], &[])
                 .map_err(classify)?;
 
-            serialise_output(returned, deadline)
+            // The output phase's deadline. `None` — every shipped build — is
+            // the same instant the evaluation ran under, so a script does not
+            // get a fresh two seconds for its output. `Some` is the test-only
+            // seam described on `Budgets::output_wall_clock`, and it is taken
+            // HERE rather than at the top of this function precisely so that
+            // what the evaluation spent cannot come out of it.
+            let output_deadline = match budgets.output_wall_clock {
+                None => deadline,
+                Some(window) => Instant::now() + window,
+            };
+
+            serialise_output(returned, output_deadline)
         })
     }));
 
@@ -2190,6 +2258,51 @@ mod tests {
         assert_eq!(shipped.ticks, MAX_TICKS);
         assert_eq!(shipped.callstack, Some(MAX_CALLSTACK));
         assert_eq!(shipped.wall_clock, MAX_WALL_CLOCK);
+        // The seam three output-phase tests use, pinned OFF in the shipped
+        // budget. `Some(_)` here would mean a script gets a fresh deadline for
+        // its output in production — the exact relaxation `run_transform`'s
+        // doc comment argues against, and the one that would be invisible
+        // because every other assertion in this module would still pass.
+        assert_eq!(
+            shipped.output_wall_clock, None,
+            "a shipped evaluation must run its output phase on the SAME deadline              as its evaluation; a second window here is a fresh unbounded phase              for any script that overran the first"
+        );
+    }
+
+    /// The output phase's deadline really is a SEPARATE one when asked for.
+    ///
+    /// Without this, `output_wall_clock` could be read and discarded and the
+    /// only thing that would notice is the three tests it exists for — which
+    /// would go green anyway, since they would then be running on one enlarged
+    /// deadline. So this pins the property directly: an evaluation given a
+    /// generous *evaluation* window and a zero-length *output* window must be
+    /// refused by the output phase, and must name the output phase in the
+    /// refusal.
+    ///
+    /// A zero window rather than a small one: the walk polls every
+    /// `OUTPUT_POLL_STEPS`, so a deadline already in the past on arrival is the
+    /// only value that makes the assertion independent of how fast this machine
+    /// walks four values.
+    #[test]
+    fn the_output_phase_can_be_given_a_deadline_of_its_own() {
+        let script = "def transform(params, statements):\n  x = []\n  for i in range(20000):\n    x.append(i)\n  return x";
+        let params = std::collections::BTreeMap::new();
+        let statements = std::collections::BTreeMap::new();
+        let err = eval_inner(
+            script,
+            Budgets::default()
+                .with_wall_clock(Duration::from_secs(300))
+                .with_output_wall_clock(Duration::ZERO),
+            Some(TransformCall {
+                params: &params,
+                statements: &statements,
+            }),
+        )
+        .expect_err("an output phase whose deadline has already passed must be refused");
+        assert!(
+            matches!(err, TransformError::BudgetExceeded(SHAPE_DEADLINE)),
+            "the OUTPUT phase must be what refuses, on its own deadline — a              `wall-clock deadline` here would mean the evaluation's window was              used for the output too: {err:?}"
+        );
     }
 }
 
@@ -2202,6 +2315,85 @@ mod transform_tests {
     use super::*;
     use serde_json::json;
     use std::collections::BTreeMap;
+
+    /// [`run_transform`] with the budgets spelled out, for the three tests
+    /// whose subject is a guard in the OUTPUT phase.
+    ///
+    /// `run_transform` is [`Budgets::default`] and nothing else, which is the
+    /// right shape for production and the wrong one for a test that names a
+    /// specific output-phase refusal: one deadline covers evaluation and output
+    /// together, so on a loaded machine the evaluation spends it and the guard
+    /// under test never runs. See [`Budgets::output_wall_clock`] for the
+    /// measurement — 3 failures out of 3 runs under contention, 0 out of 2
+    /// idle.
+    ///
+    /// Every other test in this module still goes through `run_transform`, so
+    /// this seam is used by exactly the three that need it and the shipped
+    /// budget stays the thing under test everywhere else. What the enlarged
+    /// numbers may NOT do is change which refusal is correct: each of the three
+    /// keeps its exact assertion, and each was re-checked against a mutant of
+    /// the guard it names.
+    fn run_transform_under(
+        spec: &TransformSpec,
+        budgets: Budgets,
+    ) -> Result<serde_json::Value, TransformError> {
+        let params = BTreeMap::new();
+        let statements = BTreeMap::new();
+        eval_inner(
+            &spec.script,
+            budgets,
+            Some(TransformCall {
+                params: &params,
+                statements: &statements,
+            }),
+        )
+    }
+
+    /// The evaluation deadline the three output-phase tests run under.
+    ///
+    /// Large enough that the SCRIPT finishing is not in question on any machine
+    /// this suite runs on — these scripts build millions of values in an
+    /// unoptimised build — and it bounds nothing those tests assert, because
+    /// none of them asserts an evaluation-phase refusal.
+    const SLOW_MACHINE_EVAL_WINDOW: Duration = Duration::from_secs(300);
+
+    /// The OUTPUT deadline `a_wide_shared_fan_out_is_stopped_by_the_output_deadline`
+    /// runs under, and it is small on purpose.
+    ///
+    /// # Why not `MAX_WALL_CLOCK`
+    ///
+    /// **Measured, and it is a coin flip.** That fan-out's walk is ~2 s in an
+    /// unoptimised build on the machine this was written on, which is
+    /// `MAX_WALL_CLOCK` to within the noise: run alone on an IDLE machine with a
+    /// fresh 2 s window, the same test passed, failed and passed on three
+    /// consecutive runs — the walk finishing first and reporting
+    /// `OutputTooLarge`. A window a test's own subject finishes inside is not a
+    /// deadline, it is a race, and it is the same class of defect as the
+    /// contended failures this seam exists to fix, one machine-speed in the
+    /// other direction.
+    ///
+    /// # Why 50 ms specifically, and what it costs
+    ///
+    /// The walk cannot be made much longer: it is ~10 million child iterations
+    /// and it is already near `MAX_HEAP_BYTES` — `[c] * 5000000` is ~40 MB of
+    /// pointers against a 64 MiB limit, so doubling it is refused by the heap
+    /// rather than walked. So the window shrinks instead. 50 ms against a
+    /// ~2000 ms walk is a **~40x margin** on this machine, and still ~4x on a
+    /// hypothetical machine ten times faster; the deadline is polled every
+    /// `OUTPUT_POLL_STEPS`, which is well under a millisecond of these steps, so
+    /// nothing about the granularity fights it.
+    ///
+    /// **What this costs, stated rather than buried.** 50 ms lands inside the
+    /// PUSH loop (a node's children are pushed before any of them are summed),
+    /// so what this test now pins by wall-clock position is the child poll in
+    /// the push loop. The sum loop's poll is the same `poll_output_deadline`
+    /// call on the same `since_poll` counter, and deleting BOTH is what was
+    /// measured against this test — it then reports
+    /// `OutputTooLarge { bytes: 10000001 }`, the walk having run to completion
+    /// outside every budget. Landing in the sum loop instead would require the
+    /// window to exceed the push loop's duration, which is a number that varies
+    /// with the machine — i.e. exactly the race above, wearing a different hat.
+    const SHAPE_WALK_WINDOW: Duration = Duration::from_millis(50);
 
     #[test]
     fn a_transform_receives_params_and_statements_and_returns_json() {
@@ -2280,7 +2472,18 @@ mod transform_tests {
             ),
             returns: vec![],
         };
-        match run_transform(&spec, &BTreeMap::new(), &BTreeMap::new()) {
+        // Both phases enlarged, and neither number is load-bearing: this test
+        // asserts a SIZE refusal, not a time one. Building a million-element
+        // list and then walking it is slow in an unoptimised build, and under
+        // contention the shipped 2 s was spent before `check_output_shape`
+        // reached the value count — measured, this test failed 3 runs out of 3
+        // that way, with `BudgetExceeded(SHAPE_DEADLINE)`.
+        match run_transform_under(
+            &spec,
+            Budgets::default()
+                .with_wall_clock(SLOW_MACHINE_EVAL_WINDOW)
+                .with_output_wall_clock(SLOW_MACHINE_EVAL_WINDOW),
+        ) {
             Err(TransformError::OutputTooLarge { bytes, cap }) => {
                 assert!(
                     bytes > cap,
@@ -2417,7 +2620,18 @@ mod transform_tests {
                 .into(),
             returns: vec![],
         };
-        match run_transform(&spec, &BTreeMap::new(), &BTreeMap::new()) {
+        // 200 000 loop iterations, unoptimised. Under contention that alone
+        // outran the shipped 2 s deadline and the depth guard never ran —
+        // measured, 3 failures out of 3, every one of them
+        // `BudgetExceeded("wall-clock deadline")` from the EVALUATION. The
+        // depth guard is a counter, not a clock, so neither window below can
+        // decide what this asserts.
+        match run_transform_under(
+            &spec,
+            Budgets::default()
+                .with_wall_clock(SLOW_MACHINE_EVAL_WINDOW)
+                .with_output_wall_clock(SLOW_MACHINE_EVAL_WINDOW),
+        ) {
             Err(TransformError::BudgetExceeded("output nesting depth")) => {}
             other => panic!("expected BudgetExceeded(\"output nesting depth\"), got {other:?}"),
         }
@@ -2564,12 +2778,28 @@ mod transform_tests {
         };
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(run_transform(&spec, &BTreeMap::new(), &BTreeMap::new()));
+            // The EVALUATION gets a window it cannot plausibly overrun, and the
+            // OUTPUT phase gets a small one of its own, taken fresh when it
+            // begins. That is the whole recalibration: this test's subject is
+            // the walk being cut off by ITS deadline, and it still is — what it
+            // no longer depends on is the machine. On one deadline shared with
+            // the evaluation it failed 3 contended runs out of 3 with the SHAPE
+            // poll perfectly intact; on a fresh `MAX_WALL_CLOCK` it failed 1
+            // idle run out of 3, the walk finishing first. See
+            // `SHAPE_WALK_WINDOW` for both measurements.
+            let _ = tx.send(run_transform_under(
+                &spec,
+                Budgets::default()
+                    .with_wall_clock(SLOW_MACHINE_EVAL_WINDOW)
+                    .with_output_wall_clock(SHAPE_WALK_WINDOW),
+            ));
         });
         // Long enough that the UNPOLLED walk finishes and fails the assertion
-        // below, rather than timing out and blaming the harness.
+        // below, rather than timing out and blaming the harness. Sized against
+        // the evaluation window above rather than against `MAX_WALL_CLOCK`,
+        // which is no longer what bounds this thread.
         let out = rx
-            .recv_timeout(MAX_WALL_CLOCK * 60)
+            .recv_timeout(SLOW_MACHINE_EVAL_WINDOW * 2)
             .expect("the output walk never returned at all");
 
         // `assert_eq!` on the payload, NOT `matches!(err,

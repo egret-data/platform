@@ -53,22 +53,74 @@ function newReturnColumn(): ColumnSpec {
   return { name: "", ty: "", required: true };
 }
 
-/** Names declared more than once in `returns` — a JSON object has one key per
- *  name, so publish refuses this with `TransformReturnsDuplicateName` and
- *  serving would have no single value to check. Blank names are excluded: an
- *  author adding a second row before naming it should not see every blank row
- *  flagged as a collision with every other blank row. */
-function duplicateReturnNames(returns: ColumnSpec[]): Set<string> {
-  const seen = new Set<string>();
-  const dupes = new Set<string>();
+/**
+ * `crates/egret-dataapi/src/lifecycle.rs`'s `MAX_TRANSFORM_RETURNS`. A copy,
+ * for the same reason `MAX_TRANSFORM_SCRIPT_BYTES` above is one.
+ */
+const MAX_TRANSFORM_RETURNS = 64;
+
+/** What is wrong with one row's `name`, in the order `check_transform_shape`
+ *  decides it. `null` means nothing is. */
+type ReturnNameProblem = "blank" | "padded" | "duplicate";
+
+/**
+ * Why each row's `name` would be refused at publish — one problem per row,
+ * `null` where there is none.
+ *
+ * # This is a PREVIEW of a server rule, and it is now the same rule
+ *
+ * It used to be a different one, in both directions, and both were reachable
+ * from the editor:
+ *
+ * - the editor trimmed and skipped blanks, so **two unnamed rows looked fine**
+ *   here and publish refused them with ``duplicate name ""`` — a refusal
+ *   naming a column that does not exist;
+ * - the editor compared trimmed names, so `"total"` beside `"total "` was
+ *   **flagged here and published happily** — two OpenAPI properties nobody can
+ *   tell apart.
+ *
+ * `check_transform_shape` now refuses a blank name as blank and a padded name
+ * as padded, BEFORE its duplicate rule. So by the time either side compares
+ * names for duplication, every name is non-blank and already trimmed, and
+ * comparing verbatim (Rust) and comparing trimmed (here) are the same
+ * comparison. That is the agreement, and it is why the duplicate pass below
+ * uses the raw `name`.
+ *
+ * # Why it is checked twice at all
+ *
+ * The server is the gate — no write route calls `check_transform`, so this
+ * editor is the only thing between an author and a refusal that arrives at
+ * Preview or Publish. This exists to move that refusal to the keystroke, never
+ * to replace it: a row this function passes can still be refused by the server,
+ * and a row it flags is always refused by the server.
+ */
+function returnNameProblems(returns: ColumnSpec[]): (ReturnNameProblem | null)[] {
+  // Counted first, so BOTH rows of a colliding pair are marked rather than
+  // only the second. The server names the collision once (it has one error to
+  // return); the author has two rows on screen and needs to see which two.
+  // Only well-formed names are counted — a blank or padded row has its own,
+  // more specific problem and must not also read as somebody's duplicate.
+  const counts = new Map<string, number>();
   for (const c of returns) {
-    const name = c.name.trim();
-    if (!name) continue;
-    if (seen.has(name)) dupes.add(name);
-    else seen.add(name);
+    if (c.name.trim() !== "" && c.name.trim() === c.name) {
+      counts.set(c.name, (counts.get(c.name) ?? 0) + 1);
+    }
   }
-  return dupes;
+  return returns.map((c) => {
+    if (c.name.trim() === "") return "blank";
+    if (c.name.trim() !== c.name) return "padded";
+    if ((counts.get(c.name) ?? 0) > 1) return "duplicate";
+    return null;
+  });
 }
+
+/** The sentence shown under a row whose name would be refused. */
+const RETURN_NAME_PROBLEM_TEXT: Record<ReturnNameProblem, string> = {
+  blank: "Name this column — a declared column is matched against the response by name, and a blank name matches nothing.",
+  padded:
+    "Remove the leading or trailing space — the name becomes a JSON key exactly as written, so this and its trimmed spelling would be two columns nobody can tell apart.",
+  duplicate: "Declared more than once — a JSON object has one key per name.",
+};
 
 /**
  * Just enough of the generated OpenAPI document to show the base URL. The
@@ -300,7 +352,8 @@ function ReturnsEditor({
 }) {
   const nextRowId = useRef(returns.length);
   const [rowIds, setRowIds] = useState<number[]>(() => returns.map((_, i) => i));
-  const dupes = duplicateReturnNames(returns);
+  const problems = returnNameProblems(returns);
+  const overCap = returns.length > MAX_TRANSFORM_RETURNS;
 
   function update(i: number, patch: Partial<ColumnSpec>) {
     onChange(returns.map((c, j) => (j === i ? { ...c, ...patch } : c)));
@@ -337,6 +390,19 @@ function ReturnsEditor({
           </AlertDescription>
         </Alert>
       )}
+      {/* The `returns` cap, previewed the same way the script's byte cap is:
+          `check_transform_shape` refuses more than `MAX_TRANSFORM_RETURNS`,
+          and no write route checks a transform, so without this an author
+          builds the list and meets the refusal at Preview or Publish. */}
+      {overCap && (
+        <Alert variant="destructive">
+          <AlertDescription>
+            {returns.length} return columns declared, over the {MAX_TRANSFORM_RETURNS} column cap.
+            Serving checks every response against this list on every request. Preview and Publish
+            both refuse this.
+          </AlertDescription>
+        </Alert>
+      )}
       <Table className="max-w-xl table-fixed">
         <TableHeader>
           <TableRow>
@@ -352,21 +418,26 @@ function ReturnsEditor({
           {returns.map((c, i) => {
             const rowId = rowIds[i] ?? i;
             const row = `Return ${i + 1}`;
-            const name = c.name.trim();
-            const isDup = name !== "" && dupes.has(name);
+            const problem = problems[i] ?? null;
             return (
               <TableRow key={rowId}>
                 <TableCell className="align-top">
                   <Input
                     id={`return-name-${rowId}`}
                     aria-label={`${row} name`}
-                    aria-invalid={isDup}
+                    // A blank name is the state EVERY freshly added row starts
+                    // in, so it is reported as a sentence under the field and
+                    // not as `aria-invalid` — announcing "invalid" the instant
+                    // an author clicks Add would be the editor shouting at
+                    // someone who has not typed yet. `padded` and `duplicate`
+                    // are things an author did.
+                    aria-invalid={problem !== null && problem !== "blank"}
                     value={c.name}
                     onChange={(e) => update(i, { name: e.target.value })}
                   />
-                  {isDup && (
+                  {problem && (
                     <p className="mt-1 text-xs text-destructive">
-                      Declared more than once — a JSON object has one key per name.
+                      {RETURN_NAME_PROBLEM_TEXT[problem]}
                     </p>
                   )}
                 </TableCell>
@@ -483,20 +554,59 @@ export default function ResponseSection() {
    * `"objects"`/`"as_is"` strings, matching how every Select above already
    * reads an absent field as its own default.
    */
+  /**
+   * What `enableTransform` cleared, so that `disableTransform` can put it
+   * back.
+   *
+   * A `ref`, not state: nothing renders from it, and it must not re-render
+   * anything when it changes. It is written on the way in and read on the way
+   * out, so ticking the box and unticking it leaves `output` exactly as it was
+   * found — before this, `shape: "arrays"` was cleared by the tick and simply
+   * gone, and an author who ticked the box to look at the script and unticked
+   * it again silently published an `objects` endpoint.
+   *
+   * **What it deliberately does not survive: unmounting.** Leaving the section
+   * and coming back restores nothing, because there is nothing left to restore
+   * from — the cleared values are not in `form` any more, which is the whole
+   * point of clearing them (see `enableTransform`). Within one visit, which is
+   * where the accident happens, this is exact.
+   */
+  const clearedByTransform = useRef<{ shape?: string; naming?: string } | null>(null);
+
   function enableTransform() {
-    setForm((f) => ({
-      ...f,
-      output: {
-        ...f.output,
-        shape: undefined,
-        naming: undefined,
-        transform: { script: DEFAULT_TRANSFORM_SCRIPT, returns: [] },
-      },
-    }));
+    setForm((f) => {
+      clearedByTransform.current = { shape: f.output.shape, naming: f.output.naming };
+      return {
+        ...f,
+        output: {
+          ...f.output,
+          shape: undefined,
+          naming: undefined,
+          transform: { script: DEFAULT_TRANSFORM_SCRIPT, returns: [] },
+        },
+      };
+    });
   }
 
   function disableTransform() {
-    setForm((f) => ({ ...f, output: { ...f.output, transform: null } }));
+    setForm((f) => {
+      const restored = clearedByTransform.current;
+      clearedByTransform.current = null;
+      return {
+        ...f,
+        output: {
+          ...f.output,
+          // `?? f.output.shape` rather than an unconditional write: with
+          // nothing remembered (a transform that was already on when this
+          // section mounted) the field is left exactly as it is, which is the
+          // behaviour before this ref existed. Restoring `undefined` there
+          // would be this fix inventing a change of its own.
+          shape: restored ? restored.shape : f.output.shape,
+          naming: restored ? restored.naming : f.output.naming,
+          transform: null,
+        },
+      };
+    });
   }
 
   /** Patches the transform IN PLACE — spreading the existing object rather

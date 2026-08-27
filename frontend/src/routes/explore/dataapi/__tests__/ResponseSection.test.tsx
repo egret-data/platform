@@ -282,6 +282,153 @@ describe("ResponseSection — response transform", () => {
     expect(rows).toHaveLength(2);
   });
 
+  /**
+   * Two unnamed rows are two unnamed rows.
+   *
+   * The editor used to trim and skip blanks, so this state looked FINE here
+   * and publish refused it with ``duplicate name ""`` — a refusal quoting a
+   * column that does not exist, for an author with two blank rows on screen
+   * and nothing to tell them apart. `check_transform_shape` now refuses a
+   * blank name as blank, before its duplicate rule, and this is the editor
+   * saying the same thing.
+   *
+   * The second assertion is the load-bearing one: "not flagged as duplicates"
+   * is what was wrong before, and a test that only checked for *some* error
+   * would have passed on the old message.
+   */
+  it("reports two unnamed return rows as unnamed, not as duplicates of each other", async () => {
+    renderResponse({
+      transform: {
+        script: "def transform(params, statements):\n    return {}",
+        returns: [
+          { name: "", ty: "integer" },
+          { name: "   ", ty: "integer" },
+        ],
+      },
+    });
+
+    expect(await screen.findAllByText(/Name this column/i)).toHaveLength(2);
+    expect(screen.queryByText(/Declared more than once/i)).not.toBeInTheDocument();
+  });
+
+  /**
+   * `"total"` beside `"total "` — the disagreement in the other direction.
+   *
+   * The editor flagged this pair as a collision while publish accepted it and
+   * froze two OpenAPI properties nobody can tell apart. `check_transform_shape`
+   * now refuses the padded name as padded, and the editor names the same
+   * problem: the padded row is the one at fault, and `"total"` on its own is
+   * fine.
+   */
+  it("reports a whitespace-padded return name as padded, and leaves its twin alone", async () => {
+    renderResponse({
+      transform: {
+        script: "def transform(params, statements):\n    return {}",
+        returns: [
+          { name: "total", ty: "integer" },
+          { name: "total ", ty: "integer" },
+        ],
+      },
+    });
+
+    expect(await screen.findAllByText(/Remove the leading or trailing space/i)).toHaveLength(1);
+    expect(screen.queryByText(/Declared more than once/i)).not.toBeInTheDocument();
+  });
+
+  /**
+   * `MAX_TRANSFORM_RETURNS`, previewed. `returns` was the one
+   * author-controlled list with no cap at all, and the editor is where an
+   * author meets a cap while they can still change something.
+   */
+  it("warns when more return columns are declared than the cap allows", async () => {
+    const returns = Array.from({ length: 65 }, (_, i) => ({ name: `c${i}`, ty: "integer" }));
+    renderResponse({
+      transform: { script: "def transform(params, statements):\n    return {}", returns },
+    });
+
+    expect(await screen.findByText(/65 return columns declared, over the 64 column cap/i)).toBeInTheDocument();
+  });
+
+  /** Exactly at the cap is fine — so the test above discriminates a limit
+   *  rather than the presence of many rows. */
+  it("does not warn at exactly the cap", async () => {
+    const returns = Array.from({ length: 64 }, (_, i) => ({ name: `c${i}`, ty: "integer" }));
+    renderResponse({
+      transform: { script: "def transform(params, statements):\n    return {}", returns },
+    });
+
+    expect(await screen.findByLabelText("Return 1 name")).toBeInTheDocument();
+    expect(screen.queryByText(/over the 64 column cap/i)).not.toBeInTheDocument();
+  });
+
+  /**
+   * The script byte cap — counted in UTF-8 BYTES, which is what
+   * `String::len()` counts on the Rust side.
+   *
+   * This is the assertion `scriptByteLength` exists for and had none: the
+   * script below is 8192 UTF-16 code units and 8193 UTF-8 bytes, because one
+   * character is a two-byte `é`. A `.length` counter reads it as exactly at
+   * the cap and says nothing; the server refuses it. So a test that used an
+   * ASCII script could not tell the two implementations apart, and that is
+   * precisely how this went untested through 51 new tests.
+   */
+  it("counts the script cap in UTF-8 bytes, not UTF-16 code units", async () => {
+    const head = "def transform(params, statements):\n  # é";
+    // Pad to exactly MAX_TRANSFORM_SCRIPT_BYTES UTF-16 units.
+    const script = head + "x".repeat(8192 - head.length);
+    expect(script.length).toBe(8192);
+    expect(new TextEncoder().encode(script).length).toBe(8193);
+
+    renderResponse({ transform: { script, returns: [{ name: "id", ty: "integer" }] } });
+
+    expect(await screen.findByText(/8,193 \/ 8,192 bytes/)).toBeInTheDocument();
+    expect(screen.getByText(/over the cap/i)).toBeInTheDocument();
+  });
+
+  /** An ASCII script one byte under the cap is not flagged — the mirror, so
+   *  the test above pins the boundary rather than "any long script warns". */
+  it("does not flag a script one byte under the cap", async () => {
+    const head = "def transform(params, statements):\n  # ";
+    const script = head + "x".repeat(8191 - head.length);
+    expect(new TextEncoder().encode(script).length).toBe(8191);
+
+    renderResponse({ transform: { script, returns: [{ name: "id", ty: "integer" }] } });
+
+    expect(await screen.findByText(/8,191 \/ 8,192 bytes/)).toBeInTheDocument();
+    expect(screen.queryByText(/over the cap/i)).not.toBeInTheDocument();
+  });
+
+  /**
+   * Ticking the box and unticking it must leave `output` as it was found.
+   *
+   * `enableTransform` clears `shape` and `naming` deliberately — leaving a
+   * stale non-default underneath a control that has vanished is the defect it
+   * exists to prevent — but nothing put them back, so an author who ticked the
+   * box to look at the script and unticked it again silently published an
+   * `objects`/`as_is` endpoint that had been `arrays`/`camel`.
+   *
+   * Seeded with NON-default values, so the assertion proves a restore rather
+   * than agreeing with a field that was never set.
+   */
+  it("restores the shape and naming it cleared when the transform is turned off again", async () => {
+    let latest: EndpointFormState | undefined;
+    renderResponse({ shape: "arrays", naming: "camel" }, (f) => {
+      latest = f;
+    });
+
+    const toggle = screen.getByRole("checkbox", { name: "Build the response with a script" });
+    await userEvent.click(toggle);
+    expect(await screen.findByLabelText("Response transform script")).toBeInTheDocument();
+    expect(latest?.output.shape).toBeUndefined();
+
+    await userEvent.click(screen.getByRole("checkbox", { name: "Build the response with a script" }));
+
+    expect(await screen.findByLabelText("Shape")).toBeInTheDocument();
+    expect(latest?.output.shape).toBe("arrays");
+    expect(latest?.output.naming).toBe("camel");
+    expect(latest?.output.transform).toBeNull();
+  });
+
   it("adds and removes a declared return row", async () => {
     renderResponse({
       transform: { script: "def transform(params, statements):\n    return {}", returns: [] },

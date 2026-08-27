@@ -108,9 +108,12 @@
 //!
 //! ## Why it is checked: nothing else checks it before publish
 //!
-//! `create` and `PATCH` do not call `check_transform` — the only production
-//! call site is [`crate::lifecycle::validate_endpoint`], which `/validate` and
-//! `publish` reach. So a script that does not parse, a `returns` with nothing
+//! `create` and `PATCH` do not call `check_transform` — the production call
+//! sites are [`crate::lifecycle::validate_endpoint`], which `/validate` and
+//! `publish` reach, and `EndpointStore::publish` itself, which since the C2
+//! fix wave runs the script half of it ABOVE its own `begin()` rather than
+//! inside the locked transaction (`lifecycle::ScriptEval`). So a script that
+//! does not parse, a `returns` with nothing
 //! in it, or a transform beside a non-default `shape` can all be SAVED, and
 //! before this the author heard about it for the first time at publish, having
 //! previewed green. Told "fine", then told "no" — the one thing this route

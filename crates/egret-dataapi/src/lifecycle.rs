@@ -705,6 +705,41 @@ pub enum ValidationError {
          per name, so a duplicate is not a stricter contract, it is an unresolvable one"
     )]
     TransformReturnsDuplicateName(String),
+    /// `output.transform.returns` declares more columns than
+    /// [`MAX_TRANSFORM_RETURNS`].
+    ///
+    /// Carries both numbers, like every other `…TooMany` arm here. See the
+    /// constant for why serving, not publish, is where the cost lands.
+    #[error(
+        "output.transform.returns declares {count} columns, over the {limit} column cap. \
+         Serving checks every response against this list on every request, and a response \
+         transform reshapes a response — it is not a place to enumerate a wide table"
+    )]
+    TransformReturnsTooMany { count: usize, limit: usize },
+    /// An entry in `output.transform.returns` has a blank `name`.
+    ///
+    /// No payload: the offending name is the empty string, and quoting it back
+    /// (`declares `` more than once`, which is what the duplicate rule used to
+    /// say for two unnamed rows) names nothing an author can find.
+    #[error(
+        "output.transform.returns has a column with no name. A declared column is matched \
+         against the response by name, and a blank name matches nothing — name it, or \
+         remove the row"
+    )]
+    TransformReturnsBlankName,
+    /// An entry in `output.transform.returns` has a `name` with leading or
+    /// trailing whitespace.
+    ///
+    /// Refused rather than trimmed. Trimming would silently publish a contract
+    /// whose OpenAPI property name is not the string the author typed, and
+    /// accepting it as-is makes `"total"` and `"total "` two columns that every
+    /// reader sees as one.
+    #[error(
+        "output.transform.returns declares `{0}`, whose name begins or ends with whitespace. \
+         The name becomes a JSON key and an OpenAPI property name exactly as written, so \
+         `{0}` and its trimmed spelling would be two columns nobody can tell apart"
+    )]
+    TransformReturnsPaddedName(String),
     /// `output.transform.script` does not parse under the transform dialect, or
     /// fails the same probe evaluation [`crate::transform::run_transform`]
     /// itself runs the module through.
@@ -1723,16 +1758,26 @@ pub const MAX_TRANSFORM_SCRIPT_BYTES: usize = 8192;
 /// Refusals are checked cheapest-and-most-structural first, so an author
 /// editing a script that is both too long AND missing `returns` sees the
 /// length problem rather than a starlark stack trace for a script that was
-/// going to be refused anyway:
+/// going to be refused anyway. [`check_transform_shape`] is 1-6 and
+/// [`check_transform_script`] is 7:
 ///
 /// 1. **script length** ([`MAX_TRANSFORM_SCRIPT_BYTES`]) — the cheapest
 ///    possible check, and it bounds how expensive every check after it can be;
 /// 2. **`shape`/`naming`** — see [`ValidationError::TransformWithShapeOrNaming`];
 /// 3. **empty `returns`** — see [`ValidationError::TransformReturnsEmpty`];
-/// 4. **duplicate `returns` names** — see
+/// 4. **too many `returns`** — [`MAX_TRANSFORM_RETURNS`], the bound that makes
+///    the two passes below, and `check_returns` on every served request, cost
+///    something an operator can name;
+/// 5. **blank or whitespace-padded `returns` names** — see
+///    [`ValidationError::TransformReturnsBlankName`] and
+///    [`ValidationError::TransformReturnsPaddedName`]. Before the duplicate
+///    rule, so that by the time it runs a verbatim comparison and a trimmed one
+///    are the same comparison;
+/// 6. **duplicate `returns` names** — see
 ///    [`ValidationError::TransformReturnsDuplicateName`];
-/// 5. **the script itself, parsed** — last, because it is the only check here
-///    that costs more than a comparison.
+/// 7. **the script itself, parsed and evaluated** — last, because it is the
+///    only check here that costs more than a comparison, and the only one a
+///    caller may be told to skip ([`ScriptEval`]).
 ///
 /// # Called once per ENDPOINT, not once per statement
 ///
@@ -1745,10 +1790,36 @@ pub const MAX_TRANSFORM_SCRIPT_BYTES: usize = 8192;
 /// runs a real Starlark interpreter bounded only by
 /// [`crate::transform::MAX_WALL_CLOCK`] (2s) per call. Called from the
 /// per-statement loop, an endpoint at `MAX_STATEMENTS` would pay that up to
-/// 16 times — worst case ~32s of evaluation held open inside `publish`'s
-/// locked transaction. Called once, the whole endpoint's transform cost is
-/// bounded by ONE evaluation, matching every other endpoint-wide rule.
+/// 16 times. Called once, the whole endpoint's transform cost is bounded by
+/// ONE evaluation, matching every other endpoint-wide rule.
+///
+/// # Where that one evaluation is spent
+///
+/// **Not inside `EndpointStore::publish`'s transaction.** That was true until
+/// this split and it was the more serious half of the same cost argument: 2 s
+/// is a bound on ticks, not on time, and the worst case measured against it is
+/// 28.8 s — of row lock and pool connection, held by author-supplied Starlark.
+/// [`ScriptEval`] is what publish passes to say the evaluation has already
+/// happened, outside the lock, over a script it then proves identical.
 pub fn check_transform(output: &OutputSpec) -> std::result::Result<(), ValidationError> {
+    check_transform_shape(output)?;
+    check_transform_script(output)
+}
+
+/// Every [`check_transform`] rule that is a COMPARISON — no parse, no
+/// evaluation, no interpreter.
+///
+/// Split out from [`check_transform_script`] for one reason, and it is a
+/// property of `EndpointStore::publish` rather than of this function: publish
+/// re-runs the whole validator against the row it has LOCKED, inside an open
+/// transaction, and running a Starlark interpreter there holds the endpoint's
+/// row lock and a pool connection for as long as the interpreter takes. See
+/// [`ScriptEval`] for the measurement and for what publish does instead.
+///
+/// Everything here is a string length, an equality against a default, or a
+/// pass over a list whose length this function is now what bounds
+/// ([`MAX_TRANSFORM_RETURNS`]) — microseconds, and safe to repeat under a lock.
+fn check_transform_shape(output: &OutputSpec) -> std::result::Result<(), ValidationError> {
     let Some(transform) = &output.transform else {
         return Ok(());
     };
@@ -1776,6 +1847,34 @@ pub fn check_transform(output: &OutputSpec) -> std::result::Result<(), Validatio
     if transform.returns.is_empty() {
         return Err(ValidationError::TransformReturnsEmpty);
     }
+    if transform.returns.len() > MAX_TRANSFORM_RETURNS {
+        return Err(ValidationError::TransformReturnsTooMany {
+            count: transform.returns.len(),
+            limit: MAX_TRANSFORM_RETURNS,
+        });
+    }
+
+    // BEFORE the duplicate rule, and that order is the whole point of this
+    // block. `check_transform` used to compare `col.name` verbatim and treat
+    // `""` as a name, so two unnamed rows published as
+    // `TransformReturnsDuplicateName("")` — a refusal naming a column that does
+    // not exist — while `"total"` and `"total "` were two different names to
+    // publish and one name to every reader. Refusing blank and padded names
+    // here means that by the time the duplicate rule runs, every name is
+    // non-blank and already trimmed, so comparing verbatim and comparing
+    // trimmed are the same comparison. That is what lets the editor's
+    // `returnNameProblems` (`ResponseSection.tsx`) be a preview of this rule
+    // rather than a second, differing one — see its comment.
+    for col in &transform.returns {
+        if col.name.trim().is_empty() {
+            return Err(ValidationError::TransformReturnsBlankName);
+        }
+        if col.name.trim() != col.name {
+            return Err(ValidationError::TransformReturnsPaddedName(
+                col.name.clone(),
+            ));
+        }
+    }
 
     let mut seen = std::collections::HashSet::with_capacity(transform.returns.len());
     for col in &transform.returns {
@@ -1786,8 +1885,85 @@ pub fn check_transform(output: &OutputSpec) -> std::result::Result<(), Validatio
         }
     }
 
+    Ok(())
+}
+
+/// The one [`check_transform`] rule that RUNS a Starlark interpreter.
+///
+/// Split out so that the one caller which must not run it — publish's
+/// in-transaction re-validation — cannot do so by accident. See [`ScriptEval`].
+fn check_transform_script(output: &OutputSpec) -> std::result::Result<(), ValidationError> {
+    let Some(transform) = &output.transform else {
+        return Ok(());
+    };
     crate::transform::eval_probe(&transform.script)
         .map_err(|e| ValidationError::TransformScriptInvalid(e.to_string()))
+}
+
+/// Ceiling on how many columns `output.transform.returns` may declare.
+///
+/// # Why there is one at all
+///
+/// It was the only author-controlled list in this module with no bound —
+/// `MAX_STATEMENTS` is 16, `MAX_DECLARED_PARAMS` is 32,
+/// [`MAX_TRANSFORM_SCRIPT_BYTES`] is 8192, and `returns` was unbounded. It is
+/// not a publish-time cost that makes that matter, it is a SERVING one:
+/// [`crate::transform::check_returns`] runs against **every response of every
+/// request**, and the undeclared-field half of it is a scan of `returns` per
+/// returned field.
+///
+/// # Why 64
+///
+/// Twice `MAX_DECLARED_PARAMS`, on the argument that a response object may
+/// reasonably carry more names than a request's query string does, and far
+/// above anything the shape this feature exists for produces — a transform
+/// reshapes a response, and the 8 KiB script cap already says an author writing
+/// 64 output fields by hand has left that shape behind. It is a backstop, not a
+/// design target: an honest transform never approaches it.
+pub const MAX_TRANSFORM_RETURNS: usize = 64;
+
+/// May [`validate_endpoint`] evaluate `output.transform.script`?
+///
+/// # The hazard this exists to remove, measured
+///
+/// `EndpointStore::publish` opens a transaction, takes a row lock with
+/// `SELECT ... FOR UPDATE`, and then re-runs [`validate_endpoint`] against the
+/// locked row. Until this enum existed, that re-validation called
+/// [`check_transform`], which parses and evaluates the script's module top
+/// level through a real Starlark interpreter.
+///
+/// [`crate::transform::MAX_WALL_CLOCK`] is 2 s, and it is **not a latency
+/// guarantee** — `run_transform`'s own doc comment records a script measured at
+/// **28.8 s** against that 2 s deadline, because the deadline is checked at
+/// 1000-tick granularity and a script whose every tick is expensive overruns
+/// it. So an authenticated author could hold an endpoint's row lock *and* a
+/// database pool connection, on an async worker, for tens of seconds per
+/// publish, from eight kilobytes of Starlark. That is strictly worse than the
+/// preview hazard Task 8 moved off the worker.
+///
+/// # What publish does instead
+///
+/// It evaluates the script **before** `begin()`, against the DRAFT, and then
+/// relies on the identity check it already performs: the transaction refuses
+/// with `Conflict` unless `current.output == draft.output`. So the script that
+/// was evaluated outside the lock is byte-identical to the script being frozen
+/// — the guarantee is unchanged, only where it is paid for is.
+///
+/// The evaluation count is unchanged too: publish evaluated the script once
+/// inside the transaction and now evaluates it once outside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ScriptEval {
+    /// Evaluate the script as part of this call. Every caller that holds no
+    /// lock and no open transaction: `/validate`, `/preview`, and the tests.
+    Here,
+    /// Do **not** evaluate the script; the caller has already run
+    /// [`check_transform_script`] over a script it then proved identical to the
+    /// one being validated. `EndpointStore::publish` and nothing else.
+    ///
+    /// The structural rules ([`check_transform_shape`]) still run: they are
+    /// comparisons, they cost microseconds, and running them against the locked
+    /// row is what makes the re-validation a re-validation.
+    AlreadyRunBeforeTheLock,
 }
 
 /// The probe that supplies rows, in the words its refusal names it by.
@@ -1867,9 +2043,11 @@ const EMPTY_ROWS_PROBE: &str = "the empty-rows probe";
 /// dodged by a PATCH landing between the two.
 ///
 /// So a publish costs four evaluations of an endpoint's script — one module
-/// evaluation from `check_transform` and these two, all outside the
-/// transaction, plus one more module evaluation from the re-validation inside
-/// it — and the count inside the locked transaction is unchanged from Task 4.
+/// evaluation from `check_transform` and these two, plus one more module
+/// evaluation from `EndpointStore::publish`'s own `check_transform_script`
+/// call — and **all four are outside the transaction**. The count inside the
+/// locked transaction is now zero; see [`ScriptEval`] for what it used to be
+/// and what it cost.
 ///
 /// # `limits`, and the 1 MiB output cap
 ///
@@ -2146,6 +2324,7 @@ fn validate_endpoint(
     output: &OutputSpec,
     delegated: bool,
     impersonate: bool,
+    script_eval: ScriptEval,
 ) -> std::result::Result<IteratedParams, ValidationError> {
     egret_dataapi_api::validate_statements(statements)?;
     // Cheap, and about the whole endpoint rather than any one statement: which
@@ -2158,16 +2337,24 @@ fn validate_endpoint(
     // `output.transform`, checked ONCE here rather than once per statement in
     // the loop below. `output` is a property of the ENDPOINT, not of any one
     // statement — and unlike `check_constraints` over `params` (a pure
-    // comparison, cheap to repeat), this runs a Starlark interpreter over the
-    // script's module top level. Inside the loop, an endpoint at
-    // `MAX_STATEMENTS` would parse-and-evaluate the same script up to 16
-    // times, each bounded only by `transform::MAX_WALL_CLOCK` (2s) — worst
-    // case ~32s of evaluation held open inside `publish`'s locked transaction
-    // (`EndpointStore::publish`) and again on every `/validate` call. Once
-    // here bounds the whole endpoint's transform cost by ONE evaluation,
-    // matching `validate_envelope` right above it — both are endpoint-wide
-    // properties of `output`, not per-statement rules.
-    check_transform(output)?;
+    // comparison, cheap to repeat), the second half of it runs a Starlark
+    // interpreter over the script's module top level. Inside the loop, an
+    // endpoint at `MAX_STATEMENTS` would parse-and-evaluate the same script up
+    // to 16 times. Once here bounds the whole endpoint's transform cost by ONE
+    // evaluation, matching `validate_envelope` right above it — both are
+    // endpoint-wide properties of `output`, not per-statement rules.
+    //
+    // The two halves are separate calls because ONE caller must skip the second:
+    // publish re-runs this whole function against a row it has LOCKED, inside an
+    // open transaction, and `MAX_WALL_CLOCK` is a 2 s bound on ticks rather than
+    // a latency guarantee — `run_transform` records a script measured at 28.8 s
+    // against it. Evaluating there would hold the endpoint's row lock and a pool
+    // connection for that long, per publish, from author-supplied Starlark. See
+    // `ScriptEval`.
+    check_transform_shape(output)?;
+    if script_eval == ScriptEval::Here {
+        check_transform_script(output)?;
+    }
     // Every statement through every scan except the contract rule below. The
     // scans come before ANY render for the reason `check_definition_scans`
     // records: they are what bounds the cost of the rendering, and they cost
@@ -3010,6 +3197,7 @@ pub async fn validate(
         &draft.output,
         delegated,
         impersonate,
+        ScriptEval::Here,
     )?;
 
     // Enumerate every statement's branches before describing any of them, and
@@ -3144,10 +3332,20 @@ pub(crate) struct DescribedBranches {
 /// `transform::MAX_WALL_CLOCK` (2 s nominal, 28.8 s measured for a
 /// tick-expensive script), not by this constant. That is the redo this note
 /// asks for, and it is written up in `crate::preview`. What is left inline is
-/// `validate_endpoint`, reached by `POST …/validate` and `publish` — which run
-/// the SAME Starlark evaluation and inherit the same problem. It is
-/// pre-existing (C2 Tasks 4 and 5 put it there) and is recorded rather than
-/// fixed here.
+/// `POST …/validate` and `publish` — which run the SAME Starlark evaluation, on
+/// the async worker, and inherit the same problem. It is pre-existing (C2 Tasks
+/// 4 and 5 put it there) and is recorded rather than fixed here.
+///
+/// **One half of it WAS fixed, and the distinction matters.** Until the C2 fix
+/// wave, `publish` ran that evaluation from inside its own transaction, after
+/// `SELECT … FOR UPDATE` — so a tick-expensive script held the endpoint's row
+/// lock and a pool connection for the same 28.8 s, not merely a worker. That is
+/// closed: the evaluation is hoisted above `begin()` and the in-transaction
+/// re-validation is passed [`ScriptEval::AlreadyRunBeforeTheLock`], with
+/// `pin_no_starlark_evaluation_inside_publishs_transaction` to keep it there.
+/// What remains is worker occupancy on two `data_api_endpoint:manage` routes —
+/// the same shape `crate::preview` moved to a blocking thread, and the obvious
+/// next step for these two.
 ///
 /// The reason is that the cost is **bounded and authenticated** — the paths
 /// that still do this inline sit behind `data_api_endpoint:manage`, and this
@@ -3675,6 +3873,26 @@ impl EndpointStore {
         draft: &DataApiEndpointDto,
         described: Vec<StatementSnapshot>,
     ) -> Result<DataApiPublishedDto> {
+        // BEFORE the transaction, deliberately, and this is the placement
+        // decision rather than an accident of ordering. This is the only
+        // Starlark evaluation `publish` performs. `transform::MAX_WALL_CLOCK`
+        // is 2 s of TICKS and not a latency guarantee — `run_transform`
+        // records 28.8 s measured against it — so running it after `begin()`
+        // would hold the endpoint's row lock and a pool connection, on an async
+        // worker, for as long as an author's script takes.
+        //
+        // Run against the DRAFT, which is sound because of the identity check
+        // below: the transaction refuses with `Conflict` unless
+        // `current.output == draft.output`, so the script evaluated here is
+        // byte-identical to the script being frozen. The re-validation inside
+        // the transaction therefore passes `ScriptEval::AlreadyRunBeforeTheLock`
+        // and re-runs every structural rule and no interpreter.
+        //
+        // `pin_no_starlark_evaluation_inside_publishs_transaction` is what keeps
+        // this here: it reads this function's own text and fails if an
+        // evaluation appears between `begin()` and the commit.
+        check_transform_script(&draft.output)?;
+
         let mut tx = self.db.pool.begin().await.map_err(db_err)?;
 
         let current = self.locked(&mut tx, workspace, id).await?;
@@ -3758,6 +3976,10 @@ impl EndpointStore {
             &current.output,
             delegated,
             impersonate,
+            // The script was evaluated above, before this transaction opened,
+            // and the identity check above says the row locked here carries the
+            // same one. See `ScriptEval`.
+            ScriptEval::AlreadyRunBeforeTheLock,
         )?;
 
         // The name and the SQL come from `current` — the LOCKED row — and only
@@ -4189,6 +4411,7 @@ mod tests {
             &OutputSpec::default(),
             false,
             false,
+            ScriptEval::Here,
         );
         let elapsed = started.elapsed();
         assert_eq!(
@@ -4230,7 +4453,8 @@ mod tests {
                 &cache(CacheScope::PerPrincipal),
                 &OutputSpec::default(),
                 false,
-                false
+                false,
+                ScriptEval::Here,
             ),
             // No statement loops over `region`, so it is a scalar for BOTH — the
             // set is what publish validated each of them against.
@@ -4298,7 +4522,8 @@ mod tests {
                 &cache(CacheScope::PerPrincipal),
                 &OutputSpec::default(),
                 false,
-                false
+                false,
+                ScriptEval::Here,
             ),
             Err(ValidationError::Render(
                 crate::render::RenderError::SequenceBind
@@ -4385,6 +4610,7 @@ mod tests {
             &OutputSpec::default(),
             false,
             false,
+            ScriptEval::Here,
         )
         .expect("the §4.2 pair publishes");
         // `summary_all` never mentions `region`, so on its own the union is
@@ -4516,7 +4742,8 @@ mod tests {
                 &cache(CacheScope::PerPrincipal),
                 &OutputSpec::default(),
                 false,
-                false
+                false,
+                ScriptEval::Here,
             ),
             // ONE statement loops over `region` and that is enough: the set is
             // the endpoint's, and `summary_all` was validated against it.
@@ -5908,6 +6135,258 @@ mod tests {
         assert!(err.to_string().contains("total"), "{err}");
     }
 
+    /// The `returns` cap, with both numbers.
+    ///
+    /// `returns` was the only author-controlled list in this module with no
+    /// bound at all — `MAX_STATEMENTS` is 16, `MAX_DECLARED_PARAMS` is 32,
+    /// `MAX_TRANSFORM_SCRIPT_BYTES` is 8192 — and the cost of an unbounded one
+    /// lands on SERVING, not on publish: `check_returns` scans it once per
+    /// returned field on every request.
+    #[test]
+    fn more_returns_than_the_cap_are_refused_with_both_numbers() {
+        let mut o = transformed_output("def transform(params, statements):\n  return {}");
+        let r = &mut o.transform.as_mut().unwrap().returns;
+        r.clear();
+        for i in 0..=MAX_TRANSFORM_RETURNS {
+            r.push(ColumnSpec {
+                name: format!("c{i}"),
+                ty: "bigint".into(),
+                required: true,
+            });
+        }
+        match check_transform(&o) {
+            Err(ValidationError::TransformReturnsTooMany { count, limit }) => {
+                assert_eq!(count, MAX_TRANSFORM_RETURNS + 1);
+                assert_eq!(limit, MAX_TRANSFORM_RETURNS);
+            }
+            other => panic!("expected TransformReturnsTooMany, got {other:?}"),
+        }
+    }
+
+    /// Exactly at the cap is allowed, so the test above discriminates a limit
+    /// rather than a blanket refusal.
+    #[test]
+    fn returns_exactly_at_the_cap_are_allowed() {
+        let mut o = transformed_output("def transform(params, statements):\n  return {}");
+        let r = &mut o.transform.as_mut().unwrap().returns;
+        r.clear();
+        for i in 0..MAX_TRANSFORM_RETURNS {
+            r.push(ColumnSpec {
+                name: format!("c{i}"),
+                ty: "bigint".into(),
+                required: true,
+            });
+        }
+        assert_eq!(check_transform(&o), Ok(()));
+    }
+
+    /// A blank `name` is refused as blank, **not** as a duplicate.
+    ///
+    /// Two unnamed rows used to reach the duplicate rule and publish with
+    /// ``declares `` more than once`` — a refusal quoting a column that does not
+    /// exist, for an author who has two rows on screen and no idea which one is
+    /// meant. And a SINGLE unnamed row published happily, becoming an OpenAPI
+    /// property with an empty name.
+    ///
+    /// The single-row half is what makes this test worth having: it is refused
+    /// now and could never have been refused by the duplicate rule.
+    #[test]
+    fn a_blank_return_name_is_refused_as_blank_even_when_there_is_only_one() {
+        let mut o = transformed_output("def transform(params, statements):\n  return {}");
+        let r = &mut o.transform.as_mut().unwrap().returns;
+        r.clear();
+        r.push(ColumnSpec {
+            name: "   ".into(),
+            ty: "bigint".into(),
+            required: true,
+        });
+        assert_eq!(
+            check_transform(&o),
+            Err(ValidationError::TransformReturnsBlankName),
+            "a whitespace-only name is blank, not a name"
+        );
+
+        let mut two = transformed_output("def transform(params, statements):\n  return {}");
+        let r = &mut two.transform.as_mut().unwrap().returns;
+        r.clear();
+        for _ in 0..2 {
+            r.push(ColumnSpec {
+                name: String::new(),
+                ty: "bigint".into(),
+                required: true,
+            });
+        }
+        assert_eq!(
+            check_transform(&two),
+            Err(ValidationError::TransformReturnsBlankName),
+            "two unnamed rows are two unnamed rows, not a duplicate of `\"\"`"
+        );
+    }
+
+    /// `"total"` and `"total "` are refused, not published as two columns.
+    ///
+    /// The editor already flagged this pair as a collision while publish
+    /// accepted it — a disagreement in the direction that is hardest to notice,
+    /// because the author sees a warning, publishes anyway, and gets a contract
+    /// with two indistinguishable property names. Refusing the padded name is
+    /// what makes the two agree, and it is also what makes
+    /// `check_transform_shape`'s verbatim duplicate comparison and the editor's
+    /// trimmed one the same comparison.
+    #[test]
+    fn a_whitespace_padded_return_name_is_refused_rather_than_trimmed() {
+        let mut o = transformed_output("def transform(params, statements):\n  return {}");
+        let r = &mut o.transform.as_mut().unwrap().returns;
+        r.clear();
+        r.push(ColumnSpec {
+            name: "total".into(),
+            ty: "bigint".into(),
+            required: true,
+        });
+        r.push(ColumnSpec {
+            name: "total ".into(),
+            ty: "bigint".into(),
+            required: true,
+        });
+        match check_transform(&o) {
+            Err(ValidationError::TransformReturnsPaddedName(name)) => {
+                assert_eq!(name, "total ", "the refusal must quote the name as written");
+            }
+            other => panic!("expected TransformReturnsPaddedName, got {other:?}"),
+        }
+    }
+
+    /// `ScriptEval::AlreadyRunBeforeTheLock` really does skip the interpreter.
+    ///
+    /// Both halves matter and neither is enough alone. `Here` must refuse a
+    /// script that does not parse — otherwise the skip is not a skip, it is the
+    /// evaluation having quietly stopped happening at all. And
+    /// `AlreadyRunBeforeTheLock` must ACCEPT the same endpoint, which is the
+    /// only observable difference between "publish evaluates Starlark under its
+    /// row lock" and "publish does not".
+    ///
+    /// The structural rules still run under the skip — the third assertion —
+    /// so this is a narrower claim than "the transform is not checked".
+    #[test]
+    fn the_script_evaluation_is_skipped_only_when_the_caller_says_it_already_ran() {
+        let statements = vec![StatementSpec {
+            name: "rows".into(),
+            sql: "SELECT id FROM t".into(),
+        }];
+        let unparseable = transformed_output("def transform(params, statements)\n  return {}");
+
+        assert!(
+            matches!(
+                validate_endpoint(
+                    &statements,
+                    &[],
+                    &cache(CacheScope::PerPrincipal),
+                    &unparseable,
+                    false,
+                    false,
+                    ScriptEval::Here,
+                ),
+                Err(ValidationError::TransformScriptInvalid(_))
+            ),
+            "the evaluating caller must still refuse a script that does not parse"
+        );
+
+        assert!(
+            validate_endpoint(
+                &statements,
+                &[],
+                &cache(CacheScope::PerPrincipal),
+                &unparseable,
+                false,
+                false,
+                ScriptEval::AlreadyRunBeforeTheLock,
+            )
+            .is_ok(),
+            "publish's in-transaction re-validation must run no interpreter — a refusal \
+             here means the Starlark evaluation is back inside the locked transaction"
+        );
+
+        let mut shape_broken = unparseable.clone();
+        shape_broken.shape = "arrays".into();
+        assert_eq!(
+            validate_endpoint(
+                &statements,
+                &[],
+                &cache(CacheScope::PerPrincipal),
+                &shape_broken,
+                false,
+                false,
+                ScriptEval::AlreadyRunBeforeTheLock,
+            ),
+            Err(ValidationError::TransformWithShapeOrNaming("shape")),
+            "skipping the interpreter must not skip the comparisons: the re-validation \
+             against the locked row is still a re-validation"
+        );
+    }
+
+    /// **No Starlark evaluation happens inside `EndpointStore::publish`'s
+    /// transaction**, read off this file's own text.
+    ///
+    /// A source scan rather than a behavioural test, and the reason is that the
+    /// property is about WHERE a call sits, not about what it returns: publish
+    /// needs a database, and every observable difference between evaluating
+    /// before `begin()` and evaluating after it is a matter of how long a lock
+    /// is held. `there_is_exactly_one_place_that_parses_starlark`
+    /// (`crate::transform`) is the same instrument for the same kind of claim.
+    ///
+    /// It asserts its own markers were found before it asserts anything about
+    /// them, so a renamed function or a restructured transaction fails loudly
+    /// here instead of passing on an empty search.
+    #[test]
+    fn pin_no_starlark_evaluation_inside_publishs_transaction() {
+        let src = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("src")
+                .join("lifecycle.rs"),
+        )
+        .expect("this file must be readable");
+
+        let start_marker = "let mut tx = self.db.pool.begin().await.map_err(db_err)?;";
+        let begin = src
+            .find(start_marker)
+            .expect("publish's `begin()` must be findable; if it moved, this test must move too");
+        let commit = src[begin..]
+            .find("tx.commit()")
+            .expect("publish's commit must be findable")
+            + begin;
+        assert!(
+            commit > begin,
+            "the commit must come after the begin, or the window below is empty"
+        );
+
+        let window = &src[begin..commit];
+        for forbidden in [
+            "check_transform(",
+            "check_transform_script(",
+            "eval_probe(",
+            "run_transform(",
+            "probe_transform(",
+        ] {
+            assert!(
+                !window.contains(forbidden),
+                "`{forbidden}` appears between publish's `begin()` and its commit. \
+                 transform::MAX_WALL_CLOCK is 2 s of TICKS, not of time — 28.8 s measured \
+                 for a tick-expensive script — so an evaluation there holds the endpoint's \
+                 row lock and a pool connection for as long as an author's script takes. \
+                 See `ScriptEval`."
+            );
+        }
+
+        // The other half: the evaluation must still HAPPEN, above the lock.
+        // Without this the property is satisfiable by deleting the check.
+        let publish_start = src
+            .find("    pub async fn publish(")
+            .expect("`publish` must be findable by name");
+        assert!(
+            src[publish_start..begin].contains("check_transform_script(&draft.output)?;"),
+            "publish must still evaluate the script — above `begin()`, against the draft the              identity check then proves identical to the locked row"
+        );
+    }
+
     #[test]
     fn a_script_that_does_not_parse_is_the_authors_400_not_the_callers_500() {
         let o = transformed_output("def transform(params, statements)\n  return {}");
@@ -5966,6 +6445,7 @@ mod tests {
             &output,
             false,
             false,
+            ScriptEval::Here,
         );
         assert_eq!(
             got,
@@ -6009,6 +6489,7 @@ mod tests {
                 output,
                 false,
                 false,
+                ScriptEval::Here,
             )
             .map(|_| ())
         };

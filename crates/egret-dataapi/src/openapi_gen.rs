@@ -413,10 +413,13 @@ fn statements_data_schema(
 /// contract meets that fact, because it is exactly the field `shape`/`naming`
 /// would otherwise have described.
 ///
-/// Duplicate names in `returns` cannot reach here: `check_duplicate_returns`
-/// (`lifecycle.rs`) refuses them at publish, before a transform can be
-/// declared at all — unlike `row_schema`'s naming collision, which is a
-/// runtime possibility this function has no equivalent of.
+/// Duplicate names in `returns` cannot reach here, and neither can blank or
+/// whitespace-padded ones: `check_transform_shape` (`lifecycle.rs`) refuses all
+/// three at publish, before a transform can be declared at all — unlike
+/// `row_schema`'s naming collision, which is a runtime possibility this
+/// function has no equivalent of. That is what lets `props` be built by
+/// insertion without a collision check: every name here is distinct, non-blank,
+/// and exactly as the author typed it.
 fn returns_schema(returns: &[egret_dataapi_api::ColumnSpec]) -> Value {
     let mut props = Map::new();
     for c in returns {
@@ -427,7 +430,15 @@ fn returns_schema(returns: &[egret_dataapi_api::ColumnSpec]) -> Value {
                 // the object-declared-as-string this got wrong in the browser.
                 "type": declared_json_type(&c.ty),
                 "nullable": true,
-                "x-egret-engine-type": c.ty,
+                // `x-egret-DECLARED-type`, not `x-egret-engine-type`. The
+                // extension `row_schema` writes carries the string an engine
+                // gave for a column it really produced; this one carries a
+                // string the AUTHOR typed into `output.transform.returns`, for
+                // a field no engine ever saw — a transform's `data` is whatever
+                // the script returned. Spelling them the same made a consumer's
+                // "what did the database call this" and a consumer's "what did
+                // the author call this" indistinguishable in the document.
+                "x-egret-declared-type": c.ty,
             }),
         );
     }
@@ -439,11 +450,21 @@ fn returns_schema(returns: &[egret_dataapi_api::ColumnSpec]) -> Value {
     let mut schema = json!({
         "type": "object",
         "properties": props,
+        // The document must not be LOOSER than the gate. `check_returns` runs
+        // against every response and refuses an undeclared field — serving
+        // fails closed with a 500 rather than passing it on — so an object with
+        // an extra key is not a response this endpoint can produce. Without
+        // this line the generated contract said the opposite by omission
+        // (`additionalProperties` defaults to permitted), and a consumer
+        // generating a client from it would model a shape the server refuses.
+        "additionalProperties": false,
         "description": "This endpoint has a response transform: `data` is whatever the \
                         script returns, declared here from `output.transform.returns`. \
                         `output.shape` and `output.naming` are inert for this endpoint — \
                         they describe how a row straight from SQL becomes JSON, and a \
-                        transform's output never goes through that step.",
+                        transform's output never goes through that step. The property \
+                        list is exhaustive: `check_returns` refuses a response carrying \
+                        a field this list does not declare.",
     });
     if !required.is_empty() {
         schema["required"] = json!(required);
@@ -1603,6 +1624,50 @@ mod tests {
             doc["properties"].get("n").is_none(),
             "the underlying SQL column must not leak into a transformed endpoint's declared \
              data: {doc}"
+        );
+    }
+
+    /// The declared object is CLOSED, because `check_returns` closes it.
+    ///
+    /// `check_returns` (`crate::transform`) runs against every response and
+    /// refuses an undeclared field — serving turns that into a 500 rather than
+    /// passing the field on. A document that omits `additionalProperties` says
+    /// the opposite by omission, so the generated contract was strictly LOOSER
+    /// than the gate: a client generated from it would model a response the
+    /// server refuses to send.
+    ///
+    /// Asserted as `json!(false)` rather than `.is_some()`: the failure this
+    /// exists to catch is the key being present and permissive.
+    #[test]
+    fn a_transformed_endpoints_declared_object_is_closed_like_check_returns_is() {
+        let snap = transformed_snapshot_for_doc(vec![col("region", "varchar", true)]);
+        let doc = data_schema(&snap, "e").expect("a transformed endpoint has a document");
+        assert_eq!(
+            doc["additionalProperties"],
+            json!(false),
+            "`check_returns` 500s on an undeclared field, so the document may not say a \
+             consumer might receive one: {doc}"
+        );
+    }
+
+    /// A declared type is labelled as DECLARED, never as an engine's.
+    ///
+    /// `row_schema` stamps `x-egret-engine-type` on a column an engine really
+    /// produced, and that is what the extension means everywhere else in this
+    /// document. `returns` is the author's own list for a field no engine ever
+    /// saw — a transform's `data` is whatever the script returned — so reusing
+    /// the same key told a consumer that a string the author typed came from
+    /// the database.
+    #[test]
+    fn a_declared_return_type_is_not_labelled_as_an_engine_type() {
+        let snap = transformed_snapshot_for_doc(vec![col("region", "my_own_type", true)]);
+        let doc = data_schema(&snap, "e").expect("a transformed endpoint has a document");
+        let prop = &doc["properties"]["region"];
+        assert_eq!(prop["x-egret-declared-type"], json!("my_own_type"), "{doc}");
+        assert!(
+            prop.get("x-egret-engine-type").is_none(),
+            "no engine produced this column, so nothing here may claim an engine named it: \
+             {doc}"
         );
     }
 
