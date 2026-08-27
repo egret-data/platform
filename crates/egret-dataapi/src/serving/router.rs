@@ -1431,11 +1431,16 @@ async fn statement_texts<'a>(
     // bounded by what publish accepted: the scripts by `MAX_STATEMENTS`, the
     // parameters by `MAX_DECLARED_PARAMS` and `params::MAX_PARAM_BYTES`.
     let params = resolved.json.clone();
+    // The renderer's context too, because generation is followed by the
+    // behavioural gate and that gate is about how these VALUES render — see
+    // [`generate_one`]. One clone per request, of a map the request already
+    // built.
+    let values = resolved.values.clone();
     let mut generated: BTreeMap<usize, String> =
         run_under_deadline(deadline, ScriptPhase::Generation, move || {
             let mut out = BTreeMap::new();
             for (i, script) in &scripts {
-                out.insert(*i, generate_one(script, &params)?);
+                out.insert(*i, generate_one(script, &params, &values)?);
             }
             Ok(out)
         })
@@ -1455,12 +1460,12 @@ async fn statement_texts<'a>(
         .collect()
 }
 
-/// Generate ONE statement's SQL and hold it to the rule a written statement is
-/// held to at publish.
+/// Generate ONE statement's SQL and re-apply the two publish rules that nothing
+/// downstream would re-apply for it.
 ///
-/// # Why the scan is here and not only at publish
+/// # The asymmetry this exists for
 ///
-/// Publish scans every template it can SEE, and for a script that is the
+/// Publish gates every template it can SEE, and for a script that is the
 /// baseline plus whatever the sentinel probes emitted — two values per declared
 /// parameter (`lifecycle::GeneratedSql::probe`). A script may branch on a value
 /// no probe supplies:
@@ -1472,20 +1477,63 @@ async fn statement_texts<'a>(
 /// ```
 ///
 /// publishes green — every template publish saw is a `SELECT` — and emits the
-/// other arm to the first caller who asks for `region=XX`. That statement is
-/// executed with the CALLER's engine credentials on a delegated connection, so
-/// leaving it unscanned turns "the author may write SQL" into "the author may
-/// run DML as any caller". Task 3's Mutation A measured the same asymmetry from
-/// the other side: `;` and `#` have a backstop inside `render`
-/// (`check_rendered_statement`), and **the head word has none**.
+/// other arm to the first caller who asks for `region=XX`. **For a written
+/// statement this cannot happen**: publish gated the exact bytes that will be
+/// executed. So the rules re-applied here are exactly the ones `render` does not
+/// re-apply, and they are applied to GENERATED text only. A written statement is
+/// not re-scanned: its bytes are the bytes publish scanned, and re-scanning them
+/// under today's rules could 500 an endpoint published green under yesterday's.
 ///
-/// So the one rule with no render-time backstop is applied here, to generated
-/// text only. A written statement is not re-scanned: its bytes are the bytes
-/// publish scanned, and re-scanning them under today's rules could 500 an
-/// endpoint that was published green under yesterday's.
+/// # What `render` DOES re-apply, so this does not
 ///
-/// This is a scan — no render, no engine, no connection — and it runs on the
-/// blocking thread beside the evaluation that produced the text.
+/// `check_static`, the placeholder==bind invariant, and `;`/`#` on the rendered
+/// output (`check_rendered_statement`). Those hold for any text on any path.
+///
+/// # The two that it does not, and they fail in different directions
+///
+/// 1. **[`crate::lifecycle::check_single_select`] — the head word.** Nothing
+///    re-tests it, which Task 3's Mutation A measured from the other side: a
+///    generated `DELETE FROM t` validated. It is executed with the CALLER's
+///    engine credentials on a delegated connection, so leaving it unscanned
+///    turns "the author may write SQL" into "the author may run DML as any
+///    caller". A miss here is a wrong ACTION.
+///
+/// 2. **[`crate::render::check_dynamic`] — the behavioural gate.** This is the
+///    worse of the two and it is easy to miss, because `check_static` looks like
+///    the whole of that rule. It is not: `check_dynamic` exists precisely
+///    because that scanner has been bypassed five separate times by five
+///    different spellings of one comparison, and `render` calls only the
+///    scanner. A generated template carrying a spelling the scanner misses
+///    renders a **silently false** comparison, drops the `{% if %}` it guards,
+///    and answers `200` with over-broad rows — no error, nowhere. That is the
+///    same silent-wrong-answer class this package refused to freeze a generated
+///    template for, and it deserves the same treatment.
+///
+///    A sixth spelling was not hypothetical: `{% if [p, 'x'][0] == 'lit' %}`
+///    passes `check_static` today and is caught here, pinned by
+///    `render::tests::a_parameter_wrapped_in_a_list_literal_is_caught_only_by_the_gate`.
+///
+/// `check_dynamic` rather than `check_publish`, because `check_publish` is
+/// `check_static` + `check_dynamic` and `render` runs `check_static` a few lines
+/// later. Running it twice would report a scanner refusal through this message
+/// instead of through `render_error`'s mapping.
+///
+/// # What it costs, measured, and why it is paid per request
+///
+/// `check_dynamic` renders the definition once per probe assignment, twice
+/// each, capped at `render::MAX_PROBES`. Measured (debug build): **106 µs** for
+/// a one-parameter statement with no literals (1 assignment), **9.9 ms** for a
+/// four-parameter statement with fourteen harvested literals (57 assignments) —
+/// the worst case inside the budget. Its own doc says this is "right at publish
+/// and wrong per request", and that judgement is correct for a WRITTEN
+/// statement, where publish gated the bytes that will run. It does not transfer
+/// to a text no publish has ever seen: the alternative to paying it is serving
+/// that text ungated.
+///
+/// It is bounded, it costs no engine connection, and it is dominated by the
+/// query that follows. It runs on the blocking thread beside the evaluation that
+/// produced the text, so it is inside the request deadline rather than on an
+/// async worker.
 ///
 /// # Every failure is a 500 and none is a 400
 ///
@@ -1496,14 +1544,25 @@ async fn statement_texts<'a>(
 fn generate_one(
     script: &str,
     params: &BTreeMap<String, serde_json::Value>,
+    values: &crate::render::ParamValues,
 ) -> Result<String, ServingError> {
     let sql = crate::transform::build_sql(script, params).map_err(|e| {
         ServingError::internal(format!("a statement's script did not build its SQL: {e}"))
     })?;
+    // The scan first: it is a byte test, and it refuses a text that is not a
+    // read before the gate below spends up to `MAX_PROBES` renders on it.
     crate::lifecycle::check_single_select(&sql).map_err(|e| {
         ServingError::internal(format!(
             "a statement's script built SQL that is not a single read-only \
              statement, on a branch publish's probes never took: {e}"
+        ))
+    })?;
+    crate::render::check_dynamic(&sql, values).map_err(|e| {
+        ServingError::internal(format!(
+            "a statement's script built SQL that INSPECTS a parameter, on a \
+             branch publish's probes never took; serving it would silently drop \
+             the block that comparison guards and answer 200 with over-broad \
+             rows: {e}"
         ))
     })?;
     Ok(sql)

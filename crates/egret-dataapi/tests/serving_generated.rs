@@ -35,7 +35,7 @@ mod serving_common;
 
 use axum::http::StatusCode;
 use egret_query_api::Param;
-use serving_common::{fixture, Fixture};
+use serving_common::{bind_signature, fixture, marker, Fixture};
 
 /// Self-skip when there is no database. The DURATION is what says whether these
 /// ran; an `ok` alone does not.
@@ -53,6 +53,13 @@ macro_rules! skip_without_db {
 
 /// The statement both halves of the comparison run, written by hand.
 const WRITTEN: &str = "SELECT n FROM t WHERE region = {{ region }}";
+
+/// A script whose EMITTED TEXT depends on the caller's value — the shape a
+/// frozen generated template cannot express.
+const BRANCHING_SCRIPT: &str = "def build_sql(params):\n    \
+     if params[\"region\"] == \"US\":\n        \
+     return \"SELECT n FROM t WHERE country = {{ region }}\"\n    \
+     return \"SELECT n FROM t WHERE region = {{ region }}\"\n";
 
 /// A script that returns exactly [`WRITTEN`], with its braces intact.
 const SCRIPT: &str =
@@ -146,6 +153,43 @@ async fn a_generated_statement_reaches_the_engine_exactly_as_a_written_one_does(
         "two values of a parameter produced identical rows from a generated \
          statement — nothing was bound"
     );
+
+    // **And the SQL itself is a function of the request**, which is the half of
+    // this test that says the version cannot be serving a text frozen at publish
+    // time. Without it, a snapshot that froze the generated baseline satisfies
+    // every assertion above — measured: the mutation that freezes the generated
+    // text left this test GREEN until this endpoint existed, because the fixture
+    // script above ignores its parameters.
+    publish_scripted(&f, "/branching", BRANCHING_SCRIPT).await;
+    let eu = f.call_as(f.principal_a, "branching?region=EU").await;
+    assert_eq!(eu.status, StatusCode::OK, "{}", eu.body);
+    let eu_call = f.port.last();
+    let xx = f.call_as(f.principal_a, "branching?region=US").await;
+    assert_eq!(xx.status, StatusCode::OK, "{}", xx.body);
+    let xx_call = f.port.last();
+
+    assert_eq!(
+        eu_call,
+        (
+            "SELECT n FROM t WHERE region = ?".to_string(),
+            vec![Param::Str("EU".into())]
+        ),
+        "the branch publish's representative values take"
+    );
+    assert_eq!(
+        xx_call,
+        (
+            "SELECT n FROM t WHERE country = ?".to_string(),
+            vec![Param::Str("US".into())]
+        ),
+        "and the branch only this request takes — generated for THIS caller, \
+         with the value still a bind"
+    );
+    assert_ne!(
+        eu_call.0, xx_call.0,
+        "a version that served a text frozen at publish would send one statement \
+         to both callers"
+    );
 }
 
 /// A written endpoint is byte-for-byte what it was before package S.
@@ -173,12 +217,84 @@ async fn an_endpoint_with_written_sql_is_unchanged() {
          existed, whitespace included"
     );
     assert_eq!(binds, vec![Param::Str("EU".into())]);
+    // **`data`, not only the envelope around it.** The rows are
+    // `marker(principal) + bind_signature(binds)`, so this asserts the body a
+    // consumer receives AND that the value reaching the engine is the caller's:
+    // a serving path that bound nothing collapses the signature term, and the
+    // literal below stops moving with it.
+    assert_eq!(
+        res.body["data"],
+        serde_json::json!([{
+            "n": marker(f.principal_a) + bind_signature(&[Param::Str("EU".into())])
+        }]),
+        "the body is byte-for-byte what it was: {}",
+        res.body
+    );
     assert_eq!(res.body["status"], "ok", "{}", res.body);
     assert_eq!(res.body["meta"]["cached"], false, "{}", res.body);
     assert_eq!(
         res.body["meta"]["row_count"], 1,
         "the envelope a consumer reads is unchanged: {}",
         res.body
+    );
+}
+
+/// **A generated template that INSPECTS a parameter is refused, and the reason
+/// it has to be is that serving it is a `200` rather than an error.**
+///
+/// A parameter reaches a template as an opaque `Cell` so its SQL type survives,
+/// and minijinja compares an object against a string as NOT EQUAL. So
+/// `{% if [region, 'x'][0] == 'ZZ' %}` is silently false, the `{% if %}` drops
+/// the filter it guards, and the endpoint answers with rows nobody asked for.
+/// `render::check_static` is the scanner that refuses such comparisons and it
+/// has been bypassed by five recorded spellings; this is a sixth, pinned in
+/// `render::tests::a_parameter_wrapped_in_a_list_literal_is_caught_only_by_the_gate`.
+///
+/// For a WRITTEN statement none of that reaches serving: publish runs the
+/// behavioural gate (`render::check_dynamic`) over the exact bytes that will
+/// execute. For a generated one, the bytes may be a branch publish never saw —
+/// here, the arm taken only when `region == "XX"`, which no sentinel probe
+/// supplies. So serving runs the gate on generated text.
+///
+/// The `region=EU` call is not decoration: it is what says this endpoint is
+/// otherwise perfectly serviceable, so the refusal below is about the branch.
+#[tokio::test]
+async fn a_generated_template_that_inspects_a_parameter_is_refused_at_serve() {
+    let f = skip_without_db!();
+    publish_scripted(
+        &f,
+        "/inspects",
+        "def build_sql(params):\n    if params[\"region\"] == \"XX\":\n        \
+         return \"SELECT n FROM t WHERE 1=1 {% if [region, 'x'][0] == 'ZZ' %} AND \
+         region = {{ region }}{% endif %}\"\n    return \"SELECT n FROM t WHERE \
+         region = {{ region }}\"\n",
+    )
+    .await;
+
+    let ok = f.call_as(f.principal_a, "inspects?region=EU").await;
+    assert_eq!(ok.status, StatusCode::OK, "{}", ok.body);
+    assert_eq!(
+        f.port.last(),
+        (
+            "SELECT n FROM t WHERE region = ?".to_string(),
+            vec![Param::Str("EU".into())]
+        )
+    );
+
+    let before = f.port.executions();
+    let res = f.call_as(f.principal_a, "inspects?region=XX").await;
+    assert_eq!(
+        res.status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a template whose comparison is silently false must not be served: {}",
+        res.body
+    );
+    assert_eq!(res.body["error"]["code"], "internal", "{}", res.body);
+    assert_eq!(
+        f.port.executions(),
+        before,
+        "and the statement with its filter dropped must never reach the engine — \
+         that is the 200 this refusal exists to prevent"
     );
 }
 

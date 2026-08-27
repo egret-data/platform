@@ -66,6 +66,13 @@ export interface EndpointSnapshot {
      * in exactly those cases. A pre-S snapshot has no scripted statement (no
      * path could publish one), so the fallback is complete for every row that
      * can carry it.
+     *
+     * `skip_serializing_if` for the same reason the reader has a default: a
+     * snapshot published before this field existed must round-trip through this
+     * type BYTE for byte, and without it a re-serialised pre-S row gains
+     * `"iterated": []`. There is a single writer today, so nothing re-serialises
+     * a stored row in practice — which is exactly the kind of "harmless today"
+     * that stops being true quietly.
      */
   iterated?: string[];
   method: string;

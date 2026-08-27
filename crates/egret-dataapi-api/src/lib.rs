@@ -244,7 +244,14 @@ pub struct EndpointSnapshot {
     /// in exactly those cases. A pre-S snapshot has no scripted statement (no
     /// path could publish one), so the fallback is complete for every row that
     /// can carry it.
-    #[serde(default)]
+    ///
+    /// `skip_serializing_if` for the same reason the reader has a default: a
+    /// snapshot published before this field existed must round-trip through this
+    /// type BYTE for byte, and without it a re-serialised pre-S row gains
+    /// `"iterated": []`. There is a single writer today, so nothing re-serialises
+    /// a stored row in practice — which is exactly the kind of "harmless today"
+    /// that stops being true quietly.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub iterated: Vec<String>,
     pub method: String,
     pub path: String,
@@ -1659,6 +1666,27 @@ mod tests {
         let s: EndpointSnapshot =
             serde_json::from_str(&a_snapshot_as_published_before_m2()).unwrap();
         assert!(s.iterated.is_empty());
+        // And writing it back does not INVENT the field. The byte-identity
+        // guarantee has to hold for the whole snapshot, not only for the
+        // statement inside it.
+        assert!(
+            !serde_json::to_string(&s).unwrap().contains("iterated"),
+            "a snapshot published before the field existed must not gain it on \
+             re-serialisation"
+        );
+    }
+
+    /// The field is written when there IS something to write, so the line above
+    /// is about an empty set rather than about a field that never serialises.
+    #[test]
+    fn a_frozen_shape_decision_is_written_when_it_is_not_empty() {
+        let mut s: EndpointSnapshot =
+            serde_json::from_str(&a_snapshot_as_published_before_m2()).unwrap();
+        s.iterated = vec!["regions".into()];
+        let written = serde_json::to_string(&s).unwrap();
+        assert!(written.contains(r#""iterated":["regions"]"#), "{written}");
+        let again: EndpointSnapshot = serde_json::from_str(&written).unwrap();
+        assert_eq!(again.iterated, vec!["regions".to_string()]);
     }
 
     /// Neither shape present is corrupt data, and it was an error before M2
