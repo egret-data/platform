@@ -430,6 +430,85 @@ fn param_error(
     }
 }
 
+/// [`crate::lifecycle::validate_preview`], run on a blocking thread.
+///
+/// # Why this is not called inline, and what changed to make that necessary
+///
+/// `MAX_DECLARED_PARAMS` records the rule this obeys. Everything
+/// `validate_preview` does is synchronous CPU on an async task, and the reason
+/// that was accepted is that it was **bounded and authenticated**: ~122 ms per
+/// statement, with the constant itself being what makes the upper bound a
+/// number rather than a function of the request. That note ends by saying, in
+/// as many words, that if the bound ever rises the reasoning has to be redone
+/// rather than carried over.
+///
+/// Adding [`crate::lifecycle::check_transform`] to this path raised it. The
+/// check parses AND evaluates the script's module top level under a real
+/// Starlark interpreter, whose only time-denominated budget is
+/// `transform::MAX_WALL_CLOCK` — 2 s, i.e. sixteen times the accepted figure.
+/// And 2 s is not the bound either: that budget is checked at 1000-tick
+/// granularity, so a script whose every tick is expensive overruns it, measured
+/// at **28.8 s** (see `run_transform`'s own comment). A tickless string-doubler
+/// was not interrupted at 6.8 s at all.
+///
+/// The accepted argument does not survive that, and it is worth being precise
+/// about WHICH leg broke. Not the authentication one — this is still
+/// `data_api_endpoint:manage`. The occupancy one: synchronous CPU **occupies**
+/// the worker, tokio cannot preempt it, every other task queued on that worker
+/// eats the whole spike, and an author holding `:manage` can press this button
+/// in a loop. At 122 ms that is a hiccup. At 28.8 s it is a worker gone for half
+/// a minute, per in-flight request. `serving::router` moved this exact
+/// evaluation onto `spawn_blocking` for precisely this reason, and preview is
+/// not the case that gets to differ: it is the one an author can drive fastest.
+///
+/// # What bounds it now, since ~122 ms no longer does
+///
+/// * **on the async runtime: nothing at all.** This function's CPU is zero
+///   inline — the render residual the old note accepted moves off with it,
+///   which is a strict improvement over what that note settled for;
+/// * **on the blocking pool: one thread per in-flight preview**, held for as
+///   long as the script runs. That is the bound `spawn_blocking` exists to
+///   offer, and it is the honest one: `MAX_WALL_CLOCK` bounds ticks after
+///   expiry, not time, so no smaller number would be true.
+///
+/// # No deadline over the join, deliberately
+///
+/// Serving wraps its `spawn_blocking` in a request deadline. Preview does not,
+/// and the difference is who is waiting. A dropped `JoinHandle` DETACHES — the
+/// work keeps its thread and its heap either way — so a deadline here would buy
+/// the author an early error while the runaway still ran, and
+/// `serving::router`'s own comment records what that costs: answering early
+/// **invites the retry**, and each retry stacks another uncancellable thread.
+/// A consumer with an SLA is worth that trade. An author who pressed a button
+/// and wants to know what their own script did is not: waiting is the correct
+/// answer, and pressing again is the wrong one to encourage.
+///
+/// # The clone
+///
+/// `spawn_blocking` needs `'static`, so the draft is cloned in. It is bounded
+/// by axum's body limit and by `MAX_STATEMENTS`, it happens once per preview,
+/// and it is paid immediately before an engine round trip — so it is not
+/// measurable against what follows it.
+async fn validate_off_the_worker(
+    body: &PreviewEndpointInput,
+) -> Result<crate::lifecycle::IteratedParams, DataApiError> {
+    let sql = body.sql.clone();
+    let siblings = body.siblings.clone();
+    let params = body.params.clone();
+    let output = body.output.clone();
+    let joined = tokio::task::spawn_blocking(move || {
+        crate::lifecycle::validate_preview(&sql, &siblings, &params, &output)
+    })
+    .await
+    // A panic in the validator, or a runtime shutting down. Neither is the
+    // author's doing, so it is a 500 carrying the join error rather than a 400
+    // — the same reading `serving::router::transform_outcome` gives it.
+    .map_err(|join| {
+        egret_core::Error::Internal(anyhow::anyhow!("the draft could not be validated: {join}"))
+    })?;
+    Ok(joined?)
+}
+
 /// Run `body` as `principal` and return what the engine said.
 ///
 /// Every error variant passes through unchanged, which is the deliberate
@@ -455,8 +534,7 @@ pub(crate) async fn run(
     // across `sql` AND `siblings`, i.e. the endpoint, exactly as publish makes
     // it. Taking it from here rather than recomputing it below is what stops
     // this route holding two answers to one question; see `IteratedParams`.
-    let iterated =
-        crate::lifecycle::validate_preview(&body.sql, &body.siblings, &body.params, &body.output)?;
+    let iterated = validate_off_the_worker(body).await?;
 
     // The SAME function serving resolves through, so a value that renders one
     // way here cannot render another way for a consumer — `resolve_supplied_with`
@@ -495,4 +573,109 @@ pub(crate) async fn run(
         // added since the last Save is exactly the state that needs saying.
         transform_declared: body.output.transform.is_some(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    /// A draft whose transform costs real module-evaluation time.
+    ///
+    /// The work is at the MODULE top level on purpose: `check_transform` runs
+    /// `transform::eval_probe`, which evaluates the module and stops — it never
+    /// calls the entry point — so work inside `transform()` would cost nothing
+    /// here and the test would measure the wrong thing.
+    fn slow_draft() -> PreviewEndpointInput {
+        PreviewEndpointInput {
+            sql: "SELECT 1 AS n".into(),
+            siblings: crate::lifecycle::SiblingStatements::default(),
+            params: Vec::new(),
+            values: BTreeMap::new(),
+            output: egret_dataapi_api::OutputSpec {
+                transform: Some(egret_dataapi_api::TransformSpec {
+                    script: "_warm = [i for i in range(40000)]\n\
+                             def transform(params, statements):\n  return {\"total\": 1}"
+                        .into(),
+                    returns: vec![egret_dataapi_api::ColumnSpec {
+                        name: "total".into(),
+                        ty: "bigint".into(),
+                        required: true,
+                    }],
+                }),
+                ..egret_dataapi_api::OutputSpec::default()
+            },
+            database_id: Uuid::nil(),
+        }
+    }
+
+    /// **Validating a draft must RELEASE the async worker**, not occupy it.
+    ///
+    /// The rule `MAX_DECLARED_PARAMS` states and this task had to redo: inline
+    /// synchronous CPU on an async task was accepted at ~122 ms and is not
+    /// acceptable at a Starlark evaluation's bound (2 s nominal, 28.8 s
+    /// measured). See [`validate_off_the_worker`].
+    ///
+    /// # The instrument, and its one assumption
+    ///
+    /// A **current-thread** runtime, so there is exactly one worker and no
+    /// second thread can hide the difference. A task is spawned and therefore
+    /// QUEUED; on this flavour it can only run when something awaits. If
+    /// validation were called inline it would run to completion without ever
+    /// yielding, and the flag would still be false afterwards.
+    ///
+    /// The assumption is that the blocking task has not already finished by the
+    /// time its `JoinHandle` is first polled — a ready handle would return
+    /// without yielding. That is what the module-level work in [`slow_draft`]
+    /// buys, and it is why this test uses a script that costs milliseconds
+    /// rather than an empty one.
+    #[tokio::test(flavor = "current_thread")]
+    async fn validating_a_draft_releases_the_async_worker() {
+        let ran = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&ran);
+        tokio::spawn(async move { flag.store(true, Ordering::SeqCst) });
+
+        let body = slow_draft();
+        let out = validate_off_the_worker(&body).await;
+        assert!(
+            out.is_ok(),
+            "the draft must really validate, or this measures a refusal instead of an \
+             evaluation: {:?}",
+            out.err()
+        );
+        assert!(
+            ran.load(Ordering::SeqCst),
+            "a task queued before the validation had not run by the time it finished, so \
+             the validation occupied the only worker instead of releasing it"
+        );
+    }
+
+    /// The negative control for the test above: with NO transform there is no
+    /// Starlark evaluation, and the property must still hold.
+    ///
+    /// Without this, "released the worker" could be a fact about the script
+    /// rather than about the call — and the whole of `validate_preview`
+    /// (`check_definition_scans` and `check_render_rules`, the ~122 ms
+    /// residual) is what moved, not just the transform check.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_draft_with_no_transform_releases_the_worker_too() {
+        let ran = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&ran);
+        tokio::spawn(async move { flag.store(true, Ordering::SeqCst) });
+
+        let body = PreviewEndpointInput {
+            output: egret_dataapi_api::OutputSpec::default(),
+            ..slow_draft()
+        };
+        assert!(
+            body.output.transform.is_none(),
+            "the control must be untransformed"
+        );
+        assert!(validate_off_the_worker(&body).await.is_ok());
+        assert!(
+            ran.load(Ordering::SeqCst),
+            "every draft's validation goes to the blocking pool, not only a transformed one"
+        );
+    }
 }

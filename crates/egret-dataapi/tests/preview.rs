@@ -902,12 +902,18 @@ async fn preview_will_not_read_a_default_output_for_a_body_that_omits_one() {
     );
 
     let (status, out) = f.mgmt_post(&preview_path(&f), Some(body)).await;
-    assert_ne!(
+    // The EXACT status, not merely "not 200". `assert_ne!` here passed on any
+    // refusal at all, including a 500 from something unrelated — so the test
+    // could have gone on reporting success while measuring a different failure.
+    // 422 is what axum's `Json` extractor answers for a missing required field,
+    // and it is the only answer that says the field is required rather than
+    // that the draft was bad.
+    assert_eq!(
         status,
-        StatusCode::OK,
-        "a body with no `output` must be refused rather than silently read as \
-         `OutputSpec::default()` — a default carries no transform, so preview would \
-         go green on every draft publish refuses: {out}"
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a body with no `output` must be refused by the extractor rather than silently \
+         read as `OutputSpec::default()` — a default carries no transform, so preview \
+         would go green on every draft publish refuses: {out}"
     );
     assert_eq!(f.port.executions(), 0, "nothing may reach the engine");
 }

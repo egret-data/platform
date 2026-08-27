@@ -2395,7 +2395,11 @@ pub(crate) fn validate_preview(
 /// shape and nothing else" is a property of the type rather than a rule someone
 /// has to remember — the same move [`IteratedParams`] makes for the shape
 /// itself.
-#[derive(Debug, Default, serde::Deserialize)]
+// `Clone` so `crate::preview::run` can move the whole draft onto a blocking
+// thread (see that module's section on the inline evaluation). It does not
+// weaken the containment argument above: cloning a `SiblingStatements` produces
+// another `SiblingStatements`, which still has no accessor for its text.
+#[derive(Debug, Default, Clone, serde::Deserialize)]
 #[serde(transparent)]
 pub struct SiblingStatements(Vec<String>);
 
@@ -3133,9 +3137,22 @@ pub(crate) struct DescribedBranches {
 /// What is left after this bound is up to ~122 ms of SYNCHRONOUS rendering on an
 /// async task, and it is deliberately not wrapped in `spawn_blocking`.
 ///
-/// The reason is that the cost is **bounded and authenticated** — publish and
-/// preview both sit behind `data_api_endpoint:manage`, and this constant is what
-/// makes the upper bound a number rather than a function of the request. It is
+/// **Publish only, since C2 Task 8.** `crate::preview` now runs the whole of
+/// [`validate_preview`] on a blocking thread, because adding
+/// [`check_transform`] to that path raised the bound past what the argument
+/// below can carry — a Starlark module evaluation is bounded by
+/// `transform::MAX_WALL_CLOCK` (2 s nominal, 28.8 s measured for a
+/// tick-expensive script), not by this constant. That is the redo this note
+/// asks for, and it is written up in `crate::preview`. What is left inline is
+/// `validate_endpoint`, reached by `POST …/validate` and `publish` — which run
+/// the SAME Starlark evaluation and inherit the same problem. It is
+/// pre-existing (C2 Tasks 4 and 5 put it there) and is recorded rather than
+/// fixed here.
+///
+/// The reason is that the cost is **bounded and authenticated** — the paths
+/// that still do this inline sit behind `data_api_endpoint:manage`, and this
+/// constant is what makes the RENDERING's upper bound a number rather than a
+/// function of the request. It is
 /// ~122 ms per STATEMENT, and it took
 /// [`egret_dataapi_api::MAX_STATEMENTS`] to make the endpoint's total a number
 /// too: measured at 121 ms × N, it reached 31.6 s at 256 statements. It is
@@ -3143,10 +3160,12 @@ pub(crate) struct DescribedBranches {
 /// awaited describe RELEASES the worker, so the runtime schedules other tasks
 /// for those milliseconds and only the one caller waits. This rendering OCCUPIES
 /// the worker — tokio cannot preempt it, every other task queued on that worker
-/// eats the whole spike, and an author calling preview in a loop holds one
-/// worker per in-flight request. Same magnitude, opposite effect on everything
-/// else running. If the bound ever rises, that reasoning has to be redone rather
-/// than carried over.
+/// eats the whole spike, and an author calling one of these routes in a loop
+/// holds one worker per in-flight request. Same magnitude, opposite effect on
+/// everything else running. If the bound ever rises, that reasoning has to be
+/// redone rather than carried over — which is exactly what happened above, so
+/// this paragraph now covers the rendering alone and no longer covers every
+/// caller.
 ///
 /// # Where the number comes from
 ///
