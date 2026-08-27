@@ -326,6 +326,33 @@ pub enum ValidationError {
     UndeclaredPlaceholder(String),
     #[error("parameter `{0}` is declared but never referenced as `{{{{{0}}}}}` in the query")]
     UnreferencedParameter(String),
+    /// A `build_sql` script put a parameter's VALUE into the SQL TEXT.
+    ///
+    /// Found by [`GeneratedSql::probe`], behaviourally: the script was run with
+    /// [`SENTINEL`] in this parameter's place and the sentinel came back inside
+    /// the template. See that function for what the probe does and — more
+    /// importantly — what it does not prove.
+    ///
+    /// The message names both the statement and the parameter, and offers the
+    /// three spellings that are safe, because "do not do that" without them
+    /// sends an author to delete a feature they are entitled to use: `{{ x }}`
+    /// for a value, an index into a table of names the SCRIPT contains for an
+    /// identifier, and `{{ x | ident }}` for an enum parameter (spec §2.2).
+    #[error(
+        "statement `{statement}` builds its SQL by putting parameter `{parameter}`'s value into \
+         the SQL TEXT: running the script with a sentinel in its place produced a template \
+         containing the sentinel. A caller's value must reach the engine as a BIND, so emit the \
+         placeholder `{{{{ {parameter} }}}}` and let the renderer bind it. If what you need is an \
+         IDENTIFIER, pick it from a table of names the script itself contains \
+         (`TABLES[params[\"{parameter}\"]]`), or — for an enum parameter — emit \
+         `{{{{ {parameter} | ident }}}}`"
+    )]
+    ParameterValueInSqlText {
+        /// The statement whose script emitted it, by name.
+        statement: String,
+        /// The parameter whose value reached the text.
+        parameter: String,
+    },
     #[error("parameter `{0}` is declared more than once")]
     DuplicateParameter(String),
     #[error(
@@ -2053,7 +2080,132 @@ pub(crate) enum ScriptEval<'a> {
 /// 256-statement list in under 500 ms, and without the bound ahead of
 /// generation those 256 statements are 256 evaluations of an author's script.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct GeneratedSql(BTreeMap<String, String>);
+pub(crate) struct GeneratedSql(BTreeMap<String, GeneratedStatement>);
+
+/// One statement's generated text, and what the probes learnt about it.
+///
+/// # Why `varies_with` rides along with the text rather than being recomputed
+///
+/// Because recomputing it means evaluating the script again, and the one place
+/// it would have to be recomputed is the one place no Starlark may run:
+/// `EndpointStore::publish` re-validates the row it LOCKED, and
+/// [`ScriptEval::AlreadyRunBeforeTheLock`] exists precisely so that
+/// re-validation performs no evaluation. A `varies_with` the locked re-run had
+/// to derive itself would put every probe under the row lock — or, worse, come
+/// back empty there and make publish refuse a branching script with
+/// [`ValidationError::UnreferencedParameter`] after `validate` had accepted it.
+///
+/// Carrying it in the payload publish already hands across the lock costs no new
+/// field on [`ScriptEval`] and no new soundness argument: generation and probing
+/// read `statements` and `params` and nothing else, and those two are exactly
+/// what publish's identity check proves unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GeneratedStatement {
+    /// The template the script returned — or the author's own SQL, copied.
+    sql: String,
+    /// The declared parameters whose value **changed this statement's emitted
+    /// template**, as [`GeneratedSql::probe`] measured it. Always empty for a
+    /// written statement: its text is not a function of anything.
+    ///
+    /// This is half of spec §2.4's behavioural reading of "referenced"; the
+    /// other half is `{{ x }}` in the emitted text, which
+    /// [`crate::render::context_names`] answers for written and generated SQL
+    /// alike.
+    varies_with: Vec<String>,
+}
+
+/// The value a probe puts in a parameter's place to see whether it reaches the
+/// SQL text.
+///
+/// Its shape is the gate, so it is asserted rather than assumed
+/// (`the_sentinel_cannot_collide_with_an_ordinary_value`): long enough that no
+/// author writes it by accident, and made only of bytes that survive being a
+/// parameter value unchanged — an identifier-safe run, so nothing between here
+/// and the emitted template can quote, escape or normalise it into something the
+/// containment test would miss.
+const SENTINEL: &str = "egret_sentinel_9f4c2ba7e1d05836";
+
+/// What one probe substitutes for one parameter, and what — if anything — that
+/// makes it possible to look for in the emitted template.
+///
+/// One struct rather than two functions because the value and the needle must
+/// agree: a needle for a value that was never substituted would be a gate that
+/// looks for nothing, and it would look exactly like a gate that works.
+struct SentinelProbe {
+    /// What the script sees in this parameter's place.
+    value: serde_json::Value,
+    /// The text whose presence in the emitted template is the finding, when
+    /// there is one. `None` for a probe that varies the value but has nothing
+    /// improbable to look for — see [`sentinel_probes`].
+    needle: Option<&'static str>,
+}
+
+/// The values one parameter is probed with, in order.
+///
+/// **Two per parameter, and the second one is not about the sentinel gate at
+/// all.** The first substitutes a distinctive value of the parameter's own type;
+/// the second substitutes `None`, which is what a caller who supplies nothing
+/// leaves behind. The second exists for spec §2.4: without it a script whose
+/// only use of a parameter is `if params["region"]:` never varies — `"x"` and
+/// the sentinel are both truthy — and the endpoint would be refused as
+/// `UnreferencedParameter` for a script that plainly reads it. That is the
+/// direction this whole task must not fail in.
+///
+/// It is the same pair the render probes already use: [`representative`] renders
+/// each optional parameter present and then [`ParamValues::insert_absent`],
+/// because "declared but not supplied" is a value a definition can branch on.
+///
+/// # The type is preserved, and that is not politeness
+///
+/// A string in a number parameter's place makes `params["n"] * 2` fail, and a
+/// probe that fails is inconclusive rather than a finding — so type-punning
+/// every parameter would quietly stop probing every script that does arithmetic.
+///
+/// # Which parameters carry a needle, and why the other two do not
+///
+/// A needle is only for a parameter whose bytes the CALLER writes freely: a
+/// `String`, a `Date` or a `Timestamp`, and an `Enum`, whose bytes are the
+/// author's own but which is still refused here so that the two sanctioned
+/// spellings (`TABLES[params[x]]`, `{{ x | ident }}`) stay the way an identifier
+/// is chosen.
+///
+/// A `Number` and a `Boolean` carry none, deliberately. Their caller bytes are
+/// digits or one of two words — neither can open a literal, close one, or form
+/// an identifier — and refusing them would refuse a script that exists BECAUSE
+/// of this feature: Trino will not bind `LIMIT`, so `"LIMIT " + str(params["n"])`
+/// is a legitimate reason to generate SQL at all, and it is safe for the same
+/// reason the parameter has a type.
+fn sentinel_probes(p: &ParamSpec) -> [SentinelProbe; 2] {
+    let first = match p.ty {
+        ParamType::String | ParamType::Enum | ParamType::Date | ParamType::Timestamp => {
+            SentinelProbe {
+                value: serde_json::Value::from(SENTINEL),
+                needle: Some(SENTINEL),
+            }
+        }
+        // `representative_value` is `true`, so `false` is the other member of a
+        // closed two-value space — the same reasoning `ParamValues::candidates`
+        // applies to a boolean in the render probes.
+        ParamType::Boolean => SentinelProbe {
+            value: serde_json::Value::Bool(false),
+            needle: None,
+        },
+        // `representative_value` is `1`. Zero varies both the VALUE and its
+        // truthiness, which is the branch a number is most often read for
+        // (`if params["min_total"]:`).
+        ParamType::Number => SentinelProbe {
+            value: serde_json::Value::from(0),
+            needle: None,
+        },
+    };
+    [
+        first,
+        SentinelProbe {
+            value: serde_json::Value::Null,
+            needle: None,
+        },
+    ]
+}
 
 impl GeneratedSql {
     /// Generate every scripted statement's SQL, once.
@@ -2070,12 +2222,26 @@ impl GeneratedSql {
         // here through `validate_endpoint` has already paid for it (the check is
         // a comparison over a list whose length is what it just bounded).
         egret_dataapi_api::validate_statements(statements)?;
+        // The SECOND bound, and it is here for the same reason the first one is:
+        // [`GeneratedSql::probe`] runs two evaluations per declared parameter,
+        // so an unbounded `params` is an unbounded number of evaluations of an
+        // author's script exactly as an unbounded `statements` would be.
+        // `check_definition_scans` asks this again a few lines later in
+        // `validate_endpoint` — it is a comparison over a `Vec`, and paying for
+        // it twice is what lets the bound sit where the work is bounded rather
+        // than where the scans happen to start.
+        if params.len() > MAX_DECLARED_PARAMS {
+            return Err(ValidationError::TooManyParameters {
+                declared: params.len(),
+                limit: MAX_DECLARED_PARAMS,
+            });
+        }
         let generation_params = generation_params(params);
         let mut out = BTreeMap::new();
         for statement in statements {
-            let sql =
-                match statement.source.script() {
-                    None => statement
+            let generated = match statement.source.script() {
+                None => GeneratedStatement {
+                    sql: statement
                         .source
                         .sql()
                         // `StatementSource` is a two-case enum with "neither"
@@ -2083,21 +2249,142 @@ impl GeneratedSql {
                         // means `sql()` returns `Some`.
                         .expect("a statement that is not a script carries SQL")
                         .to_owned(),
-                    Some(script) => crate::transform::build_sql(script, &generation_params)
-                        .map_err(|error| ValidationError::StatementScriptFailed {
+                    // A written statement's text is not a function of
+                    // anything, so nothing can vary it. The union in
+                    // `validate_endpoint` is then unchanged for an endpoint
+                    // with no scripts — which is what makes this task
+                    // invisible to every definition that has none.
+                    varies_with: Vec::new(),
+                },
+                Some(script) => {
+                    let sql = crate::transform::build_sql(script, &generation_params).map_err(
+                        |error| ValidationError::StatementScriptFailed {
                             statement: statement.name.clone(),
                             error: error.to_string(),
-                        })?,
-                };
-            out.insert(statement.name.clone(), sql);
+                        },
+                    )?;
+                    let varies_with =
+                        Self::probe(&statement.name, script, params, &generation_params, &sql)?;
+                    GeneratedStatement { sql, varies_with }
+                }
+            };
+            out.insert(statement.name.clone(), generated);
         }
         Ok(Self(out))
+    }
+
+    /// Run `script` again with a sentinel in each parameter's place, and answer
+    /// two questions from the same runs.
+    ///
+    /// **The gate (spec §2.3):** if the sentinel comes back inside the emitted
+    /// template, the script put the caller's value into the SQL TEXT rather than
+    /// leaving a placeholder for the renderer to bind, and the statement is
+    /// refused by [`ValidationError::ParameterValueInSqlText`].
+    ///
+    /// **The measurement (spec §2.4):** every parameter whose substitution
+    /// changed the emitted template is returned. `validate_endpoint` adds those
+    /// names to the `{{ x }}` names [`crate::render::context_names`] reads out of
+    /// the generated text, and the union is what
+    /// [`check_every_parameter_is_read`] is asked about. Without it, a script
+    /// that branches on a parameter and emits no `{{ }}` for it — the case this
+    /// package exists to enable — would be refused as
+    /// [`ValidationError::UnreferencedParameter`].
+    ///
+    /// # What this does NOT prove, stated because a limit that reads like a
+    /// guarantee is worse than a documented absence
+    ///
+    /// A script that TRANSFORMS the value before concatenating it — uppercases
+    /// it, hashes it, slices it, splits it — emits something that is not the
+    /// sentinel, and this returns clean. **The probe catches an author who
+    /// creates an injection hole by accident. It does not defend against an
+    /// author who sets out to build one**, and it is not a barrier that could be
+    /// made into one by looking harder at the emitted bytes: that is the P4.5
+    /// lesson (five independent reviews, five different bypasses of one byte
+    /// scanner guarding a template language).
+    ///
+    /// That residue is acceptable for a reason that has nothing to do with this
+    /// function's strength: the author is authenticated, holds
+    /// `data_api_endpoint:manage`, and is already trusted to write the SQL by
+    /// hand. The threat this design must stop is the CALLER, and against the
+    /// caller nothing changed — values are binds and identifiers are the
+    /// author's (spec §2.3).
+    ///
+    /// It is bounded in a second direction too, and it is the same bound M1
+    /// already lives with: a parameter read only inside a branch these
+    /// substitutions never reach is invisible here — it neither trips the gate
+    /// nor counts as referenced.
+    ///
+    /// # A probe that FAILS is inconclusive, and inconclusive means "referenced"
+    ///
+    /// `params["region"].split("-")[1]` raises under a sentinel and
+    /// `params["n"] + 1` raises under `None`. The render probes already treat a
+    /// failure as inconclusive rather than a finding
+    /// (`ParamValues::probe_replace`), and this does the same — with the one
+    /// addition that a script which CRASHES on a parameter's value has
+    /// demonstrated that it reads it, so the name counts as referenced. Both
+    /// halves lean the safe way: no refusal from a probe that proved nothing.
+    ///
+    /// # The cost, and the two bounds that make it a number
+    ///
+    /// [`sentinel_probes`] is two values per parameter, so one scripted
+    /// statement costs `2 × params.len()` evaluations — at most 64, since
+    /// [`build`](GeneratedSql::build) refuses more than [`MAX_DECLARED_PARAMS`]
+    /// declared parameters before it reaches here. Across an endpoint that is
+    /// `MAX_STATEMENTS` times that, checked first, on the publish path only.
+    /// **`crate::render::MAX_PROBES` is untouched** — it bounds renders of one
+    /// definition and this bounds evaluations of one script; the two happen to
+    /// arrive at the same 64.
+    fn probe(
+        name: &str,
+        script: &str,
+        params: &[ParamSpec],
+        base: &BTreeMap<String, serde_json::Value>,
+        baseline: &str,
+    ) -> std::result::Result<Vec<String>, ValidationError> {
+        let mut varies_with = Vec::new();
+        for p in params {
+            let mut varied = false;
+            for probe in sentinel_probes(p) {
+                let mut context = base.clone();
+                context.insert(p.name.clone(), probe.value);
+                match crate::transform::build_sql(script, &context) {
+                    // Inconclusive as a gate, conclusive as a reading: the
+                    // script looked at the value and could not cope with it.
+                    Err(_) => varied = true,
+                    Ok(emitted) => {
+                        if probe.needle.is_some_and(|needle| emitted.contains(needle)) {
+                            return Err(ValidationError::ParameterValueInSqlText {
+                                statement: name.to_owned(),
+                                parameter: p.name.clone(),
+                            });
+                        }
+                        varied |= emitted != baseline;
+                    }
+                }
+            }
+            if varied {
+                varies_with.push(p.name.clone());
+            }
+        }
+        Ok(varies_with)
     }
 
     /// The text generated for `name`, if this set was generated for a statement
     /// list containing it.
     fn get(&self, name: &str) -> Option<&str> {
-        self.0.get(name).map(String::as_str)
+        self.0.get(name).map(|g| g.sql.as_str())
+    }
+
+    /// Every parameter that changed SOME statement's emitted template, across
+    /// the whole endpoint.
+    ///
+    /// The union, for the reason [`check_every_parameter_is_read`] records: a
+    /// parameter only the rows query branches on is not an unused query
+    /// parameter (spec §4.2), and asking per statement would refuse it.
+    fn varying_params(&self) -> impl Iterator<Item = &str> {
+        self.0
+            .values()
+            .flat_map(|g| g.varies_with.iter().map(String::as_str))
     }
 }
 
@@ -2121,14 +2408,17 @@ impl GeneratedSql {
 ///
 /// # What this is not
 ///
-/// It is one assignment, so it exercises one branch of a branching script.
-/// Package S Task 4 runs the script again under a sentinel assignment (the gate
-/// that refuses a script concatenating a caller's value into the SQL text) and
-/// Task 5 runs it under M1's probe assignments to freeze the column contract.
-/// Neither exists yet, and the backstop for every branch this assignment does
-/// not reach is the one hand-written SQL already has: `render` re-runs the byte
-/// tests on what it produced, on every request
-/// (`crate::render::check_rendered_statement`).
+/// It is one assignment, so it exercises one branch of a branching script — the
+/// BASELINE branch. [`GeneratedSql::probe`] (Task 4) runs the script again from
+/// this same base with a sentinel and then `None` in each parameter's place,
+/// which is what refuses a script concatenating a caller's value into the SQL
+/// text and what measures which parameters the script actually reads; Task 5
+/// runs it under M1's probe assignments to freeze the column contract, and does
+/// not exist yet.
+///
+/// The backstop for every branch none of those assignments reaches is the one
+/// hand-written SQL already has: `render` re-runs the byte tests on what it
+/// produced, on every request (`crate::render::check_rendered_statement`).
 fn generation_params(params: &[ParamSpec]) -> BTreeMap<String, serde_json::Value> {
     params
         .iter()
@@ -2606,6 +2896,19 @@ fn validate_endpoint(
             statement, &generated,
         )?)?);
     }
+    // Spec §2.4, and the whole of what package S changes about this rule. A
+    // written statement reads a parameter in exactly one way — `{{ x }}` in its
+    // text — and the loop above finds every such name. A SCRIPT has a second
+    // way: `if params["grain"] == "daily"` reads `grain` and may emit no
+    // `{{ grain }}` at all. Applying the written-SQL test to generated text
+    // would refuse the branching case this package exists to enable, so the
+    // names measured behaviourally by [`GeneratedSql::probe`] join the union
+    // here — the same question, asked in the only way a script can answer it.
+    //
+    // The names come out of `generated` rather than being measured here so that
+    // publish's in-transaction re-validation gets them without evaluating
+    // anything; see [`GeneratedStatement`].
+    read.extend(generated.varying_params().map(str::to_owned));
     check_every_parameter_is_read(&read, params)?;
     check_cache_scope(cache, delegated, impersonate)?;
     // ONE shape decision for the endpoint, made before the first render and
@@ -4865,6 +5168,295 @@ mod tests {
         }
     }
 
+    // ---- Package S Task 4: the sentinel probe -----------------------------
+
+    fn string_param(name: &str) -> ParamSpec {
+        param(name, ParamType::String)
+    }
+
+    /// The Task 4 tests' entry point, and it is [`validate_generated`] — the
+    /// same `validate_endpoint` that `POST …/validate` and
+    /// `EndpointStore::publish` both go through.
+    ///
+    /// Named for what these tests are about rather than aliased away, because
+    /// the thing under test is not a probe function in isolation: the sentinel
+    /// gate and spec §2.4's behavioural reading of `UnreferencedParameter` only
+    /// compose correctly at this level. A test that called
+    /// [`GeneratedSql::probe`] directly would pass with the union in
+    /// `validate_endpoint` deleted, and the accepting case below would then be
+    /// refused in production.
+    fn probe_generated(
+        script: &str,
+        params: &[ParamSpec],
+    ) -> std::result::Result<Validated, ValidationError> {
+        validate_generated(script, params)
+    }
+
+    /// **THE test of package S Task 4.** A script that concatenates a caller's
+    /// value into the SQL TEXT is refused, and the refusal names the parameter.
+    ///
+    /// The arm is asserted, not merely `is_err()` — and here that is not a
+    /// formality, it is the difference between a green test and a real one.
+    /// This script emits no `{{ }}` at all, so with the sentinel gate deleted it
+    /// is STILL refused, by `UnreferencedParameter("region")` — whose message
+    /// also contains the word `region`. The brief's `contains("region")` would
+    /// pass against a gate that does not exist.
+    #[test]
+    fn a_script_that_concatenates_a_parameter_into_the_sql_is_refused() {
+        let script =
+            "def build_sql(params):\n  return \"SELECT * FROM sales_\" + params[\"region\"]";
+        let err = probe_generated(script, &[string_param("region")]).expect_err("interpolated");
+        assert_eq!(
+            err,
+            ValidationError::ParameterValueInSqlText {
+                statement: "rows".into(),
+                parameter: "region".into(),
+            }
+        );
+        assert!(
+            err.to_string().contains("region"),
+            "must name the parameter: {err}"
+        );
+    }
+
+    /// The discriminating half. Without it the rule could be "refuse every
+    /// script that mentions a parameter", which would refuse the feature.
+    #[test]
+    fn a_script_that_passes_a_parameter_through_a_placeholder_is_accepted() {
+        let script = "def build_sql(params):\n  return \"SELECT * FROM t WHERE r = {{ region }}\"";
+        assert!(probe_generated(script, &[string_param("region")]).is_ok());
+    }
+
+    /// The second discriminating half, and the one spec §2.4 was written for: a
+    /// script that reads a parameter for CONTROL FLOW and emits no `{{ grain }}`
+    /// publishes.
+    ///
+    /// Before §2.4 this was refused by `UnreferencedParameter`, which reads the
+    /// emitted text for `{{ grain }}` and finds none — the written-SQL test
+    /// applied to generated text, refusing exactly the case this package exists
+    /// to enable. The probe answers the same question behaviourally: varying
+    /// `grain` changes the emitted template, so it is read.
+    #[test]
+    fn a_script_that_branches_on_a_parameter_without_emitting_it_is_accepted() {
+        let script = "def build_sql(params):\n  \
+                      if params[\"grain\"] == \"daily\":\n    return \"SELECT 1 FROM sales_daily\"\n  \
+                      return \"SELECT 1 FROM sales_hourly\"";
+        assert!(probe_generated(script, &[enum_param("grain", &["daily", "hourly"])]).is_ok());
+    }
+
+    /// If the sentinel were something an author might legitimately write, this
+    /// gate would refuse honest scripts. Assert its shape, not just its use.
+    #[test]
+    fn the_sentinel_cannot_collide_with_an_ordinary_value() {
+        assert!(
+            SENTINEL.len() >= 16,
+            "too short to be improbable: {SENTINEL}"
+        );
+        assert!(
+            SENTINEL
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_'),
+            "the sentinel must survive being a parameter value unchanged: {SENTINEL}"
+        );
+    }
+
+    /// A parameter NOTHING reads is still refused — the rule §2.4 rewrote, not
+    /// the rule §2.4 removed.
+    ///
+    /// Without this, "referenced" could mean "declared" and every test above
+    /// would still pass. The script is a constant, so no substitution changes
+    /// the template and no `{{ }}` names the parameter: both halves of the union
+    /// are empty, which is the only way this refusal can now be reached for a
+    /// scripted statement.
+    #[test]
+    fn a_parameter_a_script_never_reads_is_still_unreferenced() {
+        let script = "def build_sql(params):\n  return \"SELECT 1 AS a\"";
+        assert_eq!(
+            probe_generated(script, &[string_param("region")]).expect_err("nothing reads it"),
+            ValidationError::UnreferencedParameter("region".into())
+        );
+    }
+
+    /// A parameter a script reads only for its PRESENCE is referenced.
+    ///
+    /// This is what the `None` probe buys, and it is the reason
+    /// [`sentinel_probes`] returns two values rather than one: `"x"` and the
+    /// sentinel are both truthy, so a single-value probe would leave this
+    /// script's template unchanged and refuse it as `UnreferencedParameter` —
+    /// a gate refusing an honest script, which is the direction this task must
+    /// not fail in.
+    #[test]
+    fn a_parameter_a_script_reads_only_for_its_presence_is_referenced() {
+        let script = "def build_sql(params):\n  \
+                      if params[\"region\"]:\n    return \"SELECT 1 FROM t WHERE r IS NOT NULL\"\n  \
+                      return \"SELECT 1 FROM t\"";
+        assert!(
+            probe_generated(script, &[string_param("region")]).is_ok(),
+            "a script branching on whether a parameter was supplied reads it"
+        );
+    }
+
+    /// A NUMBER concatenated into the text is accepted, and that is a decision
+    /// rather than an oversight.
+    ///
+    /// Trino will not bind `LIMIT`, so building that clause is one of the
+    /// reasons to generate SQL at all. A number parameter's caller bytes are
+    /// digits — they cannot open a literal, close one, or form an identifier —
+    /// so there is nothing here for the gate to protect, and refusing it would
+    /// cost a safe capability the feature exists to provide. See
+    /// [`sentinel_probes`].
+    #[test]
+    fn a_script_may_put_a_numeric_parameter_into_the_sql_text() {
+        let script = "def build_sql(params):\n  \
+                      return \"SELECT id FROM t LIMIT \" + str(params[\"n\"])";
+        assert!(
+            probe_generated(script, &[param("n", ParamType::Number)]).is_ok(),
+            "a number in the text is not an injection, and `LIMIT` cannot be bound on Trino"
+        );
+    }
+
+    /// **What the probe does not prove, asserted rather than only commented.**
+    ///
+    /// The same concatenation as the refused test above, with `.upper()` in the
+    /// way. The sentinel comes back transformed, the containment test finds
+    /// nothing, and the definition PUBLISHES. That is spec §2.3's stated
+    /// residue: the probe catches an author creating an injection hole by
+    /// accident, not one who sets out to.
+    ///
+    /// Written down as a test because a documented absence that no test pins is
+    /// a claim about behaviour nobody re-checks — and because the tempting
+    /// "fix", scanning the emitted bytes harder, is the P4.5 mistake this whole
+    /// gate is shaped to avoid.
+    #[test]
+    fn a_script_that_transforms_the_value_first_defeats_the_probe() {
+        let script =
+            "def build_sql(params):\n  return \"SELECT * FROM sales_\" + params[\"region\"].upper()";
+        assert!(
+            probe_generated(script, &[string_param("region")]).is_ok(),
+            "if this now FAILS the probe grew a capability its doc comment disclaims — update \
+             the spec and the comment, do not just delete this test"
+        );
+    }
+
+    /// The probes are the PUBLISH path's cost and nothing else's: publish's
+    /// in-transaction re-validation must not run one.
+    ///
+    /// The endpoint's script would be refused by the gate if it were evaluated
+    /// again — it concatenates the parameter — and the text handed in is
+    /// innocent. Under the skip it must validate, which it can only do by
+    /// evaluating nothing. Together with
+    /// `a_generated_statement_is_not_regenerated_under_the_lock` this covers
+    /// both evaluations a scripted statement can cost.
+    ///
+    /// The second half is the one that makes the payload's design load-bearing:
+    /// the branching script's `grain` is referenced only behaviourally, so a
+    /// re-validation that recomputed `varies_with` under the lock — or shrugged
+    /// and left it empty — would refuse with `UnreferencedParameter` an endpoint
+    /// `validate` had just accepted. Publishing would be impossible.
+    #[test]
+    fn the_sentinel_probe_does_not_run_under_the_lock() {
+        let interpolating = vec![StatementSpec::from_script(
+            "rows",
+            "def build_sql(params):\n  return \"SELECT 1 FROM sales_\" + params[\"region\"]",
+        )];
+        let params = vec![string_param("region")];
+        let innocent = GeneratedSql(BTreeMap::from([(
+            "rows".to_string(),
+            GeneratedStatement {
+                sql: "SELECT 1 FROM t WHERE r = {{ region }}".to_string(),
+                varies_with: Vec::new(),
+            },
+        )]));
+        assert!(
+            validate_endpoint(
+                &interpolating,
+                &params,
+                &cache(CacheScope::PerPrincipal),
+                &OutputSpec::default(),
+                false,
+                false,
+                ScriptEval::AlreadyRunBeforeTheLock {
+                    generated: &innocent
+                },
+            )
+            .is_ok(),
+            "a sentinel probe under the lock puts an author's Starlark back inside publish's \
+             transaction — the thing `ScriptEval` exists to prevent"
+        );
+
+        let branching = vec![StatementSpec::from_script(
+            "rows",
+            "def build_sql(params):\n  \
+             if params[\"grain\"] == \"daily\":\n    return \"SELECT 1 FROM sales_daily\"\n  \
+             return \"SELECT 1 FROM sales_hourly\"",
+        )];
+        let grain = vec![enum_param("grain", &["daily", "hourly"])];
+        let generated =
+            GeneratedSql::build(&branching, &grain).expect("the branching script builds");
+        assert_eq!(
+            generated.varying_params().collect::<Vec<_>>(),
+            vec!["grain"],
+            "the behavioural reading has to be carried across the lock, not recomputed there"
+        );
+        assert!(
+            validate_endpoint(
+                &branching,
+                &grain,
+                &cache(CacheScope::PerPrincipal),
+                &OutputSpec::default(),
+                false,
+                false,
+                ScriptEval::AlreadyRunBeforeTheLock {
+                    generated: &generated
+                },
+            )
+            .is_ok(),
+            "publish's locked re-validation must accept what `validate` accepted"
+        );
+    }
+
+    /// The probe count is bounded by the two limits checked before it, and the
+    /// bound is a WALL-CLOCK number rather than an argument.
+    ///
+    /// The worst case an author can construct: `MAX_STATEMENTS` scripted
+    /// statements and `MAX_DECLARED_PARAMS` parameters, which is
+    /// `16 × 32 × 2 = 1024` evaluations plus the 16 that generate. If that is
+    /// ever not affordable, the number here is what says so — and the fix is a
+    /// budget, not a quietly raised limit.
+    ///
+    /// Measured at 524 ms in a debug build on the author's machine. The bound is
+    /// 8 s so a loaded CI box does not make it flaky; it is there to catch an
+    /// ORDER of magnitude, which is what a third probe value or a lifted limit
+    /// would cost.
+    #[test]
+    fn the_probe_cost_is_bounded_by_the_limits_checked_before_it() {
+        let params: Vec<ParamSpec> = (0..MAX_DECLARED_PARAMS)
+            .map(|i| string_param(&format!("p{i}")))
+            .collect();
+        // The script's CONTENT does not change the count: `GeneratedSql::probe`
+        // substitutes both probe values for every declared parameter whatever
+        // the script does with them, which is the point — the cost is a function
+        // of the two limits and of nothing an author writes.
+        let script = "def build_sql(params):\n  return \"SELECT 1 AS a\"";
+        let statements: Vec<StatementSpec> = (0..egret_dataapi_api::MAX_STATEMENTS)
+            .map(|i| StatementSpec::from_script(format!("s{i}"), script))
+            .collect();
+
+        let started = std::time::Instant::now();
+        let generated = GeneratedSql::build(&statements, &params).expect("the worst case builds");
+        let elapsed = started.elapsed();
+        assert_eq!(
+            generated.varying_params().count(),
+            0,
+            "nothing branches here"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(8),
+            "1024 sentinel probes took {elapsed:?}; publish pays this once, outside its \
+             transaction, but a number climbing here is the signal for a budget"
+        );
+    }
+
     /// The wording fix package S Task 2 deferred and Task 3 is the task that
     /// makes visible: an author who did not define `build_sql` must be told
     /// about `build_sql`, not about `transform`.
@@ -4949,7 +5541,10 @@ mod tests {
         )];
         let smuggled = GeneratedSql(BTreeMap::from([(
             "rows".to_string(),
-            "SELECT 1; DROP TABLE t".to_string(),
+            GeneratedStatement {
+                sql: "SELECT 1; DROP TABLE t".to_string(),
+                varies_with: Vec::new(),
+            },
         )]));
         assert_eq!(
             validate_endpoint(
