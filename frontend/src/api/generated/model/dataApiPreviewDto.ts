@@ -28,4 +28,17 @@ export interface DataApiPreviewDto {
      * from "over".
      */
   truncated: boolean;
+  /**
+     * True when the draft declares an `output.transform` — so `columns` and
+     * `rows` above are the STATEMENT's, and a consumer receives something else
+     * entirely (the script's output, described by `returns`).
+     *
+     * A fact, not a rendering: the UI owns the sentence, the way it does for
+     * `truncated`. But it must say something, because this is the one case
+     * where the gap between "what preview shows" and "what a consumer gets" is
+     * not a renaming — it is a different value of a different shape. See the
+     * module comment for why preview does not run the script, and for what
+     * does.
+     */
+  transform_declared: boolean;
 }

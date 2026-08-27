@@ -5,6 +5,7 @@
  * egret unified data portal HTTP API.
  * OpenAPI spec version: 0.1.0
  */
+import type { TransformSpec } from './transformSpec';
 
 export interface OutputSpec {
   shape?: string;
@@ -32,4 +33,5 @@ export interface OutputSpec {
      * [`validate_envelope`] for why this field and not its two neighbours.
      */
   envelope?: string;
+  transform?: null | TransformSpec;
 }

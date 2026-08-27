@@ -127,6 +127,12 @@ export const PreviewBlock = forwardRef<PreviewHandle, PreviewBlockProps>(functio
           siblings,
           params: form.params,
           values: sent,
+          // Required by the route, and it is the DRAFT's `output` rather than
+          // the saved endpoint's — a transform added since the last Save is
+          // exactly the state preview exists to show. The server checks its
+          // `transform` with publish's own rule and applies none of it; see the
+          // note the answer's `transform_declared` turns on below.
+          output: form.output,
           database_id: form.database_id,
         },
       });
@@ -262,6 +268,29 @@ export const PreviewBlock = forwardRef<PreviewHandle, PreviewBlockProps>(functio
 
         {result && (
           <div className="space-y-2">
+            {/* The one case where the gap between what preview shows and what a
+                consumer receives is not a renaming but a different value of a
+                different shape — so it is stated ON the rows, not in the note
+                beside the button, which an author has already scrolled past.
+
+                Preview cannot run the script and does not pretend to: it runs
+                ONE statement, and `transform(params, statements)` is given
+                every statement's rows keyed by name. Handing it this one
+                statement with the others empty would refuse endpoints that
+                serve fine, and — worse — return a green answer computed from
+                `[]`. `Try it` drives the real serving router, so that is where
+                the transformed response actually exists. */}
+            {result.transform_declared && (
+              <Alert>
+                <AlertDescription className="text-xs">
+                  This endpoint builds its response with a transform. The rows below are the
+                  statement&rsquo;s own — the script&rsquo;s <em>input</em>, not the response a
+                  consumer receives. Preview runs one statement and the script is given every
+                  statement&rsquo;s rows, so it cannot run the script here; Try it runs the
+                  published endpoint for real and shows the transformed response.
+                </AlertDescription>
+              </Alert>
+            )}
             <p className="text-xs text-muted-foreground">
               {result.truncated
                 ? `Showing the first ${PREVIEW_MAX_ROWS} rows — there are more.`
