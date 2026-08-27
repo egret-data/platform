@@ -2533,6 +2533,17 @@ impl GeneratedSql {
     /// cost of that decision, not an oversight in it, and it is written down
     /// here rather than left for a reader to discover.
     ///
+    /// **TWO is still the count after package S Task 8.5 added a third way for
+    /// an evaluation to fail**, and that is worth one sentence rather than a
+    /// re-derivation. A script that concatenates the caller's value AND pads the
+    /// result past [`crate::transform::MAX_GENERATED_SQL_BYTES`] never reaches
+    /// the containment test below — the emission is refused before there is a
+    /// string to search. It escapes `ParameterValueInSqlText` and it escapes
+    /// nothing else: the length arm at the top of the loop RETURNS, so the
+    /// definition is refused either way and no such statement publishes. A
+    /// length refusal is the one `Err` that closes a door instead of opening
+    /// one.
+    ///
     /// **The probe catches an author who creates an injection hole by accident.
     /// It does not defend against an author who sets out to build one**, and it
     /// is not a barrier that could be made into one by looking harder at the
@@ -2552,6 +2563,17 @@ impl GeneratedSql {
     /// nor counts as referenced.
     ///
     /// # A probe that FAILS is inconclusive, and inconclusive means "referenced"
+    ///
+    /// **With exactly one exception, and the exception is about evidence.**
+    /// [`crate::transform::TransformError::GeneratedSqlTooLarge`] is refused
+    /// outright rather than read as inconclusive, because it is not a failure to
+    /// produce an answer: the script ran to completion, returned a template, and
+    /// this process measured it. Everything below argues that a script which
+    /// RAISES under a synthetic value has proved nothing about the values it
+    /// will really be sent — true, and it does not transfer to a branch publish
+    /// generated and found too long. Swallowing that one published an endpoint
+    /// green and left the first caller who reached the branch with a 500 for a
+    /// defect publish was holding in its hand.
     ///
     /// `params["region"].split("-")[1]` raises under a sentinel and
     /// `params["n"] + 1` raises under `None`. The render probes already treat a
@@ -2600,6 +2622,24 @@ impl GeneratedSql {
                 let mut context = base.clone();
                 context.insert(p.name.clone(), probe.value);
                 match crate::transform::build_sql(script, &context) {
+                    // The ONE failure that is neither inconclusive nor a
+                    // reading: the script ran to completion and handed back a
+                    // template this process MEASURED against
+                    // `transform::MAX_GENERATED_SQL_BYTES`. Publish holds the
+                    // evidence, so publish answers with it rather than dropping
+                    // the alternate and leaving a real caller on this branch to
+                    // meet the same cap as a 500. See the section on
+                    // inconclusive failures in this function's doc.
+                    Err(e @ crate::transform::TransformError::GeneratedSqlTooLarge { .. }) => {
+                        return Err(ValidationError::StatementScriptFailed {
+                            statement: name.to_owned(),
+                            error: format!(
+                                "on the branch a probe value for parameter \
+                                 `{}` reaches: {e}",
+                                p.name
+                            ),
+                        })
+                    }
                     // Inconclusive as a gate, conclusive as a reading: the
                     // script looked at the value and could not cope with it.
                     Err(_) => varied = true,
@@ -3381,10 +3421,17 @@ fn check_definition_scans(
 /// 8: a sibling arrives as SQL TEXT, so a sibling that is itself a `build_sql`
 /// script cannot be expressed, is spent as one template against the endpoint's
 /// budget, and contributes to the iterated union whatever its SOURCE happens to
-/// scan as rather than what it would emit. The direction is preview green then
-/// publish refused, never the reverse. The full statement of it, including why
-/// closing it is a decision about the wire type, is in the `crate::preview`
-/// module comment.
+/// scan as rather than what it would emit.
+///
+/// **That last one runs in BOTH directions**, which an earlier wording of this
+/// paragraph denied. A header only the EMITTED text carries is missed, and
+/// preview binds a scalar where serving binds a list; a header the SOURCE
+/// carries on a branch the script never emits is counted, and preview binds a
+/// list where publish and serving bind a scalar — preview refusing a draft that
+/// publishes green. [`SiblingStatements::union_with`] is where both happen, and
+/// `tests::a_scripted_siblings_source_can_make_previews_shape_wider_than_publishs`
+/// is the pin. The full statement of it, including why closing it is a decision
+/// about the wire type, is in the `crate::preview` module comment.
 ///
 /// # `output` is checked for its TRANSFORM and applied to nothing (C2)
 ///
@@ -5726,6 +5773,63 @@ mod tests {
         }
     }
 
+    /// **A probed branch over the cap is refused at PUBLISH, because publish
+    /// built that template and measured it.**
+    ///
+    /// The baseline here is a perfectly good statement, so nothing in
+    /// `build_after` refuses it — the oversized text is emitted only under the
+    /// `None` probe `sentinel_probes` supplies second for every parameter. That
+    /// makes it a branch publish GENERATED, and a refusal it holds the evidence
+    /// for.
+    ///
+    /// `GeneratedSql::probe` reads a failed evaluation as inconclusive
+    /// (`Err(_) => varied = true`) and that is right for a script that RAISES on
+    /// a synthetic value it will never be sent. A length refusal is not that
+    /// kind of failure: the script ran to completion and returned a template
+    /// this process measured. Swallowing it published an endpoint green and left
+    /// a real caller on that branch with a 500 — which is what this test would
+    /// go back to asserting if the arm were removed.
+    ///
+    /// It names the PARAMETER as well as the statement, because an author whose
+    /// baseline is fine needs to know which branch to look at, and a publish
+    /// refusal is an author-facing message where that detail belongs.
+    #[test]
+    fn a_probed_branch_over_the_cap_is_refused_rather_than_swallowed() {
+        let statements = vec![StatementSpec::from_script(
+            "rows",
+            "def build_sql(params):\n  \
+             if params[\"region\"] == None:\n    \
+             return \"SELECT \" + \"z\" * 70000\n  \
+             return \"SELECT n FROM t WHERE region = {{ region }}\"",
+        )];
+        let params = vec![string_param("region")];
+        let err = validate_endpoint(
+            &statements,
+            &params,
+            &cache(CacheScope::PerPrincipal),
+            &OutputSpec::default(),
+            false,
+            false,
+            ScriptEval::Here,
+        )
+        .expect_err("the None probe emits more than the cap");
+        match &err {
+            ValidationError::StatementScriptFailed { statement, error } => {
+                assert_eq!(statement, "rows");
+                assert!(
+                    error.contains("region"),
+                    "the author's baseline is fine — the message must say which \
+                     branch: {error}"
+                );
+                assert!(
+                    error.contains(&crate::transform::MAX_GENERATED_SQL_BYTES.to_string()),
+                    "and it must still carry the cap: {error}"
+                );
+            }
+            other => panic!("expected StatementScriptFailed, got {other:?}"),
+        }
+    }
+
     // ---- Package S Task 4: the sentinel probe -----------------------------
 
     fn string_param(name: &str) -> ParamSpec {
@@ -6484,6 +6588,88 @@ mod tests {
             published.names(),
         );
         assert_eq!(published.names(), ["region"]);
+    }
+
+    /// **The sibling divergence runs in BOTH directions, and this is the one
+    /// that goes the other way** (package S Task 8.5).
+    ///
+    /// The two consequences `crate::preview`'s module comment used to list are
+    /// under-reads: a sibling script's emitted `{% for %}` never joins the
+    /// union, so preview resolves a scalar where serving binds a list. This is
+    /// the OVER-read, and it is the mirror image. `siblings` is a list of texts,
+    /// so a client that puts a scripted sibling's SOURCE in it hands
+    /// `IteratedParams::across` a Starlark program to scan as though it were a
+    /// template — and a `{% for %}` header sitting in a string literal on a
+    /// branch the script never emits joins the union anyway.
+    ///
+    /// Preview's set is then WIDER than the endpoint's: preview binds `region`
+    /// as a list where publish and serving bind a scalar, for a draft that
+    /// publishes perfectly well. "Preview green, publish refuses, never the
+    /// reverse" was therefore not true, and a two-item list that implied it was
+    /// the kind of enumeration this task's other half exists to correct.
+    ///
+    /// The console does not reach it — `Query.tsx` sends `""` for a scripted
+    /// sibling — and the second half asserts exactly that, so "the browser is
+    /// safe" is a property this file checks rather than a claim about another
+    /// language's file.
+    #[test]
+    fn a_scripted_siblings_source_can_make_previews_shape_wider_than_publishs() {
+        const ON_SCREEN: &str = "SELECT count(*) AS n FROM t";
+        // The `{% for %}` lives in a string literal on the `__never__` branch.
+        // No probe supplies that value, so no template the endpoint can emit
+        // carries the header — but the SOURCE does.
+        const SCRIPTED: &str = "def build_sql(params):\n  \
+             if params[\"region\"] == \"__never__\":\n    \
+             return \"SELECT n FROM t WHERE region IN (\
+             {% for x in region %}{{ x }}{% endfor %})\"\n  \
+             return \"SELECT n FROM t WHERE region = {{ region }}\"";
+        let params = vec![string_param("region")];
+
+        let published = validate_endpoint(
+            &[
+                StatementSpec::from_sql("on_screen", ON_SCREEN),
+                StatementSpec::from_script("sibling", SCRIPTED),
+            ],
+            &params,
+            &cache(CacheScope::PerPrincipal),
+            &OutputSpec::default(),
+            false,
+            false,
+            ScriptEval::Here,
+        )
+        .expect("the endpoint publishes: every emitted template is a plain read")
+        .iterated;
+        assert!(
+            published.names().is_empty(),
+            "no template this endpoint can EMIT iterates anything: {:?}",
+            published.names()
+        );
+
+        // The same endpoint previewed by a client that sends the sibling's
+        // source, which is the only thing a `string[]` wire lets it send.
+        assert_eq!(
+            validate_preview(
+                &written(ON_SCREEN),
+                &siblings(&[SCRIPTED]),
+                &params,
+                &OutputSpec::default()
+            )
+            .expect("the preview is accepted")
+            .names(),
+            ["region"],
+            "the scan read a header out of a branch that is never emitted"
+        );
+
+        // …and the console's `""`, which is what makes the browser safe.
+        assert!(validate_preview(
+            &written(ON_SCREEN),
+            &siblings(&[""]),
+            &params,
+            &OutputSpec::default()
+        )
+        .expect("the preview is accepted")
+        .names()
+        .is_empty());
     }
 
     /// A sibling is not a definition being validated — it informs the shape and

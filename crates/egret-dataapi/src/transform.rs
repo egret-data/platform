@@ -365,18 +365,30 @@ pub(crate) const MAX_TRANSFORM_OUTPUT_BYTES: usize = 1 << 20;
 
 /// Ceiling on the template a [`build_sql`] script emits, in bytes (spec §5).
 ///
-/// # Sized against a real generated statement, not a round number
+/// # Measured to a BAND; 65536 is chosen inside it
 ///
-/// `tests::a_realistic_branching_statement_sizes_the_generated_sql_cap` holds
-/// the measurement, so the number below is checked by the suite rather than
-/// asserted in a report: spec §1's shape scaled to an honest analytics query —
-/// four optional dimensions, six metrics, two CTEs, three joins, a grain
-/// chosen from a dict and two optional filters — is an **1862-byte script that
-/// emits 948 bytes**. 65536 (64 KiB) is ~69x that, the same order of headroom
-/// [`crate::lifecycle::MAX_TRANSFORM_SCRIPT_BYTES`] gave C2's ~200-byte example
-/// at ~40x.
+/// Said plainly, because the alternative is a claim of measurement stronger
+/// than the evidence. `tests::a_realistic_branching_statement_sizes_the_generated_sql_cap`
+/// measures spec §1's shape scaled to an honest analytics query — four optional
+/// dimensions, six metrics, two CTEs, three joins, a grain chosen from a dict
+/// and two optional filters — at an **1862-byte script emitting 948 bytes**,
+/// and holds the cap to `[40x, 100x]` of it: **[37.9 KiB, 94.8 KiB]**.
 ///
-/// # Why not 1 MiB, which is this crate's other answer
+/// That band is what the measurement decides, and it is decided in **both**
+/// directions, which is the part a floor alone cannot do. The bottom is C2's
+/// ratio — a cap an honest script bumps into refuses work that should have been
+/// allowed. The top is C2's own sentence turned around: "a cap an honest script
+/// never approaches is not a cap at all", and past it the only thing bounding a
+/// generated statement is `render::MAX_SQL_BYTES` again, which is where this
+/// started.
+///
+/// 65536 is then a round number **chosen** inside that band, at ~69x. Nothing
+/// measured distinguishes it from 48 KiB or 80 KiB, and this comment does not
+/// pretend otherwise. What the test does guarantee is that raising it to
+/// 512 KiB or 1 MiB — the realistic future edit, made to unblock one author —
+/// goes red.
+///
+/// # Why not simply reuse 1 MiB, which is this crate's other answer
 ///
 /// [`MAX_TRANSFORM_OUTPUT_BYTES`]'s doc says a third number "would only invite
 /// the question of why", so here is why. 1 MiB is `render::MAX_SQL_BYTES`, and
@@ -387,11 +399,13 @@ pub(crate) const MAX_TRANSFORM_OUTPUT_BYTES: usize = 1 << 20;
 /// generated one is a megabyte the author's mistake is several screens behind
 /// them.
 ///
-/// The two numbers are related rather than rival. An endpoint freezes at most
-/// [`egret_dataapi_api::MAX_STATEMENTS`] generated templates
-/// ([`crate::lifecycle::ValidationError::TooManyGeneratedTemplates`] is what
-/// bounds the count), so `16 x 64 KiB` is exactly 1 MiB: the whole endpoint's
-/// generated text is held to the number ONE render is held to.
+/// **`MAX_STATEMENTS x 64 KiB` also happens to be 1 MiB, and that is arithmetic
+/// rather than a property.** It is recorded here only so the next reader does
+/// not mistake it for one: the 16 templates are never rendered as one string,
+/// nothing sums them against any limit, and a single 64 KiB template carrying a
+/// `{% for %}` can render past 1 MiB on its own — which is precisely the case
+/// `render::MAX_SQL_BYTES` exists for. This cap bounds the template; that one
+/// bounds the render. Neither contains the other.
 ///
 /// # Where it is enforced, and why there is only one place
 ///
@@ -417,12 +431,15 @@ pub(crate) const MAX_TRANSFORM_OUTPUT_BYTES: usize = 1 << 20;
 /// generated `DELETE` on an unprobed branch. Nothing else could be true of a
 /// text that does not exist until the request supplies its value.
 ///
-/// One consequence is worth writing down rather than leaving to be found:
-/// [`crate::lifecycle::GeneratedSql::probe`] reads a failed evaluation as
-/// *inconclusive* (`Err(_) => varied = true`), so an ALTERNATE branch that
-/// exceeds this cap is not a publish refusal either — it is simply not
-/// collected as an alternate. That is the existing probe rule, unchanged here
-/// on purpose, and the serving refusal above is its backstop.
+/// **The serving case is only ever a branch publish never GENERATED.** A branch
+/// publish did generate — every sentinel probe
+/// ([`crate::lifecycle::GeneratedSql::probe`]) — is refused there, by name and
+/// with this cap's sentence, even though that function otherwise reads a failed
+/// evaluation as *inconclusive*. It is the single exception to that rule and it
+/// is about evidence: a length refusal means the script ran to completion and
+/// this process measured what it returned, so publish is holding the defect
+/// rather than guessing at it. Swallowing it was a green publish and a 500 for
+/// the first caller to take the branch.
 pub(crate) const MAX_GENERATED_SQL_BYTES: usize = 64 * 1024;
 
 /// Ceiling on how deeply JSON may nest, **in both directions**.
@@ -3544,6 +3561,15 @@ mod transform_tests {
     /// constant — a test that only asserted "under the cap" would keep passing
     /// while the thing being measured drifted, and the ratio below would then
     /// be a ratio to nothing.
+    /// The bottom of the band [`MAX_GENERATED_SQL_BYTES`] must sit in, as a
+    /// multiple of a realistic generated statement. C2's ratio: a cap an honest
+    /// script bumps into refuses work that should have been allowed.
+    const HEADROOM_MIN: usize = 40;
+
+    /// The top of it. `2.5x` C2's ratio, and the reason there is a top at all is
+    /// in the assertion that uses it.
+    const HEADROOM_MAX: usize = 100;
+
     #[test]
     fn a_realistic_branching_statement_sizes_the_generated_sql_cap() {
         let script = r#"
@@ -3623,11 +3649,28 @@ def build_sql(params):
             sql.contains("{{ region }}") || sql.contains("{{ channel }}"),
             "the caller's values must still be unrendered placeholders: {sql}"
         );
+        // BOTH directions. A floor alone is not a cap: it is satisfied by 1 MiB,
+        // by 16 MiB and by `usize::MAX`, so a test carrying only the floor
+        // cannot fail in the direction a cap exists for — someone raising the
+        // number to unblock an author would keep every test green. The ceiling
+        // is C2's own argument turned around: "a cap an honest script never
+        // approaches is not a cap at all".
+        //
+        // The band is what the measurement actually decides. It does NOT decide
+        // 65536 — see `MAX_GENERATED_SQL_BYTES`, which says so.
         assert!(
-            MAX_GENERATED_SQL_BYTES >= 40 * sql.len(),
+            MAX_GENERATED_SQL_BYTES >= HEADROOM_MIN * sql.len(),
             "the cap ({MAX_GENERATED_SQL_BYTES}) must leave a realistic \
              statement ({}) the same order of headroom \
              MAX_TRANSFORM_SCRIPT_BYTES leaves C2's example",
+            sql.len()
+        );
+        assert!(
+            MAX_GENERATED_SQL_BYTES <= HEADROOM_MAX * sql.len(),
+            "the cap ({MAX_GENERATED_SQL_BYTES}) is more than {HEADROOM_MAX}x a \
+             realistic statement ({}) — at that distance it stops being a cap \
+             and the only thing bounding a generated statement is \
+             render::MAX_SQL_BYTES again",
             sql.len()
         );
     }

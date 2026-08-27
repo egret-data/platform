@@ -51,14 +51,25 @@
 //! gave a statement a second source it cannot express: if one of the endpoint's
 //! other statements is a `build_sql` script, no client can say so on this wire.
 //! Whatever is sent for it is treated as one template and scanned for
-//! `{% for %}` headers as though it were SQL. Both consequences run the same
-//! way — preview green, publish or serving refused:
+//! `{% for %}` headers as though it were SQL. There are THREE consequences and
+//! they do not all run the same way:
 //!
 //! * a sibling script emitting several templates is counted as ONE against the
 //!   endpoint's template budget (see `lifecycle::GeneratedSql::build_after`);
 //! * a `{% for %}` header that only appears in a sibling script's EMITTED text
 //!   never joins the iterated union, so preview resolves a scalar where serving
-//!   binds a list.
+//!   binds a list;
+//! * **and the mirror image of that one, which runs the other way.** A client
+//!   that sends a scripted sibling's SOURCE hands the scan a Starlark program,
+//!   and a `{% for %}` header sitting in a string literal on a branch the
+//!   script never emits joins the union anyway. Preview's set is then WIDER
+//!   than the endpoint's — it binds a list where publish and serving bind a
+//!   scalar — so preview refuses, or renders the wrong shape for, a draft that
+//!   publishes green. Pinned by
+//!   `lifecycle::tests::a_scripted_siblings_source_can_make_previews_shape_wider_than_publishs`.
+//!
+//! The first two are preview green then publish refused. The third is not, and
+//! it is the one a client reaches by sending the most obvious thing it has.
 //!
 //! **It is reachable, and it was already reachable when this paragraph first
 //! called it latent.** That sentence said "nothing authors a scripted statement
@@ -70,12 +81,19 @@
 //! any behaviour; what was wrong was a comment telling the next reader a gap
 //! could not be entered.
 //!
-//! It still fails in exactly ONE direction — preview green, publish or serving
-//! refused, never the reverse — which is why it is recorded rather than fixed
-//! under a different task's name. Closing it means `siblings` carrying sources
-//! rather than strings and generating every one of them per preview — N author
-//! scripts per keystroke-driven button — which is a decision about the wire
-//! type, not a tidy-up of this module. Recorded here, and on
+//! **What the CONSOLE reaches is only the first two**, because `Query.tsx`
+//! sends `""` for a scripted sibling rather than its source — it says so, and
+//! `a_scripted_siblings_source_can_make_previews_shape_wider_than_publishs`
+//! asserts the `""` half from this side so that is a checked property rather
+//! than a claim about another language's file. The third belongs to a direct
+//! API client, which is the same audience that made this whole divergence
+//! reachable on day one.
+//!
+//! It stays recorded rather than fixed under a task that does not own it:
+//! closing it means `siblings` carrying sources rather than strings and
+//! generating every one of them per preview — N author scripts per
+//! keystroke-driven button — which is a decision about the wire type, not a
+//! tidy-up of this module. Recorded here, and on
 //! [`crate::lifecycle::validate_preview`], so the "exactly two omissions" above
 //! is not read as "and nothing else differs".
 //!
