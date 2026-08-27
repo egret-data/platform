@@ -595,10 +595,31 @@ export default function Query() {
               </p>
             )}
 
+            {/* `overflow-y-auto` is load-bearing, and its partner is the
+                `min-h-40` on the editor's own box below. This column holds two
+                things: prose that has a fixed natural height, and an editor
+                that takes what is left. The panel above it is a fraction of the
+                page, so expanding `Database and parameters` takes that height
+                away — and every line of prose here is subtracted from the
+                editor before anything else is.
+
+                Measured in Chrome on this branch, same endpoint, same viewport
+                (1600x1300): with the strip expanded the editor laid out at
+                100px in SQL mode and 31px in script mode, against 180px at
+                `5774bc77` — and at a 1000px-tall window the script editor was
+                FIVE pixels tall and painted outside this panel, over the
+                preview below it. The two help paragraphs this section gained
+                are the height that went; they are correct and they are not
+                what should pay.
+
+                So the editor keeps a floor and the prose above it scrolls
+                instead. Not a taller panel or a bigger `minSize`: the strip can
+                be expanded at any window height, so any fixed split has a
+                window that defeats it. */}
             <div
               id="stmt-panel"
               role={several ? "tabpanel" : undefined}
-              className="flex min-h-0 flex-1 flex-col pt-2"
+              className="flex min-h-0 flex-1 flex-col overflow-y-auto pt-2"
             >
               {/* Where this statement's SQL comes from. A real `<Checkbox>`, so
                   the shell's disabled fieldset reaches it: changing the source
@@ -654,7 +675,12 @@ export default function Query() {
                   rule, and here it is structural: the state it would be showing
                   does not exist any more, because switching the mode clears it
                   in the same patch. */}
-              <div className="min-h-0 flex-1">
+              {/* `min-h-40` rather than `min-h-0`: a flex item with
+                  `min-height: 0` may be shrunk to nothing, and this one was
+                  (see the note on `#stmt-panel`). 10rem is about ten lines at
+                  this font size — enough to read a `build_sql` and the SQL it
+                  returns without the box becoming the thing you fight. */}
+              <div className="min-h-40 flex-1">
                 {scripted ? (
                   <MonacoEditor
                     height="100%"
