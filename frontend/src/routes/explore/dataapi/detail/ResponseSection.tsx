@@ -631,11 +631,18 @@ export default function ResponseSection() {
       <div className="space-y-3">
         <div>
           <h3 className="text-sm font-medium">Response transform</h3>
+          {/* The second sentence is conditional because it points AT something.
+              With a transform on, Shape and Naming are not "below" — they are
+              not on the page at all (see the note in `Output shape`), so
+              telling an author to prefer two controls that are not there sat
+              directly above a note explaining that they had gone. Seen in a
+              browser, 2026-08-27. */}
           <p className="max-w-prose text-sm text-muted-foreground">
             An optional Starlark script that builds <span className="font-mono text-xs">data</span>{" "}
-            itself once every statement has run, for a shape no SQL projection can express. Most
-            endpoints do not need one — Shape and Naming below already cover renaming and
-            objects-vs-arrays.
+            itself once every statement has run, for a shape no SQL projection can express.{" "}
+            {hasTransform
+              ? "Most endpoints do not need one — renaming and objects-vs-arrays are what Shape and Naming are for, and unticking this brings them back."
+              : "Most endpoints do not need one — Shape and Naming below already cover renaming and objects-vs-arrays."}
           </p>
         </div>
         <label className="flex items-center gap-2 text-sm" htmlFor="resp-transform-enabled">
@@ -709,11 +716,15 @@ export default function ResponseSection() {
           <TableRow className="hover:bg-transparent">
             <TableCell colSpan={3} className="whitespace-normal pb-3">
               <SettingsNote>
+                {/* "here", not "below": this note is rendered IN the two rows'
+                    own place, and the only row under it is Envelope. Seen in a
+                    browser, 2026-08-27 — the word sent a reader looking down
+                    the table for controls that had been removed. */}
                 This endpoint has a response transform, so{" "}
                 <span className="font-medium text-foreground">Shape</span> and{" "}
-                <span className="font-medium text-foreground">Naming</span> are hidden below — they
-                describe how a row straight from SQL becomes JSON, and a transform&rsquo;s output
-                never goes through that step. Remove the transform to bring them back.
+                <span className="font-medium text-foreground">Naming</span> are not shown here —
+                they describe how a row straight from SQL becomes JSON, and a transform&rsquo;s
+                output never goes through that step. Remove the transform to bring them back.
               </SettingsNote>
             </TableCell>
           </TableRow>

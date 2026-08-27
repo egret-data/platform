@@ -74,6 +74,37 @@ pub(crate) fn json_type(engine_ty: &str) -> &'static str {
     }
 }
 
+/// Map a transform's DECLARED return type onto a JSON Schema type.
+///
+/// **Not [`json_type`], and the difference is measurable in the served body.**
+/// `json_type` reads a string an ENGINE produced, where "anything unrecognised
+/// is a string" is safe because every scalar an engine returns has a string
+/// spelling. A transform's `ty` is not that: nothing checks it at runtime
+/// (`transform::check_returns` tests object-ness, required-presence and
+/// undeclared fields — never the type name), so the generated document is its
+/// ONLY consumer, and the author writing it is naming a JSON type, not a
+/// column type.
+///
+/// Measured in a browser on 2026-08-27: a script returning
+/// `{"by_region": {"EU": "30.50"}, "regions": 3}` against `returns` declaring
+/// `by_region: object` was served that object verbatim, while the generated
+/// document declared `by_region` a `string` — a generated client would parse
+/// the wrong thing, which is exactly the failure `json_type`'s "merely
+/// imprecise" argument assumes cannot happen.
+///
+/// Anything this does not recognise still falls through to [`json_type`], so an
+/// author who writes `varchar` in a transform's `returns` gets what they always
+/// did.
+pub(crate) fn declared_json_type(declared_ty: &str) -> &'static str {
+    let t = declared_ty.trim().to_ascii_lowercase();
+    let head = t.split(['(', '<']).next().unwrap_or("").trim();
+    match head {
+        "object" | "dict" | "map" | "struct" => "object",
+        "array" | "list" => "array",
+        _ => json_type(declared_ty),
+    }
+}
+
 /// Parse an author's `minimum`/`maximum` text into a JSON-Schema-legal
 /// number, for the document only.
 ///
@@ -392,7 +423,9 @@ fn returns_schema(returns: &[egret_dataapi_api::ColumnSpec]) -> Value {
         props.insert(
             c.name.clone(),
             json!({
-                "type": json_type(&c.ty),
+                // `declared_json_type`, NOT `json_type`: see that function for
+                // the object-declared-as-string this got wrong in the browser.
+                "type": declared_json_type(&c.ty),
                 "nullable": true,
                 "x-egret-engine-type": c.ty,
             }),
@@ -501,12 +534,27 @@ fn meta_schema(snap: &EndpointSnapshot) -> Value {
                 json!({ "$ref": "#/components/schemas/StatementMeta" }),
             );
         }
+        // Two readings of the SAME keyed arm, and the sentence has to say which
+        // one this document is. Without a transform, `data` really is keyed by
+        // these names — that is what "the same names" is telling a consumer to
+        // rely on. WITH one, `data`'s keys come from `output.transform.returns`
+        // and have nothing to do with the statement names; the original
+        // sentence was measured in a generated document on 2026-08-27 saying
+        // `data` was keyed by `main` while `data` held `by_region`/`regions`.
+        // Third time in this programme a shipped sentence described behaviour
+        // that does not exist.
+        let statements_description = if snap.output.transform.is_some() {
+            "One entry per statement, under the statements' own names. This endpoint has a \
+             response transform, so these are NOT `data`'s keys — `data` is what the script \
+             returned, and these describe the rows it was given."
+        } else {
+            "One entry per statement, under the same names, in the same order, as `data`."
+        };
         obj.insert(
             "statements".into(),
             json!({
                 "type": "object",
-                "description": "One entry per statement, under the same names, in the \
-                                same order, as `data`.",
+                "description": statements_description,
                 "required": snap.statements.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
                 "properties": per,
             }),
@@ -1607,6 +1655,82 @@ mod tests {
                 .iter()
                 .any(|v| v == "row_count"),
             "{meta}"
+        );
+    }
+
+    /// **Found in a browser, not by review** (Task 10, 2026-08-27). A script
+    /// returning `{"by_region": {...}, "regions": 3}` was served that object
+    /// verbatim while the generated document declared `by_region` a `string`,
+    /// because `returns_schema` reused `json_type` — the mapper for a type
+    /// name an ENGINE produced, where "unrecognised means string" is safe. A
+    /// transform's `ty` is checked by nothing at runtime, so the document is
+    /// its only consumer and the author is naming a JSON type.
+    ///
+    /// Both halves are asserted: the JSON type names now map, and anything
+    /// else still falls through to `json_type` unchanged, so an author who
+    /// writes an engine spelling here loses nothing.
+    #[test]
+    fn a_transforms_declared_object_is_documented_as_an_object() {
+        let snap = transformed_snapshot_for_doc(vec![
+            col("by_region", "object", true),
+            col("series", "array", true),
+            col("regions", "integer", true),
+            col("label", "varchar", true),
+        ]);
+        let doc = data_schema(&snap, "e").expect("a transformed endpoint has a document");
+        assert_eq!(doc["properties"]["by_region"]["type"], "object", "{doc}");
+        assert_eq!(doc["properties"]["series"]["type"], "array", "{doc}");
+        assert_eq!(doc["properties"]["regions"]["type"], "integer", "{doc}");
+        assert_eq!(
+            doc["properties"]["label"]["type"], "string",
+            "an engine spelling must still fall through to `json_type`: {doc}"
+        );
+    }
+
+    /// The keyed `meta.statements` arm is shared by two endpoints that mean
+    /// different things by it, and its sentence used to state the untransformed
+    /// reading for both: "under the same names, in the same order, as `data`"
+    /// — measured in a live generated document where `data` held
+    /// `by_region`/`regions` and `meta.statements` held `main`.
+    ///
+    /// Asserted from BOTH sides, because a rule that only fires one way is how
+    /// the first sentence survived: the untransformed multi-statement document
+    /// must keep the original claim, since there `data` really is keyed by
+    /// these names.
+    #[test]
+    fn the_statements_meta_does_not_claim_data_is_keyed_by_statement_name_when_transformed() {
+        let mut snap = snap_with_statements(
+            vec![
+                stmt("rows", vec![col("id", "integer", true)]),
+                stmt("total", vec![col("n", "bigint", true)]),
+            ],
+            json!({}),
+        );
+
+        let untransformed = meta_schema(&snap);
+        let plain = untransformed["properties"]["statements"]["description"]
+            .as_str()
+            .expect("a description");
+        assert!(
+            plain.contains("the same names, in the same order, as `data`"),
+            "without a transform `data` IS keyed by these names: {plain}"
+        );
+
+        snap.output.transform = Some(TransformSpec {
+            script: "def transform(params, statements):\n    return {\"total\": 1}".into(),
+            returns: vec![col("total", "bigint", true)],
+        });
+        let transformed = meta_schema(&snap);
+        let d = transformed["properties"]["statements"]["description"]
+            .as_str()
+            .expect("a description");
+        assert!(
+            !d.contains("as `data`"),
+            "a transformed endpoint's `data` is not keyed by statement name: {d}"
+        );
+        assert!(
+            d.contains("response transform"),
+            "and the document has to say why: {d}"
         );
     }
 

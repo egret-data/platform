@@ -185,7 +185,11 @@ describe("ResponseSection — response transform", () => {
     // the generated OpenAPI document. Scoped to the one `role="note"` element
     // this branch renders — a plain `getByText` regex would also match every
     // ancestor whose `textContent` happens to contain the phrase.
-    expect(screen.getByRole("note").textContent).toContain("Shape and Naming are hidden below");
+    // "not shown here", not "hidden below": the note is rendered in the two
+    // rows' own place and only Envelope follows it, so "below" sent a reader
+    // looking down the table for controls that had been removed (Task 10,
+    // seen in a browser).
+    expect(screen.getByRole("note").textContent).toContain("Shape and Naming are not shown here");
   });
 
   /** The mirror of the test above: no transform, both controls present. */

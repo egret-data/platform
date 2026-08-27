@@ -259,10 +259,35 @@ export const PreviewBlock = forwardRef<PreviewHandle, PreviewBlockProps>(functio
         )}
 
         {/* Inline, not a toast — an author mid-edit needs the message to stay on
-            screen while they fix the SQL it is about. */}
+            screen while they fix the SQL it is about.
+
+            `whitespace-pre-wrap`, and it is what makes the monospace font mean
+            anything. Refusals here are no longer all one-liners: a transform's
+            Starlark parse error and its run-time traceback are ASCII diagrams
+            whose caret line has to sit UNDER the token it points at —
+
+              error: Parse error: unexpected new line, expected symbol ':'
+               --> transform.star:1:34
+                |
+              1 | def transform(params, statements)
+                |
+
+            Measured in Chrome on this branch before this changed: the default
+            `white-space: normal` collapsed every newline and every run of
+            spaces, so the whole diagram printed as one line ending
+            `... | 1 | def transform(params, statements) | |`, with the caret
+            row reduced to a stray pipe and the alignment — the only thing it
+            carries — gone. `pre-wrap`, not `pre`: a long line still wraps at
+            the container edge rather than scrolling the page sideways
+            (`docs/en/ui-conventions.md` §10). Covered by
+            `tests/e2e/data-api-transform-refusal-legibility.spec.ts`, which
+            counts the rendered line boxes in a real browser; jsdom has no
+            layout and no Tailwind, so it would pass either way. */}
         {error && (
           <Alert variant="destructive">
-            <AlertDescription className="font-mono text-xs">{error}</AlertDescription>
+            <AlertDescription className="whitespace-pre-wrap font-mono text-xs">
+              {error}
+            </AlertDescription>
           </Alert>
         )}
 
