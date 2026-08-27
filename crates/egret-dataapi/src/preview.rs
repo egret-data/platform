@@ -807,7 +807,10 @@ async fn generate_off_the_worker(
     // `spawn_blocking` needs `'static`. Both are bounded by what
     // `validate_preview` has already accepted: the parameters by
     // `MAX_DECLARED_PARAMS`, the script by axum's body limit.
-    let params = resolved.json.clone();
+    // `generation`, not `json` — see `crate::transform::GenerationParams`.
+    // Preview shows the author the SQL their script builds, so it must build it
+    // from the same dict serving will.
+    let params = resolved.generation.clone();
     let values = resolved.values.clone();
     let joined = tokio::task::spawn_blocking(move || {
         crate::serving::router::generate_one(&script, &params, &values)

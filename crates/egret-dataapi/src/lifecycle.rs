@@ -2248,8 +2248,14 @@ const SENTINEL: &str = "egret_sentinel_9f4c2ba7e1d05836";
 /// agree: a needle for a value that was never substituted would be a gate that
 /// looks for nothing, and it would look exactly like a gate that works.
 struct SentinelProbe {
-    /// What the script sees in this parameter's place.
-    value: serde_json::Value,
+    /// What the script sees in this parameter's place — `None` for the probe
+    /// that substitutes an absent parameter.
+    ///
+    /// A [`Param`] rather than a `serde_json::Value` so that these substitute
+    /// through [`crate::transform::GenerationParams::with`], the one door into a
+    /// generating script's `params` dict. A probe that could carry a list would
+    /// be a probe showing the author a shape serving cannot produce.
+    value: Option<Param>,
     /// The text whose presence in the emitted template is the finding, when
     /// there is one. `None` for a probe that varies the value but has nothing
     /// improbable to look for — see [`sentinel_probes`].
@@ -2322,27 +2328,27 @@ fn sentinel_probes(p: &ParamSpec) -> [SentinelProbe; 2] {
     let first = match p.ty {
         // The one type whose bytes are the caller's, verbatim.
         ParamType::String => SentinelProbe {
-            value: serde_json::Value::from(SENTINEL),
+            value: Some(Param::Str(SENTINEL.to_owned())),
             needle: Some(SENTINEL),
         },
         // The author's own string, kept out of the SQL text so that §2.2's two
         // spellings stay the way an identifier is chosen. See above.
         ParamType::Enum => SentinelProbe {
-            value: serde_json::Value::from(SENTINEL),
+            value: Some(Param::Str(SENTINEL.to_owned())),
             needle: Some(SENTINEL),
         },
         // `representative_value` is `true`, so `false` is the other member of a
         // closed two-value space — the same reasoning `ParamValues::candidates`
         // applies to a boolean in the render probes.
         ParamType::Boolean => SentinelProbe {
-            value: serde_json::Value::Bool(false),
+            value: Some(Param::Bool(false)),
             needle: None,
         },
         // `representative_value` is `1`. Zero varies both the VALUE and its
         // truthiness, which is the branch a number is most often read for
         // (`if params["min_total"]:`).
         ParamType::Number => SentinelProbe {
-            value: serde_json::Value::from(0),
+            value: Some(Param::I64(0)),
             needle: None,
         },
         // `representative_value` is the epoch, so these are simply a different
@@ -2350,18 +2356,18 @@ fn sentinel_probes(p: &ParamSpec) -> [SentinelProbe; 2] {
         // value's only job is to VARY, and a real date varies a script that
         // parses or compares it instead of making it raise.
         ParamType::Date => SentinelProbe {
-            value: serde_json::Value::from("2038-01-19"),
+            value: Some(Param::Date("2038-01-19".to_owned())),
             needle: None,
         },
         ParamType::Timestamp => SentinelProbe {
-            value: serde_json::Value::from("2038-01-19 03:14:07"),
+            value: Some(Param::Timestamp("2038-01-19 03:14:07".to_owned())),
             needle: None,
         },
     };
     [
         first,
         SentinelProbe {
-            value: serde_json::Value::Null,
+            value: None,
             needle: None,
         },
     ]
@@ -2611,7 +2617,7 @@ impl GeneratedSql {
         name: &str,
         script: &str,
         params: &[ParamSpec],
-        base: &BTreeMap<String, serde_json::Value>,
+        base: &crate::transform::GenerationParams,
         baseline: String,
     ) -> std::result::Result<GeneratedStatement, ValidationError> {
         let mut varies_with = Vec::new();
@@ -2619,8 +2625,7 @@ impl GeneratedSql {
         for p in params {
             let mut varied = false;
             for probe in sentinel_probes(p) {
-                let mut context = base.clone();
-                context.insert(p.name.clone(), probe.value);
+                let context = base.with(&p.name, probe.value.as_ref());
                 match crate::transform::build_sql(script, &context) {
                     // The ONE failure that is neither inconclusive nor a
                     // reading: the script ran to completion and handed back a
@@ -2712,21 +2717,34 @@ impl GeneratedSql {
 
 /// The `params` dict a `build_sql` script is handed at publish time.
 ///
-/// Every declared parameter at its [`representative_value`], as JSON — the same
-/// values [`probe_params`] hands a transform probe, and for the same reason: a
-/// script that indexes `params["region"]` must find something there, and a
-/// truthy stand-in is what exercises a branch rather than skipping it.
+/// Every declared parameter at its [`representative_value`] — the same values
+/// [`probe_params`] hands a transform probe, and for the same reason: a script
+/// that indexes `params["region"]` must find something there, and a truthy
+/// stand-in is what exercises a branch rather than skipping it.
 ///
-/// # One difference from [`probe_params`], and it is forced
+/// # One difference from [`probe_params`], and serving makes the SAME one
 ///
 /// [`probe_params`] wraps a parameter any statement ITERATES in a one-element
 /// list, asking [`IteratedParams`] which those are. Generation cannot: the
 /// iterated set is computed **from the SQL** ([`IteratedParams::across`]), and
 /// here the SQL is what is being produced. So a generating script sees every
-/// parameter as a scalar. That is a fact about the phase, not a preference, and
-/// it costs nothing today — the `{% for %}` header a list feeds is in the
-/// template the script emits, and it is the RENDER that reads the list, not the
-/// script.
+/// parameter as a scalar.
+///
+/// That used to be the end of the paragraph, and it was where package S's one
+/// Critical lived. `serving::params::resolve` builds its script dict from the
+/// frozen `iterated` set and from the caller's arity, so a parameter some
+/// statement loops over arrived at the script as a one-element LIST — the
+/// opposite of what this function shows the author. `params["region"] == "ALL"`
+/// was true here and false for every caller; the script took the other branch
+/// and the endpoint answered 200 with the wrong rows.
+///
+/// **It is not a difference any more, and not because this side moved.**
+/// Serving follows this one: [`crate::transform::GenerationParams`] is the only
+/// door into a generating script's `params`, its `insert` takes at most one
+/// [`Param`], and `Param` has no list case — so neither side can express the
+/// disagreement. Read that type for what the choice costs and why the reverse
+/// (making this function follow serving) is not available: it would need
+/// `iterated`, which is derived from the very SQL this call is producing.
 ///
 /// # What this is not
 ///
@@ -2741,16 +2759,12 @@ impl GeneratedSql {
 /// The backstop for every branch none of those assignments reaches is the one
 /// hand-written SQL already has: `render` re-runs the byte tests on what it
 /// produced, on every request (`crate::render::check_rendered_statement`).
-fn generation_params(params: &[ParamSpec]) -> BTreeMap<String, serde_json::Value> {
-    params
-        .iter()
-        .map(|p| {
-            (
-                p.name.clone(),
-                crate::transform::param_json(&representative_value(p)),
-            )
-        })
-        .collect()
+fn generation_params(params: &[ParamSpec]) -> crate::transform::GenerationParams {
+    let mut out = crate::transform::GenerationParams::default();
+    for p in params {
+        out.insert(p.name.clone(), Some(&representative_value(p)));
+    }
+    out
 }
 
 /// What a green [`validate_endpoint`] hands back.

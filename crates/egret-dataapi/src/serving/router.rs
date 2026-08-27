@@ -1430,7 +1430,12 @@ async fn statement_texts<'a>(
     // Cloned into the task because `spawn_blocking` needs `'static`. Both are
     // bounded by what publish accepted: the scripts by `MAX_STATEMENTS`, the
     // parameters by `MAX_DECLARED_PARAMS` and `params::MAX_PARAM_BYTES`.
-    let params = resolved.json.clone();
+    //
+    // `generation`, not `json`: the dict a generating script sees is the one
+    // publish probed it with, and the two are different projections for the
+    // reason `crate::transform::GenerationParams` gives. `json` does not even
+    // type-check here, which is the point of that type.
+    let params = resolved.generation.clone();
     // The renderer's context too, because generation is followed by the
     // behavioural gate and that gate is about how these VALUES render — see
     // [`generate_one`]. One clone per request, of a map the request already
@@ -1550,7 +1555,7 @@ async fn statement_texts<'a>(
 /// publish that never happened is sent nowhere.
 pub(crate) fn generate_one(
     script: &str,
-    params: &BTreeMap<String, serde_json::Value>,
+    params: &crate::transform::GenerationParams,
     values: &crate::render::ParamValues,
 ) -> Result<String, ServingError> {
     let sql = crate::transform::build_sql(script, params).map_err(|e| {
@@ -3885,6 +3890,7 @@ mod tests {
             key: BTreeMap::new(),
             has_repeats: false,
             json,
+            generation: crate::transform::GenerationParams::default(),
         }
     }
 

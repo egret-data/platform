@@ -97,6 +97,23 @@ pub(crate) struct Resolved {
     /// `params["region"] == None` gets an answer instead of a KeyError, and the
     /// dict always carries exactly the endpoint's declared names.
     pub json: BTreeMap<String, serde_json::Value>,
+    /// The same resolved parameters again, in the ONE shape a `build_sql`
+    /// script is ever handed — see [`crate::transform::GenerationParams`].
+    ///
+    /// A fourth projection rather than a reuse of [`Resolved::json`], and the
+    /// difference is the point. `json` follows `as_list` below, which is right
+    /// for a response transform: publish probes a transform AFTER the SQL
+    /// exists, so `lifecycle::probe_transform` wraps exactly the same set and
+    /// the two agree. Generation runs BEFORE any SQL exists, so publish has no
+    /// `iterated` to follow and hands the script scalars — and a serving dict
+    /// that followed `as_list` would hand it a list for the same parameter.
+    /// That disagreement was package S's one Critical: a silent wrong branch.
+    ///
+    /// So this one never carries a list, and cannot: its builder takes at most
+    /// one [`Param`] per name. A parameter supplied several times reaches the
+    /// script as its FIRST value and reaches the RENDER as all of them, which
+    /// is what keeps `IN (?, ?, ?)` working for a scripted endpoint.
+    pub generation: crate::transform::GenerationParams,
 }
 
 /// Resolve a request's query string against a snapshot's declared parameters.
@@ -247,6 +264,7 @@ pub(crate) fn resolve_supplied_with(
     let mut values = ParamValues::new();
     let mut key: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut json: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+    let mut generation = crate::transform::GenerationParams::default();
     let mut has_repeats = false;
 
     for spec in specs {
@@ -286,6 +304,9 @@ pub(crate) fn resolve_supplied_with(
                 // `params["region"]` gets `None` rather than a KeyError, which
                 // is the same distinction the renderer draws.
                 json.insert(spec.name.clone(), serde_json::Value::Null);
+                // And `None` to a GENERATING script too, for the same reason —
+                // through the one constructor that decides that dict's shape.
+                generation.insert(spec.name.clone(), None);
                 continue;
             }
         };
@@ -360,6 +381,14 @@ pub(crate) fn resolve_supplied_with(
         // answer for `json` is precisely the seam the transform design exists to
         // close: `{{ region }}` binding a scalar while `params["region"]` is a
         // one-element list is a disagreement no error names.
+        // A GENERATING script is handed the first value and never a list,
+        // whatever `as_list` decides one line down. Not an oversight and not a
+        // second answer to the same question: publish generates before any SQL
+        // exists, so there is no `iterated` set for it to follow, and a script
+        // shown a scalar at publish that meets a list at serve is the silent
+        // wrong branch described on `crate::transform::GenerationParams`. The
+        // renderer's shape is unaffected — every repeat still binds.
+        generation.insert(spec.name.clone(), params.first());
         let as_list = params.len() != 1 || iterated.iter().any(|n| n == &spec.name);
         json.insert(
             spec.name.clone(),
@@ -381,6 +410,7 @@ pub(crate) fn resolve_supplied_with(
         key,
         has_repeats,
         json,
+        generation,
     })
 }
 

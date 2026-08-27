@@ -578,3 +578,126 @@ async fn a_generated_loop_reads_the_frozen_shape_decision() {
         broken.body
     );
 }
+
+// ---------------------------------------------------------------------------
+// The type a generating script is handed. C1, from the whole-branch review.
+// ---------------------------------------------------------------------------
+
+/// A script that BRANCHES on the parameter's value and emits a `{% for %}` on
+/// the branch it does not take.
+///
+/// Both halves matter. The comparison is what reads the value, so the script's
+/// answer depends on the TYPE it is handed; the `{% for %}` header is what puts
+/// `region` in the endpoint's frozen `iterated` set, which is the thing that
+/// used to change that type between publish and serve.
+const BRANCHES_ON_ITS_VALUE: &str = "def build_sql(params):\n    \
+     if params[\"region\"] == \"ALL\":\n        \
+     return \"SELECT n FROM t\"\n    \
+     return \"SELECT n FROM t WHERE region IN ({% for r in region %}{{ r }}\
+     {% if not loop.last %}, {% endif %}{% endfor %})\"\n";
+
+/// **A generating script reads the caller's value in the same shape publish
+/// probed it with.**
+///
+/// Publish hands every declared parameter a scalar `representative_value`.
+/// Serving used to hand the script `Resolved::json`, whose shape follows the
+/// frozen `iterated` set — so a parameter ANY statement loops over arrived at
+/// the script as a one-element LIST while publish had shown the author a
+/// scalar. `params["region"] == "ALL"` is then true for the author, false for
+/// every caller, and the script silently takes the other branch.
+///
+/// **The failure this pins is a 200 with the wrong rows.** Both branches are
+/// legitimate `SELECT`s, so `check_single_select` and `check_dynamic` pass, the
+/// render binds `'ALL'` into an `IN` list nobody asked for, and nothing anywhere
+/// says so. That is why the assertion is on the statement at the PORT rather
+/// than on the status: the status was always 200.
+///
+/// The second half is the control. Without it a script that returned the
+/// unfiltered text unconditionally would pass, and the comparison would be
+/// proved live by nothing.
+#[tokio::test]
+async fn a_generating_script_reads_the_value_publish_probed_it_with() {
+    let f = skip_without_db!();
+    publish_scripted(&f, "/shape", BRANCHES_ON_ITS_VALUE).await;
+
+    let all = f.call_as(f.principal_a, "shape?region=ALL").await;
+    assert_eq!(all.status, StatusCode::OK, "{}", all.body);
+    assert_eq!(
+        f.port.last(),
+        ("SELECT n FROM t".to_string(), Vec::<Param>::new()),
+        "`params[\"region\"]` must be the string the caller sent, not a \
+         one-element list of it — a list compares unequal to \"ALL\", the \
+         script takes the filtered branch, and the endpoint answers 200 with \
+         the wrong rows"
+    );
+
+    // The control: the comparison really is what chose the text above.
+    let eu = f.call_as(f.principal_a, "shape?region=EU").await;
+    assert_eq!(eu.status, StatusCode::OK, "{}", eu.body);
+    assert_eq!(
+        f.port.last(),
+        (
+            "SELECT n FROM t WHERE region IN (?)".to_string(),
+            vec![Param::Str("EU".into())]
+        ),
+        "a value that is not \"ALL\" still takes the filtered branch, and the \
+         loop still binds"
+    );
+}
+
+/// The loud half of the same defect: a string method on an iterated parameter.
+///
+/// `params["region"].upper()` runs under publish's scalar probe and raises on a
+/// list, so the endpoint published green and then answered 500 to EVERY
+/// request — a defect no probe, no scan and no test on this branch could see,
+/// because the two sides never compared the type they each hand the script.
+#[tokio::test]
+async fn a_generating_script_may_call_a_string_method_on_an_iterated_parameter() {
+    let f = skip_without_db!();
+    publish_scripted(
+        &f,
+        "/upper",
+        "def build_sql(params):\n    \
+         if params[\"region\"].upper() == \"ALL\":\n        \
+         return \"SELECT n FROM t\"\n    \
+         return \"SELECT n FROM t WHERE region IN ({% for r in region %}{{ r }}\
+         {% if not loop.last %}, {% endif %}{% endfor %})\"\n",
+    )
+    .await;
+
+    let lower = f.call_as(f.principal_a, "upper?region=all").await;
+    assert_eq!(
+        lower.status,
+        StatusCode::OK,
+        "a script publish proved runs must not raise on every real request: {}",
+        lower.body
+    );
+    assert_eq!(
+        f.port.last(),
+        ("SELECT n FROM t".to_string(), Vec::<Param>::new()),
+        "and it must reach the branch its own `.upper()` chose"
+    );
+
+    // The REPEATED half of the same question, and the cost of the answer.
+    // `?region=eu&region=us` is a list to the renderer and one value to the
+    // script: `.upper()` runs (so the script was handed a string) and the loop
+    // still binds BOTH repeats (so `IN (?, ?, ?)` is untouched for a scripted
+    // endpoint). Whether a caller repeated a parameter is decided by the
+    // REQUEST and is knowable to no publish, so this is the half no frozen set
+    // could ever have made agree.
+    let repeated = f.call_as(f.principal_a, "upper?region=eu&region=us").await;
+    assert_eq!(
+        repeated.status,
+        StatusCode::OK,
+        "a repeat must not turn the script's parameter into a list either: {}",
+        repeated.body
+    );
+    assert_eq!(
+        f.port.last(),
+        (
+            "SELECT n FROM t WHERE region IN (?, ?)".to_string(),
+            vec![Param::Str("eu".into()), Param::Str("us".into())]
+        ),
+        "the script sees the first value; the RENDER still sees every one of them"
+    );
+}

@@ -65,6 +65,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use egret_dataapi_api::TransformSpec;
+use egret_query_api::Param;
 use starlark::environment::{Globals, Module};
 use starlark::eval::Evaluator;
 use starlark::syntax::{AstModule, Dialect, DialectTypes};
@@ -830,9 +831,81 @@ struct TransformCall<'a> {
 /// `statements` on the phase that runs before any statement has.
 enum Entry<'a> {
     Transform(TransformCall<'a>),
-    BuildSql {
-        params: &'a BTreeMap<String, serde_json::Value>,
-    },
+    BuildSql { params: &'a GenerationParams },
+}
+
+/// The `params` dict a `build_sql` script is handed — on **every** path.
+///
+/// # Why this is a type and not a `BTreeMap`
+///
+/// Publish and serving must not be able to disagree about the type a generating
+/// script sees. They used to: publish built the dict from
+/// [`crate::lifecycle::representative_value`], one scalar per declared
+/// parameter, while serving reused [`crate::serving::params::Resolved::json`],
+/// whose shape follows the endpoint's frozen `iterated` set and the caller's
+/// arity — so a parameter any statement loops over, or one a caller simply
+/// repeated, reached the script as a one-element `Value::Array` where publish
+/// had shown the author a string. `params["region"] == "ALL"` was then true for
+/// the author and false for every caller, and the script silently took the
+/// other branch: a 200 with the wrong rows, both texts legitimate `SELECT`s, so
+/// every scan and both serve-time gates passed.
+///
+/// The fix is the constructor's signature rather than a rule two call sites
+/// have to remember. [`GenerationParams::insert`] takes **at most one**
+/// [`Param`], and `Param` is a scalar enum with no list case — so "hand a
+/// generating script a list" is not something any caller can express, and
+/// [`build_sql`] takes this type rather than a map so no caller can route
+/// around it. `Resolved::json` no longer type-checks at either generation site.
+///
+/// # What that costs, stated rather than implied
+///
+/// A script cannot see how many values a caller supplied for one parameter. It
+/// gets the first, which is exactly the shape publish probed it with, and the
+/// RENDER still receives every value — `{% for r in region %}` over an iterated
+/// parameter binds each repeat, unchanged (`serving::params::resolve`'s
+/// `as_list`). A script that decides structure from the multiplicity is
+/// therefore not expressible; a script that emits the loop and lets the
+/// renderer bind the list — the only shape the design asks for (spec §4.3) —
+/// is unaffected. The alternative, refusing the repeat outright, would take
+/// `IN (?, ?, ?)` away from every scripted endpoint to close a case the
+/// renderer already answers.
+///
+/// # And what it buys, in spec terms
+///
+/// §8's tripwire is "if a script's SQL can depend on anything other than
+/// `params`, §3 collapses". Following the shape decision would have made a
+/// script's SQL depend on the frozen `iterated` set — a set derived FROM the
+/// statements' SQL, which for a scripted statement does not exist until
+/// generation has already run. This shape depends on nothing but the declared
+/// parameter list and the values supplied for it, which both sides hold before
+/// generation, so the ordering problem does not arise at all.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct GenerationParams(BTreeMap<String, serde_json::Value>);
+
+impl GenerationParams {
+    /// Declare `name`, carrying `value` — or Starlark `None` when there is none.
+    ///
+    /// `Option<&Param>` rather than a JSON value, and that is the whole point of
+    /// the type: `Param` cannot be a list, and `None` is the absent case the
+    /// renderer draws the same distinction for (`ParamValues::insert_absent`).
+    /// A declared name is always present in the dict, so a script reading
+    /// `params["region"]` gets an answer rather than a KeyError.
+    pub(crate) fn insert(&mut self, name: String, value: Option<&Param>) {
+        self.0
+            .insert(name, value.map_or(serde_json::Value::Null, param_json));
+    }
+
+    /// This dict with `name` replaced — what
+    /// [`crate::lifecycle::GeneratedSql::probe`] substitutes into.
+    ///
+    /// A copy rather than a mutation because the probes all vary ONE parameter
+    /// from the same base, and a base that could be left mutated is a probe
+    /// whose meaning depends on the order they ran in.
+    pub(crate) fn with(&self, name: &str, value: Option<&Param>) -> Self {
+        let mut out = self.clone();
+        out.insert(name.to_owned(), value);
+        out
+    }
 }
 
 /// Convert `params` into a starlark dict on `heap`, polling the input budgets
@@ -940,6 +1013,10 @@ pub(crate) fn run_transform(
 ///
 /// # The script sees `params` and nothing else
 ///
+/// And it sees them as [`GenerationParams`], which is the type that stops
+/// publish and serving handing the same script different types for the same
+/// parameter — see there.
+///
 /// No `statements` — a build-SQL script runs *before* any statement has
 /// executed, so there is nothing to hand it, and [`Entry::BuildSql`] has no
 /// field to hand it even by mistake. No `db`, `http`, `tx`, `cache`, clock or
@@ -970,10 +1047,7 @@ pub(crate) fn run_transform(
 /// generator the crate has. Publish, preview and serving reach generation
 /// through this function, so none of them has to remember the cap and none of
 /// them can drift off it.
-pub(crate) fn build_sql(
-    script: &str,
-    params: &BTreeMap<String, serde_json::Value>,
-) -> Result<String, TransformError> {
+pub(crate) fn build_sql(script: &str, params: &GenerationParams) -> Result<String, TransformError> {
     match eval_inner(script, Budgets::default(), Some(Entry::BuildSql { params }))? {
         serde_json::Value::String(s) => Ok(s),
         // `eval_inner`'s `Entry::BuildSql` arm only ever returns `Ok` with a
@@ -1295,7 +1369,7 @@ fn eval_inner(
                 }
                 // No `statements` — see `Entry::BuildSql`.
                 Entry::BuildSql { params } => {
-                    let params_v = alloc_params(params, heap, deadline)?;
+                    let params_v = alloc_params(&params.0, heap, deadline)?;
                     eval.eval_function(entry, &[params_v], &[])
                         .map_err(classify)?
                 }
@@ -2667,6 +2741,20 @@ mod transform_tests {
     use serde_json::json;
     use std::collections::BTreeMap;
 
+    /// A [`GenerationParams`] from a list of scalars, for the `build_sql` tests
+    /// below.
+    ///
+    /// Through the real constructor rather than a literal map, so a test cannot
+    /// hand a generating script a shape production cannot produce — which is
+    /// the property the type exists for.
+    fn gp(entries: &[(&str, Param)]) -> GenerationParams {
+        let mut out = GenerationParams::default();
+        for (name, value) in entries {
+            out.insert((*name).to_owned(), Some(value));
+        }
+        out
+    }
+
     /// [`run_transform`] with the budgets spelled out, for the three tests
     /// whose subject is a guard in the OUTPUT phase.
     ///
@@ -3451,7 +3539,7 @@ mod transform_tests {
     #[test]
     fn build_sql_returns_the_template_the_script_built() {
         let script = "def build_sql(params):\n  return \"SELECT {{ region }} AS r\"";
-        let out = build_sql(script, &BTreeMap::new()).expect("runs");
+        let out = build_sql(script, &GenerationParams::default()).expect("runs");
         assert_eq!(
             out, "SELECT {{ region }} AS r",
             "the braces must survive verbatim"
@@ -3465,8 +3553,8 @@ mod transform_tests {
         let script = "def build_sql(params):\n  \
                       if params[\"grain\"] == \"daily\":\n    return \"SELECT 1 AS daily\"\n  \
                       return \"SELECT 1 AS hourly\"";
-        let daily = BTreeMap::from([("grain".to_string(), json!("daily"))]);
-        let hourly = BTreeMap::from([("grain".to_string(), json!("hourly"))]);
+        let daily = gp(&[("grain", Param::Str("daily".into()))]);
+        let hourly = gp(&[("grain", Param::Str("hourly".into()))]);
         assert_eq!(build_sql(script, &daily).unwrap(), "SELECT 1 AS daily");
         assert_eq!(build_sql(script, &hourly).unwrap(), "SELECT 1 AS hourly");
     }
@@ -3483,7 +3571,7 @@ mod transform_tests {
     #[test]
     fn a_script_without_the_entry_point_is_refused_by_name_for_build_sql() {
         assert!(matches!(
-            build_sql("x = 1", &BTreeMap::new()),
+            build_sql("x = 1", &GenerationParams::default()),
             Err(TransformError::MissingEntryPoint(EntryPoint::BuildSql))
         ));
     }
@@ -3501,7 +3589,7 @@ mod transform_tests {
     /// swapping which of the two is wrong.
     #[test]
     fn a_refusal_names_the_entry_point_the_author_was_asked_to_write() {
-        let missing_build_sql = build_sql("x = 1", &BTreeMap::new())
+        let missing_build_sql = build_sql("x = 1", &GenerationParams::default())
             .expect_err("`x = 1` defines no `build_sql`")
             .to_string();
         assert_eq!(
@@ -3511,7 +3599,7 @@ mod transform_tests {
 
         let wrong_arity_build_sql = build_sql(
             "def build_sql(params, statements):\n  return \"\"",
-            &BTreeMap::new(),
+            &GenerationParams::default(),
         )
         .expect_err("`build_sql` takes one argument")
         .to_string();
@@ -3622,14 +3710,14 @@ def build_sql(params):
         "ORDER BY b.bucket\n" +
         "LIMIT {{ row_limit }}")
 "#;
-        let params = BTreeMap::from([
-            ("grain".to_string(), json!("month")),
-            ("by_region".to_string(), json!(true)),
-            ("by_segment".to_string(), json!(true)),
-            ("by_channel".to_string(), json!(true)),
-            ("by_category".to_string(), json!(true)),
-            ("channel".to_string(), json!("web")),
-            ("min_total".to_string(), json!(10)),
+        let params = gp(&[
+            ("grain", Param::Str("month".into())),
+            ("by_region", Param::Bool(true)),
+            ("by_segment", Param::Bool(true)),
+            ("by_channel", Param::Bool(true)),
+            ("by_category", Param::Bool(true)),
+            ("channel", Param::Str("web".into())),
+            ("min_total", Param::I64(10)),
         ]);
         let sql = build_sql(script, &params).expect("a realistic script runs");
 
@@ -3687,7 +3775,7 @@ def build_sql(params):
     fn a_template_over_the_cap_is_refused_by_the_cap_not_by_a_budget() {
         let over = MAX_GENERATED_SQL_BYTES + 1;
         let script = format!("def build_sql(params):\n  return \"z\" * {over}");
-        let err = build_sql(&script, &BTreeMap::new()).expect_err("over the cap");
+        let err = build_sql(&script, &GenerationParams::default()).expect_err("over the cap");
         match &err {
             TransformError::GeneratedSqlTooLarge { bytes, cap } => {
                 assert_eq!(*bytes, over, "the exact size, not a lower bound");
@@ -3715,7 +3803,7 @@ def build_sql(params):
     #[test]
     fn a_template_of_exactly_the_cap_is_accepted() {
         let script = format!("def build_sql(params):\n  return \"z\" * {MAX_GENERATED_SQL_BYTES}");
-        let sql = build_sql(&script, &BTreeMap::new()).expect("exactly the cap fits");
+        let sql = build_sql(&script, &GenerationParams::default()).expect("exactly the cap fits");
         assert_eq!(sql.len(), MAX_GENERATED_SQL_BYTES);
     }
 
@@ -3732,7 +3820,7 @@ def build_sql(params):
         // bytes, and one character more is over it.
         let chars = MAX_GENERATED_SQL_BYTES / 2 + 1;
         let script = format!("def build_sql(params):\n  return \"\\u00e9\" * {chars}");
-        match build_sql(&script, &BTreeMap::new()).expect_err("over the cap in BYTES") {
+        match build_sql(&script, &GenerationParams::default()).expect_err("over the cap in BYTES") {
             TransformError::GeneratedSqlTooLarge { bytes, .. } => {
                 assert_eq!(bytes, chars * 2, "a character count would say {chars}");
             }
@@ -3746,7 +3834,7 @@ def build_sql(params):
     #[test]
     fn a_script_returning_a_non_string_is_refused_rather_than_stringified() {
         let script = "def build_sql(params):\n  return {\"sql\": \"SELECT 1\"}";
-        assert!(build_sql(script, &BTreeMap::new()).is_err());
+        assert!(build_sql(script, &GenerationParams::default()).is_err());
     }
 
     /// The evaluator is C2's. An unbounded loop must be refused, not run —
@@ -3760,7 +3848,7 @@ def build_sql(params):
         std::thread::spawn(move || {
             let _ = tx.send(build_sql(
                 "def build_sql(params):\n  for i in range(1, 1000000000):\n    pass\n  return \"x\"",
-                &BTreeMap::new(),
+                &GenerationParams::default(),
             ));
         });
         let outcome = rx
