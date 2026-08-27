@@ -499,6 +499,16 @@ impl From<&egret_core::ColumnMeta> for ColumnSpec {
 /// must be a 400, not a silently-ignored field. It is NOT
 /// `#[serde(deny_unknown_fields)]` any more — see the hand-written
 /// [`Deserialize`] impl below for what replaced it and why.
+///
+/// **The PUBLISHED schema cannot state that rule, and this is not an oversight
+/// to fix later.** Flattening makes this an `allOf`, and each branch of an
+/// `allOf` validates the whole object on its own — so an
+/// `additionalProperties: false` branch listing only `name` would reject every
+/// body carrying `sql`, which is all of them. The construct that expresses it
+/// is `unevaluatedProperties`, and utoipa 5.5 cannot emit one (the string does
+/// not occur in its source). So the refusal lives in the reader, where it is
+/// tested; the document states the one-of and loses only the typo class. Same
+/// for [`PreviewEndpointInput`], for the same reason.
 #[derive(Debug, Clone, Serialize, PartialEq, utoipa::ToSchema)]
 pub struct StatementSpec {
     pub name: String,
@@ -541,9 +551,17 @@ pub enum StatementSource {
     Sql(String),
     /// A Starlark script whose `build_sql(params)` returns that template.
     ///
-    /// Nothing in this crate runs it — package S Task 2 is the evaluator and
-    /// Task 3 is what wires generation into publish. Until then this case
-    /// exists but no path produces SQL from it.
+    /// The script decides the statement's STRUCTURE; the values are still the
+    /// renderer's. `build_sql` is handed the endpoint's declared parameters and
+    /// returns a template with its `{{ }}` intact — every caller value stays a
+    /// bind, on exactly the path a hand-written statement's does. Publish runs
+    /// it under branch probes to freeze the column contract, and every request
+    /// runs it again, so the SQL may differ per call; it may not be a second
+    /// path to the engine.
+    ///
+    /// Bounded in length — a publish over the cap is refused with both the
+    /// script's size and the cap — and refused if it emits anything but a
+    /// single `SELECT`.
     Script(String),
 }
 

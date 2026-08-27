@@ -40,9 +40,17 @@ export type StatementSource = {
   /**
      * A Starlark script whose `build_sql(params)` returns that template.
      *
-     * Nothing in this crate runs it — package S Task 2 is the evaluator and
-     * Task 3 is what wires generation into publish. Until then this case
-     * exists but no path produces SQL from it.
+     * The script decides the statement's STRUCTURE; the values are still the
+     * renderer's. `build_sql` is handed the endpoint's declared parameters and
+     * returns a template with its `{{ }}` intact — every caller value stays a
+     * bind, on exactly the path a hand-written statement's does. Publish runs
+     * it under branch probes to freeze the column contract, and every request
+     * runs it again, so the SQL may differ per call; it may not be a second
+     * path to the engine.
+     *
+     * Bounded in length — a publish over the cap is refused with both the
+     * script's size and the cap — and refused if it emits anything but a
+     * single `SELECT`.
      */
   script: string;
 };

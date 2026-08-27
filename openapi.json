@@ -34043,14 +34043,14 @@
           },
           {
             "type": "object",
-            "description": "A Starlark script whose `build_sql(params)` returns that template.\n\nNothing in this crate runs it — package S Task 2 is the evaluator and\nTask 3 is what wires generation into publish. Until then this case\nexists but no path produces SQL from it.",
+            "description": "A Starlark script whose `build_sql(params)` returns that template.\n\nThe script decides the statement's STRUCTURE; the values are still the\nrenderer's. `build_sql` is handed the endpoint's declared parameters and\nreturns a template with its `{{ }}` intact — every caller value stays a\nbind, on exactly the path a hand-written statement's does. Publish runs\nit under branch probes to freeze the column contract, and every request\nruns it again, so the SQL may differ per call; it may not be a second\npath to the engine.\n\nBounded in length — a publish over the cap is refused with both the\nscript's size and the cap — and refused if it emits anything but a\nsingle `SELECT`.",
             "required": [
               "script"
             ],
             "properties": {
               "script": {
                 "type": "string",
-                "description": "A Starlark script whose `build_sql(params)` returns that template.\n\nNothing in this crate runs it — package S Task 2 is the evaluator and\nTask 3 is what wires generation into publish. Until then this case\nexists but no path produces SQL from it."
+                "description": "A Starlark script whose `build_sql(params)` returns that template.\n\nThe script decides the statement's STRUCTURE; the values are still the\nrenderer's. `build_sql` is handed the endpoint's declared parameters and\nreturns a template with its `{{ }}` intact — every caller value stays a\nbind, on exactly the path a hand-written statement's does. Publish runs\nit under branch probes to freeze the column contract, and every request\nruns it again, so the SQL may differ per call; it may not be a second\npath to the engine.\n\nBounded in length — a publish over the cap is refused with both the\nscript's size and the cap — and refused if it emits anything but a\nsingle `SELECT`."
               }
             }
           }
@@ -34075,7 +34075,7 @@
             }
           }
         ],
-        "description": "One of an endpoint's N SQL definitions, as an author writes it (M2). The\ncanonical shape is a `rows` statement and a `total` statement for\npagination, but any number is allowed.\n\n`name` is not decoration: once an endpoint has more than one statement,\nthe response envelope is a JSON object keyed by statement name and the\ngenerated OpenAPI document names it as a property (M2 Tasks 8-9). A name a\ncaller writes into their own code is a contract, which is what\n[`validate_statement_name`] and [`validate_statements`] enforce —\n`^[a-z][a-z0-9_]*$` so the key never needs quoting in JSON and never reads\nas private, and uniqueness within the endpoint so the key is unambiguous.\n\nUnknown keys are refused for the same reason as [`ParamSpec`] and its four\nsiblings: this is a type an AUTHOR fills in, so a typo in the request body\nmust be a 400, not a silently-ignored field. It is NOT\n`#[serde(deny_unknown_fields)]` any more — see the hand-written\n[`Deserialize`] impl below for what replaced it and why."
+        "description": "One of an endpoint's N SQL definitions, as an author writes it (M2). The\ncanonical shape is a `rows` statement and a `total` statement for\npagination, but any number is allowed.\n\n`name` is not decoration: once an endpoint has more than one statement,\nthe response envelope is a JSON object keyed by statement name and the\ngenerated OpenAPI document names it as a property (M2 Tasks 8-9). A name a\ncaller writes into their own code is a contract, which is what\n[`validate_statement_name`] and [`validate_statements`] enforce —\n`^[a-z][a-z0-9_]*$` so the key never needs quoting in JSON and never reads\nas private, and uniqueness within the endpoint so the key is unambiguous.\n\nUnknown keys are refused for the same reason as [`ParamSpec`] and its four\nsiblings: this is a type an AUTHOR fills in, so a typo in the request body\nmust be a 400, not a silently-ignored field. It is NOT\n`#[serde(deny_unknown_fields)]` any more — see the hand-written\n[`Deserialize`] impl below for what replaced it and why.\n\n**The PUBLISHED schema cannot state that rule, and this is not an oversight\nto fix later.** Flattening makes this an `allOf`, and each branch of an\n`allOf` validates the whole object on its own — so an\n`additionalProperties: false` branch listing only `name` would reject every\nbody carrying `sql`, which is all of them. The construct that expresses it\nis `unevaluatedProperties`, and utoipa 5.5 cannot emit one (the string does\nnot occur in its source). So the refusal lives in the reader, where it is\ntested; the document states the one-of and loses only the typo class. Same\nfor [`PreviewEndpointInput`], for the same reason."
       },
       "StatusBody": {
         "type": "object",
