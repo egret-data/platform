@@ -6336,6 +6336,17 @@ mod tests {
     /// It asserts its own markers were found before it asserts anything about
     /// them, so a renamed function or a restructured transaction fails loudly
     /// here instead of passing on an empty search.
+    ///
+    /// **This is a text scan of `publish`'s own body, not of the functions it
+    /// calls — it has a blind spot.** The second assertion below finds
+    /// `check_transform_script(&draft.output)?;` in the slice of source text
+    /// between `publish`'s signature and `begin()`. Anyone who lifts that
+    /// in-transaction re-validation into a helper function moves the call site
+    /// (and the `check_transform_script(`/`eval_probe(`/… markers the first
+    /// loop searches for) out of the scanned window entirely. The evaluation
+    /// could then move back inside the lock — the exact regression this test
+    /// exists to catch — while this test reads a `publish` body that no longer
+    /// mentions any forbidden call and goes green.
     #[test]
     fn pin_no_starlark_evaluation_inside_publishs_transaction() {
         let src = std::fs::read_to_string(
@@ -6383,7 +6394,7 @@ mod tests {
             .expect("`publish` must be findable by name");
         assert!(
             src[publish_start..begin].contains("check_transform_script(&draft.output)?;"),
-            "publish must still evaluate the script — above `begin()`, against the draft the              identity check then proves identical to the locked row"
+            "publish must still evaluate the script — above `begin()`, against the draft the identity check then proves identical to the locked row"
         );
     }
 

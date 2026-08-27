@@ -589,24 +589,35 @@ export default function ResponseSection() {
   }
 
   function disableTransform() {
-    setForm((f) => {
-      const restored = clearedByTransform.current;
-      clearedByTransform.current = null;
-      return {
-        ...f,
-        output: {
-          ...f.output,
-          // `?? f.output.shape` rather than an unconditional write: with
-          // nothing remembered (a transform that was already on when this
-          // section mounted) the field is left exactly as it is, which is the
-          // behaviour before this ref existed. Restoring `undefined` there
-          // would be this fix inventing a change of its own.
-          shape: restored ? restored.shape : f.output.shape,
-          naming: restored ? restored.naming : f.output.naming,
-          transform: null,
-        },
-      };
-    });
+    // Read AND clear the ref here, outside the updater — not inside it.
+    // `setForm`'s updater can run twice for one call in development: React 19
+    // double-invokes a `useState` updater function under `StrictMode`,
+    // keeping only the second call's return value and discarding the first's.
+    // Clearing `clearedByTransform.current` inside the updater is a side
+    // effect that does not rewind between those two calls, so the first
+    // invocation would see the remembered value and restore it, and the
+    // second — reading the same, now-`null` ref — would fall through to
+    // `f.output.shape`/`f.output.naming`, which are `undefined` on the very
+    // state being patched. React keeps that second, empty result, silently
+    // undoing the restore this function exists to do. Reading the ref once,
+    // before `setForm` is even called, makes both invocations pure functions
+    // of the same captured `restored` value, so they agree.
+    const restored = clearedByTransform.current;
+    clearedByTransform.current = null;
+    setForm((f) => ({
+      ...f,
+      output: {
+        ...f.output,
+        // `?? f.output.shape` rather than an unconditional write: with
+        // nothing remembered (a transform that was already on when this
+        // section mounted) the field is left exactly as it is, which is the
+        // behaviour before this ref existed. Restoring `undefined` there
+        // would be this fix inventing a change of its own.
+        shape: restored ? restored.shape : f.output.shape,
+        naming: restored ? restored.naming : f.output.naming,
+        transform: null,
+      },
+    }));
   }
 
   /** Patches the transform IN PLACE — spreading the existing object rather

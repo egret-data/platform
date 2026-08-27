@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { useState } from "react";
+import { StrictMode, useState } from "react";
 import { MemoryRouter, Outlet, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
@@ -138,6 +138,33 @@ function renderResponse(initialOutput: OutputSpec, onFormChange?: (form: Endpoin
         </Routes>
       </MemoryRouter>
     </QueryClientProvider>,
+  );
+}
+
+/**
+ * `renderResponse` wrapped in `React.StrictMode`, the way `main.tsx` actually
+ * mounts the app. React 19 double-invokes a `useState` updater function under
+ * `StrictMode` in development, throwing the second call's result away for
+ * anything that doesn't come back idempotent — an updater that mutates a
+ * `ref` on its way through (`enableTransform`/`disableTransform`'s
+ * `clearedByTransform.current`) is exactly that case, and `renderResponse`
+ * alone cannot see it: it is the harness diverging from the real app that
+ * would hide the defect.
+ */
+function renderResponseStrict(initialOutput: OutputSpec, onFormChange?: (form: EndpointFormState) => void) {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(
+    <StrictMode>
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={["/response"]}>
+          <Routes>
+            <Route path="/response" element={<Harness initialOutput={initialOutput} onFormChange={onFormChange} />}>
+              <Route index element={<ResponseSection />} />
+            </Route>
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>
+    </StrictMode>,
   );
 }
 
@@ -420,6 +447,42 @@ describe("ResponseSection — response transform", () => {
     await userEvent.click(toggle);
     expect(await screen.findByLabelText("Response transform script")).toBeInTheDocument();
     expect(latest?.output.shape).toBeUndefined();
+
+    await userEvent.click(screen.getByRole("checkbox", { name: "Build the response with a script" }));
+
+    expect(await screen.findByLabelText("Shape")).toBeInTheDocument();
+    expect(latest?.output.shape).toBe("arrays");
+    expect(latest?.output.naming).toBe("camel");
+    expect(latest?.output.transform).toBeNull();
+  });
+
+  /**
+   * The same restore, under `React.StrictMode` — which is how `main.tsx`
+   * actually mounts this app, and which the test above cannot see because
+   * `renderResponse` does not wrap in it.
+   *
+   * React 19 invokes a `useState` updater function TWICE in development under
+   * `StrictMode`, discarding the first call's return value and keeping only
+   * the second's. `disableTransform` clears `clearedByTransform.current`
+   * *inside* its updater, so the first invocation reads the remembered
+   * `{ shape: "arrays", naming: "camel" }` and restores it, and the second
+   * invocation — running against the same, now-`null` ref, because clearing
+   * it is a side effect that does not rewind between the two calls — falls
+   * through to `f.output.shape`/`f.output.naming`, which are `undefined` on
+   * the very state this updater is trying to patch. React keeps that second,
+   * empty result: an author who ticks the box and unticks it again ends the
+   * visit with no shape or naming at all, in dev, which is exactly the
+   * defect `disableTransform` exists to prevent.
+   */
+  it("restores the shape and naming under StrictMode's double-invoked updater", async () => {
+    let latest: EndpointFormState | undefined;
+    renderResponseStrict({ shape: "arrays", naming: "camel" }, (f) => {
+      latest = f;
+    });
+
+    const toggle = await screen.findByRole("checkbox", { name: "Build the response with a script" });
+    await userEvent.click(toggle);
+    expect(await screen.findByLabelText("Response transform script")).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("checkbox", { name: "Build the response with a script" }));
 

@@ -2265,7 +2265,7 @@ mod tests {
         // because every other assertion in this module would still pass.
         assert_eq!(
             shipped.output_wall_clock, None,
-            "a shipped evaluation must run its output phase on the SAME deadline              as its evaluation; a second window here is a fresh unbounded phase              for any script that overran the first"
+            "a shipped evaluation must run its output phase on the SAME deadline as its evaluation; a second window here is a fresh unbounded phase for any script that overran the first"
         );
     }
 
@@ -2301,7 +2301,7 @@ mod tests {
         .expect_err("an output phase whose deadline has already passed must be refused");
         assert!(
             matches!(err, TransformError::BudgetExceeded(SHAPE_DEADLINE)),
-            "the OUTPUT phase must be what refuses, on its own deadline — a              `wall-clock deadline` here would mean the evaluation's window was              used for the output too: {err:?}"
+            "the OUTPUT phase must be what refuses, on its own deadline — a `wall-clock deadline` here would mean the evaluation's window was used for the output too: {err:?}"
         );
     }
 }
