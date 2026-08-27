@@ -161,11 +161,25 @@ export default function Query() {
    * By INDEX, not by name: two statements may share a name while the author is
    * mid-edit (`statementNameError` is what says so), and filtering by name would
    * then drop the wrong one — or drop `current` twice and leave a sibling in.
+   *
+   * A scripted sibling contributes `""`, and it is KEPT in the list rather than
+   * filtered out. The wire type is `string[]` with no way to say "unknown", and
+   * the two candidate lies differ: `validate_preview` refuses
+   * `1 + siblings.length > MAX_STATEMENTS`, so dropping a sibling understates the
+   * endpoint and lets a preview through that publish would refuse, while `""`
+   * keeps the COUNT exact and contributes nothing to the iterated-parameter
+   * union. That second part is still a claim this cannot make honestly — a
+   * generated template may well iterate a parameter — but it is unobservable
+   * today, because publish refuses a scripted statement outright until Task 3.
+   * Task 5 gives preview the generated text, which is what makes it true.
    */
   const siblings = useMemo(
     () => statements.filter((_, i) => i !== active).map(sqlOf),
     [statements, active],
   );
+
+  /** Whether the statement on screen has its SQL built by a script. */
+  const scripted = !("sql" in current);
 
   const nameError = useMemo(
     () => (several ? statementNameError(current.name, statements.map((s) => s.name), active) : null),
@@ -175,15 +189,32 @@ export default function Query() {
   /** Replace the whole list — `statements` is patched whole, never per entry. */
   const setStatements = (next: StatementSpec[]) => setForm((f) => ({ ...f, statements: next }));
 
-  // The edited statement is rebuilt rather than spread over, because a
-  // `StatementSpec` carries `sql` OR `script` and never both: `{ ...s, sql }`
-  // over a scripted statement would send both keys, which the backend refuses.
-  // Task 8 gives this editor a script mode; until then editing one writes text.
+  /**
+   * Patch the statement on screen, **never destroying the source it already has.**
+   *
+   * A `StatementSpec` carries `sql` OR `script` and never both, so `{ ...s, sql }`
+   * is wrong twice over: it would send both keys, which the backend refuses, and
+   * writing `sql: sqlOf(s)` — `""` for a scripted statement — would silently
+   * discard the author's script on any edit, INCLUDING a pure rename that never
+   * touches SQL. So the two halves are separated:
+   *
+   * * a patch without `sql` (i.e. a rename) keeps the source untouched;
+   * * a patch WITH `sql` applies only to a statement that already has `sql`.
+   *
+   * The second is a refusal rather than a conversion, and it is unreachable
+   * anyway: the editor below is `readOnly` for a scripted statement, so its
+   * `onChange` cannot fire. Both halves are here because "unreachable" is a
+   * property of today's markup and this is the function that must not lose work
+   * if that changes. Task 8 gives this editor a real script mode.
+   */
   const editActive = (patch: { name?: string; sql?: string }) =>
     setStatements(
-      statements.map((s, i) =>
-        i === active ? { name: patch.name ?? s.name, sql: patch.sql ?? sqlOf(s) } : s,
-      ),
+      statements.map((s, i) => {
+        if (i !== active) return s;
+        const named = patch.name === undefined ? s : { ...s, name: patch.name };
+        if (patch.sql === undefined) return named;
+        return "sql" in named ? { ...named, sql: patch.sql } : named;
+      }),
     );
 
   const atLimit = statements.length >= MAX_STATEMENTS;
@@ -420,6 +451,16 @@ export default function Query() {
             )}
 
             <div id="stmt-panel" role={several ? "tabpanel" : undefined} className="min-h-0 flex-1 pt-2">
+              {/* A scripted statement has no SQL to edit — a script builds it —
+                  so the editor is read-only and says so rather than showing an
+                  empty box an author would type into and lose their script to.
+                  Only the API can create one today; the script mode is Task 8. */}
+              {scripted && (
+                <p className="pb-2 text-xs text-muted-foreground">
+                  A script builds this statement&rsquo;s SQL. Editing the script is not available
+                  here yet — the SQL below is read-only.
+                </p>
+              )}
               <SqlEditor
                 value={sqlOf(current)}
                 onChange={(sql) => editActive({ sql })}
@@ -429,7 +470,10 @@ export default function Query() {
                 // The fieldset around this section does not reach a Monaco
                 // instance — it is not a form control. Without this line a
                 // trashed endpoint's SQL is fully editable.
-                readOnly={trashed}
+                // `scripted` for the reason above it: with no script mode yet,
+                // a writable editor over a scripted statement is a way to
+                // destroy the script, not a way to edit it.
+                readOnly={trashed || scripted}
                 // No schema source on this page — see the module doc.
                 schemaWords={[]}
                 // Ignores the SQL the editor offers (`pickRunSql` would hand

@@ -626,3 +626,56 @@ describe("the statement limit does not drift between the contract and the UI", (
     expect(declared).toBe(MAX_STATEMENTS);
   });
 });
+
+/**
+ * Package S Task 1: a statement's SQL is TEXT or a SCRIPT.
+ *
+ * Only the API can create a scripted statement today — this editor's script
+ * mode is Task 8 — so the property here is not "it can be edited", it is that
+ * **the author's script survives contact with a section that cannot show it**.
+ * The first version of this change rebuilt the edited statement as
+ * `{ name, sql: sqlOf(s) }`, which for a scripted statement is `sql: ""`: a pure
+ * RENAME, which never touches SQL, silently destroyed the script and sent a
+ * text statement in its place. Silent data loss on a rename is worse than a
+ * refusal, which is what both tests below are here to keep true.
+ */
+describe("Query section — a statement whose SQL a script builds", () => {
+  const SCRIPT = 'def build_sql(params):\n  return "SELECT 1"';
+  const scripted = makeEndpoint({
+    statements: [
+      { name: "rows", sql: "SELECT * FROM t" },
+      { name: "total", script: SCRIPT },
+    ],
+  } as Partial<DataApiEndpointDto>);
+
+  it("keeps the script when the statement is renamed", async () => {
+    renderQuery(scripted);
+    await screen.findByLabelText("SQL");
+    await userEvent.click(screen.getByRole("tab", { name: "total" }));
+    await userEvent.clear(screen.getByLabelText("Statement name"));
+    await userEvent.type(screen.getByLabelText("Statement name"), "row_count");
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(updateMutateAsync).toHaveBeenCalled());
+    // A deep equal on the WHOLE list: the renamed entry must still carry
+    // `script` and must NOT have grown an `sql` key beside it, because a
+    // statement carrying both is refused by the backend reader.
+    expect(savedStatements()).toEqual([
+      { name: "rows", sql: "SELECT * FROM t" },
+      { name: "row_count", script: SCRIPT },
+    ]);
+  });
+
+  it("shows the SQL read-only for a scripted statement, and writable for a text one", async () => {
+    renderQuery(scripted);
+    // The discriminating half FIRST, on the text statement, so that "readonly"
+    // below cannot be something this section does to every editor.
+    expect(await screen.findByLabelText("SQL")).not.toHaveAttribute("readonly");
+    expect(screen.queryByText(/a script builds this statement/i)).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("tab", { name: "total" }));
+
+    expect(screen.getByLabelText("SQL")).toHaveAttribute("readonly");
+    expect(screen.getByText(/a script builds this statement/i)).toBeInTheDocument();
+  });
+});

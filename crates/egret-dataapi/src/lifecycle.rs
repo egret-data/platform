@@ -4427,50 +4427,6 @@ mod tests {
     /// (2.6 s of scans and renders, 29.0 s of branch enumeration) before this
     /// bound existed, and far longer in the debug build this test runs under.
     /// The budget is two orders of magnitude below that, so a reading inside it
-    /// Package S Task 1: a script statement is REFUSED, not treated as empty SQL.
-    ///
-    /// Task 1 introduces the case and nothing generates from it until Task 3, so
-    /// the only safe answer here is a refusal naming the statement. Without it a
-    /// `Script` source has no text, every scan sees `""` and passes, and publish
-    /// freezes a snapshot with nothing to run — a failure that surfaces at
-    /// request time, on a live endpoint. **Task 3 replaces this test** with the
-    /// generated-statement tests the plan describes; it is here so the gap
-    /// between Task 1 and Task 3 is closed rather than merely known about.
-    #[test]
-    fn a_scripted_statement_is_refused_until_generation_exists() {
-        let statements = vec![
-            StatementSpec::from_sql("rows", "SELECT id FROM t"),
-            StatementSpec::from_script("total", "def build_sql(params):\n  return \"SELECT 1\""),
-        ];
-        assert_eq!(
-            validate_endpoint(
-                &statements,
-                &[],
-                &cache(CacheScope::PerPrincipal),
-                &OutputSpec::default(),
-                false,
-                false,
-                ScriptEval::Here,
-            ),
-            Err(ValidationError::ScriptedStatementNotGenerated(
-                "total".into()
-            )),
-            "a scripted statement must be refused by name, not scanned as empty SQL"
-        );
-        // The discriminating half: the same list without the script publishes,
-        // so the refusal is about the SOURCE and not about anything else in it.
-        assert!(validate_endpoint(
-            &[StatementSpec::from_sql("rows", "SELECT id FROM t")],
-            &[],
-            &cache(CacheScope::PerPrincipal),
-            &OutputSpec::default(),
-            false,
-            false,
-            ScriptEval::Here,
-        )
-        .is_ok());
-    }
-
     /// cannot coincide with the statements having been rendered.
     #[test]
     fn the_statement_bound_is_checked_before_anything_renders() {
@@ -4511,6 +4467,65 @@ mod tests {
             "the refusal must precede the rendering; this took {elapsed:?}, which \
              means 256 statements were rendered before being refused"
         );
+    }
+
+    /// Package S Task 1: a script statement is REFUSED, not treated as empty SQL.
+    ///
+    /// Task 1 introduces the case and nothing generates from it until Task 3, so
+    /// the only safe answer here is a refusal naming the statement. Without it a
+    /// `Script` source has no text, every scan sees `""` and passes, and publish
+    /// freezes a snapshot with nothing to run — the mutation that removes the
+    /// guard returns `Err(NotASelect(""))`, a message about `SELECT` naming an
+    /// empty string, which is not something an author can act on.
+    ///
+    /// **Task 3 deletes this test**, together with the guard loop at the top of
+    /// [`validate_endpoint`] and [`ValidationError::ScriptedStatementNotGenerated`].
+    /// It is deliberately SELF-CONTAINED, and it sits AFTER
+    /// [`the_statement_bound_is_checked_before_anything_renders`] rather than
+    /// before it: nothing else in this module is documented by the block above
+    /// it, so the deletion cannot take anything with it. It was first written
+    /// between that test and its doc comment, which would have made Task 3's
+    /// deletion silently remove the 31.6 s budget rationale — no gate can see
+    /// that happen, and it is the third time the shape has appeared in this
+    /// programme.
+    ///
+    /// One thing for Task 3 to carry across: this guard runs AFTER
+    /// `validate_statements` and BEFORE every scan. Generation must keep that
+    /// position, or [`egret_dataapi_api::MAX_STATEMENTS`] stops bounding it and
+    /// the 256-statement list measured above becomes 256 Starlark evaluations.
+    #[test]
+    fn a_scripted_statement_is_refused_until_generation_exists() {
+        let statements = vec![
+            StatementSpec::from_sql("rows", "SELECT id FROM t"),
+            StatementSpec::from_script("total", "def build_sql(params):\n  return \"SELECT 1\""),
+        ];
+        assert_eq!(
+            validate_endpoint(
+                &statements,
+                &[],
+                &cache(CacheScope::PerPrincipal),
+                &OutputSpec::default(),
+                false,
+                false,
+                ScriptEval::Here,
+            ),
+            Err(ValidationError::ScriptedStatementNotGenerated(
+                "total".into()
+            )),
+            "a scripted statement must be refused by name, not scanned as empty SQL"
+        );
+        // The discriminating half: the same list without the script publishes,
+        // so the refusal is about the SOURCE and not about anything else in it.
+        assert!(validate_endpoint(
+            &[StatementSpec::from_sql("rows", "SELECT id FROM t")],
+            &[],
+            &cache(CacheScope::PerPrincipal),
+            &OutputSpec::default(),
+            false,
+            false,
+            ScriptEval::Here,
+        )
+        .is_ok());
     }
 
     /// The other side of the statement bound, and its own test: a legitimate

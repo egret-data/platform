@@ -1840,6 +1840,50 @@ mod tests {
         );
     }
 
+    /// `name` is required, and that rule moved from the derive into hand-written
+    /// code — the three rules beside it each got a test and this one did not.
+    ///
+    /// Without the `ok_or_else` a nameless statement would deserialize with an
+    /// EMPTY name, which is not a name `validate_statements` would ever accept
+    /// from an author but which would have arrived through deserialization
+    /// rather than through the route that checks.
+    #[test]
+    fn a_statement_without_a_name_is_refused() {
+        let err = serde_json::from_str::<StatementSpec>(r#"{"sql":"SELECT 1"}"#)
+            .expect_err("`name` is required");
+        assert_eq!(err.to_string(), "missing field `name` at line 1 column 18");
+    }
+
+    /// The "both" refusal must not depend on which key arrives first.
+    ///
+    /// It did under the derive: `deny_unknown_fields` fired on whichever of the
+    /// two came SECOND, so `{sql, script}` blamed `script` and `{script, sql}`
+    /// blamed `sql`. The hand-written reader collects every key before deciding,
+    /// so one rule gives one message either way.
+    #[test]
+    fn the_both_refusal_does_not_depend_on_key_order() {
+        let forward = serde_json::from_str::<StatementSpec>(
+            r#"{"name":"rows","sql":"SELECT 1","script":"S"}"#,
+        )
+        .expect_err("both, sql first");
+        let reverse = serde_json::from_str::<StatementSpec>(
+            r#"{"name":"rows","script":"S","sql":"SELECT 1"}"#,
+        )
+        .expect_err("both, script first");
+        assert!(
+            forward
+                .to_string()
+                .starts_with("a statement carries either"),
+            "sql-first: {forward}"
+        );
+        assert!(
+            reverse
+                .to_string()
+                .starts_with("a statement carries either"),
+            "script-first: {reverse}"
+        );
+    }
+
     #[test]
     fn a_statement_carrying_neither_is_refused() {
         let json = r#"{"name":"rows"}"#;
