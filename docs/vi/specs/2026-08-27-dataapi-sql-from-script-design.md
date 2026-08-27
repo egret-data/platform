@@ -103,6 +103,32 @@ quyết tâm phơi endpoint của chính mình thì làm được; điều đó 
 quyền quá tay. Mối đe doạ mà thiết kế này **phải** chặn là **người gọi**, và với người
 gọi thì tính chất không đổi: giá trị là bind, định danh là của tác giả.
 
+### 2.4 "Không được tham chiếu" nghĩa là gì với một câu lệnh sinh ra
+
+**Chốt 2026-08-27, sau khi Task 3 phát hiện xung đột.** `UnreferencedParameter` nói
+*"tham số `x` được khai nhưng không bao giờ được tham chiếu dưới dạng `{{x}}` trong
+truy vấn"*. Nó tồn tại để tác giả không khai một tham số mà SQL bỏ qua — người gọi gửi
+lên và không có gì xảy ra.
+
+Một script phá vỡ **phép thử** đó mà không phá vỡ **luật**. `if params["grain"] ==
+"daily"` **có dùng** `grain`, mà template phát ra có thể không chứa `{{ grain }}` nào.
+Áp phép thử của SQL viết tay lên văn bản sinh ra sẽ từ chối đúng ca rẽ nhánh mà gói này
+sinh ra để phục vụ — và từ chối như thế không phải là thận trọng, mà là **sai**.
+
+Nên với câu lệnh **sinh từ script**, luật trở thành luật hành vi, trên chính các phép
+thăm dò mà §2.3 đã chạy: một tham số là *không được tham chiếu* khi **thay đổi nó không
+làm đổi template phát ra lẫn danh sách bind**. Đó vẫn là câu hỏi mà luật của SQL viết
+tay đặt ra, chỉ hỏi theo cách duy nhất mà một script trả lời được.
+
+Hai hệ quả cần nói rõ:
+
+- Phép kiểm **không tốn thêm gì** — nó đọc lại chính các lần chạy thăm dò mà cổng giá
+  trị mốc đã thực hiện.
+- Nó **yếu hơn luật của SQL viết tay theo một chiều**: một tham số chỉ dùng bên trong
+  một nhánh mà ngân sách thăm dò không bao giờ tới sẽ bị đọc là không tham chiếu. Đó
+  đúng là khoảng trống thăm dò có giới hạn mà §3 đã ghi, và là khoảng trống M1 vẫn sống
+  chung.
+
 ## 3. Hợp đồng cột không cần gì mới
 
 Đây là phần làm cho tính năng này rẻ, và đáng nói tường minh.

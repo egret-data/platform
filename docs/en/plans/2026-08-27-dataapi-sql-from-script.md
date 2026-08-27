@@ -371,6 +371,8 @@ git commit -m "feat(dataapi): a generated statement obeys every rule a written o
 - Consumes: `build_sql` (Task 2), M1's probe assignments. The budget is `MAX_PROBES = 64` (`render.rs:1290`) — a bound this task must not quietly raise.
 - Produces: a `ValidationError` arm naming the parameter whose value reached the SQL text.
 
+**Task 3 found a collision this task must resolve, and spec §2.4 now decides it.** `UnreferencedParameter` refuses a script that branches on a parameter without emitting it — which is the third test below, verbatim. For a **scripted** statement the rule is now behavioural: a parameter is unreferenced when **varying it changes neither the emitted template nor the binds**. Read §2.4; it costs nothing extra because it reads the probe runs you already perform, and it is deliberately weaker in one direction (a parameter used only inside a branch the probe budget never reaches reads as unreferenced — the same bounded-probe gap §3 records).
+
 **Read spec §2.3 before writing this.** Scanning the emitted template for forbidden syntax is the mistake P4.5 already paid for — five reviews, five bypasses. The gate is **behavioural**: run the script with a distinctive sentinel as each parameter's value, and check the sentinel does not appear in the emitted template.
 
 **And read what it does not prove.** A script that uppercases or hashes the value first defeats it. That is stated in the spec and must be stated in the code: this catches an author creating an injection hole **by accident**, not one who sets out to. **Do not write a comment claiming more.**

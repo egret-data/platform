@@ -106,6 +106,30 @@ so; the same is true of one who grants too much access. The threat this design m
 stop is the **caller**, and against the caller the property is unchanged: values are
 binds, identifiers are the author's.
 
+### 2.4 What "unreferenced" means for a generated statement
+
+**Decided 2026-08-27, after Task 3 found the collision.** `UnreferencedParameter`
+says *"parameter `x` is declared but never referenced as `{{x}}` in the query"*. It
+exists so an author cannot declare a parameter the SQL ignores — a caller supplies
+it and nothing happens.
+
+A script breaks the test without breaking the rule. `if params["grain"] == "daily"`
+**uses** `grain`, and the emitted template may contain no `{{ grain }}` at all. Applying
+the written-SQL test to generated text would refuse the branching case this package
+exists to enable — and refusing it is not conservative, it is wrong.
+
+So for a **scripted** statement the rule becomes behavioural, on the probes §2.3
+already runs: a parameter is unreferenced when **varying it changes neither the
+emitted template nor the binds**. That is the same question the written-SQL rule asks,
+asked in the only way a script can answer it.
+
+Two consequences worth stating:
+
+- The check costs nothing extra — it reads the probe runs the sentinel gate performs.
+- It is **weaker than the written-SQL rule in one direction**: a parameter used only
+  inside a branch the probe budget never reaches reads as unreferenced. That is the
+  same bounded-probe gap §3 records, and the same one M1 lives with.
+
 ## 3. The column contract needs nothing new
 
 This is the part that makes the feature cheap, and it is worth being explicit.
