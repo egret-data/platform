@@ -287,6 +287,56 @@ const BUILD_SQL_ENTRY_POINT: &str = "build_sql";
 /// [`ENTRY_POINT`]: the absence is structural, not optional.
 const BUILD_SQL_ENTRY_POINT_ARITY: usize = 1;
 
+/// Which of the crate's two entry-point contracts a script is being held to.
+///
+/// # Why this is a value rather than three locals
+///
+/// [`eval_inner`] used to pick `(entry_name, arity, is_build_sql)` apart into
+/// three parallel locals, and the two refusals an author actually reads —
+/// [`TransformError::MissingEntryPoint`] and [`TransformError::WrongArity`] —
+/// took none of them: they rendered `` `transform` `` and `(params,
+/// statements)` from constants, so a script that failed to define `build_sql`
+/// was told to define `transform`. That was invisible while [`build_sql`] had
+/// no non-test caller and became visible the moment publish acquired one.
+///
+/// Carrying the contract *in the error* is what makes the message impossible
+/// to get wrong: there is no second place holding the name, so the name cannot
+/// disagree with the lookup that failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryPoint {
+    /// [`ENTRY_POINT`] — an endpoint's response transform.
+    Transform,
+    /// [`BUILD_SQL_ENTRY_POINT`] — a statement's SQL template.
+    BuildSql,
+}
+
+impl EntryPoint {
+    /// The name [`eval_inner`] looks up in the evaluated module.
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Transform => ENTRY_POINT,
+            Self::BuildSql => BUILD_SQL_ENTRY_POINT,
+        }
+    }
+
+    /// How many positional arguments the entry point is called with.
+    pub(crate) const fn arity(self) -> usize {
+        match self {
+            Self::Transform => ENTRY_POINT_ARITY,
+            Self::BuildSql => BUILD_SQL_ENTRY_POINT_ARITY,
+        }
+    }
+
+    /// The parameter list an author should have written, spelled as they would
+    /// write it — so the refusal is a line they can copy.
+    pub(crate) const fn signature(self) -> &'static str {
+        match self {
+            Self::Transform => "(params, statements)",
+            Self::BuildSql => "(params)",
+        }
+    }
+}
+
 /// Ceiling on the transform's response body, measured on the **serialised**
 /// bytes rather than on any structure count.
 ///
@@ -542,19 +592,20 @@ pub enum TransformError {
     #[error("the transform script did not parse: {0}")]
     Parse(String),
     /// The script parsed and ran, but never defined a callable named
-    /// [`ENTRY_POINT`].
+    /// [`EntryPoint::name`] for the contract it was evaluated under.
     ///
-    /// Also what a *non-callable* `transform` produces — `transform = 1` leaves
+    /// Also what a *non-callable* entry point produces — `transform = 1` leaves
     /// the endpoint with no transform function just as surely as omitting it,
     /// and the author's next move is the same line either way.
     ///
-    /// Shared with [`BUILD_SQL_ENTRY_POINT`] — a script missing `build_sql`
-    /// hits this arm too, with the same wording naming `{ENTRY_POINT}`. The
-    /// variant is what a caller matches on; refining the message per contract
-    /// is deferred, not forgotten.
-    #[error("the transform script must define `{ENTRY_POINT}(params, statements)`")]
-    MissingEntryPoint,
-    /// [`ENTRY_POINT`] exists but does not take the two arguments it is called
+    /// **The contract is carried, not assumed.** Both entry points reach this
+    /// arm, and until package S wired a caller onto [`build_sql`] the message
+    /// named `` `transform` `` unconditionally — so an author whose statement
+    /// script was missing `build_sql` was told to define a function this phase
+    /// never looks up. See [`EntryPoint`].
+    #[error("the script must define `{}{}`", .0.name(), .0.signature())]
+    MissingEntryPoint(EntryPoint),
+    /// The entry point exists but does not take the arguments it is called
     /// with.
     ///
     /// Separate from [`TransformError::MissingEntryPoint`] deliberately: "you
@@ -562,19 +613,18 @@ pub enum TransformError {
     /// different lines. Without the distinction both arrive as a generic
     /// call-failed message from starlark.
     ///
-    /// Shared with [`BUILD_SQL_ENTRY_POINT`] the same way
-    /// [`TransformError::MissingEntryPoint`] is: the message names
-    /// `{ENTRY_POINT}` and [`ENTRY_POINT_ARITY`] even when the script under
-    /// check was `build_sql`. No test in this task exercises a wrong-arity
-    /// `build_sql`, so the wording was not worth widening the enum for; a
-    /// caller that needs it right refines this variant rather than adding a
-    /// third meaning to `found`.
+    /// Carries its [`EntryPoint`] for the same reason
+    /// [`TransformError::MissingEntryPoint`] does — a wrong-arity `build_sql`
+    /// must be told about `build_sql(params)`, not about
+    /// `transform(params, statements)`.
     #[error(
-        "`{ENTRY_POINT}` must take exactly {ENTRY_POINT_ARITY} arguments \
-         (params, statements), but takes {found}"
+        "`{}` must take exactly {} arguments {}, but takes {found}",
+        .entry.name(), .entry.arity(), .entry.signature()
     )]
     WrongArity {
-        /// How many parameters the script's `transform` actually declares.
+        /// Which contract's signature the script failed to match.
+        entry: EntryPoint,
+        /// How many parameters the script's entry point actually declares.
         found: usize,
     },
     /// [`BUILD_SQL_ENTRY_POINT`] ran to completion but returned something
@@ -677,11 +727,6 @@ struct TransformCall<'a> {
 /// way to express "the second argument does not exist", so the type doing the
 /// refusing is the one honest way to keep a script from being handed
 /// `statements` on the phase that runs before any statement has.
-// `BuildSql` is only ever constructed from `#[cfg(test)]` today — publish and
-// serving are what wire a non-test caller onto `build_sql` (a later task in
-// this package), the same scaffolding `TransformError` carried before
-// `run_transform` had one. Comes off as soon as that caller exists.
-#[allow(dead_code)]
 enum Entry<'a> {
     Transform(TransformCall<'a>),
     BuildSql {
@@ -807,9 +852,6 @@ pub(crate) fn run_transform(
 /// text would hand the renderer something that was never meant to be SQL and
 /// let the failure surface far from its cause — see
 /// [`TransformError::BuildSqlNotAString`].
-// No non-test caller yet — publish and serving wire one on in a later task of
-// this package. See the same note on `Entry`.
-#[allow(dead_code)]
 pub(crate) fn build_sql(
     script: &str,
     params: &BTreeMap<String, serde_json::Value>,
@@ -1095,16 +1137,14 @@ fn eval_inner(
             // decided once, before the lookup, so a script missing EITHER
             // name reports `MissingEntryPoint` against the one it was
             // actually asked to define.
-            let (entry_name, arity, is_build_sql) = match &entry_call {
-                Entry::Transform(_) => (ENTRY_POINT, ENTRY_POINT_ARITY, false),
-                Entry::BuildSql { .. } => {
-                    (BUILD_SQL_ENTRY_POINT, BUILD_SQL_ENTRY_POINT_ARITY, true)
-                }
+            let contract = match &entry_call {
+                Entry::Transform(_) => EntryPoint::Transform,
+                Entry::BuildSql { .. } => EntryPoint::BuildSql,
             };
             let entry = module
-                .get(entry_name)
-                .ok_or(TransformError::MissingEntryPoint)?;
-            check_arity(entry, arity)?;
+                .get(contract.name())
+                .ok_or(TransformError::MissingEntryPoint(contract))?;
+            check_arity(entry, contract)?;
 
             // Converting the inputs allocates on the SAME heap the script will
             // use, but it is Rust code: it consumes no ticks, so nothing starlark
@@ -1154,7 +1194,7 @@ fn eval_inner(
                 Some(window) => Instant::now() + window,
             };
 
-            if is_build_sql {
+            if contract == EntryPoint::BuildSql {
                 // A template, not JSON: `serialise_output`'s shape/byte walk
                 // is for a transform's structured return and does not apply
                 // here. What the deadline above still bounds is the one thing
@@ -1219,12 +1259,13 @@ fn classify(err: starlark::Error) -> TransformError {
     }
 }
 
-/// The entry point exists — does it take `arity` arguments?
+/// The entry point exists — does it take the contract's arguments?
 ///
-/// `arity` is [`ENTRY_POINT_ARITY`] or [`BUILD_SQL_ENTRY_POINT_ARITY`],
-/// supplied by the caller in [`eval_inner`] rather than read from a constant
-/// here, because which contract is being checked is a fact only the caller
-/// has — this function only has a `Value`.
+/// `contract` is supplied by the caller in [`eval_inner`] rather than read from
+/// a constant here, because which contract is being checked is a fact only the
+/// caller has — this function only has a `Value`. It carries the arity AND the
+/// name, so the refusal it builds cannot name one contract while the lookup
+/// that produced `entry` used the other.
 ///
 /// # Why the parameters are read out of the value's documentation
 ///
@@ -1243,11 +1284,11 @@ fn classify(err: starlark::Error) -> TransformError {
 /// so a well-formed `def` puts every parameter in `pos_or_named`; `*args` and
 /// `**kwargs` still parse, and are counted so that `def transform(*args)`
 /// reports what it is rather than reporting zero.
-fn check_arity(entry: Value<'_>, arity: usize) -> Result<(), TransformError> {
+fn check_arity(entry: Value<'_>, contract: EntryPoint) -> Result<(), TransformError> {
     let params = match entry.documentation() {
         starlark::docs::DocItem::Member(starlark::docs::DocMember::Function(f)) => f.params,
         // Not a function at all — `transform = 1`. See `MissingEntryPoint`.
-        _ => return Err(TransformError::MissingEntryPoint),
+        _ => return Err(TransformError::MissingEntryPoint(contract)),
     };
 
     let positional = params.pos_only.len() + params.pos_or_named.len();
@@ -1257,13 +1298,17 @@ fn check_arity(entry: Value<'_>, arity: usize) -> Result<(), TransformError> {
         + usize::from(params.kwargs.is_some());
 
     // `positional`, not `found`, decides: the entry point is called with
-    // exactly `arity` positional arguments, so `arity` positional parameters
-    // and nothing else is the only signature that works. `found` is what the
-    // message reports, because it is what the author wrote.
+    // exactly `contract.arity()` positional arguments, so that many positional
+    // parameters and nothing else is the only signature that works. `found` is
+    // what the message reports, because it is what the author wrote.
+    let arity = contract.arity();
     if positional == arity && found == arity {
         Ok(())
     } else {
-        Err(TransformError::WrongArity { found })
+        Err(TransformError::WrongArity {
+            entry: contract,
+            found,
+        })
     }
 }
 
@@ -2604,7 +2649,7 @@ mod transform_tests {
         };
         assert!(matches!(
             run_transform(&spec, &BTreeMap::new(), &BTreeMap::new()),
-            Err(TransformError::MissingEntryPoint)
+            Err(TransformError::MissingEntryPoint(EntryPoint::Transform))
         ));
     }
 
@@ -2618,7 +2663,10 @@ mod transform_tests {
         };
         assert!(matches!(
             run_transform(&spec, &BTreeMap::new(), &BTreeMap::new()),
-            Err(TransformError::WrongArity { found: 1 })
+            Err(TransformError::WrongArity {
+                entry: EntryPoint::Transform,
+                found: 1
+            })
         ));
     }
 
@@ -2679,7 +2727,7 @@ mod transform_tests {
         };
         assert!(matches!(
             run_transform(&spec, &BTreeMap::new(), &BTreeMap::new()),
-            Err(TransformError::MissingEntryPoint)
+            Err(TransformError::MissingEntryPoint(EntryPoint::Transform))
         ));
     }
 
@@ -2694,7 +2742,10 @@ mod transform_tests {
             returns: vec![],
         };
         match run_transform(&spec, &BTreeMap::new(), &BTreeMap::new()) {
-            Err(TransformError::WrongArity { found: 1 }) => {}
+            Err(TransformError::WrongArity {
+                entry: EntryPoint::Transform,
+                found: 1,
+            }) => {}
             other => panic!("expected WrongArity {{ found: 1 }}, got {other:?}"),
         }
     }
@@ -3288,7 +3339,8 @@ mod transform_tests {
     }
 
     /// A script that never defines `build_sql` is refused by the same
-    /// variant a missing `transform` is — see [`TransformError::MissingEntryPoint`].
+    /// variant a missing `transform` is — see [`TransformError::MissingEntryPoint`]
+    /// — carrying [`EntryPoint::BuildSql`] rather than the transform contract.
     ///
     /// Named `_for_build_sql` rather than reusing
     /// `a_script_without_the_entry_point_is_refused_by_name` verbatim: that
@@ -3299,8 +3351,64 @@ mod transform_tests {
     fn a_script_without_the_entry_point_is_refused_by_name_for_build_sql() {
         assert!(matches!(
             build_sql("x = 1", &BTreeMap::new()),
-            Err(TransformError::MissingEntryPoint)
+            Err(TransformError::MissingEntryPoint(EntryPoint::BuildSql))
         ));
+    }
+
+    /// **The message an author reads names the function they were asked to
+    /// write.** Task 2 shipped `MissingEntryPoint` and `WrongArity` rendering
+    /// `` `transform` `` and `(params, statements)` unconditionally, which was
+    /// unobservable while `build_sql` had no non-test caller and became a
+    /// wrong sentence the moment publish acquired one.
+    ///
+    /// Asserted on the rendered TEXT, not on the variant: the variant was
+    /// already right, and it is the text that would have sent an author to
+    /// define a function this phase never looks up. The transform half is
+    /// asserted alongside so that "name the contract" cannot be satisfied by
+    /// swapping which of the two is wrong.
+    #[test]
+    fn a_refusal_names_the_entry_point_the_author_was_asked_to_write() {
+        let missing_build_sql = build_sql("x = 1", &BTreeMap::new())
+            .expect_err("`x = 1` defines no `build_sql`")
+            .to_string();
+        assert_eq!(
+            missing_build_sql,
+            "the script must define `build_sql(params)`"
+        );
+
+        let wrong_arity_build_sql = build_sql(
+            "def build_sql(params, statements):\n  return \"\"",
+            &BTreeMap::new(),
+        )
+        .expect_err("`build_sql` takes one argument")
+        .to_string();
+        assert_eq!(
+            wrong_arity_build_sql,
+            "`build_sql` must take exactly 1 arguments (params), but takes 2"
+        );
+
+        let spec = TransformSpec {
+            script: "x = 1".into(),
+            returns: vec![],
+        };
+        assert_eq!(
+            run_transform(&spec, &BTreeMap::new(), &BTreeMap::new())
+                .expect_err("`x = 1` defines no `transform`")
+                .to_string(),
+            "the script must define `transform(params, statements)`",
+            "the transform contract must keep its own wording"
+        );
+
+        let spec = TransformSpec {
+            script: "def transform(params):\n  return {}".into(),
+            returns: vec![],
+        };
+        assert_eq!(
+            run_transform(&spec, &BTreeMap::new(), &BTreeMap::new())
+                .expect_err("`transform` takes two arguments")
+                .to_string(),
+            "`transform` must take exactly 2 arguments (params, statements), but takes 1"
+        );
     }
 
     /// A script returning a dict or a list is an author mistake. Coercing it

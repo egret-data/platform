@@ -274,21 +274,41 @@ pub enum ValidationError {
     /// sentence they would have got from the route that refused the write.
     #[error(transparent)]
     Statement(#[from] egret_dataapi_api::StatementError),
-    /// A statement whose SQL a script builds, on a path that cannot generate it.
+    /// A statement's `build_sql` script did not produce a template.
     ///
-    /// **Package S Task 1, and Task 3 deletes it.**
-    /// [`egret_dataapi_api::StatementSource::Script`] exists as of Task 1 so
-    /// that "text or a script" is a property of the TYPE rather than of a check
-    /// someone has to remember; nothing evaluates a script yet — Task 2 is the
-    /// evaluator and Task 3 wires it into [`validate_endpoint`]. Until then
-    /// every path that needs the text refuses here, at the top of the gate. The
-    /// alternative is treating a script statement as EMPTY SQL, which passes
-    /// every scan and freezes a snapshot with nothing to run.
+    /// The author's 400, not the caller's 500, for the same reason
+    /// [`ValidationError::TransformScriptInvalid`] is: a script that does not
+    /// parse, does not define `build_sql`, takes the wrong arguments, returns
+    /// something that is not a string, or exceeds a budget is a statement about
+    /// the definition the author just wrote.
+    ///
+    /// Names the STATEMENT, because an endpoint may have up to
+    /// [`egret_dataapi_api::MAX_STATEMENTS`] of them and
+    /// [`crate::transform::TransformError`] knows only about the one script it
+    /// was handed.
+    #[error("statement `{statement}` could not build its SQL: {error}")]
+    StatementScriptFailed {
+        /// The statement whose script failed, by name.
+        statement: String,
+        /// [`crate::transform::TransformError`], rendered.
+        error: String,
+    },
+    /// A statement has no entry in the [`GeneratedSql`] this validation was
+    /// handed — which can only mean the set was generated from a DIFFERENT
+    /// statement list.
+    ///
+    /// **Not the Task 1 placeholder this replaced.** That one meant "nothing can
+    /// generate a script yet"; this one means "the text supplied belongs to
+    /// another endpoint's statements". The only caller that could produce it is
+    /// [`EndpointStore::publish`], which generates from the DRAFT before it takes
+    /// the row lock and then re-validates the LOCKED row (see [`ScriptEval`]) —
+    /// so it is what the identity check between those two rows exists to make
+    /// unreachable, held by the data rather than by that check alone.
     #[error(
-        "statement `{0}` builds its SQL from a script, and this build cannot generate it yet; \
-         write the statement's SQL as text"
+        "statement `{0}` has no generated SQL: the endpoint was edited while it was being \
+         published; validate and publish again"
     )]
-    ScriptedStatementNotGenerated(String),
+    GenerationMismatch(String),
     #[error(
         "`#` may not appear in a published definition — delete it. StarRocks ACCEPTS AND IGNORES \
          `#` (`SELECT 1 #x` returns a column named `x`), so any meaning read into it here is a \
@@ -1966,19 +1986,174 @@ pub const MAX_TRANSFORM_RETURNS: usize = 64;
 ///
 /// The evaluation count is unchanged too: publish evaluated the script once
 /// inside the transaction and now evaluates it once outside it.
+///
+/// # Package S widened this from the transform to every script an endpoint has
+///
+/// A statement's SQL may now be built by a `build_sql` script
+/// ([`crate::transform::build_sql`]), and that evaluation is under exactly the
+/// same budgets, so it carries exactly the same hazard: generating inside the
+/// transaction would put author-supplied Starlark under the endpoint's row lock,
+/// which is the thing this enum exists to prevent.
+///
+/// So the skip variant now **carries what was generated**. That is the point of
+/// the payload: publish cannot ask to skip the evaluation without handing over
+/// the text the skipped evaluation produced, and there is no spelling of "skip
+/// it and generate anyway". `pin_no_starlark_evaluation_inside_publishs_transaction`
+/// reads publish's own body for the same property; this makes it structural
+/// rather than a text scan with a documented blind spot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ScriptEval {
-    /// Evaluate the script as part of this call. Every caller that holds no
-    /// lock and no open transaction: `/validate`, `/preview`, and the tests.
+pub(crate) enum ScriptEval<'a> {
+    /// Evaluate the endpoint's scripts as part of this call — the transform's
+    /// module top level AND every statement's `build_sql`. Every caller that
+    /// holds no lock and no open transaction: `/validate`, `/preview`, and the
+    /// tests.
     Here,
-    /// Do **not** evaluate the script; the caller has already run
-    /// [`check_transform_script`] over a script it then proved identical to the
-    /// one being validated. `EndpointStore::publish` and nothing else.
+    /// Do **not** evaluate anything; the caller has already run
+    /// [`check_transform_script`] and [`GeneratedSql::build`] over scripts it
+    /// then proved identical to the ones being validated.
+    /// `EndpointStore::publish` and nothing else.
     ///
     /// The structural rules ([`check_transform_shape`]) still run: they are
     /// comparisons, they cost microseconds, and running them against the locked
-    /// row is what makes the re-validation a re-validation.
-    AlreadyRunBeforeTheLock,
+    /// row is what makes the re-validation a re-validation. So does every scan
+    /// over `generated` — the whole point is that the locked row's statements go
+    /// through the same rules, on text the caller generated a moment earlier and
+    /// outside the lock.
+    AlreadyRunBeforeTheLock {
+        /// What generating the DRAFT's statements produced. Publish's identity
+        /// check (`current.statements == draft.statements` and
+        /// `current.params == draft.params`) is what makes that the same text
+        /// generating the locked row would produce: generation reads those two
+        /// and nothing else, and Starlark under [`crate::transform`]'s globals
+        /// has no clock, no randomness and no I/O.
+        generated: &'a GeneratedSql,
+    },
+}
+
+/// Every statement's SQL text, with each scripted statement's `build_sql`
+/// evaluated exactly once.
+///
+/// # Why text statements are in here too
+///
+/// A lookup that had to ask which kind of statement it was holding is a lookup
+/// that can answer the two kinds differently, and "nothing downstream can tell
+/// whether the text was typed or generated" is the property this whole package
+/// rests on. So [`GeneratedSql::build`] copies a written statement's SQL in
+/// beside a generated one, and [`statement_sql`] is one lookup by name with no
+/// branch in it. The copy is at most [`egret_dataapi_api::MAX_STATEMENTS`]
+/// strings on the publish path.
+///
+/// # The bound comes first, and this type is where that is enforced
+///
+/// [`build`](GeneratedSql::build) runs [`egret_dataapi_api::validate_statements`]
+/// **before** it evaluates anything, so `MAX_STATEMENTS` bounds the number of
+/// Starlark evaluations by construction rather than by the order of two
+/// statements in a caller. Package S Task 1 measured what that ordering buys:
+/// `the_statement_bound_is_checked_before_anything_renders` refuses a
+/// 256-statement list in under 500 ms, and without the bound ahead of
+/// generation those 256 statements are 256 evaluations of an author's script.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GeneratedSql(BTreeMap<String, String>);
+
+impl GeneratedSql {
+    /// Generate every scripted statement's SQL, once.
+    ///
+    /// `params` is what the scripts see, and only that — see
+    /// [`generation_params`] for the values and for why the shape decision
+    /// cannot be one of the inputs.
+    fn build(
+        statements: &[StatementSpec],
+        params: &[ParamSpec],
+    ) -> std::result::Result<Self, ValidationError> {
+        // FIRST. See the type's doc comment: this is the bound on how many
+        // evaluations the loop below can perform, and a caller that reached
+        // here through `validate_endpoint` has already paid for it (the check is
+        // a comparison over a list whose length is what it just bounded).
+        egret_dataapi_api::validate_statements(statements)?;
+        let generation_params = generation_params(params);
+        let mut out = BTreeMap::new();
+        for statement in statements {
+            let sql =
+                match statement.source.script() {
+                    None => statement
+                        .source
+                        .sql()
+                        // `StatementSource` is a two-case enum with "neither"
+                        // unrepresentable (Task 1), so `script()` returning `None`
+                        // means `sql()` returns `Some`.
+                        .expect("a statement that is not a script carries SQL")
+                        .to_owned(),
+                    Some(script) => crate::transform::build_sql(script, &generation_params)
+                        .map_err(|error| ValidationError::StatementScriptFailed {
+                            statement: statement.name.clone(),
+                            error: error.to_string(),
+                        })?,
+                };
+            out.insert(statement.name.clone(), sql);
+        }
+        Ok(Self(out))
+    }
+
+    /// The text generated for `name`, if this set was generated for a statement
+    /// list containing it.
+    fn get(&self, name: &str) -> Option<&str> {
+        self.0.get(name).map(String::as_str)
+    }
+}
+
+/// The `params` dict a `build_sql` script is handed at publish time.
+///
+/// Every declared parameter at its [`representative_value`], as JSON — the same
+/// values [`probe_params`] hands a transform probe, and for the same reason: a
+/// script that indexes `params["region"]` must find something there, and a
+/// truthy stand-in is what exercises a branch rather than skipping it.
+///
+/// # One difference from [`probe_params`], and it is forced
+///
+/// [`probe_params`] wraps a parameter any statement ITERATES in a one-element
+/// list, asking [`IteratedParams`] which those are. Generation cannot: the
+/// iterated set is computed **from the SQL** ([`IteratedParams::across`]), and
+/// here the SQL is what is being produced. So a generating script sees every
+/// parameter as a scalar. That is a fact about the phase, not a preference, and
+/// it costs nothing today — the `{% for %}` header a list feeds is in the
+/// template the script emits, and it is the RENDER that reads the list, not the
+/// script.
+///
+/// # What this is not
+///
+/// It is one assignment, so it exercises one branch of a branching script.
+/// Package S Task 4 runs the script again under a sentinel assignment (the gate
+/// that refuses a script concatenating a caller's value into the SQL text) and
+/// Task 5 runs it under M1's probe assignments to freeze the column contract.
+/// Neither exists yet, and the backstop for every branch this assignment does
+/// not reach is the one hand-written SQL already has: `render` re-runs the byte
+/// tests on what it produced, on every request
+/// (`crate::render::check_rendered_statement`).
+fn generation_params(params: &[ParamSpec]) -> BTreeMap<String, serde_json::Value> {
+    params
+        .iter()
+        .map(|p| {
+            (
+                p.name.clone(),
+                crate::transform::param_json(&representative_value(p)),
+            )
+        })
+        .collect()
+}
+
+/// What a green [`validate_endpoint`] hands back.
+///
+/// Two values rather than one because [`validate`] needs both and recomputing
+/// either would be a second computation of something already decided: see
+/// [`IteratedParams`] for what deciding the shape twice cost, and
+/// [`GeneratedSql`] for why generating twice is worse than merely wasteful.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Validated {
+    /// The one shape decision for this endpoint.
+    pub iterated: IteratedParams,
+    /// The text every rule above was applied to — generated where the statement
+    /// carries a script, copied where it carries SQL.
+    pub sql: GeneratedSql,
 }
 
 /// The probe that supplies rows, in the words its refusal names it by.
@@ -2332,18 +2507,25 @@ pub(crate) fn type_name(ty: &ParamType) -> &'static str {
 /// [`ValidationError::PlaceholderInsideQuotedText`] rather than before it, since
 /// it has moved out of [`check_params_with`]. Only a definition breaking both at
 /// once can tell, and it is refused either way.
-/// The SQL text of a statement, or the refusal
-/// [`ValidationError::ScriptedStatementNotGenerated`] records.
+/// The SQL text of a statement — the author's, or the one their script built.
 ///
 /// One helper rather than seven `match`es, because seven copies of "and what
 /// about the script case?" is seven chances for one of them to answer `""` and
-/// keep going. Package S Task 3 replaces the body with generation; the call
-/// sites do not move.
-fn statement_sql(statement: &StatementSpec) -> std::result::Result<&str, ValidationError> {
-    statement
-        .source
-        .sql()
-        .ok_or_else(|| ValidationError::ScriptedStatementNotGenerated(statement.name.clone()))
+/// keep going. Package S Task 1 put it at all seven sites while the body was a
+/// refusal; Task 3 swapped the body for a lookup into [`GeneratedSql`] and moved
+/// no call site.
+///
+/// **There is no branch on the statement's source here, deliberately.** Both
+/// kinds are in `generated` by the time this runs, so every rule downstream is
+/// applied to a `&str` that carries no evidence of where it came from — which is
+/// the property the whole package rests on. See [`GeneratedSql`].
+fn statement_sql<'a>(
+    statement: &StatementSpec,
+    generated: &'a GeneratedSql,
+) -> std::result::Result<&'a str, ValidationError> {
+    generated
+        .get(&statement.name)
+        .ok_or_else(|| ValidationError::GenerationMismatch(statement.name.clone()))
 }
 
 fn validate_endpoint(
@@ -2353,19 +2535,32 @@ fn validate_endpoint(
     output: &OutputSpec,
     delegated: bool,
     impersonate: bool,
-    script_eval: ScriptEval,
-) -> std::result::Result<IteratedParams, ValidationError> {
+    script_eval: ScriptEval<'_>,
+) -> std::result::Result<Validated, ValidationError> {
     egret_dataapi_api::validate_statements(statements)?;
-    // Package S Task 1: refuse a scripted statement here, before any scan, for
-    // the reason `ScriptedStatementNotGenerated` records. Task 3 replaces this
-    // loop with generation, and everything below it keeps reading text.
-    for statement in statements {
-        if statement.source.script().is_some() {
-            return Err(ValidationError::ScriptedStatementNotGenerated(
-                statement.name.clone(),
-            ));
-        }
-    }
+    // Package S Task 3: generate here — AFTER the statement-list rule above and
+    // BEFORE every scan below. Both halves of that position are load-bearing.
+    //
+    // After, because `MAX_STATEMENTS` is what bounds how many Starlark
+    // evaluations this line can perform;
+    // `the_statement_bound_is_checked_before_anything_renders` measures a
+    // 256-statement list refused in under 500 ms, and generating first would
+    // make it 256 evaluations of an author's script.
+    //
+    // Before, because everything below reads TEXT and must not be able to tell
+    // whether an author typed it or a script built it. A generated template that
+    // reached the scans by some other route — or skipped one of them — is the
+    // single defect this task exists to prevent: `;` is refused at
+    // `reject_unscannable_bytes`, at the comment/literal scan and again after
+    // render, and a script must not be a way around any of the three.
+    //
+    // The skip is not a skip of the RULES, only of the evaluation: see
+    // `ScriptEval`, whose payload is the text publish generated outside its
+    // transaction and hands in here to be scanned exactly like any other.
+    let generated = match script_eval {
+        ScriptEval::Here => GeneratedSql::build(statements, params)?,
+        ScriptEval::AlreadyRunBeforeTheLock { generated } => generated.clone(),
+    };
     // Cheap, and about the whole endpoint rather than any one statement: which
     // envelope the response is written in. The create and patch routes check it
     // on the request body; this is the check against the STORED row, for the
@@ -2391,7 +2586,7 @@ fn validate_endpoint(
     // connection for that long, per publish, from author-supplied Starlark. See
     // `ScriptEval`.
     check_transform_shape(output)?;
-    if script_eval == ScriptEval::Here {
+    if matches!(script_eval, ScriptEval::Here) {
         check_transform_script(output)?;
     }
     // Every statement through every scan except the contract rule below. The
@@ -2399,11 +2594,17 @@ fn validate_endpoint(
     // records: they are what bounds the cost of the rendering, and they cost
     // nothing themselves.
     for statement in statements {
-        check_definition_scans(statement_sql(statement)?, params, ParamRules::Draft)?;
+        check_definition_scans(
+            statement_sql(statement, &generated)?,
+            params,
+            ParamRules::Draft,
+        )?;
     }
     let mut read: Vec<String> = Vec::new();
     for statement in statements {
-        read.extend(crate::render::context_names(statement_sql(statement)?)?);
+        read.extend(crate::render::context_names(statement_sql(
+            statement, &generated,
+        )?)?);
     }
     check_every_parameter_is_read(&read, params)?;
     check_cache_scope(cache, delegated, impersonate)?;
@@ -2414,14 +2615,17 @@ fn validate_endpoint(
     // of the same set are two things that can disagree.
     let sqls: Vec<&str> = statements
         .iter()
-        .map(statement_sql)
+        .map(|statement| statement_sql(statement, &generated))
         .collect::<std::result::Result<_, _>>()?;
     let iterated = IteratedParams::across(&sqls, params);
     // Last, and once per statement: this is the half that renders.
     for statement in statements {
-        check_render_rules(statement_sql(statement)?, params, &iterated)?;
+        check_render_rules(statement_sql(statement, &generated)?, params, &iterated)?;
     }
-    Ok(iterated)
+    Ok(Validated {
+        iterated,
+        sql: generated,
+    })
 }
 
 /// Run every shape check over ONE definition. The order is deliberate: the
@@ -3232,7 +3436,10 @@ pub async fn validate(
     // The shape decision comes back from the validator that just used it, so the
     // renders that DESCRIBE each statement below and the renders that VALIDATED
     // it are against the same `ParamValues` shape.
-    let iterated = validate_endpoint(
+    let Validated {
+        iterated,
+        sql: generated,
+    } = validate_endpoint(
         &draft.statements,
         &draft.params,
         &draft.cache,
@@ -3248,7 +3455,11 @@ pub async fn validate(
         Vec::with_capacity(draft.statements.len());
     let mut total = 0usize;
     for statement in &draft.statements {
-        let renderings = renderings_for(statement_sql(statement)?, &draft.params, &iterated)?;
+        let renderings = renderings_for(
+            statement_sql(statement, &generated)?,
+            &draft.params,
+            &iterated,
+        )?;
         total += renderings.len();
         planned.push((statement, renderings));
     }
@@ -3314,7 +3525,7 @@ pub async fn validate(
         }
         frozen.push(StatementSnapshot {
             name: statement.name.clone(),
-            sql: statement_sql(statement)?.to_string(),
+            sql: statement_sql(statement, &generated)?.to_string(),
             columns: described.union,
         });
     }
@@ -3934,6 +4145,20 @@ impl EndpointStore {
         // this here: it reads this function's own text and fails if an
         // evaluation appears between `begin()` and the commit.
         check_transform_script(&draft.output)?;
+        // The OTHER Starlark this endpoint can carry, and it is here for exactly
+        // the reason the line above is: a statement whose SQL a `build_sql`
+        // script builds is an author's script under the same budgets, and
+        // generating it after `begin()` would hold the endpoint's row lock and a
+        // pool connection for as long as that script takes.
+        //
+        // Run against the DRAFT, sound for the same reason: the identity check
+        // below refuses with `Conflict` unless `current.statements ==
+        // draft.statements` AND `current.params == draft.params`, which are
+        // generation's only two inputs. The in-transaction re-validation is then
+        // handed this text (`ScriptEval::AlreadyRunBeforeTheLock`) and re-runs
+        // every scan over it — the rules are re-applied against the locked row,
+        // only the evaluation is not repeated.
+        let generated = GeneratedSql::build(&draft.statements, &draft.params)?;
 
         let mut tx = self.db.pool.begin().await.map_err(db_err)?;
 
@@ -4011,7 +4236,7 @@ impl EndpointStore {
         // doc comment: this is what closes the window, not the identity check above.
         // Nothing here renders — `described` was computed by `validate` — so the
         // shape set it returns has no second use on this path.
-        let _iterated = validate_endpoint(
+        let _validated = validate_endpoint(
             &current.statements,
             &current.params,
             &current.cache,
@@ -4021,7 +4246,9 @@ impl EndpointStore {
             // The script was evaluated above, before this transaction opened,
             // and the identity check above says the row locked here carries the
             // same one. See `ScriptEval`.
-            ScriptEval::AlreadyRunBeforeTheLock,
+            ScriptEval::AlreadyRunBeforeTheLock {
+                generated: &generated,
+            },
         )?;
 
         // The name and the SQL come from `current` — the LOCKED row — and only
@@ -4057,7 +4284,7 @@ impl EndpointStore {
                 // The name and the SQL come from `current` — the LOCKED row —
                 // and only the resolved columns come from the caller.
                 name: statement.name.clone(),
-                sql: statement_sql(statement)?.to_string(),
+                sql: statement_sql(statement, &generated)?.to_string(),
                 columns: resolved.columns.clone(),
             });
         }
@@ -4469,36 +4696,375 @@ mod tests {
         );
     }
 
-    /// Package S Task 1: a script statement is REFUSED, not treated as empty SQL.
+    /// One scripted statement, through the real gate.
     ///
-    /// Task 1 introduces the case and nothing generates from it until Task 3, so
-    /// the only safe answer here is a refusal naming the statement. Without it a
-    /// `Script` source has no text, every scan sees `""` and passes, and publish
-    /// freezes a snapshot with nothing to run — the mutation that removes the
-    /// guard returns `Err(NotASelect(""))`, a message about `SELECT` naming an
-    /// empty string, which is not something an author can act on.
+    /// `validate_endpoint` is what `POST …/validate` and `EndpointStore::publish`
+    /// both go through, so a rule these tests see is a rule both entry points
+    /// see. Nothing is stubbed and nothing is re-implemented: the only thing
+    /// this adds to a call an author's request would make is the boilerplate
+    /// around it.
+    fn validate_generated(
+        script: &str,
+        params: &[ParamSpec],
+    ) -> std::result::Result<Validated, ValidationError> {
+        validate_endpoint(
+            &[StatementSpec::from_script("rows", script)],
+            params,
+            &cache(CacheScope::PerPrincipal),
+            &OutputSpec::default(),
+            false,
+            false,
+            ScriptEval::Here,
+        )
+    }
+
+    /// **THE test of package S Task 3.**
     ///
-    /// **Task 3 deletes this test**, together with the guard loop at the top of
-    /// [`validate_endpoint`] and [`ValidationError::ScriptedStatementNotGenerated`].
-    /// It is deliberately SELF-CONTAINED, and it sits AFTER
-    /// [`the_statement_bound_is_checked_before_anything_renders`] rather than
-    /// before it: nothing else in this module is documented by the block above
-    /// it, so the deletion cannot take anything with it. It was first written
-    /// between that test and its doc comment, which would have made Task 3's
-    /// deletion silently remove the 31.6 s budget rationale — no gate can see
-    /// that happen, and it is the third time the shape has appeared in this
-    /// programme.
+    /// `;` is refused for hand-written SQL at three places — `reject_unscannable_bytes`
+    /// on the raw definition, the comment/literal scan, and again on the rendered
+    /// output (`crate::render::check_rendered_statement`) — and a script must not
+    /// be a way around any of them. The one refusal this asserts is the FIRST of
+    /// the three, which is what says the generated text entered the pipeline at
+    /// the top rather than downstream of a rule.
     ///
-    /// One thing for Task 3 to carry across: this guard runs AFTER
-    /// `validate_statements` and BEFORE every scan. Generation must keep that
-    /// position, or [`egret_dataapi_api::MAX_STATEMENTS`] stops bounding it and
-    /// the 256-statement list measured above becomes 256 Starlark evaluations.
+    /// Asserted with `assert_eq!` on the arm, not `is_err()`: bypassing the
+    /// definition scan for generated text alone still fails this call, because
+    /// the render-time test refuses the same bytes — with a DIFFERENT error. An
+    /// `is_err()` here would go green on that mutation and report a gate that is
+    /// no longer where it is documented to be.
     #[test]
-    fn a_scripted_statement_is_refused_until_generation_exists() {
+    fn a_script_cannot_produce_a_multi_statement_definition() {
+        let script = "def build_sql(params):\n  return \"SELECT 1; DROP TABLE t\"";
+        let err = validate_generated(script, &[]).expect_err("two statements");
+        assert_eq!(err, ValidationError::MultipleStatements);
+    }
+
+    /// `#` is the other byte layer 1 refuses outright, and for a measured reason:
+    /// StarRocks accepts and ignores it while Trino has no such token, so any
+    /// meaning read into it is a guess the engine does not share. Generated text
+    /// is held to it identically.
+    #[test]
+    fn a_script_cannot_produce_a_comment_marker_the_scanner_forbids() {
+        let script = "def build_sql(params):\n  return \"SELECT 1 # not a comment here\"";
+        let err = validate_generated(script, &[]).expect_err("a `#` is refused");
+        assert_eq!(err, ValidationError::HashNotAllowed);
+    }
+
+    /// **A script cannot produce a statement that is not a `SELECT`.**
+    ///
+    /// The sharpest of the three, and the one with no backstop behind it:
+    /// `crate::render::check_rendered_statement` re-tests `;` and `#` on every
+    /// render, so a definition that slipped past the definition scan carrying
+    /// either is still refused later — measured, by running exactly that
+    /// mutation. Nothing re-tests the HEAD WORD. Preview and describe execute
+    /// author SQL under `data_api_endpoint:manage`, which is not
+    /// `sqllab:write` — [`check_single_select`]'s own doc comment calls that
+    /// authorization rather than tidiness — so a generated `DELETE` reaching an
+    /// engine is a role holding an authoring permission getting arbitrary write
+    /// access to it.
+    #[test]
+    fn a_script_cannot_produce_a_statement_that_is_not_a_select() {
+        let script = "def build_sql(params):\n  return \"DELETE FROM t\"";
+        assert_eq!(
+            validate_generated(script, &[]).expect_err("a DELETE is not publishable"),
+            ValidationError::NotASelect("DELETE".into())
+        );
+    }
+
+    /// An undeclared `{{ }}` in generated SQL fails exactly as it would in
+    /// written SQL — same rule, same arm, same name in the message.
+    #[test]
+    fn a_generated_statement_obeys_the_parameter_rules() {
+        let script = "def build_sql(params):\n  return \"SELECT {{ nope }}\"";
+        assert_eq!(
+            validate_generated(script, &[]).expect_err("`nope` is not declared"),
+            ValidationError::UndeclaredPlaceholder("nope".into())
+        );
+    }
+
+    /// The control. Without it every assertion above passes on a definition that
+    /// could never publish for an unrelated reason — a scripted statement that
+    /// is simply always refused would satisfy all three.
+    #[test]
+    fn a_generated_statement_that_is_fine_publishes() {
+        let script = "def build_sql(params):\n  return \"SELECT CAST({{ n }} AS INTEGER) AS out\"";
+        assert!(validate_generated(script, &[param("n", ParamType::Number)]).is_ok());
+    }
+
+    /// A generated statement and a written one, side by side, and the generated
+    /// one carries the `{{ }}` the script emitted.
+    ///
+    /// Two claims in one endpoint because they are the same claim: the text a
+    /// script produced is indistinguishable downstream from text an author
+    /// typed. The braces surviving verbatim is what makes the caller's value a
+    /// BIND rather than SQL text — spec §2.1, and the whole reason a script
+    /// returns a template instead of finished SQL.
+    #[test]
+    fn a_generated_statement_is_indistinguishable_from_a_written_one() {
+        let statements = vec![
+            StatementSpec::from_sql("rows", "SELECT id FROM t WHERE region = {{ region }}"),
+            StatementSpec::from_script(
+                "total",
+                "def build_sql(params):\n  \
+                 return \"SELECT count(*) AS n FROM t WHERE region = {{ region }}\"",
+            ),
+        ];
+        let params = vec![param("region", ParamType::String)];
+        let validated = validate_endpoint(
+            &statements,
+            &params,
+            &cache(CacheScope::PerPrincipal),
+            &OutputSpec::default(),
+            false,
+            false,
+            ScriptEval::Here,
+        )
+        .expect("a written and a generated statement publish together");
+        assert_eq!(
+            validated.sql.get("total"),
+            Some("SELECT count(*) AS n FROM t WHERE region = {{ region }}"),
+            "the placeholder must reach the renderer intact, or the value stops being a bind"
+        );
+        assert_eq!(
+            validated.sql.get("rows"),
+            Some("SELECT id FROM t WHERE region = {{ region }}"),
+            "a written statement's text is carried through the same lookup"
+        );
+    }
+
+    /// A script that fails is the AUTHOR's 400, and it names the statement.
+    ///
+    /// `transform::TransformError` knows about one script; an endpoint has up to
+    /// `MAX_STATEMENTS` of them, so the name has to be added here or an author
+    /// with several scripted statements is told only that "a" script failed.
+    #[test]
+    fn a_script_that_fails_is_refused_by_the_statements_name() {
         let statements = vec![
             StatementSpec::from_sql("rows", "SELECT id FROM t"),
-            StatementSpec::from_script("total", "def build_sql(params):\n  return \"SELECT 1\""),
+            StatementSpec::from_script("total", "def build_sql(params):\n  fail(\"nope\")"),
         ];
+        let err = validate_endpoint(
+            &statements,
+            &[],
+            &cache(CacheScope::PerPrincipal),
+            &OutputSpec::default(),
+            false,
+            false,
+            ScriptEval::Here,
+        )
+        .expect_err("the script calls fail()");
+        match &err {
+            ValidationError::StatementScriptFailed { statement, error } => {
+                assert_eq!(statement, "total");
+                assert!(
+                    error.contains("nope"),
+                    "must carry the script's own words: {error}"
+                );
+            }
+            other => panic!("expected StatementScriptFailed, got {other:?}"),
+        }
+    }
+
+    /// The wording fix package S Task 2 deferred and Task 3 is the task that
+    /// makes visible: an author who did not define `build_sql` must be told
+    /// about `build_sql`, not about `transform`.
+    ///
+    /// Asserted from the PUBLISH gate rather than from `transform`'s own unit
+    /// test, because the gate is the surface an author actually reads and
+    /// because the two could drift: `transform` could name the contract
+    /// correctly while `lifecycle` wrapped it in a sentence that did not.
+    #[test]
+    fn a_script_without_build_sql_is_told_about_build_sql() {
+        let err = validate_generated("x = 1", &[]).expect_err("`x = 1` defines no `build_sql`");
+        let text = err.to_string();
+        assert_eq!(
+            text,
+            "statement `rows` could not build its SQL: the script must define `build_sql(params)`"
+        );
+        assert!(
+            !text.contains("transform"),
+            "a build-SQL author must not be sent to define `transform`: {text}"
+        );
+    }
+
+    /// The skip really skips GENERATION, not only the transform's evaluation.
+    ///
+    /// The endpoint's statement carries a script that cannot parse, and the
+    /// caller hands in text generated a moment earlier from a script that could.
+    /// Under `ScriptEval::Here` that is a refusal; under the skip it must
+    /// validate, and the only way it can is by never evaluating the script — the
+    /// observable difference between "publish generates under its row lock" and
+    /// "publish does not". See `ScriptEval`.
+    ///
+    /// The second half is what stops the skip becoming a hole: the text handed
+    /// in is still SCANNED, so a `;` in it is refused under the skip exactly as
+    /// it is under `Here`.
+    #[test]
+    fn a_generated_statement_is_not_regenerated_under_the_lock() {
+        let good = vec![StatementSpec::from_script(
+            "rows",
+            "def build_sql(params):\n  return \"SELECT 1 AS a\"",
+        )];
+        let generated = GeneratedSql::build(&good, &[]).expect("the good script generates");
+        let unparseable = vec![StatementSpec::from_script(
+            "rows",
+            "def build_sql(params)\n  return \"SELECT 1 AS a\"",
+        )];
+
+        assert!(
+            matches!(
+                validate_endpoint(
+                    &unparseable,
+                    &[],
+                    &cache(CacheScope::PerPrincipal),
+                    &OutputSpec::default(),
+                    false,
+                    false,
+                    ScriptEval::Here,
+                ),
+                Err(ValidationError::StatementScriptFailed { .. })
+            ),
+            "the generating caller must still refuse a script that does not parse"
+        );
+        assert!(
+            validate_endpoint(
+                &unparseable,
+                &[],
+                &cache(CacheScope::PerPrincipal),
+                &OutputSpec::default(),
+                false,
+                false,
+                ScriptEval::AlreadyRunBeforeTheLock {
+                    generated: &generated
+                },
+            )
+            .is_ok(),
+            "publish's in-transaction re-validation must generate nothing — a refusal here \
+             means an author's `build_sql` is back inside the locked transaction"
+        );
+
+        let separator = vec![StatementSpec::from_script(
+            "rows",
+            "def build_sql(params):\n  return \"SELECT 1; DROP TABLE t\"",
+        )];
+        let smuggled = GeneratedSql(BTreeMap::from([(
+            "rows".to_string(),
+            "SELECT 1; DROP TABLE t".to_string(),
+        )]));
+        assert_eq!(
+            validate_endpoint(
+                &separator,
+                &[],
+                &cache(CacheScope::PerPrincipal),
+                &OutputSpec::default(),
+                false,
+                false,
+                ScriptEval::AlreadyRunBeforeTheLock {
+                    generated: &smuggled
+                },
+            ),
+            Err(ValidationError::MultipleStatements),
+            "skipping the evaluation must not skip the scans: the text handed in is held to \
+             every rule the text generated here would be"
+        );
+    }
+
+    /// Text generated for a DIFFERENT statement list is refused, not silently
+    /// skipped.
+    ///
+    /// Only `EndpointStore::publish` can produce this — it generates from the
+    /// draft and re-validates the locked row — and its identity check is what
+    /// makes it unreachable. This is the same guarantee held by the data: were
+    /// the check removed or reordered, a statement renamed mid-publish would
+    /// otherwise have to be answered by *some* text, and the only candidates are
+    /// another statement's or none.
+    #[test]
+    fn generated_text_from_another_statement_list_is_refused() {
+        let generated =
+            GeneratedSql::build(&[StatementSpec::from_sql("rows", "SELECT id FROM t")], &[])
+                .expect("generates");
+        assert_eq!(
+            validate_endpoint(
+                &[StatementSpec::from_sql(
+                    "total",
+                    "SELECT count(*) AS n FROM t"
+                )],
+                &[],
+                &cache(CacheScope::PerPrincipal),
+                &OutputSpec::default(),
+                false,
+                false,
+                ScriptEval::AlreadyRunBeforeTheLock {
+                    generated: &generated
+                },
+            ),
+            Err(ValidationError::GenerationMismatch("total".into()))
+        );
+    }
+
+    /// A script sees every DECLARED parameter, and can branch on it.
+    ///
+    /// The values are `representative_value`'s, so they are truthy and a
+    /// branching script takes its first branch rather than failing on a missing
+    /// key — see `generation_params`. What this pins is that the dict is
+    /// populated at all: an empty one makes every `params["x"]` a runtime error
+    /// and no branching script could ever publish.
+    ///
+    /// Both branches emit `{{ grain }}` because
+    /// [`ValidationError::UnreferencedParameter`] is one of the rules a
+    /// generated statement obeys: a parameter the script reads but no emitted
+    /// template mentions is, to the published CONTRACT, a query parameter
+    /// nothing uses. That is the same answer written SQL gets, which is the
+    /// point of this task — but it is a spec-level question for package S,
+    /// recorded in the task report rather than decided here.
+    #[test]
+    fn a_generating_script_is_handed_the_declared_parameters() {
+        let script = "def build_sql(params):\n  \
+                      if params[\"grain\"] == \"daily\":\n    \
+                      return \"SELECT 1 AS daily FROM t WHERE g = {{ grain }}\"\n  \
+                      return \"SELECT 1 AS hourly FROM t WHERE g = {{ grain }}\"";
+        let mut grain = param("grain", ParamType::Enum);
+        grain.allowed = Some(vec!["daily".into(), "hourly".into()]);
+        let validated = validate_generated(script, std::slice::from_ref(&grain))
+            .expect("a branching script publishes");
+        assert_eq!(
+            validated.sql.get("rows"),
+            Some("SELECT 1 AS daily FROM t WHERE g = {{ grain }}"),
+            "the script must have been handed `grain`, at its representative value"
+        );
+    }
+
+    /// **`MAX_STATEMENTS` is ahead of generation**, and the identity of the
+    /// error is what proves it.
+    ///
+    /// A timing assertion is the wrong instrument here — a trivial script
+    /// evaluates in microseconds, so 256 of them would come in under any
+    /// threshold worth asserting and the test would pass with the ordering
+    /// reversed. So the script is one that CANNOT generate: if the list is
+    /// bounded first the answer is `TooManyStatements`, and if generation runs
+    /// first the answer is `StatementScriptFailed` for `s0`. Two different
+    /// arms, no clock.
+    ///
+    /// Asserted at both levels because the ordering lives in both: inside
+    /// [`GeneratedSql::build`], which is what publish calls directly before it
+    /// takes its row lock, and inside [`validate_endpoint`], which is what the
+    /// two entry points share.
+    #[test]
+    fn the_statement_bound_is_checked_before_any_script_runs() {
+        let statements: Vec<StatementSpec> = (0..256)
+            .map(|i| StatementSpec::from_script(format!("s{i}"), "x = 1"))
+            .collect();
+        let too_many =
+            ValidationError::Statement(egret_dataapi_api::StatementError::TooManyStatements {
+                count: 256,
+                limit: egret_dataapi_api::MAX_STATEMENTS,
+            });
+        assert_eq!(
+            GeneratedSql::build(&statements, &[]).unwrap_err(),
+            too_many,
+            "`GeneratedSql::build` must bound the list before it evaluates anything; a \
+             `StatementScriptFailed` here means 256 Starlark evaluations were attempted first"
+        );
         assert_eq!(
             validate_endpoint(
                 &statements,
@@ -4509,23 +5075,9 @@ mod tests {
                 false,
                 ScriptEval::Here,
             ),
-            Err(ValidationError::ScriptedStatementNotGenerated(
-                "total".into()
-            )),
-            "a scripted statement must be refused by name, not scanned as empty SQL"
+            Err(too_many),
+            "generation must sit AFTER the statement-list rule in `validate_endpoint` too"
         );
-        // The discriminating half: the same list without the script publishes,
-        // so the refusal is about the SOURCE and not about anything else in it.
-        assert!(validate_endpoint(
-            &[StatementSpec::from_sql("rows", "SELECT id FROM t")],
-            &[],
-            &cache(CacheScope::PerPrincipal),
-            &OutputSpec::default(),
-            false,
-            false,
-            ScriptEval::Here,
-        )
-        .is_ok());
     }
 
     /// The other side of the statement bound, and its own test: a legitimate
@@ -4550,7 +5102,8 @@ mod tests {
                 false,
                 false,
                 ScriptEval::Here,
-            ),
+            )
+            .map(|v| v.iterated),
             // No statement loops over `region`, so it is a scalar for BOTH — the
             // set is what publish validated each of them against.
             Ok(IteratedParams(Vec::new()))
@@ -4695,7 +5248,8 @@ mod tests {
             false,
             ScriptEval::Here,
         )
-        .expect("the §4.2 pair publishes");
+        .expect("the §4.2 pair publishes")
+        .iterated;
         // `summary_all` never mentions `region`, so on its own the union is
         // EMPTY and preview would resolve a scalar where serving binds a list.
         assert!(preview(SUMMARY_ALL, &params).unwrap().names().is_empty());
@@ -4819,7 +5373,8 @@ mod tests {
                 false,
                 false,
                 ScriptEval::Here,
-            ),
+            )
+            .map(|v| v.iterated),
             // ONE statement loops over `region` and that is enough: the set is
             // the endpoint's, and `summary_all` was validated against it.
             Ok(IteratedParams(vec!["region".into()]))
@@ -6341,9 +6896,15 @@ mod tests {
     ///
     /// The structural rules still run under the skip — the third assertion —
     /// so this is a narrower claim than "the transform is not checked".
+    ///
+    /// Package S: the skip now covers a statement's `build_sql` too, which is
+    /// why the variant carries the [`GeneratedSql`] the caller produced outside
+    /// the lock. `a_generated_statement_is_not_regenerated_under_the_lock` is
+    /// that half.
     #[test]
     fn the_script_evaluation_is_skipped_only_when_the_caller_says_it_already_ran() {
         let statements = vec![StatementSpec::from_sql("rows", "SELECT id FROM t")];
+        let generated = GeneratedSql::build(&statements, &[]).expect("written SQL copies through");
         let unparseable = transformed_output("def transform(params, statements)\n  return {}");
 
         assert!(
@@ -6370,7 +6931,9 @@ mod tests {
                 &unparseable,
                 false,
                 false,
-                ScriptEval::AlreadyRunBeforeTheLock,
+                ScriptEval::AlreadyRunBeforeTheLock {
+                    generated: &generated
+                },
             )
             .is_ok(),
             "publish's in-transaction re-validation must run no interpreter — a refusal \
@@ -6387,7 +6950,9 @@ mod tests {
                 &shape_broken,
                 false,
                 false,
-                ScriptEval::AlreadyRunBeforeTheLock,
+                ScriptEval::AlreadyRunBeforeTheLock {
+                    generated: &generated
+                },
             ),
             Err(ValidationError::TransformWithShapeOrNaming("shape")),
             "skipping the interpreter must not skip the comparisons: the re-validation \
@@ -6448,6 +7013,12 @@ mod tests {
             "eval_probe(",
             "run_transform(",
             "probe_transform(",
+            // Package S: a statement's SQL may be built by a `build_sql`
+            // script, under the same budgets and therefore with the same
+            // hazard. `GeneratedSql::build` is the only way to reach it from
+            // this module.
+            "GeneratedSql::build(",
+            "transform::build_sql(",
         ] {
             assert!(
                 !window.contains(forbidden),
@@ -6467,6 +7038,16 @@ mod tests {
         assert!(
             src[publish_start..begin].contains("check_transform_script(&draft.output)?;"),
             "publish must still evaluate the script — above `begin()`, against the draft the identity check then proves identical to the locked row"
+        );
+        // The same both-halves argument for generation: it must happen, and it
+        // must happen above the lock. Without this the property is satisfiable
+        // by deleting the generation, which would leave every scripted
+        // statement with no text for the re-validation to scan.
+        assert!(
+            src[publish_start..begin]
+                .contains("GeneratedSql::build(&draft.statements, &draft.params)?;"),
+            "publish must still generate every scripted statement — above `begin()`, against \
+             the draft the identity check then proves identical to the locked row"
         );
     }
 
