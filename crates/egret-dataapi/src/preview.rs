@@ -45,6 +45,29 @@
 //! engine write access and the placeholder-inside-quoted-text rule. That
 //! function's own comment is the authority on the split.
 //!
+//! # The one place preview and publish still diverge, and it is about SIBLINGS
+//!
+//! [`PreviewEndpointInput::siblings`] is a list of SQL **texts**, and package S
+//! gave a statement a second source it cannot express: if one of the endpoint's
+//! other statements is a `build_sql` script, no client can say so on this wire.
+//! Whatever is sent for it is treated as one template and scanned for
+//! `{% for %}` headers as though it were SQL. Both consequences run the same
+//! way — preview green, publish or serving refused:
+//!
+//! * a sibling script emitting several templates is counted as ONE against the
+//!   endpoint's template budget (see `lifecycle::GeneratedSql::build_after`);
+//! * a `{% for %}` header that only appears in a sibling script's EMITTED text
+//!   never joins the iterated union, so preview resolves a scalar where serving
+//!   binds a list.
+//!
+//! It is latent rather than live: nothing authors a scripted statement yet, so
+//! no client puts one in this field. Closing it means `siblings` carrying
+//! sources rather than strings and generating every one of them per preview —
+//! N author scripts per keystroke-driven button — which is a decision about the
+//! wire type, not a tidy-up of this module. Recorded here, and on
+//! [`crate::lifecycle::validate_preview`], so the "exactly two omissions" above
+//! is not read as "and nothing else differs".
+//!
 //! # Why the body carries the draft rather than being read from the database
 //!
 //! Reading the saved draft would defeat the feature: the author would have to
@@ -766,15 +789,25 @@ async fn generate_off_the_worker(
             "the draft's statement could not be generated: {join}"
         ))
     })?;
-    joined.map(Some).map_err(|e| {
+    joined.map(Some).map_err(|e| match e {
         // `Internal`'s source is where `generate_one` put the sentence; the
         // variant's own `Display` is the fixed "internal error" a consumer
         // reads, which is not what an author needs.
-        let detail = match &e {
-            crate::serving::ServingError::Internal(source) => source.to_string(),
-            other => other.to_string(),
-        };
-        egret_core::Error::InvalidInput(detail)
+        crate::serving::ServingError::Internal(source) => {
+            egret_core::Error::InvalidInput(source.to_string())
+        }
+        // Unreachable: `generate_one` constructs `Internal` and nothing else.
+        // Answered as a 500 rather than stringified into a 400, because every
+        // other variant's `Display` is a fixed consumer-facing sentence — "not
+        // found", "unauthorized" — and putting one of those in front of an
+        // author as though it were about their script would send them to debug
+        // something that did not happen. If this ever fires, the seam moved.
+        // Answered rather than `expect`ed for the reason `serving::router` gives
+        // its own unreachable arms: a panic inside a request handler is a
+        // dropped connection rather than a 500.
+        other => egret_core::Error::Internal(anyhow::anyhow!(
+            "generating a statement failed in a way generation cannot produce: {other}"
+        )),
     })
 }
 
@@ -865,6 +898,137 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+
+    /// A body carrying `source` plus whatever `extra` says, as bytes.
+    ///
+    /// Text rather than `serde_json::json!`, because two of the rules below are
+    /// about keys a `Value` cannot hold: a repeated key is dropped by
+    /// `serde_json::Map` before any of this code would see it.
+    fn body(source: &str, extra: &str) -> String {
+        format!(
+            "{{{source}{extra}\"output\":{{}},\
+             \"database_id\":\"00000000-0000-0000-0000-000000000000\"}}"
+        )
+    }
+
+    fn parse(json: &str) -> Result<PreviewEndpointInput, serde_json::Error> {
+        serde_json::from_str(json)
+    }
+
+    /// The two accepted shapes, and that each reaches the right case.
+    ///
+    /// The control for every refusal below: without it, a `Deserialize` that
+    /// refused everything would satisfy all four of them.
+    #[test]
+    fn a_body_carries_sql_or_script_and_the_case_says_which() {
+        let written = parse(&body("\"sql\":\"SELECT 1\",", "")).expect("`sql` is a valid body");
+        assert_eq!(written.source, StatementSource::Sql("SELECT 1".into()));
+        let scripted =
+            parse(&body("\"script\":\"def build_sql(p): pass\",", "")).expect("`script` too");
+        assert_eq!(
+            scripted.source,
+            StatementSource::Script("def build_sql(p): pass".into())
+        );
+        // …and the three optional fields really are optional, at their
+        // documented defaults.
+        assert!(written.params.is_empty());
+        assert!(written.values.is_empty());
+        // `SiblingStatements` has no public length (its text is private to
+        // `lifecycle`), so the default is asserted where it is observable: an
+        // absent `siblings` validates exactly as an empty one does.
+        assert_eq!(
+            crate::lifecycle::validate_preview(
+                &written.source,
+                &written.siblings,
+                &written.params,
+                &written.output,
+            ),
+            crate::lifecycle::validate_preview(
+                &written.source,
+                &crate::lifecycle::SiblingStatements::default(),
+                &written.params,
+                &written.output,
+            ),
+        );
+    }
+
+    /// **A typo is a refusal, not a silently-ignored field.**
+    ///
+    /// This is the rule `#[serde(deny_unknown_fields)]` used to give this type
+    /// for free, and it is load-bearing rather than tidy. `"sibling"` for
+    /// `"siblings"` reads as an endpoint with no other statements, so the shape
+    /// decision is the union of ONE — preview goes green and publish refuses the
+    /// same draft for `SequenceBind`. Told "fine", then told "no", which is the
+    /// one thing this route exists not to do.
+    #[test]
+    fn an_unknown_key_is_refused() {
+        let typo = body("\"sql\":\"SELECT 1\",", "\"sibling\":[\"SELECT 2\"],");
+        let err = parse(&typo).expect_err("a misspelt field must not be ignored");
+        assert!(
+            err.to_string().contains("sibling"),
+            "the message must name the key the author typed: {err}"
+        );
+        // The correctly spelled field is accepted, so the refusal is about the
+        // spelling and not about the field existing.
+        assert!(parse(&body(
+            "\"sql\":\"SELECT 1\",",
+            "\"siblings\":[\"SELECT 2\"],"
+        ))
+        .is_ok());
+    }
+
+    /// Exactly one of `sql`/`script` — never both.
+    ///
+    /// Both is two definitions with no rule for which one runs. The message is
+    /// `StatementSpec`'s own, because it is the same mistake about the same pair
+    /// of keys and an author who met it once should not meet a second wording.
+    #[test]
+    fn a_body_carrying_both_sql_and_script_is_refused() {
+        let err = parse(&body(
+            "\"sql\":\"SELECT 1\",\"script\":\"def build_sql(p): pass\",",
+            "",
+        ))
+        .expect_err("both is not a statement");
+        assert!(
+            err.to_string().contains("never both"),
+            "the author must be told which of the two to delete: {err}"
+        );
+    }
+
+    /// …and never neither.
+    ///
+    /// The direction that matters: a body with no statement at all must not
+    /// deserialise into one holding an empty string, which would preview a
+    /// blank statement and blame the engine for the syntax error.
+    #[test]
+    fn a_body_carrying_neither_sql_nor_script_is_refused() {
+        let err = parse(&body("", "")).expect_err("neither is not a statement either");
+        assert!(
+            err.to_string().contains("neither"),
+            "the message must say what is missing: {err}"
+        );
+    }
+
+    /// A repeated key is a malformed object, not a last-wins assignment.
+    ///
+    /// `{"sql": …, "sql": …}` has two statements in it and no rule for which one
+    /// the author meant. Asserted for `sql` and for a field with a default,
+    /// because the two go through different arms of the same visitor.
+    #[test]
+    fn a_repeated_key_is_refused() {
+        assert!(
+            parse(&body("\"sql\":\"SELECT 1\",\"sql\":\"DELETE FROM t\",", "")).is_err(),
+            "a repeated `sql` must not resolve to one of the two"
+        );
+        assert!(
+            parse(&body(
+                "\"sql\":\"SELECT 1\",",
+                "\"params\":[],\"params\":[],"
+            ))
+            .is_err(),
+            "a repeated key with a default is still a repeated key"
+        );
+    }
 
     /// A draft whose transform costs real module-evaluation time.
     ///

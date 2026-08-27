@@ -2377,6 +2377,41 @@ impl GeneratedSql {
         statements: &[StatementSpec],
         params: &[ParamSpec],
     ) -> std::result::Result<Self, ValidationError> {
+        // The whole endpoint is `statements`, so nothing has been spent yet.
+        Self::build_after(statements, params, 0)
+    }
+
+    /// [`build`](Self::build), for a caller holding only PART of the endpoint.
+    ///
+    /// # The one caller, and the divergence this parameter closes
+    ///
+    /// [`validate_preview`] validates the statement on screen and is told about
+    /// its siblings only as text. `MAX_STATEMENTS` bounds the templates an
+    /// ENDPOINT renders, and [`build`](Self::build) counts them across the
+    /// slice it is handed — so a preview passing a slice of ONE started the
+    /// count at zero and accepted a draft publish refuses: ten siblings beside a
+    /// script emitting eight templates is eighteen for a publish and eight for a
+    /// preview. Green here, refused there, which is the single defect that route
+    /// exists to invert.
+    ///
+    /// `already` is what the caller has already spent — one template per
+    /// sibling, because a sibling is one SQL text. It goes into the SAME counter
+    /// rather than into a second comparison beside it, so the rule cannot be
+    /// weakened in one place and not the other.
+    ///
+    /// # The refusal is the same SET, not the same number
+    ///
+    /// [`build`](Self::build) errors at the first statement that takes the
+    /// running total over, in published order, so the `templates` it reports
+    /// depends on where the offending statement sits. Preview spends its
+    /// siblings first and then the one statement it holds. Both refuse exactly
+    /// the drafts whose total exceeds the limit; only the number in the message
+    /// can differ, and no caller branches on it.
+    fn build_after(
+        statements: &[StatementSpec],
+        params: &[ParamSpec],
+        already: usize,
+    ) -> std::result::Result<Self, ValidationError> {
         // FIRST. See the type's doc comment: this is the bound on how many
         // evaluations the loop below can perform, and a caller that reached
         // here through `validate_endpoint` has already paid for it (the check is
@@ -2409,7 +2444,7 @@ impl GeneratedSql {
         // one with a script spends from the same pot. A count that skipped them
         // would be a second rule about which kind of statement this is, which is
         // the one thing this package may not introduce.
-        let mut templates = 0usize;
+        let mut templates = already;
         for statement in statements {
             let generated = match statement.source.script() {
                 None => GeneratedStatement {
@@ -3340,6 +3375,14 @@ fn check_definition_scans(
 /// structural rather than documented: its text is private to this module, so no
 /// caller can render, bind or execute it. See its own comment.
 ///
+/// It is also where preview and publish still diverge, in one direction and
+/// latently: a sibling arrives as SQL TEXT, so a sibling that is itself a
+/// `build_sql` script cannot be expressed, is spent as one template against the
+/// endpoint's budget, and contributes to the iterated union whatever its SOURCE
+/// happens to scan as rather than what it would emit. The full statement of it,
+/// including why closing it is a decision about the wire type, is in the
+/// `crate::preview` module comment.
+///
 /// # `output` is checked for its TRANSFORM and applied to nothing (C2)
 ///
 /// [`check_transform`] runs here, and it is the same call [`validate_endpoint`]
@@ -3411,7 +3454,16 @@ pub(crate) fn validate_preview(
         name: PREVIEW_STATEMENT_NAME.to_owned(),
         source: source.clone(),
     };
-    let generated = GeneratedSql::build(std::slice::from_ref(&statement), params)?;
+    //
+    // `build_after`, not `build`: `MAX_STATEMENTS` bounds the templates an
+    // ENDPOINT renders, and this call holds one statement of it. Each sibling is
+    // one SQL text and therefore one template, so `siblings.len()` is what the
+    // rest of the endpoint has already spent — passed into the same counter
+    // publish uses rather than compared again beside it. Without it a preview
+    // started that count at zero and went green on drafts publish refuses; see
+    // `GeneratedSql::build_after`.
+    let generated =
+        GeneratedSql::build_after(std::slice::from_ref(&statement), params, siblings.len())?;
     let templates = statement_templates(&statement, &generated)?;
     // `output.transform`, in the position [`validate_endpoint`] checks it from
     // — after the statement-list rule and before any per-statement scan — so an
@@ -9447,5 +9499,86 @@ mod tests {
                 limit: egret_dataapi_api::MAX_STATEMENTS,
             })
         );
+    }
+
+    /// **A preview spends the same budget the endpoint it belongs to spends.**
+    ///
+    /// `MAX_STATEMENTS` bounds the templates an ENDPOINT renders, and
+    /// [`GeneratedSql::build`] counts them across the slice it is handed. A
+    /// preview holds ONE statement of that endpoint and hears about the rest as
+    /// text, so counting from zero made preview accept a draft publish refuses —
+    /// green here, refused there, which is the one thing that route exists not
+    /// to do. `build_after` is what closes it.
+    ///
+    /// Both sides are computed in this test rather than one being asserted
+    /// twice: the claim is that the two AGREE, so a number that drifts in either
+    /// function turns this red. And both the pass and the refusal are asserted,
+    /// one template apart — a preview that simply refused everything with
+    /// siblings would satisfy the second half alone.
+    #[test]
+    fn a_preview_and_its_endpoint_share_one_template_budget() {
+        // Nine templates: the baseline, plus one per parameter the sentinel
+        // probes make falsy. Same shape as
+        // `a_scripts_branches_and_an_endpoints_statements_share_one_budget`.
+        const SCRIPT: &str = "def build_sql(params):\n  \
+                              sql = \"SELECT 1 AS a\"\n  \
+                              for k in sorted(params):\n    \
+                              if not params[k]:\n      sql = sql + \", 1 AS \" + k\n  \
+                              return sql";
+        const TEMPLATES: usize = 9;
+        let params: Vec<ParamSpec> = (0..8)
+            .map(|i| param(&format!("p{i}"), ParamType::Boolean))
+            .collect();
+
+        // The endpoint as PUBLISH sees it: the scripted statement first, then
+        // `n` written siblings of one template each.
+        let published = |n: usize| {
+            let mut statements = vec![StatementSpec::from_script("preview", SCRIPT)];
+            statements
+                .extend((0..n).map(|i| StatementSpec::from_sql(format!("s{i}"), "SELECT 1 AS a")));
+            validate_endpoint(
+                &statements,
+                &params,
+                &cache(CacheScope::PerPrincipal),
+                &OutputSpec::default(),
+                false,
+                false,
+                ScriptEval::Here,
+            )
+            .map(|_| ())
+        };
+        // The same endpoint as PREVIEW sees it: that one statement on screen,
+        // its siblings as text.
+        let previewed = |n: usize| {
+            let texts: Vec<String> = (0..n).map(|_| "SELECT 1 AS a".to_string()).collect();
+            let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+            validate_preview(
+                &StatementSource::Script(SCRIPT.to_string()),
+                &siblings(&refs),
+                &params,
+                &OutputSpec::default(),
+            )
+            .map(|_| ())
+        };
+
+        // Exactly the allowance. Both accept, which is what stops the refusal
+        // below being a preview that refuses any sibling at all.
+        let fits = egret_dataapi_api::MAX_STATEMENTS - TEMPLATES;
+        assert!(published(fits).is_ok(), "the endpoint is inside the budget");
+        assert!(previewed(fits).is_ok(), "so the preview of it must be too");
+
+        // One text more. Publish refuses; preview has to refuse the same draft,
+        // with the same variant and the same numbers.
+        let over = Err(ValidationError::TooManyGeneratedTemplates {
+            templates: egret_dataapi_api::MAX_STATEMENTS + 1,
+            limit: egret_dataapi_api::MAX_STATEMENTS,
+        });
+        assert_eq!(published(fits + 1), over);
+        assert_eq!(previewed(fits + 1), over);
+
+        // …and the sibling COUNT rule is not what did it: nine statements is
+        // well inside `MAX_STATEMENTS`, so only the template budget can refuse
+        // this.
+        assert!(1 + fits + 1 < egret_dataapi_api::MAX_STATEMENTS);
     }
 }

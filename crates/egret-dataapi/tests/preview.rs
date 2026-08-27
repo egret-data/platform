@@ -1170,3 +1170,55 @@ async fn preview_scans_every_template_the_script_can_emit() {
         "nothing may reach the engine once a template is refused"
     );
 }
+
+/// **A misspelt field is a refusal at the wire, not an ignored key.**
+///
+/// The unit tests beside the `Deserialize` impl pin the rule; this pins what it
+/// is FOR, end to end. `sibling` for `siblings` reads as an endpoint with no
+/// other statements, so the shape decision becomes the union of one — and a
+/// draft whose real sibling loops the same parameter previews GREEN and is then
+/// refused at publish for `SequenceBind`. Told "fine", then told "no".
+///
+/// The body below is exactly that draft: `region` is a scalar in the statement
+/// on screen and iterated by the sibling the author meant to send.
+#[tokio::test]
+async fn preview_refuses_a_misspelt_field_rather_than_ignoring_it() {
+    let Some(f) = fixture().await else { return };
+    let looping = "SELECT n FROM t WHERE region IN (\
+         {% for x in region %}{{ x }}{% if not loop.last %},{% endif %}{% endfor %})";
+    let mut body = serde_json::json!({
+        "sql": "SELECT n FROM t WHERE region = {{ region }}",
+        "params": [{ "name": "region", "type": "string", "location": "query", "required": true }],
+        "values": { "region": ["EU"] },
+        "output": {},
+        "database_id": f.database_id,
+    });
+
+    // Spelled correctly, the sibling is heard and the draft is refused for the
+    // shape — which is publish's answer, and the control that says the typo
+    // below really does change the verdict.
+    body["siblings"] = serde_json::json!([looping]);
+    let (heard, out) = f.mgmt_post(&preview_path(&f), Some(body.clone())).await;
+    assert_eq!(
+        heard,
+        StatusCode::BAD_REQUEST,
+        "a sibling that iterates the parameter must reach the shape decision: {out}"
+    );
+
+    let before = f.port.executions();
+    let obj = body.as_object_mut().expect("an object");
+    obj.remove("siblings");
+    obj.insert("sibling".into(), serde_json::json!([looping]));
+    let (status, out) = f.mgmt_post(&preview_path(&f), Some(body)).await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a misspelt field must be refused by the extractor; ignoring it previews GREEN a \
+         draft publish refuses: {out}"
+    );
+    assert_eq!(
+        f.port.executions(),
+        before,
+        "nothing may reach the engine for a body that was not understood"
+    );
+}

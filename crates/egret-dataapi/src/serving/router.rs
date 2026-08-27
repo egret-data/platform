@@ -1535,12 +1535,19 @@ async fn statement_texts<'a>(
 /// produced the text, so it is inside the request deadline rather than on an
 /// async worker.
 ///
-/// # Every failure is a 500 and none is a 400
+/// # Every failure is a 500 and none is a 400 — on THIS path
 ///
 /// The caller sent a valid request: authenticated, authorized, inside its rate
 /// limit, parameters coerced. What failed is the ENDPOINT. A 400 would blame the
 /// caller for the author's script and write `param_invalid` into `access_log`,
 /// pointing every later investigation at the wrong half of the system.
+///
+/// **`crate::preview` is the second caller and inverts that**, because the
+/// script is on screen and the author owns it: it reads the sentence out of
+/// `Internal`'s source and answers 400 with it. That is why the sentences above
+/// name "the validation probes" rather than publish's — a preview reaches this
+/// on a draft that has never been published, and an author sent to look at a
+/// publish that never happened is sent nowhere.
 pub(crate) fn generate_one(
     script: &str,
     params: &BTreeMap<String, serde_json::Value>,
@@ -1554,14 +1561,14 @@ pub(crate) fn generate_one(
     crate::lifecycle::check_single_select(&sql).map_err(|e| {
         ServingError::internal(format!(
             "a statement's script built SQL that is not a single read-only \
-             statement, on a branch publish's probes never took: {e}"
+             statement, on a branch the validation probes never took: {e}"
         ))
     })?;
     crate::render::check_dynamic(&sql, values).map_err(|e| {
         ServingError::internal(format!(
             "a statement's script built SQL that INSPECTS a parameter, on a \
-             branch publish's probes never took; serving it would silently drop \
-             the block that comparison guards and answer 200 with over-broad \
+             branch the validation probes never took; running it would silently \
+             drop the block that comparison guards and answer with over-broad \
              rows: {e}"
         ))
     })?;
