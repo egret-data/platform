@@ -270,6 +270,23 @@ const ENTRY_POINT: &str = "transform";
 /// The number of arguments [`ENTRY_POINT`] must take: `params` and `statements`.
 const ENTRY_POINT_ARITY: usize = 2;
 
+/// The function a script must define to build a statement's SQL template.
+///
+/// A name distinct from [`ENTRY_POINT`] on purpose: a script that builds SQL
+/// and a script that reshapes a response are two different contracts called
+/// through two different shapes, and [`eval_inner`] tells them apart by which
+/// of these two names it is asked to look up — never by guessing from arity.
+const BUILD_SQL_ENTRY_POINT: &str = "build_sql";
+
+/// The number of arguments [`BUILD_SQL_ENTRY_POINT`] must take: `params`
+/// alone.
+///
+/// No `statements` — a script building SQL runs *before* any statement has
+/// executed, so there are no rows yet to hand it. That is the whole reason
+/// this is a separate entry point rather than a `statements=None` case of
+/// [`ENTRY_POINT`]: the absence is structural, not optional.
+const BUILD_SQL_ENTRY_POINT_ARITY: usize = 1;
+
 /// Ceiling on the transform's response body, measured on the **serialised**
 /// bytes rather than on any structure count.
 ///
@@ -530,6 +547,11 @@ pub enum TransformError {
     /// Also what a *non-callable* `transform` produces — `transform = 1` leaves
     /// the endpoint with no transform function just as surely as omitting it,
     /// and the author's next move is the same line either way.
+    ///
+    /// Shared with [`BUILD_SQL_ENTRY_POINT`] — a script missing `build_sql`
+    /// hits this arm too, with the same wording naming `{ENTRY_POINT}`. The
+    /// variant is what a caller matches on; refining the message per contract
+    /// is deferred, not forgotten.
     #[error("the transform script must define `{ENTRY_POINT}(params, statements)`")]
     MissingEntryPoint,
     /// [`ENTRY_POINT`] exists but does not take the two arguments it is called
@@ -539,6 +561,14 @@ pub enum TransformError {
     /// named it wrong" and "you took the wrong arguments" send an author to
     /// different lines. Without the distinction both arrive as a generic
     /// call-failed message from starlark.
+    ///
+    /// Shared with [`BUILD_SQL_ENTRY_POINT`] the same way
+    /// [`TransformError::MissingEntryPoint`] is: the message names
+    /// `{ENTRY_POINT}` and [`ENTRY_POINT_ARITY`] even when the script under
+    /// check was `build_sql`. No test in this task exercises a wrong-arity
+    /// `build_sql`, so the wording was not worth widening the enum for; a
+    /// caller that needs it right refines this variant rather than adding a
+    /// third meaning to `found`.
     #[error(
         "`{ENTRY_POINT}` must take exactly {ENTRY_POINT_ARITY} arguments \
          (params, statements), but takes {found}"
@@ -547,6 +577,20 @@ pub enum TransformError {
         /// How many parameters the script's `transform` actually declares.
         found: usize,
     },
+    /// [`BUILD_SQL_ENTRY_POINT`] ran to completion but returned something
+    /// other than a string.
+    ///
+    /// A refusal rather than a coercion: the whole safety argument for a
+    /// build-SQL script is that its template goes through the same
+    /// `render()` a hand-written statement's SQL does, so stringifying a
+    /// dict or a list here would hand the renderer text that was never meant
+    /// to be a template, and the failure it caused would surface far from
+    /// this, its real cause. Carries what came back, spelled the way
+    /// [`starlark::values::Value::get_type`] spells it — `"dict"`, `"list"`,
+    /// `"int"` — so an author reads the kind of their mistake rather than a
+    /// dump of the value.
+    #[error("build_sql must return a string template, but returned a {0}")]
+    BuildSqlNotAString(String),
     /// The script parsed but failed while running — an unbound name, a type
     /// error, an explicit `fail()`.
     #[error("the transform script failed while running: {0}")]
@@ -623,6 +667,47 @@ struct TransformCall<'a> {
     statements: &'a BTreeMap<String, Vec<serde_json::Value>>,
 }
 
+/// What [`eval_inner`] does once the module's top level has run.
+///
+/// `None` — a probe — evaluates the module and stops. `Some` names which of
+/// the crate's two entry-point contracts to call: [`ENTRY_POINT`] with a
+/// row-shaped [`TransformCall`], or [`BUILD_SQL_ENTRY_POINT`] with `params`
+/// alone. One enum rather than a `statements: Option<_>` on [`TransformCall`]
+/// because a build-SQL script categorically cannot see rows — Starlark has no
+/// way to express "the second argument does not exist", so the type doing the
+/// refusing is the one honest way to keep a script from being handed
+/// `statements` on the phase that runs before any statement has.
+// `BuildSql` is only ever constructed from `#[cfg(test)]` today — publish and
+// serving are what wire a non-test caller onto `build_sql` (a later task in
+// this package), the same scaffolding `TransformError` carried before
+// `run_transform` had one. Comes off as soon as that caller exists.
+#[allow(dead_code)]
+enum Entry<'a> {
+    Transform(TransformCall<'a>),
+    BuildSql {
+        params: &'a BTreeMap<String, serde_json::Value>,
+    },
+}
+
+/// Convert `params` into a starlark dict on `heap`, polling the input budgets
+/// once afterward.
+///
+/// The one conversion both [`Entry`] variants need — [`run_transform`]'s
+/// `params` and [`build_sql`]'s are the same shape — factored out so there is
+/// one place that remembers to poll [`poll_input_budgets`], not two.
+fn alloc_params<'v>(
+    params: &BTreeMap<String, serde_json::Value>,
+    heap: starlark::values::Heap<'v>,
+    deadline: Instant,
+) -> Result<Value<'v>, TransformError> {
+    let mut items = Vec::with_capacity(params.len());
+    for (name, value) in params {
+        items.push((heap.alloc(name.as_str()), json_to_starlark(value, heap, 0)?));
+    }
+    poll_input_budgets(heap, deadline)?;
+    Ok(heap.alloc(AllocDict(items)))
+}
+
 /// Run an endpoint's response transform.
 ///
 /// **This is the single evaluator.** Publish, preview and serving all call this
@@ -684,8 +769,61 @@ pub(crate) fn run_transform(
     eval_inner(
         &spec.script,
         Budgets::default(),
-        Some(TransformCall { params, statements }),
+        Some(Entry::Transform(TransformCall { params, statements })),
     )
+}
+
+/// Run a statement's SQL-building script and return the template it built.
+///
+/// **The third entry point onto [`eval_inner`]**, alongside [`eval_probe`]
+/// (module top level only) and [`run_transform`] (`transform(params,
+/// statements)`). Same evaluator, same budgets, same globals, same dialect,
+/// same panic containment — only the call shape differs, via [`Entry`]. A
+/// second evaluator here would need a second parse, and
+/// `tests::there_is_exactly_one_place_that_parses_starlark` is what would
+/// catch that.
+///
+/// # What comes back is a template, never finished SQL
+///
+/// The script defines `build_sql(params)` and returns a string; whatever it
+/// returns is handed back **verbatim** — `{{ region }}` survives exactly as
+/// written. That is the whole safety argument for a build-SQL statement: the
+/// path a caller's bound value takes to the engine is unchanged, because the
+/// text this returns still goes through the same `render()` that runs a
+/// hand-written statement's SQL. This function never renders anything itself.
+///
+/// # The script sees `params` and nothing else
+///
+/// No `statements` — a build-SQL script runs *before* any statement has
+/// executed, so there is nothing to hand it, and [`Entry::BuildSql`] has no
+/// field to hand it even by mistake. No `db`, `http`, `tx`, `cache`, clock or
+/// randomness either: the globals are [`transform_globals`], unchanged from
+/// [`run_transform`]'s, and the dialect is [`transform_dialect`], likewise
+/// unchanged.
+///
+/// # Why a non-string return is refused, not stringified
+///
+/// A script returning a dict or a list is an author mistake. Coercing it to
+/// text would hand the renderer something that was never meant to be SQL and
+/// let the failure surface far from its cause — see
+/// [`TransformError::BuildSqlNotAString`].
+// No non-test caller yet — publish and serving wire one on in a later task of
+// this package. See the same note on `Entry`.
+#[allow(dead_code)]
+pub(crate) fn build_sql(
+    script: &str,
+    params: &BTreeMap<String, serde_json::Value>,
+) -> Result<String, TransformError> {
+    match eval_inner(script, Budgets::default(), Some(Entry::BuildSql { params }))? {
+        serde_json::Value::String(s) => Ok(s),
+        // `eval_inner`'s `Entry::BuildSql` arm only ever returns `Ok` with a
+        // `Value::String` — anything else it converts to
+        // `TransformError::BuildSqlNotAString` before returning. Reachable
+        // only if that invariant breaks.
+        other => {
+            unreachable!("eval_inner's BuildSql arm must return a JSON string on Ok, got {other:?}")
+        }
+    }
 }
 
 /// Does `value` satisfy the endpoint's declared `returns`?
@@ -892,7 +1030,7 @@ const PANIC_INJECTION_MESSAGE: &str = "injected panic: transform containment pro
 fn eval_inner(
     src: &str,
     budgets: Budgets,
-    call: Option<TransformCall<'_>>,
+    call: Option<Entry<'_>>,
 ) -> Result<serde_json::Value, TransformError> {
     let ast = AstModule::parse("transform.star", src.to_owned(), &transform_dialect())
         .map_err(|e| TransformError::Parse(e.to_string()))?;
@@ -948,15 +1086,25 @@ fn eval_inner(
 
             eval.eval_module(ast, &globals).map_err(classify)?;
 
-            let Some(call) = call else {
+            let Some(entry_call) = call else {
                 // A sandbox probe: the module ran, and there is nothing to call.
                 return Ok(serde_json::Value::Null);
             };
 
+            // Which of the crate's two entry-point contracts this call is —
+            // decided once, before the lookup, so a script missing EITHER
+            // name reports `MissingEntryPoint` against the one it was
+            // actually asked to define.
+            let (entry_name, arity, is_build_sql) = match &entry_call {
+                Entry::Transform(_) => (ENTRY_POINT, ENTRY_POINT_ARITY, false),
+                Entry::BuildSql { .. } => {
+                    (BUILD_SQL_ENTRY_POINT, BUILD_SQL_ENTRY_POINT_ARITY, true)
+                }
+            };
             let entry = module
-                .get(ENTRY_POINT)
+                .get(entry_name)
                 .ok_or(TransformError::MissingEntryPoint)?;
-            check_arity(entry)?;
+            check_arity(entry, arity)?;
 
             // Converting the inputs allocates on the SAME heap the script will
             // use, but it is Rust code: it consumes no ticks, so nothing starlark
@@ -966,29 +1114,34 @@ fn eval_inner(
             // So the two budgets that CAN be polled from here are polled from
             // here, every `INPUT_POLL_ROWS` rows.
             let heap = module.heap();
-            let mut param_items = Vec::with_capacity(call.params.len());
-            for (name, value) in call.params {
-                param_items.push((heap.alloc(name.as_str()), json_to_starlark(value, heap, 0)?));
-            }
-            poll_input_budgets(heap, deadline)?;
-            let params = heap.alloc(AllocDict(param_items));
 
-            let mut statement_items = Vec::with_capacity(call.statements.len());
-            for (name, rows) in call.statements {
-                let mut converted = Vec::with_capacity(rows.len());
-                for (i, row) in rows.iter().enumerate() {
-                    if i % INPUT_POLL_ROWS == 0 {
-                        poll_input_budgets(heap, deadline)?;
+            let returned = match entry_call {
+                Entry::Transform(TransformCall { params, statements }) => {
+                    let params_v = alloc_params(params, heap, deadline)?;
+
+                    let mut statement_items = Vec::with_capacity(statements.len());
+                    for (name, rows) in statements {
+                        let mut converted = Vec::with_capacity(rows.len());
+                        for (i, row) in rows.iter().enumerate() {
+                            if i % INPUT_POLL_ROWS == 0 {
+                                poll_input_budgets(heap, deadline)?;
+                            }
+                            converted.push(json_to_starlark(row, heap, 0)?);
+                        }
+                        statement_items.push((heap.alloc(name.as_str()), heap.alloc(converted)));
                     }
-                    converted.push(json_to_starlark(row, heap, 0)?);
-                }
-                statement_items.push((heap.alloc(name.as_str()), heap.alloc(converted)));
-            }
-            let statements = heap.alloc(AllocDict(statement_items));
+                    let statements_v = heap.alloc(AllocDict(statement_items));
 
-            let returned = eval
-                .eval_function(entry, &[params, statements], &[])
-                .map_err(classify)?;
+                    eval.eval_function(entry, &[params_v, statements_v], &[])
+                        .map_err(classify)?
+                }
+                // No `statements` — see `Entry::BuildSql`.
+                Entry::BuildSql { params } => {
+                    let params_v = alloc_params(params, heap, deadline)?;
+                    eval.eval_function(entry, &[params_v], &[])
+                        .map_err(classify)?
+                }
+            };
 
             // The output phase's deadline. `None` — every shipped build — is
             // the same instant the evaluation ran under, so a script does not
@@ -1001,7 +1154,23 @@ fn eval_inner(
                 Some(window) => Instant::now() + window,
             };
 
-            serialise_output(returned, output_deadline)
+            if is_build_sql {
+                // A template, not JSON: `serialise_output`'s shape/byte walk
+                // is for a transform's structured return and does not apply
+                // here. What the deadline above still bounds is the one thing
+                // that could be slow before this point — the evaluation that
+                // produced `returned` — which is exactly what
+                // `build_sql_is_bounded_by_the_same_budgets_as_a_transform`
+                // exercises.
+                match returned.unpack_str() {
+                    Some(s) => Ok(serde_json::Value::String(s.to_owned())),
+                    None => Err(TransformError::BuildSqlNotAString(
+                        returned.get_type().to_owned(),
+                    )),
+                }
+            } else {
+                serialise_output(returned, output_deadline)
+            }
         })
     }));
 
@@ -1050,8 +1219,12 @@ fn classify(err: starlark::Error) -> TransformError {
     }
 }
 
-/// `transform` exists — does it take the arguments it is about to be called
-/// with?
+/// The entry point exists — does it take `arity` arguments?
+///
+/// `arity` is [`ENTRY_POINT_ARITY`] or [`BUILD_SQL_ENTRY_POINT_ARITY`],
+/// supplied by the caller in [`eval_inner`] rather than read from a constant
+/// here, because which contract is being checked is a fact only the caller
+/// has — this function only has a `Value`.
 ///
 /// # Why the parameters are read out of the value's documentation
 ///
@@ -1070,7 +1243,7 @@ fn classify(err: starlark::Error) -> TransformError {
 /// so a well-formed `def` puts every parameter in `pos_or_named`; `*args` and
 /// `**kwargs` still parse, and are counted so that `def transform(*args)`
 /// reports what it is rather than reporting zero.
-fn check_arity(entry: Value<'_>) -> Result<(), TransformError> {
+fn check_arity(entry: Value<'_>, arity: usize) -> Result<(), TransformError> {
     let params = match entry.documentation() {
         starlark::docs::DocItem::Member(starlark::docs::DocMember::Function(f)) => f.params,
         // Not a function at all — `transform = 1`. See `MissingEntryPoint`.
@@ -1083,11 +1256,11 @@ fn check_arity(entry: Value<'_>) -> Result<(), TransformError> {
         + usize::from(params.args.is_some())
         + usize::from(params.kwargs.is_some());
 
-    // `positional`, not `found`, decides: the entry point is called with two
-    // positional arguments, so two positional parameters and nothing else is the
-    // only signature that works. `found` is what the message reports, because it
-    // is what the author wrote.
-    if positional == ENTRY_POINT_ARITY && found == ENTRY_POINT_ARITY {
+    // `positional`, not `found`, decides: the entry point is called with
+    // exactly `arity` positional arguments, so `arity` positional parameters
+    // and nothing else is the only signature that works. `found` is what the
+    // message reports, because it is what the author wrote.
+    if positional == arity && found == arity {
         Ok(())
     } else {
         Err(TransformError::WrongArity { found })
@@ -2293,10 +2466,10 @@ mod tests {
             Budgets::default()
                 .with_wall_clock(Duration::from_secs(300))
                 .with_output_wall_clock(Duration::ZERO),
-            Some(TransformCall {
+            Some(Entry::Transform(TransformCall {
                 params: &params,
                 statements: &statements,
-            }),
+            })),
         )
         .expect_err("an output phase whose deadline has already passed must be refused");
         assert!(
@@ -2342,10 +2515,10 @@ mod transform_tests {
         eval_inner(
             &spec.script,
             budgets,
-            Some(TransformCall {
+            Some(Entry::Transform(TransformCall {
                 params: &params,
                 statements: &statements,
-            }),
+            })),
         )
     }
 
@@ -3079,5 +3252,83 @@ mod transform_tests {
             text.bytes().all(|b| b == b'z'),
             "the payload must be intact"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // `build_sql`: the third entry point.
+    // ---------------------------------------------------------------------
+
+    /// The template a script builds must reach the caller unrendered.
+    ///
+    /// `{{ region }}` is the whole safety argument for this package: the
+    /// braces have to survive `build_sql` verbatim so the bound value still
+    /// goes through `render()` later, exactly as it would for a
+    /// hand-written statement's SQL.
+    #[test]
+    fn build_sql_returns_the_template_the_script_built() {
+        let script = "def build_sql(params):\n  return \"SELECT {{ region }} AS r\"";
+        let out = build_sql(script, &BTreeMap::new()).expect("runs");
+        assert_eq!(
+            out, "SELECT {{ region }} AS r",
+            "the braces must survive verbatim"
+        );
+    }
+
+    /// `params` reaches the script, and the script can branch on it — the
+    /// same dict shape `run_transform` hands `transform`, minus `statements`.
+    #[test]
+    fn build_sql_sees_params_and_can_branch_on_them() {
+        let script = "def build_sql(params):\n  \
+                      if params[\"grain\"] == \"daily\":\n    return \"SELECT 1 AS daily\"\n  \
+                      return \"SELECT 1 AS hourly\"";
+        let daily = BTreeMap::from([("grain".to_string(), json!("daily"))]);
+        let hourly = BTreeMap::from([("grain".to_string(), json!("hourly"))]);
+        assert_eq!(build_sql(script, &daily).unwrap(), "SELECT 1 AS daily");
+        assert_eq!(build_sql(script, &hourly).unwrap(), "SELECT 1 AS hourly");
+    }
+
+    /// A script that never defines `build_sql` is refused by the same
+    /// variant a missing `transform` is — see [`TransformError::MissingEntryPoint`].
+    ///
+    /// Named `_for_build_sql` rather than reusing
+    /// `a_script_without_the_entry_point_is_refused_by_name` verbatim: that
+    /// name is already taken above, by the same assertion against
+    /// `run_transform`. Same behaviour, different entry point, so both keep
+    /// their own name rather than one shadowing the other.
+    #[test]
+    fn a_script_without_the_entry_point_is_refused_by_name_for_build_sql() {
+        assert!(matches!(
+            build_sql("x = 1", &BTreeMap::new()),
+            Err(TransformError::MissingEntryPoint)
+        ));
+    }
+
+    /// A script returning a dict or a list is an author mistake. Coercing it
+    /// would hand the renderer something that is not SQL and let the failure
+    /// surface far from its cause.
+    #[test]
+    fn a_script_returning_a_non_string_is_refused_rather_than_stringified() {
+        let script = "def build_sql(params):\n  return {\"sql\": \"SELECT 1\"}";
+        assert!(build_sql(script, &BTreeMap::new()).is_err());
+    }
+
+    /// The evaluator is C2's. An unbounded loop must be refused, not run —
+    /// and this test must FAIL rather than hang if that stops being true, so
+    /// it evaluates on its own thread with a deadline: Rust has no per-test
+    /// timeout, and a budget regression here would otherwise stall the suite
+    /// rather than fail one test.
+    #[test]
+    fn build_sql_is_bounded_by_the_same_budgets_as_a_transform() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(build_sql(
+                "def build_sql(params):\n  for i in range(1, 1000000000):\n    pass\n  return \"x\"",
+                &BTreeMap::new(),
+            ));
+        });
+        let outcome = rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the tick budget did not stop an unbounded loop within 30s");
+        assert!(outcome.is_err(), "an unbounded loop must be refused");
     }
 }
