@@ -149,16 +149,21 @@ test.describe("Data API — the statement editor keeps a usable height", () => {
 
           const m = await measure();
           expect(m, `${height}px, ${mode}: found #stmt-panel and the editor`).not.toBeNull();
-          expect(
-            m!.panelOverflowY,
-            `${height}px, ${mode}: #stmt-panel must scroll its prose rather than let the ` +
-              `editor absorb it, got overflow-y: ${m!.panelOverflowY}`,
-          ).not.toBe("visible");
+          // The CONSEQUENCE first, deliberately. `overflow-y` below pins the
+          // mechanism, but a spec whose first failure is a property name tells
+          // the next reader which class went missing rather than what the
+          // author would have seen; and a property assertion that runs first
+          // can hide a height regression a different mechanism caused.
           expect(
             m!.editorHeight,
             `${height}px, ${mode}: editor laid out at ${m!.editorHeight}px with the ` +
               `Database and parameters strip expanded`,
           ).toBeGreaterThanOrEqual(FLOOR);
+          expect(
+            m!.panelOverflowY,
+            `${height}px, ${mode}: #stmt-panel must scroll its prose rather than let the ` +
+              `editor absorb it, got overflow-y: ${m!.panelOverflowY}`,
+          ).not.toBe("visible");
         }
       }
     } finally {
