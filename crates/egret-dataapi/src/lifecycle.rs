@@ -226,11 +226,13 @@
 //! same read that was validated — not validation. A nonsensical `max_rows` or an
 //! unknown `output.shape` will be frozen exactly as written.
 
+use std::collections::BTreeMap;
+
 use egret_core::{Error, Result, UserId};
 use egret_dataapi_api::{
-    compare_column_types, CacheScope, CacheSpec, ColumnSpec, EndpointSnapshot, OutputSpec,
-    ParamLocation, ParamSpec, ParamType, StatementSnapshot, StatementSpec, TypeAgreement,
-    PARAM_GATE,
+    compare_column_types, CacheScope, CacheSpec, ColumnSpec, EndpointSnapshot, LimitsSpec,
+    OutputSpec, ParamLocation, ParamSpec, ParamType, StatementSnapshot, StatementSpec,
+    TypeAgreement, PARAM_GATE,
 };
 use egret_query_api::Param;
 use uuid::Uuid;
@@ -655,6 +657,194 @@ pub enum ValidationError {
         first: String,
         second: String,
         naming: String,
+    },
+    /// `output.transform.script` exceeds [`MAX_TRANSFORM_SCRIPT_BYTES`].
+    ///
+    /// A response transform reshapes what a statement already returned; it is
+    /// not where an endpoint's business logic belongs. Carries both numbers —
+    /// see every other `…TooLong`/`…TooMany` arm in this enum for why "too
+    /// large" alone tells an author nothing about how much to cut.
+    #[error(
+        "output.transform.script is {bytes} bytes, over the {cap} byte cap. A response \
+         transform reshapes what a statement already returned — it is not where an \
+         endpoint's business logic belongs"
+    )]
+    TransformScriptTooLong { bytes: usize, cap: usize },
+    /// `output.transform` is set alongside a non-default `output.shape` or
+    /// `output.naming`.
+    ///
+    /// Once a script decides the shape of the response, `shape` (which rows the
+    /// wire carries) and `naming` (which key spelling a JSON object gets) are
+    /// either dead — the script's own `return` already fixed both — or
+    /// ambiguous: does `naming: camel` apply to the rows the script SEES, or to
+    /// the keys it WROTE? There is no reading that is obviously right, so this
+    /// refuses rather than picks one.
+    ///
+    /// The field's DEFAULT value (`"objects"` for `shape`, `"as_is"` for
+    /// `naming`) is not refused alongside a transform: an author who never
+    /// touched either field has not asked for a shape, and refusing that would
+    /// make every transform carry two fields it has no opinion about.
+    #[error(
+        "output.{0} may not be set alongside output.transform. A transform script decides \
+         the shape of its own response, so output.{0} would either be dead or ambiguous \
+         about whether it applies before or after the script runs. Remove output.{0}, or \
+         leave it at its default"
+    )]
+    TransformWithShapeOrNaming(&'static str),
+    /// `output.transform.returns` is empty.
+    #[error(
+        "output.transform.returns declares no columns. Serving checks a transform's response \
+         against this list; an empty list is nothing to check against, and serving would fail \
+         OPEN — serving whatever the script returned, unchecked — rather than refuse a \
+         response that disagrees with nothing"
+    )]
+    TransformReturnsEmpty,
+    /// Two entries in `output.transform.returns` declare the same `name`.
+    #[error(
+        "output.transform.returns declares `{0}` more than once. A JSON object has one key \
+         per name, so a duplicate is not a stricter contract, it is an unresolvable one"
+    )]
+    TransformReturnsDuplicateName(String),
+    /// `output.transform.returns` declares more columns than
+    /// [`MAX_TRANSFORM_RETURNS`].
+    ///
+    /// Carries both numbers, like every other `…TooMany` arm here. See the
+    /// constant for why serving, not publish, is where the cost lands.
+    #[error(
+        "output.transform.returns declares {count} columns, over the {limit} column cap. \
+         Serving checks every response against this list on every request, and a response \
+         transform reshapes a response — it is not a place to enumerate a wide table"
+    )]
+    TransformReturnsTooMany { count: usize, limit: usize },
+    /// An entry in `output.transform.returns` has a blank `name`.
+    ///
+    /// No payload: the offending name is the empty string, and quoting it back
+    /// (`declares `` more than once`, which is what the duplicate rule used to
+    /// say for two unnamed rows) names nothing an author can find.
+    #[error(
+        "output.transform.returns has a column with no name. A declared column is matched \
+         against the response by name, and a blank name matches nothing — name it, or \
+         remove the row"
+    )]
+    TransformReturnsBlankName,
+    /// An entry in `output.transform.returns` has a `name` with leading or
+    /// trailing whitespace.
+    ///
+    /// Refused rather than trimmed. Trimming would silently publish a contract
+    /// whose OpenAPI property name is not the string the author typed, and
+    /// accepting it as-is makes `"total"` and `"total "` two columns that every
+    /// reader sees as one.
+    #[error(
+        "output.transform.returns declares `{0}`, whose name begins or ends with whitespace. \
+         The name becomes a JSON key and an OpenAPI property name exactly as written, so \
+         `{0}` and its trimmed spelling would be two columns nobody can tell apart"
+    )]
+    TransformReturnsPaddedName(String),
+    /// `output.transform.script` does not parse under the transform dialect, or
+    /// fails the same probe evaluation [`crate::transform::run_transform`]
+    /// itself runs the module through.
+    ///
+    /// The author's 400, not the caller's 500: an endpoint publishes only after
+    /// its script has been through the one evaluator serving will use, so a
+    /// script this rejects can never reach a caller as a runtime failure.
+    #[error("the transform script is not valid: {0}")]
+    TransformScriptInvalid(String),
+    /// A publish-time probe ran the script and what came back does not satisfy
+    /// `output.transform.returns` — or the script failed outright on input
+    /// publish knows it will be given.
+    ///
+    /// `context` names **which** probe. There are two ([`probe_transform`]) and
+    /// they differ only in whether the statements carry a row, so a refusal that
+    /// did not say which one an author is being told about would send them
+    /// looking at the wrong half of their script — the `if len(rows) == 0`
+    /// branch is the commonest place the two disagree, and it is invisible in
+    /// the other probe's output.
+    #[error("{context}: {detail}")]
+    TransformOutputMismatch {
+        /// Which probe produced this, in the words the probe is documented
+        /// under: "the single-row probe" or "the empty-rows probe".
+        context: String,
+        /// What was wrong with what came back — from
+        /// [`crate::transform::check_returns`] when the script ran and returned
+        /// something that does not match `returns`, or the
+        /// [`crate::transform::TransformError`] when it did not run at all.
+        detail: String,
+    },
+    /// The transform's output GROWS with the rows it is given, and projecting
+    /// that growth to the endpoint's own `limits.max_rows` puts it over
+    /// [`crate::transform::MAX_TRANSFORM_OUTPUT_BYTES`].
+    ///
+    /// # What this projection proves, and what it does not
+    ///
+    /// It is measured, not assumed: `per_row` is the difference between the two
+    /// probes [`probe_transform`] already runs — the serialised size with one
+    /// row minus the size with none — so a script that aggregates (`return
+    /// {"total": len(rows)}`) measures zero growth and is never refused here,
+    /// however large `max_rows` is.
+    ///
+    /// It is an **estimate**, and it can be wrong in both directions. Saying so
+    /// precisely matters more than the number:
+    ///
+    /// * **it can under-project.** Growth is assumed linear from two points, so
+    ///   a script whose output grows faster than its input — a cross join, a
+    ///   nested expansion — is projected too small and reaches serving anyway.
+    /// * **it can over-project.** The probe row carries **every** column of the
+    ///   branch UNION at a stand-in value as small as the column's type permits.
+    ///   A real row can therefore be SMALLER than the probe row rather than
+    ///   larger: `serving::router::shape_rows` omits a `required: false` column
+    ///   from an `objects` row when the branch that ran did not return it, so a
+    ///   response can carry a strict subset of the union the probe assumed. It
+    ///   was previously claimed here that a real row is "larger, not smaller" —
+    ///   that was wrong under M1, and this arm is not allowed to justify itself
+    ///   with it.
+    /// * **it cannot see saturation.** `return {"sample": rows[:10]}` grows for
+    ///   the first ten rows and not after; two points have no way to find the
+    ///   ceiling above them. Such an endpoint is refused although it would have
+    ///   served.
+    ///
+    /// What remains true is the thing the refusal rests on: an endpoint whose
+    /// own `limits.max_rows` says it may return N rows, carrying a script that
+    /// measurably grows with rows, cannot honour both that number and the cap.
+    /// `limits.max_rows` is the author's own declaration, and `fits` is the
+    /// largest value of it this script can actually serve.
+    #[error(
+        "output.transform returns about {per_row} more bytes per row, so at \
+         limits.max_rows = {max_rows} it would return about {projected} bytes, over the \
+         {cap} byte cap — and the caller would get a 500 rather than a truncated \
+         response. Lower limits.max_rows to at most {fits}, or aggregate in the script \
+         instead of passing rows through; both change WHAT the endpoint returns and not \
+         only how much of it — a lower limit truncates the result set, and aggregating \
+         replaces the rows with a summary. The size is projected from ONE synthetic row \
+         carrying every column of the union, not measured on your data, so a response \
+         that omits an optional column can be smaller than this and a script that \
+         expands its input larger"
+    )]
+    TransformOutputExceedsRowLimit {
+        /// Serialised bytes the transform's output grew by when the probe's
+        /// statements went from no rows to one.
+        per_row: usize,
+        /// The endpoint's `limits.max_rows`, **clamped exactly as serving
+        /// clamps it** — see [`probe_transform`]. Projecting against an
+        /// unclamped `u32` would refuse an endpoint over rows serving would
+        /// never fetch.
+        max_rows: u32,
+        /// `base + per_row * max_rows`, where `base` is what the script returns
+        /// with no rows at all.
+        projected: usize,
+        /// [`crate::transform::MAX_TRANSFORM_OUTPUT_BYTES`], repeated so the
+        /// message is self-contained.
+        cap: usize,
+        /// The largest `limits.max_rows` this script's measured growth fits
+        /// under `cap`.
+        ///
+        /// **At least 1, never 0.** `run_transform` refuses an output over
+        /// `cap` outright (`CappedSink`), so a probe that RETURNED a value
+        /// satisfies `populated <= cap`; therefore
+        /// `cap - empty >= populated - empty = per_row` and the division below
+        /// is at least one. A zero here would also be advice an author cannot
+        /// take — `serving::router` clamps `max_rows` to a minimum of 1, so
+        /// "lower it to 0" names a value the endpoint cannot hold.
+        fits: u32,
     },
 }
 
@@ -1534,6 +1724,498 @@ pub fn check_constraints(params: &[ParamSpec]) -> std::result::Result<(), Valida
     Ok(())
 }
 
+/// Ceiling on `output.transform.script`, in bytes.
+///
+/// # Sized against a real script, not a round number
+///
+/// Spec §1's canonical example — read `params["region"]`, index into
+/// `statements["items"]`, return `{region, items, total}` — is about 200
+/// bytes. 8192 (8 KiB) is ~40x that: enough room for the example plus real
+/// comments, a helper `def` or two, and a second statement folded in, while
+/// staying small enough that a script anywhere near the cap is visibly no
+/// longer "reshape this response" — a response transform reshapes what a
+/// statement already returned; it is not where an endpoint's business logic
+/// belongs, and a cap an honest script never approaches is not a cap at all.
+pub const MAX_TRANSFORM_SCRIPT_BYTES: usize = 8192;
+
+/// Refuse an `output.transform` publish cannot honour.
+///
+/// A no-op when `output.transform` is absent — every snapshot frozen before
+/// C2, and every endpoint that has no transform today.
+///
+/// # What this does NOT do
+///
+/// **It never runs the script against data.** It parses the script and
+/// evaluates its module top level — through
+/// [`crate::transform::eval_probe`], the same evaluator
+/// [`crate::transform::run_transform`] is built on, so publish and serving
+/// agree about which scripts exist — and stops there. Probing the script
+/// against `returns` by actually calling `transform(params, statements)` is a
+/// later task's job; this one parses and refuses, it does not run.
+///
+/// # The order, and why
+///
+/// Refusals are checked cheapest-and-most-structural first, so an author
+/// editing a script that is both too long AND missing `returns` sees the
+/// length problem rather than a starlark stack trace for a script that was
+/// going to be refused anyway. [`check_transform_shape`] is 1-6 and
+/// [`check_transform_script`] is 7:
+///
+/// 1. **script length** ([`MAX_TRANSFORM_SCRIPT_BYTES`]) — the cheapest
+///    possible check, and it bounds how expensive every check after it can be;
+/// 2. **`shape`/`naming`** — see [`ValidationError::TransformWithShapeOrNaming`];
+/// 3. **empty `returns`** — see [`ValidationError::TransformReturnsEmpty`];
+/// 4. **too many `returns`** — [`MAX_TRANSFORM_RETURNS`], the bound that makes
+///    the two passes below, and `check_returns` on every served request, cost
+///    something an operator can name;
+/// 5. **blank or whitespace-padded `returns` names** — see
+///    [`ValidationError::TransformReturnsBlankName`] and
+///    [`ValidationError::TransformReturnsPaddedName`]. Before the duplicate
+///    rule, so that by the time it runs a verbatim comparison and a trimmed one
+///    are the same comparison;
+/// 6. **duplicate `returns` names** — see
+///    [`ValidationError::TransformReturnsDuplicateName`];
+/// 7. **the script itself, parsed and evaluated** — last, because it is the
+///    only check here that costs more than a comparison, and the only one a
+///    caller may be told to skip ([`ScriptEval`]).
+///
+/// # Called once per ENDPOINT, not once per statement
+///
+/// `output` is a property of the endpoint, not of any one statement, so
+/// [`validate_endpoint`] calls this exactly once — beside
+/// `egret_dataapi_api::validate_envelope`, the other endpoint-wide rule over
+/// `output` — rather than from inside [`check_definition_scans`], which runs
+/// once per statement. The distinction is cost, not correctness: parsing the
+/// script also EVALUATES its module top level (see the section above), which
+/// runs a real Starlark interpreter bounded only by
+/// [`crate::transform::MAX_WALL_CLOCK`] (2s) per call. Called from the
+/// per-statement loop, an endpoint at `MAX_STATEMENTS` would pay that up to
+/// 16 times. Called once, the whole endpoint's transform cost is bounded by
+/// ONE evaluation, matching every other endpoint-wide rule.
+///
+/// # Where that one evaluation is spent
+///
+/// **Not inside `EndpointStore::publish`'s transaction.** That was true until
+/// this split and it was the more serious half of the same cost argument: 2 s
+/// is a bound on ticks, not on time, and the worst case measured against it is
+/// 28.8 s — of row lock and pool connection, held by author-supplied Starlark.
+/// [`ScriptEval`] is what publish passes to say the evaluation has already
+/// happened, outside the lock, over a script it then proves identical.
+pub fn check_transform(output: &OutputSpec) -> std::result::Result<(), ValidationError> {
+    check_transform_shape(output)?;
+    check_transform_script(output)
+}
+
+/// Every [`check_transform`] rule that is a COMPARISON — no parse, no
+/// evaluation, no interpreter.
+///
+/// Split out from [`check_transform_script`] for one reason, and it is a
+/// property of `EndpointStore::publish` rather than of this function: publish
+/// re-runs the whole validator against the row it has LOCKED, inside an open
+/// transaction, and running a Starlark interpreter there holds the endpoint's
+/// row lock and a pool connection for as long as the interpreter takes. See
+/// [`ScriptEval`] for the measurement and for what publish does instead.
+///
+/// Everything here is a string length, an equality against a default, or a
+/// pass over a list whose length this function is now what bounds
+/// ([`MAX_TRANSFORM_RETURNS`]) — microseconds, and safe to repeat under a lock.
+fn check_transform_shape(output: &OutputSpec) -> std::result::Result<(), ValidationError> {
+    let Some(transform) = &output.transform else {
+        return Ok(());
+    };
+
+    let bytes = transform.script.len();
+    if bytes > MAX_TRANSFORM_SCRIPT_BYTES {
+        return Err(ValidationError::TransformScriptTooLong {
+            bytes,
+            cap: MAX_TRANSFORM_SCRIPT_BYTES,
+        });
+    }
+
+    // Compared against the field's own default rather than a literal
+    // `"objects"`/`"as_is"` copied here: the two can never drift apart, because
+    // `OutputSpec::default()` is built from the exact same `default_shape`/
+    // `default_naming` functions serde falls back to.
+    let defaults = OutputSpec::default();
+    if output.shape != defaults.shape {
+        return Err(ValidationError::TransformWithShapeOrNaming("shape"));
+    }
+    if output.naming != defaults.naming {
+        return Err(ValidationError::TransformWithShapeOrNaming("naming"));
+    }
+
+    if transform.returns.is_empty() {
+        return Err(ValidationError::TransformReturnsEmpty);
+    }
+    if transform.returns.len() > MAX_TRANSFORM_RETURNS {
+        return Err(ValidationError::TransformReturnsTooMany {
+            count: transform.returns.len(),
+            limit: MAX_TRANSFORM_RETURNS,
+        });
+    }
+
+    // BEFORE the duplicate rule, and that order is the whole point of this
+    // block. `check_transform` used to compare `col.name` verbatim and treat
+    // `""` as a name, so two unnamed rows published as
+    // `TransformReturnsDuplicateName("")` — a refusal naming a column that does
+    // not exist — while `"total"` and `"total "` were two different names to
+    // publish and one name to every reader. Refusing blank and padded names
+    // here means that by the time the duplicate rule runs, every name is
+    // non-blank and already trimmed, so comparing verbatim and comparing
+    // trimmed are the same comparison. That is what lets the editor's
+    // `returnNameProblems` (`ResponseSection.tsx`) be a preview of this rule
+    // rather than a second, differing one — see its comment.
+    for col in &transform.returns {
+        if col.name.trim().is_empty() {
+            return Err(ValidationError::TransformReturnsBlankName);
+        }
+        if col.name.trim() != col.name {
+            return Err(ValidationError::TransformReturnsPaddedName(
+                col.name.clone(),
+            ));
+        }
+    }
+
+    let mut seen = std::collections::HashSet::with_capacity(transform.returns.len());
+    for col in &transform.returns {
+        if !seen.insert(col.name.as_str()) {
+            return Err(ValidationError::TransformReturnsDuplicateName(
+                col.name.clone(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// The one [`check_transform`] rule that RUNS a Starlark interpreter.
+///
+/// Split out so that the one caller which must not run it — publish's
+/// in-transaction re-validation — cannot do so by accident. See [`ScriptEval`].
+fn check_transform_script(output: &OutputSpec) -> std::result::Result<(), ValidationError> {
+    let Some(transform) = &output.transform else {
+        return Ok(());
+    };
+    crate::transform::eval_probe(&transform.script)
+        .map_err(|e| ValidationError::TransformScriptInvalid(e.to_string()))
+}
+
+/// Ceiling on how many columns `output.transform.returns` may declare.
+///
+/// # Why there is one at all
+///
+/// It was the only author-controlled list in this module with no bound —
+/// `MAX_STATEMENTS` is 16, `MAX_DECLARED_PARAMS` is 32,
+/// [`MAX_TRANSFORM_SCRIPT_BYTES`] is 8192, and `returns` was unbounded. It is
+/// not a publish-time cost that makes that matter, it is a SERVING one:
+/// [`crate::transform::check_returns`] runs against **every response of every
+/// request**, and the undeclared-field half of it is a scan of `returns` per
+/// returned field.
+///
+/// # Why 64
+///
+/// Twice `MAX_DECLARED_PARAMS`, on the argument that a response object may
+/// reasonably carry more names than a request's query string does, and far
+/// above anything the shape this feature exists for produces — a transform
+/// reshapes a response, and the 8 KiB script cap already says an author writing
+/// 64 output fields by hand has left that shape behind. It is a backstop, not a
+/// design target: an honest transform never approaches it.
+pub const MAX_TRANSFORM_RETURNS: usize = 64;
+
+/// May [`validate_endpoint`] evaluate `output.transform.script`?
+///
+/// # The hazard this exists to remove, measured
+///
+/// `EndpointStore::publish` opens a transaction, takes a row lock with
+/// `SELECT ... FOR UPDATE`, and then re-runs [`validate_endpoint`] against the
+/// locked row. Until this enum existed, that re-validation called
+/// [`check_transform`], which parses and evaluates the script's module top
+/// level through a real Starlark interpreter.
+///
+/// [`crate::transform::MAX_WALL_CLOCK`] is 2 s, and it is **not a latency
+/// guarantee** — `run_transform`'s own doc comment records a script measured at
+/// **28.8 s** against that 2 s deadline, because the deadline is checked at
+/// 1000-tick granularity and a script whose every tick is expensive overruns
+/// it. So an authenticated author could hold an endpoint's row lock *and* a
+/// database pool connection, on an async worker, for tens of seconds per
+/// publish, from eight kilobytes of Starlark. That is strictly worse than the
+/// preview hazard Task 8 moved off the worker.
+///
+/// # What publish does instead
+///
+/// It evaluates the script **before** `begin()`, against the DRAFT, and then
+/// relies on the identity check it already performs: the transaction refuses
+/// with `Conflict` unless `current.output == draft.output`. So the script that
+/// was evaluated outside the lock is byte-identical to the script being frozen
+/// — the guarantee is unchanged, only where it is paid for is.
+///
+/// The evaluation count is unchanged too: publish evaluated the script once
+/// inside the transaction and now evaluates it once outside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ScriptEval {
+    /// Evaluate the script as part of this call. Every caller that holds no
+    /// lock and no open transaction: `/validate`, `/preview`, and the tests.
+    Here,
+    /// Do **not** evaluate the script; the caller has already run
+    /// [`check_transform_script`] over a script it then proved identical to the
+    /// one being validated. `EndpointStore::publish` and nothing else.
+    ///
+    /// The structural rules ([`check_transform_shape`]) still run: they are
+    /// comparisons, they cost microseconds, and running them against the locked
+    /// row is what makes the re-validation a re-validation.
+    AlreadyRunBeforeTheLock,
+}
+
+/// The probe that supplies rows, in the words its refusal names it by.
+const SINGLE_ROW_PROBE: &str = "the single-row probe";
+
+/// The probe that supplies none. See [`probe_transform`] for why it exists.
+const EMPTY_ROWS_PROBE: &str = "the empty-rows probe";
+
+/// Run the transform against synthetic rows and check what it returns against
+/// `output.transform.returns`.
+///
+/// A no-op when `output.transform` is absent, like [`check_transform`].
+///
+/// # What this proves, exactly
+///
+/// That the script RUNS, and that what it returns matches `returns`, for two
+/// specific inputs: one row per statement, and no rows at all. Nothing more. A
+/// script's output shape may depend on the data — that is why `returns` is
+/// declared by the author rather than inferred (see `TransformSpec`) — so a
+/// green probe is not a proof of conformance for every future call. Serving
+/// checks every real response against the same rule
+/// ([`crate::transform::check_returns`], Task 6) and fails closed; this is the
+/// check that stops an author publishing something that was never going to
+/// work, not a substitute for that one.
+///
+/// # Both probes, and why the refusal names which one
+///
+/// `if len(rows) == 0` is the commonest way a script's output shape diverges,
+/// and it is invisible in the populated probe's output — a script can satisfy
+/// `returns` with rows and return a bare list without them. So both are run.
+/// The refusal carries which probe produced it because the two differ only in
+/// their input: told merely "does not match `returns`", an author looking at a
+/// script that demonstrably returns the right object has nowhere to go.
+///
+/// # The rows are SYNTHETIC, and publish makes no extra round trip
+///
+/// `describe_as` gives publish an endpoint's COLUMNS, never its data —
+/// [`StatementSnapshot`] is `{ name, sql, columns }` — so the probe row is
+/// built from those columns with a stand-in value per column type
+/// ([`probe_value`]), the same way [`representative_value`] builds a stand-in
+/// per parameter for M1's branch renders. Nothing here reads a row from an
+/// engine, and no statement is executed.
+///
+/// Parameters carry [`representative_value`]s, in the SHAPE publish already
+/// binds them in for its own SQL probes: a parameter the endpoint's SQL
+/// iterates (`{% for x in region %}`) is a one-element LIST, every other one is
+/// a scalar. That half is not inferred, it is known — [`IteratedParams`] is
+/// computed once per endpoint by [`validate_endpoint`] and handed here by
+/// [`validate`], and [`context_with`] wraps exactly the same set for the render
+/// probes. Two probes of one endpoint disagreeing about whether `region` is a
+/// list would be a defect on its own.
+///
+/// **The other half is genuinely uninferable, and this is its limit.** Whether
+/// a parameter that NO statement iterates arrives as a scalar or a list is
+/// decided by the REQUEST — a repeated query parameter becomes a list — and a
+/// script's own expectation is written in no SQL, so there is nothing to read
+/// it from. A script that iterates a parameter its SQL treats as a scalar is
+/// therefore probed with a scalar and can still fail at serving. Task 6 owns
+/// the serving-side shape; if it ever binds such a parameter as a list, this
+/// must follow it.
+///
+/// # Two evaluations, and where they are spent
+///
+/// This adds exactly two `run_transform` calls per endpoint — not per statement
+/// — for the reason [`check_transform`] records at length: an endpoint at
+/// `MAX_STATEMENTS` inside the per-statement loop would pay each of them up to
+/// 16 times, and `transform::MAX_WALL_CLOCK` is a 2 s bound on ticks after
+/// expiry rather than a latency guarantee, so that is not a bounded cost.
+///
+/// They are spent in [`validate`], which runs BEFORE `EndpointStore::publish`
+/// opens its transaction — deliberately, and this is the placement decision, not
+/// an accident of where the described columns happen to be available. Publish's
+/// in-transaction re-validation goes through [`validate_endpoint`], which does
+/// NOT probe: the row it locked has already been through this, and the identity
+/// check that guards that re-validation now covers `limits` as well as the four
+/// inputs the columns depend on, precisely so the projection below cannot be
+/// dodged by a PATCH landing between the two.
+///
+/// So a publish costs four evaluations of an endpoint's script — one module
+/// evaluation from `check_transform` and these two, plus one more module
+/// evaluation from `EndpointStore::publish`'s own `check_transform_script`
+/// call — and **all four are outside the transaction**. The count inside the
+/// locked transaction is now zero; see [`ScriptEval`] for what it used to be
+/// and what it cost.
+///
+/// # `limits`, and the 1 MiB output cap
+///
+/// See [`ValidationError::TransformOutputExceedsRowLimit`] for what the
+/// projection proves. It costs no additional evaluation: it is the difference
+/// between the two probes that have already run.
+pub(crate) fn probe_transform(
+    output: &OutputSpec,
+    described: &[StatementSnapshot],
+    params: &[ParamSpec],
+    iterated: &IteratedParams,
+    limits: &LimitsSpec,
+) -> std::result::Result<(), ValidationError> {
+    let Some(transform) = &output.transform else {
+        return Ok(());
+    };
+
+    let bound = probe_params(iterated, params);
+    let with_rows: BTreeMap<String, Vec<serde_json::Value>> = described
+        .iter()
+        .map(|s| (s.name.clone(), vec![probe_row(&s.columns)]))
+        .collect();
+    let without_rows: BTreeMap<String, Vec<serde_json::Value>> = described
+        .iter()
+        .map(|s| (s.name.clone(), Vec::new()))
+        .collect();
+
+    // The populated probe first: it is the one an author is thinking about
+    // while they write the script, so when both fail it is the one to report.
+    let populated_bytes = one_probe(transform, &bound, &with_rows, SINGLE_ROW_PROBE)?;
+    let empty_bytes = one_probe(transform, &bound, &without_rows, EMPTY_ROWS_PROBE)?;
+
+    // What one row of input cost in output bytes. `saturating_sub`, not a
+    // difference that can go negative: a script that returns MORE without rows
+    // than with them ("no results" prose, say) does not grow with the row count,
+    // and there is nothing to project.
+    let per_row = populated_bytes.saturating_sub(empty_bytes);
+    if per_row == 0 {
+        return Ok(());
+    }
+    // Clamped exactly as `serving::router` clamps it before handing it to the
+    // engine, because that is the number of rows the script can actually be
+    // given. Projecting against the raw `u32` would refuse an endpoint whose
+    // `max_rows: 4000000000` serving would silently cut to a million.
+    let max_rows = limits
+        .max_rows
+        .clamp(1, crate::serving::router::MAX_ROWS_CEILING);
+    let cap = crate::transform::MAX_TRANSFORM_OUTPUT_BYTES;
+    let projected = empty_bytes.saturating_add(per_row.saturating_mul(max_rows as usize));
+    if projected > cap {
+        return Err(ValidationError::TransformOutputExceedsRowLimit {
+            per_row,
+            max_rows,
+            projected,
+            cap,
+            // Integer division, so this is the largest count that FITS rather
+            // than the first that does not, and it is at least 1 — see the
+            // field's own doc, which is where that is argued from `CappedSink`.
+            // `saturating_sub` cannot fire for the same reason (`empty <= cap`);
+            // it is there so that if the sink's guarantee ever changed this
+            // computes a wrong number rather than panicking in one build
+            // profile and wrapping in the other. `u32::MAX` is likewise
+            // unreachable — `fits < max_rows <= MAX_ROWS_CEILING` — but the
+            // conversion is saturating rather than an `as` cast, because a
+            // silent wrap here would print a helpful-looking number that is a
+            // lie.
+            fits: u32::try_from(cap.saturating_sub(empty_bytes) / per_row).unwrap_or(u32::MAX),
+        });
+    }
+    Ok(())
+}
+
+/// One probe: run the script, check what came back against `returns`, and
+/// report how many bytes it serialised to.
+///
+/// The bytes are what [`probe_transform`]'s projection is built from, and they
+/// are measured on the SERIALISED value for the same reason
+/// `MAX_TRANSFORM_OUTPUT_BYTES` is: that is the number that leaves the process.
+fn one_probe(
+    transform: &egret_dataapi_api::TransformSpec,
+    params: &BTreeMap<String, serde_json::Value>,
+    statements: &BTreeMap<String, Vec<serde_json::Value>>,
+    context: &str,
+) -> std::result::Result<usize, ValidationError> {
+    let value = crate::transform::run_transform(transform, params, statements).map_err(|e| {
+        ValidationError::TransformOutputMismatch {
+            context: context.to_owned(),
+            detail: e.to_string(),
+        }
+    })?;
+    crate::transform::check_returns(&value, &transform.returns).map_err(|detail| {
+        ValidationError::TransformOutputMismatch {
+            context: context.to_owned(),
+            detail,
+        }
+    })?;
+    // `run_transform` has already serialised this value once, through the
+    // capped sink that bounds it — so a value that reaches here is one
+    // `serde_json` has written before, and the error arm is unreachable rather
+    // than merely unlikely. Measuring 0 for it costs only the projection below,
+    // which then refuses nothing and leaves the question to serving.
+    Ok(serde_json::to_vec(&value).map_or(0, |bytes| bytes.len()))
+}
+
+/// One synthetic row, keyed by the described column names.
+fn probe_row(columns: &[ColumnSpec]) -> serde_json::Value {
+    serde_json::Value::Object(
+        columns
+            .iter()
+            .map(|c| (c.name.clone(), probe_value(&c.ty)))
+            .collect(),
+    )
+}
+
+/// A stand-in value for one described column, by its engine type.
+///
+/// Routed through [`crate::openapi_gen::json_type`] rather than matching engine
+/// type names here, so the value a script is probed with and the type the
+/// generated document promises a consumer come from ONE reading of
+/// `bigint`/`varchar(10)`/`timestamp(3)`. A second mapping would let publish
+/// probe a script with a string for a column the document calls an integer.
+///
+/// The values are as small as each type allows, which keeps the measured
+/// per-row growth of [`ValidationError::TransformOutputExceedsRowLimit`] small
+/// for a row of this SHAPE. It does not make that projection a lower bound on a
+/// real row, and the arm no longer claims it does: the probe row carries every
+/// column of the branch union, while `serving::router::shape_rows` omits a
+/// `required: false` column that the branch which actually ran did not return.
+/// A real row can be narrower than this one.
+fn probe_value(ty: &str) -> serde_json::Value {
+    match crate::openapi_gen::json_type(ty) {
+        "boolean" => serde_json::Value::Bool(true),
+        "integer" => serde_json::Value::from(1),
+        "number" => serde_json::Value::from(1.0),
+        // Everything `json_type` does not recognise, which it maps to `string`.
+        _ => serde_json::Value::from("x"),
+    }
+}
+
+/// The `params` dict a probe hands the script: every declared parameter at its
+/// [`representative_value`], as JSON, in the shape publish's SQL probes already
+/// bind it in.
+///
+/// The `iterated` branch is [`context_with`]'s, one type along: that function
+/// inserts a one-element LIST for a parameter any statement of the endpoint
+/// iterates and a scalar for every other, and it is handed the same
+/// [`IteratedParams`] this is. Asking the set rather than guessing is what stops
+/// publish's two probes of ONE endpoint disagreeing about whether `region` is a
+/// list — the script would then be probed against a shape the rendered SQL says
+/// it is not.
+fn probe_params(
+    iterated: &IteratedParams,
+    params: &[ParamSpec],
+) -> BTreeMap<String, serde_json::Value> {
+    params
+        .iter()
+        .map(|p| {
+            let value = crate::transform::param_json(&representative_value(p));
+            let value = if iterated.contains(&p.name) {
+                serde_json::Value::Array(vec![value])
+            } else {
+                value
+            };
+            (p.name.clone(), value)
+        })
+        .collect()
+}
+
 /// An author's `default` must satisfy its own declared type (spec §5, T7-6).
 ///
 /// Coerced through the **same function the serving path uses**, deliberately —
@@ -1642,6 +2324,7 @@ fn validate_endpoint(
     output: &OutputSpec,
     delegated: bool,
     impersonate: bool,
+    script_eval: ScriptEval,
 ) -> std::result::Result<IteratedParams, ValidationError> {
     egret_dataapi_api::validate_statements(statements)?;
     // Cheap, and about the whole endpoint rather than any one statement: which
@@ -1651,6 +2334,27 @@ fn validate_endpoint(
     // becomes a frozen contract, and nothing in the schema constrains this
     // column.
     egret_dataapi_api::validate_envelope(output)?;
+    // `output.transform`, checked ONCE here rather than once per statement in
+    // the loop below. `output` is a property of the ENDPOINT, not of any one
+    // statement — and unlike `check_constraints` over `params` (a pure
+    // comparison, cheap to repeat), the second half of it runs a Starlark
+    // interpreter over the script's module top level. Inside the loop, an
+    // endpoint at `MAX_STATEMENTS` would parse-and-evaluate the same script up
+    // to 16 times. Once here bounds the whole endpoint's transform cost by ONE
+    // evaluation, matching `validate_envelope` right above it — both are
+    // endpoint-wide properties of `output`, not per-statement rules.
+    //
+    // The two halves are separate calls because ONE caller must skip the second:
+    // publish re-runs this whole function against a row it has LOCKED, inside an
+    // open transaction, and `MAX_WALL_CLOCK` is a 2 s bound on ticks rather than
+    // a latency guarantee — `run_transform` records a script measured at 28.8 s
+    // against it. Evaluating there would hold the endpoint's row lock and a pool
+    // connection for that long, per publish, from author-supplied Starlark. See
+    // `ScriptEval`.
+    check_transform_shape(output)?;
+    if script_eval == ScriptEval::Here {
+        check_transform_script(output)?;
+    }
     // Every statement through every scan except the contract rule below. The
     // scans come before ANY render for the reason `check_definition_scans`
     // records: they are what bounds the cost of the rendering, and they cost
@@ -1790,6 +2494,22 @@ fn check_definition_scans(
 /// [`SiblingStatements`] is what keeps "informs the shape and nothing else"
 /// structural rather than documented: its text is private to this module, so no
 /// caller can render, bind or execute it. See its own comment.
+///
+/// # `output` is checked for its TRANSFORM and applied to nothing (C2)
+///
+/// [`check_transform`] runs here, and it is the same call [`validate_endpoint`]
+/// makes — the only production call site there was. Everything it refuses (a
+/// script that does not parse, an empty or duplicated `returns`, a transform
+/// beside a non-default `shape` or `naming`) is a publish refusal that no write
+/// route checks, so a draft could be saved, previewed GREEN, and refused only
+/// at publish.
+///
+/// What does NOT happen here is running the script: `crate::preview` has one
+/// statement's rows and no statement names, and `transform::run_transform`
+/// takes every statement's rows keyed by name. The full argument, including the
+/// two ways a partial `statements` dict answers wrongly, is in the
+/// `crate::preview` module comment.
+///
 /// `pub(crate)` rather than `pub`, because it now returns [`IteratedParams`] —
 /// and that type is deliberately crate-private, so that "the shape a definition
 /// is validated against" cannot be constructed, or a second one computed,
@@ -1798,6 +2518,7 @@ pub(crate) fn validate_preview(
     sql: &str,
     siblings: &SiblingStatements,
     params: &[ParamSpec],
+    output: &OutputSpec,
 ) -> std::result::Result<IteratedParams, ValidationError> {
     // FIRST, before the scan of `sql` and long before any render, and against
     // the same number publish uses: `siblings` is a list from a request body,
@@ -1816,6 +2537,24 @@ pub(crate) fn validate_preview(
             },
         ));
     }
+    // `output.transform`, in the position [`validate_endpoint`] checks it from
+    // — after the statement-list rule and before any per-statement scan — so an
+    // author who breaks both is told about the same one first on both paths.
+    //
+    // This is an endpoint-wide rule about `output`, exactly as it is for
+    // publish, so it is called here rather than added to
+    // `check_definition_scans`: that runs once per statement, and this parses
+    // AND evaluates the script's module top level under a real Starlark
+    // interpreter. See `check_transform`'s own comment for the cost argument.
+    //
+    // The other endpoint-wide `output` rule, `validate_envelope`, is
+    // deliberately NOT here, and the asymmetry is a fact about where each is
+    // enforced rather than a preference: `envelope` is checked by the create
+    // and PATCH routes on the way in, so no draft an author can be looking at
+    // carries a bad one. `check_transform` has exactly one production call
+    // site (`validate_endpoint`), so before this a script that does not parse
+    // could be SAVED, previewed green, and refused only at publish.
+    check_transform(output)?;
     // Only `sql` is SCANNED. The siblings are not this preview's statement:
     // they are already stored, they were scanned when they were written, and
     // re-refusing one here would block previewing the statement the author is
@@ -1843,7 +2582,11 @@ pub(crate) fn validate_preview(
 /// shape and nothing else" is a property of the type rather than a rule someone
 /// has to remember — the same move [`IteratedParams`] makes for the shape
 /// itself.
-#[derive(Debug, Default, serde::Deserialize)]
+// `Clone` so `crate::preview::run` can move the whole draft onto a blocking
+// thread (see that module's section on the inline evaluation). It does not
+// weaken the containment argument above: cloning a `SiblingStatements` produces
+// another `SiblingStatements`, which still has no accessor for its text.
+#[derive(Debug, Default, Clone, serde::Deserialize)]
 #[serde(transparent)]
 pub struct SiblingStatements(Vec<String>);
 
@@ -2428,6 +3171,14 @@ fn projection_has_uncast_marker(rest: &str) -> bool {
 /// described and their UNION is frozen, each column carrying whether every
 /// branch returns it. See [`branch_renderings`] for which renderings that is and
 /// [`describe_branches`] for how they are folded together.
+///
+/// # And the transform is probe-RUN, after the columns are known
+///
+/// [`validate_endpoint`] has already refused a transform publish cannot parse.
+/// What it could not do is run one: a probe needs rows, rows need columns, and
+/// the columns are what the loop below resolves. So [`probe_transform`] is
+/// called at the end of this function — still exactly once per endpoint, and
+/// still before `EndpointStore::publish` opens its transaction.
 pub async fn validate(
     port: &dyn egret_query_api::QueryExecPort,
     workspace: Uuid,
@@ -2446,6 +3197,7 @@ pub async fn validate(
         &draft.output,
         delegated,
         impersonate,
+        ScriptEval::Here,
     )?;
 
     // Enumerate every statement's branches before describing any of them, and
@@ -2524,6 +3276,18 @@ pub async fn validate(
             columns: described.union,
         });
     }
+    // Last, once for the endpoint, and only now: the probe builds its rows from
+    // the columns the loop above resolved, so it cannot run before them. Two
+    // script evaluations against synthetic rows — see `probe_transform` for why
+    // both, for what a green probe does and does not prove, and for why this is
+    // the right side of `EndpointStore::publish`'s transaction to spend them on.
+    probe_transform(
+        &draft.output,
+        &frozen,
+        &draft.params,
+        &iterated,
+        &draft.limits,
+    )?;
     Ok(frozen)
 }
 
@@ -2561,9 +3325,32 @@ pub(crate) struct DescribedBranches {
 /// What is left after this bound is up to ~122 ms of SYNCHRONOUS rendering on an
 /// async task, and it is deliberately not wrapped in `spawn_blocking`.
 ///
-/// The reason is that the cost is **bounded and authenticated** — publish and
-/// preview both sit behind `data_api_endpoint:manage`, and this constant is what
-/// makes the upper bound a number rather than a function of the request. It is
+/// **Publish only, since C2 Task 8.** `crate::preview` now runs the whole of
+/// [`validate_preview`] on a blocking thread, because adding
+/// [`check_transform`] to that path raised the bound past what the argument
+/// below can carry — a Starlark module evaluation is bounded by
+/// `transform::MAX_WALL_CLOCK` (2 s nominal, 28.8 s measured for a
+/// tick-expensive script), not by this constant. That is the redo this note
+/// asks for, and it is written up in `crate::preview`. What is left inline is
+/// `POST …/validate` and `publish` — which run the SAME Starlark evaluation, on
+/// the async worker, and inherit the same problem. It is pre-existing (C2 Tasks
+/// 4 and 5 put it there) and is recorded rather than fixed here.
+///
+/// **One half of it WAS fixed, and the distinction matters.** Until the C2 fix
+/// wave, `publish` ran that evaluation from inside its own transaction, after
+/// `SELECT … FOR UPDATE` — so a tick-expensive script held the endpoint's row
+/// lock and a pool connection for the same 28.8 s, not merely a worker. That is
+/// closed: the evaluation is hoisted above `begin()` and the in-transaction
+/// re-validation is passed [`ScriptEval::AlreadyRunBeforeTheLock`], with
+/// `pin_no_starlark_evaluation_inside_publishs_transaction` to keep it there.
+/// What remains is worker occupancy on two `data_api_endpoint:manage` routes —
+/// the same shape `crate::preview` moved to a blocking thread, and the obvious
+/// next step for these two.
+///
+/// The reason is that the cost is **bounded and authenticated** — the paths
+/// that still do this inline sit behind `data_api_endpoint:manage`, and this
+/// constant is what makes the RENDERING's upper bound a number rather than a
+/// function of the request. It is
 /// ~122 ms per STATEMENT, and it took
 /// [`egret_dataapi_api::MAX_STATEMENTS`] to make the endpoint's total a number
 /// too: measured at 121 ms × N, it reached 31.6 s at 256 statements. It is
@@ -2571,10 +3358,12 @@ pub(crate) struct DescribedBranches {
 /// awaited describe RELEASES the worker, so the runtime schedules other tasks
 /// for those milliseconds and only the one caller waits. This rendering OCCUPIES
 /// the worker — tokio cannot preempt it, every other task queued on that worker
-/// eats the whole spike, and an author calling preview in a loop holds one
-/// worker per in-flight request. Same magnitude, opposite effect on everything
-/// else running. If the bound ever rises, that reasoning has to be redone rather
-/// than carried over.
+/// eats the whole spike, and an author calling one of these routes in a loop
+/// holds one worker per in-flight request. Same magnitude, opposite effect on
+/// everything else running. If the bound ever rises, that reasoning has to be
+/// redone rather than carried over — which is exactly what happened above, so
+/// this paragraph now covers the rendering alone and no longer covers every
+/// caller.
 ///
 /// # Where the number comes from
 ///
@@ -3084,10 +3873,30 @@ impl EndpointStore {
         draft: &DataApiEndpointDto,
         described: Vec<StatementSnapshot>,
     ) -> Result<DataApiPublishedDto> {
+        // BEFORE the transaction, deliberately, and this is the placement
+        // decision rather than an accident of ordering. This is the only
+        // Starlark evaluation `publish` performs. `transform::MAX_WALL_CLOCK`
+        // is 2 s of TICKS and not a latency guarantee — `run_transform`
+        // records 28.8 s measured against it — so running it after `begin()`
+        // would hold the endpoint's row lock and a pool connection, on an async
+        // worker, for as long as an author's script takes.
+        //
+        // Run against the DRAFT, which is sound because of the identity check
+        // below: the transaction refuses with `Conflict` unless
+        // `current.output == draft.output`, so the script evaluated here is
+        // byte-identical to the script being frozen. The re-validation inside
+        // the transaction therefore passes `ScriptEval::AlreadyRunBeforeTheLock`
+        // and re-runs every structural rule and no interpreter.
+        //
+        // `pin_no_starlark_evaluation_inside_publishs_transaction` is what keeps
+        // this here: it reads this function's own text and fails if an
+        // evaluation appears between `begin()` and the commit.
+        check_transform_script(&draft.output)?;
+
         let mut tx = self.db.pool.begin().await.map_err(db_err)?;
 
         let current = self.locked(&mut tx, workspace, id).await?;
-        // The four inputs the resolved `columns` depend on. A change to any of
+        // The four inputs the resolved `columns` depend on, plus `limits`. A change to any of
         // them makes `columns` stale, which no amount of re-validation would
         // detect — only a fresh describe would, and that is the caller's to retry.
         //
@@ -3101,10 +3910,23 @@ impl EndpointStore {
         // `shape_rows` zips live against frozen by INDEX, so every branch but
         // the widest is a permanent `503`. Exactly the hole the paragraph above
         // describes closing for `cache.scope`, one field along.
+        //
+        // `limits` is the fifth, and it is here for a different reason: the
+        // resolved `columns` do not depend on it at all. `probe_transform`
+        // does — it projects a transform's measured per-row output growth
+        // against `limits.max_rows` and refuses a publish that cannot fit under
+        // the 1 MiB output cap — and that probe, like the describe, runs before
+        // this transaction. Without this clause an author could validate a
+        // transform at `max_rows: 100`, PATCH it to a million while the
+        // describes were in flight, and freeze a snapshot whose own numbers say
+        // it must fail. The re-validation below cannot catch it:
+        // `probe_transform` deliberately does NOT run inside this transaction —
+        // see its doc comment on where the evaluations are spent.
         if current.statements != draft.statements
             || current.database_id != draft.database_id
             || current.params != draft.params
             || current.output != draft.output
+            || current.limits != draft.limits
         {
             return Err(Error::Conflict(
                 "the endpoint was edited while it was being published; validate and publish again"
@@ -3154,6 +3976,10 @@ impl EndpointStore {
             &current.output,
             delegated,
             impersonate,
+            // The script was evaluated above, before this transaction opened,
+            // and the identity check above says the row locked here carries the
+            // same one. See `ScriptEval`.
+            ScriptEval::AlreadyRunBeforeTheLock,
         )?;
 
         // The name and the SQL come from `current` — the LOCKED row — and only
@@ -3447,7 +4273,7 @@ impl EndpointStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use egret_dataapi_api::{LimitsSpec, ParamLocation, RateLimitSpec};
+    use egret_dataapi_api::{LimitsSpec, ParamLocation, RateLimitSpec, TransformSpec};
 
     fn param(name: &str, ty: ParamType) -> ParamSpec {
         ParamSpec {
@@ -3480,7 +4306,17 @@ mod tests {
         sql: &str,
         params: &[ParamSpec],
     ) -> std::result::Result<IteratedParams, ValidationError> {
-        validate_preview(sql, &SiblingStatements::default(), params)
+        preview_with(sql, params, &OutputSpec::default())
+    }
+
+    /// A preview of a draft whose `output` is not the default — the transform
+    /// cases.
+    fn preview_with(
+        sql: &str,
+        params: &[ParamSpec],
+        output: &OutputSpec,
+    ) -> std::result::Result<IteratedParams, ValidationError> {
+        validate_preview(sql, &SiblingStatements::default(), params, output)
     }
 
     fn siblings(sqls: &[&str]) -> SiblingStatements {
@@ -3575,6 +4411,7 @@ mod tests {
             &OutputSpec::default(),
             false,
             false,
+            ScriptEval::Here,
         );
         let elapsed = started.elapsed();
         assert_eq!(
@@ -3616,7 +4453,8 @@ mod tests {
                 &cache(CacheScope::PerPrincipal),
                 &OutputSpec::default(),
                 false,
-                false
+                false,
+                ScriptEval::Here,
             ),
             // No statement loops over `region`, so it is a scalar for BOTH — the
             // set is what publish validated each of them against.
@@ -3684,7 +4522,8 @@ mod tests {
                 &cache(CacheScope::PerPrincipal),
                 &OutputSpec::default(),
                 false,
-                false
+                false,
+                ScriptEval::Here,
             ),
             Err(ValidationError::Render(
                 crate::render::RenderError::SequenceBind
@@ -3719,7 +4558,12 @@ mod tests {
         // by the SAME route, `IteratedParams` across every statement, so it is
         // the same conclusion rather than a second rule that agrees today.
         assert_eq!(
-            validate_preview(SUMMARY, &siblings(&[BY_REGION]), &params),
+            validate_preview(
+                SUMMARY,
+                &siblings(&[BY_REGION]),
+                &params,
+                &OutputSpec::default()
+            ),
             Err(ValidationError::Render(
                 crate::render::RenderError::SequenceBind
             )),
@@ -3728,7 +4572,13 @@ mod tests {
         // And the direction the fix must NOT go: previewing `by_region` itself,
         // with `summary` as its sibling, still passes. The union is a union — a
         // sibling that uses a parameter as a scalar does not un-iterate it.
-        assert!(validate_preview(BY_REGION, &siblings(&[SUMMARY]), &params).is_ok());
+        assert!(validate_preview(
+            BY_REGION,
+            &siblings(&[SUMMARY]),
+            &params,
+            &OutputSpec::default()
+        )
+        .is_ok());
     }
 
     /// Preview's shape decision must be the ENDPOINT's, name for name — not a
@@ -3760,15 +4610,21 @@ mod tests {
             &OutputSpec::default(),
             false,
             false,
+            ScriptEval::Here,
         )
         .expect("the §4.2 pair publishes");
         // `summary_all` never mentions `region`, so on its own the union is
         // EMPTY and preview would resolve a scalar where serving binds a list.
         assert!(preview(SUMMARY_ALL, &params).unwrap().names().is_empty());
         assert_eq!(
-            validate_preview(SUMMARY_ALL, &siblings(&[BY_REGION]), &params)
-                .unwrap()
-                .names(),
+            validate_preview(
+                SUMMARY_ALL,
+                &siblings(&[BY_REGION]),
+                &params,
+                &OutputSpec::default()
+            )
+            .unwrap()
+            .names(),
             published.names(),
         );
         assert_eq!(published.names(), ["region"]);
@@ -3790,13 +4646,13 @@ mod tests {
         // A `;`, a `#` and a DELETE — each of which `check_definition_scans`
         // refuses outright when it is the statement being previewed.
         let broken = siblings(&["DELETE FROM t; -- half typed # note"]);
-        assert!(validate_preview(ON_SCREEN, &broken, &params).is_ok());
+        assert!(validate_preview(ON_SCREEN, &broken, &params, &OutputSpec::default()).is_ok());
         // …while a sibling that DOES loop still counts, so "not scanned" has not
         // become "not read".
         let looping = siblings(&["SELECT region AS n FROM t WHERE region IN (\
              {% for x in region %}{{ x }}{% if not loop.last %},{% endif %}{% endfor %}); # oops"]);
         assert_eq!(
-            validate_preview(ON_SCREEN, &looping, &params)
+            validate_preview(ON_SCREEN, &looping, &params, &OutputSpec::default())
                 .unwrap()
                 .names(),
             ["region"],
@@ -3819,11 +4675,22 @@ mod tests {
         let refs: Vec<&str> = sqls.iter().map(String::as_str).collect();
         // One statement plus `MAX_STATEMENTS - 1` siblings is a describable
         // endpoint, and passes.
-        assert!(validate_preview("SELECT 1 AS n", &siblings(&refs[1..]), &[]).is_ok());
+        assert!(validate_preview(
+            "SELECT 1 AS n",
+            &siblings(&refs[1..]),
+            &[],
+            &OutputSpec::default()
+        )
+        .is_ok());
         // One more is an endpoint publish would refuse, refused here with the
         // same error and the same numbers.
         assert_eq!(
-            validate_preview("SELECT 1 AS n", &siblings(&refs), &[]),
+            validate_preview(
+                "SELECT 1 AS n",
+                &siblings(&refs),
+                &[],
+                &OutputSpec::default()
+            ),
             Err(ValidationError::Statement(
                 egret_dataapi_api::StatementError::TooManyStatements {
                     count: egret_dataapi_api::MAX_STATEMENTS + 1,
@@ -3835,7 +4702,12 @@ mod tests {
         // does: a body carrying too many siblings is refused for the count even
         // when the statement on screen is itself unpublishable.
         assert_eq!(
-            validate_preview("SELECT 1; DROP TABLE t", &siblings(&refs), &[]),
+            validate_preview(
+                "SELECT 1; DROP TABLE t",
+                &siblings(&refs),
+                &[],
+                &OutputSpec::default()
+            ),
             Err(ValidationError::Statement(
                 egret_dataapi_api::StatementError::TooManyStatements {
                     count: egret_dataapi_api::MAX_STATEMENTS + 1,
@@ -3870,7 +4742,8 @@ mod tests {
                 &cache(CacheScope::PerPrincipal),
                 &OutputSpec::default(),
                 false,
-                false
+                false,
+                ScriptEval::Here,
             ),
             // ONE statement loops over `region` and that is enough: the set is
             // the endpoint's, and `summary_all` was validated against it.
@@ -5179,5 +6052,1296 @@ mod tests {
         };
         assert_eq!(l.max_rows, 1);
         assert_eq!(r.burst, 1);
+    }
+
+    // -----------------------------------------------------------------
+    // check_transform (C2 Task 4) — publish refuses a transform it cannot
+    // honour
+    // -----------------------------------------------------------------
+
+    /// Build an [`OutputSpec`] carrying `script` as its transform, with one
+    /// declared `total: bigint` return column.
+    ///
+    /// `OutputSpec` does not derive `Default` (see its own doc comment, and
+    /// `check_transform`'s), so this starts from `OutputSpec::default()` —
+    /// the same construction every neighbouring test in this module already
+    /// uses (`the_statement_bound_is_checked_before_anything_renders` and
+    /// its siblings) — rather than naming every field by hand.
+    fn transformed_output(script: &str) -> OutputSpec {
+        OutputSpec {
+            transform: Some(TransformSpec {
+                script: script.into(),
+                returns: vec![ColumnSpec {
+                    name: "total".into(),
+                    ty: "bigint".into(),
+                    required: true,
+                }],
+            }),
+            ..OutputSpec::default()
+        }
+    }
+
+    #[test]
+    fn a_transform_alongside_shape_or_naming_is_refused() {
+        // Once a script decides the shape, `shape` and `naming` are dead or
+        // ambiguous — does `naming: camel` apply before the script sees the
+        // rows, or to the keys the script wrote? Refuse rather than pick.
+        let mut o = transformed_output("def transform(params, statements):\n  return {}");
+        o.shape = "arrays".into();
+        let err = check_transform(&o).expect_err("arrays plus a transform");
+        assert!(err.to_string().contains("shape"), "{err}");
+
+        let mut p = transformed_output("def transform(params, statements):\n  return {}");
+        p.naming = "camel".into();
+        assert!(
+            check_transform(&p).is_err(),
+            "naming plus a transform must be refused too"
+        );
+    }
+
+    #[test]
+    fn a_transform_with_objects_and_as_is_is_accepted() {
+        // The defaults must not be read as "the author asked for a shape".
+        let o = transformed_output("def transform(params, statements):\n  return {}");
+        assert_eq!(o.shape, "objects");
+        assert_eq!(o.naming, "as_is");
+        assert!(check_transform(&o).is_ok());
+    }
+
+    #[test]
+    fn an_empty_returns_is_refused() {
+        // A transform with no declared output has no contract at all, and
+        // serving would have nothing to check against — it would fail OPEN.
+        let mut o = transformed_output("def transform(params, statements):\n  return {}");
+        o.transform.as_mut().unwrap().returns.clear();
+        assert!(check_transform(&o).is_err());
+    }
+
+    #[test]
+    fn two_returns_with_one_name_are_refused() {
+        let mut o = transformed_output("def transform(params, statements):\n  return {}");
+        let r = &mut o.transform.as_mut().unwrap().returns;
+        r.push(ColumnSpec {
+            name: "total".into(),
+            ty: "bigint".into(),
+            required: true,
+        });
+        r.push(ColumnSpec {
+            name: "total".into(),
+            ty: "varchar".into(),
+            required: true,
+        });
+        let err = check_transform(&o).expect_err("duplicate name");
+        assert!(err.to_string().contains("total"), "{err}");
+    }
+
+    /// The `returns` cap, with both numbers.
+    ///
+    /// `returns` was the only author-controlled list in this module with no
+    /// bound at all — `MAX_STATEMENTS` is 16, `MAX_DECLARED_PARAMS` is 32,
+    /// `MAX_TRANSFORM_SCRIPT_BYTES` is 8192 — and the cost of an unbounded one
+    /// lands on SERVING, not on publish: `check_returns` scans it once per
+    /// returned field on every request.
+    #[test]
+    fn more_returns_than_the_cap_are_refused_with_both_numbers() {
+        let mut o = transformed_output("def transform(params, statements):\n  return {}");
+        let r = &mut o.transform.as_mut().unwrap().returns;
+        r.clear();
+        for i in 0..=MAX_TRANSFORM_RETURNS {
+            r.push(ColumnSpec {
+                name: format!("c{i}"),
+                ty: "bigint".into(),
+                required: true,
+            });
+        }
+        match check_transform(&o) {
+            Err(ValidationError::TransformReturnsTooMany { count, limit }) => {
+                assert_eq!(count, MAX_TRANSFORM_RETURNS + 1);
+                assert_eq!(limit, MAX_TRANSFORM_RETURNS);
+            }
+            other => panic!("expected TransformReturnsTooMany, got {other:?}"),
+        }
+    }
+
+    /// Exactly at the cap is allowed, so the test above discriminates a limit
+    /// rather than a blanket refusal.
+    #[test]
+    fn returns_exactly_at_the_cap_are_allowed() {
+        let mut o = transformed_output("def transform(params, statements):\n  return {}");
+        let r = &mut o.transform.as_mut().unwrap().returns;
+        r.clear();
+        for i in 0..MAX_TRANSFORM_RETURNS {
+            r.push(ColumnSpec {
+                name: format!("c{i}"),
+                ty: "bigint".into(),
+                required: true,
+            });
+        }
+        assert_eq!(check_transform(&o), Ok(()));
+    }
+
+    /// A blank `name` is refused as blank, **not** as a duplicate.
+    ///
+    /// Two unnamed rows used to reach the duplicate rule and publish with
+    /// ``declares `` more than once`` — a refusal quoting a column that does not
+    /// exist, for an author who has two rows on screen and no idea which one is
+    /// meant. And a SINGLE unnamed row published happily, becoming an OpenAPI
+    /// property with an empty name.
+    ///
+    /// The single-row half is what makes this test worth having: it is refused
+    /// now and could never have been refused by the duplicate rule.
+    #[test]
+    fn a_blank_return_name_is_refused_as_blank_even_when_there_is_only_one() {
+        let mut o = transformed_output("def transform(params, statements):\n  return {}");
+        let r = &mut o.transform.as_mut().unwrap().returns;
+        r.clear();
+        r.push(ColumnSpec {
+            name: "   ".into(),
+            ty: "bigint".into(),
+            required: true,
+        });
+        assert_eq!(
+            check_transform(&o),
+            Err(ValidationError::TransformReturnsBlankName),
+            "a whitespace-only name is blank, not a name"
+        );
+
+        let mut two = transformed_output("def transform(params, statements):\n  return {}");
+        let r = &mut two.transform.as_mut().unwrap().returns;
+        r.clear();
+        for _ in 0..2 {
+            r.push(ColumnSpec {
+                name: String::new(),
+                ty: "bigint".into(),
+                required: true,
+            });
+        }
+        assert_eq!(
+            check_transform(&two),
+            Err(ValidationError::TransformReturnsBlankName),
+            "two unnamed rows are two unnamed rows, not a duplicate of `\"\"`"
+        );
+    }
+
+    /// `"total"` and `"total "` are refused, not published as two columns.
+    ///
+    /// The editor already flagged this pair as a collision while publish
+    /// accepted it — a disagreement in the direction that is hardest to notice,
+    /// because the author sees a warning, publishes anyway, and gets a contract
+    /// with two indistinguishable property names. Refusing the padded name is
+    /// what makes the two agree, and it is also what makes
+    /// `check_transform_shape`'s verbatim duplicate comparison and the editor's
+    /// trimmed one the same comparison.
+    #[test]
+    fn a_whitespace_padded_return_name_is_refused_rather_than_trimmed() {
+        let mut o = transformed_output("def transform(params, statements):\n  return {}");
+        let r = &mut o.transform.as_mut().unwrap().returns;
+        r.clear();
+        r.push(ColumnSpec {
+            name: "total".into(),
+            ty: "bigint".into(),
+            required: true,
+        });
+        r.push(ColumnSpec {
+            name: "total ".into(),
+            ty: "bigint".into(),
+            required: true,
+        });
+        match check_transform(&o) {
+            Err(ValidationError::TransformReturnsPaddedName(name)) => {
+                assert_eq!(name, "total ", "the refusal must quote the name as written");
+            }
+            other => panic!("expected TransformReturnsPaddedName, got {other:?}"),
+        }
+    }
+
+    /// `ScriptEval::AlreadyRunBeforeTheLock` really does skip the interpreter.
+    ///
+    /// Both halves matter and neither is enough alone. `Here` must refuse a
+    /// script that does not parse — otherwise the skip is not a skip, it is the
+    /// evaluation having quietly stopped happening at all. And
+    /// `AlreadyRunBeforeTheLock` must ACCEPT the same endpoint, which is the
+    /// only observable difference between "publish evaluates Starlark under its
+    /// row lock" and "publish does not".
+    ///
+    /// The structural rules still run under the skip — the third assertion —
+    /// so this is a narrower claim than "the transform is not checked".
+    #[test]
+    fn the_script_evaluation_is_skipped_only_when_the_caller_says_it_already_ran() {
+        let statements = vec![StatementSpec {
+            name: "rows".into(),
+            sql: "SELECT id FROM t".into(),
+        }];
+        let unparseable = transformed_output("def transform(params, statements)\n  return {}");
+
+        assert!(
+            matches!(
+                validate_endpoint(
+                    &statements,
+                    &[],
+                    &cache(CacheScope::PerPrincipal),
+                    &unparseable,
+                    false,
+                    false,
+                    ScriptEval::Here,
+                ),
+                Err(ValidationError::TransformScriptInvalid(_))
+            ),
+            "the evaluating caller must still refuse a script that does not parse"
+        );
+
+        assert!(
+            validate_endpoint(
+                &statements,
+                &[],
+                &cache(CacheScope::PerPrincipal),
+                &unparseable,
+                false,
+                false,
+                ScriptEval::AlreadyRunBeforeTheLock,
+            )
+            .is_ok(),
+            "publish's in-transaction re-validation must run no interpreter — a refusal \
+             here means the Starlark evaluation is back inside the locked transaction"
+        );
+
+        let mut shape_broken = unparseable.clone();
+        shape_broken.shape = "arrays".into();
+        assert_eq!(
+            validate_endpoint(
+                &statements,
+                &[],
+                &cache(CacheScope::PerPrincipal),
+                &shape_broken,
+                false,
+                false,
+                ScriptEval::AlreadyRunBeforeTheLock,
+            ),
+            Err(ValidationError::TransformWithShapeOrNaming("shape")),
+            "skipping the interpreter must not skip the comparisons: the re-validation \
+             against the locked row is still a re-validation"
+        );
+    }
+
+    /// **No Starlark evaluation happens inside `EndpointStore::publish`'s
+    /// transaction**, read off this file's own text.
+    ///
+    /// A source scan rather than a behavioural test, and the reason is that the
+    /// property is about WHERE a call sits, not about what it returns: publish
+    /// needs a database, and every observable difference between evaluating
+    /// before `begin()` and evaluating after it is a matter of how long a lock
+    /// is held. `there_is_exactly_one_place_that_parses_starlark`
+    /// (`crate::transform`) is the same instrument for the same kind of claim.
+    ///
+    /// It asserts its own markers were found before it asserts anything about
+    /// them, so a renamed function or a restructured transaction fails loudly
+    /// here instead of passing on an empty search.
+    ///
+    /// **This is a text scan of `publish`'s own body, not of the functions it
+    /// calls — it has a blind spot.** The second assertion below finds
+    /// `check_transform_script(&draft.output)?;` in the slice of source text
+    /// between `publish`'s signature and `begin()`. Anyone who lifts that
+    /// in-transaction re-validation into a helper function moves the call site
+    /// (and the `check_transform_script(`/`eval_probe(`/… markers the first
+    /// loop searches for) out of the scanned window entirely. The evaluation
+    /// could then move back inside the lock — the exact regression this test
+    /// exists to catch — while this test reads a `publish` body that no longer
+    /// mentions any forbidden call and goes green.
+    #[test]
+    fn pin_no_starlark_evaluation_inside_publishs_transaction() {
+        let src = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("src")
+                .join("lifecycle.rs"),
+        )
+        .expect("this file must be readable");
+
+        let start_marker = "let mut tx = self.db.pool.begin().await.map_err(db_err)?;";
+        let begin = src
+            .find(start_marker)
+            .expect("publish's `begin()` must be findable; if it moved, this test must move too");
+        let commit = src[begin..]
+            .find("tx.commit()")
+            .expect("publish's commit must be findable")
+            + begin;
+        assert!(
+            commit > begin,
+            "the commit must come after the begin, or the window below is empty"
+        );
+
+        let window = &src[begin..commit];
+        for forbidden in [
+            "check_transform(",
+            "check_transform_script(",
+            "eval_probe(",
+            "run_transform(",
+            "probe_transform(",
+        ] {
+            assert!(
+                !window.contains(forbidden),
+                "`{forbidden}` appears between publish's `begin()` and its commit. \
+                 transform::MAX_WALL_CLOCK is 2 s of TICKS, not of time — 28.8 s measured \
+                 for a tick-expensive script — so an evaluation there holds the endpoint's \
+                 row lock and a pool connection for as long as an author's script takes. \
+                 See `ScriptEval`."
+            );
+        }
+
+        // The other half: the evaluation must still HAPPEN, above the lock.
+        // Without this the property is satisfiable by deleting the check.
+        let publish_start = src
+            .find("    pub async fn publish(")
+            .expect("`publish` must be findable by name");
+        assert!(
+            src[publish_start..begin].contains("check_transform_script(&draft.output)?;"),
+            "publish must still evaluate the script — above `begin()`, against the draft the identity check then proves identical to the locked row"
+        );
+    }
+
+    #[test]
+    fn a_script_that_does_not_parse_is_the_authors_400_not_the_callers_500() {
+        let o = transformed_output("def transform(params, statements)\n  return {}");
+        assert!(matches!(
+            check_transform(&o),
+            Err(ValidationError::TransformScriptInvalid(_))
+        ));
+    }
+
+    #[test]
+    fn a_script_longer_than_the_cap_is_refused_with_both_numbers() {
+        let long = format!(
+            "def transform(params, statements):\n  # {}\n  return {{}}",
+            "x".repeat(MAX_TRANSFORM_SCRIPT_BYTES)
+        );
+        match check_transform(&transformed_output(&long)) {
+            Err(ValidationError::TransformScriptTooLong { bytes, cap }) => {
+                assert!(
+                    bytes > cap,
+                    "the error must carry both numbers: {bytes} vs {cap}"
+                )
+            }
+            other => panic!("expected TransformScriptTooLong, got {other:?}"),
+        }
+    }
+
+    /// **Proves `check_transform` is reachable from the real publish path,
+    /// not only callable in isolation.**
+    ///
+    /// `validate_endpoint` is the private function both `POST …/validate` and
+    /// `EndpointStore::publish` go through — see its own doc comment. Calling
+    /// it directly here, with one valid statement and a transform declared
+    /// alongside `output.shape: arrays`, is that path minus the database and
+    /// the engine: everything before the first render, which is exactly
+    /// where `check_transform` lives.
+    ///
+    /// A unit test on `check_transform` alone cannot tell whether anything
+    /// still calls it — this is the test the Task 4 plan's Step 5 asks for.
+    /// Commenting out `check_transform`'s call site inside
+    /// `check_definition_scans` and re-running this test is what that step
+    /// is: it must turn the endpoint below GREEN (published) for the missing
+    /// call to be caught, rather than staying red for an unrelated reason.
+    #[test]
+    fn an_endpoint_with_a_transform_and_arrays_shape_is_refused_end_to_end() {
+        let statements = vec![StatementSpec {
+            name: "rows".into(),
+            sql: "SELECT id FROM t".into(),
+        }];
+        let mut output = transformed_output("def transform(params, statements):\n  return {}");
+        output.shape = "arrays".into();
+
+        let got = validate_endpoint(
+            &statements,
+            &[],
+            &cache(CacheScope::PerPrincipal),
+            &output,
+            false,
+            false,
+            ScriptEval::Here,
+        );
+        assert_eq!(
+            got,
+            Err(ValidationError::TransformWithShapeOrNaming("shape")),
+            "a transform alongside output.shape: arrays must be refused at the function \
+             both /validate and publish go through"
+        );
+    }
+
+    /// **Preview and publish refuse a transform with the IDENTICAL error**
+    /// (C2 Task 8).
+    ///
+    /// `check_transform` had exactly one production call site
+    /// (`validate_endpoint`), which meant every rule above was invisible until
+    /// publish: no write route checks a transform, so a script that does not
+    /// parse could be saved, previewed GREEN, and refused only when the author
+    /// pressed Publish. Told "fine", then told "no" — the defect this seam has
+    /// produced twice.
+    ///
+    /// `assert_eq!` on the two `Result`s against EACH OTHER, not two separate
+    /// `is_err()` calls: a preview that grew a second, weaker reading of the
+    /// same rule would satisfy "both refuse" while disagreeing about which
+    /// refusal, which is how the next disagreement gets in. Three rules rather
+    /// than one, because they are refused by three different `if` blocks and a
+    /// call site that reached only some of them is the plausible mistake.
+    ///
+    /// The `is_ok()` pair at the end is what stops the whole test passing on a
+    /// preview that simply refuses every transform.
+    #[test]
+    fn preview_and_publish_refuse_a_transform_with_the_identical_error() {
+        const SQL: &str = "SELECT id FROM t";
+        let statements = vec![StatementSpec {
+            name: "rows".into(),
+            sql: SQL.into(),
+        }];
+        let publish = |output: &OutputSpec| {
+            validate_endpoint(
+                &statements,
+                &[],
+                &cache(CacheScope::PerPrincipal),
+                output,
+                false,
+                false,
+                ScriptEval::Here,
+            )
+            .map(|_| ())
+        };
+
+        // Rule 5: a script that does not parse.
+        let unparseable = transformed_output("def transform(params, statements:\n");
+        // Rule 2: a transform beside a non-default `naming`.
+        let mut renamed = transformed_output("def transform(params, statements):\n  return {}");
+        renamed.naming = "camel".into();
+        // Rule 3: nothing declared for serving to check against.
+        let mut nothing_declared =
+            transformed_output("def transform(params, statements):\n  return {}");
+        nothing_declared.transform.as_mut().unwrap().returns.clear();
+
+        for output in [&unparseable, &renamed, &nothing_declared] {
+            let previewed = preview_with(SQL, &[], output).map(|_| ());
+            assert!(previewed.is_err(), "preview must refuse {output:?}");
+            assert_eq!(
+                previewed,
+                publish(output),
+                "preview and publish must reach the same refusal, from the same rule"
+            );
+        }
+
+        // And the one both accept, so none of the above passes by refusing
+        // transforms wholesale.
+        let good =
+            transformed_output("def transform(params, statements):\n  return {\"total\": 1}");
+        assert!(preview_with(SQL, &[], &good).is_ok());
+        assert!(publish(&good).is_ok());
+    }
+
+    /// **Pins the refusal ORDER `check_transform` documents.** Each rule is
+    /// mutation-proven individually by the tests above, but none of them says
+    /// anything about ORDER: swapping two `if` blocks inside `check_transform`
+    /// would still make every one of those tests pass, because each feeds a
+    /// definition that violates exactly one rule. Order is load-bearing for
+    /// the same reason C1's was — an author whose script breaks two rules at
+    /// once should be told the one they can act on FIRST, per the function's
+    /// own doc comment — so this feeds definitions that violate TWO rules at
+    /// once and asserts which refusal comes back, with `assert_eq!` on the
+    /// exact payload rather than `matches!` with a wildcard, so a swap is
+    /// caught by a value mismatch rather than merely an `is_err()`.
+    #[test]
+    fn the_documented_refusal_order_holds_when_multiple_rules_are_violated() {
+        // Rule 1 (script length) vs rule 5 (parse), the two bookends of the
+        // documented order. This script is BOTH over the cap AND unparseable
+        // (missing the `:` after the `def` header) — length must still win.
+        let unparseable_and_long = format!(
+            "def transform(params, statements)
+  # {}
+  return {{}}",
+            "x".repeat(MAX_TRANSFORM_SCRIPT_BYTES)
+        );
+        let bytes = unparseable_and_long.len();
+        assert_eq!(
+            check_transform(&transformed_output(&unparseable_and_long)),
+            Err(ValidationError::TransformScriptTooLong {
+                bytes,
+                cap: MAX_TRANSFORM_SCRIPT_BYTES,
+            }),
+            "too long AND unparseable must be refused for its length, not its syntax"
+        );
+
+        // Rule 2 (shape/naming) vs rule 3 (empty returns): both violated at
+        // once — shape/naming must win.
+        let mut shape_and_empty_returns = transformed_output(
+            "def transform(params, statements):
+  return {}",
+        );
+        shape_and_empty_returns.shape = "arrays".into();
+        shape_and_empty_returns
+            .transform
+            .as_mut()
+            .unwrap()
+            .returns
+            .clear();
+        assert_eq!(
+            check_transform(&shape_and_empty_returns),
+            Err(ValidationError::TransformWithShapeOrNaming("shape")),
+            "output.shape: arrays AND an empty returns must be refused for the shape, \
+             not the empty list"
+        );
+
+        // Rule 2 (shape/naming) vs rule 4 (duplicate returns names): both
+        // violated at once — shape/naming must still win.
+        let mut shape_and_duplicate_returns = transformed_output(
+            "def transform(params, statements):
+  return {}",
+        );
+        shape_and_duplicate_returns.shape = "arrays".into();
+        shape_and_duplicate_returns
+            .transform
+            .as_mut()
+            .unwrap()
+            .returns
+            .push(ColumnSpec {
+                name: "total".into(),
+                ty: "varchar".into(),
+                required: true,
+            });
+        assert_eq!(
+            check_transform(&shape_and_duplicate_returns),
+            Err(ValidationError::TransformWithShapeOrNaming("shape")),
+            "output.shape: arrays AND a duplicate returns name must be refused for the \
+             shape, not the duplicate"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // probe_transform (C2 Task 5) — publish RUNS the script against
+    // synthetic rows and checks what comes back against `returns`
+    // -----------------------------------------------------------------
+
+    /// One described statement, as `validate` would hand it over: a name, the
+    /// SQL, and the columns `describe_as` resolved — never any data.
+    fn one_statement(name: &str) -> StatementSnapshot {
+        StatementSnapshot {
+            name: name.into(),
+            sql: "SELECT 1 AS a, 'x' AS b".into(),
+            columns: vec![
+                ColumnSpec {
+                    name: "a".into(),
+                    ty: "bigint".into(),
+                    required: true,
+                },
+                ColumnSpec {
+                    name: "b".into(),
+                    ty: "varchar".into(),
+                    required: true,
+                },
+            ],
+        }
+    }
+
+    /// No statement of the endpoint iterates any parameter — the shape every
+    /// probe test below wants except the one that is about the shape.
+    ///
+    /// Built through `IteratedParams::across`, the ONLY constructor, rather than
+    /// a hand-made empty value: a test that built the set a second way would
+    /// stop being a statement about the set publish actually computes.
+    fn not_iterated() -> IteratedParams {
+        IteratedParams::across(&[], &[])
+    }
+
+    /// The DEFAULT limits, spelled as `LimitsSpec`'s own serde defaults do —
+    /// `max_rows: 10_000` — so the probe tests below are about the transform
+    /// rather than about a row cap nobody set.
+    fn probe_limits(max_rows: u32) -> LimitsSpec {
+        LimitsSpec {
+            max_rows,
+            timeout_seconds: 30,
+        }
+    }
+
+    #[test]
+    fn a_script_that_does_not_produce_its_declared_returns_is_refused_at_publish() {
+        let mut o =
+            transformed_output("def transform(params, statements):\n  return {\"wrong\": 1}");
+        o.transform.as_mut().unwrap().returns = vec![ColumnSpec {
+            name: "total".into(),
+            ty: "bigint".into(),
+            required: true,
+        }];
+        let err = probe_transform(
+            &o,
+            &[one_statement("rows")],
+            &[],
+            &not_iterated(),
+            &probe_limits(10_000),
+        )
+        .expect_err("declared `total`, produced `wrong`");
+        assert!(
+            err.to_string().contains("total"),
+            "must name the missing field: {err}"
+        );
+    }
+
+    #[test]
+    fn an_optional_field_may_be_absent_but_an_undeclared_one_may_not() {
+        // M1's `required` flag, unchanged: absent-when-optional is fine, present-
+        // when-undeclared never is.
+        let mut o = transformed_output("def transform(params, statements):\n  return {\"a\": 1}");
+        o.transform.as_mut().unwrap().returns = vec![
+            ColumnSpec {
+                name: "a".into(),
+                ty: "bigint".into(),
+                required: true,
+            },
+            ColumnSpec {
+                name: "b".into(),
+                ty: "bigint".into(),
+                required: false,
+            },
+        ];
+        assert!(
+            probe_transform(
+                &o,
+                &[one_statement("rows")],
+                &[],
+                &not_iterated(),
+                &probe_limits(10_000)
+            )
+            .is_ok(),
+            "optional `b` may be absent"
+        );
+
+        let mut p =
+            transformed_output("def transform(params, statements):\n  return {\"a\": 1, \"z\": 2}");
+        p.transform.as_mut().unwrap().returns = vec![ColumnSpec {
+            name: "a".into(),
+            ty: "bigint".into(),
+            required: true,
+        }];
+        assert!(
+            probe_transform(
+                &p,
+                &[one_statement("rows")],
+                &[],
+                &not_iterated(),
+                &probe_limits(10_000)
+            )
+            .is_err(),
+            "undeclared `z` must be refused"
+        );
+    }
+
+    #[test]
+    fn the_empty_row_set_is_probed_too() {
+        // The commonest way a script's shape diverges. This script conforms with
+        // rows and returns a bare list without them — publish must catch that, and
+        // it can only catch it by running the empty case.
+        let mut o = transformed_output(
+            "def transform(params, statements):\n  \
+             if len(statements[\"rows\"]) == 0:\n    return []\n  \
+             return {\"total\": 1}",
+        );
+        o.transform.as_mut().unwrap().returns = vec![ColumnSpec {
+            name: "total".into(),
+            ty: "bigint".into(),
+            required: true,
+        }];
+        let err = probe_transform(
+            &o,
+            &[one_statement("rows")],
+            &[],
+            &not_iterated(),
+            &probe_limits(10_000),
+        )
+        .expect_err("the empty-rows branch returns a list, not the declared object");
+        assert!(
+            err.to_string().contains("empty"),
+            "the refusal must say WHICH probe failed, or an author cannot find it: {err}"
+        );
+    }
+
+    /// **What the populated probe supplies: exactly one row, keyed by the
+    /// described column names.**
+    ///
+    /// Asserted through a REFUSAL, not a success, and that is the whole design
+    /// of this test. The obvious version — a script that reads the row through
+    /// a `for` and returns something conformant — is **vacuous**: every
+    /// assertion inside the loop is conditional on a row existing, so stubbing
+    /// `probe_row` to `{}` leaves it green and supplying the populated probe
+    /// with NO rows leaves it green too. Measured, both times.
+    ///
+    /// No script can distinguish "the populated probe was given no rows" from
+    /// "this is the empty probe" — the two inputs would be identical — so the
+    /// only construction that pins row PRESENCE is one where seeing a row is
+    /// what produces the observable outcome. This script raises when it sees
+    /// one, carrying the count and the keys in its message; the empty probe
+    /// returns the declared object and stays silent. So:
+    ///
+    /// * populated probe empty → no failure at all → `expect_err` fires;
+    /// * `probe_row` stubbed to `{}` → the keys in the message change;
+    /// * more than one row → the count in the message changes.
+    #[test]
+    fn probe_rows_are_built_from_the_described_columns_not_from_data() {
+        let o = transformed_output(
+            "def transform(params, statements):\n  \
+             rows = statements[\"rows\"]\n  \
+             if len(rows) > 0:\n    \
+             fail(\"saw \" + str(len(rows)) + \" row(s) keyed \" + str(sorted(rows[0].keys())))\n  \
+             return {\"total\": 0}",
+        );
+        match probe_transform(
+            &o,
+            &[one_statement("rows")],
+            &[],
+            &not_iterated(),
+            &probe_limits(10_000),
+        ) {
+            Err(ValidationError::TransformOutputMismatch { context, detail }) => {
+                assert_eq!(
+                    context, SINGLE_ROW_PROBE,
+                    "the empty probe returns the declared object and cannot be what failed"
+                );
+                // `one_statement("rows")` describes exactly `a` and `b`, and the
+                // probe supplies exactly one row of them.
+                assert!(
+                    detail.contains("saw 1 row(s) keyed [\"a\", \"b\"]"),
+                    "the probe row must be ONE row keyed by the described columns: {detail}"
+                );
+            }
+            other => panic!(
+                "the populated probe must have supplied a row for the script to see, got \
+                 {other:?}"
+            ),
+        }
+    }
+
+    /// **A script that assumes at least one row is refused, and that is the
+    /// point of the empty probe.**
+    ///
+    /// A query returning nothing is not an error — it is a Tuesday — so
+    /// `statements["rows"][0]` is an endpoint that answers 500 the first time a
+    /// filter matches nothing. Only the empty probe can see it: the script is
+    /// perfectly well-formed, parses, and satisfies `returns` for every input
+    /// that has a row in it.
+    #[test]
+    fn a_script_that_indexes_row_zero_without_checking_is_refused() {
+        let o = transformed_output(
+            "def transform(params, statements):\n  \
+             return {\"total\": len(statements[\"rows\"][0])}",
+        );
+        match probe_transform(
+            &o,
+            &[one_statement("rows")],
+            &[],
+            &not_iterated(),
+            &probe_limits(10_000),
+        ) {
+            Err(ValidationError::TransformOutputMismatch { context, detail }) => {
+                assert_eq!(
+                    context, EMPTY_ROWS_PROBE,
+                    "the populated probe is perfectly happy with this script"
+                );
+                assert!(
+                    detail.contains("out of bound") && detail.contains("transform.star:2"),
+                    "the author needs starlark's own words, and the LINE: {detail}"
+                );
+            }
+            other => panic!("expected the empty probe to refuse this, got {other:?}"),
+        }
+    }
+
+    /// The probe row's VALUES: `a bigint` arrives as an int, `b varchar` as a
+    /// string — what `probe_value` promises through `openapi_gen::json_type`,
+    /// and what a second, drifting type mapping would break.
+    ///
+    /// Reported the same way as the test above, and for the same reason: a
+    /// script that checks the types INSIDE a `for` asserts nothing when there
+    /// is no row, so it passes with `probe_row` stubbed to `{}` and passes with
+    /// the populated probe emptied. Raising with the types in the message means
+    /// the absence of a row is a failed `expect_err`, not a silent pass.
+    #[test]
+    fn the_stand_in_value_matches_the_columns_declared_type() {
+        let o = transformed_output(
+            "def transform(params, statements):\n  \
+             rows = statements[\"rows\"]\n  \
+             if len(rows) > 0:\n    \
+             fail(\"a=\" + type(rows[0][\"a\"]) + \" b=\" + type(rows[0][\"b\"]))\n  \
+             return {\"total\": 0}",
+        );
+        match probe_transform(
+            &o,
+            &[one_statement("rows")],
+            &[],
+            &not_iterated(),
+            &probe_limits(10_000),
+        ) {
+            Err(ValidationError::TransformOutputMismatch { context, detail }) => {
+                assert_eq!(context, SINGLE_ROW_PROBE);
+                assert!(
+                    detail.contains("a=int b=string"),
+                    "`a bigint` must arrive as an int and `b varchar` as a string: {detail}"
+                );
+            }
+            other => panic!("the populated probe must have supplied a row, got {other:?}"),
+        }
+    }
+
+    /// **A parameter the endpoint's SQL iterates reaches the script as a
+    /// one-element LIST; every other one reaches it as a scalar.**
+    ///
+    /// Not a preference — an agreement. `context_with` already binds exactly
+    /// this set as a one-element list for the renders that DESCRIBE the
+    /// statement, from the same `IteratedParams`, so a probe that handed the
+    /// script a bare string for `region` would be probing it against a shape
+    /// the rendered SQL says the endpoint does not have. Two probes of one
+    /// endpoint, one publish, two answers.
+    ///
+    /// `since` is in the same list of declared parameters and is NOT iterated
+    /// by any statement, which is what makes this a test about the set rather
+    /// than about wrapping everything.
+    #[test]
+    fn a_parameter_the_sql_iterates_reaches_the_script_as_a_list() {
+        const SQL: &str = "SELECT 1 AS a FROM t WHERE r IN (\
+             {% for x in region %}{{ x }}{% if not loop.last %},{% endif %}{% endfor %}) \
+             AND d > {{ since }}";
+        let params = vec![
+            param("region", ParamType::String),
+            param("since", ParamType::String),
+        ];
+        let iterated = IteratedParams::across(&[SQL], &params);
+        assert!(
+            iterated.contains("region") && !iterated.contains("since"),
+            "the premise: this SQL iterates `region` and binds `since` as a scalar"
+        );
+
+        let o = transformed_output(
+            "def transform(params, statements):\n  \
+             fail(\"region=\" + type(params[\"region\"]) + \" since=\" + type(params[\"since\"]))",
+        );
+        match probe_transform(
+            &o,
+            &[one_statement("rows")],
+            &params,
+            &iterated,
+            &probe_limits(10_000),
+        ) {
+            Err(ValidationError::TransformOutputMismatch { context, detail }) => {
+                assert_eq!(context, SINGLE_ROW_PROBE);
+                assert!(
+                    detail.contains("region=list since=string"),
+                    "the iterated parameter must arrive as a list and the scalar one as a \
+                     scalar: {detail}"
+                );
+            }
+            other => panic!("the script raises on every input, got {other:?}"),
+        }
+    }
+
+    /// The exact refusal, as a VALUE — context and detail both.
+    ///
+    /// `assert_eq!` on the whole payload rather than a `contains`, because this
+    /// is the test that pins three separate decisions at once and each of them
+    /// is invisible to an `is_err()`: which probe is named, that a
+    /// `required: false` field missing from the output is NOT reported, and that
+    /// the undeclared names are listed in a sorted order rather than in
+    /// whichever order the script's dict happened to iterate.
+    #[test]
+    fn the_refusal_names_the_probe_and_every_field_that_disagrees() {
+        let mut o =
+            transformed_output("def transform(params, statements):\n  return {\"z\": 1, \"a\": 2}");
+        o.transform.as_mut().unwrap().returns = vec![
+            ColumnSpec {
+                name: "total".into(),
+                ty: "bigint".into(),
+                required: true,
+            },
+            ColumnSpec {
+                name: "opt".into(),
+                ty: "bigint".into(),
+                required: false,
+            },
+        ];
+        assert_eq!(
+            probe_transform(
+                &o,
+                &[one_statement("rows")],
+                &[],
+                &not_iterated(),
+                &probe_limits(10_000)
+            ),
+            Err(ValidationError::TransformOutputMismatch {
+                context: SINGLE_ROW_PROBE.to_owned(),
+                detail: "it does not return the declared field(s) `total`; and it returns the \
+                         undeclared field(s) `a`, `z`"
+                    .to_owned(),
+            }),
+        );
+    }
+
+    /// A script that RAISES is attributed to the probe that ran it, not
+    /// reported as a shape mismatch.
+    #[test]
+    fn a_script_that_fails_while_running_names_the_probe_that_ran_it() {
+        let o = transformed_output(
+            "def transform(params, statements):\n  \
+             if len(statements[\"rows\"]) == 0:\n    fail(\"boom\")\n  \
+             return {\"total\": 1}",
+        );
+        match probe_transform(
+            &o,
+            &[one_statement("rows")],
+            &[],
+            &not_iterated(),
+            &probe_limits(10_000),
+        ) {
+            Err(ValidationError::TransformOutputMismatch { context, detail }) => {
+                assert_eq!(
+                    context, EMPTY_ROWS_PROBE,
+                    "only the empty probe reaches `fail`"
+                );
+                assert!(
+                    detail.contains("boom"),
+                    "the author's own message: {detail}"
+                );
+            }
+            other => panic!("expected the empty probe to report the failure, got {other:?}"),
+        }
+    }
+
+    /// **The 1 MiB output cap, surfaced at publish rather than at serving.**
+    ///
+    /// Task 3 flagged this exact case: `MAX_TRANSFORM_OUTPUT_BYTES` will refuse
+    /// a legitimate pass-through transform on a large `max_rows` endpoint, and
+    /// the author should learn it here — where they can still change something —
+    /// rather than from a caller's 500.
+    ///
+    /// The last assertion is the one that makes the message honest: `fits` is
+    /// not decoration, it is a `max_rows` this endpoint actually publishes at.
+    #[test]
+    fn a_pass_through_transform_over_a_large_max_rows_is_refused_at_publish() {
+        let mut o = transformed_output(
+            "def transform(params, statements):\n  return {\"rows\": statements[\"rows\"]}",
+        );
+        o.transform.as_mut().unwrap().returns = vec![ColumnSpec {
+            name: "rows".into(),
+            ty: "varchar".into(),
+            required: true,
+        }];
+        match probe_transform(
+            &o,
+            &[one_statement("rows")],
+            &[],
+            &not_iterated(),
+            &probe_limits(1_000_000),
+        ) {
+            Err(ValidationError::TransformOutputExceedsRowLimit {
+                per_row,
+                max_rows,
+                projected,
+                cap,
+                fits,
+            }) => {
+                assert_eq!(cap, 1 << 20, "the cap the message quotes is the real one");
+                assert_eq!(max_rows, 1_000_000);
+                // `{"rows":[{"a":1,"b":"x"}]}` minus `{"rows":[]}`.
+                assert_eq!(per_row, 15, "measured, not assumed");
+                assert_eq!(
+                    projected,
+                    11 + 15 * 1_000_000,
+                    "base bytes plus the growth, both measured"
+                );
+                assert!(fits > 0 && fits < max_rows, "a usable number: {fits}");
+                assert_eq!(
+                    probe_transform(
+                        &o,
+                        &[one_statement("rows")],
+                        &[],
+                        &not_iterated(),
+                        &probe_limits(fits)
+                    ),
+                    Ok(()),
+                    "the max_rows the refusal tells the author to use must actually publish"
+                );
+                assert!(
+                    probe_transform(
+                        &o,
+                        &[one_statement("rows")],
+                        &[],
+                        &not_iterated(),
+                        &probe_limits(fits + 1)
+                    )
+                    .is_err(),
+                    "and it must be the LARGEST one that does"
+                );
+            }
+            other => panic!("expected TransformOutputExceedsRowLimit, got {other:?}"),
+        }
+    }
+
+    /// The projection is about GROWTH, so a script that aggregates is untouched
+    /// however large `max_rows` is. Without this, "refuse what cannot fit" could
+    /// be implemented as "refuse a big `max_rows`", which would refuse the one
+    /// thing a response transform is actually for.
+    #[test]
+    fn an_aggregating_transform_is_never_refused_for_its_row_limit() {
+        let o = transformed_output(
+            "def transform(params, statements):\n  \
+             return {\"total\": len(statements[\"rows\"])}",
+        );
+        assert_eq!(
+            probe_transform(
+                &o,
+                &[one_statement("rows")],
+                &[],
+                &not_iterated(),
+                &probe_limits(u32::MAX)
+            ),
+            Ok(()),
+            "output that does not grow with the rows has nothing to project"
+        );
+    }
+
+    /// The projection counts the rows SERVING will fetch, not the number the
+    /// author typed. `serving::router` clamps `max_rows` to `MAX_ROWS_CEILING`
+    /// before the engine ever sees it, so projecting against a raw `u32` would
+    /// quote an author a number of rows their endpoint can never return.
+    #[test]
+    fn the_projection_uses_the_row_count_serving_will_actually_fetch() {
+        let mut o = transformed_output(
+            "def transform(params, statements):\n  return {\"rows\": statements[\"rows\"]}",
+        );
+        o.transform.as_mut().unwrap().returns = vec![ColumnSpec {
+            name: "rows".into(),
+            ty: "varchar".into(),
+            required: true,
+        }];
+        match probe_transform(
+            &o,
+            &[one_statement("rows")],
+            &[],
+            &not_iterated(),
+            &probe_limits(u32::MAX),
+        ) {
+            Err(ValidationError::TransformOutputExceedsRowLimit { max_rows, .. }) => {
+                assert_eq!(
+                    max_rows,
+                    crate::serving::router::MAX_ROWS_CEILING,
+                    "the refusal must quote the clamped count, not u32::MAX"
+                );
+            }
+            other => panic!("expected TransformOutputExceedsRowLimit, got {other:?}"),
+        }
+    }
+
+    /// An endpoint with no transform is not probed at all — the whole feature
+    /// is invisible to every endpoint that does not use it.
+    #[test]
+    fn an_endpoint_without_a_transform_is_not_probed() {
+        assert_eq!(
+            probe_transform(
+                &OutputSpec::default(),
+                &[one_statement("rows")],
+                &[],
+                &not_iterated(),
+                &probe_limits(u32::MAX)
+            ),
+            Ok(())
+        );
+    }
+
+    /// A `QueryExecPort` that describes two columns and can do nothing else.
+    ///
+    /// `execute_as` is unreachable by construction: publish DESCRIBES, it never
+    /// executes, and the probe rows are built from the description. If this
+    /// panic ever fires, publish has started reading data.
+    struct DescribeOnlyPort;
+
+    #[async_trait::async_trait]
+    impl egret_query_api::QueryExecPort for DescribeOnlyPort {
+        async fn describe_as(
+            &self,
+            _ws: Uuid,
+            _database_id: Uuid,
+            _principal: UserId,
+            _sql: &str,
+        ) -> std::result::Result<Vec<egret_core::ColumnMeta>, Error> {
+            Ok(vec![
+                egret_core::ColumnMeta {
+                    name: "a".into(),
+                    ty: "bigint".into(),
+                },
+                egret_core::ColumnMeta {
+                    name: "b".into(),
+                    ty: "varchar".into(),
+                },
+            ])
+        }
+
+        /// Overridden rather than left to the trait default, which REFUSES a
+        /// parameterised describe — and a conditional statement renders to one.
+        /// The default's refusal would reach a test as an `Internal`, which is
+        /// indistinguishable from the probe failing for a reason the test is
+        /// about.
+        async fn describe_as_with_params(
+            &self,
+            ws: Uuid,
+            database_id: Uuid,
+            principal: UserId,
+            sql: &str,
+            _param_count: usize,
+        ) -> std::result::Result<Vec<egret_core::ColumnMeta>, Error> {
+            self.describe_as(ws, database_id, principal, sql).await
+        }
+
+        async fn execute_as(
+            &self,
+            _ws: Uuid,
+            _database_id: Uuid,
+            _principal: UserId,
+            _sql: &str,
+            _limits: egret_query_api::Limits,
+        ) -> std::result::Result<egret_core::TabularResult, Error> {
+            unreachable!("publish must not execute a statement to probe a transform")
+        }
+    }
+
+    /// A draft carrying `output`, with one statement and no parameters.
+    fn draft_with(output: OutputSpec, limits: LimitsSpec) -> DataApiEndpointDto {
+        DataApiEndpointDto {
+            id: Uuid::new_v4(),
+            folder_id: None,
+            name: "probe".into(),
+            description: String::new(),
+            path: "probe".into(),
+            method: "GET".into(),
+            database_id: Uuid::new_v4(),
+            statements: vec![StatementSpec {
+                name: "rows".into(),
+                sql: "SELECT 1 AS a, 'x' AS b FROM t".into(),
+            }],
+            params: vec![],
+            output,
+            cache: cache(CacheScope::PerPrincipal),
+            limits,
+            rate_limit: RateLimitSpec {
+                per_key_qps: 0,
+                burst: 0,
+                per_endpoint_qps: 0,
+            },
+            source_kind: "manual".into(),
+            source_ref: None,
+            live_version_id: None,
+            state: "draft".into(),
+            created_by: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            deleted_at: None,
+        }
+    }
+
+    /// **Proves the probe is reachable from the real publish path, not only
+    /// callable in isolation** — the Task 4 test one function along, for the
+    /// check that costs an evaluation rather than a comparison.
+    ///
+    /// `validate` is what `POST …/validate` and `EndpointStore::publish` both go
+    /// through (via `validated_draft`), and it is where the described columns
+    /// exist, so it is the only place this check can be wired. Deleting the
+    /// `probe_transform` call at the end of `validate` must turn this test
+    /// green-with-a-published-endpoint — that is the mutation, and a unit test
+    /// on `probe_transform` alone cannot see it.
+    #[tokio::test]
+    async fn the_probe_runs_on_the_path_validate_and_publish_share() {
+        let draft = draft_with(
+            transformed_output("def transform(params, statements):\n  return {\"wrong\": 1}"),
+            probe_limits(10_000),
+        );
+        let err = validate(
+            &DescribeOnlyPort,
+            Uuid::new_v4(),
+            UserId::new(),
+            &draft,
+            false,
+            false,
+        )
+        .await
+        .expect_err("the script declares `total` and returns `wrong`");
+        let message = err.to_string();
+        assert!(
+            message.contains("total") && message.contains(SINGLE_ROW_PROBE),
+            "the publish path must carry the probe's own refusal: {message}"
+        );
+    }
+
+    /// **The shape the probe binds comes from the ENDPOINT's own
+    /// `IteratedParams`, not from a set the probe made up.**
+    ///
+    /// `a_parameter_the_sql_iterates_reaches_the_script_as_a_list` builds that
+    /// set itself, so it cannot see a `validate` that passes a fresh empty one
+    /// to `probe_transform` — the shape would then be decided twice, once for
+    /// the renders and once, differently, for the script. This drives the real
+    /// `validate`, whose SQL iterates `region`, and asserts the script saw a
+    /// list.
+    #[tokio::test]
+    async fn the_probe_binds_the_shape_the_endpoints_own_sql_decided() {
+        let mut draft = draft_with(
+            transformed_output(
+                "def transform(params, statements):\n  \
+                 fail(\"region=\" + type(params[\"region\"]))",
+            ),
+            probe_limits(10_000),
+        );
+        draft.params = vec![param("region", ParamType::String)];
+        draft.statements = vec![StatementSpec {
+            name: "rows".into(),
+            sql: "SELECT 1 AS a FROM t WHERE r IN (\
+                  {% for x in region %}{{ x }}{% if not loop.last %},{% endif %}{% endfor %})"
+                .into(),
+        }];
+
+        let err = validate(
+            &DescribeOnlyPort,
+            Uuid::new_v4(),
+            UserId::new(),
+            &draft,
+            false,
+            false,
+        )
+        .await
+        .expect_err("the script raises on every input");
+        assert!(
+            err.to_string().contains("region=list"),
+            "publish renders this statement with `region` as a one-element list, so the \
+             script must see one too: {err}"
+        );
+    }
+
+    /// The same path, with a script that conforms: it publishes, and the frozen
+    /// snapshot is unchanged by the probe.
+    #[tokio::test]
+    async fn a_conforming_script_validates_and_freezes_the_described_columns() {
+        let draft = draft_with(
+            transformed_output(
+                "def transform(params, statements):\n  \
+                 return {\"total\": len(statements[\"rows\"])}",
+            ),
+            probe_limits(10_000),
+        );
+        let frozen = validate(
+            &DescribeOnlyPort,
+            Uuid::new_v4(),
+            UserId::new(),
+            &draft,
+            false,
+            false,
+        )
+        .await
+        .expect("a conforming transform publishes");
+        assert_eq!(frozen.len(), 1);
+        assert_eq!(
+            frozen[0]
+                .columns
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b"],
+            "the probe must not change what publish freezes"
+        );
     }
 }

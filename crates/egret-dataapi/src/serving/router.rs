@@ -35,9 +35,9 @@
 //! # Cancellation: decided, not deferred
 //!
 //! `QueryExecPort::execute_as_with_params` takes no `CancellationToken`
-//! parameter, so `limits.timeout` is this handler's whole budget. **The decision
-//! is not to add one**, because the port already owns the mechanism a
-//! caller-supplied token would duplicate:
+//! parameter, and for the ENGINE half of a request `limits.timeout` is this
+//! handler's whole budget. **The decision is not to add one**, because the port
+//! already owns the mechanism a caller-supplied token would duplicate:
 //!
 //! * `port_impl::run_bounded` — shared by `execute_as` and
 //!   `execute_as_with_params`, which is why the wrapper cannot be present on one
@@ -52,6 +52,38 @@
 //!   with no token threaded anywhere.
 //! * Trino additionally bounds the coordinator with `query_max_run_time`,
 //!   derived from the same `limits.timeout`.
+//!
+//! # A transform is the ONE piece of this handler the paragraph above does not
+//! # cover, and it is not covered by anything else either
+//!
+//! Two sentences up there were true of every request until C2 and are not true
+//! of a request whose endpoint carries a response transform. Stated here rather
+//! than left to be inferred from [`TRANSFORM_REQUEST_DEADLINE`], because this is
+//! the text a reader meets first:
+//!
+//! * **`limits.timeout` is not the whole budget.** A transformed request costs
+//!   N statement timeouts *plus* up to [`TRANSFORM_REQUEST_DEADLINE`].
+//! * **Dropping the handler's future does not release the transform.** The
+//!   evaluation runs on `tokio::task::spawn_blocking`; dropping the `JoinHandle`
+//!   DETACHES the task, and `JoinHandle::abort` cannot stop a blocking task that
+//!   has started either. So a client disconnect — and the deadline itself —
+//!   stops the WAITING, never the work.
+//!
+//! **What a detached transform keeps holding**, which is the part that decides
+//! how the 5 s should be read: one of the blocking pool's 512 default threads,
+//! the statement rows MOVED into it (up to `limits.max_rows`, ceiling
+//! [`MAX_ROWS_CEILING`]), and its starlark heap — until `transform::MAX_TICKS`
+//! or `transform::MAX_WALL_CLOCK` fires, measured at **28.8 s** for a
+//! tick-expensive script and not bounded at all for a tickless loop.
+//!
+//! **And the consequence nobody states when they pick a short deadline:
+//! answering at 5 s invites the retry.** The caller gets a fast 500 and can
+//! re-issue immediately, which re-runs the SQL and stacks a SECOND uncancellable
+//! thread on top of the first; the endpoint's published rate limit is then the
+//! only admission bound on how many pile up. The honest 28.8 s wait would have
+//! self-throttled by simply not answering. The 5 s is still the right trade —
+//! see [`TRANSFORM_REQUEST_DEADLINE`] for why it is not 2 s — but it is a trade,
+//! and this is the half of it that is invisible from the constant.
 //!
 //! **Note what is NOT the mechanism, because it reads like it is.**
 //! `port_impl::execute_as` does create a `CancellationToken` and call
@@ -152,8 +184,10 @@
 //! published limit is the endpoint's admission control, and a client that
 //! exhausts it should not be able to keep pulling cached rows out of it.
 
+use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::extract::{Extension, Path, RawQuery, State};
 use axum::http::{HeaderMap, Method, StatusCode};
@@ -162,6 +196,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use egret_dataapi_api::{
     compare_column_types, ColumnSpec, EndpointSnapshot, OutputSpec, StatementSnapshot,
+    TransformSpec,
 };
 use egret_metastore::Db;
 use serde::Serialize;
@@ -185,12 +220,87 @@ use crate::try_it::TrialActor;
 /// in memory. Clamping is the honest reading of spec §7's "the serving path must
 /// sanity-check `limits.max_rows` and `limits.timeout_seconds` before acting on
 /// them".
-const MAX_ROWS_CEILING: u32 = 1_000_000;
+pub(crate) const MAX_ROWS_CEILING: u32 = 1_000_000;
 
 /// Upper bound applied to a snapshot's `limits.timeout_seconds`. Same reasoning
 /// as [`MAX_ROWS_CEILING`]; a 0 would make every call time out instantly and an
 /// unbounded one would pin a connection for as long as the author felt like.
 const TIMEOUT_CEILING_SECS: u64 = 300;
+
+/// How long a REQUEST waits for a response transform before it is answered 500.
+///
+/// # This is the serving path's own deadline, and it has to be
+///
+/// `transform::MAX_WALL_CLOCK` is 2 s and reads like a latency bound. It is not
+/// one, and that function's own doc says so from measurement: the deadline is
+/// polled every 1000 starlark ticks, so a script whose ticks are individually
+/// expensive overruns it — **1000 sorts of a 200 000-element list ran 28.8 s
+/// against the 2 s budget**, and a tickless string-doubler was still running at
+/// 6.8 s. A serving path that treated the evaluator's budget as its own would
+/// promise a 2 s worst case and deliver half a minute.
+///
+/// So the request gets a deadline of its own, here, denominated in the thing a
+/// caller experiences. 5 s rather than 2 s because it must not be TIGHTER than
+/// the evaluator's honest budget: a script that legitimately runs close to
+/// `MAX_WALL_CLOCK` and finishes must be served, not cut off by a race between
+/// two clocks measuring the same work.
+///
+/// # What this bounds, and what it does not
+///
+/// It bounds **the request**. It does not bound the CPU: a `spawn_blocking` task
+/// cannot be cancelled, so an overrunning script keeps burning a blocking thread
+/// until starlark's own tick check stops it, and the caller has already been
+/// answered by then. Two consequences worth stating rather than discovering:
+///
+/// * the tokio blocking pool is bounded (512 threads by default), so a flood of
+///   pathological scripts can saturate it, and the queue is what would then
+///   slow unrelated blocking work. The bound is a real one; nothing here makes
+///   it unbounded, and `MAX_TICKS`/`MAX_WALL_CLOCK` are what eventually free
+///   each thread;
+/// * the evaluation is on a blocking thread precisely BECAUSE of the 28.8 s
+///   measurement. `run_transform` is synchronous and CPU-bound; calling it
+///   inline would hold a tokio worker thread for that whole time, stalling every
+///   unrelated request scheduled on it. The stack story is unchanged —
+///   `transform::MAX_JSON_DEPTH` is calibrated against the 2 MiB stack tokio
+///   gives worker AND blocking threads alike.
+const TRANSFORM_REQUEST_DEADLINE: Duration = Duration::from_secs(5);
+
+/// The deadline one request gives its transform, as a value rather than as a
+/// constant read at the call site.
+///
+/// # Why this exists at all
+///
+/// Exactly the reason `transform::Budgets` is a struct: **a limit with no
+/// injection point cannot be tested.** With [`TRANSFORM_REQUEST_DEADLINE`] read
+/// directly inside [`transformed_data`], the only way to reach the timeout arm
+/// was to wait five seconds of real time, so nothing did — and *deleting the
+/// `tokio::time::timeout` wrapper entirely killed no test at all*. That is the
+/// same shape as a budget that is never binding: present in the source, absent
+/// from the guarantees.
+///
+/// # Non-test code cannot express a weakened deadline
+///
+/// The field is private and the only constructor that takes a value is
+/// `#[cfg(test)]`, so the sole `TransformDeadline` a shipped binary can build is
+/// [`TransformDeadline::default`] — the constant above. A relaxation that is
+/// unrepresentable is better than one a reviewer has to remember to look for,
+/// which is the argument `Budgets` already makes for itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TransformDeadline(Duration);
+
+impl Default for TransformDeadline {
+    fn default() -> Self {
+        Self(TRANSFORM_REQUEST_DEADLINE)
+    }
+}
+
+#[cfg(test)]
+impl TransformDeadline {
+    /// A deadline a test can actually reach. Not available to a shipped build.
+    fn of(d: Duration) -> Self {
+        Self(d)
+    }
+}
 
 /// `status` in the envelope (spec §4.4).
 ///
@@ -959,6 +1069,9 @@ async fn run(
     // One count per statement, in the published order, because `meta` reports
     // them per statement (spec §4.4) and the cache stores them that way.
     let mut row_counts: Vec<u64> = Vec::with_capacity(snap.statements.len());
+    // Computed ONCE, outside the loop, and identical to `&snap.output` unless
+    // this endpoint has a transform — see [`shaping_output`].
+    let shaping = shaping_output(&snap.output);
     for stmt in &snap.statements {
         let (sql, binds) = crate::render::render(&stmt.sql, &resolved.values)
             .map_err(|e| render_error(e, resolved.has_repeats))?;
@@ -1002,7 +1115,7 @@ async fn run(
         // already succeeded: their rows are discarded rather than served beside
         // a partial failure. An endpoint that answers with three of its four
         // result sets and no error is a client silently reading a hole.
-        shaped.push((stmt.name.as_str(), shape_rows(&out, &snap.output, stmt)?));
+        shaped.push((stmt.name.as_str(), shape_rows(&out, &shaping, stmt)?));
         row_counts.push(out.row_count);
     }
 
@@ -1017,7 +1130,26 @@ async fn run(
     // thing that can refuse the call, and the "served" line used to sit above it
     // — so a drift or naming-collision 503 produced a log saying the request had
     // been served with N rows. That line now lives in `serve`, on the Ok arm.
-    let data = statements_data(shaped);
+    //
+    // A transform replaces `data` here, and it is the LAST thing that can refuse
+    // the call. Everything above still ran: the rows were shaped against each
+    // statement's frozen contract, so a drifted endpoint is a 503 whether or not
+    // it has a script, and a script never sees a row the drift check would have
+    // refused.
+    //
+    // **The transformed value is what is cached**, for the same reason the
+    // shaped value was: the alternative is a hit and a miss disagreeing about
+    // what the endpoint returns. It is safe because everything the script's
+    // output depends on is in the cache key or frozen beside it — the script and
+    // its `returns` come from `version`, the parameters from `resolved.key` —
+    // and because the value was checked against `returns` BEFORE it got here, so
+    // a refused response returns above this line and is never stored.
+    let data = match &snap.output.transform {
+        None => statements_data(shaped),
+        Some(spec) => {
+            transformed_data(spec, shaped, &resolved, TransformDeadline::default()).await?
+        }
+    };
     if let Some(ttl) = ttl {
         st.cache
             .put_at(key, Arc::new(data.clone()), row_counts.clone(), ttl, now);
@@ -1064,6 +1196,276 @@ fn statements_data(mut shaped: Vec<(&str, serde_json::Value)>) -> serde_json::Va
     )
 }
 
+/// The `output` a request's rows are SHAPED against.
+///
+/// `&snap.output` unchanged for every endpoint without a transform, which is the
+/// whole corpus published before C2 — so nothing about an untransformed
+/// response moves by one byte.
+///
+/// # With a transform, `shape` and `naming` are inert, and the script sees the
+/// canonical rows
+///
+/// Those two knobs describe how **`data`** is written. On a transformed endpoint
+/// `data` is whatever the script returned, described by `returns`; the rows never
+/// reach the wire at all. What they reach is the script — and publish's probe
+/// hands it `{column name: value}` objects built straight from the described
+/// columns (`lifecycle::probe_row`). If serving applied `naming: "camel"` here,
+/// a script probed against `total_revenue` would be called with `totalRevenue`
+/// and fail on every real request having passed publish green. That is the exact
+/// publish/serving disagreement `check_returns` is one function to avoid, one
+/// level in.
+///
+/// So a transformed endpoint is shaped `objects`/`as_is`, and the rest of
+/// `shape_rows` is untouched: containment, `required`, the type comparison, the
+/// row-arity guard, the live-duplicate refusal and the zero-column refusal all
+/// still run, because all six are properties of the frozen CONTRACT rather than
+/// of the two presentation knobs. Two clauses do not run, and both are
+/// presentation:
+///
+/// * the `arrays` path's ORDER-sensitive equality. Order matters to a positional
+///   wire row; a script is handed named objects, so there is no position for a
+///   reorder to move. Every NAME and TYPE clause still applies, via the
+///   `objects` path;
+/// * the `naming` collision refusal, which is vacuous under `as_is` —
+///   `apply_naming` is the identity, and publish already refuses two frozen
+///   columns of one name. Nothing can fold together, so there is nothing to
+///   refuse.
+fn shaping_output(output: &OutputSpec) -> Cow<'_, OutputSpec> {
+    if output.transform.is_none() {
+        return Cow::Borrowed(output);
+    }
+    Cow::Owned(OutputSpec {
+        shape: "objects".into(),
+        naming: "as_is".into(),
+        // Carried rather than defaulted. `shape_rows` reads neither of the last
+        // two fields, so this changes nothing today — and a value that is simply
+        // WRONG in a struct nobody reads yet is how it becomes wrong in the one
+        // that does.
+        envelope: output.envelope.clone(),
+        transform: None,
+    })
+}
+
+/// The rows one statement contributes to a script's `statements` dict.
+///
+/// [`shape_rows`] returns a JSON array on every `Ok` path, so the other arm is
+/// unreachable — and it is a `500` rather than an `expect`, because the cost of
+/// being wrong about "unreachable" inside a request handler is a panicking
+/// worker rather than a logged fault.
+fn rows_of(name: &str, shaped: serde_json::Value) -> Result<Vec<serde_json::Value>, ServingError> {
+    match shaped {
+        serde_json::Value::Array(rows) => Ok(rows),
+        other => Err(ServingError::internal(format!(
+            "statement `{name}` shaped to {} rather than an array of rows",
+            match other {
+                serde_json::Value::Object(_) => "an object",
+                serde_json::Value::Null => "null",
+                _ => "a scalar",
+            }
+        ))),
+    }
+}
+
+/// Run an endpoint's transform for THIS request, under the request's own
+/// deadline, and answer with what it returned.
+///
+/// Off the async worker and onto a blocking thread, with
+/// [`TRANSFORM_REQUEST_DEADLINE`] over the join handle — see that constant for
+/// the measurement both halves come from, and for what a deadline can and cannot
+/// bound when the work it is waiting on is uncancellable.
+///
+/// The `statements` dict is keyed **even at N = 1**, matching `run_transform`'s
+/// contract and publish's probe: a script that has to be rewritten when its
+/// author adds a second statement is a trap, so the shape does not change with
+/// the count. Note that this is the one place where `data` and the statement
+/// keying come apart — `statements_data` unwraps a single statement's rows onto
+/// the wire under no name, and the script never sees that unwrapping.
+async fn transformed_data(
+    spec: &TransformSpec,
+    shaped: Vec<(&str, serde_json::Value)>,
+    resolved: &params::Resolved,
+    deadline: TransformDeadline,
+) -> Result<serde_json::Value, ServingError> {
+    let mut statements: BTreeMap<String, Vec<serde_json::Value>> = BTreeMap::new();
+    for (name, value) in shaped {
+        statements.insert(name.to_string(), rows_of(name, value)?);
+    }
+
+    // Cloned into the task because `spawn_blocking` needs `'static`, and the
+    // rows are MOVED rather than cloned: `statements_data` is not called on this
+    // path, so nothing above needs them again. The clone is the script and its
+    // `returns` — bounded by what publish accepted, and once per request.
+    let spec = spec.clone();
+    let params = resolved.json.clone();
+    let has_repeats = resolved.has_repeats;
+    run_under_deadline(deadline, move || {
+        transform_response(&spec, &params, &statements, has_repeats)
+    })
+    .await
+}
+
+/// Run `work` on a blocking thread and stop WAITING for it at `deadline`.
+///
+/// Generic over the work for one reason, and it is a testing reason stated
+/// plainly: with `transform_response` called inline here, the only way to reach
+/// the `Elapsed` arm was to give a real starlark script real work to be too slow
+/// at — and that work then ran, detached, on a core the rest of the test binary
+/// was using. It took `transform::a_wide_shared_fan_out_is_stopped_by_the_output_deadline`
+/// from a measured 1-in-12 flake to 3-in-12. A seam here lets the test park a
+/// thread on a channel instead, which costs no CPU at all and is not a race.
+///
+/// Nothing else may use this seam. The one production caller is
+/// [`transformed_data`] directly above, and the closure it passes is the only
+/// thing this crate ever evaluates on a blocking thread.
+async fn run_under_deadline<F>(
+    deadline: TransformDeadline,
+    work: F,
+) -> Result<serde_json::Value, ServingError>
+where
+    F: FnOnce() -> Result<serde_json::Value, ServingError> + Send + 'static,
+{
+    let handle = tokio::task::spawn_blocking(work);
+    transform_outcome(tokio::time::timeout(deadline.0, handle).await, deadline)
+}
+
+/// What [`tokio::time::timeout`] over the join handle means, decided apart from
+/// the awaiting so that both refusal arms can be driven with REAL values.
+///
+/// The three nested `Result`s are exactly what `timeout(_, handle)` yields, and
+/// they are deliberately not flattened: `Elapsed` and `JoinError` are different
+/// facts about a request and the operator reads them differently, so collapsing
+/// them into one would be the second spelling of one outcome this file argues
+/// against everywhere else.
+///
+/// Both are [`ServingError::internal`]. A transform that did not finish is the
+/// endpoint failing to answer, not the caller failing to ask — the same reading
+/// [`transform_response`] argues for a script that raised.
+fn transform_outcome(
+    joined: Result<
+        Result<Result<serde_json::Value, ServingError>, tokio::task::JoinError>,
+        tokio::time::error::Elapsed,
+    >,
+    deadline: TransformDeadline,
+) -> Result<serde_json::Value, ServingError> {
+    match joined {
+        Ok(Ok(result)) => result,
+        // `run_transform` catches an evaluator unwind itself
+        // (`TransformError::Evaluator`), so this is a panic in the plumbing
+        // around it, or a runtime shutting down. Neither is the caller's doing.
+        Ok(Err(join)) => Err(ServingError::internal(format!(
+            "the response transform did not complete: {join}"
+        ))),
+        // The WAITING stopped here; the work did not. See the module comment —
+        // the blocking task is detached, keeps a pool thread and the rows it was
+        // handed, and this answer is what invites the caller to stack a second
+        // one on top of it.
+        Err(_) => Err(ServingError::internal(format!(
+            "the response transform exceeded the {} ms request deadline; the \
+             evaluator's own budget bounds ticks rather than time, so a script \
+             whose every tick is expensive can overrun it, and the run this \
+             stopped waiting for is still holding a blocking thread",
+            deadline.0.as_millis()
+        ))),
+    }
+}
+
+/// Run the script and hold what it returned to what the endpoint DECLARED.
+///
+/// # This is the guarantee, and publish's probe is not a substitute for it
+///
+/// `lifecycle::probe_transform` runs the script against one synthetic row per
+/// statement and against no rows, and says so. It cannot prove conformance for
+/// every future call, because a script's output shape may depend on the DATA —
+/// which is the whole reason `returns` is declared by the author rather than
+/// inferred. Three ways a probed-green script reaches here with something else,
+/// none of them hypothetical:
+///
+/// * **a branch on the data.** `if row["n"] > 0: return {...}` takes the other
+///   arm on Tuesday, and the probe's stand-in value chose one of them;
+/// * **a narrower row.** The probe row carries every column of the branch union;
+///   `shape_rows` omits a `required: false` column the branch that ran did not
+///   return, and a real cell can be `null` where a probe cell never is;
+/// * **a parameter in a shape the probe never showed.** See below.
+///
+/// So every response is checked, by [`crate::transform::check_returns`] — the
+/// SAME function publish probes with, deliberately, because a second reading of
+/// "does this match `returns`" could accept at publish what serving refuses and
+/// the endpoint would publish green and 500 in production.
+///
+/// # Every failure here is a 500, and none of them is a 400
+///
+/// The caller sent a valid request: it was authenticated, authorized, inside its
+/// rate limit, and its parameters coerced and rendered. What failed is the
+/// ENDPOINT — the author's script, or the declaration the author wrote about it.
+/// A 400 would blame the caller for that and, worse, write `param_invalid` into
+/// `access_log`, so the one table an operator reads to find a broken endpoint
+/// would report a client-side mistake instead. `ServingError` gains no variant
+/// for this: it is [`ServingError::internal`], exactly like a snapshot that
+/// carries no statements or a `default` that does not satisfy its own type, and
+/// the detail reaches the operator through `serve`'s `tracing::warn!` while the
+/// body stays the fixed `"internal error"`.
+///
+/// # A repeated query parameter, and why it is not coerced away
+///
+/// `resolve_supplied_with` binds a parameter as a LIST when the caller supplied
+/// it more than once, and as a scalar otherwise — unless a statement iterates it,
+/// in which case it is always a list. Publish's probe knows the iterated half
+/// exactly (`IteratedParams`, computed from the same SQL) and binds a scalar for
+/// everything else. **The gap is a parameter no statement iterates that the
+/// request repeated**: the probe showed the author a scalar, and the script is
+/// called with a list.
+///
+/// The gap is narrow, because most of it is already closed one layer up: if any
+/// statement uses such a parameter as a scalar (`{{ region }}`), the repeat
+/// fails to render as `RenderError::SequenceBind` and the request is a 400
+/// before a script runs at all (see [`render_error`]). What is left is a
+/// parameter every statement either ignores or only tests for truthiness.
+///
+/// **Serving binds what the request resolved, unchanged, and does not collapse a
+/// repeat to a scalar for the script's benefit.** The script's `params` and the
+/// statements' binds are two readings of one request, and the whole point of
+/// deriving both from one `as_list` decision in `resolve_supplied_with` is that
+/// they cannot say different things about what the caller sent. Collapsing here
+/// would hand the script `"EU"` while the SQL filtered on `EU` and `US` — a
+/// disagreement that produces a plausible 200 and no error anywhere, which is
+/// strictly worse than the fail-closed 500 it replaces.
+///
+/// So it fails closed, and `has_repeats` is folded into the LOG line rather than
+/// into the status: the operator reading a 500 on an endpoint that works for
+/// every single-valued call needs the one fact that distinguishes this call from
+/// those, and that fact is caller-controlled, so it may inform a message and must
+/// never choose a status (the defect [`render_error`] records at length).
+fn transform_response(
+    spec: &TransformSpec,
+    params: &BTreeMap<String, serde_json::Value>,
+    statements: &BTreeMap<String, Vec<serde_json::Value>>,
+    has_repeats: bool,
+) -> Result<serde_json::Value, ServingError> {
+    /// The note appended when a repeat could be what the script tripped over.
+    /// Author-facing detail for the log, never for a body.
+    const REPEAT_NOTE: &str = "; this request supplied at least one parameter more than once, so \
+                               a parameter publish probed as a scalar reached the script as a list";
+
+    let note = if has_repeats { REPEAT_NOTE } else { "" };
+
+    let value = crate::transform::run_transform(spec, params, statements)
+        .map_err(|e| ServingError::internal(format!("the response transform failed: {e}{note}")))?;
+
+    // The same rule publish probed with, run against the real response. A
+    // mismatch is refused rather than served: an undeclared field is a response
+    // the published contract and the generated document do not describe, and a
+    // missing declared one is a client reading `body["total"]` on a body that
+    // has no `total`.
+    crate::transform::check_returns(&value, &spec.returns).map_err(|detail| {
+        ServingError::internal(format!(
+            "the response transform returned a value that does not match the endpoint's \
+             declared `returns`: {detail}{note}"
+        ))
+    })?;
+
+    Ok(value)
+}
+
 /// What `meta` reports about the contract, given the snapshot and one row count
 /// per statement in the published order.
 ///
@@ -1078,11 +1480,32 @@ fn statements_data(mut shaped: Vec<(&str, serde_json::Value)>) -> serde_json::Va
 /// so `data` and `meta` cannot disagree about which of the two shapes this
 /// endpoint has.
 ///
+/// # A transform takes the keyed arm whatever its statement count, so that
+/// `row_count` is OMITTED
+///
+/// `meta` describes the SQL. `data`, on a transformed endpoint, is whatever the
+/// script returned — commonly a single object. `total_row_count()` still sums
+/// the statements, so a top-level `row_count` would be *consistent* with
+/// `meta.statements` and still be read by every consumer as "how many things are
+/// in `data`", which after a transform it is not. M2 already changed that
+/// field's meaning without changing its type; a field that is technically
+/// truthful and reliably misread is that hazard a second time, so a transformed
+/// endpoint does not publish one (spec's recommendation; the generated contract
+/// says so in Task 7).
+///
+/// The keyed arm is how it is omitted rather than a third variant, because it is
+/// exactly the right answer for the rest of `meta` too: a transformed endpoint's
+/// SQL is still N statements with N row counts and N frozen column lists, and
+/// keying them by name is the only shape that can say which is which. What it
+/// gives up is the `data`/`meta` correspondence above — deliberately, and only
+/// here: with a transform the two are two different truths, and pretending
+/// otherwise is what a top-level `row_count` would do.
+///
 /// `zip` is safe here because the caller checked the length: the miss path
 /// builds `row_counts` in the same loop that walks `snap.statements`, and the
 /// hit path compares the lengths and re-executes rather than truncating.
 fn meta_contract(snap: &EndpointSnapshot, row_counts: &[u64]) -> MetaContract {
-    if snap.statements.len() == 1 {
+    if snap.statements.len() == 1 && snap.output.transform.is_none() {
         return MetaContract::Single {
             row_count: row_counts.first().copied().unwrap_or(0),
             columns: snap.statements[0].columns.clone(),
@@ -3055,5 +3478,805 @@ mod tests {
         let logs = logs_from_statement_shaping(&renamed, &output, &rows);
         assert!(logs.contains("statement=rows"), "{logs}");
         assert!(logs.contains(r#"frozen=["id"]"#), "{logs}");
+    }
+
+    // -----------------------------------------------------------------------
+    // C2 Task 6 — a transform produces `data`, and fails closed
+    // -----------------------------------------------------------------------
+
+    /// A snapshot whose ONE statement is `main` returning `n`, carrying `script`
+    /// as its transform and `returns` as the output it declares.
+    fn transformed_snapshot(script: &str, returns: Vec<ColumnSpec>) -> EndpointSnapshot {
+        let base = snapshot_with_limits(1, 1);
+        EndpointSnapshot {
+            statements: vec![stmt(
+                "main",
+                "SELECT n FROM t",
+                vec![spec("n", "integer", true)],
+            )],
+            output: OutputSpec {
+                transform: Some(TransformSpec {
+                    script: script.into(),
+                    returns,
+                }),
+                ..OutputSpec::default()
+            },
+            ..base
+        }
+    }
+
+    /// `data` for a transformed snapshot, driven through the REAL function the
+    /// serving path calls — `transform_response`, which is what
+    /// `transformed_data` runs inside its `spawn_blocking`, and nothing else.
+    ///
+    /// The rows are keyed per statement exactly as `transformed_data` keys them,
+    /// so a script written against `statements["main"]` here is the script that
+    /// would run in production.
+    fn build_data(
+        snap: &EndpointSnapshot,
+        rows: Vec<serde_json::Value>,
+    ) -> Result<serde_json::Value, ServingError> {
+        build_data_with(snap, rows, &BTreeMap::new(), false)
+    }
+
+    fn build_data_with(
+        snap: &EndpointSnapshot,
+        rows: Vec<serde_json::Value>,
+        params: &BTreeMap<String, serde_json::Value>,
+        has_repeats: bool,
+    ) -> Result<serde_json::Value, ServingError> {
+        let spec = snap
+            .output
+            .transform
+            .as_ref()
+            .expect("this helper is for transformed fixtures");
+        let statements: BTreeMap<String, Vec<serde_json::Value>> = snap
+            .statements
+            .iter()
+            .map(|s| (s.name.clone(), rows.clone()))
+            .collect();
+        transform_response(spec, params, &statements, has_repeats)
+    }
+
+    /// The whole success body, serialised — the object a consumer actually
+    /// reads, built from the real envelope types and the real `meta_contract`.
+    fn build_body(
+        snap: &EndpointSnapshot,
+        row_counts: &[u64],
+        data: serde_json::Value,
+    ) -> serde_json::Value {
+        serde_json::to_value(ServingResponse {
+            status: ServingStatus::mirroring(StatusCode::OK),
+            message: None,
+            data,
+            meta: ServingMeta {
+                version: 3,
+                cached: false,
+                request_id: "req-1".into(),
+                contract: meta_contract(snap, row_counts),
+            },
+        })
+        .expect("the serving envelope serialises")
+    }
+
+    fn one_row() -> Vec<serde_json::Value> {
+        vec![serde_json::json!({"n": 7})]
+    }
+
+    /// What `params::resolve` returns for a request, carrying an
+    /// already-resolved `params` dict. Built through the real struct so a field
+    /// added to it is a compile error here rather than a default nobody chose.
+    fn resolved_with(json: BTreeMap<String, serde_json::Value>) -> params::Resolved {
+        params::Resolved {
+            values: crate::render::ParamValues::new(),
+            key: BTreeMap::new(),
+            has_repeats: false,
+            json,
+        }
+    }
+
+    /// **The real guarantee.**
+    ///
+    /// Publish's probe cannot prove a script always conforms — it runs against
+    /// synthetic rows and an empty set. This is what holds when the data is not
+    /// what the probe assumed, and the script below is written so the two
+    /// disagree on purpose: it returns the declared object for the probe's
+    /// stand-in `1` and an undeclared field for anything else, so it publishes
+    /// green and must still be refused here.
+    #[test]
+    fn a_transformed_response_is_validated_against_returns_and_fails_closed() {
+        let snap = transformed_snapshot(
+            "def transform(params, statements):\n  \
+             rows = statements[\"main\"]\n  \
+             if len(rows) == 0 or rows[0][\"n\"] == 1:\n    \
+             return {\"total\": 0}\n  \
+             return {\"surprise\": 1}",
+            vec![spec("total", "bigint", true)],
+        );
+
+        // The shape publish's probe sees: `probe_value("integer")` is 1.
+        assert_eq!(
+            build_data(&snap, vec![serde_json::json!({"n": 1})])
+                .expect("the probe's own row is what publish accepted"),
+            serde_json::json!({"total": 0}),
+        );
+
+        // A real row, and the same script answers something the endpoint never
+        // declared.
+        let err = build_data(&snap, one_row())
+            .expect_err("undeclared `surprise` must not reach a caller");
+        assert!(
+            matches!(err, ServingError::Internal { .. }),
+            "a response that contradicts `returns` is refused, not served: {err:?}"
+        );
+        assert!(
+            format!("{err:?}").contains("`surprise`"),
+            "the operator is told which field: {err:?}"
+        );
+    }
+
+    /// A missing declared field fails closed too, not only an extra one.
+    ///
+    /// Without this, a check that only looked for undeclared keys would pass
+    /// every assertion above while serving a body with no `total` in it to a
+    /// client reading `body["total"]`.
+    #[test]
+    fn a_response_missing_a_declared_field_is_refused_as_well() {
+        let snap = transformed_snapshot(
+            "def transform(params, statements):\n  return {}",
+            vec![spec("total", "bigint", true)],
+        );
+        let err = build_data(&snap, one_row()).expect_err("`total` was declared required");
+        assert!(matches!(err, ServingError::Internal { .. }), "{err:?}");
+        assert!(format!("{err:?}").contains("`total`"), "{err:?}");
+    }
+
+    /// A `required: false` field may be absent — the serving check is the SAME
+    /// rule publish probed with, so it must not be stricter than the one an
+    /// author published against.
+    #[test]
+    fn an_optional_declared_field_may_be_absent() {
+        let snap = transformed_snapshot(
+            "def transform(params, statements):\n  return {\"total\": 1}",
+            vec![
+                spec("total", "bigint", true),
+                spec("note", "varchar", false),
+            ],
+        );
+        assert_eq!(
+            build_data(&snap, one_row()).expect("an optional field may be omitted"),
+            serde_json::json!({"total": 1}),
+        );
+    }
+
+    /// **The caller sent a valid request; the ENDPOINT is broken.**
+    ///
+    /// A 400 would blame the caller for the author's script and put
+    /// `param_invalid` in `access_log` — the one table an operator reads to find
+    /// a broken endpoint would report a client-side mistake. The two 400
+    /// variants are ruled out by name as well, because those are the two a
+    /// careless mapping would actually reach for.
+    #[test]
+    fn a_transform_failure_is_an_internal_error_never_a_400() {
+        for script in [
+            // An explicit `fail()`.
+            "def transform(params, statements):\n  fail(\"boom\")",
+            // A runtime fault the author did not intend.
+            "def transform(params, statements):\n  return statements[\"absent\"]",
+            // No entry point at all — publish refuses this, so reaching it means
+            // a snapshot frozen by some other path.
+            "x = 1",
+            // A value `returns` cannot describe, because it has no named fields.
+            "def transform(params, statements):\n  return [1, 2, 3]",
+        ] {
+            let snap = transformed_snapshot(script, vec![spec("total", "bigint", true)]);
+            let err = build_data(&snap, one_row()).expect_err("the script did not conform");
+            assert!(
+                matches!(err, ServingError::Internal { .. }),
+                "must be internal: {err:?} for {script:?}"
+            );
+            assert!(
+                !matches!(err, ServingError::ParamInvalid | ServingError::ParamMissing),
+                "must not be ParamInvalid or ParamMissing: {err:?} for {script:?}"
+            );
+        }
+    }
+
+    /// A repeat may inform the MESSAGE and must never choose the STATUS.
+    ///
+    /// It is the one way a parameter reaches a script in a shape publish's probe
+    /// never showed the author, so the operator gets told; it is also entirely
+    /// caller-controlled, which is why it cannot be allowed to downgrade a 500
+    /// to a 400 — the defect `render_error` records at length, one layer up.
+    #[test]
+    fn a_repeated_parameter_is_named_in_the_detail_and_changes_no_status() {
+        let snap = transformed_snapshot(
+            "def transform(params, statements):\n  fail(\"boom\")",
+            vec![spec("total", "bigint", true)],
+        );
+        let params = BTreeMap::from([("region".to_string(), serde_json::json!(["EU", "US"]))]);
+
+        let with = build_data_with(&snap, one_row(), &params, true).expect_err("the script raised");
+        assert!(matches!(with, ServingError::Internal { .. }), "{with:?}");
+        assert!(
+            format!("{with:?}").contains("more than once"),
+            "the operator is told the one fact that distinguishes this call: {with:?}"
+        );
+
+        let without =
+            build_data_with(&snap, one_row(), &params, false).expect_err("the script raised");
+        assert!(
+            matches!(without, ServingError::Internal { .. }),
+            "the status is the same either way: {without:?}"
+        );
+        assert!(
+            !format!("{without:?}").contains("more than once"),
+            "and the note is not a constant: {without:?}"
+        );
+    }
+
+    /// A script is handed the parameters the request resolved, and reads them.
+    ///
+    /// Driven through a script that fails unless the value arrived, so an
+    /// implementation passing an empty dict reddens this rather than returning a
+    /// plausible object. The second half is the repeat gap stated as a
+    /// measurement: the list the caller sent reaches the script UNCOLLAPSED,
+    /// because the script and the SQL must be two readings of one request.
+    #[test]
+    fn the_script_reads_the_bound_parameters() {
+        let snap = transformed_snapshot(
+            "def transform(params, statements):\n  \
+             if params[\"region\"] != \"EU\":\n    \
+             fail(\"saw \" + str(params[\"region\"]))\n  \
+             return {\"total\": 1}",
+            vec![spec("total", "bigint", true)],
+        );
+        let params = BTreeMap::from([("region".to_string(), serde_json::json!("EU"))]);
+        assert_eq!(
+            build_data_with(&snap, one_row(), &params, false).expect("the parameter arrived"),
+            serde_json::json!({"total": 1}),
+        );
+
+        let repeated = BTreeMap::from([("region".to_string(), serde_json::json!(["EU", "US"]))]);
+        let err = build_data_with(&snap, one_row(), &repeated, true)
+            .expect_err("a repeat is a list, and this script expects a scalar");
+        assert!(
+            format!("{err:?}").contains(r#"["EU", "US"]"#),
+            "the script saw the list the request actually sent, uncollapsed: {err:?}"
+        );
+    }
+
+    /// **`meta.row_count` is omitted for a transformed endpoint.**
+    ///
+    /// `total_row_count()` sums the statements, so the number would be
+    /// *consistent* with `meta.statements` and still be read as describing
+    /// `data` — which after a transform is the single object below.
+    #[test]
+    fn meta_row_count_is_omitted_for_a_transformed_endpoint() {
+        let snap = transformed_snapshot(
+            "def transform(params, statements):\n  return {\"total\": 1}",
+            vec![spec("total", "bigint", true)],
+        );
+        let data = build_data(&snap, one_row()).expect("runs");
+        let body = build_body(&snap, &[2], data);
+        assert!(
+            body["meta"].get("row_count").is_none(),
+            "row_count describes the SQL, and a consumer reads it as describing \
+             `data`: {body}"
+        );
+        assert_eq!(body["data"], serde_json::json!({"total": 1}), "{body}");
+    }
+
+    /// **`meta.statements` still describes the SQL.** Two different truths, kept
+    /// separate: what the engine returned, and what the endpoint promised.
+    ///
+    /// Asserted as a whole object rather than key by key, because the claim is
+    /// that the SQL half of `meta` is untouched by the transform — a per-key
+    /// assertion would pass on a `meta` that had quietly grown or lost one.
+    #[test]
+    fn meta_statements_still_describes_the_sql_after_a_transform() {
+        let snap = transformed_snapshot(
+            "def transform(params, statements):\n  return {\"total\": 1}",
+            vec![spec("total", "bigint", true)],
+        );
+        let data = build_data(&snap, one_row()).expect("runs");
+        let body = build_body(&snap, &[2], data);
+        assert!(body["meta"]["statements"].is_object(), "{body}");
+        assert_eq!(
+            body["meta"]["statements"],
+            serde_json::json!({
+                "main": {
+                    "row_count": 2,
+                    "columns": [{"name": "n", "ty": "integer", "required": true}],
+                }
+            }),
+            "the SQL's own name, count and frozen columns — not the transform's \
+             `returns`, and not the length of `data`: {body}"
+        );
+    }
+
+    /// **An untransformed endpoint is byte for byte unchanged.**
+    ///
+    /// The whole feature must be invisible to every endpoint that does not use
+    /// it, and this is the test that catches a refactor which "just moves" the
+    /// shaping code. The literal below is the pre-C2 body for one statement:
+    /// `data` is the rows themselves under no name, `meta` carries a top-level
+    /// `row_count` and `columns`, and there is no `statements` key at all.
+    ///
+    /// The `shape`/`naming` half is asserted too, because that is the half C2
+    /// touched: `shaping_output` must hand `shape_rows` the endpoint's OWN
+    /// output spec, and `Cow::Borrowed` is the evidence it did not build a
+    /// canonical one behind its back.
+    #[test]
+    fn an_untransformed_endpoint_is_byte_for_byte_unchanged() {
+        let snap = snapshot_with_columns(vec![spec("n", "integer", true)]);
+        assert!(
+            snap.output.transform.is_none(),
+            "the fixture is the old world"
+        );
+
+        let out = result(vec![live("n", "integer")], vec![vec![serde_json::json!(7)]]);
+        let data = statements_data(vec![(
+            snap.statements[0].name.as_str(),
+            shape_rows(&out, &shaping_output(&snap.output), &snap.statements[0]).expect("shapes"),
+        )]);
+
+        assert_eq!(
+            build_body(&snap, &[1], data),
+            serde_json::json!({
+                "status": "ok",
+                "message": null,
+                "data": [{"n": 7}],
+                "meta": {
+                    "version": 3,
+                    "cached": false,
+                    "request_id": "req-1",
+                    "row_count": 1,
+                    "columns": [{"name": "n", "ty": "integer", "required": true}],
+                }
+            }),
+        );
+
+        // And the spec handed to `shape_rows` is the endpoint's own, not a copy.
+        for naming in ["as_is", "camel", "snake"] {
+            for shape in ["objects", "arrays"] {
+                let output = OutputSpec {
+                    shape: shape.into(),
+                    naming: naming.into(),
+                    ..OutputSpec::default()
+                };
+                assert!(
+                    matches!(shaping_output(&output), Cow::Borrowed(_)),
+                    "an untransformed endpoint is shaped against its own spec: \
+                     {shape}/{naming}"
+                );
+            }
+        }
+    }
+
+    /// **A script is handed the rows publish probed it with**, whatever the
+    /// endpoint's presentation knobs say.
+    ///
+    /// `lifecycle::probe_row` builds `{column name: value}` objects from the
+    /// described columns and applies neither `shape` nor `naming`. If serving
+    /// applied them, a script probed against `total_revenue` would be called
+    /// with `totalRevenue` under `camel`, and with a positional LIST under
+    /// `arrays` — green at publish, broken on every real call.
+    #[test]
+    fn a_transformed_endpoint_shapes_the_rows_the_script_was_probed_with() {
+        for (shape, naming) in [
+            ("objects", "camel"),
+            ("arrays", "as_is"),
+            ("arrays", "snake"),
+            ("nonsense", "kebab"),
+        ] {
+            let output = OutputSpec {
+                shape: shape.into(),
+                naming: naming.into(),
+                transform: Some(TransformSpec {
+                    script: "def transform(params, statements):\n  return {}".into(),
+                    returns: vec![],
+                }),
+                ..OutputSpec::default()
+            };
+            let shaping = shaping_output(&output);
+            assert_eq!(shaping.shape, "objects", "{shape}/{naming}");
+            assert_eq!(shaping.naming, "as_is", "{shape}/{naming}");
+
+            // And it is the rows themselves, not just the two strings: the
+            // frozen name survives verbatim into what the script reads.
+            let declared = stmt(
+                "main",
+                "SELECT total_revenue",
+                vec![spec("total_revenue", "integer", true)],
+            );
+            let out = result(
+                vec![live("total_revenue", "integer")],
+                vec![vec![serde_json::json!(7)]],
+            );
+            assert_eq!(
+                shape_rows(&out, &shaping, &declared).expect("shapes"),
+                serde_json::json!([{"total_revenue": 7}]),
+                "{shape}/{naming}",
+            );
+        }
+    }
+
+    /// The contract clauses `shape_rows` judges still run for a transformed
+    /// endpoint, so a script never sees a row a drifted endpoint produced.
+    ///
+    /// Each of these is refused BEFORE the transform, which is why the whole
+    /// call stays a 503 rather than becoming a 500 — the operator's fix is to
+    /// re-publish, not to read a script.
+    #[test]
+    fn drift_is_still_refused_before_a_script_sees_a_row() {
+        let output = OutputSpec {
+            naming: "camel".into(),
+            transform: Some(TransformSpec {
+                script: "def transform(params, statements):\n  return {}".into(),
+                returns: vec![],
+            }),
+            ..OutputSpec::default()
+        };
+        let shaping = shaping_output(&output);
+        let declared = stmt(
+            "main",
+            "SELECT id",
+            vec![spec("id", "integer", true), spec("name", "varchar", false)],
+        );
+
+        for (why, out) in [
+            (
+                "a column that was never declared",
+                result(
+                    vec![live("nope", "integer")],
+                    vec![vec![serde_json::json!(1)]],
+                ),
+            ),
+            (
+                "a declared column that changed type",
+                result(
+                    vec![live("id", "varchar")],
+                    vec![vec![serde_json::json!(1)]],
+                ),
+            ),
+            (
+                "a required column that was not returned",
+                result(
+                    vec![live("name", "varchar")],
+                    vec![vec![serde_json::json!(1)]],
+                ),
+            ),
+            ("no columns at all", result(vec![], vec![])),
+        ] {
+            assert!(
+                matches!(
+                    shape_rows(&out, &shaping, &declared),
+                    Err(ServingError::SchemaDrift)
+                ),
+                "{why} must be refused before the script runs",
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // C2 Task 6, fix round 1 — the request deadline, and the two arms that
+    // answer when the script does not
+    // -----------------------------------------------------------------------
+
+    /// The two facts a refusal is judged on: the status a caller sees and the
+    /// code that lands in `access_log`. Read off the REAL wire mapping rather
+    /// than matched on the variant, because those two are the payload and the
+    /// variant is only how it is spelled.
+    fn wire_of(err: &ServingError) -> (StatusCode, &'static str) {
+        let w = to_wire(err);
+        (w.status, w.code)
+    }
+
+    /// **What [`transformed_data`] hands the script**: every statement keyed by
+    /// its own NAME, and the request's resolved parameters.
+    ///
+    /// Driven with TWO statements, because at N = 1 a path that keyed by index,
+    /// or that handed over only the first statement, is indistinguishable from
+    /// the correct one — the same reading M2 had to remove from `shape_rows`.
+    /// The script reads from both keys and from `params`, so an assembly that
+    /// dropped any of the three fails rather than returning a plausible object.
+    ///
+    /// Note what `data` does NOT do here: `statements_data` unwraps a single
+    /// statement's rows onto the wire under no name, and a script never sees
+    /// that unwrapping — its dict is keyed at every count.
+    #[tokio::test]
+    async fn a_transform_is_handed_every_statement_by_name_and_the_request_s_parameters() {
+        let snap = transformed_snapshot(
+            "def transform(params, statements):\n  \
+             return {\"total\": statements[\"total\"][0][\"n\"] + len(statements[\"rows\"]), \
+             \"region\": params[\"region\"]}",
+            vec![
+                spec("total", "bigint", true),
+                spec("region", "varchar", true),
+            ],
+        );
+        let resolved = resolved_with(BTreeMap::from([(
+            "region".to_string(),
+            serde_json::json!("EU"),
+        )]));
+
+        assert_eq!(
+            transformed_data(
+                snap.output.transform.as_ref().expect("transformed fixture"),
+                vec![
+                    ("rows", serde_json::json!([{"n": 1}, {"n": 2}])),
+                    ("total", serde_json::json!([{"n": 40}])),
+                ],
+                &resolved,
+                TransformDeadline::default(),
+            )
+            .await
+            .expect("the script reads both statements and the parameter"),
+            serde_json::json!({"total": 42, "region": "EU"}),
+        );
+    }
+
+    /// **The request's own deadline is what refuses work that has not
+    /// finished — and it stops the WAITING, not the work.**
+    ///
+    /// This is the test that did not exist. `transformed_data`'s
+    /// `tokio::time::timeout` could be deleted outright and nothing went red,
+    /// because the only way to reach the arm was to wait five real seconds.
+    /// [`TransformDeadline`] is the injection point that makes it reachable, the
+    /// same way `transform::Budgets` makes a tick budget reachable.
+    ///
+    /// # Two dead ends, recorded because each looked correct
+    ///
+    /// **A slow script.** An unbounded starlark loop with a 50 ms deadline
+    /// works, and it reddened
+    /// `transform::a_wide_shared_fan_out_is_stopped_by_the_output_deadline` in
+    /// the same binary about half the time: that test asserts which of two
+    /// output-deadline pollers fires first inside one evaluation, so it loses to
+    /// any concurrent CPU, and libtest runs the two in parallel. The load came
+    /// from the run this test stops waiting for — detached, still burning a core
+    /// for the full `transform::MAX_WALL_CLOCK` after the answer. Shrinking it
+    /// to a ~39 ms loop still measured 3 failures in 12 runs.
+    ///
+    /// The neighbour is load-sensitive **on its own** — 2 failures in 24 runs on
+    /// the commit before Task 6 existed, so it is genuinely pre-existing — and
+    /// that is not licence to make it worse. The version below measures **2 in
+    /// 24, the same rate**, which is the check that this test is not a
+    /// contributor; the 12-run numbers above are too small to separate 1 from 3
+    /// and are quoted as the signal that sent this looking, not as a rate.
+    ///
+    /// **A trivial script with a `Duration::ZERO` deadline.** The reasoning said
+    /// the poll must win, since there is no yield point between `spawn_blocking`
+    /// and the first poll. Measured, **the blocking task completes first and
+    /// `timeout` returns `Ok`** — it polls the inner future before it looks at
+    /// the clock, and a one-line parse on an already-warm pool thread is faster
+    /// than that reasoning assumed.
+    ///
+    /// # What works: park the thread instead of burning it
+    ///
+    /// [`run_under_deadline`] is the seam. The closure below blocks on a channel
+    /// this test owns, so it consumes no CPU, cannot finish early, and is
+    /// released deliberately at the end — deterministic in any build profile.
+    ///
+    /// The `finished` flag is the part worth having beyond the arm itself: it is
+    /// still `false` when the caller has been answered, which is the module
+    /// comment's central claim about detachment turned into a measurement.
+    #[tokio::test]
+    async fn the_request_deadline_stops_the_waiting_and_not_the_work() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        // 1. Work that finishes is served, so the refusal below is not "every
+        //    transform times out".
+        assert_eq!(
+            run_under_deadline(TransformDeadline::default(), || Ok(
+                serde_json::json!({"total": 1})
+            ))
+            .await
+            .expect("work that returns at once is served"),
+            serde_json::json!({"total": 1}),
+        );
+
+        // 2. Work that has not finished when the deadline is up is refused.
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
+        let finished = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&finished);
+
+        // The OUTER timeout is the test's own, and it is not redundant: with the
+        // production wrapper deleted this await never returns, and a mutation
+        // that HANGS the suite is indistinguishable from a slow machine. It
+        // turns that into a named failure. Panicking here still drops
+        // `release`, so the parked thread is not leaked either.
+        let err = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_under_deadline(
+                TransformDeadline::of(Duration::from_millis(20)),
+                move || {
+                    // Parks. `recv` returns `Err` once the sender is dropped,
+                    // which is how the thread is released at the end of this
+                    // test rather than leaked.
+                    let _ = blocked.recv();
+                    flag.store(true, Ordering::SeqCst);
+                    Ok(serde_json::json!({"total": 1}))
+                },
+            ),
+        )
+        .await
+        .expect("the request deadline must answer — a hang here is the production timeout gone")
+        .expect_err("the work had not finished");
+
+        assert_eq!(
+            wire_of(&err),
+            (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
+            "work that did not finish is the endpoint failing to answer: {err:?}"
+        );
+        let detail = format!("{err:?}");
+        assert!(
+            detail.contains("20 ms request deadline"),
+            "the detail names the deadline that fired, in the units it was set \
+             in — and it is the INJECTED one, not the shipped constant: {detail}"
+        );
+        assert!(
+            !detail.contains("wall-clock"),
+            "and it is the REQUEST's deadline, not `transform::MAX_WALL_CLOCK`: \
+             {detail}"
+        );
+
+        // The claim the module comment makes, measured: the caller has its
+        // answer and the work is still running.
+        assert!(
+            !finished.load(Ordering::SeqCst),
+            "the deadline stops the WAITING; a `spawn_blocking` task cannot be \
+             cancelled, and this is what the module comment means by the run \
+             still holding a thread after the 500"
+        );
+
+        // Release it, and confirm it really was only parked — so "not finished"
+        // above cannot have been a closure that never ran at all.
+        drop(release);
+        for _ in 0..1000 {
+            if finished.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert!(
+            finished.load(Ordering::SeqCst),
+            "the detached work resumes and completes once it is unblocked"
+        );
+    }
+
+    /// **Both refusal arms of [`transform_outcome`], driven with REAL values.**
+    ///
+    /// A fabricated `JoinError` is not a thing that can be constructed, and that
+    /// is the point: the one below comes from a task that actually panicked, and
+    /// the `Elapsed` from a timeout that actually elapsed. The `Ok` arm is
+    /// asserted on its PAYLOAD, so a mapping that swallowed the value and
+    /// answered a default would redden here.
+    #[tokio::test]
+    async fn every_arm_of_the_join_outcome_is_decided() {
+        // The value path.
+        assert_eq!(
+            transform_outcome(
+                Ok(Ok(Ok(serde_json::json!({"total": 1})))),
+                TransformDeadline::default(),
+            )
+            .expect("a completed run is served"),
+            serde_json::json!({"total": 1}),
+            "the script's value reaches the caller unaltered",
+        );
+
+        // A refusal the script itself produced travels through unchanged, so
+        // this function cannot be what turns a 500 into something else.
+        let refused = transform_outcome(
+            Ok(Ok(Err(ServingError::internal("the script said no")))),
+            TransformDeadline::default(),
+        )
+        .expect_err("a refusal stays a refusal");
+        assert_eq!(
+            wire_of(&refused),
+            (StatusCode::INTERNAL_SERVER_ERROR, "internal")
+        );
+        assert!(
+            format!("{refused:?}").contains("the script said no"),
+            "and it is the SAME refusal, not a re-worded one: {refused:?}"
+        );
+
+        // A real `JoinError`, from a task that really panicked.
+        let join = tokio::spawn(async { panic!("plumbing") })
+            .await
+            .expect_err("the task panicked");
+        assert!(
+            join.is_panic(),
+            "the fixture must be a real panic: {join:?}"
+        );
+        let err = transform_outcome(Ok(Err(join)), TransformDeadline::default())
+            .expect_err("a task that did not complete is a refusal");
+        assert_eq!(
+            wire_of(&err),
+            (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
+            "a panic in the plumbing is not the caller's doing: {err:?}"
+        );
+        assert!(
+            format!("{err:?}").contains("did not complete"),
+            "and it is diagnosable as one: {err:?}"
+        );
+
+        // A real `Elapsed`, from a timeout that really elapsed.
+        let elapsed = tokio::time::timeout(Duration::ZERO, std::future::pending::<()>())
+            .await
+            .expect_err("zero is already up");
+        let err = transform_outcome(
+            Err(elapsed),
+            TransformDeadline::of(Duration::from_millis(7)),
+        )
+        .expect_err("the deadline is a refusal");
+        assert_eq!(
+            wire_of(&err),
+            (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
+            "not a 400 and not a 503: {err:?}"
+        );
+        let detail = format!("{err:?}");
+        assert!(
+            detail.contains("7 ms request deadline"),
+            "the detail states the deadline that was actually applied, not the \
+             shipped constant: {detail}"
+        );
+        assert!(
+            detail.contains("still holding a blocking thread"),
+            "and it says what answering did NOT stop — see the module comment: \
+             {detail}"
+        );
+    }
+
+    /// The shipped deadline is the only one a non-test build can express.
+    ///
+    /// `TransformDeadline::of` is `#[cfg(test)]`, so this pins the DEFAULT
+    /// against the constant; a relaxation would have to change the constant,
+    /// which is the thing a reviewer reads.
+    #[test]
+    fn the_shipped_deadline_is_the_constant() {
+        assert_eq!(
+            TransformDeadline::default(),
+            TransformDeadline::of(TRANSFORM_REQUEST_DEADLINE)
+        );
+        assert_eq!(TRANSFORM_REQUEST_DEADLINE, Duration::from_secs(5));
+        assert!(
+            TRANSFORM_REQUEST_DEADLINE > crate::transform::MAX_WALL_CLOCK,
+            "the request deadline must not be TIGHTER than the evaluator's own \
+             budget, or a script that legitimately runs close to it and \
+             finishes is cut off by a race between two clocks measuring one \
+             piece of work",
+        );
+    }
+
+    /// A statement that did not shape to an array is a fault, not a panic.
+    ///
+    /// `shape_rows` returns an array on every `Ok` path, so this arm is
+    /// unreachable today — which is exactly why it is asserted rather than
+    /// written as an `expect`: the cost of being wrong about "unreachable"
+    /// inside a request handler is a panicking worker.
+    #[test]
+    fn a_statement_that_did_not_shape_to_rows_is_a_fault() {
+        assert_eq!(
+            rows_of("main", serde_json::json!([{"n": 1}])).expect("an array is rows"),
+            vec![serde_json::json!({"n": 1})],
+        );
+
+        for (value, named) in [
+            (serde_json::json!({"n": 1}), "an object"),
+            (serde_json::json!(null), "null"),
+            (serde_json::json!(7), "a scalar"),
+        ] {
+            let err = rows_of("main", value).expect_err("not an array of rows");
+            assert_eq!(
+                wire_of(&err),
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal")
+            );
+            let detail = format!("{err:?}");
+            assert!(
+                detail.contains("`main`") && detail.contains(named),
+                "the detail names the statement and what it was: {detail}"
+            );
+        }
     }
 }

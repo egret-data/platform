@@ -5,6 +5,7 @@
  * egret unified data portal HTTP API.
  * OpenAPI spec version: 0.1.0
  */
+import type { OutputSpec } from './outputSpec';
 import type { ParamSpec } from './paramSpec';
 import type { PreviewEndpointInputValues } from './previewEndpointInputValues';
 
@@ -39,6 +40,19 @@ export interface PreviewEndpointInput {
      * and preview must resolve it the same way.
      */
   values?: PreviewEndpointInputValues;
+  /**
+     * The response contract as it is on screen — carried for ONE part of it,
+     * `transform`, and applied to nothing.
+     *
+     * `shape`, `naming` and `envelope` are still not applied here (see
+     * [`DataApiPreviewDto`]); they arrive because `transform`'s own publish
+     * rules are stated in terms of them — a transform beside a non-default
+     * `shape` is refused — and reconstructing an `OutputSpec` from a bare
+     * `TransformSpec` plus defaults would be a second, quietly weaker copy of
+     * [`crate::lifecycle::check_transform`]. The whole struct goes in, and
+     * that one function decides.
+     */
+  output: OutputSpec;
   /**
      * The database picker's current value. Workspace-scoped by
      * `connection_per_principal_pair`, which answers `NotFound` for a database

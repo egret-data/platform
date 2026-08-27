@@ -61,6 +61,10 @@ mod preview;
 pub mod render;
 pub mod routes;
 pub mod serving;
+/// C2 Task 1: the Starlark evaluator a response transform runs in, and the
+/// budgets it runs under. Private for now — Task 3 gives it a caller and decides
+/// what, if anything, the rest of the crate needs to see.
+mod transform;
 pub mod try_it;
 
 pub use activity::{

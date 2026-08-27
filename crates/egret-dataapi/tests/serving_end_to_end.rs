@@ -383,3 +383,289 @@ async fn an_endpoint_published_before_this_branch_still_serves_unchanged() {
         modern.body
     );
 }
+
+// ---------------------------------------------------------------------------
+// 3. C2 — a response transform, published and called
+// ---------------------------------------------------------------------------
+
+/// The declared output every transform test below promises.
+const RETURNS_TOTAL: &str = "total";
+
+/// A script that answers the DECLARED object for publish's probe row and an
+/// UNDECLARED one for anything else.
+///
+/// `lifecycle::probe_value` stands in `1` for an integer column and
+/// `probe_transform` also runs the script against no rows at all, so both probes
+/// take the first branch and publish is green. A real execution returns
+/// `marker(principal)`, which takes the second — the branch a probe cannot
+/// reach, and the reason serving checks every response rather than trusting the
+/// publish-time one.
+const DATA_DEPENDENT: &str = "def transform(params, statements):\n  \
+     rows = statements[\"main\"]\n  \
+     if len(rows) == 0 or rows[0][\"n\"] == 1:\n    \
+     return {\"total\": len(rows)}\n  \
+     return {\"surprise\": rows[0][\"n\"]}";
+
+/// `output` for an endpoint declaring `script` and returning one `bigint total`.
+fn transform_output(script: &str) -> serde_json::Value {
+    serde_json::json!({
+        "transform": {
+            "script": script,
+            "returns": [{ "name": RETURNS_TOTAL, "ty": "bigint", "required": true }],
+        }
+    })
+}
+
+/// **A transform produces `data`, and `meta` still describes the SQL.**
+///
+/// The whole body, through the real publish route and the real serving route —
+/// so `data` is what the script returned rather than the rows, and `meta` is
+/// what the statements did. The two are asserted together because keeping them
+/// separate is the claim: a `meta` rebuilt from the transform's output would
+/// report `row_count: 1` about an object, and a `data` built from the rows would
+/// mean the script never ran.
+#[tokio::test]
+async fn a_transformed_endpoint_answers_with_the_script_s_output() {
+    let f = skip_without_db!();
+
+    f.publish_statements_with_output(
+        "/reshaped",
+        f.database_id,
+        serde_json::json!([{ "name": "main", "sql": "SELECT n FROM t" }]),
+        serde_json::json!({}),
+        transform_output(
+            "def transform(params, statements):\n  \
+             return {\"total\": len(statements[\"main\"])}",
+        ),
+    )
+    .await;
+
+    let res = f.call_as(f.principal_a, "reshaped").await;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.body);
+
+    assert_eq!(
+        keys(&res.body),
+        vec!["status", "message", "data", "meta"],
+        "the envelope is unchanged by a transform: {}",
+        res.body
+    );
+    assert_eq!(
+        res.body["data"],
+        serde_json::json!({ "total": 1 }),
+        "`data` is what the SCRIPT returned — an object, not the row array, and \
+         the count proves the script was handed the row the engine produced: {}",
+        res.body
+    );
+
+    // --- meta, whole ---
+    assert_eq!(
+        keys(&res.body["meta"]),
+        vec!["version", "cached", "request_id", "statements"],
+        "no `row_count` and no `columns` beside them: both describe the SQL, and \
+         a consumer reads `row_count` as describing `data` — which here is one \
+         object: {}",
+        res.body
+    );
+    assert_eq!(
+        res.body["meta"]["statements"],
+        serde_json::json!({ "main": { "row_count": 1, "columns": [{ "name": "n", "ty": "integer", "required": true }] } }),
+        "`meta.statements` still describes the SQL: the statement's name, the \
+         rows the ENGINE returned, and the columns publish froze — none of which \
+         is the transform's `returns`: {}",
+        res.body
+    );
+
+    // The statement was executed once. A `data` of `{"total": 1}` could
+    // otherwise have been produced by a script handed a fabricated row.
+    assert_eq!(f.port.executions(), 1, "{}", res.body);
+}
+
+/// **The real guarantee: publish accepts it, and serving refuses it anyway.**
+///
+/// This is the test the whole task exists for. The script conforms for the
+/// synthetic row publish probes with and for the empty set, so publish is a
+/// `200` — and the same script returns an undeclared field for the row a real
+/// execution produces. Nothing before this point can see that; `check_returns`
+/// on the serving path is what stops it reaching a caller.
+///
+/// The refusal is asserted three ways, because each could pass alone while the
+/// guarantee was broken: the STATUS is 500 (not a 200 carrying `surprise`, and
+/// not a 400 blaming the caller), the BODY carries nothing about the script, and
+/// the `access_log` row an operator reads records `internal` against a real
+/// status code.
+#[tokio::test]
+async fn a_response_that_contradicts_returns_is_refused_after_publish_accepted_it() {
+    let f = skip_without_db!();
+
+    // The premise, measured rather than assumed: the fake engine folds the
+    // principal's uuid into every cell, and the script's probe branch is keyed
+    // on `probe_value("integer")`, which is exactly 1. If they ever collided the
+    // test would pass while measuring nothing.
+    assert_ne!(
+        marker(f.principal_a),
+        1,
+        "this fixture needs an executed value distinguishable from the probe's \
+         stand-in"
+    );
+
+    // Publish is GREEN — the probe cannot reach the branch below.
+    let ep = f
+        .publish_statements_with_output(
+            "/liar",
+            f.database_id,
+            serde_json::json!([{ "name": "main", "sql": "SELECT n FROM t" }]),
+            serde_json::json!({}),
+            transform_output(DATA_DEPENDENT),
+        )
+        .await;
+
+    let res = f.call_as(f.principal_a, "liar").await;
+    assert_eq!(
+        res.status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "an undeclared field must not reach a caller, and the endpoint — not \
+         the caller — is what is broken: {}",
+        res.body
+    );
+    assert_eq!(
+        res.body["error"]["code"], "internal",
+        "not `param_invalid`: the request was valid, the script was not: {}",
+        res.body
+    );
+    assert_eq!(
+        res.body["error"]["message"], "internal error",
+        "the detail names the script and the field, and it goes to `tracing` \
+         rather than to a public endpoint's body: {}",
+        res.body
+    );
+    assert!(
+        !res.body.to_string().contains("surprise"),
+        "the value the script produced must not be echoed back: {}",
+        res.body
+    );
+
+    // The row an operator reads. `error_code` is what a dashboard groups on, so
+    // a 400 here would send them looking for a client that is doing nothing
+    // wrong.
+    //
+    // Fetched by the request id the CALLER was given, not by "the most recent
+    // row": that is the correlation an operator actually performs, and it is
+    // the only lookup that cannot pick up a different call's row.
+    let request_id = res.body["error"]["request_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a refusal carries a request id: {}", res.body));
+    let (endpoint_id, status_code, error_code): (Option<uuid::Uuid>, i32, Option<String>) =
+        sqlx::query_as(
+            "SELECT endpoint_id, status_code, error_code FROM dataapi.access_log \
+              WHERE request_id = $1",
+        )
+        .bind(request_id)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("the call was logged");
+    assert_eq!(
+        endpoint_id,
+        Some(ep),
+        "logged against the endpoint that broke"
+    );
+    assert_eq!(status_code, 500, "the access log records the real status");
+    assert_eq!(
+        error_code.as_deref(),
+        Some("internal"),
+        "`param_invalid` here would send an operator hunting a client that is \
+         doing nothing wrong"
+    );
+
+    // And the statement DID run: the refusal is about what the script returned,
+    // not about the endpoint failing earlier.
+    assert_eq!(f.port.executions(), 1);
+}
+
+/// **A response the serving-side check REFUSED is not cached.**
+///
+/// Correct today only by where the `?` sits — the transform runs, and is checked,
+/// above `cache.put_at`. Nothing pinned that, so an edit that moved the caching a
+/// few lines up would store a body the endpoint had just refused to serve and
+/// then answer it from the cache, with `check_returns` never consulted again.
+///
+/// The control endpoint is what makes this non-vacuous. Both are published with
+/// the SAME cache config; the conforming one must be a warm `cached: true` on its
+/// second call, so a suite where caching was simply off cannot be what passed.
+#[tokio::test]
+async fn a_refused_transform_is_not_cached() {
+    let f = skip_without_db!();
+    assert_ne!(marker(f.principal_a), 1, "see the test above");
+
+    let warm = serde_json::json!({ "enabled": true, "ttl_seconds": 60, "scope": "per_principal" });
+
+    // The control: conforming, cached, and it really does warm.
+    f.publish_statements_with_output_and_cache(
+        "/cached-ok",
+        f.database_id,
+        serde_json::json!([{ "name": "main", "sql": "SELECT n FROM t" }]),
+        serde_json::json!({}),
+        transform_output(
+            "def transform(params, statements):\n  \
+             return {\"total\": len(statements[\"main\"])}",
+        ),
+        warm.clone(),
+    )
+    .await;
+
+    let first = f.call_as(f.principal_a, "cached-ok").await;
+    assert_eq!(first.status, StatusCode::OK, "{}", first.body);
+    assert_eq!(first.body["meta"]["cached"], false, "{}", first.body);
+    let second = f.call_as(f.principal_a, "cached-ok").await;
+    assert_eq!(second.status, StatusCode::OK, "{}", second.body);
+    assert_eq!(
+        second.body["meta"]["cached"], true,
+        "the control must actually cache, or the subject below proves nothing: {}",
+        second.body
+    );
+    assert_eq!(
+        second.body["data"], first.body["data"],
+        "and the warm answer is the transformed value: {}",
+        second.body
+    );
+    assert_eq!(
+        f.port.executions(),
+        1,
+        "one execution across two calls — the second was served warm"
+    );
+
+    // The subject: the same cache config, a script that is refused at serving.
+    f.publish_statements_with_output_and_cache(
+        "/cached-liar",
+        f.database_id,
+        serde_json::json!([{ "name": "main", "sql": "SELECT n FROM t" }]),
+        serde_json::json!({}),
+        transform_output(DATA_DEPENDENT),
+        warm,
+    )
+    .await;
+
+    let before = f.port.executions();
+    let first = f.call_as(f.principal_a, "cached-liar").await;
+    assert_eq!(
+        first.status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "{}",
+        first.body
+    );
+
+    let second = f.call_as(f.principal_a, "cached-liar").await;
+    assert_eq!(
+        second.status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a refused response must not be stored — a cached one would come back \
+         as a 200 carrying the undeclared field, with `check_returns` never \
+         consulted again: {}",
+        second.body
+    );
+    assert_eq!(
+        f.port.executions() - before,
+        2,
+        "and there was nothing warm to answer either call: a stored entry would \
+         have skipped the second execution"
+    );
+}

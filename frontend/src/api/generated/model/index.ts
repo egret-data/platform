@@ -355,6 +355,7 @@ export * from './tlsMode';
 export * from './tokenForm';
 export * from './tokenResp';
 export * from './transferOwner';
+export * from './transformSpec';
 export * from './tryRequest';
 export * from './tryRequestEcho';
 export * from './tryRequestParams';

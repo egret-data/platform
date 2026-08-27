@@ -297,6 +297,11 @@ describe("Query section — preview", () => {
       siblings: [],
       params,
       values: { region: ["EU"] },
+      // The DRAFT's `output`, and required by the route (C2 Task 8). The server
+      // checks its `transform` with publish's own rule — a script that does not
+      // parse is refused here rather than only at Publish — so a body that
+      // dropped this field would preview green on drafts publish refuses.
+      output: {},
       database_id: "db-1",
     });
   });
@@ -480,6 +485,56 @@ describe("Query section — preview", () => {
     expect(await screen.findByText(/could not run the preview/i)).toBeInTheDocument();
     // And it must name the thing the author can actually do about it.
     expect(screen.getByText(/session may have expired/i)).toBeInTheDocument();
+  });
+
+  /**
+   * C2 Task 8. A transformed endpoint's response is the script's output, not the
+   * rows — a different value of a different shape, which is a much wider gap than
+   * the naming one the note beside the button already covers. Preview cannot show
+   * it: it runs ONE statement, and `transform(params, statements)` is handed every
+   * statement's rows keyed by name, so the honest answer is the statement's rows
+   * plus a sentence saying what they are.
+   *
+   * Both halves in one test, because the property is the DIFFERENCE — an
+   * untransformed preview must NOT carry the note. `queryByText` on the negative
+   * side after the positive one has been proven findable, so "absent" cannot mean
+   * "the copy was never on screen for either".
+   */
+  it("says the rows are the statement's, not the response, when a transform is declared", async () => {
+    const endpoint = makeEndpoint();
+    vi.mocked(api.useDataApiGetEndpoint).mockReturnValue({
+      data: { status: 200, data: endpoint },
+      isLoading: false,
+      isError: false,
+      refetch: vi.fn(),
+    } as never);
+    const answer = (transform_declared: boolean) => ({
+      status: 200,
+      data: {
+        columns: [{ name: "n", type: "integer" }],
+        rows: [[1]],
+        row_count: 1,
+        truncated: false,
+        transform_declared,
+      },
+    });
+
+    const mutateAsync = vi.fn().mockResolvedValue(answer(true));
+    vi.mocked(api.useDataApiPreviewEndpoint).mockReturnValue({ mutateAsync, isPending: false } as never);
+    const transformed = renderQuery(endpoint);
+    await userEvent.click(await screen.findByRole("button", { name: /preview unsaved draft/i }));
+    expect(await screen.findByText(/not the response a consumer receives/i)).toBeInTheDocument();
+    // And it must send the author somewhere the real response exists.
+    expect(screen.getByText(/Try it runs the published endpoint for real/i)).toBeInTheDocument();
+    transformed.unmount();
+
+    mutateAsync.mockResolvedValue(answer(false));
+    renderQuery(endpoint);
+    await userEvent.click(await screen.findByRole("button", { name: /preview unsaved draft/i }));
+    // The rows arrived — so the absence below is the flag's doing, not an
+    // unrendered result.
+    expect(await screen.findByText("1 row.")).toBeInTheDocument();
+    expect(screen.queryByText(/not the response a consumer receives/i)).not.toBeInTheDocument();
   });
 
   it("says preview shows the engine's column names, not the published contract's", async () => {

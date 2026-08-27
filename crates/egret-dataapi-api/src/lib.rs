@@ -859,6 +859,29 @@ fn strip_precision_arg(rest: &str) -> Option<&str> {
     Some(&tail[1..])
 }
 
+/// An author's response transform: a Starlark script plus the output schema it
+/// promises.
+///
+/// # Why `returns` is declared rather than inferred
+///
+/// Every other column egret freezes comes from `describe_as`, which works
+/// because a SQL statement's shape is a function of its text and the branch a
+/// parameter takes. A script's shape can depend on the DATA — `if len(rows) > 0`
+/// — which publish cannot see. Inferring from a probe run would produce a
+/// contract that is right for the probe data and wrong for a Tuesday. So the
+/// author declares, publish checks the probes against the declaration, and
+/// serving fails closed on every response that disagrees. See spec §3.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TransformSpec {
+    /// The script source. Must define `transform(params, statements)`.
+    pub script: String,
+    /// The output schema this endpoint promises. `ColumnSpec` is reused rather
+    /// than duplicated: its `required` flag already means "present in every
+    /// permutation described at publish", which is exactly what it means here.
+    pub returns: Vec<ColumnSpec>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct OutputSpec {
@@ -888,6 +911,9 @@ pub struct OutputSpec {
     /// [`validate_envelope`] for why this field and not its two neighbours.
     #[serde(default = "default_envelope")]
     pub envelope: String, // "wrapped" | "bare"
+    /// Absent means no transform, which is every snapshot frozen before C2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transform: Option<TransformSpec>,
 }
 fn default_shape() -> String {
     "objects".into()
@@ -944,6 +970,7 @@ impl Default for OutputSpec {
             shape: default_shape(),
             naming: default_naming(),
             envelope: default_envelope(),
+            transform: None,
         }
     }
 }
@@ -1525,5 +1552,49 @@ mod tests {
             let once = erase_datetime_precision(ty);
             assert_eq!(erase_datetime_precision(&once), once);
         }
+    }
+
+    // --- OutputSpec.transform (C2 Task 2) ---
+
+    #[test]
+    fn an_output_spec_without_a_transform_round_trips_and_means_no_transform() {
+        // A snapshot written before C2 has no `transform` key. Reading it back must
+        // give `None`, and writing it back must not GROW the key — a snapshot that
+        // gains fields on re-read is how two binaries disagree about one row.
+        let json = r#"{"shape":"objects","naming":"as_is","envelope":"wrapped"}"#;
+        let spec: OutputSpec = serde_json::from_str(json).expect("pre-C2 spec must still read");
+        assert!(spec.transform.is_none());
+        let back = serde_json::to_string(&spec).expect("serialize");
+        assert!(!back.contains("transform"), "spec grew a key: {back}");
+    }
+
+    #[test]
+    fn a_transform_round_trips_with_its_declared_returns() {
+        let json = r#"{"shape":"objects","naming":"as_is","envelope":"wrapped",
+                       "transform":{"script":"def transform(params, statements):\n  return {}",
+                                    "returns":[{"name":"total","ty":"bigint","required":true}]}}"#;
+        let spec: OutputSpec = serde_json::from_str(json).expect("must read");
+        let t = spec.transform.as_ref().expect("transform present");
+        assert!(t.script.contains("def transform"));
+        assert_eq!(t.returns.len(), 1);
+        assert_eq!(t.returns[0].name, "total");
+        assert!(t.returns[0].required);
+
+        let round: OutputSpec =
+            serde_json::from_str(&serde_json::to_string(&spec).unwrap()).unwrap();
+        assert_eq!(round, spec, "round trip must be lossless");
+    }
+
+    #[test]
+    fn an_unknown_key_inside_a_transform_is_refused() {
+        // `deny_unknown_fields` is what turned a documented-but-wrong rate_limit key
+        // into an error instead of a silent default. The same protection has to
+        // reach INSIDE the new struct, not just around it.
+        let json = r#"{"shape":"objects","naming":"as_is","envelope":"wrapped",
+                       "transform":{"script":"x","returns":[],"timeout_ms":5000}}"#;
+        assert!(
+            serde_json::from_str::<OutputSpec>(json).is_err(),
+            "an unknown key inside `transform` must be refused, not defaulted"
+        );
     }
 }

@@ -63,7 +63,7 @@ pub enum OpenApiGenError {
 /// not agree. Anything unrecognised becomes `string` and keeps its original
 /// spelling in `x-egret-engine-type`: a confident wrong mapping sends a client
 /// to parse a number that is not one, while `string` is merely imprecise.
-fn json_type(engine_ty: &str) -> &'static str {
+pub(crate) fn json_type(engine_ty: &str) -> &'static str {
     let t = engine_ty.trim().to_ascii_lowercase();
     let head = t.split(['(', '<']).next().unwrap_or("").trim();
     match head {
@@ -71,6 +71,37 @@ fn json_type(engine_ty: &str) -> &'static str {
         "tinyint" | "smallint" | "int" | "integer" | "bigint" | "largeint" => "integer",
         "real" | "float" | "double" | "decimal" | "numeric" => "number",
         _ => "string",
+    }
+}
+
+/// Map a transform's DECLARED return type onto a JSON Schema type.
+///
+/// **Not [`json_type`], and the difference is measurable in the served body.**
+/// `json_type` reads a string an ENGINE produced, where "anything unrecognised
+/// is a string" is safe because every scalar an engine returns has a string
+/// spelling. A transform's `ty` is not that: nothing checks it at runtime
+/// (`transform::check_returns` tests object-ness, required-presence and
+/// undeclared fields — never the type name), so the generated document is its
+/// ONLY consumer, and the author writing it is naming a JSON type, not a
+/// column type.
+///
+/// Measured in a browser on 2026-08-27: a script returning
+/// `{"by_region": {"EU": "30.50"}, "regions": 3}` against `returns` declaring
+/// `by_region: object` was served that object verbatim, while the generated
+/// document declared `by_region` a `string` — a generated client would parse
+/// the wrong thing, which is exactly the failure `json_type`'s "merely
+/// imprecise" argument assumes cannot happen.
+///
+/// Anything this does not recognise still falls through to [`json_type`], so an
+/// author who writes `varchar` in a transform's `returns` gets what they always
+/// did.
+pub(crate) fn declared_json_type(declared_ty: &str) -> &'static str {
+    let t = declared_ty.trim().to_ascii_lowercase();
+    let head = t.split(['(', '<']).next().unwrap_or("").trim();
+    match head {
+        "object" | "dict" | "map" | "struct" => "object",
+        "array" | "list" => "array",
+        _ => json_type(declared_ty),
     }
 }
 
@@ -331,7 +362,8 @@ fn statement_schema(
     Ok(json!({ "type": "array", "items": row_schema(stmt, snap, endpoint)? }))
 }
 
-/// What `data` holds, for THIS endpoint (spec §4.4).
+/// What `data` holds, for THIS endpoint (spec §4.4) when it has NO response
+/// transform.
 ///
 /// One statement: the rows array. Several: an object with one property per
 /// statement NAME, each that statement's own rows array — the same keys, in the
@@ -342,12 +374,10 @@ fn statement_schema(
 /// would ask every consumer to branch on a question their own endpoint has
 /// already answered — and openapi-generator would hand them an untagged
 /// either-type to unwrap on every call.
-fn data_schema(snap: &EndpointSnapshot, endpoint: &str) -> Result<Value, OpenApiGenError> {
-    if snap.statements.is_empty() {
-        return Err(OpenApiGenError::Core(egret_core::Error::Internal(
-            anyhow::anyhow!("published snapshot for endpoint {endpoint} carries no statements"),
-        )));
-    }
+fn statements_data_schema(
+    snap: &EndpointSnapshot,
+    endpoint: &str,
+) -> Result<Value, OpenApiGenError> {
     if snap.statements.len() == 1 {
         return statement_schema(&snap.statements[0], snap, endpoint);
     }
@@ -363,6 +393,111 @@ fn data_schema(snap: &EndpointSnapshot, endpoint: &str) -> Result<Value, OpenApi
         "required": snap.statements.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
         "properties": props,
     }))
+}
+
+/// The `data` object a transformed endpoint promises, straight from
+/// `output.transform.returns` — never from the SQL statements' own columns.
+///
+/// `check_returns` (`crate::transform`, the SAME function serving enforces
+/// every response against) requires the value to be a JSON OBJECT, so this is
+/// never wrapped in an array the way `statement_schema` wraps a row: a
+/// transform's `data` is one object, not a list of rows.
+///
+/// **`output.shape` and `output.naming` do not apply here, and the document
+/// says so.** Those two settings describe how a row straight from SQL becomes
+/// JSON (`row_schema`); a transform's output never goes through that step
+/// (`serving::router::shaping_output` — a transformed endpoint is served
+/// `objects`/`as_is` regardless of what is published), so running `returns`'
+/// names through `apply_naming` a second time would rename a key the author
+/// already chose. The `description` below is where a reader of the generated
+/// contract meets that fact, because it is exactly the field `shape`/`naming`
+/// would otherwise have described.
+///
+/// Duplicate names in `returns` cannot reach here, and neither can blank or
+/// whitespace-padded ones: `check_transform_shape` (`lifecycle.rs`) refuses all
+/// three at publish, before a transform can be declared at all — unlike
+/// `row_schema`'s naming collision, which is a runtime possibility this
+/// function has no equivalent of. That is what lets `props` be built by
+/// insertion without a collision check: every name here is distinct, non-blank,
+/// and exactly as the author typed it.
+fn returns_schema(returns: &[egret_dataapi_api::ColumnSpec]) -> Value {
+    let mut props = Map::new();
+    for c in returns {
+        props.insert(
+            c.name.clone(),
+            json!({
+                // `declared_json_type`, NOT `json_type`: see that function for
+                // the object-declared-as-string this got wrong in the browser.
+                "type": declared_json_type(&c.ty),
+                "nullable": true,
+                // `x-egret-DECLARED-type`, not `x-egret-engine-type`. The
+                // extension `row_schema` writes carries the string an engine
+                // gave for a column it really produced; this one carries a
+                // string the AUTHOR typed into `output.transform.returns`, for
+                // a field no engine ever saw — a transform's `data` is whatever
+                // the script returned. Spelling them the same made a consumer's
+                // "what did the database call this" and a consumer's "what did
+                // the author call this" indistinguishable in the document.
+                "x-egret-declared-type": c.ty,
+            }),
+        );
+    }
+    let required: Vec<&str> = returns
+        .iter()
+        .filter(|c| c.required)
+        .map(|c| c.name.as_str())
+        .collect();
+    let mut schema = json!({
+        "type": "object",
+        "properties": props,
+        // The document must not be LOOSER than the gate. `check_returns` runs
+        // against every response and refuses an undeclared field — serving
+        // fails closed with a 500 rather than passing it on — so an object with
+        // an extra key is not a response this endpoint can produce. Without
+        // this line the generated contract said the opposite by omission
+        // (`additionalProperties` defaults to permitted), and a consumer
+        // generating a client from it would model a shape the server refuses.
+        "additionalProperties": false,
+        "description": "This endpoint has a response transform: `data` is whatever the \
+                        script returns, declared here from `output.transform.returns`. \
+                        `output.shape` and `output.naming` are inert for this endpoint — \
+                        they describe how a row straight from SQL becomes JSON, and a \
+                        transform's output never goes through that step. The property \
+                        list is exhaustive: `check_returns` refuses a response carrying \
+                        a field this list does not declare.",
+    });
+    if !required.is_empty() {
+        schema["required"] = json!(required);
+    }
+    schema
+}
+
+/// What `data` holds, for THIS endpoint (spec §4.4).
+///
+/// A response transform, when declared, is the WHOLE answer: `returns_schema`
+/// from `output.transform.returns`, whatever the statement count. Without one,
+/// `statements_data_schema` documents the SQL statements' own columns — see
+/// that function for the one-vs-several shape.
+///
+/// **Not a union**, for two independent reasons. First, the one
+/// `statements_data_schema` already gives: an endpoint's statement list is
+/// frozen, so `oneOf` over one-vs-several would ask every consumer to branch
+/// on a question their own endpoint has already answered. Second, and new
+/// here: without a transform `data` is rows straight from SQL; with one it is
+/// whatever the script returns. Documenting both for one endpoint would
+/// describe an endpoint that answers two different ways, when `output.transform`
+/// is a fixed fact of the published snapshot, not something a caller chooses
+/// per request.
+fn data_schema(snap: &EndpointSnapshot, endpoint: &str) -> Result<Value, OpenApiGenError> {
+    if snap.statements.is_empty() {
+        return Err(OpenApiGenError::Core(egret_core::Error::Internal(
+            anyhow::anyhow!("published snapshot for endpoint {endpoint} carries no statements"),
+        )));
+    }
+    if let Some(transform) = &snap.output.transform {
+        return Ok(returns_schema(&transform.returns));
+    }
+    statements_data_schema(snap, endpoint)
 }
 
 /// What `meta` holds, for THIS endpoint (spec §4.4).
@@ -392,7 +527,13 @@ fn meta_schema(snap: &EndpointSnapshot) -> Value {
         },
     });
     let obj = props.as_object_mut().expect("just built");
-    if snap.statements.len() < 2 {
+    // Matches `serving::router::meta_contract`'s own condition exactly: a
+    // transform takes the keyed arm whatever its statement count, so that the
+    // endpoint-wide `row_count` — which would describe `data`, and a
+    // transform's `data` is not the rows this counts — is omitted. See Task
+    // 6's `meta_contract` for why the keyed arm, not a third variant, is the
+    // right shape to fall back to.
+    if snap.statements.len() < 2 && snap.output.transform.is_none() {
         required.push("row_count");
         required.push("columns");
         obj.insert("row_count".into(), json!({ "type": "integer" }));
@@ -414,12 +555,27 @@ fn meta_schema(snap: &EndpointSnapshot) -> Value {
                 json!({ "$ref": "#/components/schemas/StatementMeta" }),
             );
         }
+        // Two readings of the SAME keyed arm, and the sentence has to say which
+        // one this document is. Without a transform, `data` really is keyed by
+        // these names — that is what "the same names" is telling a consumer to
+        // rely on. WITH one, `data`'s keys come from `output.transform.returns`
+        // and have nothing to do with the statement names; the original
+        // sentence was measured in a generated document on 2026-08-27 saying
+        // `data` was keyed by `main` while `data` held `by_region`/`regions`.
+        // Third time in this programme a shipped sentence described behaviour
+        // that does not exist.
+        let statements_description = if snap.output.transform.is_some() {
+            "One entry per statement, under the statements' own names. This endpoint has a \
+             response transform, so these are NOT `data`'s keys — `data` is what the script \
+             returned, and these describe the rows it was given."
+        } else {
+            "One entry per statement, under the same names, in the same order, as `data`."
+        };
         obj.insert(
             "statements".into(),
             json!({
                 "type": "object",
-                "description": "One entry per statement, under the same names, in the \
-                                same order, as `data`.",
+                "description": statements_description,
                 "required": snap.statements.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
                 "properties": per,
             }),
@@ -741,7 +897,7 @@ pub async fn build(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use egret_dataapi_api::{ColumnSpec, ParamSpec};
+    use egret_dataapi_api::{ColumnSpec, ParamSpec, TransformSpec};
 
     fn spec(name: &str, ty: ParamType) -> ParamSpec {
         ParamSpec {
@@ -1425,6 +1581,288 @@ mod tests {
         assert!(
             d.contains("no transaction") && d.contains("no snapshot") && d.contains("may disagree"),
             "the plain sentence §4.5 requires: {d}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // C2 Task 7 — the contract is generated from `returns`
+    // -----------------------------------------------------------------------
+
+    /// A snapshot with ONE statement, carrying a response transform whose
+    /// `returns` is `returns`. Mirrors `serving::router`'s own
+    /// `transformed_snapshot` test fixture — a single `main` statement is
+    /// enough to exercise the transformed path, and keeping it to one
+    /// statement is what lets
+    /// `the_contract_says_row_count_is_absent_for_a_transformed_endpoint`
+    /// tell the fix apart from the pre-existing "several statements omit
+    /// `row_count` anyway" case.
+    fn transformed_snapshot_for_doc(returns: Vec<ColumnSpec>) -> EndpointSnapshot {
+        let mut snap = snap_with_columns(vec![col("n", "integer", true)], "as_is");
+        snap.output.transform = Some(TransformSpec {
+            script: "def transform(params, statements):\n    return {}".into(),
+            returns,
+        });
+        snap
+    }
+
+    /// **The scenario the whole task turns on.** A transformed endpoint's
+    /// `data` schema is built from `output.transform.returns`, not from the
+    /// SQL statement's own columns — `required` names exactly the `returns`
+    /// entries marked `required: true`, and the SQL column `n` must not leak
+    /// in, or the document would describe two different things a caller could
+    /// receive.
+    #[test]
+    fn a_transformed_endpoints_data_schema_comes_from_returns() {
+        let snap = transformed_snapshot_for_doc(vec![
+            col("region", "varchar", true),
+            col("total", "bigint", false),
+        ]);
+        let doc = data_schema(&snap, "e").expect("a transformed endpoint has a document");
+        assert_eq!(doc["required"], json!(["region"]), "{doc}");
+        assert!(doc["properties"]["total"].is_object(), "{doc}");
+        assert!(
+            doc["properties"].get("n").is_none(),
+            "the underlying SQL column must not leak into a transformed endpoint's declared \
+             data: {doc}"
+        );
+    }
+
+    /// The declared object is CLOSED, because `check_returns` closes it.
+    ///
+    /// `check_returns` (`crate::transform`) runs against every response and
+    /// refuses an undeclared field — serving turns that into a 500 rather than
+    /// passing the field on. A document that omits `additionalProperties` says
+    /// the opposite by omission, so the generated contract was strictly LOOSER
+    /// than the gate: a client generated from it would model a response the
+    /// server refuses to send.
+    ///
+    /// Asserted as `json!(false)` rather than `.is_some()`: the failure this
+    /// exists to catch is the key being present and permissive.
+    #[test]
+    fn a_transformed_endpoints_declared_object_is_closed_like_check_returns_is() {
+        let snap = transformed_snapshot_for_doc(vec![col("region", "varchar", true)]);
+        let doc = data_schema(&snap, "e").expect("a transformed endpoint has a document");
+        assert_eq!(
+            doc["additionalProperties"],
+            json!(false),
+            "`check_returns` 500s on an undeclared field, so the document may not say a \
+             consumer might receive one: {doc}"
+        );
+    }
+
+    /// A declared type is labelled as DECLARED, never as an engine's.
+    ///
+    /// `row_schema` stamps `x-egret-engine-type` on a column an engine really
+    /// produced, and that is what the extension means everywhere else in this
+    /// document. `returns` is the author's own list for a field no engine ever
+    /// saw — a transform's `data` is whatever the script returned — so reusing
+    /// the same key told a consumer that a string the author typed came from
+    /// the database.
+    #[test]
+    fn a_declared_return_type_is_not_labelled_as_an_engine_type() {
+        let snap = transformed_snapshot_for_doc(vec![col("region", "my_own_type", true)]);
+        let doc = data_schema(&snap, "e").expect("a transformed endpoint has a document");
+        let prop = &doc["properties"]["region"];
+        assert_eq!(prop["x-egret-declared-type"], json!("my_own_type"), "{doc}");
+        assert!(
+            prop.get("x-egret-engine-type").is_none(),
+            "no engine produced this column, so nothing here may claim an engine named it: \
+             {doc}"
+        );
+    }
+
+    /// Without a transform, several statements document `data` as an object
+    /// keyed by statement name
+    /// (`several_statements_document_data_as_an_object_keyed_by_statement_name`).
+    /// With one, `data` is whatever the script returns — documenting both
+    /// would describe an endpoint that answers two different ways, so the
+    /// statement keys (`rows`, `total`) must not appear anywhere in the
+    /// transformed document.
+    #[test]
+    fn a_transformed_endpoint_does_not_document_the_statement_keyed_data() {
+        let mut snap = snap_with_statements(
+            vec![
+                stmt("rows", vec![col("id", "integer", true)]),
+                stmt("total", vec![col("n", "bigint", true)]),
+            ],
+            json!({}),
+        );
+        snap.output.transform = Some(TransformSpec {
+            script: "def transform(params, statements):\n    return {\"total\": 1}".into(),
+            returns: vec![col("total", "bigint", true)],
+        });
+        let doc = data_schema(&snap, "e").expect("a transformed endpoint has a document");
+        let s = doc.to_string();
+        assert!(
+            !s.contains("\"rows\""),
+            "the statement keys must not appear in `data`: {s}"
+        );
+    }
+
+    /// Task 6 omits `row_count` from a served, transformed response
+    /// (`meta_contract`'s keyed arm). A generated contract that still
+    /// promised it would be a lie a generated client acts on.
+    ///
+    /// A single-statement snapshot on purpose: with two or more statements
+    /// `row_count` was already absent before this task, so that shape cannot
+    /// tell the fix apart from doing nothing. Only a single statement PLUS a
+    /// transform exercises the new condition.
+    #[test]
+    fn the_contract_says_row_count_is_absent_for_a_transformed_endpoint() {
+        let snap = transformed_snapshot_for_doc(vec![col("total", "bigint", true)]);
+        let meta = meta_schema(&snap);
+        assert!(meta["properties"].get("row_count").is_none(), "{meta}");
+        assert!(meta["properties"].get("columns").is_none(), "{meta}");
+        assert!(
+            !meta["required"]
+                .as_array()
+                .expect("required array")
+                .iter()
+                .any(|v| v == "row_count"),
+            "{meta}"
+        );
+    }
+
+    /// **Found in a browser, not by review** (Task 10, 2026-08-27). A script
+    /// returning `{"by_region": {...}, "regions": 3}` was served that object
+    /// verbatim while the generated document declared `by_region` a `string`,
+    /// because `returns_schema` reused `json_type` — the mapper for a type
+    /// name an ENGINE produced, where "unrecognised means string" is safe. A
+    /// transform's `ty` is checked by nothing at runtime, so the document is
+    /// its only consumer and the author is naming a JSON type.
+    ///
+    /// Both halves are asserted: the JSON type names now map, and anything
+    /// else still falls through to `json_type` unchanged, so an author who
+    /// writes an engine spelling here loses nothing.
+    #[test]
+    fn a_transforms_declared_object_is_documented_as_an_object() {
+        let snap = transformed_snapshot_for_doc(vec![
+            col("by_region", "object", true),
+            col("series", "array", true),
+            col("regions", "integer", true),
+            col("label", "varchar", true),
+        ]);
+        let doc = data_schema(&snap, "e").expect("a transformed endpoint has a document");
+        assert_eq!(doc["properties"]["by_region"]["type"], "object", "{doc}");
+        assert_eq!(doc["properties"]["series"]["type"], "array", "{doc}");
+        assert_eq!(doc["properties"]["regions"]["type"], "integer", "{doc}");
+        assert_eq!(
+            doc["properties"]["label"]["type"], "string",
+            "an engine spelling must still fall through to `json_type`: {doc}"
+        );
+    }
+
+    /// The keyed `meta.statements` arm is shared by two endpoints that mean
+    /// different things by it, and its sentence used to state the untransformed
+    /// reading for both: "under the same names, in the same order, as `data`"
+    /// — measured in a live generated document where `data` held
+    /// `by_region`/`regions` and `meta.statements` held `main`.
+    ///
+    /// Asserted from BOTH sides, because a rule that only fires one way is how
+    /// the first sentence survived: the untransformed multi-statement document
+    /// must keep the original claim, since there `data` really is keyed by
+    /// these names.
+    #[test]
+    fn the_statements_meta_does_not_claim_data_is_keyed_by_statement_name_when_transformed() {
+        let mut snap = snap_with_statements(
+            vec![
+                stmt("rows", vec![col("id", "integer", true)]),
+                stmt("total", vec![col("n", "bigint", true)]),
+            ],
+            json!({}),
+        );
+
+        let untransformed = meta_schema(&snap);
+        let plain = untransformed["properties"]["statements"]["description"]
+            .as_str()
+            .expect("a description");
+        assert!(
+            plain.contains("the same names, in the same order, as `data`"),
+            "without a transform `data` IS keyed by these names: {plain}"
+        );
+
+        snap.output.transform = Some(TransformSpec {
+            script: "def transform(params, statements):\n    return {\"total\": 1}".into(),
+            returns: vec![col("total", "bigint", true)],
+        });
+        let transformed = meta_schema(&snap);
+        let d = transformed["properties"]["statements"]["description"]
+            .as_str()
+            .expect("a description");
+        assert!(
+            !d.contains("as `data`"),
+            "a transformed endpoint's `data` is not keyed by statement name: {d}"
+        );
+        assert!(
+            d.contains("response transform"),
+            "and the document has to say why: {d}"
+        );
+    }
+
+    /// The refactor that makes `data_schema`/`meta_schema` transform-aware
+    /// must not move a single byte of an UNTRANSFORMED endpoint's document —
+    /// this is the test most likely to catch a change that "just moves" the
+    /// generation code. Pinned as a full literal rather than a handful of
+    /// spot assertions, because a partial pin is exactly the kind of check
+    /// that lets an unrelated field move.
+    #[test]
+    fn an_untransformed_endpoints_document_is_unchanged() {
+        let snap = snap_with_columns(vec![col("id", "integer", true)], "as_is");
+        let doc = success_schema(&snap, "e").expect("document");
+        assert_eq!(
+            doc,
+            json!({
+                "type": "object",
+                "required": ["status", "message", "data", "meta"],
+                "properties": {
+                    "status": { "type": "string", "enum": ["ok"] },
+                    "message": {
+                        "type": "string",
+                        "nullable": true,
+                        "description": "Always null on success. A string here is the human half \
+                                        of a refusal — read `error.code`.",
+                    },
+                    "data": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {
+                                    "type": "integer",
+                                    "nullable": true,
+                                    "x-egret-engine-type": "integer",
+                                }
+                            },
+                            "required": ["id"],
+                        }
+                    },
+                    "meta": {
+                        "type": "object",
+                        "required": ["version", "cached", "request_id", "row_count", "columns"],
+                        "properties": {
+                            "version": {
+                                "type": "integer",
+                                "description": "The published version that served this call.",
+                            },
+                            "cached": { "type": "boolean" },
+                            "request_id": {
+                                "type": "string",
+                                "description": "Correlation id, also written to this call's \
+                                                access-log row.",
+                            },
+                            "row_count": { "type": "integer" },
+                            "columns": {
+                                "type": "array",
+                                "description": "The FROZEN contract from the published \
+                                                snapshot, not the shape this execution happened \
+                                                to return.",
+                                "items": { "$ref": "#/components/schemas/ServingColumn" },
+                            }
+                        }
+                    }
+                }
+            }),
+            "an untransformed endpoint's document must not move: {doc}"
         );
     }
 }

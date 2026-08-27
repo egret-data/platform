@@ -127,6 +127,12 @@ export const PreviewBlock = forwardRef<PreviewHandle, PreviewBlockProps>(functio
           siblings,
           params: form.params,
           values: sent,
+          // Required by the route, and it is the DRAFT's `output` rather than
+          // the saved endpoint's — a transform added since the last Save is
+          // exactly the state preview exists to show. The server checks its
+          // `transform` with publish's own rule and applies none of it; see the
+          // note the answer's `transform_declared` turns on below.
+          output: form.output,
           database_id: form.database_id,
         },
       });
@@ -253,15 +259,63 @@ export const PreviewBlock = forwardRef<PreviewHandle, PreviewBlockProps>(functio
         )}
 
         {/* Inline, not a toast — an author mid-edit needs the message to stay on
-            screen while they fix the SQL it is about. */}
+            screen while they fix the SQL it is about.
+
+            `whitespace-pre-wrap`, and it is what makes the monospace font mean
+            anything. Refusals here are no longer all one-liners: a transform's
+            Starlark parse error and its run-time traceback are ASCII diagrams
+            whose caret line has to sit UNDER the token it points at —
+
+              error: Parse error: unexpected new line, expected symbol ':'
+               --> transform.star:1:34
+                |
+              1 | def transform(params, statements)
+                |
+
+            Measured in Chrome on this branch before this changed: the default
+            `white-space: normal` collapsed every newline and every run of
+            spaces, so the whole diagram printed as one line ending
+            `... | 1 | def transform(params, statements) | |`, with the caret
+            row reduced to a stray pipe and the alignment — the only thing it
+            carries — gone. `pre-wrap`, not `pre`: a long line still wraps at
+            the container edge rather than scrolling the page sideways
+            (`docs/en/ui-conventions.md` §10). Covered by
+            `tests/e2e/data-api-transform-refusal-legibility.spec.ts`, which
+            counts the rendered line boxes in a real browser; jsdom has no
+            layout and no Tailwind, so it would pass either way. */}
         {error && (
           <Alert variant="destructive">
-            <AlertDescription className="font-mono text-xs">{error}</AlertDescription>
+            <AlertDescription className="whitespace-pre-wrap font-mono text-xs">
+              {error}
+            </AlertDescription>
           </Alert>
         )}
 
         {result && (
           <div className="space-y-2">
+            {/* The one case where the gap between what preview shows and what a
+                consumer receives is not a renaming but a different value of a
+                different shape — so it is stated ON the rows, not in the note
+                beside the button, which an author has already scrolled past.
+
+                Preview cannot run the script and does not pretend to: it runs
+                ONE statement, and `transform(params, statements)` is given
+                every statement's rows keyed by name. Handing it this one
+                statement with the others empty would refuse endpoints that
+                serve fine, and — worse — return a green answer computed from
+                `[]`. `Try it` drives the real serving router, so that is where
+                the transformed response actually exists. */}
+            {result.transform_declared && (
+              <Alert>
+                <AlertDescription className="text-xs">
+                  This endpoint builds its response with a transform. The rows below are the
+                  statement&rsquo;s own — the script&rsquo;s <em>input</em>, not the response a
+                  consumer receives. Preview runs one statement and the script is given every
+                  statement&rsquo;s rows, so it cannot run the script here; Try it runs the
+                  published endpoint for real and shows the transformed response.
+                </AlertDescription>
+              </Alert>
+            )}
             <p className="text-xs text-muted-foreground">
               {result.truncated
                 ? `Showing the first ${PREVIEW_MAX_ROWS} rows — there are more.`

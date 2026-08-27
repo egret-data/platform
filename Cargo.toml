@@ -115,6 +115,16 @@ hex = "0.4"
 # egret-dataapi's publish-time check_constraints. Already resolved at 1.13.1
 # as a transitive dependency, so this adds no new compilation.
 regex = "1.13"
+# C2: the response-transform evaluator (egret-dataapi's `transform`). Two-component
+# per this manifest's convention, which for a 0.x crate IS a minor pin — cargo's
+# compatibility range for `0.14` is `>=0.14.0, <0.15.0`, so the build is
+# reproducible without a third component freezing patch fixes.
+#
+# Chosen for a property no allow-list can give: Starlark has no `import`, no
+# filesystem, no clock and no randomness IN THE LANGUAGE. `db`, `http`, `tx` and
+# `cache` are not reachable because there is nothing to reach them WITH — see
+# `transform.rs`, whose first test pins exactly that.
+starlark = "0.14"
 # The Data API's endpoint-SQL renderer (P4.5). `default-features = false` with an
 # explicit list: `macros` and `multi_template` are dropped so `{% macro %}`,
 # `{% call %}`, `{% include %}` and `{% extends %}` do not parse at all, and

@@ -78,9 +78,25 @@ pub(crate) struct Resolved {
     /// resolved to no value at all is **absent from this map** — see the module
     /// comment.
     pub key: BTreeMap<String, Vec<String>>,
-    /// Whether any declared parameter was supplied more than once. Read only by
-    /// [`super::router`]'s render-failure mapping; see there for why.
+    /// Whether any declared parameter was supplied more than once. Read by
+    /// [`super::router`]'s render-failure mapping — see there for why — and,
+    /// since C2, by its transform-failure log line, because a repeat is the one
+    /// way a parameter reaches a script in a shape publish's probe never showed
+    /// the author.
     pub has_repeats: bool,
+    /// The same resolved parameters as JSON — what a response transform's
+    /// `params` dict carries (`crate::transform::run_transform`).
+    ///
+    /// A THIRD projection of the one resolution rather than a second
+    /// resolution, and built in the same loop from the same `as_list` decision
+    /// as [`Resolved::values`], so the script and the SQL cannot disagree about
+    /// whether `region` was one value or a list. A declared parameter that
+    /// resolved to no value at all is present here as `null` — Starlark `None` —
+    /// rather than absent, matching `ParamValues::insert_absent`'s "strict
+    /// undefined is `none`, not a missing name": a script asking
+    /// `params["region"] == None` gets an answer instead of a KeyError, and the
+    /// dict always carries exactly the endpoint's declared names.
+    pub json: BTreeMap<String, serde_json::Value>,
 }
 
 /// Resolve a request's query string against a snapshot's declared parameters.
@@ -206,6 +222,7 @@ pub(crate) fn resolve_supplied_with(
 ) -> Result<Resolved, ServingError> {
     let mut values = ParamValues::new();
     let mut key: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut json: BTreeMap<String, serde_json::Value> = BTreeMap::new();
     let mut has_repeats = false;
 
     for spec in specs {
@@ -240,6 +257,11 @@ pub(crate) fn resolve_supplied_with(
                 // being false and every optional filter becomes a 500. See
                 // `ParamValues`' own comment.
                 values.insert_absent(spec.name.clone());
+                // And `None` to a script, for the same reason one line up: the
+                // name is DECLARED, so it is in the dict — a script reading
+                // `params["region"]` gets `None` rather than a KeyError, which
+                // is the same distinction the renderer draws.
+                json.insert(spec.name.clone(), serde_json::Value::Null);
                 continue;
             }
         };
@@ -295,24 +317,38 @@ pub(crate) fn resolve_supplied_with(
             params.iter().map(key_text).collect::<Vec<_>>(),
         );
 
-        match params.len() {
-            // One value stays a scalar so `{{ region }}` is one bind. More than
-            // one becomes a list, which is what makes
-            // `IN ({% for r in regions %}{{ r }}…{% endfor %})` render
-            // `IN (?, ?, ?)` — the `IN (?)`-binds-one-value problem falls out of
-            // the formatter and needs no construct of its own (spec §4.3).
-            //
-            // **Unless the definition ITERATES it**, in which case one value is
-            // still a list of one. Arity is the caller's, and shape is the
-            // definition's: a `{% for r in regions %}` over a scalar is not a
-            // one-element loop, it is "plain is not iterable" — a 500 on the
-            // perfectly ordinary request `?regions=EU`. Publish infers the same
-            // set from the same function, so the shape a definition is validated
-            // against and the shape it is served cannot disagree.
-            1 if !iterated.iter().any(|n| n == &spec.name) => {
-                insert_one(&mut values, spec, params.pop().expect("len == 1"))
-            }
-            _ => values.insert_list(spec.name.clone(), params),
+        // One value stays a scalar so `{{ region }}` is one bind. More than one
+        // becomes a list, which is what makes
+        // `IN ({% for r in regions %}{{ r }}…{% endfor %})` render
+        // `IN (?, ?, ?)` — the `IN (?)`-binds-one-value problem falls out of the
+        // formatter and needs no construct of its own (spec §4.3).
+        //
+        // **Unless the definition ITERATES it**, in which case one value is
+        // still a list of one. Arity is the caller's, and shape is the
+        // definition's: a `{% for r in regions %}` over a scalar is not a
+        // one-element loop, it is "plain is not iterable" — a 500 on the
+        // perfectly ordinary request `?regions=EU`. Publish infers the same set
+        // from the same function, so the shape a definition is validated against
+        // and the shape it is served cannot disagree.
+        //
+        // **Decided ONCE and read twice.** C2 gives a script the same
+        // parameters, and a second `match params.len()` computing the same
+        // answer for `json` is precisely the seam the transform design exists to
+        // close: `{{ region }}` binding a scalar while `params["region"]` is a
+        // one-element list is a disagreement no error names.
+        let as_list = params.len() != 1 || iterated.iter().any(|n| n == &spec.name);
+        json.insert(
+            spec.name.clone(),
+            if as_list {
+                serde_json::Value::Array(params.iter().map(crate::transform::param_json).collect())
+            } else {
+                crate::transform::param_json(&params[0])
+            },
+        );
+        if as_list {
+            values.insert_list(spec.name.clone(), params);
+        } else {
+            insert_one(&mut values, spec, params.pop().expect("len == 1"));
         }
     }
 
@@ -320,6 +356,7 @@ pub(crate) fn resolve_supplied_with(
         values,
         key,
         has_repeats,
+        json,
     })
 }
 
@@ -1701,5 +1738,107 @@ mod tests {
             !rendered.contains("pattern") && !rendered.contains("enum"),
             "the log line must not borrow an UNRELATED `Malformed` diagnosis: {rendered}"
         );
+    }
+
+    /// **A script and the SQL are two readings of ONE request.**
+    ///
+    /// [`Resolved::json`] is what a C2 response transform's `params` dict
+    /// carries; [`Resolved::values`] is what the statements bind. Both come from
+    /// the single `as_list` decision in [`resolve_supplied_with`], and this is
+    /// what says so by measurement rather than by comment.
+    ///
+    /// **Every case asserts BOTH sides**, including the two repeat cases: a
+    /// `json` built by a second reading of the same request would agree with
+    /// `values` in the easy first case and diverge in the ones after it — and
+    /// those are the shapes publish's probe cannot show an author, so a
+    /// disagreement there is invisible until a real call makes it.
+    ///
+    /// 3a and 3b are the probe's blind spot split into the half that is already
+    /// closed and the half that is not, which is what makes "the gap is narrow"
+    /// a measurement instead of a claim in a doc comment.
+    #[test]
+    fn the_script_reads_the_parameters_the_sql_bound() {
+        // 1. One value for a parameter nothing iterates: a scalar on both sides.
+        let s = snap(SQL, vec![number_param("day")]);
+        let r = resolve(Some("day=3"), &s).expect("resolve");
+        assert_eq!(r.json["day"], serde_json::json!(3));
+        assert!(!r.has_repeats);
+        let (_, binds) = crate::render::render(&s.statements[0].sql, &r.values).expect("render");
+        assert_eq!(binds, vec![Param::I64(3)], "one value, one bind");
+
+        // 2. A declared parameter the caller did not supply is `None` to the
+        //    script and absent from the render — present in the dict either way,
+        //    so `params["day"]` answers rather than raising.
+        let r = resolve(Some(""), &s).expect("resolve");
+        assert_eq!(
+            r.json.keys().collect::<Vec<_>>(),
+            vec!["day"],
+            "the dict carries exactly the DECLARED names: {:?}",
+            r.json
+        );
+        assert_eq!(r.json["day"], serde_json::Value::Null);
+        let (_, binds) = crate::render::render(&s.statements[0].sql, &r.values).expect("render");
+        assert!(
+            binds.is_empty(),
+            "the `{{% if day %}}` block did not render"
+        );
+
+        // 3a. A REPEAT of a parameter a statement uses as a SCALAR. Both sides
+        //     see the list — and the SQL side is a REFUSAL, which is the 400
+        //     that means no script ever runs for this request. This is the half
+        //     of the probe's blind spot that is already closed one layer up, and
+        //     it is asserted here so that "the gap is narrow" is a measurement
+        //     rather than a claim in a doc comment.
+        let r = resolve(Some("day=3&day=4"), &s).expect("resolve");
+        assert!(r.has_repeats);
+        assert_eq!(
+            r.json["day"],
+            serde_json::json!([3, 4]),
+            "the script's side: both values, in the order the caller sent them"
+        );
+        assert_eq!(
+            crate::render::render(&s.statements[0].sql, &r.values).unwrap_err(),
+            crate::render::RenderError::SequenceBind,
+            "the SQL's side: `{{{{ day }}}}` cannot bind a sequence, so this \
+             request is refused before a transform is reached",
+        );
+
+        // 3b. The RESIDUAL gap, stated exactly: a repeat of a parameter no
+        //     statement uses at all. Nothing refuses it, the SQL binds nothing,
+        //     and the script is handed the list publish probed as a scalar. Both
+        //     sides asserted, because this is the one case where they legitimately
+        //     say different things — and what they say is still one reading of
+        //     the request, not two.
+        let unused = snap("SELECT 1 AS n", vec![number_param("day")]);
+        let r = resolve(Some("day=3&day=4"), &unused).expect("resolve");
+        assert!(r.has_repeats);
+        assert_eq!(
+            r.json["day"],
+            serde_json::json!([3, 4]),
+            "uncollapsed — the script is told what the caller actually sent"
+        );
+        let (sql, binds) =
+            crate::render::render(&unused.statements[0].sql, &r.values).expect("render");
+        assert_eq!(sql, "SELECT 1 AS n", "the statement never mentions it");
+        assert!(
+            binds.is_empty(),
+            "so the SQL binds nothing, and the script's list is the only place \
+             the repeat is visible: {binds:?}"
+        );
+
+        // 4. A parameter a statement ITERATES is a list even at one value —
+        //    arity is the caller's, shape is the definition's. The script must
+        //    read the same list the `{% for %}` header binds, or it is written
+        //    against a shape the SQL says the endpoint does not have.
+        let s = pagination_snap(vec![number_param("r")]);
+        let r = resolve(Some("r=3"), &s).expect("resolve");
+        assert!(!r.has_repeats, "one value is not a repeat");
+        assert_eq!(
+            r.json["r"],
+            serde_json::json!([3]),
+            "a one-element LIST, exactly as the definition iterates it"
+        );
+        let (_, binds) = crate::render::render(&s.statements[1].sql, &r.values).expect("render");
+        assert_eq!(binds, vec![Param::I64(3)], "and the loop bound it");
     }
 }

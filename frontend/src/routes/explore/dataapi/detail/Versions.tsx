@@ -375,9 +375,39 @@ function PublishDialog({
               and had to press Publish again to read the sentence. It is the
               refusal that names the parameter, the constraint and the bound,
               so it is the one message that must not expire. */}
+          {/* A refusal here used to be a sentence; a transform's is sometimes a
+              diagnostic. `probe_transform` reports the Starlark interpreter's
+              own traceback for the probe that failed, and that is an ASCII
+              diagram whose caret row has to sit under the token it points at:
+
+                the empty-rows probe: … error: Index `0` is out of bound
+                 --> transform.star:3:13
+                  |
+                3 |     first = rows[0]
+                  |             ^^^^^^^
+
+              Measured in Chrome on this branch before this changed: every
+              newline collapsed, so the dialog showed
+              `... transform.star:3:13 | 3 | first = rows[0] | ^^^^^^^ |` on
+              one proportional-font line — the line and column survived, the
+              alignment that makes a caret a caret did not.
+
+              `font-mono` only when the message HAS a newline, deliberately.
+              Every other refusal this dialog shows is prose that names a
+              parameter and a bound, and setting the whole alert in monospace
+              would make the common case worse to read to help the rare one.
+              A multi-line refusal is a diagnostic; a single-line one is a
+              sentence. Covered in a real browser by
+              `tests/e2e/data-api-transform-refusal-legibility.spec.ts`. */}
           {refusal && (
             <Alert variant="destructive">
-              <AlertDescription>{refusal}</AlertDescription>
+              <AlertDescription
+                className={
+                  refusal.includes("\n") ? "whitespace-pre-wrap font-mono text-xs" : undefined
+                }
+              >
+                {refusal}
+              </AlertDescription>
             </Alert>
           )}
           <div className="space-y-1.5">
