@@ -2160,29 +2160,61 @@ struct SentinelProbe {
 /// A string in a number parameter's place makes `params["n"] * 2` fail, and a
 /// probe that fails is inconclusive rather than a finding — so type-punning
 /// every parameter would quietly stop probing every script that does arithmetic.
+/// For the same reason the temporal probe values are real dates rather than the
+/// sentinel: a script that splits `params["day"]` on `-` should VARY, not raise.
 ///
-/// # Which parameters carry a needle, and why the other two do not
+/// # Which parameters carry a needle, and the one property that decides it
 ///
-/// A needle is only for a parameter whose bytes the CALLER writes freely: a
-/// `String`, a `Date` or a `Timestamp`, and an `Enum`, whose bytes are the
-/// author's own but which is still refused here so that the two sanctioned
-/// spellings (`TABLES[params[x]]`, `{{ x | ident }}`) stay the way an identifier
-/// is chosen.
+/// **A needle is for a parameter whose bytes reach [`Param`] VERBATIM, and
+/// `String` is the only such type.** `crate::serving::params::coerce` is where
+/// that is decided, and it is worth reading rather than assuming:
 ///
-/// A `Number` and a `Boolean` carry none, deliberately. Their caller bytes are
-/// digits or one of two words — neither can open a literal, close one, or form
-/// an identifier — and refusing them would refuse a script that exists BECAUSE
-/// of this feature: Trino will not bind `LIMIT`, so `"LIMIT " + str(params["n"])`
-/// is a legitimate reason to generate SQL at all, and it is safe for the same
-/// reason the parameter has a type.
+/// * `String` → `Param::Str(text.to_string())`. The caller's bytes, unchanged.
+///   An author's `pattern`/`max_length` may narrow them, but nothing requires
+///   one, so the default is a free run of bytes — the only kind that can open a
+///   literal, close one, or form an identifier.
+/// * `Number` → gated by `is_plain_decimal` first, so the value is
+///   `-?digits[.digits]` and nothing else.
+/// * `Boolean` → `Param::Bool`, one of two words.
+/// * `Date` / `Timestamp` → parsed by chrono and **re-formatted**
+///   (`normalize_temporal_bound`), so what survives is `%Y-%m-%d` /
+///   `%Y-%m-%d %H:%M:%S%.f`. A caller's spelling does not reach the engine at
+///   all; a normalisation of it does.
+///
+/// So the last three are exactly as constrained as each other, and none of them
+/// can carry a quote, a backslash or an identifier byte. **They all go
+/// needle-less, and refusing any one of them while permitting the others would
+/// be an inconsistency, not caution.** `Date` and `Timestamp` did carry a needle
+/// in this task's first draft, on the stated ground that a caller writes their
+/// bytes freely — which `coerce` shows is false. Recorded because the code
+/// disagreeing with its own comment is how this programme has lost time before.
+///
+/// One consequence rather than the reason, and it is the one that shows the cost
+/// of getting this wrong: Trino will not bind `LIMIT`, so
+/// `"LIMIT " + str(params["n"])` is one of the honest reasons to generate SQL at
+/// all, and `"… >= DATE '" + params["day"] + "'"` is the same script one type
+/// along.
+///
+/// `Enum` keeps a needle, and NOT because its bytes are the caller's — `coerce`
+/// returns the author's own `allowed` entry (`Param::Str(a.clone())`), the same
+/// provenance rule `ident_filter` enforces. It keeps one because spec §2.2
+/// blesses exactly two spellings for choosing an identifier from a parameter —
+/// `TABLES[params["grain"]]` and `{{ grain | ident }}` — and both survive this
+/// gate untouched. Refusing the third spelling costs an author nothing and keeps
+/// `allowed`, which is author text no rule scans, out of the SQL text.
 fn sentinel_probes(p: &ParamSpec) -> [SentinelProbe; 2] {
     let first = match p.ty {
-        ParamType::String | ParamType::Enum | ParamType::Date | ParamType::Timestamp => {
-            SentinelProbe {
-                value: serde_json::Value::from(SENTINEL),
-                needle: Some(SENTINEL),
-            }
-        }
+        // The one type whose bytes are the caller's, verbatim.
+        ParamType::String => SentinelProbe {
+            value: serde_json::Value::from(SENTINEL),
+            needle: Some(SENTINEL),
+        },
+        // The author's own string, kept out of the SQL text so that §2.2's two
+        // spellings stay the way an identifier is chosen. See above.
+        ParamType::Enum => SentinelProbe {
+            value: serde_json::Value::from(SENTINEL),
+            needle: Some(SENTINEL),
+        },
         // `representative_value` is `true`, so `false` is the other member of a
         // closed two-value space — the same reasoning `ParamValues::candidates`
         // applies to a boolean in the render probes.
@@ -2195,6 +2227,18 @@ fn sentinel_probes(p: &ParamSpec) -> [SentinelProbe; 2] {
         // (`if params["min_total"]:`).
         ParamType::Number => SentinelProbe {
             value: serde_json::Value::from(0),
+            needle: None,
+        },
+        // `representative_value` is the epoch, so these are simply a different
+        // valid instant. Valid, not a sentinel: with no needle to look for, the
+        // value's only job is to VARY, and a real date varies a script that
+        // parses or compares it instead of making it raise.
+        ParamType::Date => SentinelProbe {
+            value: serde_json::Value::from("2038-01-19"),
+            needle: None,
+        },
+        ParamType::Timestamp => SentinelProbe {
+            value: serde_json::Value::from("2038-01-19 03:14:07"),
             needle: None,
         },
     };
@@ -2293,14 +2337,28 @@ impl GeneratedSql {
     /// # What this does NOT prove, stated because a limit that reads like a
     /// guarantee is worse than a documented absence
     ///
-    /// A script that TRANSFORMS the value before concatenating it — uppercases
-    /// it, hashes it, slices it, splits it — emits something that is not the
-    /// sentinel, and this returns clean. **The probe catches an author who
-    /// creates an injection hole by accident. It does not defend against an
-    /// author who sets out to build one**, and it is not a barrier that could be
-    /// made into one by looking harder at the emitted bytes: that is the P4.5
-    /// lesson (five independent reviews, five different bypasses of one byte
-    /// scanner guarding a template language).
+    /// There are TWO ways past this, and both are ordinary Starlark:
+    ///
+    /// 1. **Transform the value first.** `params["region"].upper()` — or a hash,
+    ///    a slice, a `replace` — emits something that is not the sentinel, and
+    ///    the containment test finds nothing. Pinned by
+    ///    `a_script_that_transforms_the_value_first_defeats_the_probe`.
+    /// 2. **Refuse the sentinel before concatenating.** A script that
+    ///    length-checks or format-checks its input RAISES on a 31-character
+    ///    sentinel, the probe is inconclusive (see below), and the
+    ///    concatenation on the accepting path is never observed. Pinned by
+    ///    `a_script_that_rejects_the_sentinel_before_concatenating_also_defeats_the_probe`.
+    ///
+    /// The second is a direct consequence of treating a failed probe as
+    /// inconclusive, which is the right call for the reasons below — so it is a
+    /// cost of that decision, not an oversight in it, and it is written down
+    /// here rather than left for a reader to discover.
+    ///
+    /// **The probe catches an author who creates an injection hole by accident.
+    /// It does not defend against an author who sets out to build one**, and it
+    /// is not a barrier that could be made into one by looking harder at the
+    /// emitted bytes: that is the P4.5 lesson (five independent reviews, five
+    /// different bypasses of one byte scanner guarding a template language).
     ///
     /// That residue is acceptable for a reason that has nothing to do with this
     /// function's strength: the author is authenticated, holds
@@ -2321,8 +2379,15 @@ impl GeneratedSql {
     /// failure as inconclusive rather than a finding
     /// (`ParamValues::probe_replace`), and this does the same — with the one
     /// addition that a script which CRASHES on a parameter's value has
-    /// demonstrated that it reads it, so the name counts as referenced. Both
-    /// halves lean the safe way: no refusal from a probe that proved nothing.
+    /// demonstrated that it reads it, so the name counts as referenced.
+    ///
+    /// **Only one of those halves is "safe" in the same sense.** Reading a
+    /// failure as *referenced* leans safe for the AUTHOR — it cannot manufacture
+    /// an `UnreferencedParameter` out of a probe that proved nothing. Declining
+    /// to make a finding out of it is **permissive for the GATE**, and it is
+    /// escape route 2 above. The alternative — refusing a definition whose
+    /// script raises under a synthetic value it will never actually be sent —
+    /// would refuse honest scripts wholesale, which is the worse failure.
     ///
     /// # The cost, and the two bounds that make it a number
     ///
@@ -5195,12 +5260,27 @@ mod tests {
     /// **THE test of package S Task 4.** A script that concatenates a caller's
     /// value into the SQL TEXT is refused, and the refusal names the parameter.
     ///
-    /// The arm is asserted, not merely `is_err()` — and here that is not a
-    /// formality, it is the difference between a green test and a real one.
-    /// This script emits no `{{ }}` at all, so with the sentinel gate deleted it
-    /// is STILL refused, by `UnreferencedParameter("region")` — whose message
-    /// also contains the word `region`. The brief's `contains("region")` would
-    /// pass against a gate that does not exist.
+    /// The arm is asserted, not merely `is_err()`, and the reason is MEASURED
+    /// rather than reasoned: deleting the containment test and running this
+    /// prints
+    ///
+    /// ```text
+    /// Validated { sql: GeneratedSql({"rows": GeneratedStatement {
+    ///   sql: "SELECT * FROM sales_x", varies_with: ["region"] }}) }
+    /// ```
+    ///
+    /// — the interpolating definition **publishes clean**. Nothing else refuses
+    /// it. In particular it does NOT fall back on
+    /// [`ValidationError::UnreferencedParameter`], because spec §2.4 correctly
+    /// finds `region` referenced (varying it changes the emitted template), so
+    /// this test is the whole of what stands between that script and an
+    /// endpoint.
+    ///
+    /// The arm is still what is asserted, and deliberately. `is_err()` — or the
+    /// plan's `to_string().contains("region")` — would be satisfied by any
+    /// refusal naming the parameter, and `UnreferencedParameter`'s message
+    /// contains the word `region` too. Which of the two halves happens to fire
+    /// is not a thing this test should be able to be wrong about.
     #[test]
     fn a_script_that_concatenates_a_parameter_into_the_sql_is_refused() {
         let script =
@@ -5312,6 +5392,55 @@ mod tests {
         assert!(
             probe_generated(script, &[param("n", ParamType::Number)]).is_ok(),
             "a number in the text is not an injection, and `LIMIT` cannot be bound on Trino"
+        );
+    }
+
+    /// A `Date` in the SQL text is accepted, for the same measured reason a
+    /// number is — and this test exists because the first draft of this task
+    /// refused it.
+    ///
+    /// The draft's rationale was that a `Date` is "a parameter whose bytes the
+    /// caller writes freely". `crate::serving::params::coerce` says otherwise: a
+    /// date is parsed by chrono and **re-formatted** through
+    /// `normalize_temporal_bound`, so the caller's spelling never reaches the
+    /// engine — a normalisation of it does, in one closed grammar. That makes it
+    /// exactly as constrained as the `Number` the gate expressly permits, and
+    /// refusing one while permitting the other was an inconsistency dressed as
+    /// caution.
+    ///
+    /// The test is the assertion; [`sentinel_probes`] carries the reasoning.
+    #[test]
+    fn a_script_may_put_a_temporal_parameter_into_the_sql_text() {
+        let script = "def build_sql(params):\n  \
+                      return \"SELECT id FROM t WHERE d >= DATE '\" + params[\"d\"] + \"'\"";
+        assert!(
+            probe_generated(script, &[param("d", ParamType::Date)]).is_ok(),
+            "a date's bytes are re-serialised by `coerce`, so they cannot open or close a literal"
+        );
+    }
+
+    /// **Escape route 2, asserted rather than only commented.**
+    ///
+    /// The script refuses the sentinel — it is 31 characters and the script
+    /// accepts at most 4 — so both probes RAISE, both are inconclusive, and the
+    /// concatenation on the accepting path is never observed. The definition
+    /// publishes with `"sales_" + params["region"]` intact.
+    ///
+    /// This is the cost of treating a failed probe as inconclusive, which is
+    /// still the right call: refusing every script that raises under a synthetic
+    /// value it will never be sent would refuse honest scripts wholesale. Two
+    /// escape routes, both written down, is what "the gate's honest limits" has
+    /// to mean.
+    #[test]
+    fn a_script_that_rejects_the_sentinel_before_concatenating_also_defeats_the_probe() {
+        let script = "def build_sql(params):\n  \
+                      r = params[\"region\"]\n  \
+                      if r == None or len(r) > 4:\n    fail(\"bad region\")\n  \
+                      return \"SELECT * FROM sales_\" + r";
+        assert!(
+            probe_generated(script, &[string_param("region")]).is_ok(),
+            "if this now FAILS the probe grew a capability its doc comment disclaims — update \
+             the spec and the comment, do not just delete this test"
         );
     }
 
