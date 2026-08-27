@@ -89,8 +89,22 @@ Cổng ở đây là **hành vi**, cùng hình dạng với "render hai lần, s
 **Publish chạy script với một giá trị mốc đặc biệt làm giá trị cho từng tham số, rồi
 kiểm xem giá trị mốc đó có xuất hiện trong template phát ra hay không.** Nếu script
 nối tham số vào văn bản SQL, cái mốc nằm đó. Nếu nó chỉ dùng tham số để rẽ nhánh,
-hoặc truyền qua `{{ }}`, cái mốc không xuất hiện. M1 **vốn đã** chạy định nghĩa dưới
-nhiều phép gán thăm dò, nên việc này tốn thêm một phép gán, không phải một cỗ máy mới.
+hoặc truyền qua `{{ }}`, cái mốc không xuất hiện.
+
+**Đã sửa 2026-08-27, đo được trong Task 4.** Bản nháp trước nói việc này "tốn thêm một
+phép gán, không phải một cỗ máy mới", bằng cách gộp vào các phép gán thăm dò của M1. Nó
+**không gộp được**: `render::probe_assignments(sql, ctx)` suy ra các phép gán **từ chính
+câu SQL**, bằng cách thu thập các literal mà định nghĩa đem so sánh — mà khi `build_sql`
+chạy, câu SQL ấy chính là thứ **chưa tồn tại**. Hai bên cũng là hai thao tác trên hai
+đối tượng khác nhau: phép gán của M1 điều khiển *các lần render một template*, còn cái
+này điều khiển *các lần chạy một script*. Nên cổng cần lượt chạy riêng, tốn `2 × số tham
+số` lần chạy cho mỗi câu lệnh sinh từ script.
+
+Thứ **thật sự** gộp được là §2.4: luật "không được tham chiếu" đọc `emitted != baseline`
+từ chính các lần chạy mà cổng này đã thực hiện, chi phí thêm bằng không. Và lượt chạy ấy
+cần trần riêng — `MAX_DECLARED_PARAMS` vốn nằm **sau** phần sinh SQL, nên tới Task 4 mới
+có thứ chặn số phép thăm dò. Ca xấu nhất là `MAX_STATEMENTS × MAX_DECLARED_PARAMS × 2`
+= 1024 lần chạy, **đo được 524 ms** trên bản build debug.
 
 **Nói thẳng, vì một giới hạn đọc lên như một bảo đảm thì tệ hơn một thiếu sót được ghi
 rõ:** một script **biến đổi** giá trị trước — viết hoa, băm, cắt chuỗi — sẽ vượt được

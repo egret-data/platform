@@ -89,9 +89,22 @@ P4.5 already paid for. The gate is **behavioural** instead, in the same shape as
 **Publish runs the script with a distinctive sentinel as each parameter's value and
 checks the sentinel does not appear in the emitted template.** If the script
 concatenated the parameter into the SQL text, the sentinel is there. If it used the
-parameter only for control flow, or passed it through `{{ }}`, it is not. M1
-already runs the definition under several probe assignments, so this costs one more
-assignment, not new machinery.
+parameter only for control flow, or passed it through `{{ }}`, it is not.
+
+**Corrected 2026-08-27, measured during Task 4.** An earlier draft said this costs
+"one more assignment, not new machinery", by folding into M1's probe assignments. It
+cannot: `render::probe_assignments(sql, ctx)` derives its assignments **from the SQL**,
+by harvesting the literals a definition compares against — and when `build_sql` runs,
+that SQL is precisely what does not exist yet. They are also different operations on
+different objects: M1's assignments drive *renders of one template*, this drives
+*evaluations of one script*. So the gate needs its own pass, at `2 × params` evaluations
+per scripted statement.
+
+What **does** fold is §2.4: the unreferenced rule reads `emitted != baseline` off the
+runs this gate already performs, at zero extra cost. And the pass needs its own bound —
+`MAX_DECLARED_PARAMS` lived downstream of generation, so nothing capped the probe count
+until Task 4 moved a check ahead of it. Worst case is `MAX_STATEMENTS × MAX_DECLARED_PARAMS × 2`
+= 1024 evaluations, measured at 524 ms in a debug build.
 
 **Stated plainly, because a limit that reads like a guarantee is worse than a
 documented absence:** a script that *transforms* the value first — uppercases it,
