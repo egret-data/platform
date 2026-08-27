@@ -1132,3 +1132,41 @@ async fn preview_refuses_a_generated_branch_that_is_not_a_read() {
         "nothing may reach the engine once generation is refused"
     );
 }
+
+/// **Every template the script can emit is scanned, not only the one the
+/// author's values reach.**
+///
+/// `lifecycle::GeneratedSql::probe` runs the script again with a sentinel and
+/// then with the parameter ABSENT, and publish scans everything those runs
+/// emitted — a branch that is not a read is refused there even when the
+/// representative values do not take it. Preview has to reach the same verdict
+/// or the author is told "fine" and then told "no" at publish, which is the one
+/// thing this route exists not to do.
+///
+/// The test value below takes the SELECT branch, so `generate_one`'s per-value
+/// gate is satisfied and cannot be what refuses this. Only the scan over the
+/// absent-parameter template can.
+#[tokio::test]
+async fn preview_scans_every_template_the_script_can_emit() {
+    let Some(f) = fixture().await else { return };
+    let script = "def build_sql(params):\n    \
+         if params[\"region\"] == None:\n        \
+         return \"DELETE FROM t\"\n    \
+         return \"SELECT n FROM t WHERE region = {{ region }}\"\n";
+
+    let before = f.port.executions();
+    let (status, out) = f
+        .mgmt_post(&preview_path(&f), Some(scripted(&f, script, "EU")))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a branch that is not a read must be refused even when the author's own test \
+         value does not take it — publish refuses it, so preview must: {out}"
+    );
+    assert_eq!(
+        f.port.executions(),
+        before,
+        "nothing may reach the engine once a template is refused"
+    );
+}
