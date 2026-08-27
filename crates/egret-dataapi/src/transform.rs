@@ -3790,12 +3790,10 @@ def build_sql(params):
             egret_dataapi_api::MAX_STATEMENT_SCRIPT_BYTES,
             script.len()
         );
-        assert!(
-            egret_dataapi_api::MAX_STATEMENT_SCRIPT_BYTES
-                >= crate::lifecycle::MAX_TRANSFORM_SCRIPT_BYTES,
-            "a generating script decides a statement's structure, so it may not \
-             be capped tighter than a response transform"
-        );
+        // The third relation — that the script cap is at least the transform's —
+        // is not here: it is two constants, so it is a `const _: () = assert!`
+        // beside `MAX_TRANSFORM_SCRIPT_BYTES` and fails the BUILD rather than a
+        // test run.
     }
 
     /// A template past [`MAX_GENERATED_SQL_BYTES`] is refused, with both

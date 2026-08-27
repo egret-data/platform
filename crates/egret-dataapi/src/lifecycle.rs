@@ -1868,6 +1868,18 @@ pub fn check_constraints(params: &[ParamSpec]) -> std::result::Result<(), Valida
 /// belongs, and a cap an honest script never approaches is not a cap at all.
 pub const MAX_TRANSFORM_SCRIPT_BYTES: usize = 8192;
 
+/// The two script caps, in the one relation that must hold between them.
+///
+/// A statement's `script` decides that statement's STRUCTURE; a response
+/// transform reshapes rows a statement already returned. So the generating one
+/// may be larger and may not be smaller — and this is a `const` assertion
+/// rather than a test because both sides are constants: it fails the build, at
+/// the moment either number is edited, rather than on the next suite run.
+const _: () = assert!(
+    egret_dataapi_api::MAX_STATEMENT_SCRIPT_BYTES >= MAX_TRANSFORM_SCRIPT_BYTES,
+    "MAX_STATEMENT_SCRIPT_BYTES may not be smaller than MAX_TRANSFORM_SCRIPT_BYTES"
+);
+
 /// Refuse an `output.transform` publish cannot honour.
 ///
 /// A no-op when `output.transform` is absent — every snapshot frozen before
