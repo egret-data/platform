@@ -96,11 +96,78 @@
 //!   query string and pushing it back through `decode` is lossy — a value
 //!   containing `&`, `=` or `%` would not survive the round trip intact, so
 //!   "reuse `decode` for the caps" would trade a bound for a correctness bug.
+//!
+//! # A response transform is REFUSED here, and deliberately not RUN here (C2)
+//!
+//! An endpoint may carry an `output.transform`: a Starlark script that takes
+//! every statement's rows and returns the response. This route **checks** one
+//! ([`crate::lifecycle::check_transform`], the same call `validate_endpoint`
+//! makes for a publish) and **does not evaluate it against data**. Both halves
+//! are decisions, and each is argued below because the seam between them is
+//! where this feature has failed twice.
+//!
+//! ## Why it is checked: nothing else checks it before publish
+//!
+//! `create` and `PATCH` do not call `check_transform` — the only production
+//! call site is [`crate::lifecycle::validate_endpoint`], which `/validate` and
+//! `publish` reach. So a script that does not parse, a `returns` with nothing
+//! in it, or a transform beside a non-default `shape` can all be SAVED, and
+//! before this the author heard about it for the first time at publish, having
+//! previewed green. Told "fine", then told "no" — the one thing this route
+//! exists not to do. It is `output.transform`'s rules and no other rule over
+//! `output`: `envelope` is already checked by the write routes, so an author
+//! cannot get a bad one into the form to preview.
+//!
+//! ## Why it is not run: this route has one statement's rows, and no names
+//!
+//! `transform::run_transform` takes `statements` — a dict from statement NAME
+//! to that statement's rows — because a script must not have to be rewritten
+//! when its author adds a second statement. This route has neither half of
+//! that:
+//!
+//! * **one statement's rows.** [`PreviewEndpointInput::sql`] is the only
+//!   statement that runs; `siblings` is text that decides a parameter's shape
+//!   and is never rendered, bound or executed. Handing the script the previewed
+//!   statement's rows with every sibling's set to `[]` produces two wrong
+//!   answers and only one of them announces itself. `statements["totals"][0]`
+//!   raises on an empty list, so preview would show a REFUSAL for an endpoint
+//!   that publishes and serves perfectly — the "told fine, then told no" defect
+//!   inverted, and an author will edit a working script to make it stop. Worse
+//!   is the quiet one: a script that reads a sibling it can find empty returns
+//!   a well-formed `{"series": []}`, satisfies `check_returns`, and preview
+//!   shows a GREEN transformed answer that is fabricated;
+//! * **no names at all.** The body carries no statement name, for the previewed
+//!   statement or for any sibling, so the dict could not even be keyed the way
+//!   publish and serving key it.
+//!
+//! And a third reason that survives fixing both: these rows are capped at
+//! [`PREVIEW_MAX_ROWS`], not at the endpoint's `limits.max_rows`. A table is
+//! honest about that because `truncated` is beside it; an aggregate is not —
+//! `{"total": 4213}` computed over a 100-row prefix looks exactly like the
+//! answer a consumer gets.
+//!
+//! **Executing every statement** is the option that would make the data right,
+//! and it is a different route, not a bigger version of this one: it would put
+//! sibling text through the engine — precisely what
+//! [`crate::lifecycle::SiblingStatements`] is a type in order to make
+//! impossible, since a `:manage` body that can run N texts is an arbitrary
+//! multi-statement run — and it would cost N engine round trips per press of a
+//! keystroke-driven button.
+//!
+//! So preview answers with the statement's own rows and
+//! [`DataApiPreviewDto::transform_declared`] says the response a consumer
+//! receives is not this. What DOES show a transformed response, for real, is
+//! `Try it` — it drives the actual serving router (`crate::try_it`), so the
+//! script really runs, over the endpoint's real `limits`, with every statement
+//! present. That is the same division this route already draws for
+//! authorization: a green preview does not prove a consumer can call the
+//! endpoint, and the note beside the button already sends the author to `Try
+//! it` for that question.
 
 use std::collections::BTreeMap;
 
 use egret_core::UserId;
-use egret_dataapi_api::ParamSpec;
+use egret_dataapi_api::{OutputSpec, ParamSpec};
 use uuid::Uuid;
 
 use crate::routes::{DataApiError, DataApiState};
@@ -180,6 +247,36 @@ pub struct PreviewEndpointInput {
     /// and preview must resolve it the same way.
     #[serde(default)]
     pub values: BTreeMap<String, Vec<String>>,
+    /// The response contract as it is on screen — carried for ONE part of it,
+    /// `transform`, and applied to nothing.
+    ///
+    /// `shape`, `naming` and `envelope` are still not applied here (see
+    /// [`DataApiPreviewDto`]); they arrive because `transform`'s own publish
+    /// rules are stated in terms of them — a transform beside a non-default
+    /// `shape` is refused — and reconstructing an `OutputSpec` from a bare
+    /// `TransformSpec` plus defaults would be a second, quietly weaker copy of
+    /// [`crate::lifecycle::check_transform`]. The whole struct goes in, and
+    /// that one function decides.
+    ///
+    // # REQUIRED, and this is the load-bearing part
+    //
+    // No `#[serde(default)]`, unlike all three fields above it. The reason is
+    // the DIRECTION a default fails in: `OutputSpec::default()` has
+    // `transform: None`, so an omitted `output` makes every transform refusal
+    // vanish and preview goes green on exactly the drafts publish refuses. A
+    // default here would not be a compatibility allowance, it would be the
+    // defect — and it would be invisible, because every other test in
+    // `tests/preview.rs` stays green under it.
+    //
+    // `siblings` documents the opposite trade and it is not a precedent: an
+    // absent `siblings` is the union of one, which is the behaviour that
+    // shipped, and it fails closed. There is no such reading of an absent
+    // `output`.
+    //
+    // `tests/preview.rs::preview_will_not_read_a_default_output_for_a_body_that_omits_one`
+    // asserts this at the wire, because the edit to catch is a serde attribute
+    // rather than a call.
+    pub output: OutputSpec,
     /// The database picker's current value. Workspace-scoped by
     /// `connection_per_principal_pair`, which answers `NotFound` for a database
     /// belonging to another workspace — this id comes from a request body, so it
@@ -204,6 +301,17 @@ pub struct DataApiPreviewDto {
     /// truncating silently, so `row_count == 100` alone cannot tell "exactly at"
     /// from "over".
     pub truncated: bool,
+    /// True when the draft declares an `output.transform` — so `columns` and
+    /// `rows` above are the STATEMENT's, and a consumer receives something else
+    /// entirely (the script's output, described by `returns`).
+    ///
+    /// A fact, not a rendering: the UI owns the sentence, the way it does for
+    /// `truncated`. But it must say something, because this is the one case
+    /// where the gap between "what preview shows" and "what a consumer gets" is
+    /// not a renaming — it is a different value of a different shape. See the
+    /// module comment for why preview does not run the script, and for what
+    /// does.
+    pub transform_declared: bool,
 }
 
 /// One refusal from [`crate::serving::params::resolve_supplied`], as the sentence
@@ -347,7 +455,8 @@ pub(crate) async fn run(
     // across `sql` AND `siblings`, i.e. the endpoint, exactly as publish makes
     // it. Taking it from here rather than recomputing it below is what stops
     // this route holding two answers to one question; see `IteratedParams`.
-    let iterated = crate::lifecycle::validate_preview(&body.sql, &body.siblings, &body.params)?;
+    let iterated =
+        crate::lifecycle::validate_preview(&body.sql, &body.siblings, &body.params, &body.output)?;
 
     // The SAME function serving resolves through, so a value that renders one
     // way here cannot render another way for a consumer — `resolve_supplied_with`
@@ -380,5 +489,10 @@ pub(crate) async fn run(
         rows: out.rows,
         row_count: out.row_count,
         truncated: out.truncated,
+        // Read from the body the author is looking at, not from the stored
+        // snapshot — for the same reason every other field of this route is:
+        // the draft on screen is the thing being previewed, and a transform
+        // added since the last Save is exactly the state that needs saying.
+        transform_declared: body.output.transform.is_some(),
     })
 }

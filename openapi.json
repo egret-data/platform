@@ -28859,7 +28859,8 @@
           "columns",
           "rows",
           "row_count",
-          "truncated"
+          "truncated",
+          "transform_declared"
         ],
         "properties": {
           "columns": {
@@ -28885,6 +28886,10 @@
           "truncated": {
             "type": "boolean",
             "description": "True when the result was longer than [`PREVIEW_MAX_ROWS`] and this is a\nprefix of it. The connector fetches `cap + 1` and sets this rather than\ntruncating silently, so `row_count == 100` alone cannot tell \"exactly at\"\nfrom \"over\"."
+          },
+          "transform_declared": {
+            "type": "boolean",
+            "description": "True when the draft declares an `output.transform` — so `columns` and\n`rows` above are the STATEMENT's, and a consumer receives something else\nentirely (the script's output, described by `returns`).\n\nA fact, not a rendering: the UI owns the sentence, the way it does for\n`truncated`. But it must say something, because this is the one case\nwhere the gap between \"what preview shows\" and \"what a consumer gets\" is\nnot a renaming — it is a different value of a different shape. See the\nmodule comment for why preview does not run the script, and for what\ndoes."
           }
         }
       },
@@ -31494,6 +31499,7 @@
         "description": "The on-screen draft, as the request carries it.\n\nNo `cache`, `limits` or `rate_limit`: preview does not consult any of them,\nand accepting fields it ignores would invite the reader to think it did.",
         "required": [
           "sql",
+          "output",
           "database_id"
         ],
         "properties": {
@@ -31527,6 +31533,10 @@
             "propertyNames": {
               "type": "string"
             }
+          },
+          "output": {
+            "$ref": "#/components/schemas/OutputSpec",
+            "description": "The response contract as it is on screen — carried for ONE part of it,\n`transform`, and applied to nothing.\n\n`shape`, `naming` and `envelope` are still not applied here (see\n[`DataApiPreviewDto`]); they arrive because `transform`'s own publish\nrules are stated in terms of them — a transform beside a non-default\n`shape` is refused — and reconstructing an `OutputSpec` from a bare\n`TransformSpec` plus defaults would be a second, quietly weaker copy of\n[`crate::lifecycle::check_transform`]. The whole struct goes in, and\nthat one function decides.\n"
           },
           "database_id": {
             "type": "string",

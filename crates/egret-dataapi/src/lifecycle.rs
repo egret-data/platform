@@ -2307,6 +2307,22 @@ fn check_definition_scans(
 /// [`SiblingStatements`] is what keeps "informs the shape and nothing else"
 /// structural rather than documented: its text is private to this module, so no
 /// caller can render, bind or execute it. See its own comment.
+///
+/// # `output` is checked for its TRANSFORM and applied to nothing (C2)
+///
+/// [`check_transform`] runs here, and it is the same call [`validate_endpoint`]
+/// makes — the only production call site there was. Everything it refuses (a
+/// script that does not parse, an empty or duplicated `returns`, a transform
+/// beside a non-default `shape` or `naming`) is a publish refusal that no write
+/// route checks, so a draft could be saved, previewed GREEN, and refused only
+/// at publish.
+///
+/// What does NOT happen here is running the script: `crate::preview` has one
+/// statement's rows and no statement names, and `transform::run_transform`
+/// takes every statement's rows keyed by name. The full argument, including the
+/// two ways a partial `statements` dict answers wrongly, is in the
+/// `crate::preview` module comment.
+///
 /// `pub(crate)` rather than `pub`, because it now returns [`IteratedParams`] —
 /// and that type is deliberately crate-private, so that "the shape a definition
 /// is validated against" cannot be constructed, or a second one computed,
@@ -2315,6 +2331,7 @@ pub(crate) fn validate_preview(
     sql: &str,
     siblings: &SiblingStatements,
     params: &[ParamSpec],
+    output: &OutputSpec,
 ) -> std::result::Result<IteratedParams, ValidationError> {
     // FIRST, before the scan of `sql` and long before any render, and against
     // the same number publish uses: `siblings` is a list from a request body,
@@ -2333,16 +2350,28 @@ pub(crate) fn validate_preview(
             },
         ));
     }
+    // `output.transform`, in the position [`validate_endpoint`] checks it from
+    // — after the statement-list rule and before any per-statement scan — so an
+    // author who breaks both is told about the same one first on both paths.
+    //
+    // This is an endpoint-wide rule about `output`, exactly as it is for
+    // publish, so it is called here rather than added to
+    // `check_definition_scans`: that runs once per statement, and this parses
+    // AND evaluates the script's module top level under a real Starlark
+    // interpreter. See `check_transform`'s own comment for the cost argument.
+    //
+    // The other endpoint-wide `output` rule, `validate_envelope`, is
+    // deliberately NOT here, and the asymmetry is a fact about where each is
+    // enforced rather than a preference: `envelope` is checked by the create
+    // and PATCH routes on the way in, so no draft an author can be looking at
+    // carries a bad one. `check_transform` has exactly one production call
+    // site (`validate_endpoint`), so before this a script that does not parse
+    // could be SAVED, previewed green, and refused only at publish.
+    check_transform(output)?;
     // Only `sql` is SCANNED. The siblings are not this preview's statement:
     // they are already stored, they were scanned when they were written, and
     // re-refusing one here would block previewing the statement the author is
     // actually looking at because a different one is mid-edit.
-    //
-    // No `output.transform` check here: `PreviewEndpointInput` carries no
-    // `output` at all — preview runs the statement on screen and returns its
-    // raw rows, it does not resolve a transform. `check_transform` is an
-    // endpoint-wide rule, checked once in `validate_endpoint`; it was never a
-    // per-statement scan and does not belong in `check_definition_scans`.
     check_definition_scans(sql, params, ParamRules::Draft)?;
     let iterated = siblings.union_with(sql, params);
     check_render_rules(sql, params, &iterated)?;
@@ -4036,7 +4065,17 @@ mod tests {
         sql: &str,
         params: &[ParamSpec],
     ) -> std::result::Result<IteratedParams, ValidationError> {
-        validate_preview(sql, &SiblingStatements::default(), params)
+        preview_with(sql, params, &OutputSpec::default())
+    }
+
+    /// A preview of a draft whose `output` is not the default — the transform
+    /// cases.
+    fn preview_with(
+        sql: &str,
+        params: &[ParamSpec],
+        output: &OutputSpec,
+    ) -> std::result::Result<IteratedParams, ValidationError> {
+        validate_preview(sql, &SiblingStatements::default(), params, output)
     }
 
     fn siblings(sqls: &[&str]) -> SiblingStatements {
@@ -4275,7 +4314,12 @@ mod tests {
         // by the SAME route, `IteratedParams` across every statement, so it is
         // the same conclusion rather than a second rule that agrees today.
         assert_eq!(
-            validate_preview(SUMMARY, &siblings(&[BY_REGION]), &params),
+            validate_preview(
+                SUMMARY,
+                &siblings(&[BY_REGION]),
+                &params,
+                &OutputSpec::default()
+            ),
             Err(ValidationError::Render(
                 crate::render::RenderError::SequenceBind
             )),
@@ -4284,7 +4328,13 @@ mod tests {
         // And the direction the fix must NOT go: previewing `by_region` itself,
         // with `summary` as its sibling, still passes. The union is a union — a
         // sibling that uses a parameter as a scalar does not un-iterate it.
-        assert!(validate_preview(BY_REGION, &siblings(&[SUMMARY]), &params).is_ok());
+        assert!(validate_preview(
+            BY_REGION,
+            &siblings(&[SUMMARY]),
+            &params,
+            &OutputSpec::default()
+        )
+        .is_ok());
     }
 
     /// Preview's shape decision must be the ENDPOINT's, name for name — not a
@@ -4322,9 +4372,14 @@ mod tests {
         // EMPTY and preview would resolve a scalar where serving binds a list.
         assert!(preview(SUMMARY_ALL, &params).unwrap().names().is_empty());
         assert_eq!(
-            validate_preview(SUMMARY_ALL, &siblings(&[BY_REGION]), &params)
-                .unwrap()
-                .names(),
+            validate_preview(
+                SUMMARY_ALL,
+                &siblings(&[BY_REGION]),
+                &params,
+                &OutputSpec::default()
+            )
+            .unwrap()
+            .names(),
             published.names(),
         );
         assert_eq!(published.names(), ["region"]);
@@ -4346,13 +4401,13 @@ mod tests {
         // A `;`, a `#` and a DELETE — each of which `check_definition_scans`
         // refuses outright when it is the statement being previewed.
         let broken = siblings(&["DELETE FROM t; -- half typed # note"]);
-        assert!(validate_preview(ON_SCREEN, &broken, &params).is_ok());
+        assert!(validate_preview(ON_SCREEN, &broken, &params, &OutputSpec::default()).is_ok());
         // …while a sibling that DOES loop still counts, so "not scanned" has not
         // become "not read".
         let looping = siblings(&["SELECT region AS n FROM t WHERE region IN (\
              {% for x in region %}{{ x }}{% if not loop.last %},{% endif %}{% endfor %}); # oops"]);
         assert_eq!(
-            validate_preview(ON_SCREEN, &looping, &params)
+            validate_preview(ON_SCREEN, &looping, &params, &OutputSpec::default())
                 .unwrap()
                 .names(),
             ["region"],
@@ -4375,11 +4430,22 @@ mod tests {
         let refs: Vec<&str> = sqls.iter().map(String::as_str).collect();
         // One statement plus `MAX_STATEMENTS - 1` siblings is a describable
         // endpoint, and passes.
-        assert!(validate_preview("SELECT 1 AS n", &siblings(&refs[1..]), &[]).is_ok());
+        assert!(validate_preview(
+            "SELECT 1 AS n",
+            &siblings(&refs[1..]),
+            &[],
+            &OutputSpec::default()
+        )
+        .is_ok());
         // One more is an endpoint publish would refuse, refused here with the
         // same error and the same numbers.
         assert_eq!(
-            validate_preview("SELECT 1 AS n", &siblings(&refs), &[]),
+            validate_preview(
+                "SELECT 1 AS n",
+                &siblings(&refs),
+                &[],
+                &OutputSpec::default()
+            ),
             Err(ValidationError::Statement(
                 egret_dataapi_api::StatementError::TooManyStatements {
                     count: egret_dataapi_api::MAX_STATEMENTS + 1,
@@ -4391,7 +4457,12 @@ mod tests {
         // does: a body carrying too many siblings is refused for the count even
         // when the statement on screen is itself unpublishable.
         assert_eq!(
-            validate_preview("SELECT 1; DROP TABLE t", &siblings(&refs), &[]),
+            validate_preview(
+                "SELECT 1; DROP TABLE t",
+                &siblings(&refs),
+                &[],
+                &OutputSpec::default()
+            ),
             Err(ValidationError::Statement(
                 egret_dataapi_api::StatementError::TooManyStatements {
                     count: egret_dataapi_api::MAX_STATEMENTS + 1,
@@ -5883,6 +5954,72 @@ mod tests {
             "a transform alongside output.shape: arrays must be refused at the function \
              both /validate and publish go through"
         );
+    }
+
+    /// **Preview and publish refuse a transform with the IDENTICAL error**
+    /// (C2 Task 8).
+    ///
+    /// `check_transform` had exactly one production call site
+    /// (`validate_endpoint`), which meant every rule above was invisible until
+    /// publish: no write route checks a transform, so a script that does not
+    /// parse could be saved, previewed GREEN, and refused only when the author
+    /// pressed Publish. Told "fine", then told "no" — the defect this seam has
+    /// produced twice.
+    ///
+    /// `assert_eq!` on the two `Result`s against EACH OTHER, not two separate
+    /// `is_err()` calls: a preview that grew a second, weaker reading of the
+    /// same rule would satisfy "both refuse" while disagreeing about which
+    /// refusal, which is how the next disagreement gets in. Three rules rather
+    /// than one, because they are refused by three different `if` blocks and a
+    /// call site that reached only some of them is the plausible mistake.
+    ///
+    /// The `is_ok()` pair at the end is what stops the whole test passing on a
+    /// preview that simply refuses every transform.
+    #[test]
+    fn preview_and_publish_refuse_a_transform_with_the_identical_error() {
+        const SQL: &str = "SELECT id FROM t";
+        let statements = vec![StatementSpec {
+            name: "rows".into(),
+            sql: SQL.into(),
+        }];
+        let publish = |output: &OutputSpec| {
+            validate_endpoint(
+                &statements,
+                &[],
+                &cache(CacheScope::PerPrincipal),
+                output,
+                false,
+                false,
+            )
+            .map(|_| ())
+        };
+
+        // Rule 5: a script that does not parse.
+        let unparseable = transformed_output("def transform(params, statements:\n");
+        // Rule 2: a transform beside a non-default `naming`.
+        let mut renamed = transformed_output("def transform(params, statements):\n  return {}");
+        renamed.naming = "camel".into();
+        // Rule 3: nothing declared for serving to check against.
+        let mut nothing_declared =
+            transformed_output("def transform(params, statements):\n  return {}");
+        nothing_declared.transform.as_mut().unwrap().returns.clear();
+
+        for output in [&unparseable, &renamed, &nothing_declared] {
+            let previewed = preview_with(SQL, &[], output).map(|_| ());
+            assert!(previewed.is_err(), "preview must refuse {output:?}");
+            assert_eq!(
+                previewed,
+                publish(output),
+                "preview and publish must reach the same refusal, from the same rule"
+            );
+        }
+
+        // And the one both accept, so none of the above passes by refusing
+        // transforms wholesale.
+        let good =
+            transformed_output("def transform(params, statements):\n  return {\"total\": 1}");
+        assert!(preview_with(SQL, &[], &good).is_ok());
+        assert!(publish(&good).is_ok());
     }
 
     /// **Pins the refusal ORDER `check_transform` documents.** Each rule is

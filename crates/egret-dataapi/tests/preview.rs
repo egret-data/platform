@@ -16,13 +16,37 @@ fn preview_path(f: &serving_common::Fixture) -> String {
     )
 }
 
-/// The body every test below starts from: a draft with no parameters.
+/// The body every test below starts from: a draft with no parameters and no
+/// transform.
+///
+/// `output` is spelled `{}` rather than omitted, and it is REQUIRED on the wire
+/// (C2 Task 8) — the empty object is every `OutputSpec` field at its serde
+/// default, which is an endpoint that declares no transform.
 fn draft(f: &serving_common::Fixture, sql: &str) -> serde_json::Value {
     serde_json::json!({
         "sql": sql,
         "params": [],
         "values": {},
+        "output": {},
         "database_id": f.database_id,
+    })
+}
+
+/// An `output` carrying `script` as its transform, declaring `returns`.
+///
+/// A helper rather than a literal at each call site because the SHAPE is what
+/// the tests below vary — a script that will not parse, a `returns` with
+/// nothing in it — and spelling the rest out four times invites two of them to
+/// drift.
+fn transformed(script: &str, returns: &[&str]) -> serde_json::Value {
+    serde_json::json!({
+        "transform": {
+            "script": script,
+            "returns": returns
+                .iter()
+                .map(|n| serde_json::json!({ "name": n, "ty": "bigint", "required": true }))
+                .collect::<Vec<_>>(),
+        }
     })
 }
 
@@ -202,6 +226,7 @@ async fn preview_judges_a_parameter_shape_across_its_siblings() {
                 "required": true,
             }],
             "values": { "region": ["EU"] },
+            "output": {},
             "database_id": f.database_id,
         })
     };
@@ -243,6 +268,7 @@ fn draft_with_region(f: &serving_common::Fixture) -> serde_json::Value {
             "required": true,
         }],
         "values": { "region": ["EU"] },
+        "output": {},
         "database_id": f.database_id,
     })
 }
@@ -449,6 +475,7 @@ async fn preview_binds_the_authors_test_values() {
                 "required": true,
             }],
             "values": { "region": [v] },
+            "output": {},
             "database_id": f.database_id,
         })
     };
@@ -494,6 +521,7 @@ async fn preview_runs_sql_that_references_none_of_the_declared_parameters() {
         "values": { "region": ["EU"] },
         // …and SQL that reads neither of them, the way it looks mid-edit.
         "sql": "SELECT 7 AS mid_edit",
+        "output": {},
         "database_id": f.database_id,
     });
     let (status, body) = f.mgmt_post(&preview_path(&f), Some(body)).await;
@@ -534,12 +562,14 @@ async fn preview_names_which_test_value_is_wrong() {
         "sql": "SELECT 1 AS n WHERE region = {{ region }}",
         "params": [{ "name": "region", "type": "string", "location": "query", "required": true }],
         "values": {},
+        "output": {},
         "database_id": f.database_id,
     });
     let mistyped = serde_json::json!({
         "sql": "SELECT 1 AS n WHERE day = {{ day }}",
         "params": [{ "name": "day", "type": "date", "location": "query", "required": true }],
         "values": { "day": ["not-a-date"] },
+        "output": {},
         "database_id": f.database_id,
     });
     let repeated_enum = serde_json::json!({
@@ -552,6 +582,7 @@ async fn preview_names_which_test_value_is_wrong() {
             "allowed": ["asc", "desc"],
         }],
         "values": { "sort_dir": ["asc", "desc"] },
+        "output": {},
         "database_id": f.database_id,
     });
 
@@ -663,6 +694,7 @@ async fn preview_refuses_a_value_its_endpoint_would_refuse() {
                 "minimum": "10",
             }],
             "values": { "n": [v] },
+            "output": {},
             "database_id": f.database_id,
         })
     };
@@ -734,6 +766,7 @@ async fn preview_enforces_a_pattern_the_way_serving_does() {
                 "pattern": "EU-\\d",
             }],
             "values": { "region": [v] },
+            "output": {},
             "database_id": f.database_id,
         })
     };
@@ -766,5 +799,169 @@ async fn preview_enforces_a_pattern_the_way_serving_does() {
         f.port.executions(),
         before + 1,
         "the matching value must have reached the engine"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// C2 §6 — the response transform, at the preview seam
+// ---------------------------------------------------------------------------
+
+/// **Preview refuses the transform publish refuses**, with publish's own words.
+///
+/// This is the seam, and it had been open in the one direction that costs an
+/// author the most: `PreviewEndpointInput` carried no `output` at all, so a
+/// draft whose script does not parse — or that declares nothing for serving to
+/// check against — previewed GREEN and was then refused at publish. Told
+/// "fine", then told "no".
+///
+/// Two refusals, chosen for two different reasons:
+///
+/// * the **unparseable script** is the one that goes through
+///   `transform::eval_probe`, i.e. the single evaluator. A preview that reached
+///   its own parser could accept a script publish rejects, which is the
+///   second-implementation failure this whole package is built to avoid;
+/// * the **empty `returns`** is the one whose sentence is short enough to pin
+///   whole, so this asserts publish's message character for character rather
+///   than merely asserting a 400. A preview-shaped imitation of the rule would
+///   pass a status assertion and fail this one.
+#[tokio::test]
+async fn preview_refuses_the_transform_publish_refuses() {
+    let Some(f) = fixture().await else { return };
+
+    let mut unparseable = draft(&f, "SELECT 1 AS n");
+    unparseable["output"] = transformed("def transform(params, statements:\n", &["total"]);
+    let (status, out) = f.mgmt_post(&preview_path(&f), Some(unparseable)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{out}");
+    assert!(
+        out["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("the transform script is not valid"),
+        "a script that does not parse must be refused in publish's words: {out}"
+    );
+    assert_eq!(f.port.executions(), 0, "nothing may reach the engine");
+
+    let mut no_returns = draft(&f, "SELECT 1 AS n");
+    no_returns["output"] = transformed("def transform(params, statements):\n  return {}", &[]);
+    let (status, out) = f.mgmt_post(&preview_path(&f), Some(no_returns)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{out}");
+    // `ValidationError` reaches a body through `Error::InvalidInput`, which
+    // prefixes it — the same wrapping publish's own refusal gets, so this is
+    // still publish's sentence and not a paraphrase of it.
+    assert_eq!(
+        out["error"].as_str(),
+        Some(
+            format!(
+                "invalid input: {}",
+                egret_dataapi::lifecycle::ValidationError::TransformReturnsEmpty
+            )
+            .as_str()
+        ),
+        "preview must answer with the sentence publish answers with, not one of its own"
+    );
+    assert_eq!(f.port.executions(), 0, "nothing may reach the engine");
+
+    // The control that makes both refusals mean something: the SAME script,
+    // parseable, with a `returns` — green. Without this, a route that refused
+    // every transform outright would pass everything above.
+    let mut good = draft(&f, "SELECT 1 AS n");
+    good["output"] = transformed(
+        "def transform(params, statements):\n  return {\"total\": 1}",
+        &["total"],
+    );
+    let (status, out) = f.mgmt_post(&preview_path(&f), Some(good)).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a valid transform must preview — {out}"
+    );
+}
+
+/// **Preview may not read a default `OutputSpec` for a body that omits one.**
+///
+/// The guard against the edit this seam invites. `output` looks exactly like
+/// the kind of field that should carry `#[serde(default)]` — `siblings`,
+/// `params` and `values` all do, and one of them documents at length why an
+/// older client must keep working. It must not, and the direction is what
+/// decides it: a defaulted `OutputSpec` has `transform: None`, so an omitted
+/// `output` makes every refusal in the test above vanish and preview goes green
+/// on a draft publish refuses. That is the failure, not a compatibility cost.
+///
+/// Asserted at the WIRE rather than through a Rust call, because the edit to
+/// catch is a serde attribute: `#[serde(default)]` on the field, or an
+/// `OutputSpec::default()` threaded in at a call site, both leave every other
+/// test in this file green and turn this one red.
+#[tokio::test]
+async fn preview_will_not_read_a_default_output_for_a_body_that_omits_one() {
+    let Some(f) = fixture().await else { return };
+    let mut body = draft(&f, "SELECT 1 AS n");
+    body.as_object_mut().expect("an object").remove("output");
+    assert!(
+        body.get("output").is_none(),
+        "the field must really be absent"
+    );
+
+    let (status, out) = f.mgmt_post(&preview_path(&f), Some(body)).await;
+    assert_ne!(
+        status,
+        StatusCode::OK,
+        "a body with no `output` must be refused rather than silently read as \
+         `OutputSpec::default()` — a default carries no transform, so preview would \
+         go green on every draft publish refuses: {out}"
+    );
+    assert_eq!(f.port.executions(), 0, "nothing may reach the engine");
+}
+
+/// **A transform is DECLARED to preview, and preview says it did not apply it.**
+///
+/// The decision this task settles, asserted rather than described. Preview runs
+/// exactly ONE statement of an endpoint that may have sixteen, and
+/// `run_transform` takes every statement's rows keyed by NAME — which this
+/// route is not even told. Handing the script the one statement's rows with the
+/// others empty would show the author a refusal for an endpoint that serves
+/// fine, or worse a GREEN answer computed from `[]`. So the rows below are the
+/// engine's own, and `transform_declared` is what tells the UI to say so.
+///
+/// Both sides in one test, because the property is the DIFFERENCE: the same
+/// draft without a transform must read `false`. A constant — the flag hardcoded
+/// either way, or dropped from the DTO — cannot satisfy both halves.
+#[tokio::test]
+async fn preview_shows_the_statements_own_rows_and_says_a_transform_is_declared() {
+    let Some(f) = fixture().await else { return };
+
+    let (status, plain) = f
+        .mgmt_post(&preview_path(&f), Some(draft(&f, "SELECT 1 AS n")))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{plain}");
+    assert_eq!(
+        plain["transform_declared"].as_bool(),
+        Some(false),
+        "a draft with no transform must not claim one: {plain}"
+    );
+
+    // A script that returns something no raw row could be mistaken for. If
+    // preview ever ran it, `columns` would be `total` and `rows` would carry
+    // 99 — so the two assertions below are what say the script did not run.
+    let mut body = draft(&f, "SELECT 1 AS n");
+    body["output"] = transformed(
+        "def transform(params, statements):\n  return {\"total\": 99}",
+        &["total"],
+    );
+    let (status, out) = f.mgmt_post(&preview_path(&f), Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    assert_eq!(
+        out["transform_declared"].as_bool(),
+        Some(true),
+        "the answer must tell the author the endpoint declares a transform: {out}"
+    );
+    assert_eq!(
+        out["columns"][0]["name"].as_str(),
+        Some("n"),
+        "preview answers with the statement's own columns, not the transform's `returns`: {out}"
+    );
+    assert_eq!(
+        out["rows"][0][0].as_i64(),
+        Some(marker(UserId(f.author))),
+        "preview answers with the statement's own rows, not the script's output: {out}"
     );
 }
