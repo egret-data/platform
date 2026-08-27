@@ -337,13 +337,19 @@ async fn an_endpoint_written_before_m2_survives_the_migration() {
     );
 
     // And the shape the DRAFT ROW is read back through, not just the shape a
-    // human reads: `StatementSpec` is `deny_unknown_fields`, so a conversion
-    // that emitted an extra key would fail here rather than in production.
+    // human reads: `StatementSpec` refuses an unknown key, so a conversion that
+    // emitted an extra key would fail here rather than in production.
+    //
+    // Package S made a statement's SQL text OR a script; the migrated row must
+    // still read as the TEXT case, from exactly the keys migration 0129 wrote.
     let parsed: Vec<StatementSpec> =
         serde_json::from_value(stored).expect("the converted list must be a Vec<StatementSpec>");
     assert_eq!(parsed.len(), 1);
-    assert_eq!(parsed[0].name, "main");
-    assert_eq!(parsed[0].sql, ORIGINAL);
+    assert_eq!(
+        parsed[0],
+        StatementSpec::from_sql("main", ORIGINAL),
+        "a row migration 0129 wrote must read back as text, byte for byte"
+    );
 
     // The old column is gone, so nothing can go on reading it and quietly serve
     // the pre-M2 definition.

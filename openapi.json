@@ -34006,22 +34006,56 @@
           }
         }
       },
-      "StatementSpec": {
-        "type": "object",
-        "description": "One of an endpoint's N SQL definitions, as an author writes it (M2). The\ncanonical shape is a `rows` statement and a `total` statement for\npagination, but any number is allowed.\n\n`name` is not decoration: once an endpoint has more than one statement,\nthe response envelope is a JSON object keyed by statement name and the\ngenerated OpenAPI document names it as a property (M2 Tasks 8-9). A name a\ncaller writes into their own code is a contract, which is what\n[`validate_statement_name`] and [`validate_statements`] enforce —\n`^[a-z][a-z0-9_]*$` so the key never needs quoting in JSON and never reads\nas private, and uniqueness within the endpoint so the key is unambiguous.\n\n`#[serde(deny_unknown_fields)]` for the same reason as [`ParamSpec`] and\nits four siblings: this is a type an AUTHOR fills in, so a typo in the\nrequest body must be a 400, not a silently-ignored field.",
-        "required": [
-          "name",
-          "sql"
-        ],
-        "properties": {
-          "name": {
-            "type": "string"
+      "StatementSource": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "SQL the author wrote, as a template the existing render pipeline runs.",
+            "required": [
+              "sql"
+            ],
+            "properties": {
+              "sql": {
+                "type": "string",
+                "description": "SQL the author wrote, as a template the existing render pipeline runs."
+              }
+            }
           },
-          "sql": {
-            "type": "string"
+          {
+            "type": "object",
+            "description": "A Starlark script whose `build_sql(params)` returns that template.\n\nNothing in this crate runs it — package S Task 2 is the evaluator and\nTask 3 is what wires generation into publish. Until then this case\nexists but no path produces SQL from it.",
+            "required": [
+              "script"
+            ],
+            "properties": {
+              "script": {
+                "type": "string",
+                "description": "A Starlark script whose `build_sql(params)` returns that template.\n\nNothing in this crate runs it — package S Task 2 is the evaluator and\nTask 3 is what wires generation into publish. Until then this case\nexists but no path produces SQL from it."
+              }
+            }
           }
-        },
-        "additionalProperties": false
+        ],
+        "description": "Where one statement's SQL comes from: the author typed it, or a script\nbuilds it (package S).\n\n**Two cases and no third.** A statement carrying BOTH a literal and a script\nhas two definitions and no rule for which one runs; a statement carrying\nNEITHER has nothing to execute and would discover that at request time, long\nafter the author left. Both are refused by the type rather than by a check\nsomeone downstream has to remember — this codebase's repeated lesson is that\nunrepresentable beats unforgettable.\n\nThe wire form is the ENCLOSING object's key, not a nested one:\n`{\"name\": \"rows\", \"sql\": \"…\"}` or `{\"name\": \"rows\", \"script\": \"…\"}`. That is\nnot a style choice. [`StatementSpec`] is the persisted `jsonb` of\n`dataapi.endpoints.statements` (migration `0129`) and every row already in\nthat column is `{\"name\": …, \"sql\": …}`, so the text case has to read\nunchanged or every list, detail and serve breaks on READ — where no author\nis present to see it. A tagged shape (`{\"kind\": \"sql\", …}`) would demand a\nkey no stored row carries."
+      },
+      "StatementSpec": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/StatementSource",
+            "description": "Where this statement's SQL comes from. Flattened onto the object, so the\nwire form is `{\"name\": …, \"sql\": …}` or `{\"name\": …, \"script\": …}` —\nthe first of those is byte-for-byte what every stored row already is."
+          },
+          {
+            "type": "object",
+            "required": [
+              "name"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              }
+            }
+          }
+        ],
+        "description": "One of an endpoint's N SQL definitions, as an author writes it (M2). The\ncanonical shape is a `rows` statement and a `total` statement for\npagination, but any number is allowed.\n\n`name` is not decoration: once an endpoint has more than one statement,\nthe response envelope is a JSON object keyed by statement name and the\ngenerated OpenAPI document names it as a property (M2 Tasks 8-9). A name a\ncaller writes into their own code is a contract, which is what\n[`validate_statement_name`] and [`validate_statements`] enforce —\n`^[a-z][a-z0-9_]*$` so the key never needs quoting in JSON and never reads\nas private, and uniqueness within the endpoint so the key is unambiguous.\n\nUnknown keys are refused for the same reason as [`ParamSpec`] and its four\nsiblings: this is a type an AUTHOR fills in, so a typo in the request body\nmust be a 400, not a silently-ignored field. It is NOT\n`#[serde(deny_unknown_fields)]` any more — see the hand-written\n[`Deserialize`] impl below for what replaced it and why."
       },
       "StatusBody": {
         "type": "object",

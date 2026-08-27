@@ -450,14 +450,207 @@ impl From<&egret_core::ColumnMeta> for ColumnSpec {
 /// `^[a-z][a-z0-9_]*$` so the key never needs quoting in JSON and never reads
 /// as private, and uniqueness within the endpoint so the key is unambiguous.
 ///
-/// `#[serde(deny_unknown_fields)]` for the same reason as [`ParamSpec`] and
-/// its four siblings: this is a type an AUTHOR fills in, so a typo in the
-/// request body must be a 400, not a silently-ignored field.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
-#[serde(deny_unknown_fields)]
+/// Unknown keys are refused for the same reason as [`ParamSpec`] and its four
+/// siblings: this is a type an AUTHOR fills in, so a typo in the request body
+/// must be a 400, not a silently-ignored field. It is NOT
+/// `#[serde(deny_unknown_fields)]` any more — see the hand-written
+/// [`Deserialize`] impl below for what replaced it and why.
+#[derive(Debug, Clone, Serialize, PartialEq, utoipa::ToSchema)]
 pub struct StatementSpec {
     pub name: String,
-    pub sql: String,
+    /// Where this statement's SQL comes from. Flattened onto the object, so the
+    /// wire form is `{"name": …, "sql": …}` or `{"name": …, "script": …}` —
+    /// the first of those is byte-for-byte what every stored row already is.
+    #[serde(flatten)]
+    pub source: StatementSource,
+}
+
+/// Where one statement's SQL comes from: the author typed it, or a script
+/// builds it (package S).
+///
+/// **Two cases and no third.** A statement carrying BOTH a literal and a script
+/// has two definitions and no rule for which one runs; a statement carrying
+/// NEITHER has nothing to execute and would discover that at request time, long
+/// after the author left. Both are refused by the type rather than by a check
+/// someone downstream has to remember — this codebase's repeated lesson is that
+/// unrepresentable beats unforgettable.
+///
+/// The wire form is the ENCLOSING object's key, not a nested one:
+/// `{"name": "rows", "sql": "…"}` or `{"name": "rows", "script": "…"}`. That is
+/// not a style choice. [`StatementSpec`] is the persisted `jsonb` of
+/// `dataapi.endpoints.statements` (migration `0129`) and every row already in
+/// that column is `{"name": …, "sql": …}`, so the text case has to read
+/// unchanged or every list, detail and serve breaks on READ — where no author
+/// is present to see it. A tagged shape (`{"kind": "sql", …}`) would demand a
+/// key no stored row carries.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum StatementSource {
+    /// SQL the author wrote, as a template the existing render pipeline runs.
+    Sql(String),
+    /// A Starlark script whose `build_sql(params)` returns that template.
+    ///
+    /// Nothing in this crate runs it — package S Task 2 is the evaluator and
+    /// Task 3 is what wires generation into publish. Until then this case
+    /// exists but no path produces SQL from it.
+    Script(String),
+}
+
+impl StatementSource {
+    /// The SQL text, when the author wrote it; `None` for a script.
+    ///
+    /// Deliberately NOT "the SQL, generating it if necessary": generation needs
+    /// the parameter values and a Starlark evaluator, neither of which a leaf
+    /// contract crate has. A caller that wants the text of a script statement
+    /// has to go through the generator, which is exactly the seam that keeps
+    /// generated SQL on the same path as written SQL.
+    pub fn sql(&self) -> Option<&str> {
+        match self {
+            Self::Sql(sql) => Some(sql.as_str()),
+            Self::Script(_) => None,
+        }
+    }
+
+    /// The script, when one builds this statement's SQL; `None` for text.
+    pub fn script(&self) -> Option<&str> {
+        match self {
+            Self::Sql(_) => None,
+            Self::Script(script) => Some(script.as_str()),
+        }
+    }
+}
+
+impl StatementSpec {
+    /// A statement whose SQL the author wrote.
+    pub fn from_sql(name: impl Into<String>, sql: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            source: StatementSource::Sql(sql.into()),
+        }
+    }
+
+    /// A statement whose SQL a script builds.
+    pub fn from_script(name: impl Into<String>, script: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            source: StatementSource::Script(script.into()),
+        }
+    }
+}
+
+/// The three keys a statement object may carry, and the only three.
+const STATEMENT_SPEC_FIELDS: &[&str] = &["name", "sql", "script"];
+
+/// Hand-written, and the reason is measured rather than stylistic.
+///
+/// The derive for this shape is `#[serde(flatten)]` over [`StatementSource`]
+/// plus `#[serde(deny_unknown_fields)]`, and serde documents those two as not
+/// composing. On the pinned `serde 1.0.229` they were measured to compose — a
+/// struct with both DID refuse `{"name":"rows","sql":"…","timeout_ms":5000}`,
+/// and the same struct without `deny_unknown_fields` accepted it silently. But
+/// the measurement also showed WHERE each property came from, and that is what
+/// decided against the derive:
+///
+/// * "Unknown key refused" came from `deny_unknown_fields`, an attribute serde
+///   documents as unsupported in this position. A future serde is free to make
+///   it inert again, and it would do so silently — which is precisely the
+///   failure `deny_unknown_fields` is here to prevent (a documented-but-wrong
+///   `rate_limit` key once returned 201 with the real field defaulted to `0`).
+/// * "Both refused" was not a one-of check at all: it was `deny_unknown_fields`
+///   firing on whichever of `sql`/`script` came second. So the two properties
+///   were not independent — losing the attribute would have lost BOTH at once,
+///   and `{"sql": …, "script": …}` would have deserialized as `sql`, silently
+///   discarding the script the author wrote.
+/// * The messages were wrong for an author. "Both" reported ``unknown field
+///   `script` `` — a key that is not unknown — and "neither" reported "no
+///   variant of enum StatementSource found in flattened data", which names an
+///   internal type. These are 400 bodies an author reads.
+///
+/// So this impl states all three rules itself: exactly one of `sql`/`script`,
+/// no unknown key, no repeated key. `Serialize` stays derived, where `flatten`
+/// has no such caveat and produces exactly the stored shape.
+impl<'de> Deserialize<'de> for StatementSpec {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::{Error as DeError, MapAccess, Visitor};
+
+        struct StatementSpecVisitor;
+
+        impl<'de> Visitor<'de> for StatementSpecVisitor {
+            type Value = StatementSpec;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a statement object with a `name` and exactly one of `sql` or `script`")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<StatementSpec, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut name: Option<String> = None;
+                let mut sql: Option<String> = None;
+                let mut script: Option<String> = None;
+                // Every key is read, including the ones after the reader already
+                // has what it needs: stopping early would accept a trailing typo
+                // and JSON permits a repeated key, which is a malformed object
+                // rather than a last-wins assignment.
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "name" => {
+                            if name.is_some() {
+                                return Err(DeError::duplicate_field("name"));
+                            }
+                            name = Some(map.next_value()?);
+                        }
+                        "sql" => {
+                            if sql.is_some() {
+                                return Err(DeError::duplicate_field("sql"));
+                            }
+                            sql = Some(map.next_value()?);
+                        }
+                        "script" => {
+                            if script.is_some() {
+                                return Err(DeError::duplicate_field("script"));
+                            }
+                            script = Some(map.next_value()?);
+                        }
+                        unknown => {
+                            return Err(DeError::unknown_field(unknown, STATEMENT_SPEC_FIELDS));
+                        }
+                    }
+                }
+                let name = name.ok_or_else(|| DeError::missing_field("name"))?;
+                let source = match (sql, script) {
+                    (Some(sql), None) => StatementSource::Sql(sql),
+                    (None, Some(script)) => StatementSource::Script(script),
+                    (Some(_), Some(_)) => {
+                        return Err(DeError::custom(
+                            "a statement carries either `sql` or `script`, never both; \
+                             `sql` is SQL the author wrote and `script` is a Starlark script \
+                             that builds it, so a statement with both has two definitions and \
+                             no rule for which one runs",
+                        ))
+                    }
+                    (None, None) => {
+                        return Err(DeError::custom(
+                            "a statement must carry either `sql`, the SQL the author wrote, \
+                             or `script`, a Starlark script that builds it; this one carries \
+                             neither",
+                        ))
+                    }
+                };
+                Ok(StatementSpec { name, source })
+            }
+        }
+
+        deserializer.deserialize_struct(
+            "StatementSpec",
+            STATEMENT_SPEC_FIELDS,
+            StatementSpecVisitor,
+        )
+    }
 }
 
 /// The frozen form of a [`StatementSpec`]: what a publish freezes into
@@ -1107,10 +1300,7 @@ mod tests {
         // And through the list validator, which is what the routes and publish
         // actually call.
         assert_eq!(
-            validate_statements(&[StatementSpec {
-                name: past.clone(),
-                sql: "SELECT 1".into(),
-            }]),
+            validate_statements(&[StatementSpec::from_sql(past.clone(), "SELECT 1")]),
             Err(StatementError::NameTooLong {
                 len: MAX_STATEMENT_NAME_LEN + 1,
                 limit: MAX_STATEMENT_NAME_LEN,
@@ -1154,14 +1344,8 @@ mod tests {
     #[test]
     fn two_statements_may_not_share_a_name() {
         let statements = vec![
-            StatementSpec {
-                name: "rows".into(),
-                sql: "SELECT 1".into(),
-            },
-            StatementSpec {
-                name: "rows".into(),
-                sql: "SELECT 2".into(),
-            },
+            StatementSpec::from_sql("rows", "SELECT 1"),
+            StatementSpec::from_sql("rows", "SELECT 2"),
         ];
         assert_eq!(
             validate_statements(&statements),
@@ -1181,10 +1365,7 @@ mod tests {
     #[test]
     fn a_statement_list_past_the_limit_is_refused() {
         let statements: Vec<StatementSpec> = (0..=MAX_STATEMENTS)
-            .map(|i| StatementSpec {
-                name: format!("s{i}"),
-                sql: "SELECT 1".into(),
-            })
+            .map(|i| StatementSpec::from_sql(format!("s{i}"), "SELECT 1"))
             .collect();
         assert_eq!(
             validate_statements(&statements),
@@ -1207,10 +1388,7 @@ mod tests {
     fn the_canonical_two_statement_endpoint_and_a_list_at_the_limit_are_accepted() {
         let build = |n: usize| -> Vec<StatementSpec> {
             (0..n)
-                .map(|i| StatementSpec {
-                    name: format!("s{i}"),
-                    sql: "SELECT 1".into(),
-                })
+                .map(|i| StatementSpec::from_sql(format!("s{i}"), "SELECT 1"))
                 .collect()
         };
         assert_eq!(validate_statements(&build(2)), Ok(()));
@@ -1219,19 +1397,13 @@ mod tests {
 
     #[test]
     fn a_single_valid_statement_is_accepted() {
-        let statements = vec![StatementSpec {
-            name: "rows".into(),
-            sql: "SELECT 1".into(),
-        }];
+        let statements = vec![StatementSpec::from_sql("rows", "SELECT 1")];
         assert!(validate_statements(&statements).is_ok());
     }
 
     #[test]
     fn an_invalid_name_inside_the_list_is_refused_by_the_list_validator() {
-        let statements = vec![StatementSpec {
-            name: "Rows".into(),
-            sql: "SELECT 1".into(),
-        }];
+        let statements = vec![StatementSpec::from_sql("Rows", "SELECT 1")];
         assert_eq!(
             validate_statements(&statements),
             Err(StatementError::InvalidName("Rows".into()))
@@ -1596,5 +1768,195 @@ mod tests {
             serde_json::from_str::<OutputSpec>(json).is_err(),
             "an unknown key inside `transform` must be refused, not defaulted"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // Package S Task 1: a statement's SQL is TEXT or a SCRIPT.
+    //
+    // `StatementSpec` IS the persisted `jsonb` of `dataapi.endpoints.statements`
+    // (migration 0129), so the first test below is the load-bearing one: every
+    // stored row is `{"name":"main","sql":"…"}` and a shape that stops reading
+    // it breaks every list, detail and serve — on READ, where no author is
+    // present to notice.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn a_statement_with_sql_reads_as_text_and_round_trips() {
+        let json = r#"{"name":"rows","sql":"SELECT 1 AS a"}"#;
+        let s: StatementSpec = serde_json::from_str(json).expect("pre-S spec must still read");
+        assert_eq!(s.name, "rows");
+        assert_eq!(
+            s.source,
+            StatementSource::Sql("SELECT 1 AS a".to_string()),
+            "a stored row with `sql` must observe the TEXT case"
+        );
+        // The wire form must be byte-identical to what is already in the column,
+        // or a round trip through the API rewrites every stored row.
+        assert_eq!(
+            serde_json::to_string(&s).unwrap(),
+            json,
+            "the text form must serialize back to exactly the stored shape"
+        );
+        let round: StatementSpec =
+            serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(round, s, "round trip must be lossless");
+    }
+
+    #[test]
+    fn a_statement_with_a_script_reads_as_a_script() {
+        let json = r#"{"name":"rows","script":"def build_sql(params):\n  return \"SELECT 1\""}"#;
+        let s: StatementSpec = serde_json::from_str(json).expect("script form must read");
+        assert_eq!(s.name, "rows");
+        assert_eq!(
+            s.source,
+            StatementSource::Script("def build_sql(params):\n  return \"SELECT 1\"".to_string()),
+            "must observe the SCRIPT case, not the text one"
+        );
+        assert_eq!(
+            s.source.sql(),
+            None,
+            "a script statement has no author-written SQL to hand a scanner"
+        );
+        assert_eq!(
+            serde_json::to_string(&s).unwrap(),
+            json,
+            "the script form must round-trip through the same key it read"
+        );
+    }
+
+    #[test]
+    fn a_statement_carrying_both_is_refused() {
+        // "Both" must be unrepresentable, not merely invalid-and-checked-later.
+        let json = r#"{"name":"rows","sql":"SELECT 1","script":"def build_sql(p): return \"\""}"#;
+        let err = serde_json::from_str::<StatementSpec>(json)
+            .expect_err("a statement with both a literal and a script must not deserialize");
+        assert_eq!(
+            err.to_string(),
+            "a statement carries either `sql` or `script`, never both; \
+             `sql` is SQL the author wrote and `script` is a Starlark script that \
+             builds it, so a statement with both has two definitions and no rule \
+             for which one runs at line 1 column 73",
+            "the message must say WHICH rule was broken, not name a field"
+        );
+    }
+
+    #[test]
+    fn a_statement_carrying_neither_is_refused() {
+        let json = r#"{"name":"rows"}"#;
+        let err = serde_json::from_str::<StatementSpec>(json).expect_err("neither is refused");
+        assert_eq!(
+            err.to_string(),
+            "a statement must carry either `sql`, the SQL the author wrote, or \
+             `script`, a Starlark script that builds it; this one carries neither \
+             at line 1 column 15"
+        );
+    }
+
+    #[test]
+    fn an_unknown_key_on_a_statement_is_still_refused() {
+        // The protection `deny_unknown_fields` gives today must survive whatever
+        // shape this type takes. A documented-but-wrong key once returned 201
+        // with the real field silently defaulted to 0 — that is what this
+        // prevents, and `StatementSpec` is now hand-deserialized, so it is this
+        // test rather than a derive attribute that holds the property.
+        let json = r#"{"name":"rows","sql":"SELECT 1","timeout_ms":5000}"#;
+        let err = serde_json::from_str::<StatementSpec>(json)
+            .expect_err("an unknown key must be refused, not ignored");
+        assert_eq!(
+            err.to_string(),
+            "unknown field `timeout_ms`, expected one of `name`, `sql`, `script` \
+             at line 1 column 44"
+        );
+    }
+
+    /// The unknown key must be refused wherever it appears in the object, not
+    /// only after the fields the reader happens to want. A reader that decides
+    /// once it has what it needs would accept a leading typo.
+    #[test]
+    fn an_unknown_key_is_refused_before_the_known_ones_too() {
+        for json in [
+            r#"{"timeout_ms":5000,"name":"rows","sql":"SELECT 1"}"#,
+            r#"{"name":"rows","timeout_ms":5000,"sql":"SELECT 1"}"#,
+        ] {
+            let err = serde_json::from_str::<StatementSpec>(json)
+                .expect_err("an unknown key must be refused wherever it sits");
+            assert!(
+                err.to_string().starts_with("unknown field `timeout_ms`"),
+                "wrong error for {json}: {err}"
+            );
+        }
+    }
+
+    /// A repeated key is a malformed object, not a last-wins assignment. JSON
+    /// permits duplicates and `serde_json` hands them over one at a time, so
+    /// nothing refuses this unless the reader does.
+    #[test]
+    fn a_repeated_key_on_a_statement_is_refused() {
+        let err = serde_json::from_str::<StatementSpec>(
+            r#"{"name":"rows","sql":"SELECT 1","sql":"DROP TABLE t"}"#,
+        )
+        .expect_err("a duplicate key must not silently win");
+        assert!(
+            err.to_string().starts_with("duplicate field `sql`"),
+            "unexpected: {err}"
+        );
+    }
+
+    /// A list of statements is how the column is actually read back — one
+    /// `Vec<StatementSpec>` out of one `jsonb` value — so the pre-S row is
+    /// pinned in the shape the three `endpoints.rs` read sites use, not only
+    /// as a single object.
+    #[test]
+    fn the_stored_statements_column_still_reads_as_a_list() {
+        let stored = r#"[{"name":"main","sql":"SELECT 1 AS a"},{"name":"total","sql":"SELECT 1"}]"#;
+        let list: Vec<StatementSpec> =
+            serde_json::from_str(stored).expect("every existing row must still read");
+        assert_eq!(
+            list,
+            vec![
+                StatementSpec::from_sql("main", "SELECT 1 AS a"),
+                StatementSpec::from_sql("total", "SELECT 1"),
+            ]
+        );
+        assert_eq!(serde_json::to_string(&list).unwrap(), stored);
+    }
+
+    /// `validate_statements` is defined over the LIST, not over the SQL, so it
+    /// must apply its three rules to a script statement exactly as it does to a
+    /// written one. A rule that quietly stopped seeing half the statements
+    /// would let a duplicate name through.
+    #[test]
+    fn the_list_rules_apply_to_a_script_statement_too() {
+        assert_eq!(
+            validate_statements(&[StatementSpec::from_script("Rows", "def build_sql(p): pass")]),
+            Err(StatementError::InvalidName("Rows".into()))
+        );
+        assert_eq!(
+            validate_statements(&[
+                StatementSpec::from_sql("rows", "SELECT 1"),
+                StatementSpec::from_script("rows", "def build_sql(p): pass"),
+            ]),
+            Err(StatementError::DuplicateName("rows".into()))
+        );
+        assert_eq!(
+            validate_statements(&[
+                StatementSpec::from_sql("rows", "SELECT 1"),
+                StatementSpec::from_script("total", "def build_sql(p): pass"),
+            ]),
+            Ok(()),
+            "a mixed list is well-formed: the rules are about names"
+        );
+    }
+
+    /// The two cases are distinguishable by an accessor, and neither answers for
+    /// the other. Task 3 dispatches on exactly this.
+    #[test]
+    fn each_source_answers_only_for_its_own_case() {
+        let text = StatementSource::Sql("SELECT 1".into());
+        let script = StatementSource::Script("def build_sql(p): pass".into());
+        assert_eq!(text.sql(), Some("SELECT 1"));
+        assert_eq!(text.script(), None);
+        assert_eq!(script.script(), Some("def build_sql(p): pass"));
+        assert_eq!(script.sql(), None);
     }
 }

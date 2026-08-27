@@ -274,6 +274,21 @@ pub enum ValidationError {
     /// sentence they would have got from the route that refused the write.
     #[error(transparent)]
     Statement(#[from] egret_dataapi_api::StatementError),
+    /// A statement whose SQL a script builds, on a path that cannot generate it.
+    ///
+    /// **Package S Task 1, and Task 3 deletes it.**
+    /// [`egret_dataapi_api::StatementSource::Script`] exists as of Task 1 so
+    /// that "text or a script" is a property of the TYPE rather than of a check
+    /// someone has to remember; nothing evaluates a script yet — Task 2 is the
+    /// evaluator and Task 3 wires it into [`validate_endpoint`]. Until then
+    /// every path that needs the text refuses here, at the top of the gate. The
+    /// alternative is treating a script statement as EMPTY SQL, which passes
+    /// every scan and freezes a snapshot with nothing to run.
+    #[error(
+        "statement `{0}` builds its SQL from a script, and this build cannot generate it yet; \
+         write the statement's SQL as text"
+    )]
+    ScriptedStatementNotGenerated(String),
     #[error(
         "`#` may not appear in a published definition — delete it. StarRocks ACCEPTS AND IGNORES \
          `#` (`SELECT 1 #x` returns a column named `x`), so any meaning read into it here is a \
@@ -2317,6 +2332,20 @@ pub(crate) fn type_name(ty: &ParamType) -> &'static str {
 /// [`ValidationError::PlaceholderInsideQuotedText`] rather than before it, since
 /// it has moved out of [`check_params_with`]. Only a definition breaking both at
 /// once can tell, and it is refused either way.
+/// The SQL text of a statement, or the refusal
+/// [`ValidationError::ScriptedStatementNotGenerated`] records.
+///
+/// One helper rather than seven `match`es, because seven copies of "and what
+/// about the script case?" is seven chances for one of them to answer `""` and
+/// keep going. Package S Task 3 replaces the body with generation; the call
+/// sites do not move.
+fn statement_sql(statement: &StatementSpec) -> std::result::Result<&str, ValidationError> {
+    statement
+        .source
+        .sql()
+        .ok_or_else(|| ValidationError::ScriptedStatementNotGenerated(statement.name.clone()))
+}
+
 fn validate_endpoint(
     statements: &[StatementSpec],
     params: &[ParamSpec],
@@ -2327,6 +2356,16 @@ fn validate_endpoint(
     script_eval: ScriptEval,
 ) -> std::result::Result<IteratedParams, ValidationError> {
     egret_dataapi_api::validate_statements(statements)?;
+    // Package S Task 1: refuse a scripted statement here, before any scan, for
+    // the reason `ScriptedStatementNotGenerated` records. Task 3 replaces this
+    // loop with generation, and everything below it keeps reading text.
+    for statement in statements {
+        if statement.source.script().is_some() {
+            return Err(ValidationError::ScriptedStatementNotGenerated(
+                statement.name.clone(),
+            ));
+        }
+    }
     // Cheap, and about the whole endpoint rather than any one statement: which
     // envelope the response is written in. The create and patch routes check it
     // on the request body; this is the check against the STORED row, for the
@@ -2360,11 +2399,11 @@ fn validate_endpoint(
     // records: they are what bounds the cost of the rendering, and they cost
     // nothing themselves.
     for statement in statements {
-        check_definition_scans(&statement.sql, params, ParamRules::Draft)?;
+        check_definition_scans(statement_sql(statement)?, params, ParamRules::Draft)?;
     }
     let mut read: Vec<String> = Vec::new();
     for statement in statements {
-        read.extend(crate::render::context_names(&statement.sql)?);
+        read.extend(crate::render::context_names(statement_sql(statement)?)?);
     }
     check_every_parameter_is_read(&read, params)?;
     check_cache_scope(cache, delegated, impersonate)?;
@@ -2373,11 +2412,14 @@ fn validate_endpoint(
     // per statement cost. Returned rather than recomputed by [`validate`],
     // which renders the same statements again to describe them: two computations
     // of the same set are two things that can disagree.
-    let sqls: Vec<&str> = statements.iter().map(|s| s.sql.as_str()).collect();
+    let sqls: Vec<&str> = statements
+        .iter()
+        .map(statement_sql)
+        .collect::<std::result::Result<_, _>>()?;
     let iterated = IteratedParams::across(&sqls, params);
     // Last, and once per statement: this is the half that renders.
     for statement in statements {
-        check_render_rules(&statement.sql, params, &iterated)?;
+        check_render_rules(statement_sql(statement)?, params, &iterated)?;
     }
     Ok(iterated)
 }
@@ -3206,7 +3248,7 @@ pub async fn validate(
         Vec::with_capacity(draft.statements.len());
     let mut total = 0usize;
     for statement in &draft.statements {
-        let renderings = renderings_for(&statement.sql, &draft.params, &iterated)?;
+        let renderings = renderings_for(statement_sql(statement)?, &draft.params, &iterated)?;
         total += renderings.len();
         planned.push((statement, renderings));
     }
@@ -3272,7 +3314,7 @@ pub async fn validate(
         }
         frozen.push(StatementSnapshot {
             name: statement.name.clone(),
-            sql: statement.sql.clone(),
+            sql: statement_sql(statement)?.to_string(),
             columns: described.union,
         });
     }
@@ -4015,7 +4057,7 @@ impl EndpointStore {
                 // The name and the SQL come from `current` — the LOCKED row —
                 // and only the resolved columns come from the caller.
                 name: statement.name.clone(),
-                sql: statement.sql.clone(),
+                sql: statement_sql(statement)?.to_string(),
                 columns: resolved.columns.clone(),
             });
         }
@@ -4385,6 +4427,50 @@ mod tests {
     /// (2.6 s of scans and renders, 29.0 s of branch enumeration) before this
     /// bound existed, and far longer in the debug build this test runs under.
     /// The budget is two orders of magnitude below that, so a reading inside it
+    /// Package S Task 1: a script statement is REFUSED, not treated as empty SQL.
+    ///
+    /// Task 1 introduces the case and nothing generates from it until Task 3, so
+    /// the only safe answer here is a refusal naming the statement. Without it a
+    /// `Script` source has no text, every scan sees `""` and passes, and publish
+    /// freezes a snapshot with nothing to run — a failure that surfaces at
+    /// request time, on a live endpoint. **Task 3 replaces this test** with the
+    /// generated-statement tests the plan describes; it is here so the gap
+    /// between Task 1 and Task 3 is closed rather than merely known about.
+    #[test]
+    fn a_scripted_statement_is_refused_until_generation_exists() {
+        let statements = vec![
+            StatementSpec::from_sql("rows", "SELECT id FROM t"),
+            StatementSpec::from_script("total", "def build_sql(params):\n  return \"SELECT 1\""),
+        ];
+        assert_eq!(
+            validate_endpoint(
+                &statements,
+                &[],
+                &cache(CacheScope::PerPrincipal),
+                &OutputSpec::default(),
+                false,
+                false,
+                ScriptEval::Here,
+            ),
+            Err(ValidationError::ScriptedStatementNotGenerated(
+                "total".into()
+            )),
+            "a scripted statement must be refused by name, not scanned as empty SQL"
+        );
+        // The discriminating half: the same list without the script publishes,
+        // so the refusal is about the SOURCE and not about anything else in it.
+        assert!(validate_endpoint(
+            &[StatementSpec::from_sql("rows", "SELECT id FROM t")],
+            &[],
+            &cache(CacheScope::PerPrincipal),
+            &OutputSpec::default(),
+            false,
+            false,
+            ScriptEval::Here,
+        )
+        .is_ok());
+    }
+
     /// cannot coincide with the statements having been rendered.
     #[test]
     fn the_statement_bound_is_checked_before_anything_renders() {
@@ -4397,10 +4483,7 @@ mod tests {
             params.push(param(&format!("p{i}"), ParamType::Boolean));
         }
         let statements: Vec<StatementSpec> = (0..256)
-            .map(|i| StatementSpec {
-                name: format!("s{i}"),
-                sql: sql.clone(),
-            })
+            .map(|i| StatementSpec::from_sql(format!("s{i}"), sql.clone()))
             .collect();
 
         let started = std::time::Instant::now();
@@ -4436,14 +4519,11 @@ mod tests {
     #[test]
     fn the_canonical_two_statement_endpoint_still_validates() {
         let statements = vec![
-            StatementSpec {
-                name: "rows".into(),
-                sql: "SELECT id FROM t WHERE region = {{ region }}".into(),
-            },
-            StatementSpec {
-                name: "total".into(),
-                sql: "SELECT count(*) AS n FROM t WHERE region = {{ region }}".into(),
-            },
+            StatementSpec::from_sql("rows", "SELECT id FROM t WHERE region = {{ region }}"),
+            StatementSpec::from_sql(
+                "total",
+                "SELECT count(*) AS n FROM t WHERE region = {{ region }}",
+            ),
         ];
         let params = vec![param("region", ParamType::String)];
         assert_eq!(
@@ -4506,14 +4586,8 @@ mod tests {
         // So publish must refuse the endpoint, with THAT failure. Deciding
         // `summary`'s shape from `summary` alone makes this `Ok(())`.
         let statements = vec![
-            StatementSpec {
-                name: "summary".into(),
-                sql: SUMMARY.into(),
-            },
-            StatementSpec {
-                name: "by_region".into(),
-                sql: BY_REGION.into(),
-            },
+            StatementSpec::from_sql("summary", SUMMARY),
+            StatementSpec::from_sql("by_region", BY_REGION),
         ];
         assert_eq!(
             validate_endpoint(
@@ -4594,14 +4668,8 @@ mod tests {
              {% for x in region %}{{ x }}{% if not loop.last %},{% endif %}{% endfor %})";
         let params = vec![param("region", ParamType::String)];
         let statements = vec![
-            StatementSpec {
-                name: "summary_all".into(),
-                sql: SUMMARY_ALL.into(),
-            },
-            StatementSpec {
-                name: "by_region".into(),
-                sql: BY_REGION.into(),
-            },
+            StatementSpec::from_sql("summary_all", SUMMARY_ALL),
+            StatementSpec::from_sql("by_region", BY_REGION),
         ];
         let published = validate_endpoint(
             &statements,
@@ -4724,16 +4792,8 @@ mod tests {
     #[test]
     fn a_statement_that_ignores_an_iterated_parameter_still_publishes() {
         let statements = vec![
-            StatementSpec {
-                name: "summary_all".into(),
-                sql: "SELECT count(*) AS n FROM t".into(),
-            },
-            StatementSpec {
-                name: "by_region".into(),
-                sql: "SELECT region AS n FROM t WHERE region IN (\
-                     {% for x in region %}{{ x }}{% if not loop.last %},{% endif %}{% endfor %})"
-                    .into(),
-            },
+            StatementSpec::from_sql("summary_all", "SELECT count(*) AS n FROM t"),
+            StatementSpec::from_sql("by_region", "SELECT region AS n FROM t WHERE region IN ({% for x in region %}{{ x }}{% if not loop.last %},{% endif %}{% endfor %})"),
         ];
         assert_eq!(
             validate_endpoint(
@@ -6268,10 +6328,7 @@ mod tests {
     /// so this is a narrower claim than "the transform is not checked".
     #[test]
     fn the_script_evaluation_is_skipped_only_when_the_caller_says_it_already_ran() {
-        let statements = vec![StatementSpec {
-            name: "rows".into(),
-            sql: "SELECT id FROM t".into(),
-        }];
+        let statements = vec![StatementSpec::from_sql("rows", "SELECT id FROM t")];
         let unparseable = transformed_output("def transform(params, statements)\n  return {}");
 
         assert!(
@@ -6442,10 +6499,7 @@ mod tests {
     /// call to be caught, rather than staying red for an unrelated reason.
     #[test]
     fn an_endpoint_with_a_transform_and_arrays_shape_is_refused_end_to_end() {
-        let statements = vec![StatementSpec {
-            name: "rows".into(),
-            sql: "SELECT id FROM t".into(),
-        }];
+        let statements = vec![StatementSpec::from_sql("rows", "SELECT id FROM t")];
         let mut output = transformed_output("def transform(params, statements):\n  return {}");
         output.shape = "arrays".into();
 
@@ -6488,10 +6542,7 @@ mod tests {
     #[test]
     fn preview_and_publish_refuse_a_transform_with_the_identical_error() {
         const SQL: &str = "SELECT id FROM t";
-        let statements = vec![StatementSpec {
-            name: "rows".into(),
-            sql: SQL.into(),
-        }];
+        let statements = vec![StatementSpec::from_sql("rows", SQL)];
         let publish = |output: &OutputSpec| {
             validate_endpoint(
                 &statements,
@@ -7212,10 +7263,10 @@ mod tests {
             path: "probe".into(),
             method: "GET".into(),
             database_id: Uuid::new_v4(),
-            statements: vec![StatementSpec {
-                name: "rows".into(),
-                sql: "SELECT 1 AS a, 'x' AS b FROM t".into(),
-            }],
+            statements: vec![StatementSpec::from_sql(
+                "rows",
+                "SELECT 1 AS a, 'x' AS b FROM t",
+            )],
             params: vec![],
             output,
             cache: cache(CacheScope::PerPrincipal),
@@ -7288,12 +7339,7 @@ mod tests {
             probe_limits(10_000),
         );
         draft.params = vec![param("region", ParamType::String)];
-        draft.statements = vec![StatementSpec {
-            name: "rows".into(),
-            sql: "SELECT 1 AS a FROM t WHERE r IN (\
-                  {% for x in region %}{{ x }}{% if not loop.last %},{% endif %}{% endfor %})"
-                .into(),
-        }];
+        draft.statements = vec![StatementSpec::from_sql("rows", "SELECT 1 AS a FROM t WHERE r IN ({% for x in region %}{{ x }}{% if not loop.last %},{% endif %}{% endfor %})")];
 
         let err = validate(
             &DescribeOnlyPort,

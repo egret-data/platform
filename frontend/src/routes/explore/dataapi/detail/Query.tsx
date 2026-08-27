@@ -13,6 +13,17 @@ import { useDatabases } from "@/api/databases";
 import { useEndpointDetail } from "../EndpointDetail";
 import { ParamEditor } from "./ParamEditor";
 import { PreviewBlock, type PreviewHandle } from "./PreviewBlock";
+import type { StatementSpec } from "@/api/generated/model";
+
+/**
+ * The SQL text of a statement, or `""` when a script builds it.
+ *
+ * Package S Task 1 made a statement's SQL text OR a script, and this editor
+ * only writes the text form — **the script mode is Task 8**. Until then a
+ * scripted statement (which today only the API can create) renders as an empty
+ * editor rather than crashing on a field that is not there.
+ */
+const sqlOf = (s: StatementSpec): string => ("sql" in s ? s.sql : "");
 
 /**
  * Everything that decides what the query RETURNS: the database it runs against,
@@ -152,7 +163,7 @@ export default function Query() {
    * then drop the wrong one — or drop `current` twice and leave a sibling in.
    */
   const siblings = useMemo(
-    () => statements.filter((_, i) => i !== active).map((s) => s.sql),
+    () => statements.filter((_, i) => i !== active).map(sqlOf),
     [statements, active],
   );
 
@@ -162,11 +173,18 @@ export default function Query() {
   );
 
   /** Replace the whole list — `statements` is patched whole, never per entry. */
-  const setStatements = (next: { name: string; sql: string }[]) =>
-    setForm((f) => ({ ...f, statements: next }));
+  const setStatements = (next: StatementSpec[]) => setForm((f) => ({ ...f, statements: next }));
 
+  // The edited statement is rebuilt rather than spread over, because a
+  // `StatementSpec` carries `sql` OR `script` and never both: `{ ...s, sql }`
+  // over a scripted statement would send both keys, which the backend refuses.
+  // Task 8 gives this editor a script mode; until then editing one writes text.
   const editActive = (patch: { name?: string; sql?: string }) =>
-    setStatements(statements.map((s, i) => (i === active ? { ...s, ...patch } : s)));
+    setStatements(
+      statements.map((s, i) =>
+        i === active ? { name: patch.name ?? s.name, sql: patch.sql ?? sqlOf(s) } : s,
+      ),
+    );
 
   const atLimit = statements.length >= MAX_STATEMENTS;
 
@@ -403,7 +421,7 @@ export default function Query() {
 
             <div id="stmt-panel" role={several ? "tabpanel" : undefined} className="min-h-0 flex-1 pt-2">
               <SqlEditor
-                value={current.sql}
+                value={sqlOf(current)}
                 onChange={(sql) => editActive({ sql })}
                 // Named, because Monaco's own label is a generic "Editor
                 // content" that cannot say WHICH field this is.
@@ -441,7 +459,7 @@ export default function Query() {
               byte-identical to what it said before this feature. */}
           <PreviewBlock
             ref={preview}
-            sql={current.sql}
+            sql={sqlOf(current)}
             siblings={siblings}
             statementName={several ? current.name : undefined}
           />

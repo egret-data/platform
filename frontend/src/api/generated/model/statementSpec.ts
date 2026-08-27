@@ -5,6 +5,7 @@
  * egret unified data portal HTTP API.
  * OpenAPI spec version: 0.1.0
  */
+import type { StatementSource } from './statementSource';
 
 /**
  * One of an endpoint's N SQL definitions, as an author writes it (M2). The
@@ -19,11 +20,12 @@
  * `^[a-z][a-z0-9_]*$` so the key never needs quoting in JSON and never reads
  * as private, and uniqueness within the endpoint so the key is unambiguous.
  *
- * `#[serde(deny_unknown_fields)]` for the same reason as [`ParamSpec`] and
- * its four siblings: this is a type an AUTHOR fills in, so a typo in the
- * request body must be a 400, not a silently-ignored field.
+ * Unknown keys are refused for the same reason as [`ParamSpec`] and its four
+ * siblings: this is a type an AUTHOR fills in, so a typo in the request body
+ * must be a 400, not a silently-ignored field. It is NOT
+ * `#[serde(deny_unknown_fields)]` any more — see the hand-written
+ * [`Deserialize`] impl below for what replaced it and why.
  */
-export interface StatementSpec {
+export type StatementSpec = StatementSource & {
   name: string;
-  sql: string;
-}
+};
