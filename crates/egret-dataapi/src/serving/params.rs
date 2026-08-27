@@ -127,7 +127,31 @@ pub(crate) fn resolve(
     if snap.statements.is_empty() {
         return Err(ServingError::internal("snapshot carries no statements"));
     }
-    let sqls: Vec<&str> = snap.statements.iter().map(|s| s.sql.as_str()).collect();
+    // The shape decision. Package S Task 6 moved it: publish freezes the set it
+    // decided across every template of every statement, and this reads it —
+    // through `resolve_supplied_with`, the same entry point preview uses, for
+    // the same reason both of them cannot compute it here.
+    //
+    // **A scripted statement cannot be scanned for it.** Its SQL is generated
+    // from the caller's parameters, and this decision is what says whether
+    // `?regions=EU` reaches the script (and the renderer) as a scalar or as a
+    // one-element list — so the text does not exist until after the answer is
+    // needed. See `EndpointSnapshot::iterated`.
+    //
+    // Empty means "published before the field existed", and it means "nothing
+    // is iterated"; the fallback below answers the same set in both cases, which
+    // is why one test can serve for both. A pre-S snapshot carries only written
+    // statements, so scanning their text is exactly what this function did
+    // before — byte for byte, through the same
+    // `render::iterated_params_union`.
+    if !snap.iterated.is_empty() {
+        return resolve_supplied_with(&supplied, &snap.iterated, &snap.params);
+    }
+    let sqls: Vec<&str> = snap
+        .statements
+        .iter()
+        .filter_map(|s| s.source.sql())
+        .collect();
     resolve_supplied(&supplied, &sqls, &snap.params)
 }
 
@@ -858,13 +882,32 @@ mod tests {
         }
     }
 
+    /// The written SQL of a fixture's only statement.
+    ///
+    /// Every fixture in this module is written SQL — the file is about resolving
+    /// a REQUEST's parameters, which happens before any statement exists — so
+    /// the `expect` here is a statement about the fixtures rather than a
+    /// possibility. A scripted statement has no text to render at this point at
+    /// all; that is `router::statement_texts`' subject.
+    fn written(snap: &EndpointSnapshot, i: usize) -> &str {
+        snap.statements[i]
+            .source
+            .sql()
+            .expect("these fixtures are written SQL")
+    }
+
+    fn sole_sql(snap: &EndpointSnapshot) -> &str {
+        written(snap, 0)
+    }
+
     fn snap(sql: &str, params: Vec<ParamSpec>) -> EndpointSnapshot {
         EndpointSnapshot {
             statements: vec![egret_dataapi_api::StatementSnapshot {
                 name: "main".into(),
-                sql: sql.into(),
+                source: egret_dataapi_api::StatementSource::Sql(sql.into()),
                 columns: vec![],
             }],
+            iterated: Vec::new(),
             method: "GET".into(),
             path: "/x".into(),
             database_id: Uuid::nil(),
@@ -908,12 +951,12 @@ mod tests {
         s.statements = vec![
             egret_dataapi_api::StatementSnapshot {
                 name: "total".into(),
-                sql: PAGINATION_TOTAL_SQL.into(),
+                source: egret_dataapi_api::StatementSource::Sql(PAGINATION_TOTAL_SQL.into()),
                 columns: vec![],
             },
             egret_dataapi_api::StatementSnapshot {
                 name: "rows".into(),
-                sql: PAGINATION_ROWS_SQL.into(),
+                source: egret_dataapi_api::StatementSource::Sql(PAGINATION_ROWS_SQL.into()),
                 columns: vec![],
             },
         ];
@@ -922,7 +965,7 @@ mod tests {
 
     fn rendered(query: &str, s: &EndpointSnapshot) -> (String, Vec<Param>) {
         let r = resolve(Some(query), s).expect("resolve");
-        crate::render::render(&s.statements[0].sql, &r.values).expect("render")
+        crate::render::render(sole_sql(s), &r.values).expect("render")
     }
 
     /// **Step 2's property, at the level where it is decided.** The percent-
@@ -1000,8 +1043,8 @@ mod tests {
         assert!(absent.key.is_empty(), "an absent parameter is omitted");
 
         // And the reason it matters: the two DO render differently.
-        let a = crate::render::render(&s.statements[0].sql, &present.values).expect("render");
-        let b = crate::render::render(&s.statements[0].sql, &absent.values).expect("render");
+        let a = crate::render::render(sole_sql(&s), &present.values).expect("render");
+        let b = crate::render::render(sole_sql(&s), &absent.values).expect("render");
         assert_ne!(a, b);
         assert!(b.1.is_empty(), "an absent parameter binds nothing");
     }
@@ -1083,8 +1126,8 @@ mod tests {
                     continue;
                 }
                 assert_eq!(
-                    crate::render::render(&s.statements[0].sql, &ra.values).expect("render a"),
-                    crate::render::render(&s.statements[0].sql, &rb.values).expect("render b"),
+                    crate::render::render(sole_sql(&s), &ra.values).expect("render a"),
+                    crate::render::render(sole_sql(&s), &rb.values).expect("render b"),
                     "`?{a}` and `?{b}` share a cache key but render differently"
                 );
             }
@@ -1763,7 +1806,7 @@ mod tests {
         let r = resolve(Some("day=3"), &s).expect("resolve");
         assert_eq!(r.json["day"], serde_json::json!(3));
         assert!(!r.has_repeats);
-        let (_, binds) = crate::render::render(&s.statements[0].sql, &r.values).expect("render");
+        let (_, binds) = crate::render::render(sole_sql(&s), &r.values).expect("render");
         assert_eq!(binds, vec![Param::I64(3)], "one value, one bind");
 
         // 2. A declared parameter the caller did not supply is `None` to the
@@ -1777,7 +1820,7 @@ mod tests {
             r.json
         );
         assert_eq!(r.json["day"], serde_json::Value::Null);
-        let (_, binds) = crate::render::render(&s.statements[0].sql, &r.values).expect("render");
+        let (_, binds) = crate::render::render(sole_sql(&s), &r.values).expect("render");
         assert!(
             binds.is_empty(),
             "the `{{% if day %}}` block did not render"
@@ -1797,7 +1840,7 @@ mod tests {
             "the script's side: both values, in the order the caller sent them"
         );
         assert_eq!(
-            crate::render::render(&s.statements[0].sql, &r.values).unwrap_err(),
+            crate::render::render(sole_sql(&s), &r.values).unwrap_err(),
             crate::render::RenderError::SequenceBind,
             "the SQL's side: `{{{{ day }}}}` cannot bind a sequence, so this \
              request is refused before a transform is reached",
@@ -1817,8 +1860,7 @@ mod tests {
             serde_json::json!([3, 4]),
             "uncollapsed — the script is told what the caller actually sent"
         );
-        let (sql, binds) =
-            crate::render::render(&unused.statements[0].sql, &r.values).expect("render");
+        let (sql, binds) = crate::render::render(sole_sql(&unused), &r.values).expect("render");
         assert_eq!(sql, "SELECT 1 AS n", "the statement never mentions it");
         assert!(
             binds.is_empty(),
@@ -1838,7 +1880,7 @@ mod tests {
             serde_json::json!([3]),
             "a one-element LIST, exactly as the definition iterates it"
         );
-        let (_, binds) = crate::render::render(&s.statements[1].sql, &r.values).expect("render");
+        let (_, binds) = crate::render::render(written(&s, 1), &r.values).expect("render");
         assert_eq!(binds, vec![Param::I64(3)], "and the loop bound it");
     }
 }

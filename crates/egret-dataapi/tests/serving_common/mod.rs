@@ -1388,6 +1388,105 @@ impl Fixture {
         ep
     }
 
+    /// Publish an arbitrary statement list WITH declared parameters.
+    ///
+    /// The four wrappers above each take one of `params`, `limits`, `output`
+    /// and `cache` and not the others; package S needs `statements` (to say
+    /// `script` instead of `sql`) together with `params` (a scripted statement
+    /// that reads none is not the thing under test) and `cache` (whether a HIT
+    /// generates is one of the questions). So this one takes the three and
+    /// leaves `limits` and `output` at their defaults.
+    ///
+    /// `statements` is the jsonb the draft column stores, stated exactly as an
+    /// author would: `[{"name": "main", "script": "def build_sql(params): …"}]`.
+    pub async fn publish_statements_with_params(
+        &self,
+        path: &str,
+        database_id: Uuid,
+        statements: serde_json::Value,
+        params: serde_json::Value,
+        cache: serde_json::Value,
+    ) -> Uuid {
+        let (ep, status, body) = self
+            .try_publish_statements_with_params(path, database_id, statements, params, cache)
+            .await;
+        assert_eq!(status, StatusCode::OK, "publish failed: {body}");
+        grant_invoke(&self.db, self.principal_a, ep).await;
+        grant_invoke(&self.db, self.principal_b, ep).await;
+        ep
+    }
+
+    /// The same, without asserting the publish succeeded — for the tests that
+    /// are about what publish REFUSES. Returns the draft's id as well, so a
+    /// refusal can be inspected against the row that produced it.
+    pub async fn try_publish_statements_with_params(
+        &self,
+        path: &str,
+        database_id: Uuid,
+        statements: serde_json::Value,
+        params: serde_json::Value,
+        cache: serde_json::Value,
+    ) -> (Uuid, StatusCode, serde_json::Value) {
+        let ep: Uuid = sqlx::query_scalar(
+            "INSERT INTO dataapi.endpoints \
+               (workspace_id, name, path, method, database_id, statements, params, cache, created_by) \
+             VALUES ($1, $2, $3, 'GET', $4, $5, $6, $7, $8) RETURNING id",
+        )
+        .bind(self.ws_id)
+        .bind(format!("ep-{}", Uuid::new_v4().simple()))
+        .bind(path)
+        .bind(database_id)
+        .bind(&statements)
+        .bind(&params)
+        .bind(&cache)
+        .bind(self.admin)
+        .fetch_one(&self.db.pool)
+        .await
+        .expect("insert endpoint draft");
+
+        let (status, body) = self
+            .mgmt_send(
+                "POST",
+                &format!("/api/ws/{}/data-api/endpoints/{ep}/publish", self.ws_slug),
+                Some(serde_json::json!({})),
+            )
+            .await;
+        (ep, status, body)
+    }
+
+    /// Rewrite the live version's frozen snapshot, in place.
+    ///
+    /// **A published version is immutable and this is the one thing that
+    /// deliberately violates that**, because it is the only instrument that can
+    /// answer "did serving run the script for THIS request?": generation has no
+    /// observable side effect, so the way to measure that a cache hit skipped it
+    /// is to make the script unrunnable between two identical calls and watch
+    /// the second one still answer 200. A timing comparison could not tell a
+    /// skipped evaluation from a fast one.
+    ///
+    /// `mutate` is handed the snapshot as JSON and returns the replacement.
+    pub async fn rewrite_live_snapshot(
+        &self,
+        endpoint: Uuid,
+        mutate: impl FnOnce(serde_json::Value) -> serde_json::Value,
+    ) {
+        let (version_id, snapshot): (Uuid, serde_json::Value) = sqlx::query_as(
+            "SELECT v.id, v.snapshot FROM dataapi.endpoint_versions v \
+               JOIN dataapi.endpoints e ON e.live_version_id = v.id \
+              WHERE e.id = $1",
+        )
+        .bind(endpoint)
+        .fetch_one(&self.db.pool)
+        .await
+        .expect("read the live snapshot");
+        sqlx::query("UPDATE dataapi.endpoint_versions SET snapshot = $1 WHERE id = $2")
+            .bind(mutate(snapshot))
+            .bind(version_id)
+            .execute(&self.db.pool)
+            .await
+            .expect("rewrite the live snapshot");
+    }
+
     /// Publish without asserting success, so a test can assert the REFUSAL.
     pub async fn try_publish(
         &self,

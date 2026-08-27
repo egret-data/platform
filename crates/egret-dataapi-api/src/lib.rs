@@ -214,6 +214,38 @@ pub struct EndpointSnapshot {
     /// neither a `statements` list nor the pre-M2 `sql` + `columns` pair, and
     /// refuses an explicitly empty list.
     pub statements: Vec<StatementSnapshot>,
+    /// Which declared parameters SOME statement iterates — the endpoint's one
+    /// shape decision, made at publish and frozen here (package S Task 6).
+    ///
+    /// # Why this is frozen rather than re-derived, and why package S forced it
+    ///
+    /// `serving::params::resolve` used to compute this itself, by scanning every
+    /// statement's `sql` for a `{% for x in NAME %}` header
+    /// (`render::iterated_params_union`, the one function it shares with
+    /// publish). That works only while the text exists before the request does.
+    ///
+    /// **A scripted statement makes it circular.** Its SQL is generated from the
+    /// caller's parameters, so there is no text to scan until the parameters are
+    /// resolved — and resolving them needs this decision first, because it is
+    /// what makes `?regions=EU` a one-element LIST rather than a scalar (a
+    /// `{% for %}` over a scalar is "plain is not iterable", a 500 on an
+    /// ordinary request). Deriving it from the one template publish happened to
+    /// generate would repeat M2's own bug one level down: a set decided from one
+    /// text of several, disagreeing with the union publish validated against.
+    ///
+    /// So publish freezes the set it decided across EVERY template of EVERY
+    /// statement, and serving hands it to `params::resolve_supplied_with` — the
+    /// same entry point preview already uses, for the same reason.
+    ///
+    /// `#[serde(default)]` for the snapshots published before this field
+    /// existed. Empty is also what publish writes for an endpoint that iterates
+    /// nothing, and the two are deliberately indistinguishable: the reader falls
+    /// back to deriving from the written statements' text, which answers empty
+    /// in exactly those cases. A pre-S snapshot has no scripted statement (no
+    /// path could publish one), so the fallback is complete for every row that
+    /// can carry it.
+    #[serde(default)]
+    pub iterated: Vec<String>,
     pub method: String,
     pub path: String,
     pub database_id: uuid::Uuid,
@@ -331,6 +363,10 @@ struct EndpointSnapshotRepr {
     sql: Option<String>,
     #[serde(default)]
     columns: Option<Vec<ColumnSpec>>,
+    /// Absent on every snapshot published before package S — see
+    /// [`EndpointSnapshot::iterated`] for what the reader does then.
+    #[serde(default)]
+    iterated: Vec<String>,
     method: String,
     path: String,
     database_id: uuid::Uuid,
@@ -372,13 +408,14 @@ impl TryFrom<EndpointSnapshotRepr> for EndpointSnapshot {
             // is what the old struct already demanded of them.
             (_, Some(sql), Some(columns)) => vec![StatementSnapshot {
                 name: LEGACY_STATEMENT_NAME.to_string(),
-                sql,
+                source: StatementSource::Sql(sql),
                 columns,
             }],
             _ => return Err(SnapshotShapeError::NoStatements),
         };
         Ok(EndpointSnapshot {
             statements,
+            iterated: r.iterated,
             method: r.method,
             path: r.path,
             database_id: r.database_id,
@@ -483,7 +520,14 @@ pub struct StatementSpec {
 /// unchanged or every list, detail and serve breaks on READ — where no author
 /// is present to see it. A tagged shape (`{"kind": "sql", …}`) would demand a
 /// key no stored row carries.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+///
+/// `Deserialize` is DERIVED here and hand-written on [`StatementSpec`], which is
+/// not an inconsistency. [`StatementSpec`] is a REQUEST body, where "both",
+/// "neither" and a typo are things an author can send and must read a sentence
+/// about; this enum is also read back inside [`StatementSnapshot`], which the
+/// server wrote for itself, where the derive's externally-tagged map is exactly
+/// the stored shape and no message is going anywhere near an author.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum StatementSource {
     /// SQL the author wrote, as a template the existing render pipeline runs.
@@ -660,11 +704,51 @@ impl<'de> Deserialize<'de> for StatementSpec {
 /// No `deny_unknown_fields` — like [`EndpointSnapshot`] and [`ColumnSpec`],
 /// the server writes this for itself; a typo here is not possible the way one
 /// is in a request body.
+///
+/// # It freezes the SOURCE, not the generated text (package S Task 6)
+///
+/// This carried `sql: String` until serving learnt to generate. For a scripted
+/// statement that string was the text `build_sql` returned under publish's
+/// REPRESENTATIVE parameter values — one branch of a script whose whole purpose
+/// is to take a different one per request. Freezing it and serving it would
+/// have made every parameter a scripted statement branches on inert: the
+/// endpoint would answer the representative branch's SQL to every caller, with
+/// a `200` and no error anywhere. So the version freezes what publish validated
+/// — the author's text, or the author's script — and serving generates from it,
+/// per request, with the caller's own values.
+///
+/// **The generated text is deliberately not kept beside the script.** A
+/// statement carrying both a script and a frozen rendering of it is two
+/// definitions with no rule for which one runs — the shape [`StatementSpec`]
+/// refuses at the wire, refused here for the same reason and with a sharper
+/// edge: the failure would be a silent wrong answer rather than an error. What
+/// publish measured about the OTHER branches survives where it is actually
+/// used: `columns` is the union across every template, and
+/// [`EndpointSnapshot::iterated`] is the shape decision made across them all.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
 pub struct StatementSnapshot {
     pub name: String,
-    pub sql: String,
+    /// The author's SQL, or the script that builds it — flattened, so a
+    /// statement frozen before package S reads back byte-for-byte unchanged as
+    /// [`StatementSource::Sql`].
+    #[serde(flatten)]
+    pub source: StatementSource,
     pub columns: Vec<ColumnSpec>,
+}
+
+impl StatementSnapshot {
+    /// A frozen statement whose SQL the author wrote.
+    pub fn from_sql(
+        name: impl Into<String>,
+        sql: impl Into<String>,
+        columns: Vec<ColumnSpec>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            source: StatementSource::Sql(sql.into()),
+            columns,
+        }
+    }
 }
 
 /// What [`validate_statement_name`] and [`validate_statements`] refuse.
@@ -1464,7 +1548,10 @@ mod tests {
             "one `sql` is one statement — not zero, and not a list the serving \
              path would iterate emptily over"
         );
-        assert_eq!(s.statements[0].sql, "SELECT 1 AS a");
+        assert_eq!(
+            s.statements[0].source,
+            StatementSource::Sql("SELECT 1 AS a".into())
+        );
         assert_eq!(s.statements[0].columns.len(), 1);
         assert_eq!(s.statements[0].columns[0].name, "a");
         assert!(
@@ -1527,6 +1614,51 @@ mod tests {
         );
         let again: EndpointSnapshot = serde_json::from_str(&written).unwrap();
         assert_eq!(s, again);
+    }
+
+    /// **A statement frozen before package S reads back unchanged, and writes
+    /// back unchanged.**
+    ///
+    /// `StatementSnapshot.sql` became `source`, flattened, so the key on the
+    /// wire is still `sql` and every row already in
+    /// `dataapi.endpoint_versions.snapshot` — an immutable column nobody may
+    /// migrate — reads as the text case. Get this wrong and the failure is on
+    /// READ: every live endpoint 500s, and not at publish where an author is
+    /// present to see it.
+    #[test]
+    fn a_statement_frozen_before_package_s_reads_and_writes_unchanged() {
+        let stored = r#"{"name":"rows","sql":"SELECT 1 AS a","columns":[]}"#;
+        let s: StatementSnapshot = serde_json::from_str(stored).expect("a live row must read");
+        assert_eq!(s.source, StatementSource::Sql("SELECT 1 AS a".into()));
+        assert_eq!(
+            serde_json::to_string(&s).unwrap(),
+            stored,
+            "and it must be written back byte for byte: this column is read by              every serve, and a spelling change is a spelling every older              binary stops understanding"
+        );
+    }
+
+    /// A frozen statement may carry a script, and it is a DIFFERENT case rather
+    /// than a `sql` that happens to contain starlark.
+    #[test]
+    fn a_frozen_statement_may_carry_a_script() {
+        let stored = r#"{"name":"rows","script":"def build_sql(params):\n  return \"SELECT 1\"","columns":[]}"#;
+        let s: StatementSnapshot = serde_json::from_str(stored).expect("the script case reads");
+        assert_eq!(s.source.sql(), None, "a script is not SQL");
+        assert!(s.source.script().is_some());
+        assert_eq!(serde_json::to_string(&s).unwrap(), stored);
+    }
+
+    /// A snapshot frozen before package S carries no shape decision, and the
+    /// reader answers the empty set rather than refusing.
+    ///
+    /// `serving::params::resolve` falls back to deriving it from the written
+    /// statements exactly as it always did, which is complete for such a row:
+    /// no path could have published a scripted statement into it.
+    #[test]
+    fn a_snapshot_published_before_package_s_has_no_frozen_shape_decision() {
+        let s: EndpointSnapshot =
+            serde_json::from_str(&a_snapshot_as_published_before_m2()).unwrap();
+        assert!(s.iterated.is_empty());
     }
 
     /// Neither shape present is corrupt data, and it was an error before M2

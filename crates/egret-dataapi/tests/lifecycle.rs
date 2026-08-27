@@ -611,6 +611,56 @@ impl Fixture {
 ///
 /// Mutation-verified: pointing `EndpointStore::versions` at `e.sql` instead of
 /// `v.snapshot` turns this red.
+/// **A published version freezes a scripted statement's SCRIPT, not the text
+/// publish generated from it.**
+///
+/// The largest design call in package S Task 6, and this is the assertion it
+/// comes down to. Publish generates with REPRESENTATIVE parameter values —
+/// stand-ins, not any caller's — so the text it produced is one branch of a
+/// script whose whole purpose is to take a different one per request. A version
+/// that froze that text would answer the representative branch to every caller,
+/// with a `200` and no error anywhere: every parameter the script branches on
+/// would be inert, silently. So the version carries what the author wrote, and
+/// serving generates from it.
+///
+/// The `columns` assertion is the other half. What publish learnt about the
+/// branches is not thrown away — it survives as the frozen union, which is what
+/// every response is shaped against.
+#[tokio::test]
+async fn a_published_version_freezes_a_statements_script_and_not_its_output() {
+    let f = skip_without_db!();
+    let ep = f.create_endpoint("gen", "gen", "SELECT 1 AS n").await;
+    let script = "def build_sql(params):\n  return \"SELECT 1 AS n\"";
+    f.set_statements(
+        ep,
+        serde_json::json!([{ "name": "main", "script": script }]),
+    )
+    .await;
+    f.publish(ep).await;
+
+    let snap = f.live_snapshot(ep).await;
+    assert_eq!(
+        snap.statements[0].source,
+        egret_dataapi_api::StatementSource::Script(script.into()),
+        "the version must carry the script the author wrote"
+    );
+    assert_eq!(
+        snap.statements[0].source.sql(),
+        None,
+        "and no generated text beside it: two definitions with no rule for \
+         which one runs is the shape this type exists to refuse"
+    );
+    assert_eq!(
+        snap.statements[0]
+            .columns
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["n"],
+        "what publish learnt from the generated text survives as the contract"
+    );
+}
+
 #[tokio::test]
 async fn a_published_version_is_unaffected_by_later_draft_edits() {
     let f = skip_without_db!();
@@ -619,7 +669,10 @@ async fn a_published_version_is_unaffected_by_later_draft_edits() {
         .await;
     f.publish(ep).await;
     let v1 = f.live_snapshot(ep).await;
-    assert_eq!(v1.statements[0].sql, "SELECT 1 AS n");
+    assert_eq!(
+        v1.statements[0].source.sql().expect("written SQL"),
+        "SELECT 1 AS n"
+    );
 
     // Edit the draft afterwards — including the SQL and the parameter list.
     f.patch_endpoint(
@@ -634,7 +687,8 @@ async fn a_published_version_is_unaffected_by_later_draft_edits() {
 
     let still = f.live_snapshot(ep).await;
     assert_eq!(
-        still.statements[0].sql, "SELECT 1 AS n",
+        still.statements[0].source.sql().expect("written SQL"),
+        "SELECT 1 AS n",
         "the live version must not follow the draft — this is what makes versioning real"
     );
     // Not only the SQL: every field the snapshot froze must be equal to what was
@@ -659,10 +713,22 @@ async fn rollback_restores_the_previous_snapshot() {
     )
     .await;
     f.publish(ep).await; // v2
-    assert_eq!(f.live_snapshot(ep).await.statements[0].sql, "SELECT 2 AS n");
+    assert_eq!(
+        f.live_snapshot(ep).await.statements[0]
+            .source
+            .sql()
+            .expect("written SQL"),
+        "SELECT 2 AS n"
+    );
 
     f.rollback(ep, 1).await;
-    assert_eq!(f.live_snapshot(ep).await.statements[0].sql, "SELECT 1 AS n");
+    assert_eq!(
+        f.live_snapshot(ep).await.statements[0]
+            .source
+            .sql()
+            .expect("written SQL"),
+        "SELECT 1 AS n"
+    );
 }
 
 /// A version belongs to exactly one endpoint. Without the `v.endpoint_id = e.id`
@@ -687,7 +753,13 @@ async fn rollback_refuses_a_version_from_another_endpoint() {
         "a version belongs to exactly one endpoint: {body}"
     );
     // And nothing moved.
-    assert_eq!(f.live_snapshot(a).await.statements[0].sql, "SELECT 1 AS n");
+    assert_eq!(
+        f.live_snapshot(a).await.statements[0]
+            .source
+            .sql()
+            .expect("written SQL"),
+        "SELECT 1 AS n"
+    );
 }
 
 #[tokio::test]
@@ -1152,7 +1224,13 @@ async fn publishing_a_disabled_endpoint_does_not_put_it_back_in_service() {
     )
     .await;
     assert_eq!(f.state_of(ep).await.0, "live");
-    assert_eq!(f.live_snapshot(ep).await.statements[0].sql, "SELECT 2 AS n");
+    assert_eq!(
+        f.live_snapshot(ep).await.statements[0]
+            .source
+            .sql()
+            .expect("written SQL"),
+        "SELECT 2 AS n"
+    );
 }
 
 /// A parameterized endpoint has to be describable at all. `WHERE r = {{r}}` is
@@ -1185,7 +1263,10 @@ async fn a_parameterized_endpoint_is_described_through_a_rendered_probe() {
         "and the marker count beside it, or the engine cannot type the statement"
     );
     assert_eq!(
-        f.live_snapshot(ep).await.statements[0].sql,
+        f.live_snapshot(ep).await.statements[0]
+            .source
+            .sql()
+            .expect("written SQL"),
         sql,
         "the snapshot freezes the TEMPLATE — the render is only for describe"
     );
@@ -2079,7 +2160,13 @@ async fn rollback_does_not_silently_re_enable_a_disabled_endpoint() {
 
     f.rollback(ep, 1).await;
     assert_eq!(f.state_of(ep).await.0, "disabled");
-    assert_eq!(f.live_snapshot(ep).await.statements[0].sql, "SELECT 1 AS n");
+    assert_eq!(
+        f.live_snapshot(ep).await.statements[0]
+            .source
+            .sql()
+            .expect("written SQL"),
+        "SELECT 1 AS n"
+    );
 }
 
 // ---------- Authorization and containment ----------
@@ -2665,9 +2752,12 @@ async fn a_two_statement_endpoint_freezes_a_column_set_for_each() {
         vec!["rows", "total"],
         "in the author's order, and under the author's names"
     );
-    assert_eq!(snap.statements[0].sql, "SELECT id, amount FROM sales");
     assert_eq!(
-        snap.statements[1].sql,
+        snap.statements[0].source.sql().expect("written SQL"),
+        "SELECT id, amount FROM sales"
+    );
+    assert_eq!(
+        snap.statements[1].source.sql().expect("written SQL"),
         "SELECT count(*) AS total FROM ledger"
     );
     let columns = |i: usize| -> Vec<&str> {
@@ -3185,12 +3275,12 @@ async fn publish_freezes_each_statements_own_columns() {
     let described = vec![
         egret_dataapi_api::StatementSnapshot {
             name: "total".into(),
-            sql: "SELECT count(*) AS n FROM t".into(),
+            source: egret_dataapi_api::StatementSource::Sql("SELECT count(*) AS n FROM t".into()),
             columns: vec![column("n")],
         },
         egret_dataapi_api::StatementSnapshot {
             name: "rows".into(),
-            sql: "SELECT id FROM t".into(),
+            source: egret_dataapi_api::StatementSource::Sql("SELECT id FROM t".into()),
             columns: vec![column("id")],
         },
     ];
@@ -3226,7 +3316,10 @@ async fn publish_freezes_each_statements_own_columns() {
         "each statement must carry the columns described for IT, in the draft's order"
     );
     // And the SQL still comes from the locked row, not from `described`.
-    assert_eq!(snap.statements[0].sql, "SELECT id FROM t");
+    assert_eq!(
+        snap.statements[0].source.sql().expect("written SQL"),
+        "SELECT id FROM t"
+    );
 }
 
 /// **Publish re-checks the statement NAMES, and it is not a duplicate of the

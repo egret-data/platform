@@ -91,7 +91,9 @@ fn fixture_snapshot(database_id: Uuid) -> EndpointSnapshot {
     EndpointSnapshot {
         statements: vec![StatementSnapshot {
             name: "main".to_string(),
-            sql: "SELECT id, status FROM orders WHERE status = :status".to_string(),
+            source: egret_dataapi_api::StatementSource::Sql(
+                "SELECT id, status FROM orders WHERE status = :status".to_string(),
+            ),
             columns: vec![
                 ColumnSpec {
                     name: "id".to_string(),
@@ -109,6 +111,7 @@ fn fixture_snapshot(database_id: Uuid) -> EndpointSnapshot {
                 },
             ],
         }],
+        iterated: Vec::new(),
         method: "GET".to_string(),
         path: "/orders/by-status".to_string(),
         database_id,

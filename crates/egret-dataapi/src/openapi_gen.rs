@@ -1216,7 +1216,7 @@ mod tests {
     fn stmt(name: &str, columns: Vec<ColumnSpec>) -> egret_dataapi_api::StatementSnapshot {
         egret_dataapi_api::StatementSnapshot {
             name: name.into(),
-            sql: "SELECT 1".into(),
+            source: egret_dataapi_api::StatementSource::Sql("SELECT 1".into()),
             columns,
         }
     }
@@ -1231,6 +1231,7 @@ mod tests {
     ) -> EndpointSnapshot {
         EndpointSnapshot {
             statements,
+            iterated: Vec::new(),
             method: "GET".into(),
             path: "/x".into(),
             database_id: Uuid::nil(),

@@ -25,6 +25,13 @@
  * unchanged or every list, detail and serve breaks on READ — where no author
  * is present to see it. A tagged shape (`{"kind": "sql", …}`) would demand a
  * key no stored row carries.
+ *
+ * `Deserialize` is DERIVED here and hand-written on [`StatementSpec`], which is
+ * not an inconsistency. [`StatementSpec`] is a REQUEST body, where "both",
+ * "neither" and a typo are things an author can send and must read a sentence
+ * about; this enum is also read back inside [`StatementSnapshot`], which the
+ * server wrote for itself, where the derive's externally-tagged map is exactly
+ * the stored shape and no message is going anywhere near an author.
  */
 export type StatementSource = {
   /** SQL the author wrote, as a template the existing render pipeline runs. */

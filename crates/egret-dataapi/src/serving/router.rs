@@ -58,11 +58,11 @@
 //!
 //! Two sentences up there were true of every request until C2 and are not true
 //! of a request whose endpoint carries a response transform. Stated here rather
-//! than left to be inferred from [`TRANSFORM_REQUEST_DEADLINE`], because this is
+//! than left to be inferred from [`SCRIPT_REQUEST_DEADLINE`], because this is
 //! the text a reader meets first:
 //!
 //! * **`limits.timeout` is not the whole budget.** A transformed request costs
-//!   N statement timeouts *plus* up to [`TRANSFORM_REQUEST_DEADLINE`].
+//!   N statement timeouts *plus* up to [`SCRIPT_REQUEST_DEADLINE`].
 //! * **Dropping the handler's future does not release the transform.** The
 //!   evaluation runs on `tokio::task::spawn_blocking`; dropping the `JoinHandle`
 //!   DETACHES the task, and `JoinHandle::abort` cannot stop a blocking task that
@@ -82,7 +82,7 @@
 //! thread on top of the first; the endpoint's published rate limit is then the
 //! only admission bound on how many pile up. The honest 28.8 s wait would have
 //! self-throttled by simply not answering. The 5 s is still the right trade —
-//! see [`TRANSFORM_REQUEST_DEADLINE`] for why it is not 2 s — but it is a trade,
+//! see [`SCRIPT_REQUEST_DEADLINE`] for why it is not 2 s — but it is a trade,
 //! and this is the half of it that is invisible from the constant.
 //!
 //! **Note what is NOT the mechanism, because it reads like it is.**
@@ -131,13 +131,29 @@
 //!   bytes from one pass — read its module comment before touching either half.
 //! * [`crate::render::render`] runs after a cache MISS, because a hit needs no
 //!   statement — once per statement, since M2. What goes to the engine is its
-//!   output, never a statement's own `sql`: every `{{ … }}` has become a `?` and
-//!   the values travel beside it as binds.
+//!   output, never a statement's own definition: every `{{ … }}` has become a
+//!   `?` and the values travel beside it as binds.
 //!
-//! **A `StatementSnapshot`'s `sql` must not be executed from this module
-//! again.** It is the template, not the statement; sending it would send
-//! `{{ region }}` to the engine verbatim, which is the state P4 shipped in and
-//! P4.5 exists to end.
+//! **A `StatementSnapshot`'s definition must not be executed from this module.**
+//! It is the template, not the statement; sending it would send `{{ region }}`
+//! to the engine verbatim, which is the state P4 shipped in and P4.5 exists to
+//! end.
+//!
+//! # Package S put a third thing between the cache and the render
+//!
+//! A statement's definition is now the author's TEXT or the author's SCRIPT
+//! ([`StatementSnapshot::source`]), and `statement_texts` is what turns the
+//! second into the first — per request, from this caller's resolved parameters.
+//! Three properties of that placement, each measured rather than assumed, are
+//! stated in that function: a cache hit generates nothing, the evaluation is one
+//! `spawn_blocking` for the whole request rather than one per statement, and a
+//! written statement pays nothing at all.
+//!
+//! **What it does NOT do is render.** The text a script returns still carries
+//! its `{{ }}` and goes into the one `render` call above, so the path a caller's
+//! value takes to the engine is the same for both kinds of statement. That is
+//! the whole of package S's safety argument, and a second render call here would
+//! end it.
 //!
 //! # What is deliberately NOT here yet
 //!
@@ -227,7 +243,24 @@ pub(crate) const MAX_ROWS_CEILING: u32 = 1_000_000;
 /// unbounded one would pin a connection for as long as the author felt like.
 const TIMEOUT_CEILING_SECS: u64 = 300;
 
-/// How long a REQUEST waits for a response transform before it is answered 500.
+/// How long a REQUEST waits for author-supplied starlark before it is answered
+/// 500 — a response transform (C2), or the SQL generation package S put on this
+/// path.
+///
+/// # One constant for both phases, and that is a derivation rather than reuse
+///
+/// The number below is derived from `transform::MAX_WALL_CLOCK`, which is a
+/// property of the EVALUATOR: it must not be tighter than the evaluator's own
+/// honest budget. `crate::transform::build_sql` runs on the same `eval_inner`
+/// under the same `Budgets::default()` as `run_transform`, so the same
+/// derivation gives the same number, and two constants would be two things that
+/// can drift apart while the budget they are both derived from does not.
+///
+/// **Measured for `build_sql` itself rather than inherited from C2's
+/// transform**: a tick-expensive `build_sql` script ran **39.9 s against the 2 s
+/// `MAX_WALL_CLOCK`** before the budget stopped it (debug build, package S Task
+/// 6). The evaluator's budget bounds ticks, not time, and generation is on the
+/// same side of that as the transform is.
 ///
 /// # This is the serving path's own deadline, and it has to be
 ///
@@ -263,7 +296,7 @@ const TIMEOUT_CEILING_SECS: u64 = 300;
 ///   unrelated request scheduled on it. The stack story is unchanged —
 ///   `transform::MAX_JSON_DEPTH` is calibrated against the 2 MiB stack tokio
 ///   gives worker AND blocking threads alike.
-const TRANSFORM_REQUEST_DEADLINE: Duration = Duration::from_secs(5);
+const SCRIPT_REQUEST_DEADLINE: Duration = Duration::from_secs(5);
 
 /// The deadline one request gives its transform, as a value rather than as a
 /// constant read at the call site.
@@ -271,7 +304,7 @@ const TRANSFORM_REQUEST_DEADLINE: Duration = Duration::from_secs(5);
 /// # Why this exists at all
 ///
 /// Exactly the reason `transform::Budgets` is a struct: **a limit with no
-/// injection point cannot be tested.** With [`TRANSFORM_REQUEST_DEADLINE`] read
+/// injection point cannot be tested.** With [`SCRIPT_REQUEST_DEADLINE`] read
 /// directly inside [`transformed_data`], the only way to reach the timeout arm
 /// was to wait five seconds of real time, so nothing did — and *deleting the
 /// `tokio::time::timeout` wrapper entirely killed no test at all*. That is the
@@ -281,21 +314,21 @@ const TRANSFORM_REQUEST_DEADLINE: Duration = Duration::from_secs(5);
 /// # Non-test code cannot express a weakened deadline
 ///
 /// The field is private and the only constructor that takes a value is
-/// `#[cfg(test)]`, so the sole `TransformDeadline` a shipped binary can build is
-/// [`TransformDeadline::default`] — the constant above. A relaxation that is
+/// `#[cfg(test)]`, so the sole `ScriptDeadline` a shipped binary can build is
+/// [`ScriptDeadline::default`] — the constant above. A relaxation that is
 /// unrepresentable is better than one a reviewer has to remember to look for,
 /// which is the argument `Budgets` already makes for itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct TransformDeadline(Duration);
+pub(crate) struct ScriptDeadline(Duration);
 
-impl Default for TransformDeadline {
+impl Default for ScriptDeadline {
     fn default() -> Self {
-        Self(TRANSFORM_REQUEST_DEADLINE)
+        Self(SCRIPT_REQUEST_DEADLINE)
     }
 }
 
 #[cfg(test)]
-impl TransformDeadline {
+impl ScriptDeadline {
     /// A deadline a test can actually reach. Not available to a shipped build.
     fn of(d: Duration) -> Self {
         Self(d)
@@ -1072,8 +1105,21 @@ async fn run(
     // Computed ONCE, outside the loop, and identical to `&snap.output` unless
     // this endpoint has a transform — see [`shaping_output`].
     let shaping = shaping_output(&snap.output);
-    for stmt in &snap.statements {
-        let (sql, binds) = crate::render::render(&stmt.sql, &resolved.values)
+    // Package S: the SQL each statement will render, generated HERE for a
+    // scripted statement and borrowed from the snapshot for a written one. After
+    // the cache lookup, so a hit generates nothing; before the loop, so a
+    // request spends one blocking thread rather than one per statement. See
+    // [`statement_texts`] for both measurements.
+    let texts = statement_texts(&snap.statements, &resolved, ScriptDeadline::default()).await?;
+    for (stmt, text) in snap.statements.iter().zip(&texts) {
+        // **The same call, for both kinds.** Generated text goes through the
+        // render a hand-written statement goes through, which is the whole
+        // safety argument of package S: `{{ region }}` is still `{{ region }}`
+        // when the script hands it back, so the caller's value becomes a `?` and
+        // travels beside the statement as a bind exactly as it always did. A
+        // second render for generated SQL — or an interpolation instead of this
+        // one — would be the defect the design exists to prevent.
+        let (sql, binds) = crate::render::render(text, &resolved.values)
             .map_err(|e| render_error(e, resolved.has_repeats))?;
 
         let out = st
@@ -1146,9 +1192,7 @@ async fn run(
     // a refused response returns above this line and is never stored.
     let data = match &snap.output.transform {
         None => statements_data(shaped),
-        Some(spec) => {
-            transformed_data(spec, shaped, &resolved, TransformDeadline::default()).await?
-        }
+        Some(spec) => transformed_data(spec, shaped, &resolved, ScriptDeadline::default()).await?,
     };
     if let Some(ttl) = ttl {
         st.cache
@@ -1270,7 +1314,7 @@ fn rows_of(name: &str, shaped: serde_json::Value) -> Result<Vec<serde_json::Valu
 /// deadline, and answer with what it returned.
 ///
 /// Off the async worker and onto a blocking thread, with
-/// [`TRANSFORM_REQUEST_DEADLINE`] over the join handle — see that constant for
+/// [`SCRIPT_REQUEST_DEADLINE`] over the join handle — see that constant for
 /// the measurement both halves come from, and for what a deadline can and cannot
 /// bound when the work it is waiting on is uncancellable.
 ///
@@ -1284,7 +1328,7 @@ async fn transformed_data(
     spec: &TransformSpec,
     shaped: Vec<(&str, serde_json::Value)>,
     resolved: &params::Resolved,
-    deadline: TransformDeadline,
+    deadline: ScriptDeadline,
 ) -> Result<serde_json::Value, ServingError> {
     let mut statements: BTreeMap<String, Vec<serde_json::Value>> = BTreeMap::new();
     for (name, value) in shaped {
@@ -1298,10 +1342,171 @@ async fn transformed_data(
     let spec = spec.clone();
     let params = resolved.json.clone();
     let has_repeats = resolved.has_repeats;
-    run_under_deadline(deadline, move || {
+    run_under_deadline(deadline, ScriptPhase::Transform, move || {
         transform_response(&spec, &params, &statements, has_repeats)
     })
     .await
+}
+
+/// The SQL every statement of this request will render — the author's own text,
+/// or the text their script built from THIS caller's parameters (package S).
+///
+/// # Where generation sits, and what a cache hit pays
+///
+/// It is called from [`run`] AFTER the cache lookup and before the execution
+/// loop, in the position `render` already occupied and for the same reason: a
+/// hit needs no statement, so it needs no generation either. Generated SQL is a
+/// pure function of the resolved parameters (`build_sql` sees `params` and
+/// nothing else — [`crate::transform::build_sql`]) and the resolved parameters
+/// are the cache key, so a hit could only ever regenerate what it already has.
+/// **A hit runs no starlark at all**, which is what
+/// `a_cache_hit_serves_without_running_the_script` measures by making the script
+/// unrunnable between the two calls.
+///
+/// # On a blocking thread, and the case is stronger than C2's
+///
+/// `build_sql` is the same `eval_inner` under the same `Budgets::default()` as a
+/// transform, so it carries the same measured tail: **39.9 s against a 2 s
+/// budget** for a tick-expensive script (measured for `build_sql` itself, not
+/// inherited), because `MAX_WALL_CLOCK` is polled every 1000 ticks rather than
+/// being a latency bound. C2 moved the transform off the async worker for
+/// exactly that, and generation runs on **every served miss** of a scripted
+/// endpoint rather than only on endpoints that declare a transform. Inline, one
+/// such script would hold a tokio worker thread — and every unrelated request
+/// scheduled on it — for that whole time.
+///
+/// An ordinary script costs **542 µs** (debug build, same measurement), which is
+/// what a miss actually pays; the number above is the tail the deadline exists
+/// for, not the cost.
+///
+/// # ONE evaluation task for the request, not one per statement
+///
+/// Every scripted statement is generated inside a single `spawn_blocking`, so a
+/// request holds at most one blocking thread for generation and a request that
+/// times out detaches at most one. The alternative — a `spawn_blocking` per
+/// statement, in the execution loop — is what makes the numbers ugly:
+/// `MAX_STATEMENTS` is 16, so one request could stack 16 detached threads and
+/// wait `16 × deadline` before the engine is touched at all. The bound the
+/// deadline states is then a bound on the REQUEST, which is what it claims to
+/// be.
+///
+/// The generations are sequential inside that task, in the published order, like
+/// the executions that follow them.
+///
+/// # A written statement pays nothing
+///
+/// No script, no clone, no `spawn_blocking`, no await: the loop below hands back
+/// borrowed slices of the snapshot and the caller renders exactly the `&str` it
+/// rendered before package S existed.
+async fn statement_texts<'a>(
+    statements: &'a [StatementSnapshot],
+    resolved: &params::Resolved,
+    deadline: ScriptDeadline,
+) -> Result<Vec<Cow<'a, str>>, ServingError> {
+    // `(index, script)` rather than `(name, script)`: the answers are paired
+    // back onto the statement list by position, so nothing here depends on the
+    // names being unique. Publish does guarantee that, and this is one fewer
+    // place that has to know.
+    let scripts: Vec<(usize, String)> = statements
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| s.source.script().map(|script| (i, script.to_owned())))
+        .collect();
+    if scripts.is_empty() {
+        return statements
+            .iter()
+            .map(|s| {
+                s.source.sql().map(Cow::Borrowed).ok_or_else(|| {
+                    // Unreachable: `scripts` is empty, so every statement's
+                    // source is the `Sql` case. Answered rather than
+                    // `expect`ed because a panic inside a request handler is a
+                    // dropped connection rather than a 500.
+                    ServingError::internal("a statement carries neither SQL nor a script")
+                })
+            })
+            .collect();
+    }
+
+    // Cloned into the task because `spawn_blocking` needs `'static`. Both are
+    // bounded by what publish accepted: the scripts by `MAX_STATEMENTS`, the
+    // parameters by `MAX_DECLARED_PARAMS` and `params::MAX_PARAM_BYTES`.
+    let params = resolved.json.clone();
+    let mut generated: BTreeMap<usize, String> =
+        run_under_deadline(deadline, ScriptPhase::Generation, move || {
+            let mut out = BTreeMap::new();
+            for (i, script) in &scripts {
+                out.insert(*i, generate_one(script, &params)?);
+            }
+            Ok(out)
+        })
+        .await?;
+
+    statements
+        .iter()
+        .enumerate()
+        .map(|(i, s)| match s.source.sql() {
+            Some(sql) => Ok(Cow::Borrowed(sql)),
+            None => generated.remove(&i).map(Cow::Owned).ok_or_else(|| {
+                // Unreachable: `i` was put into `scripts` by the same
+                // `script().is_some()` test that lands here.
+                ServingError::internal("a scripted statement was not generated")
+            }),
+        })
+        .collect()
+}
+
+/// Generate ONE statement's SQL and hold it to the rule a written statement is
+/// held to at publish.
+///
+/// # Why the scan is here and not only at publish
+///
+/// Publish scans every template it can SEE, and for a script that is the
+/// baseline plus whatever the sentinel probes emitted — two values per declared
+/// parameter (`lifecycle::GeneratedSql::probe`). A script may branch on a value
+/// no probe supplies:
+///
+/// ```text
+/// def build_sql(params):
+///     if params["region"] == "XX": return "DELETE FROM t"
+///     return "SELECT * FROM t"
+/// ```
+///
+/// publishes green — every template publish saw is a `SELECT` — and emits the
+/// other arm to the first caller who asks for `region=XX`. That statement is
+/// executed with the CALLER's engine credentials on a delegated connection, so
+/// leaving it unscanned turns "the author may write SQL" into "the author may
+/// run DML as any caller". Task 3's Mutation A measured the same asymmetry from
+/// the other side: `;` and `#` have a backstop inside `render`
+/// (`check_rendered_statement`), and **the head word has none**.
+///
+/// So the one rule with no render-time backstop is applied here, to generated
+/// text only. A written statement is not re-scanned: its bytes are the bytes
+/// publish scanned, and re-scanning them under today's rules could 500 an
+/// endpoint that was published green under yesterday's.
+///
+/// This is a scan — no render, no engine, no connection — and it runs on the
+/// blocking thread beside the evaluation that produced the text.
+///
+/// # Every failure is a 500 and none is a 400
+///
+/// The caller sent a valid request: authenticated, authorized, inside its rate
+/// limit, parameters coerced. What failed is the ENDPOINT. A 400 would blame the
+/// caller for the author's script and write `param_invalid` into `access_log`,
+/// pointing every later investigation at the wrong half of the system.
+fn generate_one(
+    script: &str,
+    params: &BTreeMap<String, serde_json::Value>,
+) -> Result<String, ServingError> {
+    let sql = crate::transform::build_sql(script, params).map_err(|e| {
+        ServingError::internal(format!("a statement's script did not build its SQL: {e}"))
+    })?;
+    crate::lifecycle::check_single_select(&sql).map_err(|e| {
+        ServingError::internal(format!(
+            "a statement's script built SQL that is not a single read-only \
+             statement, on a branch publish's probes never took: {e}"
+        ))
+    })?;
+    Ok(sql)
 }
 
 /// Run `work` on a blocking thread and stop WAITING for it at `deadline`.
@@ -1314,18 +1519,55 @@ async fn transformed_data(
 /// from a measured 1-in-12 flake to 3-in-12. A seam here lets the test park a
 /// thread on a channel instead, which costs no CPU at all and is not a race.
 ///
-/// Nothing else may use this seam. The one production caller is
-/// [`transformed_data`] directly above, and the closure it passes is the only
-/// thing this crate ever evaluates on a blocking thread.
-async fn run_under_deadline<F>(
-    deadline: TransformDeadline,
+/// Nothing else may use this seam. There are exactly TWO production callers —
+/// [`transformed_data`] directly above and [`statement_texts`], package S's
+/// generation — and the closures they pass are the only things this crate ever
+/// evaluates on a blocking thread.
+///
+/// Generic over `T` because generation answers with texts rather than with a
+/// JSON value. It is one function rather than two for the reason this file
+/// gives everywhere else: "spawn it blocking, stop waiting at the deadline,
+/// both failures are internal" is ONE rule, and a second copy is a second thing
+/// that can be weakened alone. What differs between the two phases is a
+/// sentence, and [`ScriptPhase`] is that sentence.
+async fn run_under_deadline<T, F>(
+    deadline: ScriptDeadline,
+    phase: ScriptPhase,
     work: F,
-) -> Result<serde_json::Value, ServingError>
+) -> Result<T, ServingError>
 where
-    F: FnOnce() -> Result<serde_json::Value, ServingError> + Send + 'static,
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, ServingError> + Send + 'static,
 {
     let handle = tokio::task::spawn_blocking(work);
-    transform_outcome(tokio::time::timeout(deadline.0, handle).await, deadline)
+    blocking_outcome(
+        tokio::time::timeout(deadline.0, handle).await,
+        deadline,
+        phase,
+    )
+}
+
+/// Which author-supplied evaluation a refusal is about.
+///
+/// The two are indistinguishable to [`blocking_outcome`] except in the words it
+/// writes, and those words are the only thing an operator has: both arrive as
+/// `internal`, so the wire says nothing and the log line is the whole diagnosis.
+/// A generation failure blamed on "the response transform" would send that
+/// operator to a script the endpoint may not even have.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScriptPhase {
+    Transform,
+    Generation,
+}
+
+impl ScriptPhase {
+    /// The subject of the sentence a refusal writes.
+    fn subject(self) -> &'static str {
+        match self {
+            Self::Transform => "the response transform",
+            Self::Generation => "a statement's SQL-building script",
+        }
+    }
 }
 
 /// What [`tokio::time::timeout`] over the join handle means, decided apart from
@@ -1339,31 +1581,35 @@ where
 ///
 /// Both are [`ServingError::internal`]. A transform that did not finish is the
 /// endpoint failing to answer, not the caller failing to ask — the same reading
-/// [`transform_response`] argues for a script that raised.
-fn transform_outcome(
+/// [`transform_response`] argues for a script that raised, and the same reading
+/// package S gives a script that could not build its SQL.
+fn blocking_outcome<T>(
     joined: Result<
-        Result<Result<serde_json::Value, ServingError>, tokio::task::JoinError>,
+        Result<Result<T, ServingError>, tokio::task::JoinError>,
         tokio::time::error::Elapsed,
     >,
-    deadline: TransformDeadline,
-) -> Result<serde_json::Value, ServingError> {
+    deadline: ScriptDeadline,
+    phase: ScriptPhase,
+) -> Result<T, ServingError> {
     match joined {
         Ok(Ok(result)) => result,
-        // `run_transform` catches an evaluator unwind itself
+        // `run_transform` and `build_sql` catch an evaluator unwind themselves
         // (`TransformError::Evaluator`), so this is a panic in the plumbing
         // around it, or a runtime shutting down. Neither is the caller's doing.
         Ok(Err(join)) => Err(ServingError::internal(format!(
-            "the response transform did not complete: {join}"
+            "{} did not complete: {join}",
+            phase.subject()
         ))),
         // The WAITING stopped here; the work did not. See the module comment —
-        // the blocking task is detached, keeps a pool thread and the rows it was
+        // the blocking task is detached, keeps a pool thread and whatever it was
         // handed, and this answer is what invites the caller to stack a second
         // one on top of it.
         Err(_) => Err(ServingError::internal(format!(
-            "the response transform exceeded the {} ms request deadline; the \
+            "{} exceeded the {} ms request deadline; the \
              evaluator's own budget bounds ticks rather than time, so a script \
              whose every tick is expensive can overrun it, and the run this \
              stopped waiting for is still holding a blocking thread",
+            phase.subject(),
             deadline.0.as_millis()
         ))),
     }
@@ -3077,9 +3323,10 @@ mod tests {
         EndpointSnapshot {
             statements: vec![egret_dataapi_api::StatementSnapshot {
                 name: "main".into(),
-                sql: "SELECT 1".into(),
+                source: egret_dataapi_api::StatementSource::Sql("SELECT 1".into()),
                 columns: vec![],
             }],
+            iterated: Vec::new(),
             method: "GET".into(),
             path: "/x".into(),
             database_id: Uuid::nil(),
@@ -3104,7 +3351,7 @@ mod tests {
     fn stmt(name: &str, sql: &str, columns: Vec<ColumnSpec>) -> StatementSnapshot {
         StatementSnapshot {
             name: name.into(),
-            sql: sql.into(),
+            source: egret_dataapi_api::StatementSource::Sql(sql.into()),
             columns,
         }
     }
@@ -4009,7 +4256,7 @@ mod tests {
                     ("total", serde_json::json!([{"n": 40}])),
                 ],
                 &resolved,
-                TransformDeadline::default(),
+                ScriptDeadline::default(),
             )
             .await
             .expect("the script reads both statements and the parameter"),
@@ -4023,7 +4270,7 @@ mod tests {
     /// This is the test that did not exist. `transformed_data`'s
     /// `tokio::time::timeout` could be deleted outright and nothing went red,
     /// because the only way to reach the arm was to wait five real seconds.
-    /// [`TransformDeadline`] is the injection point that makes it reachable, the
+    /// [`ScriptDeadline`] is the injection point that makes it reachable, the
     /// same way `transform::Budgets` makes a tick budget reachable.
     ///
     /// # Two dead ends, recorded because each looked correct
@@ -4068,7 +4315,7 @@ mod tests {
         // 1. Work that finishes is served, so the refusal below is not "every
         //    transform times out".
         assert_eq!(
-            run_under_deadline(TransformDeadline::default(), || Ok(
+            run_under_deadline(ScriptDeadline::default(), ScriptPhase::Transform, || Ok(
                 serde_json::json!({"total": 1})
             ))
             .await
@@ -4089,7 +4336,8 @@ mod tests {
         let err = tokio::time::timeout(
             Duration::from_secs(5),
             run_under_deadline(
-                TransformDeadline::of(Duration::from_millis(20)),
+                ScriptDeadline::of(Duration::from_millis(20)),
+                ScriptPhase::Transform,
                 move || {
                     // Parks. `recv` returns `Err` once the sender is dropped,
                     // which is how the thread is released at the end of this
@@ -4145,7 +4393,7 @@ mod tests {
         );
     }
 
-    /// **Both refusal arms of [`transform_outcome`], driven with REAL values.**
+    /// **Both refusal arms of [`blocking_outcome`], driven with REAL values.**
     ///
     /// A fabricated `JoinError` is not a thing that can be constructed, and that
     /// is the point: the one below comes from a task that actually panicked, and
@@ -4156,9 +4404,10 @@ mod tests {
     async fn every_arm_of_the_join_outcome_is_decided() {
         // The value path.
         assert_eq!(
-            transform_outcome(
+            blocking_outcome(
                 Ok(Ok(Ok(serde_json::json!({"total": 1})))),
-                TransformDeadline::default(),
+                ScriptDeadline::default(),
+                ScriptPhase::Transform,
             )
             .expect("a completed run is served"),
             serde_json::json!({"total": 1}),
@@ -4167,9 +4416,12 @@ mod tests {
 
         // A refusal the script itself produced travels through unchanged, so
         // this function cannot be what turns a 500 into something else.
-        let refused = transform_outcome(
-            Ok(Ok(Err(ServingError::internal("the script said no")))),
-            TransformDeadline::default(),
+        let refused = blocking_outcome(
+            Ok(Ok(Err::<serde_json::Value, _>(ServingError::internal(
+                "the script said no",
+            )))),
+            ScriptDeadline::default(),
+            ScriptPhase::Transform,
         )
         .expect_err("a refusal stays a refusal");
         assert_eq!(
@@ -4189,8 +4441,12 @@ mod tests {
             join.is_panic(),
             "the fixture must be a real panic: {join:?}"
         );
-        let err = transform_outcome(Ok(Err(join)), TransformDeadline::default())
-            .expect_err("a task that did not complete is a refusal");
+        let err = blocking_outcome::<serde_json::Value>(
+            Ok(Err(join)),
+            ScriptDeadline::default(),
+            ScriptPhase::Transform,
+        )
+        .expect_err("a task that did not complete is a refusal");
         assert_eq!(
             wire_of(&err),
             (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
@@ -4205,9 +4461,10 @@ mod tests {
         let elapsed = tokio::time::timeout(Duration::ZERO, std::future::pending::<()>())
             .await
             .expect_err("zero is already up");
-        let err = transform_outcome(
+        let err = blocking_outcome::<serde_json::Value>(
             Err(elapsed),
-            TransformDeadline::of(Duration::from_millis(7)),
+            ScriptDeadline::of(Duration::from_millis(7)),
+            ScriptPhase::Transform,
         )
         .expect_err("the deadline is a refusal");
         assert_eq!(
@@ -4230,18 +4487,18 @@ mod tests {
 
     /// The shipped deadline is the only one a non-test build can express.
     ///
-    /// `TransformDeadline::of` is `#[cfg(test)]`, so this pins the DEFAULT
+    /// `ScriptDeadline::of` is `#[cfg(test)]`, so this pins the DEFAULT
     /// against the constant; a relaxation would have to change the constant,
     /// which is the thing a reviewer reads.
     #[test]
     fn the_shipped_deadline_is_the_constant() {
         assert_eq!(
-            TransformDeadline::default(),
-            TransformDeadline::of(TRANSFORM_REQUEST_DEADLINE)
+            ScriptDeadline::default(),
+            ScriptDeadline::of(SCRIPT_REQUEST_DEADLINE)
         );
-        assert_eq!(TRANSFORM_REQUEST_DEADLINE, Duration::from_secs(5));
+        assert_eq!(SCRIPT_REQUEST_DEADLINE, Duration::from_secs(5));
         assert!(
-            TRANSFORM_REQUEST_DEADLINE > crate::transform::MAX_WALL_CLOCK,
+            SCRIPT_REQUEST_DEADLINE > crate::transform::MAX_WALL_CLOCK,
             "the request deadline must not be TIGHTER than the evaluator's own \
              budget, or a script that legitimately runs close to it and \
              finishes is cut off by a race between two clocks measuring one \

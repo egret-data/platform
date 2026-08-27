@@ -3204,9 +3204,22 @@ fn validate_endpoint(
         .collect::<std::result::Result<Vec<_>, _>>()?
         .concat();
     let iterated = IteratedParams::across(&sqls, params);
-    // Last, and once per statement: this is the half that renders.
-    for statement in statements {
-        check_render_rules(statement_sql(statement, &generated)?, params, &iterated)?;
+    // Last, and once per TEMPLATE: this is the half that renders.
+    //
+    // Every template rather than the baseline one, and package S Task 6 is where
+    // that had to change. Task 5 left it deliberately: alternates were described
+    // but never SERVED, so the gate over the baseline was the gate over
+    // everything an engine could receive. Task 6 makes serving generate per
+    // request, and a template the representative values do not take is then a
+    // statement a real call sends — so the behavioural gate
+    // (`render::check_publish`: render with opaque values, render again with
+    // plain ones, refuse any divergence) has to have looked at it.
+    //
+    // `sqls` above is the same concatenation and is already built; this loop
+    // walks it rather than re-deriving, so the set the shape was decided across
+    // and the set that is gated cannot differ.
+    for sql in &sqls {
+        check_render_rules(sql, params, &iterated)?;
     }
     Ok(Validated {
         iterated,
@@ -4127,7 +4140,11 @@ pub async fn validate(
         }
         frozen.push(StatementSnapshot {
             name: statement.name.clone(),
-            sql: statement_sql(statement, &generated)?.to_string(),
+            // The SOURCE, not the text just described. For a script that text is
+            // one branch of many and serving generates its own per request — see
+            // [`StatementSnapshot`]. `described.union` above is what carries
+            // every branch's contract forward.
+            source: statement.source.clone(),
             columns: described.union,
         });
     }
@@ -4843,9 +4860,13 @@ impl EndpointStore {
 
         // The whole pure validator, against the row actually being frozen. See the
         // doc comment: this is what closes the window, not the identity check above.
-        // Nothing here renders — `described` was computed by `validate` — so the
-        // shape set it returns has no second use on this path.
-        let _validated = validate_endpoint(
+        // Nothing here renders — `described` was computed by `validate`.
+        //
+        // The shape set it returns is FROZEN into the snapshot below (package S
+        // Task 6), and this call is the right one to take it from for the same
+        // reason the statements are taken from `current`: it is the run against
+        // the locked row. Until Task 6 it had no second use and was discarded.
+        let validated = validate_endpoint(
             &current.statements,
             &current.params,
             &current.cache,
@@ -4890,10 +4911,15 @@ impl EndpointStore {
                 ));
             };
             statements.push(StatementSnapshot {
-                // The name and the SQL come from `current` — the LOCKED row —
-                // and only the resolved columns come from the caller.
+                // The name and the DEFINITION come from `current` — the LOCKED
+                // row — and only the resolved columns come from the caller.
+                // Since package S Task 6 the definition is the author's source
+                // rather than the text generated from it, which makes that
+                // sentence stronger rather than weaker: what is frozen is
+                // exactly the bytes the locked row carries, with nothing
+                // computed in between.
                 name: statement.name.clone(),
-                sql: statement_sql(statement, &generated)?.to_string(),
+                source: statement.source.clone(),
                 columns: resolved.columns.clone(),
             });
         }
@@ -4910,6 +4936,12 @@ impl EndpointStore {
 
         let snapshot = EndpointSnapshot {
             statements,
+            // The endpoint's one shape decision, made across every template of
+            // every statement by the validation of the LOCKED row directly
+            // above. Frozen because a scripted statement has no text to derive
+            // it from before its parameters are resolved, and resolving them
+            // needs it — see [`EndpointSnapshot::iterated`].
+            iterated: validated.iterated.names().to_vec(),
             method: current.method.clone(),
             // The stored path, which `normalize_path` already canonicalised. The
             // snapshot must never carry a spelling the endpoint row does not have.
@@ -5388,6 +5420,60 @@ mod tests {
         assert_eq!(
             validate_generated(script, &[]).expect_err("`nope` is not declared"),
             ValidationError::UndeclaredPlaceholder("nope".into())
+        );
+    }
+
+    /// **The RENDER gate reaches every template, not only the baseline.**
+    ///
+    /// Task 5 left this deliberately: it moved the scans to every template and
+    /// left `check_render_rules` on the baseline, because an alternate was
+    /// described but never SERVED, so no engine could receive one. Package S
+    /// Task 6 is what makes serving generate per request, and a branch the
+    /// representative values do not take is then a statement a real call sends.
+    ///
+    /// The script below emits `ORDER BY {{ sort | ident }}` only when `region`
+    /// is absent, which is the arm the `None` probe takes and the baseline does
+    /// not. `| ident` writes an `allowed` entry into the statement as TEXT, so
+    /// `check_ident_values` requires every entry to be identifier-shaped —
+    /// `"b; DROP TABLE t"` is not, and that value reaches a caller who simply
+    /// omits `region`.
+    ///
+    /// Asserted on the exact refusal rather than on `is_err()`. Task 3's
+    /// Mutation A is why: with the gate bypassed, `;` and `#` still failed —
+    /// through a DIFFERENT check — so an `is_err()` assertion here would go
+    /// green with the loop back on the baseline.
+    #[test]
+    fn the_render_gate_reaches_a_template_the_representative_values_do_not() {
+        let script = "def build_sql(params):\n  \
+                      if params[\"region\"] == None:\n    \
+                      return \"SELECT n FROM t WHERE 1=1 {% if region %} AND r = {{ region }}\
+                      {% endif %} ORDER BY {{ sort | ident }}\"\n  \
+                      return \"SELECT n FROM t WHERE 1=1 {% if region %} AND r = {{ region }}\
+                      {% endif %} ORDER BY {{ sort }}\"";
+        let sort = ParamSpec {
+            allowed: Some(vec!["a".into(), "b; DROP TABLE t".into()]),
+            required: true,
+            ..param("sort", ParamType::Enum)
+        };
+        let params = vec![param("region", ParamType::String), sort];
+
+        // The control comes FIRST, because it is what says the refusal below is
+        // about the alternate template: the same script with an `allowed` list
+        // that is identifier-shaped publishes.
+        let mut safe = params.clone();
+        safe[1].allowed = Some(vec!["a".into(), "b".into()]);
+        assert!(
+            validate_generated(script, &safe).is_ok(),
+            "the script itself is publishable; only the `allowed` list is not"
+        );
+
+        assert_eq!(
+            validate_generated(script, &params)
+                .expect_err("an `allowed` value that is not identifier-shaped reaches the text"),
+            ValidationError::EnumValueNotIdentifier {
+                param: "sort".into(),
+                value: "b; DROP TABLE t".into(),
+            }
         );
     }
 
@@ -8234,7 +8320,7 @@ mod tests {
     fn one_statement(name: &str) -> StatementSnapshot {
         StatementSnapshot {
             name: name.into(),
-            sql: "SELECT 1 AS a, 'x' AS b".into(),
+            source: egret_dataapi_api::StatementSource::Sql("SELECT 1 AS a, 'x' AS b".into()),
             columns: vec![
                 ColumnSpec {
                     name: "a".into(),
