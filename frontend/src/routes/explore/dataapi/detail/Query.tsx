@@ -198,10 +198,21 @@ export default function Query() {
    * `1 + siblings.length > MAX_STATEMENTS`, so dropping a sibling understates the
    * endpoint and lets a preview through that publish would refuse, while `""`
    * keeps the COUNT exact and contributes nothing to the iterated-parameter
-   * union. That second part is still a claim this cannot make honestly — a
-   * generated template may well iterate a parameter — but it is unobservable
-   * today, because publish refuses a scripted statement outright until Task 3.
-   * Task 5 gives preview the generated text, which is what makes it true.
+   * union.
+   *
+   * **That second part is a lie, and as of Task 8 it is a reachable one.** A
+   * sibling script's emitted template may well carry a `{% for %}` header, and
+   * `""` never joins the iterated-parameter union — so a preview can resolve a
+   * scalar where serving binds a list, and can count a several-template script
+   * as one against the endpoint's template budget. It is the divergence
+   * `preview.rs`'s module comment records in full, and it is a property of the
+   * WIRE: `siblings` is `string[]`, so no client can say "this one is a
+   * script". Closing it means sending sources rather than strings and
+   * generating every one of them per preview — N author scripts per press of a
+   * button — which is a decision about the request type, not something this
+   * component can fix by choosing a better lie. Publish and serving both see
+   * the real thing, so the failure is "preview green, publish refuses", never
+   * the reverse.
    */
   const siblings = useMemo(
     () => statements.filter((_, i) => i !== active).map(sqlOf),
