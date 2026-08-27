@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type React from "react";
-import { useEffect, useRef } from "react";
+import { StrictMode, useEffect, useRef } from "react";
 import { Link, MemoryRouter, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
@@ -1570,5 +1570,309 @@ describe("Query section — the editor, the split and the preview", () => {
     // The count is what makes a collapsed strip honest — the reader can see
     // there is one declaration in there without opening it.
     expect(summary).toHaveTextContent("Database and parameters (1)");
+  });
+});
+
+/**
+ * Package S Task 8: a statement's SQL can come from a `build_sql` script, and
+ * this is the editor for it.
+ *
+ * **The rule the whole block is about is C2's, in `ResponseSection.tsx`: a
+ * control a mode makes inert is REMOVED, and the value it held is CLEARED in
+ * the same state patch.** Here that rule is not a preference — `StatementSpec`
+ * is `{name, sql}` **or** `{name, script}`, and the backend's hand-written
+ * reader refuses a body carrying both, so an editor that hid the SQL box while
+ * leaving `sql: "SELECT 1"` underneath would produce a 422 with nothing on
+ * screen to point at.
+ *
+ * Every assertion about a cleared field is therefore a deep equal on the whole
+ * statement, never `toBeUndefined()` on `sql`: the fixtures below all start
+ * with a real `sql`, so the assertion proves the key went AWAY rather than
+ * passing because it was never set.
+ */
+describe("Query section — a statement's SQL from a script", () => {
+  const updateMutateAsync = vi.fn();
+  const previewMutateAsync = vi.fn();
+
+  /** The default the editor offers when a statement is switched to a script. */
+  const DEFAULT_SCRIPT = 'def build_sql(params):\n    return "SELECT 1"\n';
+  const BRANCHING = 'def build_sql(params):\n    if params["grain"] == "daily":\n        return "SELECT 1 AS daily"\n    return "SELECT 1 AS hourly"\n';
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    monacoStub.reset();
+    vi.mocked(databasesApi.useDatabases).mockReturnValue({
+      data: [{ id: "db-1", name: "warehouse" }],
+    } as never);
+    updateMutateAsync.mockReset();
+    updateMutateAsync.mockImplementation(
+      ({ data }: { workspace: string; id: string; data: Partial<DataApiEndpointDto> }) =>
+        Promise.resolve({ status: 200, data: { ...makeEndpoint(), ...data }, headers: new Headers() }),
+    );
+    vi.mocked(dataApi.useUpdateEndpoint).mockReturnValue({
+      mutateAsync: updateMutateAsync,
+      isPending: false,
+    } as never);
+    vi.mocked(dataApi.useRestoreEndpoint).mockReturnValue({ mutateAsync: vi.fn(), isPending: false } as never);
+    previewMutateAsync.mockResolvedValue({
+      status: 200,
+      data: { columns: [], rows: [], row_count: 0, truncated: false },
+    });
+    vi.mocked(api.useDataApiPreviewEndpoint).mockReturnValue({
+      mutateAsync: previewMutateAsync,
+      isPending: false,
+    } as never);
+  });
+
+  function show(endpoint: DataApiEndpointDto, strict = false) {
+    vi.mocked(api.useDataApiGetEndpoint).mockReturnValue({
+      data: { status: 200, data: endpoint },
+      isLoading: false,
+      isError: false,
+      refetch: vi.fn(),
+    } as never);
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const tree = (
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={[`/explore/ws1/data-api/endpoints/${endpoint.id}`]}>
+          <Routes>
+            <Route path="/explore/:workspace/data-api/endpoints/:id" element={<EndpointDetail />}>
+              <Route index element={<Query />} />
+            </Route>
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>
+    );
+    return render(strict ? <StrictMode>{tree}</StrictMode> : tree);
+  }
+
+  /** The `statements` the one Save actually PATCHed. */
+  function savedStatements() {
+    expect(updateMutateAsync).toHaveBeenCalledTimes(1);
+    return updateMutateAsync.mock.calls[0][0].data.statements;
+  }
+
+  const modeToggle = () =>
+    screen.getByRole("checkbox", { name: /build this statement.s sql with a script/i });
+
+  it("switches a statement between written SQL and a script", async () => {
+    show(makeEndpoint({ statements: [{ name: "main", sql: "SELECT 1" }] } as Partial<DataApiEndpointDto>));
+
+    // Written SQL to start with, and no script editor anywhere.
+    expect(await screen.findByLabelText("SQL")).toHaveValue("SELECT 1");
+    expect(screen.queryByLabelText("SQL script")).not.toBeInTheDocument();
+    expect(modeToggle()).not.toBeChecked();
+
+    await userEvent.click(modeToggle());
+
+    // REMOVED, not disabled — the C2 rule. A SQL box left on screen `readOnly`
+    // would still be showing text that is no longer part of the statement.
+    const script = await screen.findByLabelText("SQL script");
+    expect(script).toHaveValue(DEFAULT_SCRIPT);
+    expect(screen.queryByLabelText("SQL")).not.toBeInTheDocument();
+
+    fireEvent.change(script, { target: { value: BRANCHING } });
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    // …and CLEARED. A deep equal on the whole list: `sql` must be gone, not
+    // merely hidden — a statement carrying both keys is refused by the reader,
+    // and `toBeUndefined()` on a field would pass even if the editor had never
+    // written one.
+    await waitFor(() => expect(updateMutateAsync).toHaveBeenCalled());
+    expect(savedStatements()).toEqual([{ name: "main", script: BRANCHING }]);
+  });
+
+  it("switches a script back to written SQL, and does not leave the script behind", async () => {
+    // The other direction, from a statement that has only ever been a script —
+    // so "the `script` key went away" cannot be an artifact of the fixture.
+    show(
+      makeEndpoint({ statements: [{ name: "main", script: BRANCHING }] } as Partial<DataApiEndpointDto>),
+    );
+
+    expect(await screen.findByLabelText("SQL script")).toHaveValue(BRANCHING);
+    expect(screen.queryByLabelText("SQL")).not.toBeInTheDocument();
+    expect(modeToggle()).toBeChecked();
+
+    await userEvent.click(modeToggle());
+
+    const sql = await screen.findByLabelText("SQL");
+    expect(screen.queryByLabelText("SQL script")).not.toBeInTheDocument();
+    await userEvent.type(sql, "SELECT 2");
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(updateMutateAsync).toHaveBeenCalled());
+    expect(savedStatements()).toEqual([{ name: "main", sql: "SELECT 2" }]);
+  });
+
+  /**
+   * C2's `clearedByTransform` precedent: an author who ticks the box to look at
+   * what a script would be, then unticks it, must get their SQL back. Without
+   * this the switch is silent data loss on a control whose whole purpose is to
+   * be tried out.
+   *
+   * Under `StrictMode`, because that is where the C2 version of this broke:
+   * React double-invokes a `useState` updater and keeps only the second call's
+   * result, so a ref read INSIDE the updater is `null` by the second pass and
+   * the restore silently undoes itself.
+   */
+  it("gives the written SQL back when the script mode is switched off again", async () => {
+    show(makeEndpoint({ statements: [{ name: "main", sql: "SELECT 1" }] } as Partial<DataApiEndpointDto>), true);
+
+    await screen.findByLabelText("SQL");
+    await userEvent.click(modeToggle());
+    expect(await screen.findByLabelText("SQL script")).toBeInTheDocument();
+    await userEvent.click(modeToggle());
+
+    expect(await screen.findByLabelText("SQL")).toHaveValue("SELECT 1");
+    // Stronger than reading the box: the endpoint is back to EXACTLY what was
+    // loaded. `dirty` is a `JSON.stringify` comparison against the baseline, so
+    // a restore that left a stray `script` key beside the SQL — invisible on
+    // screen and a 422 on Save — would still be showing "Unsaved changes" here.
+    expect(screen.queryByText(/unsaved changes/i)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^save$/i })).toBeDisabled();
+  });
+
+  /**
+   * M2 gave each statement its own contract; the mode belongs to the statement,
+   * not to the endpoint. The failure this catches is the natural one — a single
+   * `scripted` piece of state for the section — which would flip every tab at
+   * once and, worse, write the script into whichever statement was on screen.
+   */
+  it("keeps each statement's mode independent", async () => {
+    show(
+      makeEndpoint({
+        statements: [
+          { name: "rows", sql: "SELECT * FROM t" },
+          { name: "total", sql: "SELECT count(*) FROM t" },
+        ],
+      } as Partial<DataApiEndpointDto>),
+    );
+
+    await screen.findByLabelText("SQL");
+    await userEvent.click(screen.getByRole("tab", { name: "total" }));
+    await userEvent.click(modeToggle());
+    fireEvent.change(await screen.findByLabelText("SQL script"), { target: { value: BRANCHING } });
+
+    // Back to the first statement: still written SQL, still its own text, and
+    // the toggle reads the statement on screen rather than the section.
+    await userEvent.click(screen.getByRole("tab", { name: "rows" }));
+    expect(await screen.findByLabelText("SQL")).toHaveValue("SELECT * FROM t");
+    expect(screen.queryByLabelText("SQL script")).not.toBeInTheDocument();
+    expect(modeToggle()).not.toBeChecked();
+
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(updateMutateAsync).toHaveBeenCalled());
+    // The whole list: the untouched statement must be byte-identical, and the
+    // switched one must carry exactly one source key.
+    expect(savedStatements()).toEqual([
+      { name: "rows", sql: "SELECT * FROM t" },
+      { name: "total", script: BRANCHING },
+    ]);
+  });
+
+  it("previews a generated statement by sending its script, never an empty sql", async () => {
+    show(makeEndpoint({ statements: [{ name: "main", script: BRANCHING }] } as Partial<DataApiEndpointDto>));
+
+    await screen.findByLabelText("SQL script");
+    await userEvent.click(screen.getByRole("button", { name: /preview unsaved draft/i }));
+
+    await waitFor(() => expect(previewMutateAsync).toHaveBeenCalled());
+    // Deep equal on the whole body: `/preview` reads the same two-case source
+    // as `StatementSpec` and refuses both keys, so an added `sql: ""` here is a
+    // 422 — and `sql: ""` is exactly what a body built from the old `sqlOf`
+    // would carry.
+    expect(previewMutateAsync.mock.calls[0][0].data).toEqual({
+      script: BRANCHING,
+      siblings: [],
+      params: [],
+      values: {},
+      output: {},
+      database_id: "db-1",
+    });
+  });
+
+  it("shows the SQL the script built, beside the rows", async () => {
+    previewMutateAsync.mockResolvedValue({
+      status: 200,
+      data: {
+        columns: [{ name: "n", type: "integer" }],
+        rows: [[1]],
+        row_count: 1,
+        truncated: false,
+        generated_sql: "SELECT 1 AS daily WHERE region = {{ region }}",
+      },
+    });
+    show(makeEndpoint({ statements: [{ name: "main", script: BRANCHING }] } as Partial<DataApiEndpointDto>));
+
+    await screen.findByLabelText("SQL script");
+    await userEvent.click(screen.getByRole("button", { name: /preview unsaved draft/i }));
+
+    // The template, `{{ }}` intact — the artefact the script is responsible for
+    // and the only way an author sees which branch their test values took.
+    expect(await screen.findByText("SELECT 1 AS daily WHERE region = {{ region }}")).toBeInTheDocument();
+  });
+
+  it("shows no generated-SQL block for a statement the author wrote", async () => {
+    // The discriminating half: a block that always renders would pass the test
+    // above while telling every author their typed SQL was "built by a script".
+    show(makeEndpoint({ statements: [{ name: "main", sql: "SELECT 1" }] } as Partial<DataApiEndpointDto>));
+
+    await screen.findByLabelText("SQL");
+    await userEvent.click(screen.getByRole("button", { name: /preview unsaved draft/i }));
+
+    await waitFor(() => expect(previewMutateAsync).toHaveBeenCalled());
+    expect(screen.queryByText(/sql this script built/i)).not.toBeInTheDocument();
+  });
+
+  it("runs the preview from the script editor's ⌘↵ too", async () => {
+    // The note beside the Preview button promises ⌘↵ "in the editor"; with the
+    // SQL box removed, the script editor is the editor.
+    show(makeEndpoint({ statements: [{ name: "main", script: BRANCHING }] } as Partial<DataApiEndpointDto>));
+
+    await screen.findByLabelText("SQL script");
+    const run = monacoStub.runCommand();
+    expect(run).toBeTypeOf("function");
+    await act(async () => {
+      run!();
+    });
+    await waitFor(() => expect(previewMutateAsync).toHaveBeenCalled());
+    expect(previewMutateAsync.mock.calls[0][0].data.script).toBe(BRANCHING);
+  });
+
+  it("makes the script editor read-only for a trashed endpoint, and ⌘↵ runs nothing", async () => {
+    show(
+      makeEndpoint({
+        statements: [{ name: "main", script: BRANCHING }],
+        state: "disabled",
+        deleted_at: "2026-08-18T09:00:00Z",
+      } as Partial<DataApiEndpointDto>),
+    );
+
+    // Monaco is not a form control, so the shell's `<fieldset disabled>` does
+    // not reach it — asserted on the editor's own attribute, and NOT with
+    // `toBeDisabled()`, which would walk up to that fieldset and pass with the
+    // guard deleted.
+    const script = await screen.findByLabelText("SQL script");
+    expect(script).toHaveAttribute("readonly");
+    await userEvent.type(script, "fail(");
+    expect(script).toHaveValue(BRANCHING);
+
+    const run = monacoStub.runCommand();
+    if (run) {
+      await act(async () => {
+        run();
+      });
+    }
+    expect(previewMutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("leaves the script editor writable when the endpoint is not in the trash", async () => {
+    // The other half: an editor that is always read-only passes the test above.
+    show(makeEndpoint({ statements: [{ name: "main", script: BRANCHING }] } as Partial<DataApiEndpointDto>));
+
+    const script = await screen.findByLabelText("SQL script");
+    expect(script).not.toHaveAttribute("readonly");
+    fireEvent.change(script, { target: { value: DEFAULT_SCRIPT } });
+    expect(script).toHaveValue(DEFAULT_SCRIPT);
   });
 });

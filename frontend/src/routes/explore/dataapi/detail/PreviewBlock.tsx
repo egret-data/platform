@@ -5,7 +5,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { SettingsNote } from "@/routes/explore/settings/SettingsNote";
 import { useDataApiPreviewEndpoint } from "@/api/generated/data-api/data-api";
-import type { DataApiPreviewDto } from "@/api/generated/model";
+import type { DataApiPreviewDto, StatementSource } from "@/api/generated/model";
 import { useEndpointDetail } from "../EndpointDetail";
 
 /** The cap the backend applies (`preview::PREVIEW_MAX_ROWS`). Named so the copy
@@ -16,9 +16,10 @@ const PREVIEW_MAX_ROWS = 100;
  * Runs the ON-SCREEN statement and shows the rows, without saving or publishing.
  *
  * ONE statement RUNS, but the request describes the whole endpoint's SHAPE:
- * `POST /preview` takes the `sql` on screen plus the other statements' text as
- * `siblings`, and an endpoint has N of them since M2. `Query` owns which one is
- * on screen and passes both down — see [`PreviewBlockProps`].
+ * `POST /preview` takes the source on screen — the SQL, or the script that
+ * builds it — plus the other statements' text as `siblings`, and an endpoint
+ * has N of them since M2. `Query` owns which one is on screen and passes both
+ * down — see [`PreviewBlockProps`].
  *
  * **Test values are NOT part of the endpoint.** They live in this component's
  * own state, never in the shared `form`, so they cannot be saved by accident and
@@ -41,14 +42,22 @@ export interface PreviewHandle {
 
 export interface PreviewBlockProps {
   /**
-   * The statement to run — the SQL as it is on screen right now, handed down
-   * rather than read from `form`.
+   * The statement to run — its source as it is on screen right now, handed
+   * down rather than read from `form`.
    *
-   * `POST /preview` runs ONE `sql`: a statement, not an endpoint. An endpoint
-   * has N of them (M2), and this component cannot know which one the author is
-   * looking at — `Query` owns that selection, so `Query` supplies the text.
+   * `POST /preview` runs ONE statement, not an endpoint. An endpoint has N of
+   * them (M2), and this component cannot know which one the author is looking
+   * at — `Query` owns that selection, so `Query` supplies the source.
+   *
+   * A `StatementSource`, not a `string`: package S gave a statement two
+   * sources, `{sql}` **or** `{script}`, and the preview route reads the same
+   * two-case shape with the same hand-written reader — both keys, neither key
+   * or an unknown key is a 422. Taking the whole source and spreading it into
+   * the body is what keeps that exact; a `sql: string` prop would have had to
+   * carry `""` for a scripted statement, which is a body the server refuses
+   * and, before it refused, a preview of an empty statement.
    */
-  sql: string;
+  source: StatementSource;
   /**
    * The OTHER statements' SQL, in any order — empty for a one-statement
    * endpoint.
@@ -78,7 +87,7 @@ export interface PreviewBlockProps {
 }
 
 export const PreviewBlock = forwardRef<PreviewHandle, PreviewBlockProps>(function PreviewBlock(
-  { sql, siblings, statementName },
+  { source, siblings, statementName },
   ref,
 ) {
   const { ws, id, form } = useEndpointDetail();
@@ -122,7 +131,11 @@ export const PreviewBlock = forwardRef<PreviewHandle, PreviewBlockProps>(functio
         workspace: ws,
         id,
         data: {
-          sql,
+          // Spread, so the body carries EXACTLY the one source key the
+          // statement has — `sql` for a written one, `script` for a generated
+          // one. A body with both is refused, and a body with neither has
+          // nothing to run.
+          ...source,
           // The shape input, not a second statement — see `PreviewBlockProps`.
           siblings,
           params: form.params,
@@ -315,6 +328,36 @@ export const PreviewBlock = forwardRef<PreviewHandle, PreviewBlockProps>(functio
                   published endpoint for real and shows the transformed response.
                 </AlertDescription>
               </Alert>
+            )}
+            {/* The template the statement's script built, `{{ }}` intact.
+                Showing it is the point of previewing a script at all: a script
+                that branches emits a different statement per parameter value,
+                and without this the only way to see which one a draft produced
+                was to publish it and read the engine's error.
+
+                Above the rows, not below them: it is what RAN, and an author
+                reading an unexpected result reads the statement first.
+
+                `whitespace-pre-wrap` for the reason the error alert above has
+                it — a generated statement is many lines and a normal
+                `white-space` collapses every one of them into a paragraph.
+                Its own `overflow-x-auto` box, so a long line scrolls here
+                rather than sideways-scrolling the page
+                (`docs/en/ui-conventions.md` §10). */}
+            {result.generated_sql != null && (
+              <div className="space-y-1">
+                <p className="text-xs font-medium">SQL this script built</p>
+                <p className="text-xs text-muted-foreground">
+                  What <span className="font-mono">build_sql</span> returned for the test values
+                  above — a template, before any render, so{" "}
+                  <span className="font-mono">{"{{ }}"}</span> is still there and is bound the
+                  same way a statement you typed would be. Another value can build another
+                  statement; this is the one your values reach.
+                </p>
+                <pre className="overflow-x-auto whitespace-pre-wrap rounded-md border border-border bg-muted/40 p-2 font-mono text-xs">
+                  {result.generated_sql}
+                </pre>
+              </div>
             )}
             <p className="text-xs text-muted-foreground">
               {result.truncated

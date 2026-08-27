@@ -1,6 +1,9 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, ChevronRight, ChevronUp, Plus, Trash2 } from "lucide-react";
+import type { Monaco } from "@monaco-editor/react";
+import type * as MonacoNS from "monaco-editor";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 // `Separator` is aliased: `@/components/ui/separator` exports that name for the
 // visual divider, and react-resizable-panels v4 renamed `PanelResizeHandle`
@@ -9,21 +12,48 @@ import { Group, Panel, Separator as PanelSeparator } from "react-resizable-panel
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ConfigTable, ConfigTableRow } from "@/components/config/ConfigTable";
 import { SqlEditor } from "@/components/sqllab/SqlEditor";
+import MonacoEditor from "@/components/monaco/MonacoEditor";
+import { useIsDark } from "@/hooks/useIsDark";
 import { useDatabases } from "@/api/databases";
 import { useEndpointDetail } from "../EndpointDetail";
 import { ParamEditor } from "./ParamEditor";
 import { PreviewBlock, type PreviewHandle } from "./PreviewBlock";
-import type { StatementSpec } from "@/api/generated/model";
+import type { StatementSource, StatementSpec } from "@/api/generated/model";
 
 /**
  * The SQL text of a statement, or `""` when a script builds it.
  *
- * Package S Task 1 made a statement's SQL text OR a script, and this editor
- * only writes the text form — **the script mode is Task 8**. Until then a
- * scripted statement (which today only the API can create) renders as an empty
- * editor rather than crashing on a field that is not there.
+ * Only `siblings` reads this now (see the note there for why a scripted
+ * sibling contributes `""` rather than being dropped). The statement on
+ * SCREEN is handed around as a whole [`StatementSource`], so that the two
+ * cases stay one key each and neither can be flattened into the other.
  */
 const sqlOf = (s: StatementSpec): string => ("sql" in s ? s.sql : "");
+
+/**
+ * A statement's SOURCE — everything about it except its name.
+ *
+ * Rebuilt as a fresh one-key object rather than passed through as `s`: a
+ * `StatementSpec` is `{name, sql}` or `{name, script}`, and the two places
+ * this feeds (the preview body and `setActiveSource`) must carry exactly one
+ * source key and no `name`. The backend's hand-written reader refuses both
+ * keys, neither key and an unknown key, so "spread whatever is there" is a
+ * 422 waiting for the first edit that adds a field.
+ */
+const sourceOf = (s: StatementSpec): StatementSource =>
+  "sql" in s ? { sql: s.sql } : { script: s.script };
+
+/**
+ * A fresh, syntactically valid `build_sql` an author can edit from — the shape
+ * `crates/egret-dataapi/src/transform.rs` documents as the entry point, so what
+ * the box opens with is what the evaluator is looking for.
+ *
+ * Not blank, for the reason `nextStatementName` is not blank: a script that
+ * does not define `build_sql` is refused by name (`MissingEntryPoint`), and an
+ * author who ticks the box, types their SQL where the `return` goes and saves
+ * would meet that refusal for a function they were never shown.
+ */
+const DEFAULT_BUILD_SQL_SCRIPT = 'def build_sql(params):\n    return "SELECT 1"\n';
 
 /**
  * Everything that decides what the query RETURNS: the database it runs against,
@@ -178,7 +208,15 @@ export default function Query() {
     [statements, active],
   );
 
-  /** Whether the statement on screen has its SQL built by a script. */
+  /**
+   * Whether the statement on screen has its SQL built by a script.
+   *
+   * Derived from the statement, never held in state of its own. A `useState`
+   * here would make the mode a property of the SECTION — one flag for N
+   * statements — so switching tabs would show the wrong editor and, worse, the
+   * next keystroke would write a script into a statement the author never
+   * switched. M2 gave every statement its own contract; this is that.
+   */
   const scripted = !("sql" in current);
 
   const nameError = useMemo(
@@ -190,32 +228,76 @@ export default function Query() {
   const setStatements = (next: StatementSpec[]) => setForm((f) => ({ ...f, statements: next }));
 
   /**
-   * Patch the statement on screen, **never destroying the source it already has.**
+   * Rename the statement on screen, **without touching its source.**
    *
-   * A `StatementSpec` carries `sql` OR `script` and never both, so `{ ...s, sql }`
-   * is wrong twice over: it would send both keys, which the backend refuses, and
-   * writing `sql: sqlOf(s)` — `""` for a scripted statement — would silently
-   * discard the author's script on any edit, INCLUDING a pure rename that never
-   * touches SQL. So the two halves are separated:
-   *
-   * * a patch without `sql` (i.e. a rename) keeps the source untouched;
-   * * a patch WITH `sql` applies only to a statement that already has `sql`.
-   *
-   * The second is a refusal rather than a conversion, and it is unreachable
-   * anyway: the editor below is `readOnly` for a scripted statement, so its
-   * `onChange` cannot fire. Both halves are here because "unreachable" is a
-   * property of today's markup and this is the function that must not lose work
-   * if that changes. Task 8 gives this editor a real script mode.
+   * `{ ...s, name }` and nothing else, which is what makes a rename a rename.
+   * The first version of package S wrote `{ name, sql: sqlOf(s) }` here, and
+   * for a scripted statement `sqlOf` is `""` — so a pure rename silently threw
+   * the author's script away and sent a text statement in its place.
+   * Identity and content are separate concerns, and this function only knows
+   * about the first.
    */
-  const editActive = (patch: { name?: string; sql?: string }) =>
-    setStatements(
-      statements.map((s, i) => {
-        if (i !== active) return s;
-        const named = patch.name === undefined ? s : { ...s, name: patch.name };
-        if (patch.sql === undefined) return named;
-        return "sql" in named ? { ...named, sql: patch.sql } : named;
-      }),
-    );
+  const renameActive = (name: string) =>
+    setStatements(statements.map((s, i) => (i === active ? { ...s, name } : s)));
+
+  /**
+   * Replace the SOURCE of the statement on screen, keeping its name.
+   *
+   * Rebuilt as `{ name, ...source }` rather than patched onto `s`: a patch
+   * leaves the OTHER case's key in place, and a statement carrying both `sql`
+   * and `script` has two definitions with no rule for which one runs — which
+   * the backend's reader refuses with a 422. Building the object from the name
+   * plus exactly one source is what makes "never both, never neither" a
+   * property of the code rather than of every caller remembering.
+   */
+  const setActiveSource = (source: StatementSource) =>
+    setStatements(statements.map((s, i) => (i === active ? { name: s.name, ...source } : s)));
+
+  /**
+   * What switching a statement's mode threw away, by POSITION in the list.
+   *
+   * A `ref`, not state, and read on the way back — `ResponseSection`'s
+   * `clearedByTransform` exactly: an author who ticks the box to see what a
+   * script would look like and unticks it again must find their SQL where they
+   * left it. Without this, the control whose entire purpose is to be tried out
+   * is also silent data loss, and the thing lost is the whole statement.
+   *
+   * **Cleared by every structural change** (`addStatement`, `move`,
+   * `removeActive`). The key is a position, so a reorder or a removal would
+   * re-attribute a remembered body to a DIFFERENT statement — the one failure
+   * mode this section must never have. Dropping the memory costs an undo that
+   * was never promised; keeping it stale would put one statement's SQL inside
+   * another.
+   *
+   * Like C2's, it deliberately does not survive unmounting: the discarded text
+   * is not in `form` any more, which is the whole point of clearing it.
+   */
+  const discarded = useRef<Record<number, StatementSource>>({});
+
+  /**
+   * Switch the statement on screen between written SQL and a script.
+   *
+   * The mode is not a stored field — it IS which key the source carries — so
+   * this both removes the control that goes inert and clears the value it held,
+   * in one patch, because they are the same write. That is C2's rule
+   * (`ResponseSection`) made unavoidable: there is no representable state where
+   * the hidden `sql` survives underneath a script.
+   *
+   * The ref is read AND written outside `setForm`'s updater. React double-
+   * invokes a `useState` updater under `StrictMode` and keeps only the second
+   * call's result, so a ref mutated inside would be seen already-consumed on
+   * the second pass and the restore would silently undo itself — measured in
+   * C2, in `disableTransform`.
+   */
+  function setActiveMode(toScript: boolean) {
+    if (toScript === scripted) return;
+    const remembered = discarded.current[active];
+    discarded.current = { ...discarded.current, [active]: sourceOf(current) };
+    // Only if it is the mode being switched TO: the memory holds one entry per
+    // position, and a third switch would otherwise restore the wrong half.
+    const restore = remembered && "script" in remembered === toScript ? remembered : undefined;
+    setActiveSource(restore ?? (toScript ? { script: DEFAULT_BUILD_SQL_SCRIPT } : { sql: "" }));
+  }
 
   const atLimit = statements.length >= MAX_STATEMENTS;
 
@@ -223,6 +305,7 @@ export default function Query() {
     // Guarded as well as disabled: the button is the only caller today, and a
     // guard here is what makes that stay true.
     if (atLimit) return;
+    discarded.current = {};
     setStatements([...statements, { name: nextStatementName(statements.map((s) => s.name)), sql: "" }]);
     // Select the one just added: an author who asks for a statement means to
     // write it, and landing them anywhere else would hide what they created.
@@ -234,6 +317,7 @@ export default function Query() {
     if (to < 0 || to >= statements.length) return;
     const next = [...statements];
     [next[active], next[to]] = [next[to], next[active]];
+    discarded.current = {};
     setStatements(next);
     // The moved statement stays selected — it is the one being worked on, and
     // following the INDEX instead would silently switch the editor's contents.
@@ -245,9 +329,30 @@ export default function Query() {
     // and guarded anyway: the schema's own CHECK makes an empty list
     // unrepresentable, so this must never be the request that tries.
     if (statements.length < 2) return;
+    discarded.current = {};
     setStatements(statements.filter((_, i) => i !== active));
     setSelected(Math.max(active - 1, 0));
   };
+
+  /**
+   * `trashed`, readable from a Monaco command registered once at mount.
+   *
+   * The script editor's ⌘↵ is registered in `onMount` and never re-registered,
+   * so a plain closure over `trashed` would keep whatever the value was when
+   * the editor appeared — and an endpoint can be trashed from the header while
+   * this section is on screen. `SqlEditor` holds its `onRun` the same way.
+   *
+   * Written from an EFFECT rather than during render: `react-hooks/refs`
+   * refuses a ref assignment in a render body, and this repo's lint gate is
+   * warning-count-based. The command cannot fire before the commit that runs
+   * this effect — it needs a mounted editor and a keystroke — so the guard is
+   * never read stale.
+   */
+  const trashedRef = useRef(trashed);
+  useEffect(() => {
+    trashedRef.current = trashed;
+  }, [trashed]);
+  const isDark = useIsDark();
 
   return (
     <div className="flex h-full flex-col">
@@ -416,7 +521,7 @@ export default function Query() {
                   aria-label="Statement name"
                   className="h-8 w-48 font-mono text-xs"
                   value={current.name}
-                  onChange={(e) => editActive({ name: e.target.value })}
+                  onChange={(e) => renameActive(e.target.value)}
                 />
                 <Button
                   type="button"
@@ -450,43 +555,113 @@ export default function Query() {
               </p>
             )}
 
-            <div id="stmt-panel" role={several ? "tabpanel" : undefined} className="min-h-0 flex-1 pt-2">
-              {/* A scripted statement has no SQL to edit — a script builds it —
-                  so the editor is read-only and says so rather than showing an
-                  empty box an author would type into and lose their script to.
-                  Only the API can create one today; the script mode is Task 8. */}
-              {scripted && (
-                <p className="pb-2 text-xs text-muted-foreground">
-                  A script builds this statement&rsquo;s SQL. Editing the script is not available
-                  here yet — the SQL below is read-only.
-                </p>
-              )}
-              <SqlEditor
-                value={sqlOf(current)}
-                onChange={(sql) => editActive({ sql })}
-                // Named, because Monaco's own label is a generic "Editor
-                // content" that cannot say WHICH field this is.
-                ariaLabel="SQL"
-                // The fieldset around this section does not reach a Monaco
-                // instance — it is not a form control. Without this line a
-                // trashed endpoint's SQL is fully editable.
-                // `scripted` for the reason above it: with no script mode yet,
-                // a writable editor over a scripted statement is a way to
-                // destroy the script, not a way to edit it.
-                readOnly={trashed || scripted}
-                // No schema source on this page — see the module doc.
-                schemaWords={[]}
-                // Ignores the SQL the editor offers (`pickRunSql` would hand
-                // back a SELECTION if there is one): a preview runs the whole
-                // on-screen statement, which is what the note beside the button
-                // promises and what the request body actually carries.
-                //
-                // `undefined` rather than a guarded callback when trashed:
-                // ⌘↵ bypasses both the read-only editor and the fieldset's
-                // disabled button, so this is the only thing stopping a
-                // trashed endpoint from running a preview.
-                onRun={trashed ? undefined : () => preview.current?.run()}
-              />
+            <div
+              id="stmt-panel"
+              role={several ? "tabpanel" : undefined}
+              className="flex min-h-0 flex-1 flex-col pt-2"
+            >
+              {/* Where this statement's SQL comes from. A real `<Checkbox>`, so
+                  the shell's disabled fieldset reaches it: changing the source
+                  of a statement is editing, not reading. */}
+              <div className="shrink-0 pb-2">
+                <label className="flex items-center gap-2 text-sm" htmlFor="stmt-scripted">
+                  <Checkbox
+                    id="stmt-scripted"
+                    checked={scripted}
+                    onCheckedChange={(v) => setActiveMode(v === true)}
+                  />
+                  Build this statement&rsquo;s SQL with a script
+                </label>
+                {/* Only when it is on, and it says the one thing an author has
+                    to know to write a correct script: what comes back is a
+                    TEMPLATE, so a parameter still goes through `{{ }}` and is
+                    bound on every call. A script that pastes the value into the
+                    text instead is refused at publish, by name. */}
+                {scripted && (
+                  <p className="max-w-prose pl-6 pt-1 text-xs text-muted-foreground">
+                    <span className="font-mono">build_sql(params)</span> returns this
+                    statement&rsquo;s SQL as a template. Leave a parameter as{" "}
+                    <span className="font-mono">{"{{ name }}"}</span> — it is bound on every
+                    call, exactly as if you had typed the SQL yourself. A script that puts a
+                    parameter&rsquo;s value into the text is refused at publish.
+                  </p>
+                )}
+              </div>
+
+              {/* One editor or the other, never both, and the one that is not
+                  in use is REMOVED rather than disabled — `ResponseSection`'s
+                  rule, and here it is structural: the state it would be showing
+                  does not exist any more, because switching the mode clears it
+                  in the same patch. */}
+              <div className="min-h-0 flex-1">
+                {scripted ? (
+                  <MonacoEditor
+                    height="100%"
+                    // `python`, which `lib/monaco.ts` already registers for
+                    // notebook cells — Starlark is close enough to read in it
+                    // and registering an eightieth language would cost the
+                    // whole Monaco bundle's diet. Same choice C2 made for the
+                    // response transform.
+                    defaultLanguage="python"
+                    value={current.script}
+                    onChange={(v) => setActiveSource({ script: v ?? "" })}
+                    // Monaco applies a theme GLOBALLY, so this editor and the
+                    // SQL one below must not disagree about light and dark. The
+                    // two surface-matched themes are private to `SqlEditor`;
+                    // these are the built-ins nearest them.
+                    theme={isDark ? "vs-dark" : "vs"}
+                    onMount={(editor: MonacoNS.editor.IStandaloneCodeEditor, monaco: Monaco) => {
+                      // The same ⌘↵ the SQL editor registers, so the promise
+                      // the preview panel prints ("⌘↵ in the editor") is true
+                      // in both modes. Guarded through a ref rather than by
+                      // not registering: the command is registered once at
+                      // mount and an endpoint can be trashed after that.
+                      editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => {
+                        if (trashedRef.current) return;
+                        preview.current?.run();
+                      });
+                    }}
+                    options={{
+                      minimap: { enabled: false },
+                      fontSize: 13,
+                      scrollBeyondLastLine: false,
+                      padding: { top: 10, bottom: 10 },
+                      renderLineHighlight: "line",
+                      // Named, because Monaco's own label is a generic "Editor
+                      // content" that cannot say WHICH field this is.
+                      ariaLabel: "SQL script",
+                      // A fieldset does not reach a Monaco instance — it is not
+                      // a form control — so a trashed endpoint's script would
+                      // be fully editable without these two. `domReadOnly`
+                      // alongside `readOnly` for `SqlEditor`'s reason: without
+                      // it the underlying textarea still reports itself
+                      // editable to assistive tech.
+                      readOnly: trashed,
+                      domReadOnly: trashed,
+                    }}
+                  />
+                ) : (
+                  <SqlEditor
+                    value={"sql" in current ? current.sql : ""}
+                    onChange={(sql) => setActiveSource({ sql })}
+                    ariaLabel="SQL"
+                    // See `domReadOnly` above — the fieldset cannot do this.
+                    readOnly={trashed}
+                    // No schema source on this page — see the module doc.
+                    schemaWords={[]}
+                    // Ignores the SQL the editor offers (`pickRunSql` would hand
+                    // back a SELECTION if there is one): a preview runs the whole
+                    // on-screen statement, which is what the note beside the button
+                    // promises and what the request body actually carries.
+                    //
+                    // `undefined` rather than a guarded callback when trashed:
+                    // ⌘↵ bypasses both the read-only editor and the fieldset's
+                    // disabled button, so this is the only thing stopping a
+                    // trashed endpoint from running a preview.
+                    onRun={trashed ? undefined : () => preview.current?.run()}
+                  />
+                )}
+              </div>
             </div>
           </div>
         </Panel>
@@ -503,7 +678,7 @@ export default function Query() {
               byte-identical to what it said before this feature. */}
           <PreviewBlock
             ref={preview}
-            sql={sqlOf(current)}
+            source={sourceOf(current)}
             siblings={siblings}
             statementName={several ? current.name : undefined}
           />
