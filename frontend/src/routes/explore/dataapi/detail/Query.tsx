@@ -230,6 +230,10 @@ export default function Query() {
    */
   const scripted = !("sql" in current);
 
+  /** The statement's body, whichever of the two it has — what a switch would
+   *  discard, and `""` when there is nothing to discard. */
+  const body = scripted ? current.script : current.sql;
+
   const nameError = useMemo(
     () => (several ? statementNameError(current.name, statements.map((s) => s.name), active) : null),
     [several, current.name, statements, active],
@@ -273,15 +277,38 @@ export default function Query() {
    * left it. Without this, the control whose entire purpose is to be tried out
    * is also silent data loss, and the thing lost is the whole statement.
    *
-   * **Cleared by every structural change** (`addStatement`, `move`,
-   * `removeActive`). The key is a position, so a reorder or a removal would
-   * re-attribute a remembered body to a DIFFERENT statement — the one failure
-   * mode this section must never have. Dropping the memory costs an undo that
-   * was never promised; keeping it stale would put one statement's SQL inside
-   * another.
+   * # A position is the only key available, so `move` and `remove` must forget
    *
-   * Like C2's, it deliberately does not survive unmounting: the discarded text
-   * is not in `form` any more, which is the whole point of clearing it.
+   * A statement has no id, and its name is not unique while it is being
+   * renamed (`statementNameError` is what says so), so the entry is keyed by
+   * POSITION — and `move` and `removeActive` are precisely the two operations
+   * that change what a position means. Leaving the memory alone across them
+   * hands one statement's body to another: with `[rows(sql), total(script)]`,
+   * switching `rows` to a script and then removing it leaves `total` at
+   * position 0, and unticking `total` rewrites it with the DELETED statement's
+   * SQL — its own script gone. Both call sites clear the memory, and
+   * `__tests__/Query.test.tsx` has one test per operation.
+   *
+   * **`addStatement` deliberately does not clear it.** Adding only ever
+   * appends, so every existing position still means what it meant, and
+   * forgetting there would throw away a live undo for nothing. "Clear it
+   * everywhere, defensively" is the wrong shape: it costs a real affordance
+   * and, being untestable, is exactly the kind of line that survives a
+   * mutation because no assertion can tell it from its absence.
+   *
+   * # It does not survive this section unmounting, and the UI says so
+   *
+   * `Query`, `Config`, `Response` and the rest are SIBLING routes (`App.tsx`),
+   * so opening another section unmounts this one and takes the memory with it;
+   * so does a reload. The alternative — hoisting the ref into
+   * `EndpointDetail`'s context so it outlives the section — would widen the
+   * undo without ever making it a guarantee (a reload, another endpoint, a new
+   * tab all still lose it), which leaves an author unable to tell the cases
+   * apart. That is the actual defect, and it is not fixed by covering one more
+   * case: it is fixed by SAYING what the undo is worth, beside the control,
+   * BEFORE the click. The sentence in the render below is that, and it is what
+   * makes the memory an in-page convenience rather than a promise this section
+   * quietly breaks on navigation.
    */
   const discarded = useRef<Record<number, StatementSource>>({});
 
@@ -316,7 +343,9 @@ export default function Query() {
     // Guarded as well as disabled: the button is the only caller today, and a
     // guard here is what makes that stay true.
     if (atLimit) return;
-    discarded.current = {};
+    // No `discarded.current = {}` here, unlike `move` and `removeActive`:
+    // appending renumbers nothing, so every remembered position still points
+    // at the statement it was taken from. See the ref's own comment.
     setStatements([...statements, { name: nextStatementName(statements.map((s) => s.name)), sql: "" }]);
     // Select the one just added: an author who asks for a statement means to
     // write it, and landing them anywhere else would hide what they created.
@@ -595,6 +624,27 @@ export default function Query() {
                     <span className="font-mono">{"{{ name }}"}</span> — it is bound on every
                     call, exactly as if you had typed the SQL yourself. A script that puts a
                     parameter&rsquo;s value into the text is refused at publish.
+                  </p>
+                )}
+                {/* What the NEXT click costs, said before it is clicked.
+                    A statement has one body, so switching always discards the
+                    other one, and the undo below it is an in-page convenience
+                    — leaving this section unmounts `Query` and takes the
+                    memory with it (see `discarded`). An author who cannot tell
+                    "switching back restores this" from "switching back does
+                    not" has been promised something this section only
+                    sometimes keeps, so the limit travels with the promise
+                    rather than being discovered by losing a statement.
+
+                    Only when there is something to lose: a warning over an
+                    empty editor is one an author learns to stop reading, and
+                    it would be false — nothing is discarded. */}
+                {body !== "" && (
+                  <p className="max-w-prose pl-6 pt-1 text-xs text-muted-foreground">
+                    Switching discards this statement&rsquo;s{" "}
+                    {scripted ? "script" : "SQL"} — a statement has one body, not both. Switching
+                    back brings it back while you stay in Query; leaving this section or reloading
+                    the page does not.
                   </p>
                 )}
               </div>

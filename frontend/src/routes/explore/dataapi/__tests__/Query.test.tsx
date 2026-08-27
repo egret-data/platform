@@ -1614,6 +1614,9 @@ describe("Query section — a statement's SQL from a script", () => {
       isPending: false,
     } as never);
     vi.mocked(dataApi.useRestoreEndpoint).mockReturnValue({ mutateAsync: vi.fn(), isPending: false } as never);
+    // Only the navigation test renders `Config`, but a hook mock cannot be
+    // conditional on which route is open.
+    vi.mocked(api.useDataApiValidateEndpoint).mockReturnValue({ mutateAsync: vi.fn(), isPending: false } as never);
     previewMutateAsync.mockResolvedValue({
       status: 200,
       data: { columns: [], rows: [], row_count: 0, truncated: false },
@@ -1624,7 +1627,12 @@ describe("Query section — a statement's SQL from a script", () => {
     } as never);
   });
 
-  function show(endpoint: DataApiEndpointDto, strict = false) {
+  /**
+   * `withConfig` registers the sibling section route, so a test can leave Query
+   * and come back — which UNMOUNTS this section, exactly as the real app does
+   * (`App.tsx` gives every section its own child route).
+   */
+  function show(endpoint: DataApiEndpointDto, strict = false, withConfig = false) {
     vi.mocked(api.useDataApiGetEndpoint).mockReturnValue({
       data: { status: 200, data: endpoint },
       isLoading: false,
@@ -1638,6 +1646,7 @@ describe("Query section — a statement's SQL from a script", () => {
           <Routes>
             <Route path="/explore/:workspace/data-api/endpoints/:id" element={<EndpointDetail />}>
               <Route index element={<Query />} />
+              {withConfig && <Route path="config" element={<Config />} />}
             </Route>
           </Routes>
         </MemoryRouter>
@@ -1874,5 +1883,152 @@ describe("Query section — a statement's SQL from a script", () => {
     expect(script).not.toHaveAttribute("readonly");
     fireEvent.change(script, { target: { value: DEFAULT_SCRIPT } });
     expect(script).toHaveValue(DEFAULT_SCRIPT);
+  });
+
+  /**
+   * The three structural operations, one test each — the reviewer deleted all
+   * three `discarded.current = {}` clears and 75/75 tests still passed.
+   *
+   * The memory is keyed by POSITION, which is the only key available (a
+   * statement has no id, and its name is not unique while it is being renamed).
+   * A position is exactly what `move` and `removeActive` change under it, so
+   * those two must forget; `addStatement` only ever appends, so it must NOT —
+   * and that asymmetry is why "clear it everywhere, defensively" is not the
+   * answer. Each test below fails for a different one of the three.
+   */
+  it("does not resurrect a removed statement's SQL into the one that takes its place", async () => {
+    show(
+      makeEndpoint({
+        statements: [
+          { name: "rows", sql: "SELECT A" },
+          { name: "total", script: BRANCHING },
+        ],
+      } as Partial<DataApiEndpointDto>),
+    );
+
+    // Switch `rows` to a script: its SQL is now remembered at position 0.
+    await screen.findByLabelText("SQL");
+    await userEvent.click(modeToggle());
+    await screen.findByLabelText("SQL script");
+
+    // Remove it. `total` slides into position 0 and is selected — and it is
+    // scripted, so the remembered entry's key matches the mode being switched
+    // TO and nothing else stands between it and the restore.
+    await userEvent.click(screen.getByRole("button", { name: /^remove statement$/i }));
+    await userEvent.click(modeToggle());
+
+    // The statement on screen is `total`, and it must be EMPTY. Anything else
+    // is a deleted statement's SQL wearing a surviving statement's name.
+    expect(await screen.findByLabelText("SQL")).toHaveValue("");
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(updateMutateAsync).toHaveBeenCalled());
+    expect(savedStatements()).toEqual([{ name: "total", sql: "" }]);
+  });
+
+  it("does not carry an undo across a reorder", async () => {
+    show(
+      makeEndpoint({
+        statements: [
+          { name: "rows", sql: "SELECT A" },
+          { name: "total", script: BRANCHING },
+        ],
+      } as Partial<DataApiEndpointDto>),
+    );
+
+    await screen.findByLabelText("SQL");
+    await userEvent.click(modeToggle());
+    await screen.findByLabelText("SQL script");
+
+    // `rows` moves to the end; `total` is now at position 0, where `rows`'s
+    // discarded SQL is remembered.
+    await userEvent.click(screen.getByRole("button", { name: "Move down" }));
+    await userEvent.click(screen.getByRole("tab", { name: "total" }));
+    await userEvent.click(modeToggle());
+
+    expect(await screen.findByLabelText("SQL")).toHaveValue("");
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(updateMutateAsync).toHaveBeenCalled());
+    expect(savedStatements()).toEqual([
+      { name: "total", sql: "" },
+      { name: "rows", script: DEFAULT_SCRIPT },
+    ]);
+  });
+
+  it("keeps a statement's undo when another statement is added", async () => {
+    // The other side of the asymmetry, and the reason a blanket clear is wrong:
+    // adding appends, so every existing position still means what it meant, and
+    // forgetting here would throw away an undo for no reason at all.
+    show(makeEndpoint({ statements: [{ name: "main", sql: "SELECT 1" }] } as Partial<DataApiEndpointDto>));
+
+    await screen.findByLabelText("SQL");
+    await userEvent.click(modeToggle());
+    await screen.findByLabelText("SQL script");
+
+    await userEvent.click(screen.getByRole("button", { name: /add statement/i }));
+    await userEvent.click(screen.getByRole("tab", { name: "main" }));
+    await userEvent.click(modeToggle());
+
+    expect(await screen.findByLabelText("SQL")).toHaveValue("SELECT 1");
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(updateMutateAsync).toHaveBeenCalled());
+    expect(savedStatements()).toEqual([
+      { name: "main", sql: "SELECT 1" },
+      { name: "statement_2", sql: "" },
+    ]);
+  });
+
+  /**
+   * The undo is a within-visit convenience and cannot be anything else — the
+   * discarded text is not in `form`, which is the whole point of discarding it.
+   * So the limit is stated BEFORE the click rather than discovered after it:
+   * an author who cannot tell "switching back restores this" from "switching
+   * back does not" has been promised something the section only sometimes
+   * keeps.
+   */
+  it("says what the switch discards, and how long the undo lasts, before the box is ticked", async () => {
+    show(makeEndpoint({ statements: [{ name: "main", sql: "SELECT 1" }] } as Partial<DataApiEndpointDto>));
+
+    await screen.findByLabelText("SQL");
+    const warning = screen.getByText(/discards this statement.s SQL/i);
+    expect(warning).toHaveTextContent(/leaving this section or reloading the page does not/i);
+
+    // And it follows the mode: after the switch it is the SCRIPT that the next
+    // switch would discard, so that is what it names.
+    await userEvent.click(modeToggle());
+    expect(await screen.findByText(/discards this statement.s script/i)).toBeInTheDocument();
+  });
+
+  it("says nothing about discarding when there is nothing to discard", async () => {
+    // The discriminating half: a warning that always renders is one an author
+    // stops reading, and a blank editor loses nothing.
+    show(makeEndpoint({ statements: [{ name: "main", sql: "" }] } as Partial<DataApiEndpointDto>));
+
+    await screen.findByLabelText("SQL");
+    expect(screen.queryByText(/discards this statement/i)).not.toBeInTheDocument();
+  });
+
+  /**
+   * The case the warning exists for, driven end to end: `Query` and `Config`
+   * are sibling routes (`App.tsx`), so opening another section UNMOUNTS this
+   * one and the memory goes with it. That is not a bug to fix by hoisting the
+   * ref into the shell — see `Query.tsx` — it is a limit, and the test pins
+   * that the limit is what the sentence above says it is.
+   */
+  it("does not offer the undo after the section has been left and reopened", async () => {
+    show(makeEndpoint({ statements: [{ name: "main", sql: "SELECT 1" }] } as Partial<DataApiEndpointDto>), false, true);
+
+    await screen.findByLabelText("SQL");
+    await userEvent.click(modeToggle());
+    await screen.findByLabelText("SQL script");
+
+    await userEvent.click(screen.getByRole("link", { name: "Config" }));
+    await screen.findByLabelText("Path");
+    await userEvent.click(screen.getByRole("link", { name: "Query" }));
+
+    await userEvent.click(await screen.findByRole("checkbox", { name: /build this statement.s sql with a script/i }));
+    // Empty, exactly as the sentence beside the box says. The script is gone
+    // too — a statement has one body — which is why the sentence is on screen
+    // before the first click and not after the second.
+    expect(await screen.findByLabelText("SQL")).toHaveValue("");
   });
 });
