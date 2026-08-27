@@ -60,11 +60,22 @@
 //!   never joins the iterated union, so preview resolves a scalar where serving
 //!   binds a list.
 //!
-//! It is latent rather than live: nothing authors a scripted statement yet, so
-//! no client puts one in this field. Closing it means `siblings` carrying
-//! sources rather than strings and generating every one of them per preview —
-//! N author scripts per keystroke-driven button — which is a decision about the
-//! wire type, not a tidy-up of this module. Recorded here, and on
+//! **It is reachable, and it was already reachable when this paragraph first
+//! called it latent.** That sentence said "nothing authors a scripted statement
+//! yet", which was a claim about the CONSOLE — and this divergence is a
+//! property of the wire, not of the console. `StatementSpec` has accepted
+//! `script` on the draft routes since package S Task 1, so an API client could
+//! save an endpoint with a scripted sibling and preview it that same day. Task
+//! 8 then shipped the editor, so a browser reaches it too. Neither date changed
+//! any behaviour; what was wrong was a comment telling the next reader a gap
+//! could not be entered.
+//!
+//! It still fails in exactly ONE direction — preview green, publish or serving
+//! refused, never the reverse — which is why it is recorded rather than fixed
+//! under a different task's name. Closing it means `siblings` carrying sources
+//! rather than strings and generating every one of them per preview — N author
+//! scripts per keystroke-driven button — which is a decision about the wire
+//! type, not a tidy-up of this module. Recorded here, and on
 //! [`crate::lifecycle::validate_preview`], so the "exactly two omissions" above
 //! is not read as "and nothing else differs".
 //!

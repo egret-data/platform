@@ -3376,12 +3376,15 @@ fn check_definition_scans(
 /// caller can render, bind or execute it. See its own comment.
 ///
 /// It is also where preview and publish still diverge, in one direction and
-/// latently: a sibling arrives as SQL TEXT, so a sibling that is itself a
-/// `build_sql` script cannot be expressed, is spent as one template against the
-/// endpoint's budget, and contributes to the iterated union whatever its SOURCE
-/// happens to scan as rather than what it would emit. The full statement of it,
-/// including why closing it is a decision about the wire type, is in the
-/// `crate::preview` module comment.
+/// **reachably** — through the draft wire since package S Task 1, which is when
+/// `StatementSpec` began accepting `script`, and through the console since Task
+/// 8: a sibling arrives as SQL TEXT, so a sibling that is itself a `build_sql`
+/// script cannot be expressed, is spent as one template against the endpoint's
+/// budget, and contributes to the iterated union whatever its SOURCE happens to
+/// scan as rather than what it would emit. The direction is preview green then
+/// publish refused, never the reverse. The full statement of it, including why
+/// closing it is a decision about the wire type, is in the `crate::preview`
+/// module comment.
 ///
 /// # `output` is checked for its TRANSFORM and applied to nothing (C2)
 ///
