@@ -231,8 +231,8 @@ use std::collections::BTreeMap;
 use egret_core::{Error, Result, UserId};
 use egret_dataapi_api::{
     compare_column_types, CacheScope, CacheSpec, ColumnSpec, EndpointSnapshot, LimitsSpec,
-    OutputSpec, ParamLocation, ParamSpec, ParamType, StatementSnapshot, StatementSpec,
-    TypeAgreement, PARAM_GATE,
+    OutputSpec, ParamLocation, ParamSpec, ParamType, StatementSnapshot, StatementSource,
+    StatementSpec, TypeAgreement, PARAM_GATE,
 };
 use egret_query_api::Param;
 use uuid::Uuid;
@@ -3359,8 +3359,23 @@ fn check_definition_scans(
 /// and that type is deliberately crate-private, so that "the shape a definition
 /// is validated against" cannot be constructed, or a second one computed,
 /// outside this module. Nothing outside the crate called this.
+///
+/// # The statement on screen may be a SCRIPT (package S Task 7)
+///
+/// It takes a [`StatementSource`] rather than a `&str` for the same reason
+/// [`validate_endpoint`] takes [`StatementSpec`]s: the author's editor now holds
+/// either SQL or a `build_sql` script, and the rules below are about TEXT. So
+/// this generates first — through [`GeneratedSql::build`], the one generator —
+/// and scans what came out. Nothing downstream of that line can tell whether the
+/// author typed the text or a script built it, which is the property package S
+/// rests on.
+///
+/// **Every template, not only the baseline one**, exactly as
+/// [`validate_endpoint`] does since Task 6: a branching script emits more than
+/// one, and a text this function did not scan is a text `crate::preview::run`
+/// could send to the engine as the AUTHOR.
 pub(crate) fn validate_preview(
-    sql: &str,
+    source: &StatementSource,
     siblings: &SiblingStatements,
     params: &[ParamSpec],
     output: &OutputSpec,
@@ -3382,6 +3397,22 @@ pub(crate) fn validate_preview(
             },
         ));
     }
+    // Generate, in the position [`validate_endpoint`] generates from: after the
+    // statement-list rule that bounds how many evaluations are possible, and
+    // before every scan below, which must read TEXT and must not be able to tell
+    // where it came from. Both halves are the same argument that function's own
+    // comment makes at length.
+    //
+    // A written statement pays a `BTreeMap` insert and a `String` clone here and
+    // nothing else — `GeneratedSql::build` copies its SQL in rather than
+    // branching on the kind — so every preview that existed before package S
+    // takes exactly the path it took.
+    let statement = StatementSpec {
+        name: PREVIEW_STATEMENT_NAME.to_owned(),
+        source: source.clone(),
+    };
+    let generated = GeneratedSql::build(std::slice::from_ref(&statement), params)?;
+    let templates = statement_templates(&statement, &generated)?;
     // `output.transform`, in the position [`validate_endpoint`] checks it from
     // — after the statement-list rule and before any per-statement scan — so an
     // author who breaks both is told about the same one first on both paths.
@@ -3400,15 +3431,31 @@ pub(crate) fn validate_preview(
     // site (`validate_endpoint`), so before this a script that does not parse
     // could be SAVED, previewed green, and refused only at publish.
     check_transform(output)?;
-    // Only `sql` is SCANNED. The siblings are not this preview's statement:
-    // they are already stored, they were scanned when they were written, and
-    // re-refusing one here would block previewing the statement the author is
-    // actually looking at because a different one is mid-edit.
-    check_definition_scans(sql, params, ParamRules::Draft)?;
-    let iterated = siblings.union_with(sql, params);
-    check_render_rules(sql, params, &iterated)?;
+    // Only the statement on screen is SCANNED. The siblings are not this
+    // preview's statement: they are already stored, they were scanned when they
+    // were written, and re-refusing one here would block previewing the
+    // statement the author is actually looking at because a different one is
+    // mid-edit.
+    for template in &templates {
+        check_definition_scans(template, params, ParamRules::Draft)?;
+    }
+    let iterated = siblings.union_with(&templates, params);
+    for template in &templates {
+        check_render_rules(template, params, &iterated)?;
+    }
     Ok(iterated)
 }
+
+/// The name a preview's one statement is generated under.
+///
+/// The body carries no statement name — this route runs the statement on screen
+/// and the siblings are text with no names either (see [`SiblingStatements`]) —
+/// but [`GeneratedSql`] is keyed by name, so generation needs one. It is a
+/// constant rather than anything derived from the request: it never leaves this
+/// function, it is looked up by the same value it was inserted under, and
+/// `^[a-z][a-z0-9_]*$` is what [`egret_dataapi_api::validate_statements`]
+/// demands of it.
+const PREVIEW_STATEMENT_NAME: &str = "preview";
 
 /// The SQL text of the other statements of the endpoint a preview belongs to.
 ///
@@ -3442,18 +3489,26 @@ impl SiblingStatements {
         self.0.len()
     }
 
-    /// The iterated-parameter union across `sql` and every sibling — the same
-    /// set [`validate_endpoint`] computes for the whole endpoint, which is the
-    /// point.
+    /// The iterated-parameter union across the previewed statement's templates
+    /// and every sibling — the same set [`validate_endpoint`] computes for the
+    /// whole endpoint, which is the point.
     ///
-    /// `sql` is passed IN rather than the siblings being handed out, so this is
-    /// the only expression that ever sees the texts together and there is no
+    /// The texts are passed IN rather than the siblings being handed out, so
+    /// this is the only expression that ever sees them together and there is no
     /// accessor to misuse.
-    fn union_with(&self, sql: &str, params: &[ParamSpec]) -> IteratedParams {
-        let mut sqls: Vec<&str> = Vec::with_capacity(1 + self.0.len());
-        sqls.push(sql);
-        sqls.extend(self.0.iter().map(String::as_str));
-        IteratedParams::across(&sqls, params)
+    ///
+    /// A SLICE of texts, not one, because a branching script emits more than one
+    /// template and the shape is one decision for the endpoint: a branch whose
+    /// `{% for %}` header iterates a parameter the baseline reads as a scalar
+    /// has to widen the set, or that branch renders under the wrong shape. Same
+    /// reason [`validate_endpoint`] decides it across every template rather than
+    /// across every statement's first one. A written statement passes a slice of
+    /// one and nothing changes.
+    fn union_with(&self, sqls: &[&str], params: &[ParamSpec]) -> IteratedParams {
+        let mut all: Vec<&str> = Vec::with_capacity(sqls.len() + self.0.len());
+        all.extend(sqls.iter().copied());
+        all.extend(self.0.iter().map(String::as_str));
+        IteratedParams::across(&all, params)
     }
 }
 
@@ -5226,7 +5281,18 @@ mod tests {
         params: &[ParamSpec],
         output: &OutputSpec,
     ) -> std::result::Result<IteratedParams, ValidationError> {
-        validate_preview(sql, &SiblingStatements::default(), params, output)
+        validate_preview(
+            &StatementSource::Sql(sql.to_owned()),
+            &SiblingStatements::default(),
+            params,
+            output,
+        )
+    }
+
+    /// The statement on screen, as the request now carries it: the author's own
+    /// text. The scripted case has its own tests below.
+    fn written(sql: &str) -> StatementSource {
+        StatementSource::Sql(sql.to_owned())
     }
 
     fn siblings(sqls: &[&str]) -> SiblingStatements {
@@ -6254,7 +6320,7 @@ mod tests {
         // the same conclusion rather than a second rule that agrees today.
         assert_eq!(
             validate_preview(
-                SUMMARY,
+                &written(SUMMARY),
                 &siblings(&[BY_REGION]),
                 &params,
                 &OutputSpec::default()
@@ -6268,7 +6334,7 @@ mod tests {
         // with `summary` as its sibling, still passes. The union is a union — a
         // sibling that uses a parameter as a scalar does not un-iterate it.
         assert!(validate_preview(
-            BY_REGION,
+            &written(BY_REGION),
             &siblings(&[SUMMARY]),
             &params,
             &OutputSpec::default()
@@ -6308,7 +6374,7 @@ mod tests {
         assert!(preview(SUMMARY_ALL, &params).unwrap().names().is_empty());
         assert_eq!(
             validate_preview(
-                SUMMARY_ALL,
+                &written(SUMMARY_ALL),
                 &siblings(&[BY_REGION]),
                 &params,
                 &OutputSpec::default()
@@ -6336,15 +6402,26 @@ mod tests {
         // A `;`, a `#` and a DELETE — each of which `check_definition_scans`
         // refuses outright when it is the statement being previewed.
         let broken = siblings(&["DELETE FROM t; -- half typed # note"]);
-        assert!(validate_preview(ON_SCREEN, &broken, &params, &OutputSpec::default()).is_ok());
+        assert!(validate_preview(
+            &written(ON_SCREEN),
+            &broken,
+            &params,
+            &OutputSpec::default()
+        )
+        .is_ok());
         // …while a sibling that DOES loop still counts, so "not scanned" has not
         // become "not read".
         let looping = siblings(&["SELECT region AS n FROM t WHERE region IN (\
              {% for x in region %}{{ x }}{% if not loop.last %},{% endif %}{% endfor %}); # oops"]);
         assert_eq!(
-            validate_preview(ON_SCREEN, &looping, &params, &OutputSpec::default())
-                .unwrap()
-                .names(),
+            validate_preview(
+                &written(ON_SCREEN),
+                &looping,
+                &params,
+                &OutputSpec::default()
+            )
+            .unwrap()
+            .names(),
             ["region"],
         );
     }
@@ -6366,7 +6443,7 @@ mod tests {
         // One statement plus `MAX_STATEMENTS - 1` siblings is a describable
         // endpoint, and passes.
         assert!(validate_preview(
-            "SELECT 1 AS n",
+            &written("SELECT 1 AS n"),
             &siblings(&refs[1..]),
             &[],
             &OutputSpec::default()
@@ -6376,7 +6453,7 @@ mod tests {
         // same error and the same numbers.
         assert_eq!(
             validate_preview(
-                "SELECT 1 AS n",
+                &written("SELECT 1 AS n"),
                 &siblings(&refs),
                 &[],
                 &OutputSpec::default()
@@ -6393,7 +6470,7 @@ mod tests {
         // when the statement on screen is itself unpublishable.
         assert_eq!(
             validate_preview(
-                "SELECT 1; DROP TABLE t",
+                &written("SELECT 1; DROP TABLE t"),
                 &siblings(&refs),
                 &[],
                 &OutputSpec::default()

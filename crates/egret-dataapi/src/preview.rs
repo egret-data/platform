@@ -16,6 +16,23 @@
 //! decision is made once by [`crate::lifecycle::validate_preview`], which returns
 //! it, and the text stays inside `lifecycle::SiblingStatements`.
 //!
+//! # The statement on screen may be a SCRIPT, and preview shows what it built
+//!
+//! Package S gave a statement a second source: a Starlark `build_sql(params)`
+//! that returns the template. The body carries `sql` or `script` exactly as a
+//! stored statement does, and [`DataApiPreviewDto::generated_sql`] is what the
+//! script produced — the artefact an author debugging a branching script cannot
+//! otherwise see, and the reason this route is worth extending rather than
+//! leaving to `Try it`.
+//!
+//! **Generation happens twice, on two different questions**, and neither is a
+//! second generator: [`crate::lifecycle::validate_preview`] generates through
+//! `GeneratedSql::build` to ask publish's question of every branch, and
+//! [`generate_off_the_worker`] generates through
+//! `crate::serving::router::generate_one` to ask serving's question of the
+//! author's own test values. That second function's two re-applied rules are
+//! load-bearing here, not inherited decoration — see its call site.
+//!
 //! # Not quite EVERY publish rule — two are about things a preview does not do
 //!
 //! [`crate::lifecycle::validate_preview`] omits the cache-scope rule (preview
@@ -128,7 +145,7 @@
 //! when its author adds a second statement. This route has neither half of
 //! that:
 //!
-//! * **one statement's rows.** [`PreviewEndpointInput::sql`] is the only
+//! * **one statement's rows.** [`PreviewEndpointInput::source`] is the only
 //!   statement that runs; `siblings` is text that decides a parameter's shape
 //!   and is never rendered, bound or executed. Handing the script the previewed
 //!   statement's rows with every sibling's set to `[]` produces two wrong
@@ -170,7 +187,7 @@
 use std::collections::BTreeMap;
 
 use egret_core::UserId;
-use egret_dataapi_api::{OutputSpec, ParamSpec};
+use egret_dataapi_api::{OutputSpec, ParamSpec, StatementSource};
 use uuid::Uuid;
 
 use crate::routes::{DataApiError, DataApiState};
@@ -195,12 +212,26 @@ pub(crate) const PREVIEW_TIMEOUT_SECS: u64 = 30;
 ///
 /// No `cache`, `limits` or `rate_limit`: preview does not consult any of them,
 /// and accepting fields it ignores would invite the reader to think it did.
-#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
-#[serde(deny_unknown_fields)]
+/// # Unknown keys, `sql`-or-`script`, and why [`Deserialize`] is hand-written
+///
+/// Package S Task 7 gave this body the same two-case source
+/// [`egret_dataapi_api::StatementSpec`] has, flattened onto the object the same
+/// way: `{"sql": …}` or `{"script": …}`, never both and never neither. That
+/// shape and `#[serde(deny_unknown_fields)]` are the pair serde documents as not
+/// composing, so this impl states all three rules itself — exactly what
+/// `StatementSpec` does, for the reasons measured there. A body an older client
+/// sends is unchanged: `sql` is still `sql`, in the same position, with the same
+/// type.
+#[derive(Debug, utoipa::ToSchema)]
 pub struct PreviewEndpointInput {
     /// What is in the editor right now — not what is stored. **The only
     /// statement this route runs.**
-    pub sql: String,
+    ///
+    /// The author's SQL, or the Starlark script that builds it. A script is
+    /// generated here through the same generator publish and serving use, and
+    /// what it produced comes back in [`DataApiPreviewDto::generated_sql`].
+    #[serde(flatten)]
+    pub source: StatementSource,
     /// The SQL text of the endpoint's OTHER statements, as they are on screen.
     ///
     /// They decide ONE thing and are used for nothing else: whether a parameter
@@ -219,12 +250,14 @@ pub struct PreviewEndpointInput {
     // shape and nothing else" structural: its text is private to the module that
     // computes the union, so this file cannot read a byte of it.
     //
-    // # `#[serde(default)]`, on a `deny_unknown_fields` struct
+    // # Optional, and an older client omits it
     //
-    // An older client omits the field entirely and must keep working. It also
-    // keeps TODAY'S behaviour exactly: an empty list makes the union
+    // A client that never learnt this field must keep working, and its body must
+    // keep TODAY'S behaviour exactly: an empty list makes the union
     // `IteratedParams::across(&[sql], …)`, the slice of one that was there
-    // before.
+    // before. The default is applied by the hand-written [`Deserialize`] below;
+    // `#[serde(default)]` stays on the field because that is what utoipa reads
+    // to leave it out of the schema's `required` list, and the two must agree.
     //
     // # Bounded by COUNT, not by length — and why that is the right pair
     //
@@ -263,7 +296,7 @@ pub struct PreviewEndpointInput {
     ///
     // # REQUIRED, and this is the load-bearing part
     //
-    // No `#[serde(default)]`, unlike all three fields above it. The reason is
+    // No default, unlike all three fields above it. The reason is
     // the DIRECTION a default fails in: `OutputSpec::default()` has
     // `transform: None`, so an omitted `output` makes every transform refusal
     // vanish and preview goes green on exactly the drafts publish refuses. A
@@ -277,14 +310,126 @@ pub struct PreviewEndpointInput {
     // `output`.
     //
     // `tests/preview.rs::preview_will_not_read_a_default_output_for_a_body_that_omits_one`
-    // asserts this at the wire, because the edit to catch is a serde attribute
-    // rather than a call.
+    // asserts this at the wire, because the edit to catch is one word in the
+    // [`Deserialize`] impl below — `unwrap_or_default()` where `ok_or_else` is —
+    // rather than a call anything else would notice.
     pub output: OutputSpec,
     /// The database picker's current value. Workspace-scoped by
     /// `connection_per_principal_pair`, which answers `NotFound` for a database
     /// belonging to another workspace — this id comes from a request body, so it
     /// is exactly the shape that could name someone else's connection.
     pub database_id: Uuid,
+}
+
+/// The seven keys a preview body may carry, and the only seven.
+const PREVIEW_INPUT_FIELDS: &[&str] = &[
+    "sql",
+    "script",
+    "siblings",
+    "params",
+    "values",
+    "output",
+    "database_id",
+];
+
+impl<'de> serde::Deserialize<'de> for PreviewEndpointInput {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::{Error as DeError, MapAccess, Visitor};
+
+        struct PreviewInputVisitor;
+
+        impl<'de> Visitor<'de> for PreviewInputVisitor {
+            type Value = PreviewEndpointInput;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(
+                    "a preview body with an `output`, a `database_id` and exactly one of \
+                     `sql` or `script`",
+                )
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<PreviewEndpointInput, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut sql: Option<String> = None;
+                let mut script: Option<String> = None;
+                let mut siblings: Option<crate::lifecycle::SiblingStatements> = None;
+                let mut params: Option<Vec<ParamSpec>> = None;
+                let mut values: Option<BTreeMap<String, Vec<String>>> = None;
+                let mut output: Option<OutputSpec> = None;
+                let mut database_id: Option<Uuid> = None;
+                // Every key is read, including the ones after the reader already
+                // has what it needs: stopping early would accept a trailing typo,
+                // and JSON permits a repeated key, which is a malformed object
+                // rather than a last-wins assignment.
+                macro_rules! once {
+                    ($slot:ident) => {{
+                        if $slot.is_some() {
+                            return Err(DeError::duplicate_field(stringify!($slot)));
+                        }
+                        $slot = Some(map.next_value()?);
+                    }};
+                }
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "sql" => once!(sql),
+                        "script" => once!(script),
+                        "siblings" => once!(siblings),
+                        "params" => once!(params),
+                        "values" => once!(values),
+                        "output" => once!(output),
+                        "database_id" => once!(database_id),
+                        unknown => {
+                            return Err(DeError::unknown_field(unknown, PREVIEW_INPUT_FIELDS))
+                        }
+                    }
+                }
+                let source = match (sql, script) {
+                    (Some(sql), None) => StatementSource::Sql(sql),
+                    (None, Some(script)) => StatementSource::Script(script),
+                    (Some(_), Some(_)) => {
+                        return Err(DeError::custom(
+                            "a statement carries either `sql` or `script`, never both; \
+                             `sql` is SQL the author wrote and `script` is a Starlark script \
+                             that builds it, so a statement with both has two definitions and \
+                             no rule for which one runs",
+                        ))
+                    }
+                    (None, None) => {
+                        return Err(DeError::custom(
+                            "a statement must carry either `sql`, the SQL the author wrote, \
+                             or `script`, a Starlark script that builds it; this one carries \
+                             neither",
+                        ))
+                    }
+                };
+                Ok(PreviewEndpointInput {
+                    source,
+                    siblings: siblings.unwrap_or_default(),
+                    params: params.unwrap_or_default(),
+                    values: values.unwrap_or_default(),
+                    // No default, and the whole reason is on the field above:
+                    // `OutputSpec::default()` declares no transform, so an
+                    // omitted `output` would make every transform refusal
+                    // vanish and preview would go green on exactly the drafts
+                    // publish refuses.
+                    output: output.ok_or_else(|| DeError::missing_field("output"))?,
+                    database_id: database_id
+                        .ok_or_else(|| DeError::missing_field("database_id"))?,
+                })
+            }
+        }
+
+        deserializer.deserialize_struct(
+            "PreviewEndpointInput",
+            PREVIEW_INPUT_FIELDS,
+            PreviewInputVisitor,
+        )
+    }
 }
 
 /// What a preview answers with.
@@ -315,6 +460,37 @@ pub struct DataApiPreviewDto {
     /// module comment for why preview does not run the script, and for what
     /// does.
     pub transform_declared: bool,
+    /// The template the statement's `build_sql` script returned — `{{ }}`
+    /// intact, before any render — or `None` when the author wrote the SQL
+    /// themselves (package S Task 7).
+    ///
+    /// **Showing it is the point of previewing a script at all.** A script that
+    /// branches emits a different statement per parameter value, and until this
+    /// field the only way an author could see which one their draft produced was
+    /// to publish it and read the engine's error. C2's response transform could
+    /// not be previewed and this route says so (`transform_declared`); here the
+    /// artefact exists, so it is on screen.
+    ///
+    /// # It is the TEMPLATE, not what the engine ran
+    ///
+    /// The rendered form has the author's values replaced by bind markers, which
+    /// is the one thing they cannot edit and did not write. The template is what
+    /// they would have typed by hand, so it is directly comparable with the
+    /// editor beside it — and it is the artefact the script is responsible for.
+    ///
+    /// # It is generated from the author's own test `values`
+    ///
+    /// Not from publish's representative ones. A preview that showed the
+    /// baseline branch while binding the author's values would show a statement
+    /// their values do not take — the "told fine, then told no" defect this
+    /// route exists to invert, in its quietest form.
+    ///
+    /// # `None`, not an echo, for a written statement
+    ///
+    /// The author is looking at that text in the editor. A field that always
+    /// carried something would give the UI no way to tell "this is what your
+    /// script built" from "this is what you typed".
+    pub generated_sql: Option<String>,
 }
 
 /// One refusal from [`crate::serving::params::resolve_supplied`], as the sentence
@@ -495,12 +671,12 @@ fn param_error(
 async fn validate_off_the_worker(
     body: &PreviewEndpointInput,
 ) -> Result<crate::lifecycle::IteratedParams, DataApiError> {
-    let sql = body.sql.clone();
+    let source = body.source.clone();
     let siblings = body.siblings.clone();
     let params = body.params.clone();
     let output = body.output.clone();
     let joined = tokio::task::spawn_blocking(move || {
-        crate::lifecycle::validate_preview(&sql, &siblings, &params, &output)
+        crate::lifecycle::validate_preview(&source, &siblings, &params, &output)
     })
     .await
     // A panic in the validator, or a runtime shutting down. Neither is the
@@ -510,6 +686,96 @@ async fn validate_off_the_worker(
         egret_core::Error::Internal(anyhow::anyhow!("the draft could not be validated: {join}"))
     })?;
     Ok(joined?)
+}
+
+/// Build this statement's SQL from the author's own test values, through the
+/// function the SERVING path generates with.
+///
+/// `None` when the author wrote the SQL: there is nothing to generate, no
+/// Starlark to evaluate, no thread to spawn, and the caller renders exactly the
+/// `&str` it rendered before package S existed.
+///
+/// # Why generate a SECOND time, when validation already generated once
+///
+/// Because the two answer different questions, and preview is the one route that
+/// has to ask both. `crate::lifecycle::validate_preview` generates from
+/// `representative_value` and probes with a sentinel — that is publish's
+/// question ("is every branch this draft can reach publishable?"). This
+/// generates from the values the author typed — serving's question ("what does
+/// this endpoint say for THESE parameters?"). A branching script gives two
+/// different texts, and the one on screen has to be the second: showing the
+/// baseline branch while binding the author's values is a preview of a statement
+/// their values do not take.
+///
+/// Two evaluations of `build_sql` per preview, then. That is not a regression
+/// against a one-evaluation design that could have worked: the union of a
+/// publish and a serve is what a preview IS, and the shape decision the resolve
+/// needs is computed from the SQL, which for a script does not exist until
+/// something generates it.
+///
+/// # `serving::router::generate_one`, not a second generator
+///
+/// It is `build_sql` plus the two publish rules nothing downstream re-applies —
+/// `check_single_select` on the head word and `crate::render::check_dynamic` on
+/// the comparison the scanner can miss — and BOTH are needed here for the same
+/// reason they are needed there: the branch the author's test values take may be
+/// one no probe took, so no validation above has seen this text. Its own comment
+/// carries the argument in full.
+///
+/// Preview needs it in both directions. A generated `DELETE FROM t` would run
+/// **as the author**, against a real engine, from a route whose whole error
+/// contract is "pass the engine's message through". And a generated template
+/// carrying a comparison `check_static` misses would preview GREEN with
+/// over-broad rows and serve exactly the same way — a silent wrong answer shown
+/// to the one person who could have caught it.
+///
+/// # A 400, where serving answers 500
+///
+/// The same refusal means opposite things on the two paths. For a consumer the
+/// request was fine and the ENDPOINT failed, so `generate_one` is 500 throughout
+/// and says nothing on the wire. Here the script is the thing on screen, the
+/// author owns it, and a 500 with a fixed message tells them nothing about the
+/// branch they just took. So the detail comes out — the same inversion `run`'s
+/// own comment makes about engine errors, and the same one [`param_error`]
+/// makes about parameters. `ServingError` is not weakened to do it: the message
+/// is read from the `Internal` variant's SOURCE, which that type already keeps
+/// for the log.
+///
+/// # On the blocking pool, for the reason [`validate_off_the_worker`] is
+///
+/// `build_sql` is author-supplied Starlark and `MAX_WALL_CLOCK` bounds ticks
+/// rather than time. Inline, it occupies the only worker its task is on.
+async fn generate_off_the_worker(
+    body: &PreviewEndpointInput,
+    resolved: &crate::serving::params::Resolved,
+) -> Result<Option<String>, DataApiError> {
+    let Some(script) = body.source.script().map(str::to_owned) else {
+        return Ok(None);
+    };
+    // `spawn_blocking` needs `'static`. Both are bounded by what
+    // `validate_preview` has already accepted: the parameters by
+    // `MAX_DECLARED_PARAMS`, the script by axum's body limit.
+    let params = resolved.json.clone();
+    let values = resolved.values.clone();
+    let joined = tokio::task::spawn_blocking(move || {
+        crate::serving::router::generate_one(&script, &params, &values)
+    })
+    .await
+    .map_err(|join| {
+        egret_core::Error::Internal(anyhow::anyhow!(
+            "the draft's statement could not be generated: {join}"
+        ))
+    })?;
+    joined.map(Some).map_err(|e| {
+        // `Internal`'s source is where `generate_one` put the sentence; the
+        // variant's own `Display` is the fixed "internal error" a consumer
+        // reads, which is not what an author needs.
+        let detail = match &e {
+            crate::serving::ServingError::Internal(source) => source.to_string(),
+            other => other.to_string(),
+        };
+        egret_core::Error::InvalidInput(detail)
+    })
 }
 
 /// Run `body` as `principal` and return what the engine said.
@@ -547,7 +813,22 @@ pub(crate) async fn run(
         crate::serving::params::resolve_supplied_with(&body.values, iterated.names(), &body.params)
             .map_err(|e| param_error(e, &body.params, &body.values))?;
 
-    let (sql, binds) = crate::render::render(&body.sql, &resolved.values)
+    // What the author's own test values make this statement say. `None` for
+    // written SQL — there is nothing to generate — and the script's answer
+    // otherwise. See [`generate_off_the_worker`] for why it is generated a
+    // second time here rather than taken from the validation above.
+    let generated = generate_off_the_worker(body, &resolved).await?;
+    let template = match &generated {
+        Some(sql) => sql.as_str(),
+        None => body
+            .source
+            .sql()
+            // `StatementSource` is a two-case enum with "neither"
+            // unrepresentable, so a source that generated nothing carries SQL.
+            .expect("a statement that is not a script carries SQL"),
+    };
+
+    let (sql, binds) = crate::render::render(template, &resolved.values)
         .map_err(crate::lifecycle::ValidationError::Render)?;
 
     let out = st
@@ -575,6 +856,7 @@ pub(crate) async fn run(
         // the draft on screen is the thing being previewed, and a transform
         // added since the last Save is exactly the state that needs saying.
         transform_declared: body.output.transform.is_some(),
+        generated_sql: generated,
     })
 }
 
@@ -592,7 +874,7 @@ mod tests {
     /// here and the test would measure the wrong thing.
     fn slow_draft() -> PreviewEndpointInput {
         PreviewEndpointInput {
-            sql: "SELECT 1 AS n".into(),
+            source: StatementSource::Sql("SELECT 1 AS n".into()),
             siblings: crate::lifecycle::SiblingStatements::default(),
             params: Vec::new(),
             values: BTreeMap::new(),

@@ -28890,6 +28890,13 @@
           "transform_declared": {
             "type": "boolean",
             "description": "True when the draft declares an `output.transform` — so `columns` and\n`rows` above are the STATEMENT's, and a consumer receives something else\nentirely (the script's output, described by `returns`).\n\nA fact, not a rendering: the UI owns the sentence, the way it does for\n`truncated`. But it must say something, because this is the one case\nwhere the gap between \"what preview shows\" and \"what a consumer gets\" is\nnot a renaming — it is a different value of a different shape. See the\nmodule comment for why preview does not run the script, and for what\ndoes."
+          },
+          "generated_sql": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The template the statement's `build_sql` script returned — `{{ }}`\nintact, before any render — or `None` when the author wrote the SQL\nthemselves (package S Task 7).\n\n**Showing it is the point of previewing a script at all.** A script that\nbranches emits a different statement per parameter value, and until this\nfield the only way an author could see which one their draft produced was\nto publish it and read the engine's error. C2's response transform could\nnot be previewed and this route says so (`transform_declared`); here the\nartefact exists, so it is on screen.\n\n# It is the TEMPLATE, not what the engine ran\n\nThe rendered form has the author's values replaced by bind markers, which\nis the one thing they cannot edit and did not write. The template is what\nthey would have typed by hand, so it is directly comparable with the\neditor beside it — and it is the artefact the script is responsible for.\n\n# It is generated from the author's own test `values`\n\nNot from publish's representative ones. A preview that showed the\nbaseline branch while binding the author's values would show a statement\ntheir values do not take — the \"told fine, then told no\" defect this\nroute exists to invert, in its quietest form.\n\n# `None`, not an echo, for a written statement\n\nThe author is looking at that text in the editor. A field that always\ncarried something would give the UI no way to tell \"this is what your\nscript built\" from \"this is what you typed\"."
           }
         }
       },
@@ -31502,56 +31509,58 @@
         }
       },
       "PreviewEndpointInput": {
-        "type": "object",
-        "description": "The on-screen draft, as the request carries it.\n\nNo `cache`, `limits` or `rate_limit`: preview does not consult any of them,\nand accepting fields it ignores would invite the reader to think it did.",
-        "required": [
-          "sql",
-          "output",
-          "database_id"
-        ],
-        "properties": {
-          "sql": {
-            "type": "string",
-            "description": "What is in the editor right now — not what is stored. **The only\nstatement this route runs.**"
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/StatementSource",
+            "description": "What is in the editor right now — not what is stored. **The only\nstatement this route runs.**\n\nThe author's SQL, or the Starlark script that builds it. A script is\ngenerated here through the same generator publish and serving use, and\nwhat it produced comes back in [`DataApiPreviewDto::generated_sql`]."
           },
-          "siblings": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "description": "The SQL text of the endpoint's OTHER statements, as they are on screen.\n\nThey decide ONE thing and are used for nothing else: whether a parameter\narrives as a scalar or a list, which is a property of the endpoint (any\nstatement's `{% for %}` header makes it a list) and not of the statement\nbeing previewed. They are never rendered, bound or executed. Omit the\nfield for a one-statement endpoint. At most `MAX_STATEMENTS - 1` of them,\nsince `sql` plus its siblings is an endpoint."
-          },
-          "params": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/ParamSpec"
-            },
-            "description": "The parameter declarations as they are on screen right now."
-          },
-          "values": {
+          {
             "type": "object",
-            "description": "The author's test values, one list per parameter name. A list, not a\nscalar, because a repeated parameter is a list on the serving path too\nand preview must resolve it the same way.",
-            "additionalProperties": {
-              "type": "array",
-              "items": {
-                "type": "string"
+            "required": [
+              "output",
+              "database_id"
+            ],
+            "properties": {
+              "siblings": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "The SQL text of the endpoint's OTHER statements, as they are on screen.\n\nThey decide ONE thing and are used for nothing else: whether a parameter\narrives as a scalar or a list, which is a property of the endpoint (any\nstatement's `{% for %}` header makes it a list) and not of the statement\nbeing previewed. They are never rendered, bound or executed. Omit the\nfield for a one-statement endpoint. At most `MAX_STATEMENTS - 1` of them,\nsince `sql` plus its siblings is an endpoint."
+              },
+              "params": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ParamSpec"
+                },
+                "description": "The parameter declarations as they are on screen right now."
+              },
+              "values": {
+                "type": "object",
+                "description": "The author's test values, one list per parameter name. A list, not a\nscalar, because a repeated parameter is a list on the serving path too\nand preview must resolve it the same way.",
+                "additionalProperties": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "propertyNames": {
+                  "type": "string"
+                }
+              },
+              "output": {
+                "$ref": "#/components/schemas/OutputSpec",
+                "description": "The response contract as it is on screen — carried for ONE part of it,\n`transform`, and applied to nothing.\n\n`shape`, `naming` and `envelope` are still not applied here (see\n[`DataApiPreviewDto`]); they arrive because `transform`'s own publish\nrules are stated in terms of them — a transform beside a non-default\n`shape` is refused — and reconstructing an `OutputSpec` from a bare\n`TransformSpec` plus defaults would be a second, quietly weaker copy of\n[`crate::lifecycle::check_transform`]. The whole struct goes in, and\nthat one function decides.\n"
+              },
+              "database_id": {
+                "type": "string",
+                "format": "uuid",
+                "description": "The database picker's current value. Workspace-scoped by\n`connection_per_principal_pair`, which answers `NotFound` for a database\nbelonging to another workspace — this id comes from a request body, so it\nis exactly the shape that could name someone else's connection."
               }
-            },
-            "propertyNames": {
-              "type": "string"
             }
-          },
-          "output": {
-            "$ref": "#/components/schemas/OutputSpec",
-            "description": "The response contract as it is on screen — carried for ONE part of it,\n`transform`, and applied to nothing.\n\n`shape`, `naming` and `envelope` are still not applied here (see\n[`DataApiPreviewDto`]); they arrive because `transform`'s own publish\nrules are stated in terms of them — a transform beside a non-default\n`shape` is refused — and reconstructing an `OutputSpec` from a bare\n`TransformSpec` plus defaults would be a second, quietly weaker copy of\n[`crate::lifecycle::check_transform`]. The whole struct goes in, and\nthat one function decides.\n"
-          },
-          "database_id": {
-            "type": "string",
-            "format": "uuid",
-            "description": "The database picker's current value. Workspace-scoped by\n`connection_per_principal_pair`, which answers `NotFound` for a database\nbelonging to another workspace — this id comes from a request body, so it\nis exactly the shape that could name someone else's connection."
           }
-        },
-        "additionalProperties": false
+        ],
+        "description": "The on-screen draft, as the request carries it.\n\nNo `cache`, `limits` or `rate_limit`: preview does not consult any of them,\nand accepting fields it ignores would invite the reader to think it did.\n# Unknown keys, `sql`-or-`script`, and why [`Deserialize`] is hand-written\n\nPackage S Task 7 gave this body the same two-case source\n[`egret_dataapi_api::StatementSpec`] has, flattened onto the object the same\nway: `{\"sql\": …}` or `{\"script\": …}`, never both and never neither. That\nshape and `#[serde(deny_unknown_fields)]` are the pair serde documents as not\ncomposing, so this impl states all three rules itself — exactly what\n`StatementSpec` does, for the reasons measured there. A body an older client\nsends is unchanged: `sql` is still `sql`, in the same position, with the same\ntype."
       },
       "Principal": {
         "type": "object",

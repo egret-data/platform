@@ -1541,7 +1541,7 @@ async fn statement_texts<'a>(
 /// limit, parameters coerced. What failed is the ENDPOINT. A 400 would blame the
 /// caller for the author's script and write `param_invalid` into `access_log`,
 /// pointing every later investigation at the wrong half of the system.
-fn generate_one(
+pub(crate) fn generate_one(
     script: &str,
     params: &BTreeMap<String, serde_json::Value>,
     values: &crate::render::ParamValues,
