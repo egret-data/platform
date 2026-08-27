@@ -57,6 +57,12 @@ For every test: stub the thing it targets, **confirm the file BUILDS** (a mutati
 
 **`StatementSpec` is `{ name: String, sql: String }` today.** The goal is that "both text and a script" and "neither" cannot be represented — this codebase's repeated lesson is that unrepresentable beats unforgettable.
 
+**The constraint that decides the shape, checked before this plan was written: `StatementSpec` IS the persisted `jsonb`.** `dataapi.endpoints.statements` (migration `0129`) stores `Vec<StatementSpec>`, and `endpoints.rs` reads it back at three sites. Every existing row is `{"name":"main","sql":"…"}`.
+
+So the shape you choose **must deserialize today's JSON unchanged**. Get it wrong and every existing endpoint breaks **on read** — not at publish, where an author would see it, but on every list, detail and serve.
+
+That rules out an internally-tagged enum (`#[serde(tag = "kind")]`), which would demand a `"kind"` key no stored row has. It leaves an externally-tagged enum behind `flatten`, or a hand-written `Deserialize`. The first test below is the one that catches this, and it is the most important test in the task.
+
 **A trap to resolve before writing the type, not after.** The obvious shape is an enum behind `#[serde(flatten)]`:
 
 ```rust
