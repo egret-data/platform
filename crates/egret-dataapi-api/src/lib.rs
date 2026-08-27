@@ -820,6 +820,23 @@ pub enum StatementError {
 /// inside 60 s; keeping a real endpoint inside it is `timeout_seconds`'s job,
 /// per statement. This bound exists because N was a multiplier on two costs that
 /// were each already bounded, and it was itself bounded by nothing.
+///
+/// # It has a second consumer, and it is the SAME bound counted more carefully
+///
+/// **Package S Task 5.** Everything above measures N as *the number of SQL texts
+/// publish renders*, because until a statement's SQL could be built by a script
+/// the two were one quantity. A branching `build_sql` separates them: one
+/// statement, up to `2 × MAX_DECLARED_PARAMS + 1` texts, each rendered,
+/// enumerated and described exactly as a written statement's is. So
+/// `egret_dataapi::lifecycle` also counts this limit over the TEXTS an
+/// endpoint's statements produce (`ValidationError::TooManyGeneratedTemplates`),
+/// which holds the 1.97 s above where it is — measured again at 2.06 s for
+/// sixteen written statements and 2.03 s for one script branching fifteen ways,
+/// against 9.29 s if the templates are given a budget of their own.
+///
+/// It is not a second limit and it is not this one lifted: sixteen written
+/// statements is still exactly the allowance, so an endpoint with no script sees
+/// no change.
 pub const MAX_STATEMENTS: usize = 16;
 
 /// How long a statement name may be.

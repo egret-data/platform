@@ -644,6 +644,74 @@ pub enum ValidationError {
          into two endpoints"
     )]
     TooManyBranches { branches: usize, limit: usize },
+    /// More distinct SQL templates across the endpoint than publish will render.
+    ///
+    /// # This is [`egret_dataapi_api::MAX_STATEMENTS`], counting what that bound
+    /// was always counting
+    ///
+    /// `MAX_STATEMENTS`'s own doc records what it bounds: "the publish CPU from
+    /// unbounded … to a measured 1.97 s". The quantity in that measurement is
+    /// **the number of TEXTS publish renders**, and until package S the two were
+    /// the same thing — one statement was one text, so counting statements
+    /// counted texts. A `build_sql` script that branches breaks the identity: one
+    /// statement, up to `2 × MAX_DECLARED_PARAMS + 1` = 65 texts, each rendered
+    /// and enumerated exactly as a written statement's is.
+    ///
+    /// So this is not a second budget. It is `MAX_STATEMENTS` asked about the
+    /// thing it was measuring, and a script's branches draw on the SAME
+    /// allowance a written statement does: sixteen texts per endpoint, whether
+    /// they arrive as sixteen `sql` statements, as one script with fifteen
+    /// branches, or as any mixture. An endpoint at the statement limit with no
+    /// script is at exactly sixteen and is unaffected — which is what keeps this
+    /// task invisible to every definition that has none.
+    ///
+    /// # Measured, because the multiplication is the whole point
+    ///
+    /// Release build, the most expensive text the other limits admit (32 boolean
+    /// parameters each guarding its own `{% if %}`, ~129 ms of synchronous
+    /// rendering), timing `validate` up to its refusal:
+    ///
+    /// | endpoint | texts | measured |
+    /// |---|---|---|
+    /// | 16 written statements — today's worst case, unchanged | 16 | **2.06 s** |
+    /// | one script branching on 31 parameters, capped at `MAX_DESCRIBED_BRANCHES` | 64 | **9.29 s** |
+    /// | the same script, capped here | 16 | **2.03 s** |
+    ///
+    /// The middle row is why the count is `MAX_STATEMENTS` and not the branch
+    /// budget: 64 texts is a defensible number for the ENGINE half and a 4.5×
+    /// regression on the CPU half, and the CPU half is the one that occupies a
+    /// tokio worker rather than releasing it. Uncapped it is worse still —
+    /// `MAX_STATEMENTS × 65` = 1040 texts, over two minutes.
+    ///
+    /// # Why the count and not [`ValidationError::TooManyBranches`]
+    ///
+    /// Because that one is measured AFTER the work, deliberately: its message
+    /// quotes the endpoint's exact branch total and
+    /// `the_describe_budget_is_the_endpoints_total_not_one_per_statement`
+    /// derives the expected number from a real publish rather than hard-coding
+    /// it, so the count cannot be made partial without making that message a
+    /// lie. The rendering that produces it is what has to be bounded, and this
+    /// is a `usize` addition over strings the script has already returned. Same
+    /// shape as [`MAX_DECLARED_PARAMS`]: bound the cost at its source, with a
+    /// scan, before the first render. It runs inside [`GeneratedSql::build`]'s
+    /// own loop, so it also stops the remaining statements' scripts from being
+    /// evaluated at all.
+    ///
+    /// # Why it refuses rather than truncates
+    ///
+    /// Identical to [`ValidationError::TooManyBranches`], and for the identical
+    /// reason: a template that is dropped is a branch that is not described, and
+    /// a branch that is not described is a column missing from the union — the
+    /// `503 schema_drift` the union exists to remove.
+    #[error(
+        "this endpoint renders to {templates} distinct SQL templates across its statements, and \
+         the limit is {limit}. A `build_sql` script that branches returns a different template \
+         per branch, and publish renders and describes every one of them so the frozen contract \
+         covers every branch a caller can reach — so a script's branches and an endpoint's \
+         statements are drawn from the same allowance. Branch on fewer parameters, or split \
+         this into two endpoints"
+    )]
+    TooManyGeneratedTemplates { templates: usize, limit: usize },
     /// More declared parameters than publish will render a definition for.
     ///
     /// # Why a second limit, when [`ValidationError::TooManyBranches`] already caps the cost
@@ -2102,7 +2170,55 @@ pub(crate) struct GeneratedSql(BTreeMap<String, GeneratedStatement>);
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct GeneratedStatement {
     /// The template the script returned — or the author's own SQL, copied.
+    ///
+    /// This is the one the snapshot freezes and the one every scan that names a
+    /// single statement reads. The others are in `alternates`.
     sql: String,
+    /// The OTHER distinct templates the same script emitted under
+    /// [`GeneratedSql::probe`]'s substitutions, in first-seen order and never
+    /// containing `sql`. Always empty for a written statement.
+    ///
+    /// # Why the contract cannot be frozen from `sql` alone (spec §3)
+    ///
+    /// A script that returns a different projection per branch has one output
+    /// schema per branch, exactly as a `{% if %}` definition does — and M1
+    /// already learnt what freezing one branch of those costs: every call that
+    /// took a different branch became a `503 schema_drift`, including the call
+    /// with no query string, which is the one the generated OpenAPI advertises.
+    /// M1's answer is to describe every branch and freeze the UNION; the only
+    /// thing missing for a generated statement was the SET of texts to run that
+    /// answer over, because [`branch_renderings`] takes a `&str` and a script
+    /// produces more than one.
+    ///
+    /// # These cost nothing to collect, and that is not a coincidence
+    ///
+    /// They are read off the runs Task 4's sentinel gate already performs —
+    /// the same fold spec §2.4 makes for `varies_with`, from the same
+    /// `2 × params` evaluations. **No new evaluation of an author's script.**
+    /// What they are NOT is M1's probe assignments: `render::probe_assignments`
+    /// derives its assignments FROM the SQL by harvesting the literals a
+    /// definition compares against, and when `build_sql` runs that SQL is
+    /// precisely what does not exist yet (spec §2.3, corrected in Task 4).
+    ///
+    /// # What they DO cost, and the budget that bounds it
+    ///
+    /// Each one is a template [`validate`] renders and describes like any
+    /// other, so a statement's render and engine cost is now multiplied by how
+    /// many there are. That product is bounded by
+    /// [`egret_dataapi_api::MAX_STATEMENTS`], which
+    /// [`GeneratedSql::build`] spends on TEXTS rather than on statements —
+    /// measured, and explained, on
+    /// [`ValidationError::TooManyGeneratedTemplates`].
+    ///
+    /// # The gap, stated at its real size
+    ///
+    /// The set is bounded — two substitutions per declared parameter — so a
+    /// script can branch on more combinations than it covers, exactly as a
+    /// definition can branch on more than `render::MAX_PROBES` reaches. A
+    /// branch neither set visits is not described, and its columns are not in
+    /// the frozen union. The backstop is unchanged and is not this function:
+    /// `crate::serving::router::shape_rows` refuses a column nobody declared.
+    alternates: Vec<String>,
     /// The declared parameters whose value **changed this statement's emitted
     /// template**, as [`GeneratedSql::probe`] measured it. Always empty for a
     /// written statement: its text is not a function of anything.
@@ -2282,6 +2398,18 @@ impl GeneratedSql {
         }
         let generation_params = generation_params(params);
         let mut out = BTreeMap::new();
+        // The bound package S Task 5 needs, and it is `MAX_STATEMENTS` rather
+        // than a new number: that limit's own measurement is of the TEXTS
+        // publish renders, and until a script could branch, one statement was
+        // one text. See `ValidationError::TooManyGeneratedTemplates` for the
+        // measurement of what happens when the two costs multiply instead.
+        //
+        // A written statement is counted too, and must be: sixteen of them is
+        // exactly the allowance, so an endpoint with no script is unaffected and
+        // one with a script spends from the same pot. A count that skipped them
+        // would be a second rule about which kind of statement this is, which is
+        // the one thing this package may not introduce.
+        let mut templates = 0usize;
         for statement in statements {
             let generated = match statement.source.script() {
                 None => GeneratedStatement {
@@ -2294,10 +2422,12 @@ impl GeneratedSql {
                         .expect("a statement that is not a script carries SQL")
                         .to_owned(),
                     // A written statement's text is not a function of
-                    // anything, so nothing can vary it. The union in
-                    // `validate_endpoint` is then unchanged for an endpoint
-                    // with no scripts — which is what makes this task
-                    // invisible to every definition that has none.
+                    // anything, so nothing can vary it — there is no second
+                    // template and nothing can change it. The union in
+                    // `validate` is then unchanged for an endpoint with no
+                    // scripts, which is what makes this task invisible to every
+                    // definition that has none.
+                    alternates: Vec::new(),
                     varies_with: Vec::new(),
                 },
                 Some(script) => {
@@ -2307,23 +2437,37 @@ impl GeneratedSql {
                             error: error.to_string(),
                         },
                     )?;
-                    let varies_with =
-                        Self::probe(&statement.name, script, params, &generation_params, &sql)?;
-                    GeneratedStatement { sql, varies_with }
+                    Self::probe(&statement.name, script, params, &generation_params, sql)?
                 }
             };
+            templates += 1 + generated.alternates.len();
+            if templates > egret_dataapi_api::MAX_STATEMENTS {
+                return Err(ValidationError::TooManyGeneratedTemplates {
+                    templates,
+                    limit: egret_dataapi_api::MAX_STATEMENTS,
+                });
+            }
             out.insert(statement.name.clone(), generated);
         }
         Ok(Self(out))
     }
 
     /// Run `script` again with a sentinel in each parameter's place, and answer
-    /// two questions from the same runs.
+    /// three questions from the same runs.
     ///
     /// **The gate (spec §2.3):** if the sentinel comes back inside the emitted
     /// template, the script put the caller's value into the SQL TEXT rather than
     /// leaving a placeholder for the renderer to bind, and the statement is
     /// refused by [`ValidationError::ParameterValueInSqlText`].
+    ///
+    /// **The contract (spec §3, package S Task 5):** every DISTINCT template
+    /// these runs emitted is kept, and `validate` describes all of them and
+    /// freezes their union. Nothing about the runs changes to collect them —
+    /// the emitted text was already in hand for the two questions below, and
+    /// throwing it away was what left a branching script's contract frozen from
+    /// whichever branch the representative values happened to take. See
+    /// [`GeneratedStatement::alternates`] for what that costs and what it does
+    /// not cover.
     ///
     /// **The measurement (spec §2.4):** every parameter whose substitution
     /// changed the emitted template is returned. `validate_endpoint` adds those
@@ -2399,14 +2543,22 @@ impl GeneratedSql {
     /// **`crate::render::MAX_PROBES` is untouched** — it bounds renders of one
     /// definition and this bounds evaluations of one script; the two happen to
     /// arrive at the same 64.
+    ///
+    /// Returning the whole [`GeneratedStatement`] rather than the two lists,
+    /// because the three answers come off the same runs and one of them is the
+    /// baseline the caller already holds: a signature that handed back
+    /// `alternates` on its own could be called with a `sql` the alternates were
+    /// not measured against, and that mismatch is not observable in any single
+    /// test — the union would simply be frozen from the wrong text.
     fn probe(
         name: &str,
         script: &str,
         params: &[ParamSpec],
         base: &BTreeMap<String, serde_json::Value>,
-        baseline: &str,
-    ) -> std::result::Result<Vec<String>, ValidationError> {
+        baseline: String,
+    ) -> std::result::Result<GeneratedStatement, ValidationError> {
         let mut varies_with = Vec::new();
+        let mut alternates: Vec<String> = Vec::new();
         for p in params {
             let mut varied = false;
             for probe in sentinel_probes(p) {
@@ -2423,7 +2575,18 @@ impl GeneratedSql {
                                 parameter: p.name.clone(),
                             });
                         }
-                        varied |= emitted != baseline;
+                        if emitted != baseline {
+                            varied = true;
+                            // Distinct, and by TEXT rather than by which
+                            // parameter produced it: two parameters that turn
+                            // the same block off emit the same template and it
+                            // has one contract, one render and one describe.
+                            // `branch_renderings` deduplicates its renderings
+                            // the same way and for the same reason.
+                            if !alternates.contains(&emitted) {
+                                alternates.push(emitted);
+                            }
+                        }
                     }
                 }
             }
@@ -2431,13 +2594,32 @@ impl GeneratedSql {
                 varies_with.push(p.name.clone());
             }
         }
-        Ok(varies_with)
+        Ok(GeneratedStatement {
+            sql: baseline,
+            alternates,
+            varies_with,
+        })
     }
 
     /// The text generated for `name`, if this set was generated for a statement
     /// list containing it.
     fn get(&self, name: &str) -> Option<&str> {
         self.0.get(name).map(|g| g.sql.as_str())
+    }
+
+    /// Every template `name` may emit, [`get`](GeneratedSql::get)'s first.
+    ///
+    /// One statement's whole contract comes from this list: `validate`
+    /// describes each of them and freezes the union. For a written statement it
+    /// is a one-element list holding exactly what `get` returns, so nothing
+    /// downstream can tell the two apart by asking a different question — the
+    /// property the whole package rests on.
+    fn templates(&self, name: &str) -> Option<Vec<&str>> {
+        self.0.get(name).map(|g| {
+            std::iter::once(g.sql.as_str())
+                .chain(g.alternates.iter().map(String::as_str))
+                .collect()
+        })
     }
 
     /// Every parameter that changed SOME statement's emitted template, across
@@ -2883,6 +3065,23 @@ fn statement_sql<'a>(
         .ok_or_else(|| ValidationError::GenerationMismatch(statement.name.clone()))
 }
 
+/// Every template `statement` may emit, [`statement_sql`]'s first.
+///
+/// The sibling of [`statement_sql`] and the same lookup, for the rules that are
+/// about the SET of texts a statement can produce rather than about the one the
+/// snapshot freezes: the scans that decide whether a text may be sent to the
+/// engine at all, and the describe loop whose union is the contract. A written
+/// statement returns a one-element list, so both callers below are unchanged for
+/// every definition with no script.
+fn statement_templates<'a>(
+    statement: &StatementSpec,
+    generated: &'a GeneratedSql,
+) -> std::result::Result<Vec<&'a str>, ValidationError> {
+    generated
+        .templates(&statement.name)
+        .ok_or_else(|| ValidationError::GenerationMismatch(statement.name.clone()))
+}
+
 fn validate_endpoint(
     statements: &[StatementSpec],
     params: &[ParamSpec],
@@ -2948,12 +3147,22 @@ fn validate_endpoint(
     // scans come before ANY render for the reason `check_definition_scans`
     // records: they are what bounds the cost of the rendering, and they cost
     // nothing themselves.
+    // EVERY template, not only the one the snapshot freezes. Task 3 left this as
+    // a recorded residual — one assignment was generated, so one branch of a
+    // branching script was scanned — and Task 5 is where it closes, because Task
+    // 5 is what makes the other branches exist as text. It is not a tidy-up: a
+    // template in `alternates` is one `validate` hands to
+    // `describe_as_with_params`, so a generated `DELETE FROM t` on a branch the
+    // representative values do not take would reach the engine unscanned. `;`
+    // and `#` have the render-time backstop; the head word has none.
+    //
+    // The scans are the cheap half by construction — no render, no engine, no
+    // connection — so running them per template costs comparisons, and the
+    // budget that bounds the expensive half is spent in `GeneratedSql::build`.
     for statement in statements {
-        check_definition_scans(
-            statement_sql(statement, &generated)?,
-            params,
-            ParamRules::Draft,
-        )?;
+        for template in statement_templates(statement, &generated)? {
+            check_definition_scans(template, params, ParamRules::Draft)?;
+        }
     }
     let mut read: Vec<String> = Vec::new();
     for statement in statements {
@@ -2981,10 +3190,19 @@ fn validate_endpoint(
     // per statement cost. Returned rather than recomputed by [`validate`],
     // which renders the same statements again to describe them: two computations
     // of the same set are two things that can disagree.
+    //
+    // Across every TEMPLATE, for the same reason it is across every statement:
+    // the shape is one decision for the endpoint and a `{% for %}` header in any
+    // text that will be rendered is what widens it. A branch that iterates a
+    // parameter the baseline only reads as a scalar would otherwise be rendered
+    // under the wrong shape — and, since `renderings_for` falls back to a direct
+    // render whose failure it reports, refused with a render error rather than
+    // published.
     let sqls: Vec<&str> = statements
         .iter()
-        .map(|statement| statement_sql(statement, &generated))
-        .collect::<std::result::Result<_, _>>()?;
+        .map(|statement| statement_templates(statement, &generated))
+        .collect::<std::result::Result<Vec<_>, _>>()?
+        .concat();
     let iterated = IteratedParams::across(&sqls, params);
     // Last, and once per statement: this is the half that renders.
     for statement in statements {
@@ -3823,11 +4041,27 @@ pub async fn validate(
         Vec::with_capacity(draft.statements.len());
     let mut total = 0usize;
     for statement in &draft.statements {
-        let renderings = renderings_for(
-            statement_sql(statement, &generated)?,
-            &draft.params,
-            &iterated,
-        )?;
+        // Every TEMPLATE the statement can emit, and `branch_renderings` over
+        // each — package S Task 5, and the whole of what it needed. A generated
+        // statement's SQL is a pure function of `params` (the script never sees
+        // a row: that is C2's transform, a different phase), so the situation is
+        // exactly the one M1 already solved. The only thing missing was the SET
+        // of texts, because `branch_renderings` takes a `&str`.
+        let mut renderings: Vec<(String, usize)> = Vec::new();
+        for template in statement_templates(statement, &generated)? {
+            for rendering in renderings_for(template, &draft.params, &iterated)? {
+                // Deduplicated ACROSS the templates as well as within each one:
+                // two templates that differ only where the parameters do not
+                // reach can render to the same statement, and describing it
+                // twice would spend two of the endpoint's branches on one
+                // contract — and put the same column list into `per_branch`
+                // twice, which is the list `required` and the `arrays` rule are
+                // computed from.
+                if !renderings.iter().any(|(text, _)| *text == rendering.0) {
+                    renderings.push(rendering);
+                }
+            }
+        }
         total += renderings.len();
         planned.push((statement, renderings));
     }
@@ -4042,16 +4276,23 @@ const MAX_DECLARED_PARAMS: usize = 32;
 /// this is the number of round trips one publish may cost. It does **not** bound
 /// the rendering that produces that number — the count has to be known before it
 /// can be refused, so an endpoint still renders up to `64 × (optional + 2)`
-/// times per statement (`render::MAX_PROBES` assignments per context) before this
+/// times per TEXT (`render::MAX_PROBES` assignments per context) before this
 /// limit can say no. That residual is synchronous CPU on an async task, and it is
 /// bounded by [`MAX_DECLARED_PARAMS`] instead, which is a scan and runs first —
-/// though only per statement, so an endpoint's worst-case render cost is that
-/// bound times the number of statements. The spec asked for that to be
-/// re-measured rather than carried over, and it was: **121 ms per statement,
+/// though only per text, so an endpoint's worst-case render cost is that
+/// bound times the number of texts. The spec asked for that to be
+/// re-measured rather than carried over, and it was: **121 ms per text,
 /// linear in N**, which is why the third bound exists.
 /// [`egret_dataapi_api::MAX_STATEMENTS`] caps N, and it is the only one of the
 /// three that runs before `validate_endpoint`'s first scan. The three are parts
 /// of one bound, not one limit and two spares.
+///
+/// **"Text", not "statement", since package S Task 5**, and the two used to be
+/// the same word: a `build_sql` script that branches gives ONE statement more
+/// than one text, so `MAX_STATEMENTS` is now counted over the templates
+/// [`GeneratedSql::build`] produces rather than over the list it was handed.
+/// Nothing about N changed — see [`ValidationError::TooManyGeneratedTemplates`]
+/// for the measurement, which lands on the same 2.06 s this paragraph describes.
 ///
 /// # Why it refuses rather than truncates
 ///
@@ -5493,6 +5734,7 @@ mod tests {
             "rows".to_string(),
             GeneratedStatement {
                 sql: "SELECT 1 FROM t WHERE r = {{ region }}".to_string(),
+                alternates: Vec::new(),
                 varies_with: Vec::new(),
             },
         )]));
@@ -5672,6 +5914,7 @@ mod tests {
             "rows".to_string(),
             GeneratedStatement {
                 sql: "SELECT 1; DROP TABLE t".to_string(),
+                alternates: Vec::new(),
                 varies_with: Vec::new(),
             },
         )]));
@@ -8708,6 +8951,338 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["a", "b"],
             "the probe must not change what publish freezes"
+        );
+    }
+
+    /// A `QueryExecPort` that answers each statement with the columns THAT
+    /// statement aliases.
+    ///
+    /// `DescribeOnlyPort` returns the same two columns for every SQL it is
+    /// handed, which is right for the transform probe — and useless here, where
+    /// the whole question is whether publish described more than one text. A
+    /// port that cannot tell two statements apart cannot tell a union apart from
+    /// a single describe. `Describe::PerSql` in `tests/lifecycle.rs` exists for
+    /// the same reason and says so.
+    ///
+    /// It panics rather than returning an empty list for a statement that
+    /// aliases nothing: an empty describe is refused by
+    /// `ValidationError::DescribeReturnedNoColumns`, which would reach a test as
+    /// a plausible-looking failure about columns rather than as "this fake was
+    /// asked something it cannot answer".
+    struct AliasPort;
+
+    #[async_trait::async_trait]
+    impl egret_query_api::QueryExecPort for AliasPort {
+        async fn describe_as(
+            &self,
+            _ws: Uuid,
+            _database_id: Uuid,
+            _principal: UserId,
+            sql: &str,
+        ) -> std::result::Result<Vec<egret_core::ColumnMeta>, Error> {
+            let mut columns = Vec::new();
+            let mut words = sql.split_whitespace();
+            while let Some(word) = words.next() {
+                if word.eq_ignore_ascii_case("AS") {
+                    if let Some(name) = words.next() {
+                        columns.push(egret_core::ColumnMeta {
+                            name: name.trim_end_matches(',').to_owned(),
+                            ty: "bigint".into(),
+                        });
+                    }
+                }
+            }
+            assert!(
+                !columns.is_empty(),
+                "AliasPort was handed a statement that aliases nothing: {sql:?}"
+            );
+            Ok(columns)
+        }
+
+        async fn describe_as_with_params(
+            &self,
+            ws: Uuid,
+            database_id: Uuid,
+            principal: UserId,
+            sql: &str,
+            _param_count: usize,
+        ) -> std::result::Result<Vec<egret_core::ColumnMeta>, Error> {
+            self.describe_as(ws, database_id, principal, sql).await
+        }
+
+        async fn execute_as(
+            &self,
+            _ws: Uuid,
+            _database_id: Uuid,
+            _principal: UserId,
+            _sql: &str,
+            _limits: egret_query_api::Limits,
+        ) -> std::result::Result<egret_core::TabularResult, Error> {
+            unreachable!("publish must not execute a statement to freeze its contract")
+        }
+    }
+
+    /// A draft whose one statement is generated by `script`.
+    fn generated_draft(script: &str, params: Vec<ParamSpec>) -> DataApiEndpointDto {
+        DataApiEndpointDto {
+            statements: vec![StatementSpec::from_script("rows", script)],
+            params,
+            ..draft_with(OutputSpec::default(), probe_limits(10_000))
+        }
+    }
+
+    /// **THE test of package S Task 5.**
+    ///
+    /// The script returns a different projection per branch, so the endpoint has
+    /// one output schema per branch exactly as a `{% if %}` definition does.
+    /// Publish must freeze BOTH columns, with the branch-specific one marked
+    /// not-required — the union M1 already computes, over the set of texts a
+    /// script produces.
+    ///
+    /// Freezing the first probe's columns alone is the mutation, and it is the
+    /// `503 schema_drift` M1 was written to remove: `b` would be declared
+    /// required and every call sending `wide=false` would be refused by
+    /// `shape_rows` on a contract it could never satisfy.
+    #[tokio::test]
+    async fn a_generated_endpoints_columns_are_the_union_across_probes() {
+        let script = "def build_sql(params):\n  \
+                      if params[\"wide\"]:\n    return \"SELECT 1 AS a, 2 AS b\"\n  \
+                      return \"SELECT 1 AS a\"";
+        let frozen = validate(
+            &AliasPort,
+            Uuid::new_v4(),
+            UserId::new(),
+            &generated_draft(script, vec![param("wide", ParamType::Boolean)]),
+            false,
+            false,
+        )
+        .await
+        .expect("both branches describe");
+        assert_eq!(frozen.len(), 1);
+        let columns = &frozen[0].columns;
+        assert_eq!(
+            columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b"],
+            "both of the script's branches are described, and the union keeps \
+             first-seen order"
+        );
+        let by = |n: &str| {
+            columns
+                .iter()
+                .find(|c| c.name == n)
+                .unwrap_or_else(|| panic!("no column {n}"))
+        };
+        assert!(by("a").required, "`a` is in every branch");
+        assert!(
+            !by("b").required,
+            "`b` is only in the branch `wide` takes, so it is declared and optional"
+        );
+    }
+
+    /// The same union, from the other side: the extra column is in the branch
+    /// the representative values do NOT take.
+    ///
+    /// **Not a restatement, and the mutation is why.** Freezing only the first
+    /// probe's columns leaves the test above with `[a, b]` — the representative
+    /// `wide` is `true`, so the one branch it describes is the WIDE one — and
+    /// only its `required` assertion can see the mutation. Here the same
+    /// mutation freezes `[a]` and `b` is gone from the contract altogether,
+    /// which is the failure an author actually meets: `503 schema_drift` on
+    /// every call that reaches the branch, from a published endpoint whose own
+    /// OpenAPI never mentions the column.
+    ///
+    /// A test that could not distinguish those two directions would have let a
+    /// "describe the first probe and the last" implementation through.
+    #[tokio::test]
+    async fn a_column_only_a_non_representative_branch_returns_is_still_declared() {
+        let script = "def build_sql(params):\n  \
+                      if params[\"narrow\"]:\n    return \"SELECT 1 AS a\"\n  \
+                      return \"SELECT 1 AS a, 2 AS b\"";
+        let frozen = validate(
+            &AliasPort,
+            Uuid::new_v4(),
+            UserId::new(),
+            &generated_draft(script, vec![param("narrow", ParamType::Boolean)]),
+            false,
+            false,
+        )
+        .await
+        .expect("both branches describe");
+        let columns = &frozen[0].columns;
+        assert_eq!(
+            columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b"],
+            "`b` is returned only when `narrow` is falsy, which is the branch the \
+             representative values do not take — and it must still be declared"
+        );
+        assert!(
+            !columns[1].required,
+            "`b` is in one branch of two, so it is declared and optional"
+        );
+    }
+
+    /// And a script with ONE branch freezes exactly its columns — the feature is
+    /// invisible to a script that does not branch.
+    ///
+    /// Not a weaker restatement of the test above: it is what says the union is
+    /// a UNION rather than a widening. A probe set that described some text the
+    /// script never returns, or a `required` computed from anything but "every
+    /// described branch had it", shows up here as a column that should not be
+    /// declared or a `required` that should be true.
+    #[tokio::test]
+    async fn a_generated_endpoint_with_one_branch_freezes_exactly_its_columns() {
+        let script = "def build_sql(params):\n  return \"SELECT 1 AS a\"";
+        let frozen = validate(
+            &AliasPort,
+            Uuid::new_v4(),
+            UserId::new(),
+            &generated_draft(script, vec![]),
+            false,
+            false,
+        )
+        .await
+        .expect("one branch describes");
+        assert_eq!(frozen.len(), 1);
+        assert_eq!(
+            frozen[0]
+                .columns
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a"]
+        );
+        assert!(frozen[0].columns[0].required);
+    }
+
+    /// A branch the representative values do not take is SCANNED, not merely
+    /// described — Task 3's recorded residual, closed here.
+    ///
+    /// Task 3 measured that `;` and `#` in a generated statement have a
+    /// render-time backstop but the HEAD WORD has none: a generated
+    /// `DELETE FROM t` validated. That was harmless while one assignment was
+    /// generated and that one assignment was the only text anything saw. Task 5
+    /// makes the other branches real — `validate` hands each of them to
+    /// `describe_as_with_params` — so an unscanned branch is a `DELETE` publish
+    /// sends to the engine.
+    ///
+    /// Asserted on the arm rather than `is_err()`, because Task 3 found the
+    /// shape where that lies: with the scan bypassed for generated text, `;` and
+    /// `#` still failed, via a different guard. `NotASelect` has no such
+    /// backstop, which is exactly why it is the one to assert.
+    #[test]
+    fn a_branch_the_representative_values_do_not_take_is_scanned_too() {
+        let script = "def build_sql(params):\n  \
+                      if params[\"wide\"]:\n    return \"SELECT 1 AS a\"\n  \
+                      return \"DELETE FROM t\"";
+        let err = validate_generated(script, &[param("wide", ParamType::Boolean)])
+            .expect_err("the `wide=false` branch is not a SELECT");
+        assert_eq!(err, ValidationError::NotASelect("DELETE".into()));
+    }
+
+    /// A script's branches and an endpoint's statements are ONE budget, and it
+    /// is spent before the first render.
+    ///
+    /// Each parameter this script branches on emits its own template, so a
+    /// statement's template count is `params + 1`. Nine of them is under the
+    /// limit; two such statements is eighteen and is not — the count is the
+    /// ENDPOINT's, which is the half a per-statement limit would miss.
+    ///
+    /// **Both halves are proven publishable alone**, in the shape
+    /// `the_describe_budget_is_the_endpoints_total_not_one_per_statement` uses:
+    /// a limit that refused the pair for some unrelated reason would pass a test
+    /// that only asserted the refusal.
+    #[test]
+    fn a_scripts_branches_and_an_endpoints_statements_share_one_budget() {
+        // Each parameter adds its own projection when it is FALSY, so the
+        // sentinel probes reach a distinct template per parameter: 8 alternates
+        // plus the baseline, per statement.
+        let script = "def build_sql(params):\n  \
+                      sql = \"SELECT 1 AS a\"\n  \
+                      for k in sorted(params):\n    \
+                      if not params[k]:\n      sql = sql + \", 1 AS \" + k\n  \
+                      return sql";
+        let params: Vec<ParamSpec> = (0..8)
+            .map(|i| param(&format!("p{i}"), ParamType::Boolean))
+            .collect();
+        let one = |names: &[&str]| {
+            validate_endpoint(
+                &names
+                    .iter()
+                    .map(|n| StatementSpec::from_script(*n, script))
+                    .collect::<Vec<_>>(),
+                &params,
+                &cache(CacheScope::PerPrincipal),
+                &OutputSpec::default(),
+                false,
+                false,
+                ScriptEval::Here,
+            )
+        };
+        assert!(
+            one(&["rows"]).is_ok(),
+            "nine templates is inside the allowance on its own"
+        );
+        assert_eq!(
+            one(&["rows", "more"]),
+            Err(ValidationError::TooManyGeneratedTemplates {
+                templates: 2 * (params.len() + 1),
+                limit: egret_dataapi_api::MAX_STATEMENTS,
+            })
+        );
+    }
+
+    /// And the allowance is the SAME one written statements spend, so an
+    /// endpoint at the statement limit with no script is untouched.
+    ///
+    /// This is what says the budget was shared rather than lifted: sixteen
+    /// written statements is exactly `MAX_STATEMENTS` templates, and a
+    /// seventeenth text — from a script branching ONCE — is what tips it. A
+    /// count that exempted written statements would leave the seventeenth text
+    /// unbudgeted, which is the render `MAX_STATEMENTS` was measured to bound.
+    #[test]
+    fn a_written_statement_spends_from_the_same_allowance() {
+        let mut statements: Vec<StatementSpec> = (0..egret_dataapi_api::MAX_STATEMENTS)
+            .map(|i| StatementSpec::from_sql(format!("s{i}"), "SELECT 1 AS a"))
+            .collect();
+        let full = || {
+            validate_endpoint(
+                &statements,
+                &[],
+                &cache(CacheScope::PerPrincipal),
+                &OutputSpec::default(),
+                false,
+                false,
+                ScriptEval::Here,
+            )
+        };
+        assert!(
+            full().is_ok(),
+            "`MAX_STATEMENTS` written statements is exactly the allowance"
+        );
+        // The SAME endpoint, with its last statement generated by a script that
+        // branches once. One more text, and only one.
+        statements.pop();
+        statements.push(StatementSpec::from_script(
+            "s15",
+            "def build_sql(params):\n  \
+             if params[\"wide\"]:\n    return \"SELECT 1 AS a, 2 AS b\"\n  \
+             return \"SELECT 1 AS a\"",
+        ));
+        let params = vec![param("wide", ParamType::Boolean)];
+        assert_eq!(
+            validate_endpoint(
+                &statements,
+                &params,
+                &cache(CacheScope::PerPrincipal),
+                &OutputSpec::default(),
+                false,
+                false,
+                ScriptEval::Here,
+            ),
+            Err(ValidationError::TooManyGeneratedTemplates {
+                templates: egret_dataapi_api::MAX_STATEMENTS + 1,
+                limit: egret_dataapi_api::MAX_STATEMENTS,
+            })
         );
     }
 }
