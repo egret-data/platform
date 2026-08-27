@@ -247,10 +247,13 @@ describe("ResponseSection — response transform", () => {
 
   /**
    * Serving checks a transform's response against `returns`; with none it
-   * would fail OPEN. The editor states the refusal it will otherwise meet at
-   * Save, rather than letting the author find out from a red toast.
+   * would fail OPEN. `check_transform` (which is what refuses this) runs
+   * only from `/validate` (publish) and `/preview` — create/update never
+   * call it, so this SAVES successfully. The editor states the refusal the
+   * author will meet at Preview or Publish, rather than only Save's silence
+   * followed by a red toast later.
    */
-  it("warns that a transform with no declared returns will be refused", async () => {
+  it("warns that a transform with no declared returns will be refused at preview or publish", async () => {
     renderResponse({
       transform: { script: "def transform(params, statements):\n    return {}", returns: [] },
     });

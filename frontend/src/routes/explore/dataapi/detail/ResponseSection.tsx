@@ -318,17 +318,22 @@ function ReturnsEditor({
   return (
     <div className="space-y-2">
       {/* Serving would have nothing to check a transform's response against —
-          it would fail OPEN, serving whatever the script returned unchecked —
-          so this is not a style nit, it is the same refusal
-          `TransformReturnsEmpty` gives at Save, said here before the author
-          reaches it. */}
+          it would fail OPEN, serving whatever the script returned unchecked.
+          `TransformReturnsEmpty` is what `check_transform` gives for this —
+          but `check_transform` runs from `validate_endpoint`, which only
+          `/validate` (publish) and `/preview` call. Create and update
+          (`routes.rs`'s `create_endpoint`/`update_endpoint`) call neither, so
+          an empty `returns` list SAVES successfully; the refusal only
+          arrives at Preview or Publish. This alert previews that refusal
+          before the author reaches it — it does not claim Save itself is
+          gated, because it is not. */}
       {returns.length === 0 && (
         <Alert variant="destructive">
           <AlertDescription>
             No return columns declared. Serving checks a transform&rsquo;s response against this
             list — with none, there is nothing to check, so a published endpoint would serve
-            whatever the script returns, unchecked. Saving is refused until at least one is
-            declared.
+            whatever the script returns, unchecked. Preview and Publish both refuse this; add at
+            least one before either.
           </AlertDescription>
         </Alert>
       )}
