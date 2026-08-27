@@ -1,18 +1,74 @@
-import { useState, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
+import { Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ConfigTable, ConfigTableGroup, ConfigTableRow } from "@/components/config/ConfigTable";
+import { SettingsNote } from "@/routes/explore/settings/SettingsNote";
+import MonacoEditor from "@/components/monaco/MonacoEditor";
 import {
   useDataApiGetOpenapi,
   useDataApiListEndpointVersions,
   useDataApiListServiceAccounts,
 } from "@/api/generated/data-api/data-api";
-import type { ColumnSpec } from "@/api/generated/model";
+import type { ColumnSpec, TransformSpec } from "@/api/generated/model";
 import { useEndpointDetail } from "../EndpointDetail";
 import { DownloadOpenApiDialog } from "../DownloadOpenApiDialog";
+
+/**
+ * `crates/egret-dataapi/src/lifecycle.rs`'s `MAX_TRANSFORM_SCRIPT_BYTES` — no
+ * mechanism in this repo shares a constant between Rust and TypeScript (the
+ * same gap `MAX_STATEMENTS` in `Query.tsx` documents), so this is a copy, not
+ * a reference. Shown so an author sees the cap while writing, rather than
+ * meeting it only in a refusal toast after Save.
+ */
+const MAX_TRANSFORM_SCRIPT_BYTES = 8192;
+
+/**
+ * The script's size the way the server measures it: `bytes`, not
+ * `.length` — a `String`'s `.len()` on the Rust side counts UTF-8 bytes, and
+ * `.length` on a JS string counts UTF-16 code units. The two agree for ASCII
+ * script text and diverge the moment an author's comment uses a non-ASCII
+ * character, which is exactly the case a byte-accurate counter exists to get
+ * right.
+ */
+function scriptByteLength(script: string): number {
+  return new TextEncoder().encode(script).length;
+}
+
+/** A fresh, syntactically valid transform an author can edit from — the same
+ *  shape `openapi_gen.rs`'s own doc-test fixture uses, so a screenshot of
+ *  either would show the same script. */
+const DEFAULT_TRANSFORM_SCRIPT = 'def transform(params, statements):\n    return {}\n';
+
+/** A new declared return column. `required: true` explicitly, matching
+ *  `ColumnSpec`'s own default (`mayBeAbsent` below reads it the same way a
+ *  frozen SQL column would) — the author LOOSENS a freshly-added row by
+ *  unchecking Required, rather than the row starting loose by omission. */
+function newReturnColumn(): ColumnSpec {
+  return { name: "", ty: "", required: true };
+}
+
+/** Names declared more than once in `returns` — a JSON object has one key per
+ *  name, so publish refuses this with `TransformReturnsDuplicateName` and
+ *  serving would have no single value to check. Blank names are excluded: an
+ *  author adding a second row before naming it should not see every blank row
+ *  flagged as a collision with every other blank row. */
+function duplicateReturnNames(returns: ColumnSpec[]): Set<string> {
+  const seen = new Set<string>();
+  const dupes = new Set<string>();
+  for (const c of returns) {
+    const name = c.name.trim();
+    if (!name) continue;
+    if (seen.has(name)) dupes.add(name);
+    else seen.add(name);
+  }
+  return dupes;
+}
 
 /**
  * Just enough of the generated OpenAPI document to show the base URL. The
@@ -215,6 +271,140 @@ function ColumnRows({ columns }: { columns: ColumnSpec[] }) {
   );
 }
 
+/**
+ * The `Name | Type | Required` table for `output.transform.returns` — the
+ * contract a transform script promises, checked against what it actually
+ * returns at publish (`check_returns`) and enforced on every request after
+ * (`serving/router.rs`).
+ *
+ * **One table row per declaration, following `ParamEditor`'s precedent** —
+ * the same reviewer-verified shape: a plain `components/ui/table`, one
+ * control per field, every control's `aria-label` naming its row (`Return 2
+ * name`) because a visible `<th>` cannot say which row a control belongs to.
+ * `ty` is free text rather than a `Select` — unlike a parameter's `ParamType`,
+ * a column's type is whatever string the SQL engine or the script names
+ * (`"integer"`, `"varchar"`, a script's own `"object"`), and there is no
+ * closed set here to offer.
+ *
+ * Rows are keyed by a stable, locally-generated id — never the array index —
+ * for the same reason `ParamEditor` is: React would otherwise re-associate a
+ * surviving row's DOM node with the NEXT row's data when a row in the middle
+ * is removed.
+ */
+function ReturnsEditor({
+  returns,
+  onChange,
+}: {
+  returns: ColumnSpec[];
+  onChange: (returns: ColumnSpec[]) => void;
+}) {
+  const nextRowId = useRef(returns.length);
+  const [rowIds, setRowIds] = useState<number[]>(() => returns.map((_, i) => i));
+  const dupes = duplicateReturnNames(returns);
+
+  function update(i: number, patch: Partial<ColumnSpec>) {
+    onChange(returns.map((c, j) => (j === i ? { ...c, ...patch } : c)));
+  }
+  function remove(i: number) {
+    onChange(returns.filter((_, j) => j !== i));
+    setRowIds((ids) => ids.filter((_, j) => j !== i));
+  }
+  function add() {
+    const rowId = nextRowId.current++;
+    onChange([...returns, newReturnColumn()]);
+    setRowIds((ids) => [...ids, rowId]);
+  }
+
+  return (
+    <div className="space-y-2">
+      {/* Serving would have nothing to check a transform's response against —
+          it would fail OPEN, serving whatever the script returned unchecked —
+          so this is not a style nit, it is the same refusal
+          `TransformReturnsEmpty` gives at Save, said here before the author
+          reaches it. */}
+      {returns.length === 0 && (
+        <Alert variant="destructive">
+          <AlertDescription>
+            No return columns declared. Serving checks a transform&rsquo;s response against this
+            list — with none, there is nothing to check, so a published endpoint would serve
+            whatever the script returns, unchecked. Saving is refused until at least one is
+            declared.
+          </AlertDescription>
+        </Alert>
+      )}
+      <Table className="max-w-xl table-fixed">
+        <TableHeader>
+          <TableRow>
+            <TableHead className="w-1/2">Name</TableHead>
+            <TableHead>Type</TableHead>
+            <TableHead className="w-24">Required</TableHead>
+            <TableHead className="w-12">
+              <span className="sr-only">Actions</span>
+            </TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {returns.map((c, i) => {
+            const rowId = rowIds[i] ?? i;
+            const row = `Return ${i + 1}`;
+            const name = c.name.trim();
+            const isDup = name !== "" && dupes.has(name);
+            return (
+              <TableRow key={rowId}>
+                <TableCell className="align-top">
+                  <Input
+                    id={`return-name-${rowId}`}
+                    aria-label={`${row} name`}
+                    aria-invalid={isDup}
+                    value={c.name}
+                    onChange={(e) => update(i, { name: e.target.value })}
+                  />
+                  {isDup && (
+                    <p className="mt-1 text-xs text-destructive">
+                      Declared more than once — a JSON object has one key per name.
+                    </p>
+                  )}
+                </TableCell>
+                <TableCell className="align-top">
+                  <Input
+                    id={`return-type-${rowId}`}
+                    aria-label={`${row} type`}
+                    value={c.ty}
+                    onChange={(e) => update(i, { ty: e.target.value })}
+                  />
+                </TableCell>
+                <TableCell className="align-top">
+                  <Checkbox
+                    id={`return-required-${rowId}`}
+                    className="mt-2.5"
+                    aria-label={`${row} required`}
+                    checked={!mayBeAbsent(c)}
+                    onCheckedChange={(v) => update(i, { required: v === true })}
+                  />
+                </TableCell>
+                <TableCell className="align-top">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    aria-label={`Remove ${row.toLowerCase()}`}
+                    onClick={() => remove(i)}
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                </TableCell>
+              </TableRow>
+            );
+          })}
+        </TableBody>
+      </Table>
+      <Button type="button" variant="outline" size="sm" onClick={add}>
+        <Plus className="h-4 w-4" /> Add return column
+      </Button>
+    </div>
+  );
+}
+
 export default function ResponseSection() {
   const { ws, id, endpoint, form, setForm } = useEndpointDetail();
 
@@ -269,6 +459,53 @@ export default function ResponseSection() {
   const oaError = oaQuery.error as unknown as (Error & { status?: number }) | null | undefined;
 
   const [downloadOpen, setDownloadOpen] = useState(false);
+
+  const transform = form.output.transform ?? null;
+  const hasTransform = !!transform;
+  const scriptBytes = scriptByteLength(transform?.script ?? "");
+  const scriptOverCap = scriptBytes > MAX_TRANSFORM_SCRIPT_BYTES;
+
+  /**
+   * Turn the transform ON, from the checkbox below.
+   *
+   * `shape` and `naming` are cleared to their default in the SAME patch that
+   * sets `transform` — not merely hidden — following `ParamEditor`'s
+   * `clearInapplicableConstraints`: hiding a control while its old value
+   * survives underneath produces exactly the defect that function exists to
+   * prevent, a Save whose body still carries the non-default value the editor
+   * no longer shows the author, refused by `TransformWithShapeOrNaming` with
+   * no control on screen to point at. `undefined` rather than the literal
+   * `"objects"`/`"as_is"` strings, matching how every Select above already
+   * reads an absent field as its own default.
+   */
+  function enableTransform() {
+    setForm((f) => ({
+      ...f,
+      output: {
+        ...f.output,
+        shape: undefined,
+        naming: undefined,
+        transform: { script: DEFAULT_TRANSFORM_SCRIPT, returns: [] },
+      },
+    }));
+  }
+
+  function disableTransform() {
+    setForm((f) => ({ ...f, output: { ...f.output, transform: null } }));
+  }
+
+  /** Patches the transform IN PLACE — spreading the existing object rather
+   *  than rebuilding one from `patch` alone is what keeps a script edit from
+   *  wiping `returns`, and a `returns` edit from wiping the script. `returns`
+   *  is the declared CONTRACT, not a view derived from the script text, so a
+   *  keystroke in one must never touch the other. */
+  function updateTransform(patch: Partial<TransformSpec>) {
+    setForm((f) => {
+      const current = f.output.transform;
+      if (!current) return f;
+      return { ...f, output: { ...f.output, transform: { ...current, ...patch } } };
+    });
+  }
 
   return (
     // Capped like `Access`, `Try it` and `Versions`, and for the same reason:
@@ -378,45 +615,145 @@ export default function ResponseSection() {
         )}
       </div>
 
+      {/* An author's response transform — a Starlark script plus the `returns`
+          it promises (`spec §3`, Tasks 1–8). Placed above "Output shape"
+          rather than folded into that `ConfigTable`: the script and its
+          returns table are the `ParamEditor` shape (a titled block holding a
+          multi-row table and, here, a code editor), not a single
+          `Setting | Details | Value` row, and the two Selects it makes inert
+          read better with the thing that disables them right above them than
+          below. */}
+      <div className="space-y-3">
+        <div>
+          <h3 className="text-sm font-medium">Response transform</h3>
+          <p className="max-w-prose text-sm text-muted-foreground">
+            An optional Starlark script that builds <span className="font-mono text-xs">data</span>{" "}
+            itself once every statement has run, for a shape no SQL projection can express. Most
+            endpoints do not need one — Shape and Naming below already cover renaming and
+            objects-vs-arrays.
+          </p>
+        </div>
+        <label className="flex items-center gap-2 text-sm" htmlFor="resp-transform-enabled">
+          <Checkbox
+            id="resp-transform-enabled"
+            checked={hasTransform}
+            onCheckedChange={(v) => (v === true ? enableTransform() : disableTransform())}
+          />
+          Build the response with a script
+        </label>
+        {hasTransform && transform && (
+          <div className="max-w-2xl space-y-4 pl-6">
+            <div className="space-y-1.5">
+              <p className="text-sm font-medium">Script</p>
+              {/* Fixed height, not `CellEditor`'s grow-with-content: this
+                  section is an ordinary scrolling document (`fieldset` in
+                  `EndpointDetail`), not a bounded split pane like `Query`'s,
+                  so a script that grows the editor also grows the page under
+                  it rather than fighting a sibling pane for height. */}
+              <div className="h-64 overflow-hidden rounded-md border border-border">
+                <MonacoEditor
+                  height="100%"
+                  defaultLanguage="python"
+                  value={transform.script}
+                  onChange={(v) => updateTransform({ script: v ?? "" })}
+                  options={{
+                    minimap: { enabled: false },
+                    fontSize: 13,
+                    scrollBeyondLastLine: false,
+                    padding: { top: 10, bottom: 10 },
+                    renderLineHighlight: "line",
+                    ariaLabel: "Response transform script",
+                  }}
+                />
+              </div>
+              <p className={`text-xs ${scriptOverCap ? "text-destructive" : "text-muted-foreground"}`}>
+                {scriptBytes.toLocaleString()} / {MAX_TRANSFORM_SCRIPT_BYTES.toLocaleString()} bytes
+                {scriptOverCap &&
+                  " — over the cap. A response transform reshapes what a statement already returned; it is not where an endpoint's business logic belongs, and publish will refuse this script."}
+              </p>
+            </div>
+
+            <div className="space-y-1.5">
+              <p className="text-sm font-medium">Declared returns</p>
+              <p className="max-w-prose text-sm text-muted-foreground">
+                What <span className="font-mono text-xs">data</span> looks like once the script
+                runs — checked against the script&rsquo;s own output at publish, and enforced on
+                every request after.
+              </p>
+              <ReturnsEditor
+                returns={transform.returns}
+                onChange={(returns) => updateTransform({ returns })}
+              />
+            </div>
+          </div>
+        )}
+      </div>
+
       <ConfigTable detailsClassName="max-w-prose">
         <ConfigTableGroup label="Output shape" />
-        <ConfigTableRow
-          label="Shape"
-          htmlFor="resp-shape"
-          details="Objects returns each row as a named object. Arrays returns positional rows, which are smaller but depend on column order."
-        >
-          <Select
-            value={form.output.shape ?? "objects"}
-            onValueChange={(v) => setForm((f) => ({ ...f, output: { ...f.output, shape: v } }))}
-          >
-            <SelectTrigger id="resp-shape" className="w-full" aria-label="Shape">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="objects">Objects</SelectItem>
-              <SelectItem value="arrays">Arrays</SelectItem>
-            </SelectContent>
-          </Select>
-        </ConfigTableRow>
-        <ConfigTableRow
-          label="Naming"
-          htmlFor="resp-naming"
-          details="How column names are written in the response: as the query returns them, camelCase, or snake_case. Two columns that collapse onto one name make the endpoint refuse to serve until it is re-published."
-        >
-          <Select
-            value={form.output.naming ?? "as_is"}
-            onValueChange={(v) => setForm((f) => ({ ...f, output: { ...f.output, naming: v } }))}
-          >
-            <SelectTrigger id="resp-naming" className="w-full" aria-label="Key naming">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="as_is">As-is</SelectItem>
-              <SelectItem value="camel">camelCase</SelectItem>
-              <SelectItem value="snake">snake_case</SelectItem>
-            </SelectContent>
-          </Select>
-        </ConfigTableRow>
+        {/* Neither row below is merely disabled while a transform is present
+            — it is not rendered at all. `openapi_gen.rs`'s own generated
+            `data` description says why, verbatim: once a script decides `data`,
+            `shape` and `naming` "describe how a row straight from SQL becomes
+            JSON, and a transform's output never goes through that step" — so
+            offering them here would be a control whose only effect is being
+            silently ignored, which is worse than not offering it. Said once,
+            in the author's own words rather than left for them to discover in
+            the generated OpenAPI document (Task 7) after the fact. */}
+        {hasTransform && (
+          <TableRow className="hover:bg-transparent">
+            <TableCell colSpan={3} className="whitespace-normal pb-3">
+              <SettingsNote>
+                This endpoint has a response transform, so{" "}
+                <span className="font-medium text-foreground">Shape</span> and{" "}
+                <span className="font-medium text-foreground">Naming</span> are hidden below — they
+                describe how a row straight from SQL becomes JSON, and a transform&rsquo;s output
+                never goes through that step. Remove the transform to bring them back.
+              </SettingsNote>
+            </TableCell>
+          </TableRow>
+        )}
+        {!hasTransform && (
+          <>
+            <ConfigTableRow
+              label="Shape"
+              htmlFor="resp-shape"
+              details="Objects returns each row as a named object. Arrays returns positional rows, which are smaller but depend on column order."
+            >
+              <Select
+                value={form.output.shape ?? "objects"}
+                onValueChange={(v) => setForm((f) => ({ ...f, output: { ...f.output, shape: v } }))}
+              >
+                <SelectTrigger id="resp-shape" className="w-full" aria-label="Shape">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="objects">Objects</SelectItem>
+                  <SelectItem value="arrays">Arrays</SelectItem>
+                </SelectContent>
+              </Select>
+            </ConfigTableRow>
+            <ConfigTableRow
+              label="Naming"
+              htmlFor="resp-naming"
+              details="How column names are written in the response: as the query returns them, camelCase, or snake_case. Two columns that collapse onto one name make the endpoint refuse to serve until it is re-published."
+            >
+              <Select
+                value={form.output.naming ?? "as_is"}
+                onValueChange={(v) => setForm((f) => ({ ...f, output: { ...f.output, naming: v } }))}
+              >
+                <SelectTrigger id="resp-naming" className="w-full" aria-label="Key naming">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="as_is">As-is</SelectItem>
+                  <SelectItem value="camel">camelCase</SelectItem>
+                  <SelectItem value="snake">snake_case</SelectItem>
+                </SelectContent>
+              </Select>
+            </ConfigTableRow>
+          </>
+        )}
         {/* `output.envelope` shipped with no control at all — `bare` was
             reachable through the API and invisible to the person publishing the
             endpoint, which is the same gap `required` had and had to be come
