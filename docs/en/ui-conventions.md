@@ -419,18 +419,39 @@ Two things that came out of converting `Versions` and `Access`:
   **The test for it:** ask what is left of the column once the constant sentence is hoisted.
   For `Access` it was one thing, the `Try it` link carrying `?service_account=<id>` — and
   that is an *action*, so it joined the actions column and the `Data` column went. **Do not
-  keep a column empty for symmetry.** Say once, above the table, that the condition is not a
-  column and why; a reader who expects it is then told where it went instead of assuming it
-  was dropped.
+  keep a column empty for symmetry.** Say once that the condition is not a column and why; a
+  reader who expects it is then told where it went instead of assuming it was dropped.
+
+  **Where "once" goes: the surviving column's header, not a paragraph above the table.** This
+  said "above the table" until the Data API UI audit, which measured the result: `Access` had
+  a page-level `SettingsNote` *and* that paragraph, ~550 characters of standing prose over a
+  table whose first row is one line — and the two overlapped, both saying the invoke right on
+  the page is not the data access a call needs. Merged into one §4.4 `Caveat` on the `Invoke`
+  `<th>`, the sentence qualifies the answers it is about rather than the page.
+
+  **A `<th>` names every cell in its column, so give it an explicit `aria-label`.** Without
+  one the header's accessible name becomes the whole caveat and a screen-reader user hears
+  550 characters before each row's answer — the audio form of the very defect that removed
+  the `Data` column. `AccessSection.tsx` carries `aria-label="Invoke"`, and
+  `AccessSection.test.tsx` asserts the columnheaders by **accessible name** rather than
+  `textContent`, because `textContent` would have passed on exactly that regression.
 
 **What the labels buy.** `Access`'s Invoke condition used to be a `<dt>` inside each row's
 `<dl>`, which repeated the word on every row and left each row's answer at a different
 vertical offset from the one above it. As a column the label is written once and the answers
 line up down the page — and comparing accounts is the whole job of that screen.
 
-### 4.4 A row-scoped caveat: the consequence in the summary, the reason behind it
+### 4.4 A caveat: the consequence in the summary, the reason behind it
 
-`src/routes/explore/dataapi/detail/AccessSection.tsx` — `Caveat`.
+`src/routes/explore/dataapi/detail/Caveat.tsx` — used by `AccessSection`, `TryIt`, `Query`
+and `PreviewBlock`.
+
+It was written row-scoped, for one `Access` row, and the Data API UI audit found the same
+shape at SECTION scale — `Try it` carried ~950 characters of standing prose over one dropdown
+and one button. So the rule is not about rows: **an explanation that describes one control
+belongs in that control's `Details` cell, capped at about two lines; an explanation that
+describes a consequence of acting goes behind a disclosure headed by the consequence.** The
+component moved out of `AccessSection.tsx` when the fourth caller wanted it.
 
 Some per-row prose genuinely *is* per-row. `Access`'s "this account also reaches invoke
 through the workspace, so revoking here removes the grant but not the access" is the
@@ -889,13 +910,31 @@ trashed-caveat test, whose only difference from the passing untrashed test is `d
 **The failure mode is a false negative**, so a test of any non-form affordance inside a
 trashed section must use `fireEvent`, or it reports the product broken when it is not.
 
-**`TryIt` deliberately has no strip**, and the reason generalises: its setup is one picker and
-a short row per parameter, and the prose that would have gone in the drawer is a *warning* —
-a trial spends the rate limit, writes the access log and fills the cache for real.
-`PreviewBlock` already records why that class of copy travels with the button ("a reader who
-has to scroll to find that has already pressed the button"), and a drawer closed by default is
-worse than a scroll. **Collapse a strip because it is big, not because the other section has
-one.**
+**`TryIt` deliberately has no strip**, and the reason still holds for the SETUP: it is one
+picker and a short row per parameter, so there is nothing to win. **Collapse a strip because
+it is big, not because the other section has one.**
+
+#### The part of this section that was reversed, and why
+
+This paragraph used to end differently. It said `TryIt`'s prose could not be collapsed *at
+all*, on `PreviewBlock`'s rule — a reader who has to scroll, or open a drawer, to learn that a
+trial is a real call has already pressed the button — and concluded that the ~500-character
+warning must stand beside Run.
+
+**The argument was right and the conclusion did not follow**, which is the same shape §4.2
+records. That rule argues against hiding the FACT. It says nothing about the four sentences of
+*mechanism* under it, and reading it as "nothing may be collapsed" is what let the section
+reach ~950 characters of standing prose over one dropdown and one button. §4.4 supplies the
+option the old wording never weighed: split at the hinge, headline on screen, mechanism
+behind it. Both `TryIt` blocks and `PreviewBlock`'s note are `Caveat`s now, headed by "A trial
+is a real call, not a dry run" and "A green preview does not prove a consumer can call this
+endpoint" — the sentences the old ruling was actually protecting, still on screen with nothing
+clicked.
+
+What did not move is as informative. `TryIt`'s two-line published-version note and `Access`'s
+conditional state paragraphs stay plain text, on the same rule pointing the other way:
+**collapse a caveat because it is big.** Two lines with no explanation to hold cost a click to
+reveal nothing.
 
 ### 11.3 What a test can say about any of this
 
@@ -908,6 +947,15 @@ with the on-screen values, and that it fires nothing when a guard in §11.1 shou
 **jsdom does not hide a closed `<details>`** — it has no layout to hide it with, and Testing
 Library does not exclude its contents. Assert the `open` **attribute**; `toBeVisible` passes
 either way and says nothing.
+
+**So test that a sentence is still REACHABLE, not merely still present.** Once copy moves
+behind a §4.4 disclosure, every pre-existing `getByText` for it keeps passing whether or not a
+reader can get to it — the Data API audit's relocation turned four such tests into assertions
+about the DOM rather than about the product. The form that says something: find the summary,
+assert the `<details>` is closed, `fireEvent.click` it, assert `open`, and assert the sentence
+is inside that element and NOT inside the `<summary>`. Do it inside a genuinely disabled
+`<fieldset>` at least once per section, which is the only place the `<details>`-vs-Radix
+choice is observable.
 
 ---
 
@@ -964,10 +1012,18 @@ not exist yet:
     each. The plan inherited the same arithmetic ("8 `<Card>`… convert the rest"), and there
     was no rest. A symbol-family count is not a block count — the same trap §7.2 records for
     consumer counts, one level down.
-- The `Caveat` disclosure of §4.4 — **1** file (`AccessSection`), 3 call sites. New, and
-  deliberately narrow: it earns its place where a row-scoped explanation is big enough to set
-  the row height, which so far is one screen. The same file's short transient states stay
-  plain text, which is the rule working rather than an inconsistency.
+- The `Caveat` disclosure of §4.4 — **4** files, **9** call sites, all Data API endpoint
+  detail (`AccessSection` 4, `TryIt` 2, `Query` 2, `PreviewBlock` 1). Counted by import
+  specifier (`from "./Caveat"`), per §7.2. It was 1 file and 3 call sites for one phase, all
+  in `AccessSection`, where it was written for a row-scoped explanation big enough to set the
+  row height; the Data API UI audit found the same shape at section scale and it moved out of
+  that file into `detail/Caveat.tsx`. Still deliberately not in `components/`: the rule it
+  encodes has been measured on this editor and nowhere else.
+
+  What has NOT adopted it is the rule working rather than an inconsistency — `Access`'s short
+  transient states, `TryIt`'s two-line published-version note and `Access`'s conditional state
+  paragraphs are all plain text, because a disclosure over two lines costs a click to reveal
+  nothing.
 - The split of §11 — **2** sections, both Data API endpoint detail (`Query`, `TryIt`); `react-resizable-panels` itself is also used by `components/sqllab/SqlTab.tsx`, which is
   where the idiom came from. `Versions` and `Access` are deliberately not splits: neither is
   "configure, run, read the result" — there is nothing to run.
