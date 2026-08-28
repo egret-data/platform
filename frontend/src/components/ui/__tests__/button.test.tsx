@@ -131,8 +131,11 @@ describe("Button — disabled is a paint change, not an alpha change", () => {
     return [...btn.classList];
   };
 
-  test.each(["default", "destructive", "secondary", "outline", "ai"] as const)(
-    "the %s variant loses its fill and takes a token border when disabled",
+  // ONLY the variants whose enabled fill is saturated. `outline` and `secondary`
+  // were in this list for one round and it was a net regression on 298 call
+  // sites — see the block below, which is the guard against putting them back.
+  test.each(["default", "destructive", "ai"] as const)(
+    "the %s variant loses its saturated fill and takes a token border when disabled",
     (variant) => {
       render(
         <Button variant={variant} disabled>
@@ -164,8 +167,15 @@ describe("Button — disabled is a paint change, not an alpha change", () => {
     },
   );
 
-  test.each(["ghost", "link"] as const)(
-    "the %s variant has no fill to lose, so it dims its ink instead of gaining a box",
+  // The variants whose enabled fill is NEUTRAL or absent. `opacity-50` was never
+  // broken for these — alpha only preserves a hue when there is a hue to
+  // preserve — so they keep it, and the numbers stay identical to it by
+  // construction. Giving them the filled treatment measured WORSE than
+  // `opacity-50` on the enabled-vs-disabled ink (light 5.08 -> 2.85, dark
+  // 3.36 -> 2.51) across 238 `outline` + 60 `secondary` call sites, which is the
+  // same defect this component exists to remove, moved to a different variant.
+  test.each(["outline", "secondary", "ghost"] as const)(
+    "the %s variant keeps the alpha cue instead of gaining a box",
     (variant) => {
       render(
         <Button variant={variant} disabled>
@@ -174,18 +184,40 @@ describe("Button — disabled is a paint change, not an alpha change", () => {
       );
       const classes = classesOf("Save");
 
-      expect(classes).toContain("disabled:text-muted-foreground");
-      // The inverse of the assertion above, and the reason it is here: giving a
-      // borderless variant the filled treatment would make every disabled
-      // toolbar icon a grey box — and in dark mode `--secondary` and `--accent`
-      // are the same value, so that box would be pixel-identical to this
-      // button's own HOVER state. A disabled control that looks hovered is worse
-      // than the bug being fixed.
+      expect(classes).toContain("disabled:opacity-50");
+      expect(classes).toContain("aria-disabled:opacity-50");
+      // A second reason for `ghost` specifically: in dark mode `--secondary` and
+      // `--accent` are the same value, and `--accent` is what it paints on
+      // HOVER, so a filled disabled ghost would be pixel-identical to a hovered
+      // one. A disabled control that looks hovered is worse than the bug.
       expect(classes).not.toContain("disabled:bg-secondary");
       expect(classes).not.toContain("disabled:inset-ring-1");
-      expect(classes).toContain("disabled:hover:bg-transparent");
+      // The one thing that IS added for them: the hover paint is neutralised
+      // back to their own resting value, which the component knows exactly.
+      expect(classes.some((c) => c.startsWith("disabled:hover:bg-"))).toBe(true);
     },
   );
+
+  test("link degrades to plain text, because fading it moves it TOWARDS the enabled colour", () => {
+    render(
+      <Button variant="link" disabled>
+        Save
+      </Button>,
+    );
+    const classes = classesOf("Save");
+
+    // `--primary` sits mid-luminance in both themes, so `--muted-foreground` is
+    // 1.11:1 from it in light — a hue difference at equal lightness, i.e. WCAG
+    // 1.4.1 (colour alone). And alpha cannot fix it: in dark, fading white ink
+    // moves it towards the teal's luminance, not away. `--foreground` is the
+    // only token far from `--primary` in both themes at once.
+    expect(classes).toContain("disabled:text-foreground");
+    expect(classes).toContain("aria-disabled:text-foreground");
+    expect(classes).not.toContain("disabled:text-muted-foreground");
+    // ...and therefore no alpha, which would undo exactly that.
+    expect(classes.filter((c) => c.startsWith("disabled:opacity-"))).toEqual([]);
+    expect(classes).not.toContain("disabled:bg-secondary");
+  });
 
   test("the gradient variant also drops its gradient, which a background-COLOR cannot cover", () => {
     render(
@@ -200,7 +232,9 @@ describe("Button — disabled is a paint change, not an alpha change", () => {
     expect(classes).toContain("disabled:bg-none");
     // Same shape one level down: `[&_svg]:text-white` colours the icon from a
     // rule of its own, so the button's `color` change never reaches it.
-    expect(classes).toContain("disabled:[&_svg]:text-muted-foreground");
+    // `text-current` rather than the token, so the icon follows whatever the
+    // label ends up being — including the `/80` the dark theme applies.
+    expect(classes).toContain("disabled:[&_svg]:text-current");
   });
 
   test("`aria-disabled` gets the same paint — it is the only signal the asChild path has", () => {
@@ -312,8 +346,15 @@ describe("Button — a dark-mode fill must say what it becomes when disabled", (
   });
 
   // A RESTING dark fill (`dark:bg-*`, not `dark:hover:bg-*`) is the one that
-  // silently survives into the disabled state.
-  const restingDarkFill = entries.filter((e) => /(?:^|\s)dark:bg-/.test(e.classes));
+  // silently survives into the disabled state — but only for a variant that
+  // REPLACES its fill when disabled. A variant that keeps its fill and dims the
+  // whole element (`outline`) has nothing to override and is correctly exempt.
+  // `${disabledFilled}` is the marker for "this variant replaces its fill when
+  // disabled"; the treatment itself is interpolated, so the literal class names
+  // are not in the variant's own source text.
+  const restingDarkFill = entries.filter(
+    (e) => /(?:^|\s)dark:bg-/.test(e.classes) && e.classes.includes("${disabledFilled}"),
+  );
   const hoverDarkFill = entries.filter((e) => /dark:hover:bg-/.test(e.classes));
 
   test("both lists below are non-empty, so neither `each` is vacuously green", () => {

@@ -71,54 +71,91 @@ import { cn } from "@/lib/utils";
  * rather than guessing one, and it is set. `chart/settings/FieldLabel.tsx` and
  * `ui/icon-button.tsx` still do the same thing locally, and still may.
  *
- * The `disabled:hover:*` twins are INSURANCE, not the load-bearing part, and
- * that distinction was measured rather than assumed. `hover:bg-primary/90` and
- * `disabled:bg-secondary` are both 0-2-0, so neither wins on specificity and the
- * tie goes to emission order — and Tailwind emits `disabled:` after `hover:`.
- * Deleting every `disabled:hover:bg-*` from this file and hovering a disabled
- * button in real Chrome changes nothing: it stays `oklch(0.27 0.01 286.1)`,
- * light and dark, `outline` and `default`. What DOES repaint it teal is removing
- * the disabled fill itself, which is the mutation that kills the e2e test. The
- * twins are kept because "correct only because of the order Tailwind happens to
- * emit variants in" is a fact about a dependency, not a decision this file made.
+ * The `disabled:hover:*` twins on the FILLED variants are INSURANCE, not the
+ * load-bearing part, and that distinction was measured rather than assumed.
+ * `hover:bg-primary/90` and `disabled:bg-secondary` are both 0-2-0, so neither
+ * wins on specificity and the tie goes to emission order — and Tailwind emits
+ * `hover:` first, then `disabled:`, then the whole `dark:` block last. Deleting
+ * every `disabled:hover:bg-*` and hovering a disabled filled button in real
+ * Chrome changes nothing: it stays `oklch(0.27 0.01 286.1)`. What DOES repaint
+ * it teal is removing the disabled fill itself, which is the mutation that kills
+ * the e2e test. They are kept because "correct only because of the order
+ * Tailwind happens to emit variants in" is a fact about a dependency, not a
+ * decision this file made. On the QUIET variants below the same twins are not
+ * insurance but the improvement itself — see FIFTH.
  *
- * FOURTH — the disabled paint, and why alpha alone was a bug rather than a
- * shortcut. Disabled used to be `disabled:opacity-50` and nothing else. Measured
- * with `getComputedStyle` on the deployed build's endpoint-detail Save button,
- * in dark mode: `disabled=true`, `opacity=0.5`, `background: oklch(0.66 0.13 185)`
- * and `color: oklch(0.1 0 0)` — both UNCHANGED from the enabled button.
+ * FOURTH — the disabled paint, and why alpha alone was a bug HERE and not
+ * everywhere. Disabled used to be `disabled:opacity-50` and nothing else.
+ * Measured with `getComputedStyle` on the deployed build's endpoint-detail Save
+ * button, in dark mode: `disabled=true`, `opacity=0.5`,
+ * `background: oklch(0.66 0.13 185)` and `color: oklch(0.1 0 0)` — both
+ * UNCHANGED from the enabled button.
  *
  * Alpha is not a colour change; it is a blend with whatever happens to be
- * behind. Blended into white, that teal washes out to a pastel (#7fccc4) that
- * sits 1.93:1 from the enabled fill and carries an illegible 1.35:1 label, and
+ * behind. Blended into white, that teal washes out to a pastel (#80ccc4) that
+ * sits 1.94:1 from the enabled fill and carries an illegible 1.83:1 label, and
  * reads unavailable. Blended into the near-black dark ground it stays a
- * saturated teal (#0c615d), 2.53:1 from the enabled fill — under the 3:1 that
+ * saturated teal (#0c625d), 2.50:1 from the enabled fill — under the 3:1 that
  * WCAG 1.4.11 asks of the visual information identifying a STATE — and reads
  * ready. The identical declaration therefore meant opposite things in the two
  * themes, and in dark mode nothing on screen said that Save does nothing.
  *
- * Lowering the alpha further is the wrong repair: it fails harder in light mode
- * and takes the label with it, because a single alpha is applied to fill and ink
- * together. So the paint changes instead. Disabled loses the fill (`bg-secondary`),
- * takes muted ink (`text-muted-foreground`), drops the shadow, and gains a token
- * border. Measured in real Chrome (`tests/e2e/disabled-button-paint.spec.ts`):
- * the disabled fill sits 3.10:1 from the enabled primary in light and 5.26:1 in
- * dark, both over the 3:1 state bar and — the point of the exercise — within
- * 0.2 of each other's meaning rather than opposite; the label reads 5.47:1 /
- * 5.85:1, which is above the 4.5:1 text bar it is formally exempt from.
+ * So for those variants the paint changes instead of the alpha. Disabled loses
+ * the fill (`bg-secondary`), takes muted ink, drops the shadow and gains a token
+ * border. Measured in real Chrome (`tests/e2e/disabled-button-paint.spec.ts`),
+ * fill against the same variant's enabled fill: 1.94 -> 3.10 light,
+ * 2.50 -> 5.24 dark, with the fill's chroma going 0.109/0.118 -> 0.010/0.009 —
+ * the teal is gone rather than diluted, which a luminance ratio cannot see.
  *
  * The border is `inset-ring-1`, not `border`. A real border would add 2px to the
  * button's width, and the buttons this fixes toggle disabled as a form goes
  * dirty and clean — Save would twitch on every keystroke. An inset ring paints
- * inside the box and moves nothing.
+ * inside the box and moves nothing. Measured width shift: 0.00px.
  *
- * `ghost` and `link` are excluded from the fill, and that exclusion is load-
- * bearing rather than tidy. In dark mode `--secondary` and `--accent` are the
- * same value (`oklch(0.27 0.01 286.1)`), and `--accent` is what those two
- * variants paint on HOVER — so filling them would make every disabled toolbar
- * icon pixel-identical to its own hover state. A disabled control that looks
- * hovered is worse than the bug this fixes. They take the muted ink and a
- * modest alpha instead, which is what `ui/icon-button.tsx` already does.
+ * In dark the muted ink is `text-muted-foreground/80`, not the full token, and
+ * the asymmetry has a reason. The filled variants' enabled ink is WHITE in dark
+ * (`destructive` and `ai`) — and `--muted-foreground` at full strength is only
+ * 2.58:1 from white, which was WEAKER than what `opacity-50` used to give
+ * (3.38:1). At 80% over the disabled fill it is 3.52:1 and the label still reads
+ * 4.27:1. In light the enabled ink is white and the disabled ink is dark, so
+ * they are already 6.34:1 apart and no alpha is wanted.
+ *
+ * FIFTH — why `outline`, `secondary`, `ghost` and `link` do NOT get that paint.
+ * The bug above is specific to a SATURATED fill: alpha preserves hue, so half a
+ * vivid teal on near-black is still vivid teal. A neutral fill has no hue to
+ * preserve — half of `--secondary` reads as half of `--secondary` in both themes
+ * — so on those variants `opacity-50` was never broken, and replacing it made
+ * things worse. Measured, disabled-vs-enabled ink, against the `opacity-50` this
+ * component briefly stopped using:
+ *
+ *     outline    light 5.08 -> 2.85    dark 3.36 -> 2.51
+ *     secondary  light 5.08 -> 2.85    dark 3.36 -> 2.51
+ *
+ * on 238 + 60 call sites, i.e. most of the buttons in the product. The fix for
+ * the primary had relocated the defect onto the quiet variants. They now keep
+ * `opacity-50` exactly as before — every number identical to it, by construction
+ * rather than by luck — plus `disabled:hover:*` twins restoring their own
+ * resting paint, which the component can compute exactly because those values
+ * are its own. That last part is the only thing that changed for them, and it is
+ * strictly an improvement: a disabled `outline` no longer takes the 3% hover
+ * step it used to.
+ *
+ * `link` is the exception inside the exception. Its enabled ink is `--primary`,
+ * which sits mid-luminance in BOTH themes, so `--muted-foreground` lands 1.11:1
+ * from it in light — a difference of HUE at equal lightness, which is WCAG 1.4.1
+ * (colour alone). Fading it does not help either: in dark, alpha moves white ink
+ * TOWARDS the teal's luminance rather than away. `--foreground` is the only
+ * token far from `--primary` in both directions at once (near-black in light,
+ * near-white in dark), so a disabled link degrades to plain text: 5.03:1 light
+ * and 2.80:1 dark, against the 1.94/2.50 that `opacity-50` gave, and it reads at
+ * 18:1 instead of 1.85:1.
+ *
+ * `ghost` and `link` are also excluded from the FILL for a second reason. In
+ * dark, `--secondary` and `--accent` are the same value
+ * (`oklch(0.27 0.01 286.1)`), and `--accent` is what those two paint on HOVER —
+ * so filling them would make every disabled toolbar icon pixel-identical to its
+ * own hover state. A disabled control that looks hovered is worse than the bug
+ * this fixes.
  *
  * Every `disabled:*` here is mirrored as `aria-disabled:*`. The `asChild` path
  * renders an `<a>`, which cannot carry a `disabled` attribute at all — see
@@ -127,34 +164,38 @@ import { cn } from "@/lib/utils";
  */
 
 /**
- * The disabled paint, split by whether the variant HAS a fill to lose. Written
- * as whole literal class names — Tailwind v4 scans this file as text and will
- * not emit a utility it cannot see spelled out.
+ * The disabled paint, split by whether the variant's enabled fill is SATURATED.
+ * That is the line the defect actually falls on — see FOURTH and FIFTH above.
+ * Written as whole literal class names: Tailwind v4 scans this file as text and
+ * will not emit a utility it cannot see spelled out.
  */
-const disabledFill =
-  "disabled:bg-secondary disabled:inset-ring-1 disabled:inset-ring-border disabled:hover:bg-secondary " +
-  "aria-disabled:bg-secondary aria-disabled:inset-ring-1 aria-disabled:inset-ring-border aria-disabled:hover:bg-secondary";
+const disabledFilled =
+  "disabled:bg-secondary disabled:inset-ring-1 disabled:inset-ring-border " +
+  "disabled:text-muted-foreground dark:disabled:text-muted-foreground/80 " +
+  "disabled:hover:bg-secondary disabled:hover:text-muted-foreground dark:disabled:hover:text-muted-foreground/80 " +
+  "aria-disabled:bg-secondary aria-disabled:inset-ring-1 aria-disabled:inset-ring-border " +
+  "aria-disabled:text-muted-foreground dark:aria-disabled:text-muted-foreground/80 " +
+  "aria-disabled:hover:bg-secondary aria-disabled:hover:text-muted-foreground dark:aria-disabled:hover:text-muted-foreground/80";
 
-const disabledBare =
-  "disabled:opacity-70 disabled:hover:bg-transparent aria-disabled:opacity-70 aria-disabled:hover:bg-transparent";
+const disabledQuiet = "disabled:opacity-50 aria-disabled:opacity-50";
 
 const buttonVariants = cva(
-  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-all cursor-pointer disabled:cursor-not-allowed disabled:shadow-none disabled:text-muted-foreground disabled:hover:text-muted-foreground aria-disabled:cursor-not-allowed aria-disabled:shadow-none aria-disabled:text-muted-foreground aria-disabled:hover:text-muted-foreground [&_svg]:pointer-events-none [&_svg:not([class*='size-'])]:size-4 shrink-0 [&_svg]:shrink-0 outline-none focus-visible:border-ring focus-visible:ring-ring focus-visible:ring-2 aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive",
+  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-all cursor-pointer disabled:cursor-not-allowed disabled:shadow-none aria-disabled:cursor-not-allowed aria-disabled:shadow-none [&_svg]:pointer-events-none [&_svg:not([class*='size-'])]:size-4 shrink-0 [&_svg]:shrink-0 outline-none focus-visible:border-ring focus-visible:ring-ring focus-visible:ring-2 aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive",
   {
     variants: {
       variant: {
         default:
-          `bg-primary text-primary-foreground shadow-xs hover:bg-primary/90 ${disabledFill}`,
+          `bg-primary text-primary-foreground shadow-xs hover:bg-primary/90 ${disabledFilled}`,
         destructive:
-          `bg-destructive text-white shadow-xs hover:bg-destructive/90 dark:bg-destructive/60 ${disabledFill} dark:disabled:bg-secondary dark:disabled:hover:bg-secondary dark:aria-disabled:bg-secondary dark:aria-disabled:hover:bg-secondary`,
+          `bg-destructive text-white shadow-xs hover:bg-destructive/90 dark:bg-destructive/60 ${disabledFilled} dark:disabled:bg-secondary dark:disabled:hover:bg-secondary dark:aria-disabled:bg-secondary dark:aria-disabled:hover:bg-secondary`,
         outline:
-          `border bg-background shadow-xs hover:bg-accent hover:text-accent-foreground dark:bg-input/30 dark:border-input dark:hover:bg-input/50 ${disabledFill} dark:disabled:bg-secondary dark:disabled:hover:bg-secondary dark:aria-disabled:bg-secondary dark:aria-disabled:hover:bg-secondary`,
+          `border bg-background shadow-xs hover:bg-accent hover:text-accent-foreground dark:bg-input/30 dark:border-input dark:hover:bg-input/50 ${disabledQuiet} disabled:hover:bg-background disabled:hover:text-inherit dark:disabled:hover:bg-input/30 aria-disabled:hover:bg-background aria-disabled:hover:text-inherit dark:aria-disabled:hover:bg-input/30`,
         secondary:
-          `bg-secondary text-secondary-foreground shadow-xs hover:bg-secondary/80 ${disabledFill}`,
+          `bg-secondary text-secondary-foreground shadow-xs hover:bg-secondary/80 ${disabledQuiet} disabled:hover:bg-secondary aria-disabled:hover:bg-secondary`,
         ghost:
-          `hover:bg-accent hover:text-accent-foreground dark:hover:bg-accent/50 ${disabledBare} dark:disabled:hover:bg-transparent dark:aria-disabled:hover:bg-transparent`,
-        link: `text-primary underline-offset-4 hover:underline disabled:no-underline disabled:hover:no-underline aria-disabled:no-underline aria-disabled:hover:no-underline ${disabledBare}`,
-        ai: `bg-gradient-to-br from-purple-500 via-pink-500 to-orange-500 text-white hover:shadow-xs transition-all duration-200 hover:from-purple-600 hover:via-pink-600 hover:to-orange-600 [&_svg]:text-white ${disabledFill} disabled:bg-none disabled:[&_svg]:text-muted-foreground aria-disabled:bg-none aria-disabled:[&_svg]:text-muted-foreground`,
+          `hover:bg-accent hover:text-accent-foreground dark:hover:bg-accent/50 ${disabledQuiet} disabled:hover:bg-transparent disabled:hover:text-inherit aria-disabled:hover:bg-transparent aria-disabled:hover:text-inherit dark:disabled:hover:bg-transparent dark:aria-disabled:hover:bg-transparent`,
+        link: `text-primary underline-offset-4 hover:underline disabled:text-foreground disabled:hover:text-foreground disabled:no-underline disabled:hover:no-underline aria-disabled:text-foreground aria-disabled:hover:text-foreground aria-disabled:no-underline aria-disabled:hover:no-underline`,
+        ai: `bg-gradient-to-br from-purple-500 via-pink-500 to-orange-500 text-white hover:shadow-xs transition-all duration-200 hover:from-purple-600 hover:via-pink-600 hover:to-orange-600 [&_svg]:text-white ${disabledFilled} disabled:bg-none disabled:[&_svg]:text-current aria-disabled:bg-none aria-disabled:[&_svg]:text-current`,
       },
       size: {
         default: "h-9 px-4 py-2 has-[>svg]:px-3",
