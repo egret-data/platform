@@ -27,12 +27,27 @@ import type { ReactNode } from "react";
 export function ListPageShell({
   title,
   description,
+  back,
   toolbar,
   action,
   children,
 }: {
   title: string;
   description?: string;
+  /**
+   * A way OUT, rendered above the title.
+   *
+   * It exists because the three Data API create pages put `← Endpoints` in
+   * `toolbar`, which renders into the same right-hand group as `action` — so
+   * the escape sat one control away from the commit, and every detail screen
+   * puts that link top-left instead (`EndpointDetail.tsx`). A slot rather than
+   * a `backTo` string for the same reason `toolbar` and `action` are nodes: the
+   * caller owns the link, its label and whether it is a `Link` at all.
+   *
+   * Omitted renders no element at all, like `description` — the six list pages
+   * that pass none are unchanged.
+   */
+  back?: ReactNode;
   toolbar?: ReactNode;
   action?: ReactNode;
   children: ReactNode;
@@ -42,6 +57,7 @@ export function ListPageShell({
     <div className="p-4">
       <header className={`mb-4 flex flex-wrap ${alignClass} justify-between gap-3`}>
         <div className="min-w-0">
+          {back}
           <h1 className="text-lg font-semibold">{title}</h1>
           {description ? (
             <p className="mt-0.5 text-sm text-muted-foreground">{description}</p>

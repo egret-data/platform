@@ -1,14 +1,13 @@
 import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { ArrowLeft } from "lucide-react";
 
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Textarea } from "@/components/ui/textarea";
 import { ListPageShell } from "@/components/explore/ListPageShell";
+import { SqlEditor } from "@/components/sqllab/SqlEditor";
 import { useDatabases } from "@/api/databases";
 // The mutation comes from the hand-written wrapper, never the generated hook:
 // the wrapper is what invalidates the endpoint list, so the row this page
@@ -104,13 +103,18 @@ export default function EndpointCreate() {
     <ListPageShell
       title="New endpoint"
       description="Publish a query as a REST endpoint. Everything else — parameters, output shape, cache, limits — is configured on the endpoint itself once it exists."
-      toolbar={
-        <Button asChild variant="ghost">
-          <Link to={`/explore/${ws}/data-api/endpoints`}>
-            <ArrowLeft className="h-4 w-4" />
-            Endpoints
-          </Link>
-        </Button>
+      back={
+        /* Top-left, above the title, exactly as every endpoint detail screen
+           renders it (`EndpointDetail.tsx`). It used to sit in `toolbar`, which
+           `ListPageShell` renders into the same right-hand group as `action` —
+           so "leave without creating anything" was one control away from
+           "create it", the two outcomes furthest apart on the page. */
+        <Link
+          className="text-sm text-muted-foreground hover:underline"
+          to={`/explore/${ws}/data-api/endpoints`}
+        >
+          ← Endpoints
+        </Link>
       }
       action={
         <Button onClick={() => void submit()} disabled={!canSubmit || create.isPending}>
@@ -169,9 +173,38 @@ export default function EndpointCreate() {
             </div>
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="new-ep-sql">SQL</Label>
-            {/* The page has room the dialog did not: 12 rows, not 4. */}
-            <Textarea id="new-ep-sql" className="font-mono text-xs" rows={12} value={sql} onChange={(e) => setSql(e.target.value)} placeholder="SELECT …" />
+            {/* A `<p>`, not a `<Label>`: Monaco is not a form control, so
+                `htmlFor` would point at nothing. The editor names itself
+                through `ariaLabel` below, which is where `Query`'s SQL editor
+                gets its accessible name too. */}
+            <p className="text-sm font-medium">SQL</p>
+            {/* The same editor this SQL becomes the moment the endpoint exists
+                (`detail/Query.tsx`). It was a bare `<Textarea>` here — the
+                weakest tool at the moment of most need, since the first
+                statement is the one written from nothing and every statement
+                after it gets syntax colouring, bracket matching and
+                completion.
+
+                Fixed height, like the response transform's editor and unlike
+                `Query`'s: this page is an ordinary scrolling form, not a
+                bounded split pane, so an editor that grew with its content
+                would push the Create button down the page as the author types.
+
+                **No `onRun`, deliberately.** Preview is
+                `POST …/endpoints/{id}/preview` and there is no id yet, so there
+                is nothing ⌘↵ could run. `SqlEditor` registers that command
+                unconditionally, so the guard is that the callback is absent
+                rather than that the command is.
+
+                **Schema-aware completion is deliberately absent**, exactly as
+                in `Query`: SQL Lab's `words` come from its schema explorer's
+                own state (a `SchemaSink` the `DataPanel` writes into), there is
+                no reusable hook to call and no explorer on this page, so `[]`
+                is passed and Monaco offers its built-in SQL keywords. Wiring a
+                catalog fetch here is its own task. */}
+            <div className="h-64 overflow-hidden rounded-md border border-border">
+              <SqlEditor value={sql} onChange={setSql} schemaWords={[]} ariaLabel="SQL" />
+            </div>
           </div>
         </div>
       </div>

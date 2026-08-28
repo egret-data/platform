@@ -53,6 +53,40 @@ describe("ListPageShell", () => {
     expect(container.querySelector("header p")).toBeNull();
   });
 
+  it("renders `back` above the title and outside the action group", () => {
+    // The slot exists because a create page's way OUT must not sit in the same
+    // group as its commit: `EndpointCreate` had `← Endpoints` in `toolbar`,
+    // which renders beside `action`, one control from "Create endpoint". Every
+    // detail screen puts that link top-left, above the name.
+    const { container } = render(
+      <ListPageShell
+        title="New endpoint"
+        back={<a href="/endpoints">← Endpoints</a>}
+        action={<button type="button">Create endpoint</button>}
+      >
+        <p>body</p>
+      </ListPageShell>,
+    );
+    const back = screen.getByRole("link", { name: "← Endpoints" });
+    const h1 = screen.getByRole("heading", { level: 1 });
+    // Above the title, not merely present.
+    expect(back.compareDocumentPosition(h1) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const actions = container.querySelector("header")!.lastElementChild as HTMLElement;
+    expect(actions).toContainElement(screen.getByRole("button", { name: "Create endpoint" }));
+    expect(actions).not.toContainElement(back);
+  });
+
+  it("emits nothing for `back` when there is none", () => {
+    // The same rule as `description`: an omitted slot renders no element at
+    // all, so the six pages that do not pass one are byte-identical to what
+    // they were before the slot existed.
+    const { container } = render(
+      <ListPageShell title="Endpoints"><p>body</p></ListPageShell>,
+    );
+    expect(container.querySelector("header a")).toBeNull();
+    expect(container.querySelector("header")!.firstElementChild!.firstElementChild!.tagName).toBe("H1");
+  });
+
   it("centers the header row when there is no description, and top-aligns it when there is", () => {
     // Checking a class name is a weaker assertion than checking behaviour, so
     // keep it narrow: assert only the alignment class, not the whole
