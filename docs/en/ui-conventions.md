@@ -151,7 +151,7 @@ reaches the table. See §2.
 ### 1.5 A grouped list is the siblings' hand-rolled `<table>`, never `FilterableTable`
 
 `src/routes/explore/Charts.tsx`, `Datasets.tsx`, `Dashboards.tsx`, `Notebooks.tsx`,
-`dataapi/Endpoints.tsx`, `dataapi/Clients.tsx`
+`Alerts.tsx`, `dataapi/Endpoints.tsx`, `dataapi/Clients.tsx`
 
 `FilterableTable` sorts, searches and paginates **one flat entity**. It cannot model a group,
 so a page whose list has two levels writes the table out by hand, exactly as the BI lists do:
@@ -192,11 +192,24 @@ practice — and this section would otherwise be a convention its own reference 
 violates.** `Clients.tsx` puts the role on the header's spanning cell, the same idiom §4.1
 records for `ConfigTableGroup` and for the same reason: a group row that reads as another data
 cell is the confusion the shape exists to remove. But `FolderHeaderRow.tsx` — the shared
-component Charts, Datasets, Dashboards and Endpoints group with — does **not** set it, so four
-of the five grouped tables in Explore currently announce their folder header as an ordinary
-cell.
+component Charts, Datasets, Dashboards, Notebooks, Alerts and Endpoints group with — does
+**not** set it, so **six** of the seven grouped tables in Explore currently announce their
+folder header as an ordinary cell.
 
-That is a gap in those four, not a licence for the next one. A new grouped table sets the
+**It was recorded as four, and the counting is worth more than the number.** `Notebooks` was
+named in this section's own file list above and then dropped from the count in this paragraph;
+`Alerts` was in neither, because it was missing from the list the count was read off. The count
+was taken from a prose list in this document instead of from the tree. **Count by resolved
+module:**
+
+```bash
+grep -rln 'from "@/components/explore/FolderHeaderRow"' frontend/src   # 6, plus its own test
+```
+
+Same failure as §7.2's `Caveat` inventory, and the same fix: an inventory in this document is a
+claim about the tree, so it is taken FROM the tree.
+
+That is a gap in those six, not a licence for the next one. A new grouped table sets the
 role, and `FolderHeaderRow` should adopt it: it is a one-attribute change, held back only
 because the task that wrote this section was scoped to a single page. It is stated here rather
 than left implicit so that nobody reads the reference implementation's silence as the
@@ -569,10 +582,12 @@ carries the consequence** and whose body carries the explanation:
 > *(open)* This account also reaches invoke through the workspace, so revoking here removes
 > the grant but not the access. [Workspace membership]
 
-**Why this is not the drawer mistake.** §11.2 records the opposite ruling for `TryIt`'s
-warning: a reader who must open something to learn a call is real has already pressed the
-button. That rule holds here, and the split is what satisfies it — the load-bearing fact is
-the summary and is on screen with nothing clicked. What is collapsed is the *why* and the
+**Why this is not the drawer mistake.** §11.2 used to record the opposite RULING for `TryIt`'s
+warning — that it could not be collapsed at all — on the rule that a reader who must open
+something to learn a call is real has already pressed the button. **§11.2 has since reversed
+that ruling, and `TryIt.tsx` ships both of its blocks as `Caveat`s.** The RULE is what holds
+here, not the ruling it used to support, and the split is what satisfies it — the load-bearing
+fact is the summary and is on screen with nothing clicked. What is collapsed is the *why* and the
 *where to go instead*, which is what a reader goes looking for once the headline has stopped
 them. **Collapsing the headline would be the mistake; collapsing the paragraph under it is
 the point.**
@@ -588,6 +603,21 @@ Three constraints on the form, all load-bearing:
 - **Collapse a caveat because it is big, not because its neighbour is.** `Access`'s transient
   "Checking workspace-inherited invoke…" stays plain text: six words, no explanation to hold,
   so a disclosure costs a click to reveal nothing.
+
+**Which test governs, because this section states two and they were read as disagreeing.** The
+rule above is a KIND test — an explanation of a consequence of acting goes behind a disclosure
+headed by that consequence — and the bullet just above it reads as a SIZE test. **The kind test
+governs; size decides nothing on its own.** A `Caveat` is a two-part form, a consequence and the
+explanation under it, so the question is not "is this long?" but "**is there a second part to
+put behind the summary?**" Where there is none there is no caveat to collapse, only a line of
+text — which is why the six-word transient above stays plain, and it would stay plain at sixty
+words.
+
+Read that way the shipped call sites stop disagreeing with each other. `Access`'s conditional
+states — "Revoking may not remove access", "Nothing here to revoke" — each have a consequence
+and a mechanism (or a where-to-go-instead), so they are `Caveat`s (`AccessSection.tsx`).
+`TryIt`'s published-version note is two sentences of one fact with no separable why, so it is a
+`<p>`. Neither is decided by length.
 
 **An action column's header is `sr-only`.** A visible "Actions" heading over one small
 button is louder than what it labels; an unnamed column is worse for anyone not reading it
@@ -607,8 +637,16 @@ assert on.
 page empty while Config's Details column wrapped to three lines. A single page-level cap is
 the wrong instrument: the six sections do not want the same width. Config and Query should use
 the page — Config holds the two widest controls of any tab, Query a SQL editor and a result
-grid; Access, Try it, Versions and Response are prose, short-column lists and short controls
+grid; Access, Try it and Versions are prose, short-column lists and short controls
 that read worse stretched across a wide monitor.
+
+**`Response` used to be named in that second list and has been taken out of it**, because it
+moved to the first — see the criterion two paragraphs down and §5.4b. The sentence stayed
+behind for four revisions of this section, so a reader met "Response reads worse stretched" in
+the present tense ten lines above "Response uses the page", with nothing saying which was
+current. `ResponseSection.tsx`'s ROOT carries no `max-w-*` today (its prose still does, §5.4b),
+and that is the tiebreaker: **where this document and the tree disagree, the tree is the fact
+and the document is the bug.**
 
 **So sections own their own caps**, on their own root element, visible next to the layout they
 constrain: `AccessSection.tsx`, `TryIt.tsx` and `Versions.tsx` use `max-w-5xl`. Query needs none
@@ -723,8 +761,12 @@ things §5.1 gives as the reason Config and Query use the page. So the cap came 
   would have gone to Details, the only unsized column, and the three Selects would have stayed at
   208px. With `valueClassName="w-52 lg:w-96"` — the pair Config already uses — the trigger went
   192 → 368px and Details 528 → 624 rather than to 720.
-- **The frozen table's cap was not buying what it was added for.** §5.1 recorded `max-w-xl` as the
-  fix for `bigint` sitting far from its name. Measured: `w-full` AUTO layout inside that cap gave
+- **The frozen table's cap was not buying what it was added for.** The rationale for `max-w-xl`
+  — that `bigint` sat far from the name it describes — was never in this document; it is in
+  `ResponseSection.tsx`'s own comment on that table, which is also where the correction now
+  lives. (§5.1 and §5.4a mention the cap, neither gives that reason. Citing a section for a
+  rationale it does not contain is the §9 failure happening to a cross-reference: the claim
+  reads as sourced and is not.) Measured: `w-full` AUTO layout inside that cap gave
   `Name` 443.9px of 576, so the type started 444px in and would drift further with the longest
   name. `table-fixed` with `w-72` on Name puts it 288px in at any width — closer, stable, and the
   same first column the settings table below uses, so the two read as one grid.
@@ -782,7 +824,7 @@ width is well spent is a question only a browser can answer.** See §10.
 
 Three sections had the walk in §5.5 copy-pasted and **two had no guard at all**: `Try it` and
 `Access`. That is how `Try it` shipped a `max-w-5xl` nothing was holding in place — §5.1
-lists it among the four sections that cap themselves, and nothing said so in code. The walk,
+lists it among the three sections that cap themselves, and nothing said so in code. The walk,
 the host resolution and the two regexes now live in one module and all five sections call it.
 
 Two details are load-bearing and were preserved from the copies:
@@ -1083,10 +1125,19 @@ is a real call, not a dry run" and "A green preview does not prove a consumer ca
 endpoint" — the sentences the old ruling was actually protecting, still on screen with nothing
 clicked.
 
-What did not move is as informative. `TryIt`'s two-line published-version note and `Access`'s
-conditional state paragraphs stay plain text, on the same rule pointing the other way:
-**collapse a caveat because it is big.** Two lines with no explanation to hold cost a click to
-reveal nothing.
+What did not move is as informative. `TryIt`'s two-line published-version note stays plain
+text, and `Access`'s transient "Checking workspace-inherited invoke…" with it, on the same rule
+pointing the other way: **there is no second part to put behind a summary**, so a disclosure
+would cost a click to reveal nothing.
+
+**A previous revision of this paragraph also claimed `Access`'s CONDITIONAL STATE paragraphs
+stay plain text. They do not** — "Revoking may not remove access" and "Nothing here to revoke"
+are both `Caveat`s in `AccessSection.tsx`, and have been since §4.4's component landed. The
+claim was wrong in the same way twice (see also §7.2's inventory), and wrong in a way this
+document is especially prone to: it described the section's REASONING, which is correct, and
+then named files as if it had read them. §4.4 now says which test governs so that the two
+sections cannot drift again — kind, not size — and under it the two `Caveat`s are right and
+this sentence was the error.
 
 ### 11.3 What a test can say about any of this
 
@@ -1173,18 +1224,39 @@ not exist yet:
     each. The plan inherited the same arithmetic ("8 `<Card>`… convert the rest"), and there
     was no rest. A symbol-family count is not a block count — the same trap §7.2 records for
     consumer counts, one level down.
-- The `Caveat` disclosure of §4.4 — **4** files, **9** call sites, all Data API endpoint
-  detail (`AccessSection` 4, `TryIt` 2, `Query` 2, `PreviewBlock` 1). Counted by import
-  specifier (`from "./Caveat"`), per §7.2. It was 1 file and 3 call sites for one phase, all
-  in `AccessSection`, where it was written for a row-scoped explanation big enough to set the
-  row height; the Data API UI audit found the same shape at section scale and it moved out of
-  that file into `detail/Caveat.tsx`. Still deliberately not in `components/`: the rule it
-  encodes has been measured on this editor and nowhere else.
+- The `Caveat` disclosure of §4.4 — **5** files, **11** call sites (`AccessSection` 4,
+  `TryIt` 2, `Query` 2, `Activity` 2, `PreviewBlock` 1). It was 1 file and 3 call sites for one
+  phase, all in `AccessSection`, where it was written for a row-scoped explanation big enough to
+  set the row height; the Data API UI audit found the same shape at section scale and it moved
+  out of that file into `detail/Caveat.tsx`.
+
+  **This was recorded as 4 files / 9 sites, and the counting method is why.** The previous
+  revision counted `from "./Caveat"` — an import SPECIFIER — and `Activity.tsx` writes
+  `from "./detail/Caveat"` because it sits one directory up. A specifier search structurally
+  cannot see a consumer outside the component's own directory, which is precisely the consumer
+  a "does this belong in `components/`?" question is asking about. **Count by resolved module,
+  not by import string.** For this file that is:
+
+  ```bash
+  grep -rn 'Caveat"' frontend/src --include='*.tsx'   # every specifier that ENDS in Caveat
+  grep -rn '<Caveat' frontend/src --include='*.tsx'   # and the call sites, separately
+  ```
+
+  The second command is separate on purpose: a file count and a call-site count are different
+  questions, and collapsing them is the symbol-family error recorded two bullets up.
+
+  **Does the "deliberately not in `components/`" ruling survive the correction?** Yes, and for a
+  reason the wrong count was hiding rather than supporting. The fifth file is `Activity.tsx`,
+  which is still Data API — a sibling route, not another feature — so the spread is 5 files
+  inside one feature, not 4 inside one directory. The test for promotion is whether the rule has
+  been measured somewhere else, and it has not. Had the fifth consumer been outside Data API,
+  the specifier count would have hidden exactly the evidence that should have moved it.
 
   What has NOT adopted it is the rule working rather than an inconsistency — `Access`'s short
-  transient states, `TryIt`'s two-line published-version note and `Access`'s conditional state
-  paragraphs are all plain text, because a disclosure over two lines costs a click to reveal
-  nothing.
+  transient states and `TryIt`'s two-line published-version note are plain text, because there
+  is no second part to put behind a summary. (This bullet used to name `Access`'s conditional
+  state paragraphs here too; they are `Caveat`s, and are two of the four counted above. See
+  §11.2.)
 - The split of §11 — **2** sections, both Data API endpoint detail (`Query`, `TryIt`); `react-resizable-panels` itself is also used by `components/sqllab/SqlTab.tsx`, which is
   where the idiom came from. `Versions` and `Access` are deliberately not splits: neither is
   "configure, run, read the result" — there is nothing to run.
