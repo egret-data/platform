@@ -1,10 +1,8 @@
 import { type ReactNode, useState } from "react";
-import { Inbox } from "lucide-react";
-import { Link, useParams } from "react-router-dom";
+import { useParams } from "react-router-dom";
 
 import { useDataApiActivitySummary } from "@/api/generated/data-api/data-api";
 import type { ActivityRange, ActivityRow } from "@/api/generated/model";
-import { EmptyState } from "@/components/explore/EmptyState";
 import { ListStates } from "@/components/explore/ListStates";
 import { Button } from "@/components/ui/button";
 import {
@@ -48,12 +46,6 @@ const RANGE_DAYS: Record<ActivityRange, number> = {
 export default function Activity() {
   const ws = useParams().workspace!;
   const [range, setRange] = useState<ActivityRange>("24h");
-  // Lifted out of `ActivityCallList` so the empty state can offer it. The
-  // summary EXCLUDES trials (`activity.rs`: "Trials (`actor_user_id IS NOT
-  // NULL`) are excluded here and shown only in the call list"), so a range
-  // whose only traffic was Try-it runs reads as empty on this page, and this
-  // toggle is the one control that can reach those rows.
-  const [includeTrials, setIncludeTrials] = useState(false);
 
   const summaryQuery = useDataApiActivitySummary(ws, { range }, { query: { retry: false } });
   const summary = summaryQuery.data?.status === 200 ? summaryQuery.data.data : undefined;
@@ -65,16 +57,12 @@ export default function Activity() {
   // them is wrong.
   const hasCalls = summary != null && (summary.total.calls > 0 || summary.endpoints.length > 0);
 
-  // Built before the branch rather than inside `ListStates`' children, which
-  // are constructed whether or not that branch is taken — `summary` is not
-  // narrowed across the JSX boundary and would be read while undefined.
-  const summaryBlock =
-    summary && hasCalls ? (
-      <>
-        <Tiles total={summary.total} />
-        <EndpointTable rows={summary.endpoints} />
-      </>
-    ) : null;
+  // NOT `!hasCalls`. This is "the summary has SETTLED and says the range
+  // produced nothing", which is a different claim from "we have not measured
+  // yet" — and it is the one the call list gates its filter row on, so a range
+  // switch (which puts the summary back into `isLoading`) must not read as an
+  // empty range for the frame it is in flight.
+  const rangeIsEmpty = summary != null && !hasCalls;
 
   return (
     // Canonical Explore list-page scaffold (same as Charts.tsx/Datasets.tsx):
@@ -92,61 +80,53 @@ export default function Activity() {
         <RangePicker range={range} onChange={setRange} retentionDays={retentionDays} />
       </div>
 
-      {/* Four states, in `ListStates`' order — `isError` BEFORE `hasData`, and
-          error may never fold into empty (§2.1/§2.2). A 500 must not render as
-          "No calls in this range."
+      <div className="space-y-6">
+        {/* Four states, in `ListStates`' order — `isError` BEFORE `hasData`, and
+            error may never fold into empty (§2.1/§2.2). A 500 must not render
+            as "No calls in this range."
 
-          `isLoading` also covers "settled with no payload": react-query clears
-          `isLoading` on ANY settle, so a result nobody has would otherwise fall
-          straight into the empty branch and assert something about the world
-          from nothing. The `!summaryQuery.isError` guard keeps the error branch
-          reachable — `ListStates` checks loading first. */}
-      <ListStates
-        isLoading={summaryQuery.isLoading || (!summary && !summaryQuery.isError)}
-        isError={summaryQuery.isError}
-        // The generated hook types its error as the response SHAPE; the mutator
-        // throws the real `ApiError`. `ListStates` takes `unknown`.
-        error={summaryQuery.error}
-        errorText="Could not load activity statistics."
-        hasData={hasCalls || includeTrials}
-        skeletonCols={4}
-        empty={
-          // ONE empty state, not four metric cards showing an em dash over two
-          // tables each saying "empty" in its own words. An empty dashboard is
-          // not an empty state.
-          <EmptyState
-            variant="dashed"
-            icon={Inbox}
-            title="No calls in this range"
-            description="Nothing has called this workspace's endpoints in the selected range. Try-it runs are not counted here."
-            action={
-              <div className="flex flex-wrap items-center justify-center gap-2">
-                {/* The escape hatch, not decoration: trials are excluded from
-                    every number on this page, so without this the rows a
-                    Try-it run produced are unreachable from the screen whose
-                    job is to show calls. */}
-                <Button variant="outline" onClick={() => setIncludeTrials(true)}>
-                  Show trial runs
-                </Button>
-                <Button asChild variant="ghost">
-                  <Link to={`/explore/${ws}/data-api/endpoints`}>View endpoints</Link>
-                </Button>
-              </div>
-            }
-          />
-        }
-      >
-        <div className="space-y-6">
-          {summaryBlock}
-          <ActivityCallList
-            ws={ws}
-            range={range}
-            hasCalls={hasCalls}
-            includeTrials={includeTrials}
-            onIncludeTrialsChange={setIncludeTrials}
-          />
-        </div>
-      </ListStates>
+            `isLoading` also covers "settled with no payload": react-query clears
+            `isLoading` on ANY settle, so a result nobody has would otherwise
+            fall straight into the empty branch and assert something about the
+            world from nothing. The `!summaryQuery.isError` guard keeps the error
+            branch reachable — `ListStates` checks loading first.
+
+            `empty={null}`: this region has no empty state of its own. The
+            page's ONE empty state belongs to the call list below, which is
+            mounted in every state of this query — a second sentence here is the
+            defect this task exists to remove. */}
+        <ListStates
+          isLoading={summaryQuery.isLoading || (!summary && !summaryQuery.isError)}
+          isError={summaryQuery.isError}
+          // The generated hook types its error as the response SHAPE; the
+          // mutator throws the real `ApiError`. `ListStates` takes `unknown`.
+          error={summaryQuery.error}
+          errorText="Could not load activity statistics."
+          hasData={hasCalls}
+          skeletonCols={4}
+          empty={null}
+        >
+          {summary && (
+            <>
+              <Tiles total={summary.total} />
+              {/* Mounted only when there is a breakdown to show, so the table
+                  has no empty state to own. `hasCalls` is also true when the
+                  grand total is positive and this array is somehow not, and a
+                  header row over nothing is not a better answer than no table. */}
+              {summary.endpoints.length > 0 && <EndpointTable rows={summary.endpoints} />}
+            </>
+          )}
+        </ListStates>
+
+        {/* OUTSIDE the branch above, and that placement is the whole point.
+            `range` is in the summary's query key, so every range switch puts it
+            back into `isLoading`; mounted inside those children, this list
+            unmounted on each switch and its four filter `useState`s reset —
+            a request id the operator pasted, gone on the way to a wider window.
+            Out here it also fetches in parallel with the summary instead of
+            queueing behind it. */}
+        <ActivityCallList ws={ws} range={range} rangeIsEmpty={rangeIsEmpty} />
+      </div>
     </div>
   );
 }
@@ -292,13 +272,6 @@ function EndpointTable({ rows }: { rows: ActivityRow[] }) {
               <EndpointRow key={r.endpoint_id} row={r} name={r.endpoint_name ?? r.endpoint_id!} />
             ))}
             {unmatched && <EndpointRow key="unmatched" row={unmatched} name="No matching endpoint" muted />}
-            {matched.length === 0 && !unmatched && (
-              <TableRow className="hover:bg-transparent">
-                <TableCell colSpan={5} className="py-8 text-center text-muted-foreground">
-                  No calls in this range.
-                </TableCell>
-              </TableRow>
-            )}
           </TableBody>
         </Table>
       </div>

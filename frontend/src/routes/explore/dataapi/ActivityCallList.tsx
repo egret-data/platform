@@ -1,9 +1,12 @@
 import { useMemo, useState } from "react";
+import { Inbox } from "lucide-react";
+import { Link } from "react-router-dom";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 
 import { listUsers } from "@/api/access";
 import { dataApiActivityCalls, useDataApiListEndpoints } from "@/api/generated/data-api/data-api";
 import type { ActivityCallDto, ActivityRange } from "@/api/generated/model";
+import { EmptyState } from "@/components/explore/EmptyState";
 import { ListStates } from "@/components/explore/ListStates";
 import { RelativeTime } from "@/components/explore/RelativeTime";
 import { Badge } from "@/components/ui/badge";
@@ -54,27 +57,24 @@ const PAGE_SIZE = 50;
 export default function ActivityCallList({
   ws,
   range,
-  hasCalls,
-  includeTrials,
-  onIncludeTrialsChange,
+  rangeIsEmpty,
 }: {
   ws: string;
   range: ActivityRange;
-  /** Did the RANGE produce calls at all, per the summary — the unfiltered
-   * truth (§2.3). Read to gate the filter row: gated on the rows this list
-   * happens to be showing, a filter miss would remove the input holding the
-   * filter and leave nothing on screen to un-set. */
-  hasCalls: boolean;
-  /** Owned by `Activity`, not here: the summary excludes trials, so the page's
-   * empty state has to be able to offer this toggle. Off by default (spec
-   * §4.8) — a trial is not consumer traffic. */
-  includeTrials: boolean;
-  onIncludeTrialsChange: (next: boolean) => void;
+  /** The summary has SETTLED and says this range produced no calls — the
+   * unfiltered truth the filter row is gated on (§2.3). False while that query
+   * is in flight, which is not the same claim: gated on `!hasCalls` instead,
+   * the row would blink out of existence on every range switch. */
+  rangeIsEmpty: boolean;
 }) {
   const [endpointId, setEndpointId] = useState("all");
   const [statusCode, setStatusCode] = useState("");
   const [errorCode, setErrorCode] = useState("");
   const [requestId, setRequestId] = useState("");
+  // Off by default (spec §4.8): a trial is not consumer traffic, so an operator
+  // opts in to see it. Local state again, and it survives a range switch
+  // because this component no longer unmounts on one.
+  const [includeTrials, setIncludeTrials] = useState(false);
 
   const endpointParam = endpointId === "all" ? undefined : endpointId;
   const trimmedStatus = statusCode.trim();
@@ -166,11 +166,11 @@ export default function ActivityCallList({
 
   // §1.2: "a filter or a bulk mode over zero rows is a control that cannot do
   // anything." The two other disjuncts are what keeps that from becoming a
-  // trap: rows on screen (trials, which `hasCalls` never counts) mean the
+  // trap: rows on screen (trials, which the summary never counts) mean the
   // filters CAN act, and a filter that is engaged must stay reachable even
   // when it matches nothing — the same argument §1.2 records for the way OUT
   // of an empty trash.
-  const showFilters = hasCalls || entries.length > 0 || narrowingFiltersEngaged;
+  const showFilters = !rangeIsEmpty || entries.length > 0 || narrowingFiltersEngaged;
 
   return (
     // Testid, not a heading lookup: this list's empty sentence and the page's
@@ -191,7 +191,7 @@ export default function ActivityCallList({
           <Checkbox
             id="activity-include-trials"
             checked={includeTrials}
-            onCheckedChange={(c) => onIncludeTrialsChange(c === true)}
+            onCheckedChange={(c) => setIncludeTrials(c === true)}
           />
           <Label htmlFor="activity-include-trials" className="font-normal">
             Include trial runs
@@ -264,15 +264,33 @@ export default function ActivityCallList({
         hasData={entries.length > 0}
         skeletonCols={7}
         empty={
-          // A miss is a different situation from a range with no traffic, so it
-          // is a different sentence (§2.3). The page's own empty state owns the
-          // second one; this list only reaches it in the fixture-shaped case
-          // where the summary counted calls the unfiltered list did not return.
-          <p className="py-8 text-center text-muted-foreground">
-            {narrowingFiltersEngaged || includeTrials
-              ? "No calls match the current filters."
-              : "No calls in this range."}
-          </p>
+          // Two situations, two sentences (§2.3) — and the predicate is what
+          // the reader can see engaged, nothing else. "Include trial runs" is
+          // NOT in it: it is a view switch over a population the summary never
+          // counted, so an empty result with only that on is an empty range,
+          // not a mismatch. Counting it here had the page reporting "No calls
+          // match the current filters" with no filter set.
+          narrowingFiltersEngaged ? (
+            <p className="py-8 text-center text-muted-foreground">
+              No calls match the current filters.
+            </p>
+          ) : (
+            // The page's ONE empty state. It lives here because this section is
+            // the only one mounted in every state: the tiles and the
+            // per-endpoint table above simply do not render when there is
+            // nothing to put in them.
+            <EmptyState
+              variant="dashed"
+              icon={Inbox}
+              title="No calls in this range"
+              description="Nothing has called this workspace's endpoints in the selected range. Try-it runs are not counted above; include them beside Calls to see them here."
+              action={
+                <Button asChild variant="outline">
+                  <Link to={`/explore/${ws}/data-api/endpoints`}>View endpoints</Link>
+                </Button>
+              }
+            />
+          )
         }
       >
         <div className="overflow-x-auto rounded-md border">

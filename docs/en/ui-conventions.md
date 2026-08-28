@@ -83,6 +83,27 @@ only way *out* of an empty trash, removed exactly when it is the only control le
 is `"keeps the way OUT of an empty trash"` in
 `src/routes/explore/dataapi/__tests__/Endpoints.test.tsx`.
 
+`src/routes/explore/dataapi/Activity.tsx` and `ActivityCallList.tsx` are the second
+application, and they read the rule twice over. **The 1h/24h/7d/30d strip is a view switch**:
+it selects the window the whole page is about, and it is how a reader leaves a range that
+turned out to be empty. **So is "Include trial runs"**, which is less obvious and matters
+more. `crates/egret-dataapi/src/activity.rs`'s summary query ends `AND al.actor_user_id IS
+NULL`, so trials are excluded from *every number the page shows* — including the one the
+filter gate is computed from. A workspace whose only traffic was Try-it runs therefore reads
+as an empty range, and gating that toggle would delete the one control that can reach rows
+that exist: both halves of the trash argument, verbatim. It lives in the section's heading
+row rather than in the gated filter row for exactly that reason, and the guards are
+`"keeps the one way to reach trial runs, which the summary never counts"` and
+`"can be turned back off from a trial view that found nothing"`.
+
+**The gate's input is the unfiltered truth, and "not measured yet" is not "empty".** Activity
+gates on `rangeIsEmpty` — *the summary has settled and says the range produced nothing* — not
+on `!hasCalls`, which is also false for the whole of every reload. `range` is in the summary's
+query key, so gating on the weaker predicate blinks the filter row out of existence on each
+range switch. Guarded by `"does not blink the filter row out while a range switch is in
+flight"`, which types nothing first: an engaged filter holds the row up by itself and hides
+the bug.
+
 Everything the trash view does not render is cleared on the way IN, not merely hidden
 (`toggleTrash`): the bookmark filter, both facets and bulk mode. A filter left engaged behind
 a control that is no longer on screen makes the trash report "No endpoints match the current
@@ -237,6 +258,22 @@ never-published endpoint is not misreported either.
 the first-run call-to-action must not appear just because a search missed. A search that
 narrows to zero is the table's own empty body, which is a different sentence for a different
 situation.
+
+`ActivityCallList.tsx` is the second reference, and it splits the same way: "No calls match
+the current filters." when a narrowing control is engaged, and otherwise the page's one
+`EmptyState`, "No calls in this range". **The predicate is what the reader can see engaged and
+nothing else.** Its first version counted the "Include trial runs" view switch as a filter,
+and a range with no trials in it then reported a mismatch with no filter set — the same
+defect class as §2.2, an interface saying something untrue about its own state. Guarded inside
+`"can be turned back off from a trial view that found nothing"`.
+
+**Where the one empty state lives is a consequence of what is mounted.** Activity's tiles and
+per-endpoint table do not render when there is nothing to put in them, so the empty state
+belongs to the call list, the only section mounted in every state of the summary query. That
+list also sits **outside** the summary's `ListStates`, which is what keeps a range switch from
+unmounting it and resetting the four filters the operator typed
+(`"keeps the filters the user typed across a range switch that reloads the summary"`). A
+region with nothing to say passes `empty={null}` rather than a second sentence.
 
 ### 2.4 The empty state itself
 
