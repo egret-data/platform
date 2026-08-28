@@ -611,13 +611,17 @@ grid; Access, Try it, Versions and Response are prose, short-column lists and sh
 that read worse stretched across a wide monitor.
 
 **So sections own their own caps**, on their own root element, visible next to the layout they
-constrain: `AccessSection.tsx`, `TryIt.tsx`, `Versions.tsx` and `ResponseSection.tsx` all use
-`max-w-5xl`, and `ResponseSection.tsx`'s frozen-column table adds `max-w-xl` (it kept that cap
-across the §4.2 conversion — the class moved from a hand-written `<table>` onto the shared
-`Table`, which is where the `w-full` it caps comes from). Query needs none
+constrain: `AccessSection.tsx`, `TryIt.tsx` and `Versions.tsx` use `max-w-5xl`. Query needs none
 and gained the most —
 its SQL editor went from 768px to 1424px (measured during the width pass, not by this
 document; the same applies to the figures in §5.4 and §5.5).
+
+**The criterion is what a section HOLDS, and it is what moved `Response` from one group to the
+other** — see §5.4b. Config and Query use the page because they hold settings tables and code
+editors; Access, Try it and Versions cap themselves because they hold prose, short-column lists
+and short controls that read worse stretched across a wide monitor. Response was measured while
+it was the second kind and has since been given both of the first kind's things, so it now uses
+the page too, and its frozen-column table gave up its own `max-w-xl` with it.
 
 ### 5.2 Removing the cap is not enough, because `ConfigTable` is `table-fixed`
 
@@ -687,11 +691,54 @@ of the labels they answer to, where the old route cap put them at ~560px. That i
 complaint that earned `Versions` its cap, so the fix wave gave Response the same `max-w-5xl` root
 (~816px), which also reined in the `Frozen columns` and `OpenAPI document` Cards — the frozen
 *table* had `max-w-xl`, its Card did not. (Those two Cards are gone as of §4.2's reversal. The
-measurement is kept: it is why the section root is capped, which is still true, and "the frame
-stretched further than the content it framed" was one input to removing them.)
+measurement is kept: it is why the section root WAS capped, and "the frame stretched further than
+the content it framed" was one input to removing them. **The cap itself is gone as of §5.4b** —
+not because this measurement was wrong, but because the thing measured changed: the fix for the
+Selects sitting far from their labels is `valueClassName`, which did not exist on `ConfigTable`
+when this was written.)
 
 The general rule: **a task that rebuilds a surface and a task that measures widths must agree on
 the same list of surfaces**, or the difference between the two lists ships.
+
+### 5.4b The same section, measured again after what it holds changed
+
+The 2026-08-28 Data API UI audit measured `Response` in a browser and reported four content
+widths inside one section, with a gutter nothing could use. Reproduced in Chromium at 1600×1000
+with the sidebar expanded, against the shipped stylesheet:
+
+| | width | right edge |
+|---|---|---|
+| content box | 1296 | 1576 |
+| section root (`max-w-5xl`) | 1024 | 1288 |
+| frozen `Name \| Type` table (`max-w-xl`) | 576 | 840 |
+| `Setting \| Details \| Value` table | 1024 | 1288 |
+| the two block paragraphs (`max-w-prose`) | 532 | 796 |
+
+**The cap was not wrong when it was applied; the section stopped being the kind of section it was
+applied to.** §5.4a capped it as a prose-and-short-lists tab. It has since gained a
+`Setting | Details | Value` table (§4.2) and a Monaco editor for the response transform — the two
+things §5.1 gives as the reason Config and Query use the page. So the cap came off, and:
+
+- **Removing it is half the change** (§5.2). `ConfigTable` is `table-fixed`, so all 272 new pixels
+  would have gone to Details, the only unsized column, and the three Selects would have stayed at
+  208px. With `valueClassName="w-52 lg:w-96"` — the pair Config already uses — the trigger went
+  192 → 368px and Details 528 → 624 rather than to 720.
+- **The frozen table's cap was not buying what it was added for.** §5.1 recorded `max-w-xl` as the
+  fix for `bigint` sitting far from its name. Measured: `w-full` AUTO layout inside that cap gave
+  `Name` 443.9px of 576, so the type started 444px in and would drift further with the longest
+  name. `table-fixed` with `w-72` on Name puts it 288px in at any width — closer, stable, and the
+  same first column the settings table below uses, so the two read as one grid.
+- **Prose is the one deliberate exception to a single measure.** The paragraphs still stop at
+  `max-w-prose` (§5.2's "cap the prose, not the column"): a frame can span whatever it is given,
+  a line of running text cannot. Widening them too is the obvious wrong fix, so the real-browser
+  spec asserts they stop short rather than skipping them.
+- **Below `lg` nothing changed**, which is the point of §5.3's `lg:`. Measured at 900px: Value is
+  208px before and after, and the old cap never bound there either (the content box is 628px).
+
+Two things to carry from this. **A recorded cap binds its measurement, not its conclusion** —
+the §4.2 reversal made the same point about a recorded rationale. And the frozen table is the
+second case in this document where five rounds of reading classes described a table's geometry
+wrongly (§10): the cap everyone cited as fixing the Name/Type gap was leaving 444px of it.
 
 ### 5.5 What the width test can and cannot say
 
@@ -720,7 +767,9 @@ sentinel guard and every other Config test: 230/230 green. `Versions` had a guar
 *owns* its cap; `Config`, the tab the whole width pass was motivated by, had no counterpart. It
 has one now — the inverse assertion, that Config's own root carries no `max-w-*` (responsive
 prefixes included) — and it was mutation-checked with that exact mutation, which now fails one
-test and only that one. `Response`'s new cap is pinned the same way as `Versions`'s.
+test and only that one. `Response` is pinned the same way, in the other direction: §5.4b moved it
+into the uses-the-page group, so its guard is `expectSectionLeavesWidthToThePage` — the same
+assertion Config's carries, and the reversal is stated in the test's own name.
 
 The test's own comment is honest about its limits: the class-name assertions are weak and are
 meant to be — they exist only so a cap cannot come back, or vanish, silently. **Whether the
