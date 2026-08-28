@@ -86,7 +86,17 @@ test.describe("Data API — the Response section is on one measure", () => {
       endpointId = endpoint.id as string;
 
       await page.goto(`/explore/${ws.slug}/data-api/endpoints/${endpointId}/response`);
-      await expect(page.getByRole("heading", { name: "Response", level: 2 })).toBeVisible();
+      // `exact: true`, and it is not tidying. Playwright matches an accessible
+      // name by case-insensitive SUBSTRING unless told otherwise, and the
+      // endpoint shell renders the endpoint's own name as an `h2` beside the
+      // section's — so `name: "Response"` also matched this spec's own fixture,
+      // `E2E response width`, and the run died on a strict-mode violation
+      // before it measured anything. The first live run of this spec is what
+      // found that; the fixture name is the collision and the loose match is
+      // the cause, so the assertion is pinned rather than the fixture renamed.
+      await expect(
+        page.getByRole("heading", { name: "Response", level: 2, exact: true }),
+      ).toBeVisible();
 
       /**
        * The right edge of each frame, of the two paragraphs, and of the space
