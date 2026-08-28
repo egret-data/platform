@@ -720,6 +720,47 @@ describe("AccessSection — the shape", () => {
   });
 
   /**
+   * The identity column is `w-48` inside a `table-fixed` table, so both of its
+   * lines `truncate` at 192px at every viewport — measured live at seven
+   * accounts, every email was cut. `title` is the cheap recovery: the full
+   * value is still readable without rebalancing a column whose neighbour
+   * genuinely carries a sentence per row.
+   *
+   * The assertion is that the tooltip equals the RENDERED text, not that a
+   * tooltip merely exists. A `title` holding something else — the id, a
+   * stale prop, an empty string — is a tooltip that lies, and `toHaveAttribute`
+   * with no expected value would pass on all three. jsdom can say this: `title`
+   * is an attribute, not a layout fact (§10), so the truncation itself stays a
+   * browser question and only the recovery is pinned here.
+   */
+  it("makes the truncated account name and email recoverable on hover", async () => {
+    setup({ accounts: [SA_GRANTED], grants: [] });
+    renderAccess();
+
+    const row = await screen.findByTestId(`access-row-${SA_GRANTED.id}`);
+    expect(within(row).getByText(SA_GRANTED.name)).toHaveAttribute("title", SA_GRANTED.name);
+    expect(within(row).getByText(SA_GRANTED.email!)).toHaveAttribute("title", SA_GRANTED.email);
+  });
+
+  /**
+   * The second line is not always an address. An orphaned grant — a grant whose
+   * service account this workspace no longer lists — renders an explanation
+   * there instead, and the component hands the same binding to the text and to
+   * the `title` so the two cannot drift. Pinned because the obvious shape
+   * (`title={account.email}` beside a conditional child) is wrong in exactly
+   * this row and right everywhere else, so nothing else in this file would
+   * catch it.
+   */
+  it("points the tooltip at what an orphaned row actually says", async () => {
+    setup({ accounts: [], grants: [makeGrant("sa-gone", "deleted-bot")] });
+    renderAccess();
+
+    const row = await screen.findByTestId("access-row-sa-gone");
+    const line = within(row).getByText("no longer a service account in this workspace");
+    expect(line).toHaveAttribute("title", "no longer a service account in this workspace");
+  });
+
+  /**
    * Access had no width guard at all, and neither did `Try it` — which is how
    * `Try it` shipped a `max-w-5xl` that nothing was holding in place.
    * `docs/en/ui-conventions.md` §5.1 lists this section among the four that cap

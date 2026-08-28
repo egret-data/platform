@@ -520,12 +520,38 @@ function AccessRow({
   // with that account already chosen.
   const tryItHref = `/explore/${ws}/data-api/endpoints/${endpointId}/try?service_account=${encodeURIComponent(account.id)}`;
 
+  // One binding for the second line, so the `title` and the visible text cannot
+  // drift: an orphaned grant shows an explanation instead of an address, and a
+  // tooltip repeating a DIFFERENT string than the one it is attached to would be
+  // worse than no tooltip.
+  const secondary = orphaned ? "no longer a service account in this workspace" : account.email;
+
   return (
     <TableRow className="align-top" data-testid={`access-row-${account.id}`}>
+      {/* `title` on both lines, and it is the cheap half of a two-part fix.
+          This column is `w-48` in a `table-fixed` table, so `truncate` cuts at
+          192px no matter the viewport — measured live at seven accounts, EVERY
+          email was cut. Identity is this screen's subject: the whole job here
+          is comparing accounts, and an address the reader cannot finish reading
+          is one they cannot check.
+
+          The column widths are deliberately NOT rebalanced. The 688px Invoke
+          neighbour is not slack — on a draft or disabled endpoint it carries a
+          sentence per row (the `Caveat`s below), so taking width from it trades
+          one truncation for another, on prose rather than on an identifier.
+
+          `title` is not the whole answer and is not claimed to be: it is
+          pointer-only, and the value still cannot be copied without selecting
+          it by hand. A copy affordance beside the address is the follow-on. It
+          is recorded rather than done here because it adds a control to every
+          row of a table whose row height is already the thing §4.4 was written
+          to protect. */}
       <TableCell className="py-3 whitespace-normal">
-        <div className="truncate text-sm font-medium">{account.name}</div>
-        <div className="truncate font-mono text-xs text-muted-foreground">
-          {orphaned ? "no longer a service account in this workspace" : account.email}
+        <div className="truncate text-sm font-medium" title={account.name}>
+          {account.name}
+        </div>
+        <div className="truncate font-mono text-xs text-muted-foreground" title={secondary}>
+          {secondary}
         </div>
       </TableCell>
 
