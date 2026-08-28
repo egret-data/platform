@@ -34,7 +34,7 @@ import { fullTimestamp } from "@/lib/relativeTime";
 // `useCollapsed` will look for, and a hardcoded "__uncat__" would keep
 // passing against a page that had stopped using this key at all.
 import { UNCATEGORIZED_KEY } from "@/components/explore/folders";
-import Endpoints from "@/routes/explore/dataapi/Endpoints";
+import Endpoints, { folderCollapseKey } from "@/routes/explore/dataapi/Endpoints";
 
 function mockList(over: Partial<{ data: unknown; isError: boolean; isLoading: boolean; error: unknown }> = {}) {
   vi.mocked(api.useDataApiListEndpoints).mockReturnValue(
@@ -1431,6 +1431,8 @@ describe("Endpoints — folders", () => {
     await waitFor(() => expect(toast.error).toHaveBeenCalled());
     expect(toast.success).not.toHaveBeenCalled();
   });
+});
+
 /**
  * Folder SECTION HEADERS, which are not the same thing as folder grouping
  * (task 7, item 1).
@@ -1459,8 +1461,6 @@ describe("Endpoints — a folder header needs a folder", () => {
   const LOOSE_B = makeEndpoint({ id: "ep-b", name: "Second query", folder_id: null });
   const IN_REPORTING = makeEndpoint({ id: "ep-r", name: "Daily report", folder_id: "f-1" });
 
-  /** `useCollapsed`'s storage key for this page: `folders:${ws}:${FOLDER_KIND}`. */
-  const COLLAPSE_KEY = "folders:eng:data_api_endpoints";
 
   it("heads no section at all in a workspace with no folders", async () => {
     mockList({ data: { status: 200, data: [LOOSE_A] } });
@@ -1530,7 +1530,14 @@ describe("Endpoints — a folder header needs a folder", () => {
     // What a previous session left behind: Uncategorized collapsed, from back
     // when this workspace still had folders. `useCollapsed` reads that out of
     // localStorage at mount, and it survives the folders being deleted.
-    localStorage.setItem(COLLAPSE_KEY, JSON.stringify([UNCATEGORIZED_KEY]));
+    // Both halves derived, never spelled out: `folderCollapseKey` is the same
+    // function the component hands `useCollapsed`, and `UNCATEGORIZED_KEY` the
+    // same constant it collapses under. A hardcoded key would survive a change
+    // to either format by landing the seed where nothing reads it — and this
+    // test would still PASS, because a seed that misses is indistinguishable
+    // from a page that correctly ignored it. That is the failure mode that
+    // stops the M2 mutant (render gated, `visibleRows` not) from dying.
+    localStorage.setItem(folderCollapseKey("eng"), JSON.stringify([UNCATEGORIZED_KEY]));
     mockList({ data: { status: 200, data: [LOOSE_A, LOOSE_B] } });
     mockFolders([]);
     const user = userEvent.setup();
@@ -1639,7 +1646,6 @@ describe("Endpoints — the header's icon controls", () => {
 
     expect(within(pageHeader()).queryByRole("separator")).not.toBeInTheDocument();
   });
-});
 });
 
 /**

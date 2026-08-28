@@ -40,6 +40,19 @@ import { EndpointActionsMenu } from "./EndpointActionsMenu";
 // `crates/egret-bi/src/routes.rs`'s `kind_perms("data_api_endpoints")`.
 const FOLDER_KIND = "data_api_endpoints";
 
+/**
+ * Where `useCollapsed` persists which sections this page's visitor left shut.
+ *
+ * Exported, and a function rather than a literal, because the tests have to
+ * SEED it: the "rows are not stranded behind a stale collapse state" guard
+ * writes a collapsed Uncategorized into localStorage before mounting. Spelled
+ * out a second time over there, a change to this format would land the seed on
+ * a key nothing reads — and that test would keep passing, because a seed that
+ * misses looks exactly like a page that correctly ignored it. Deriving it from
+ * here is what keeps the guard able to fail.
+ */
+export const folderCollapseKey = (ws: string) => `folders:${ws}:${FOLDER_KIND}`;
+
 
 /**
  * `deleted_at` is a sort key and not merely a column because the Trash is sorted
@@ -133,7 +146,7 @@ export default function Endpoints() {
   // there stays scoped to the row that was clicked.
   const updateMutation = useUpdateEndpoint();
 
-  const collapse = useCollapsed(`folders:${ws}:${FOLDER_KIND}`);
+  const collapse = useCollapsed(folderCollapseKey(ws));
 
   const [query, setQuery] = useState("");
   // ONE piece of state behind two controls: the SummaryStrip chip (a shortcut)
@@ -236,14 +249,18 @@ export default function Endpoints() {
    * NAMED folder; on its own it labels the whole list after the one thing it
    * is not, and its collapse control's only effect is to hide everything.
    *
-   * **This page leads its siblings here.** `Charts.tsx`, `Datasets.tsx`,
-   * `Dashboards.tsx`, `Notebooks.tsx` and `Alerts.tsx` all render
-   * `FolderHeaderRow` unconditionally for every group `groupByFolder` returns,
-   * so all five show a lone "Uncategorized" header in a folderless workspace.
-   * That is the same relationship §1.5 of `docs/en/ui-conventions.md` already
-   * records for `role="rowheader"` on `Clients.tsx`: a gap in those five, not a
-   * licence for this one to reproduce it. The divergence is invisible in any
-   * workspace that HAS a folder, where this page groups exactly as they do.
+   * **`SavedTab.tsx:134` is the precedent, and this is the second application
+   * of it, not a deviation.** That file already branches
+   * `folders.length === 0 ? <flat list> : groups.map(…)` around the same
+   * `groupByFolder`/`FolderHeader` pair, for the same reason. Do not "restore
+   * consistency" by deleting this gate: `Charts.tsx`, `Datasets.tsx`,
+   * `Dashboards.tsx`, `Notebooks.tsx` and `Alerts.tsx` DO render their header
+   * unconditionally, so those five are the ones out of step, and dropping this
+   * brings back a lone "Uncategorized (1)" over a folderless workspace's only
+   * row. The split is a gap in those five, not a licence for this one to
+   * reproduce it — the same reading §1.5 of `docs/en/ui-conventions.md`
+   * applies to `role="rowheader"`. It is invisible in any workspace that HAS a
+   * folder, where every one of these pages groups identically.
    *
    * Read off `folders`, not off `groups.length`: with a filter engaged
    * `groupByFolder` drops empty named folders, so a search matching only
