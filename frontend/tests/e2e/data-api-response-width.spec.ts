@@ -105,12 +105,32 @@ test.describe("Data API — the Response section is on one measure", () => {
             (h2) => h2.textContent?.trim() === "Response",
           );
           if (!heading) return null;
-          // The section's own root, walked up from its heading — never
-          // `querySelector`, so an interposed wrapper breaks the walk instead
-          // of being silently walked past.
-          const root = heading.parentElement?.parentElement as HTMLElement | undefined;
+
+          // The element the route renders the section INTO, resolved rather
+          // than assumed — the `<fieldset>` inside the route's `.p-4` root
+          // (disabled only for a trashed endpoint), exactly as
+          // `__tests__/sectionWidth.ts` resolves it.
+          const routeRoot = document.querySelector<HTMLElement>("main .p-4");
+          if (!routeRoot) return null;
+          const host = routeRoot.querySelector<HTMLElement>("fieldset") ?? routeRoot;
+
+          // The section's own root: a real WALK up from the heading to the
+          // child the host renders directly — never `parentElement.parentElement`.
+          //
+          // This was a counted hop, and the review caught what that costs: it is
+          // correct only for today's markup, and ONE extra wrapper inside the
+          // section makes `root` the fieldset instead — at which point
+          // `root === available` is tautologically true and this spec goes green
+          // on a page that has regressed. `sectionWidth.ts:57` forbids the
+          // counted hop for exactly this reason, and its comment applied here
+          // while the code did not.
+          let root: HTMLElement | null = heading.parentElement;
+          while (root && root.parentElement !== host) root = root.parentElement;
           if (!root) return null;
-          const host = root.parentElement as HTMLElement;
+          // The walk overshooting the section and landing on the host is the
+          // failure the counted hop hid, so it is a hard stop rather than a
+          // silently-passing measurement.
+          if (root.tagName === "FIELDSET") return null;
           const hostStyle = getComputedStyle(host);
           const tables = [...root.querySelectorAll("table")];
           const settings = tables.find(
@@ -121,7 +141,21 @@ test.describe("Data API — the Response section is on one measure", () => {
           );
           const nameHead = frozen?.querySelector("th");
           const typeHead = frozen?.querySelectorAll("th")[1];
-          const paragraphs = [...root.querySelectorAll(":scope > div > p.max-w-prose")];
+          // EVERY paragraph in the section, at any depth.
+          //
+          // `:scope > div > p` matched only depth 2. For THIS fixture — an
+          // endpoint that is never published and has no transform — two capped
+          // paragraphs render (`Response transform`, at depth 3, and
+          // `OpenAPI document`, at depth 2), so that selector saw exactly one
+          // of the two; the `Frozen columns` note is conditional on a branching
+          // column and the `Declared returns` one on a transform, so neither is
+          // on screen here. Measured in Chromium against the real markup: 2 of
+          // 3 at depth 2 for a published endpoint with an optional column, and
+          // **0 of 3 as soon as one wrapper div is added inside the section** —
+          // the same fragility as the counted hop above, in the assertion
+          // rather than in the walk. The count guard at the call site is what
+          // stops that degrading into a green run over an empty list.
+          const paragraphs = [...root.querySelectorAll("p.max-w-prose")];
           return {
             available: round(host.getBoundingClientRect().right - parseFloat(hostStyle.paddingRight)),
             root: right(root),
@@ -161,7 +195,13 @@ test.describe("Data API — the Response section is on one measure", () => {
         expect(m!.settingsTable, `${width}px: the settings table's right edge`).toBe(m!.root);
         expect(m!.frozenTable, `${width}px: the frozen list's right edge`).toBe(m!.root);
 
-        // The exception, asserted rather than skipped.
+        // The exception, asserted rather than skipped — and counted first: a
+        // `for` over an empty list asserts nothing at all, which is how a
+        // selector that stops matching turns into a green run.
+        expect(
+          m!.paragraphRights.length,
+          `${width}px: found the section's capped prose`,
+        ).toBeGreaterThan(0);
         for (const r of m!.paragraphRights) {
           expect(r, `${width}px: prose keeps its own reading measure`).toBeLessThan(m!.root!);
         }
