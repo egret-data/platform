@@ -417,4 +417,15 @@ describe("Clients — the summary strip agrees with itself about number", () => 
 
     expect(screen.getByText("service accounts").textContent).toBe("2service accounts");
   });
+
+  it("never renders a zero count — the empty workspace gets the first-run CTA instead", async () => {
+    // The third branch: `ListStates` swaps the list for its `empty` slot, so
+    // there is no "0 service accounts" to get wrong. Asserted both ways —
+    // the CTA alone would pass over a page that rendered the strip too.
+    renderClients([]);
+
+    expect(await screen.findByText(/no service accounts yet/i)).toBeInTheDocument();
+    expect(screen.queryByText("service accounts")).not.toBeInTheDocument();
+    expect(screen.queryByText("service account")).not.toBeInTheDocument();
+  });
 });

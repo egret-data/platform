@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -306,17 +306,25 @@ describe("Activity — per-endpoint table", () => {
 });
 
 describe("Activity — call list", () => {
+  // Both assertions below are scoped to the call list. The per-endpoint table
+  // now renders the SAME sentence, so an unscoped negative here would be
+  // satisfied by whatever that table happens to show — it would fail for a
+  // correct call list the day someone gives the summary fixture no endpoints,
+  // and it would pass for a broken one that leaked an empty row beside its
+  // error.
   it("shows the call-list error state, not an empty table, when it fails", async () => {
     mockCallsError("calls boom");
     renderActivity();
     await screen.findByTestId("tile-calls");
-    expect(await screen.findByText(/calls boom/i)).toBeInTheDocument();
-    expect(screen.queryByText(/no calls in this range/i)).not.toBeInTheDocument();
+    const list = await screen.findByTestId("activity-call-list");
+    expect(await within(list).findByText(/calls boom/i)).toBeInTheDocument();
+    expect(within(list).queryByText(/no calls in this range/i)).not.toBeInTheDocument();
   });
 
   it("shows an empty state distinct from the error state when there are genuinely no calls", async () => {
     renderActivity();
-    expect(await screen.findByText(/no calls in this range/i)).toBeInTheDocument();
+    const list = await screen.findByTestId("activity-call-list");
+    expect(await within(list).findByText(/no calls in this range/i)).toBeInTheDocument();
   });
 
   it("renders a call row with endpoint, status, duration, cache hit and request id", async () => {
@@ -523,6 +531,11 @@ describe("Activity — one wording for one empty state", () => {
     await waitFor(() =>
       expect(screen.getAllByText("No calls in this range.")).toHaveLength(2),
     );
+    // …and the two matches are one per table, not two inside whichever table
+    // happened to render: the call list owns one of them.
+    expect(
+      within(screen.getByTestId("activity-call-list")).getByText("No calls in this range."),
+    ).toBeInTheDocument();
     expect(screen.queryByText("No calls in range.")).not.toBeInTheDocument();
   });
 });

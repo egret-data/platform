@@ -1903,25 +1903,32 @@ describe("Endpoints — the summary strip agrees with itself about number", () =
     expect(screen.queryByText("endpoints total")).not.toBeInTheDocument();
   });
 
-  it("keeps the s for every other count, zero included", async () => {
+  it("keeps the s for two", async () => {
     // Guards the other direction: a naive `s`-stripper would render
-    // "0 endpoint total" and "2 endpoint total".
+    // "2 endpoint total".
     mockList({
       data: {
         status: 200,
         data: [makeEndpoint({ id: "e1", name: "one" }), makeEndpoint({ id: "e2", name: "two" })],
       },
     });
-    const { unmount } = renderEndpoints();
+    renderEndpoints();
     await screen.findByText("one");
-    expect(screen.getByText("endpoints total").textContent).toBe("2endpoints total");
-    unmount();
 
+    expect(screen.getByText("endpoints total").textContent).toBe("2endpoints total");
+  });
+
+  it("never renders a zero count — the empty workspace gets the first-run CTA instead", async () => {
+    // The third branch, and the reason "0 endpoints total" is not asserted
+    // anywhere: `ListStates` swaps the whole list for its `empty` slot, so the
+    // strip is not on screen at all. Both halves are asserted — the CTA is
+    // present AND the strip is absent — because the CTA alone would still pass
+    // over a page that rendered both.
     mockList({ data: { status: 200, data: [] } });
     renderEndpoints();
-    // An empty workspace shows the first-run CTA instead of the strip, so
-    // there is no "0 endpoints total" on screen to assert — the CTA is what
-    // this state must render.
+
     expect(await screen.findByText(/no endpoints yet/i)).toBeInTheDocument();
+    expect(screen.queryByText("endpoints total")).not.toBeInTheDocument();
+    expect(screen.queryByText("endpoint total")).not.toBeInTheDocument();
   });
 });

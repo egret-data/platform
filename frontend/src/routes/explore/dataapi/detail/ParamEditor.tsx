@@ -249,7 +249,7 @@ function ConstraintFields({
 }
 
 /**
- * The `:name` parameters a caller supplies on the query string — **one table
+ * The `{{ name }}` parameters a caller supplies on the query string — **one table
  * row per declaration**, not one card per declaration.
  *
  * The card-per-parameter stack this replaced put a `grid grid-cols-2` inside a

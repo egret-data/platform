@@ -146,7 +146,11 @@ export default function ActivityCallList({ ws, range }: { ws: string; range: Act
     (callsQuery.error as { message?: string } | null)?.message ?? "Could not load the call list.";
 
   return (
-    <div className="space-y-3">
+    // Testid, not a heading lookup: the per-endpoint table above renders the
+    // IDENTICAL empty sentence, so every assertion about this list's three
+    // states has to be scoped to it — and in the error state there is no
+    // table here to scope by.
+    <div data-testid="activity-call-list" className="space-y-3">
       <h2 className="text-sm font-semibold">Calls</h2>
 
       <div className="flex flex-wrap items-end gap-3">
