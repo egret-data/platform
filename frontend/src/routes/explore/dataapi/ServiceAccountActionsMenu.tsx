@@ -21,9 +21,12 @@ import type { DataApiServiceAccountDto } from "@/api/generated/model";
  * dialogs still belong to the page.
  *
  * Deliberately absent: **Revoke**. A revoke acts on one client credential, not
- * on the account, so it stays on the client's own line inside `ClientsCell` —
- * this menu would put it on the wrong object, and an account with four clients
- * has no single "the client" to revoke.
+ * on the account, so it lives in the client's OWN row menu (`ClientRow` in
+ * `Clients.tsx`) — this menu would put it on the wrong object, and an account
+ * with four clients has no single "the client" to revoke.
+ *
+ * This menu now sits in the account's GROUP HEADER row, not in a data row: a
+ * client is the row, and the account is the header above its clients.
  */
 export function ServiceAccountActionsMenu({ ws, account, onDelete }: {
   /** Needed only to build the issue-client URL; the row itself carries the id. */

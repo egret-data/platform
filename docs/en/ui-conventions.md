@@ -114,14 +114,61 @@ now set on every list toolbar toggle in Explore except `Notebooks.tsx`.
 
 Search goes in a toolbar row above the summary strip, where the five sibling Explore pages
 put theirs. `FilterableTable`'s own search box renders *below* the strip, inside the table
-block — the one place no other list page has it — so pages pass `hideSearch` and filter
-`rows` themselves. Two search inputs one row apart would be worse than either.
+block — the one place no other list page has it — so a page that uses that component passes
+`hideSearch` and filters `rows` itself. Two search inputs one row apart would be worse than
+either.
 
-This has a knock-on that is easy to get wrong and is commented in place: with `hideSearch`,
-`FilterableTable`'s internal `q` never leaves `""`, so it can no longer distinguish a
-first-run empty from a search miss and always renders `emptyText`. That is correct **only
-because** the genuine first-run case is `ListStates`' `empty` and never reaches the table.
-See §2.
+`Clients.tsx` no longer uses `FilterableTable` at all (§1.5), so its toolbar is now simply
+the only search box on the page; it kept the `page-toolbar` testid, and its test asserts both
+that the box is *inside* that toolbar and that there is exactly one of it. The `hideSearch`
+escape hatch is documented here because the next page to reach for `FilterableTable` will
+need it — with `hideSearch` set, that component's internal `q` never leaves `""`, so it can
+no longer distinguish a first-run empty from a search miss and always renders `emptyText`,
+which is correct **only** where the genuine first-run case is `ListStates`' `empty` and never
+reaches the table. See §2.
+
+### 1.5 A grouped list is the siblings' hand-rolled `<table>`, never `FilterableTable`
+
+`src/routes/explore/Charts.tsx`, `Datasets.tsx`, `Dashboards.tsx`, `Notebooks.tsx`,
+`dataapi/Endpoints.tsx`, `dataapi/Clients.tsx`
+
+`FilterableTable` sorts, searches and paginates **one flat entity**. It cannot model a group,
+so a page whose list has two levels writes the table out by hand, exactly as the BI lists do:
+
+```tsx
+<div className="overflow-x-auto">
+  <table className="w-full text-sm">
+    <thead className="text-left text-muted-foreground">…</thead>
+    {groups.map((g) => <tbody key={g.id}>{/* header row, then its rows */}</tbody>)}
+  </table>
+</div>
+```
+
+One `<tbody>` per group, the group's own heading as the first row in it, `border-t` between
+rows and `hover:bg-accent` on them.
+
+**The defect.** `Clients.tsx` nested a variable-length list of OAuth2 clients inside one cell
+of a `FilterableTable` row — each client a line of running text carrying a name, a
+36-character id, a badge, a last-used phrase and a Revoke — because the page's list is
+two-level and the component is not. Nothing aligned down the page, and an irreversible action
+sat as body text between two timestamps. A client is a row now and the service account is a
+group header, in the hand-rolled table above.
+
+**Do not reach for `FilterableTable` to avoid hand-writing a `<table>`.** Its styling is not
+the siblings': bold dark headers against their muted ones, `border-b` against `border-t`,
+`hover:bg-muted/50` against `hover:bg-accent`. The mismatch is visible in the browser on a
+page that sits next to those siblings in the sidebar, and has been reported as one.
+
+**What the hand-rolled table gives up, and how to keep it.** `FilterableTable` also paginates,
+and a page whose rows each fire their own query was relying on that for more than layout:
+`Clients.tsx`'s `pageSize={25}` capped how many per-account client requests could be in flight,
+because only one page of rows was ever mounted. Grouping removed the pagination, so the cap is
+now explicit (`GROUP_PAGE`, a "Show N more" button), and its test asserts the number of
+distinct accounts queried on first paint — not just what is on screen.
+
+Group headers carry `role="rowheader"` on the spanning cell, the same idiom §4.1 records for
+`ConfigTableGroup`, and for the same reason: a group row that reads as another data cell is
+the confusion the shape exists to remove.
 
 ---
 

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -19,6 +19,11 @@ import Clients from "@/routes/explore/dataapi/Clients";
 // the declared fields and print it would be caught here, even though nothing
 // in the real backend response could ever carry it.
 const SECRET_FIXTURE = "sk_live_do_not_leak_9f3c2b";
+
+// A real 36-character client id. The short form is what the ID column renders;
+// the full value stays reachable through `title` and the copy button.
+const LONG_CLIENT_ID = "7f3b2c1a-9d4e-4f8b-9a2c-1e5d6f7a8b9c";
+const LONG_CLIENT_ID_SHORT = "7f3b2c1a…8b9c";
 
 const SERVICE_ACCOUNT: DataApiServiceAccountDto = {
   id: "sa-1",
@@ -58,6 +63,17 @@ function mockClients(over: Partial<{ data: unknown; isError: boolean; isLoading:
   vi.mocked(api.useDataApiListClients).mockReturnValue(
     { data: { status: 200, data: [] }, isLoading: false, isError: false, ...over } as unknown as
       ReturnType<typeof api.useDataApiListClients>,
+  );
+}
+
+/** Per-account client lists, so a grouping test can give two accounts different clients. */
+function mockClientsByAccount(byAccount: Record<string, DataApiClientDto[]>) {
+  vi.mocked(api.useDataApiListClients).mockImplementation(
+    ((_ws: string, accountId: string) => ({
+      data: { status: 200, data: byAccount[accountId] ?? [] },
+      isLoading: false,
+      isError: false,
+    })) as unknown as typeof api.useDataApiListClients,
   );
 }
 
@@ -105,12 +121,17 @@ beforeEach(() => {
       ReturnType<typeof api.useDataApiRevokeClient>,
   );
 
-  // Automocking turns the query-key builder into a `vi.fn()` returning
-  // `undefined`; an argument-sensitive fake is what lets a test tell "the
-  // service-account list was invalidated" from "something was".
+  // Automocking turns the query-key builders into `vi.fn()`s returning
+  // `undefined`; argument-sensitive fakes are what let a test tell "the
+  // service-account list was invalidated" from "something was", and "THIS
+  // account's client list" from "some client list".
   vi.mocked(api.getDataApiListServiceAccountsQueryKey).mockImplementation(
     (ws) => ["dataApiListServiceAccounts", ws] as unknown as
       ReturnType<typeof api.getDataApiListServiceAccountsQueryKey>,
+  );
+  vi.mocked(api.getDataApiListClientsQueryKey).mockImplementation(
+    (ws, accountId) => ["dataApiListClients", ws, accountId] as unknown as
+      ReturnType<typeof api.getDataApiListClientsQueryKey>,
   );
 
   deleteAccountMutateAsync.mockResolvedValue({ status: 200, data: { ok: true }, headers: new Headers() });
@@ -140,7 +161,7 @@ describe("Clients", () => {
   it("shows which account a client belongs to without clicking", async () => {
     renderClients();
     expect(await screen.findByText("reporting-bot")).toBeInTheDocument();
-    // "etl" (the client) renders in the same row as its owning account, with
+    // "etl" (the client) renders under its owning account's group header, with
     // no expand/select step required to reveal it.
     expect(screen.getByText("etl")).toBeInTheDocument();
   });
@@ -155,17 +176,18 @@ describe("Clients", () => {
    * Issuing a client used to be TWO dialogs this page owned — a form, then the
    * one-time secret, the second mounting as the first was unmounted while still
    * open. Both are the `ClientCreate` route now, so what is left for the list to
-   * get right is that the row menu points at it, for the ROW's own account.
+   * get right is that the group header's menu points at it, for the GROUP's own
+   * account.
    *
    * The `href` is asserted rather than clicked: this harness mounts only the
    * `clients` route, so a click would land on nothing and "pass" for a link
    * pointing anywhere. And no form or secret may appear here — opening the menu
    * must navigate, not reveal a dialog.
    */
-  it("the row menu's Issue client item links to that account's new-client page, not a dialog trigger", async () => {
+  it("the group menu's Issue client item links to that account's new-client page, not a dialog trigger", async () => {
     renderClients([makeAccount({ id: "sa-7", name: "nightly-exporter" })]);
     await screen.findByText("nightly-exporter");
-    await userEvent.click(screen.getByRole("button", { name: /actions/i }));
+    await userEvent.click(screen.getByRole("button", { name: "Actions for nightly-exporter" }));
 
     const item = await screen.findByRole("menuitem", { name: /issue client/i });
     // The account id comes from the ROW, not from a constant: `sa-7` is not the
@@ -191,7 +213,7 @@ describe("Clients", () => {
     mockClients({ isLoading: true });
     renderClients();
     await screen.findByText("reporting-bot");
-    expect(screen.getByText(/loading/i)).toBeInTheDocument();
+    expect(screen.getByText(/loading clients/i)).toBeInTheDocument();
     expect(screen.queryByText(/no clients yet/i)).not.toBeInTheDocument();
   });
 
@@ -203,19 +225,17 @@ describe("Clients", () => {
       },
     });
     renderClients();
-    await screen.findByText("etl");
-    expect(screen.getByText(/expires/i)).toBeInTheDocument();
-    expect(screen.getByText(/last used/i)).toBeInTheDocument();
+    const row = await screen.findByRole("row", { name: /etl/ });
+    expect(within(row).getByText(/expires/i)).toBeInTheDocument();
+    // Last used is a COLUMN now, so the cell carries the time and nothing else;
+    // "never" is what an unused client's cell says.
+    expect(within(row).queryByText(/never/i)).not.toBeInTheDocument();
   });
 
-  it("shows a Revoked badge and no Revoke action for an already-revoked client", async () => {
-    mockClients({
-      data: { status: 200, data: [makeClient({ name: "old-etl", revoked_at: "2026-08-01T00:00:00Z" })] },
-    });
+  it("says Never in the Last used column for a client that has never been used", async () => {
     renderClients();
-    await screen.findByText("old-etl");
-    expect(screen.getByText("Revoked")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /revoke old-etl/i })).not.toBeInTheDocument();
+    const row = await screen.findByRole("row", { name: /etl/ });
+    expect(within(row).getByText("Never")).toBeInTheDocument();
   });
 
   it("revoking a client goes through ConfirmDeleteDialog (type-to-confirm) and calls useDataApiRevokeClient", async () => {
@@ -223,7 +243,8 @@ describe("Clients", () => {
     renderClients();
     await screen.findByText("etl");
 
-    await user.click(screen.getByRole("button", { name: /revoke etl/i }));
+    await user.click(screen.getByRole("button", { name: "Actions for etl" }));
+    await user.click(await screen.findByRole("menuitem", { name: /revoke/i }));
     const input = await screen.findByPlaceholderText("revoke");
     await user.type(input, "revoke");
     await user.click(screen.getByRole("button", { name: /^revoke$/i }));
@@ -238,7 +259,7 @@ describe("Clients", () => {
     renderClients();
     await screen.findByText("reporting-bot");
 
-    await user.click(screen.getByRole("button", { name: /actions/i }));
+    await user.click(screen.getByRole("button", { name: "Actions for reporting-bot" }));
     await user.click(await screen.findByRole("menuitem", { name: /delete/i }));
     expect(await screen.findByText(/grants and every client/i)).toBeInTheDocument();
 
@@ -263,7 +284,7 @@ describe("Clients", () => {
   it("puts the account's actions in a menu, not loose in the row", async () => {
     renderClients([makeAccount({ id: "a1", name: "bot" })]);
     await screen.findByText("bot");
-    await userEvent.click(screen.getByRole("button", { name: /actions/i }));
+    await userEvent.click(screen.getByRole("button", { name: "Actions for bot" }));
     expect(await screen.findByRole("menuitem", { name: /issue client/i })).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: /delete/i })).toBeInTheDocument();
   });
@@ -271,15 +292,9 @@ describe("Clients", () => {
   it("searches from the page toolbar, where every other Explore page has it", async () => {
     renderClients([makeAccount({ id: "a1", name: "alpha" }), makeAccount({ id: "a2", name: "beta" })]);
     await screen.findByText("alpha");
-    // `FilterableTable` has its own internal search box, so this page's search
-    // sat in a different place from all five siblings.
-    //
-    // WHERE it is, not just that it filters: the brief's version of this test
-    // passed against the OLD page unchanged, because FilterableTable's own box
-    // carried this very placeholder. These two assertions are what make it a
-    // test of the move — the box is in the page toolbar, and there is exactly
-    // one of it (an uncontrolled second box would filter a set this one had
-    // already filtered).
+    // WHERE it is, not just that it filters: the box is in the page toolbar,
+    // and there is exactly one of it (a second, uncontrolled box would filter a
+    // set this one had already filtered).
     const box = screen.getByPlaceholderText(/search service accounts/i);
     expect(screen.getByTestId("page-toolbar")).toContainElement(box);
     expect(screen.getAllByPlaceholderText(/^search/i)).toHaveLength(1);
@@ -296,10 +311,6 @@ describe("Clients", () => {
    * entry points are real LINKS to that URL — a `<button>` that pushed the
    * route imperatively would look identical on screen but could not be
    * middle-clicked, opened in a new tab, or copied.
-   *
-   * The `href` is asserted rather than clicked: this harness mounts only the
-   * `clients` route, so a click would land on nothing and "pass" for a link
-   * pointing anywhere.
    */
   it("the + Service account action is a link to the create page, not a dialog trigger", async () => {
     renderClients();
@@ -321,6 +332,245 @@ describe("Clients", () => {
 });
 
 /**
+ * The shape this task exists to fix.
+ *
+ * Before: ONE table cell nested a variable-length list of clients, each entry a
+ * line of running text — name, a 36-character UUID, a badge, a last-used phrase
+ * and an action — so nothing aligned down the page. A client is now a ROW with
+ * real columns, and the service account is the group header above it.
+ */
+describe("Clients — a client is a row, an account is a group header", () => {
+  const ACCOUNTS = [
+    makeAccount({ id: "sa-1", name: "reporting-bot", email: "sa-1@service.egret.local" }),
+    makeAccount({ id: "sa-2", name: "warehouse-bot", email: "sa-2@service.egret.local" }),
+  ];
+
+  function renderTwoAccounts() {
+    mockClientsByAccount({
+      "sa-1": [
+        makeClient({ id: "cl-a", name: "alpha-loader", client_id: LONG_CLIENT_ID }),
+        makeClient({ id: "cl-b", name: "beta-loader", client_id: "client_bbb222" }),
+      ],
+      "sa-2": [makeClient({ id: "cl-c", name: "gamma-loader", client_id: "client_ccc333" })],
+    });
+    return renderClients(ACCOUNTS);
+  }
+
+  it("names the columns a client is read across", async () => {
+    renderTwoAccounts();
+    await screen.findByText("alpha-loader");
+    for (const label of ["Client", "ID", "Status", "Last used"]) {
+      expect(screen.getByRole("columnheader", { name: label })).toBeInTheDocument();
+    }
+  });
+
+  it("gives each client its own row, with one cell per column", async () => {
+    renderTwoAccounts();
+    const row = await screen.findByRole("row", { name: /alpha-loader/ });
+    // Five cells: Client · ID · Status · Last used · actions. A row with one
+    // cell is the shape this task replaced.
+    expect(within(row).getAllByRole("cell")).toHaveLength(5);
+    expect(within(row).getByText("Active")).toBeInTheDocument();
+    expect(within(row).getByText("Never")).toBeInTheDocument();
+    // The account is the header ABOVE the row, never inside it.
+    expect(within(row).queryByText("reporting-bot")).not.toBeInTheDocument();
+  });
+
+  it("makes the service account a group header row, not a cell in a client's row", async () => {
+    renderTwoAccounts();
+    await screen.findByText("alpha-loader");
+    const header = screen.getByRole("rowheader", { name: /reporting-bot/ });
+    expect(header).toBeInTheDocument();
+    // The header names how many clients hang off it, so a reader can tell an
+    // account with none from one whose list has not arrived.
+    expect(header.textContent).toContain("2 clients");
+    expect(screen.getByRole("rowheader", { name: /warehouse-bot/ }).textContent).toContain("1 client");
+  });
+
+  it("keeps each client under its OWN account, not merged into one list", async () => {
+    renderTwoAccounts();
+    await screen.findByText("alpha-loader");
+    // `<tbody>` per group: the group header and its clients share a parent, and
+    // the other account's client does not.
+    const group = screen.getByRole("rowheader", { name: /reporting-bot/ }).closest("tbody")!;
+    expect(within(group).getByText("alpha-loader")).toBeInTheDocument();
+    expect(within(group).getByText("beta-loader")).toBeInTheDocument();
+    expect(within(group).queryByText("gamma-loader")).not.toBeInTheDocument();
+  });
+
+  it("keeps the column headers on screen when an account has no clients", async () => {
+    mockClients({ data: { status: 200, data: [] } });
+    renderClients([makeAccount()]);
+    expect(await screen.findByText(/no clients yet/i)).toBeInTheDocument();
+    // §4.3: a list's states are rows INSIDE the table, so the columns are named
+    // in every state rather than disappearing with the branch that replaced them.
+    expect(screen.getByRole("columnheader", { name: "Client" })).toBeInTheDocument();
+    expect(screen.getByText(/no clients yet/i).closest("tr")).toBeInTheDocument();
+  });
+
+  it("keeps the column headers on screen while an account's clients load, and when they fail", async () => {
+    mockClients({ isLoading: true });
+    const { unmount } = renderClients([makeAccount()]);
+    expect(await screen.findByText(/loading clients/i)).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Status" })).toBeInTheDocument();
+    unmount();
+
+    mockClients({ isError: true });
+    renderClients([makeAccount()]);
+    expect(await screen.findByText(/could not load clients/i)).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Status" })).toBeInTheDocument();
+  });
+});
+
+/**
+ * The ID column. A 36-character UUID dominated the old running-text line and
+ * nobody reads one; what a reader actually does with it is paste it into a
+ * client config.
+ */
+describe("Clients — the client id is truncated and copyable", () => {
+  beforeEach(() => {
+    mockClients({ data: { status: 200, data: [makeClient({ client_id: LONG_CLIENT_ID })] } });
+  });
+
+  it("renders a short form, not the whole 36 characters", async () => {
+    renderClients();
+    await screen.findByText("etl");
+    expect(screen.getByText(LONG_CLIENT_ID_SHORT)).toBeInTheDocument();
+    // Asserted alongside the short form on purpose: "the long id is absent"
+    // passes over a page that rendered no id at all.
+    expect(screen.queryByText(LONG_CLIENT_ID)).not.toBeInTheDocument();
+  });
+
+  it("keeps the full id reachable without a copy, through the cell's title", async () => {
+    renderClients();
+    await screen.findByText("etl");
+    expect(screen.getByTitle(LONG_CLIENT_ID)).toHaveTextContent(LONG_CLIENT_ID_SHORT);
+  });
+
+  it("copies the FULL id, not the short form it shows", async () => {
+    // Read back through `userEvent`'s own clipboard stub rather than spying on
+    // `writeText`: `setup()` replaces `navigator.clipboard` with that stub, so
+    // a spy installed beforehand is the object the component never touched —
+    // which is exactly how this assertion failed first time round. Reading the
+    // clipboard also asserts the VALUE that landed, not the call that was made.
+    const user = userEvent.setup();
+    renderClients();
+    await screen.findByText("etl");
+    await user.click(screen.getByRole("button", { name: "Copy client id for etl" }));
+    expect(await navigator.clipboard.readText()).toBe(LONG_CLIENT_ID);
+  });
+
+  it("leaves a short id alone rather than truncating it to something longer", async () => {
+    mockClients({ data: { status: 200, data: [makeClient({ client_id: "client_abc123" })] } });
+    renderClients();
+    await screen.findByText("etl");
+    expect(screen.getByText("client_abc123")).toBeInTheDocument();
+    expect(screen.queryByText(/…/)).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * Revoked clients.
+ *
+ * The old row struck through the client's NAME and left the UUID beside it
+ * unstruck, so the line read half-cancelled. Status is a column now: the badge
+ * carries the word, and the row's muted form carries the rest. Nothing is
+ * encoded by strikethrough, and nothing is encoded by colour alone.
+ */
+describe("Clients — a revoked client is not encoded by strikethrough", () => {
+  beforeEach(() => {
+    mockClients({
+      data: {
+        status: 200,
+        data: [makeClient({ name: "old-etl", client_id: LONG_CLIENT_ID, revoked_at: "2026-08-01T00:00:00Z" })],
+      },
+    });
+  });
+
+  it("says Revoked in words, in the Status column", async () => {
+    renderClients();
+    const row = await screen.findByRole("row", { name: /old-etl/ });
+    expect(within(row).getByText("Revoked")).toBeInTheDocument();
+  });
+
+  it("strikes through nothing at all — not the name, not the id", async () => {
+    renderClients();
+    const row = await screen.findByRole("row", { name: /old-etl/ });
+    expect(row.querySelectorAll(".line-through")).toHaveLength(0);
+  });
+
+  it("carries a form difference beyond the badge's colour: the whole row is muted", async () => {
+    renderClients();
+    const row = await screen.findByRole("row", { name: /old-etl/ });
+    expect(row.className).toContain("text-muted-foreground");
+  });
+
+  it("offers no revoke action for a client that is already revoked", async () => {
+    renderClients();
+    await screen.findByText("old-etl");
+    expect(screen.queryByRole("button", { name: "Actions for old-etl" })).not.toBeInTheDocument();
+  });
+
+  it("still offers revoke for an expired-but-not-revoked client", async () => {
+    mockClients({
+      data: {
+        status: 200,
+        data: [makeClient({ name: "stale-etl", expires_at: "2020-01-01T00:00:00Z" })],
+      },
+    });
+    renderClients();
+    const row = await screen.findByRole("row", { name: /stale-etl/ });
+    // Expiry and revocation are different lifecycle events on the backend
+    // (`expires_at` vs `revoked_at`, independently settable).
+    expect(within(row).getByText("Expired")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Actions for stale-etl" })).toBeInTheDocument();
+  });
+});
+
+/**
+ * Revoke is irreversible, and it used to be body text sitting between two
+ * timestamps.
+ */
+describe("Clients — Revoke is a destructive control behind a confirmation", () => {
+  it("does not revoke on the menu click alone", async () => {
+    const user = userEvent.setup();
+    renderClients();
+    await screen.findByText("etl");
+    await user.click(screen.getByRole("button", { name: "Actions for etl" }));
+    await user.click(await screen.findByRole("menuitem", { name: /revoke/i }));
+    expect(revokeMutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("does not revoke until the confirmation word is typed", async () => {
+    const user = userEvent.setup();
+    renderClients();
+    await screen.findByText("etl");
+    await user.click(screen.getByRole("button", { name: "Actions for etl" }));
+    await user.click(await screen.findByRole("menuitem", { name: /revoke/i }));
+
+    const confirm = screen.getByRole("button", { name: /^revoke$/i });
+    // Rendered outside any `fieldset`, so `toBeDisabled` cannot be satisfied by
+    // an ancestor: this is the button's own state.
+    expect(confirm.closest("fieldset")).toBeNull();
+    expect(confirm).toBeDisabled();
+
+    await user.type(screen.getByPlaceholderText("revoke"), "revoke");
+    expect(confirm).toBeEnabled();
+  });
+
+  it("marks the menu item destructive and names the client it acts on", async () => {
+    const user = userEvent.setup();
+    renderClients();
+    await screen.findByText("etl");
+    await user.click(screen.getByRole("button", { name: "Actions for etl" }));
+    const item = await screen.findByRole("menuitem", { name: /revoke/i });
+    expect(item.className).toContain("text-destructive");
+    await user.click(item);
+    expect(await screen.findByText(/"etl"/)).toBeInTheDocument();
+  });
+});
+
+/**
  * Cache invalidation (final-review finding, Important #1).
  *
  * The service-account list key is shared by FIVE surfaces — this table,
@@ -328,10 +578,6 @@ describe("Clients", () => {
  * and the Response preview. With `staleTime: 30000` and no `onSuccess` on the
  * generated hooks, a newly created account was missing from all five for
  * thirty seconds, and a deleted one stayed in all five.
- *
- * These drive the `onSuccess` the page's mutations were constructed with —
- * the one `src/api/dataApi.ts` attaches — the same way `EndpointDetail.test.tsx`
- * pins Save's.
  */
 describe("Clients — cache invalidation", () => {
   const RESULT = { status: 200, data: {}, headers: new Headers() } as never;
@@ -351,10 +597,6 @@ describe("Clients — cache invalidation", () => {
     );
   }
 
-  // Create's invalidation moved with the mutation: this page no longer builds
-  // it, `ServiceAccountCreate` does. The same assertion lives in
-  // `ServiceAccountCreate.invalidation.test.tsx`.
-
   it("deleting a service account invalidates that same list, so the row leaves the table", async () => {
     const { qc } = renderClients();
     const spy = vi.spyOn(qc, "invalidateQueries");
@@ -364,10 +606,6 @@ describe("Clients — cache invalidation", () => {
     );
   });
 
-  // The workspace is read from the mutation VARIABLES, never from a separate
-  // hook argument that could drift from where the write went. Driven through
-  // DELETE here because create's mutation left with the form; the wrapper
-  // derives the key the same way for both.
   it("invalidates the list of the workspace the write actually went to", async () => {
     const { qc } = renderClients();
     const spy = vi.spyOn(qc, "invalidateQueries");
@@ -375,6 +613,30 @@ describe("Clients — cache invalidation", () => {
     expect(spy).toHaveBeenCalledWith(
       expect.objectContaining({ queryKey: ["dataApiListServiceAccounts", "other-ws"] }),
     );
+  });
+
+  /**
+   * Revoke's key is per SERVICE ACCOUNT, and the mutation's variables carry the
+   * CLIENT's id — so the owning account's id has to be carried through the
+   * pending-revoke state. Keying off the client id instead leaves the revoked
+   * row on screen with an Active badge.
+   */
+  it("revoking invalidates the owning ACCOUNT's client list, not a key built from the client id", async () => {
+    const user = userEvent.setup();
+    const { qc } = renderClients([makeAccount({ id: "sa-9", name: "billing-bot" })]);
+    const spy = vi.spyOn(qc, "invalidateQueries");
+    await screen.findByText("etl");
+
+    await user.click(screen.getByRole("button", { name: "Actions for etl" }));
+    await user.click(await screen.findByRole("menuitem", { name: /revoke/i }));
+    await user.type(screen.getByPlaceholderText("revoke"), "revoke");
+    await user.click(screen.getByRole("button", { name: /^revoke$/i }));
+
+    await waitFor(() => {
+      expect(spy).toHaveBeenCalledWith(
+        expect.objectContaining({ queryKey: ["dataApiListClients", "eng", "sa-9"] }),
+      );
+    });
   });
 });
 
@@ -395,6 +657,24 @@ describe("Clients — page scaffold", () => {
     const { container } = renderClients();
     await screen.findByRole("heading", { level: 1, name: "Clients" });
     expect(container.firstElementChild?.className ?? "").toMatch(/\bp-4\b/);
+  });
+
+  /**
+   * One noun, one explanation. The sidebar and the title say *Clients*; the
+   * search box and the summary say *service accounts*. They are different
+   * things — an account HOLDS clients — and the page says so once, in its
+   * description, instead of letting the two labels read as synonyms that
+   * disagree.
+   */
+  it("explains, once, that a service account holds clients", async () => {
+    renderClients();
+    await screen.findByRole("heading", { level: 1, name: "Clients" });
+    const description = screen.getByText(/service account holds/i);
+    expect(description).toBeInTheDocument();
+    expect(description.textContent).toMatch(/client/i);
+    // Once: the explanation is the page description, directly under the h1 —
+    // not repeated as a caption over the table.
+    expect(screen.getAllByText(/service account holds/i)).toHaveLength(1);
   });
 });
 
@@ -419,13 +699,50 @@ describe("Clients — the summary strip agrees with itself about number", () => 
   });
 
   it("never renders a zero count — the empty workspace gets the first-run CTA instead", async () => {
-    // The third branch: `ListStates` swaps the list for its `empty` slot, so
-    // there is no "0 service accounts" to get wrong. Asserted both ways —
-    // the CTA alone would pass over a page that rendered the strip too.
     renderClients([]);
 
     expect(await screen.findByText(/no service accounts yet/i)).toBeInTheDocument();
     expect(screen.queryByText("service accounts")).not.toBeInTheDocument();
     expect(screen.queryByText("service account")).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * Each group fires its own `useDataApiListClients` on mount — one request per
+ * rendered service account. `FilterableTable`'s `pageSize={25}` used to cap
+ * that by only mounting one page of rows; grouping replaced that table, so the
+ * cap has to be kept explicitly or a workspace with 200 accounts fires 200
+ * requests on first paint.
+ */
+describe("Clients — the per-account request fan-out stays capped", () => {
+  const MANY = Array.from({ length: 30 }, (_, i) =>
+    makeAccount({ id: `sa-${i}`, name: `bot-${String(i).padStart(2, "0")}`, email: `sa-${i}@service.egret.local` }),
+  );
+
+  function queriedAccountIds() {
+    return new Set(vi.mocked(api.useDataApiListClients).mock.calls.map((c) => c[1]));
+  }
+
+  it("mounts at most 25 groups, so at most 25 client queries, on first paint", async () => {
+    renderClients(MANY);
+    await screen.findByText("bot-00");
+    expect(queriedAccountIds().size).toBe(25);
+    expect(screen.queryByText("bot-29")).not.toBeInTheDocument();
+  });
+
+  it("names how many are left, and shows them on request", async () => {
+    const user = userEvent.setup();
+    renderClients(MANY);
+    await screen.findByText("bot-00");
+    await user.click(screen.getByRole("button", { name: /show 5 more service accounts/i }));
+    expect(await screen.findByText("bot-29")).toBeInTheDocument();
+    expect(queriedAccountIds().size).toBe(30);
+    expect(screen.queryByRole("button", { name: /show .* more/i })).not.toBeInTheDocument();
+  });
+
+  it("offers no Show-more button when everything already fits", async () => {
+    renderClients([makeAccount()]);
+    await screen.findByText("reporting-bot");
+    expect(screen.queryByRole("button", { name: /show .* more/i })).not.toBeInTheDocument();
   });
 });
