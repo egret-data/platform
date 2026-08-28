@@ -414,6 +414,58 @@ describe("Config — config table Details column", () => {
       ).length,
     ).toBeGreaterThan(0);
   });
+
+  /**
+   * A rate limit of `0` is the value every endpoint has until somebody sets
+   * one, and on a security-shaped setting "unlimited" and "blocked" are
+   * opposites. The answer is not a matter of taste — it is in
+   * `crates/egret-dataapi/src/serving/ratelimit.rs`:
+   *
+   *   - `Rate::from_spec` (`:86-88`) returns `None` for `qps == 0`, and
+   *     `check_request` (`:202`, `:214`) then installs no bucket at all. So `0`
+   *     on either qps field means NO LIMIT. Its own doc says so (`:73-81`):
+   *     "Treating that as 'zero requests per second' would make every default
+   *     endpoint unreachable; it means unlimited."
+   *   - `burst == 0` is a DIFFERENT sentinel (`:91-95`): the burst becomes the
+   *     qps, i.e. one second of allowance. Not unlimited, and not zero. And it
+   *     is passed only for the per-KEY bucket — `:214` hard-codes `0` for the
+   *     endpoint-wide one — so a burst with no `per_key_qps` does nothing at
+   *     all.
+   *
+   * The three rows shipped one placeholder, "unlimited", on all three. Two were
+   * right for the wrong reason (they described the EMPTY box, and a stored `0`
+   * renders as `0` and never shows a placeholder) and the third was simply
+   * false.
+   */
+  it("says what a rate limit of 0 does, and does not say the same thing for Burst", async () => {
+    renderConfig();
+    const perCaller = await screen.findByLabelText("Per caller (qps)");
+    const burst = screen.getByLabelText("Burst");
+    const perEndpoint = screen.getByLabelText("Endpoint-wide (qps)");
+
+    // The row's text, not the Details cell's: the copy renders twice (the
+    // `lg:table-cell` column and the `lg:hidden` inline copy), which is how
+    // this file already asserts Details copy above.
+    const rowText = (el: HTMLElement) => (el.closest("tr") as HTMLElement).textContent ?? "";
+
+    expect(rowText(perCaller)).toMatch(/no per-caller limit/i);
+    expect(rowText(perEndpoint)).toMatch(/no endpoint-wide limit/i);
+
+    // Burst's zero is the other sentinel, and the row has to say both halves:
+    // what 0 means, and that it is inert without a per-caller rate.
+    expect(rowText(burst)).toMatch(/one second of the per-caller rate/i);
+    expect(rowText(burst)).toMatch(/per caller \(qps\)/i);
+
+    // The discriminating half. All three rows said "unlimited" before, so a
+    // test that only checked the two qps rows would pass on the copy that was
+    // wrong — and would pass again the next time somebody "makes the three
+    // rows consistent".
+    expect(rowText(burst)).not.toMatch(/\bunlimited\b/i);
+    expect(perCaller).toHaveAttribute("placeholder", "0 — unlimited");
+    expect(perEndpoint).toHaveAttribute("placeholder", "0 — unlimited");
+    expect(burst.getAttribute("placeholder")).not.toBe("0 — unlimited");
+    expect(burst.getAttribute("placeholder")).toMatch(/per-caller rate/i);
+  });
 });
 
 function renderResponse(endpoint: DataApiEndpointDto = makeEndpoint()) {

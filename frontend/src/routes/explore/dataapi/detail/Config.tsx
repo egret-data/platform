@@ -284,18 +284,51 @@ export default function Config() {
           />
         </ConfigTableRow>
 
+        {/* # What a rate limit of `0` means, and why the three rows do not agree
+            about it
+
+            Every endpoint carries `0` on all three fields until somebody sets
+            one — `RateLimitSpec` derives `#[serde(default)]` for each
+            (`crates/egret-dataapi-api/src/lib.rs:187-194`) — and on a
+            security-shaped setting "unlimited" and "blocked" are opposites. All
+            three rows shipped the same `placeholder="unlimited"` and said
+            nothing else, which was right for the wrong reason on two of them and
+            simply false on the third.
+
+            `crates/egret-dataapi/src/serving/ratelimit.rs` settles it:
+
+              - `Rate::from_spec` (`:86-89`) returns `None` when `qps == 0`, and
+                `check_request` (`:202`, `:214`) installs no bucket for a `None`.
+                So `0` on either qps field is NO LIMIT. The function's own doc
+                (`:76-80`) says why it has to be: "Treating that as 'zero
+                requests per second' would make every default endpoint
+                unreachable; it means unlimited."
+              - `burst == 0` is a DIFFERENT sentinel (`:91-95`): the burst
+                becomes the qps — one second of allowance, the smallest burst
+                that does not refuse a client sending exactly at its configured
+                rate. Not unlimited, and not zero.
+              - That burst belongs to the per-KEY bucket alone. `:214` hard-codes
+                `0` for the endpoint-wide one, with the reason in the comment
+                there, so a burst set on an endpoint with no `per_key_qps` has no
+                effect whatsoever.
+
+            A stored `0` renders as `0` (`?? ""` is nullish-coalescing, and `0`
+            is not nullish), so the placeholder is only ever seen on an EMPTY
+            box: it teaches what leaving the field alone does, and the Details
+            cell is what explains the `0` an author is looking at. Both, because
+            neither reaches the other's case. */}
         <ConfigTableGroup label="Rate limit" />
         <ConfigTableRow
           label="Per caller (qps)"
           htmlFor="cfg-rl-per-key"
-          details="Sustained requests per second allowed for each client credential."
+          details="Sustained requests per second allowed for each client credential. 0, the default, means no per-caller limit."
         >
           <Input
             id="cfg-rl-per-key"
             className="w-full"
             type="number"
             min={0}
-            placeholder="unlimited"
+            placeholder="0 — unlimited"
             value={form.rate_limit.per_key_qps ?? ""}
             onChange={(e) =>
               setForm((f) => ({
@@ -311,14 +344,14 @@ export default function Config() {
         <ConfigTableRow
           label="Burst"
           htmlFor="cfg-rl-burst"
-          details="How many requests may arrive at once above the sustained rate before throttling starts."
+          details="How many requests may arrive at once above the sustained rate before throttling starts. 0 means one second of the per-caller rate, and it does nothing at all unless Per caller (qps) is set."
         >
           <Input
             id="cfg-rl-burst"
             className="w-full"
             type="number"
             min={0}
-            placeholder="unlimited"
+            placeholder="0 — one second of the per-caller rate"
             value={form.rate_limit.burst ?? ""}
             onChange={(e) =>
               setForm((f) => ({
@@ -331,14 +364,14 @@ export default function Config() {
         <ConfigTableRow
           label="Endpoint-wide (qps)"
           htmlFor="cfg-rl-per-endpoint"
-          details="Ceiling across all callers of this endpoint combined, whatever their individual limits."
+          details="Ceiling across all callers of this endpoint combined, whatever their individual limits. 0, the default, means no endpoint-wide limit."
         >
           <Input
             id="cfg-rl-per-endpoint"
             className="w-full"
             type="number"
             min={0}
-            placeholder="unlimited"
+            placeholder="0 — unlimited"
             value={form.rate_limit.per_endpoint_qps ?? ""}
             onChange={(e) =>
               setForm((f) => ({
