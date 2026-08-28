@@ -71,6 +71,17 @@ import { cn } from "@/lib/utils";
  * rather than guessing one, and it is set. `chart/settings/FieldLabel.tsx` and
  * `ui/icon-button.tsx` still do the same thing locally, and still may.
  *
+ * The `disabled:hover:*` twins are INSURANCE, not the load-bearing part, and
+ * that distinction was measured rather than assumed. `hover:bg-primary/90` and
+ * `disabled:bg-secondary` are both 0-2-0, so neither wins on specificity and the
+ * tie goes to emission order — and Tailwind emits `disabled:` after `hover:`.
+ * Deleting every `disabled:hover:bg-*` from this file and hovering a disabled
+ * button in real Chrome changes nothing: it stays `oklch(0.27 0.01 286.1)`,
+ * light and dark, `outline` and `default`. What DOES repaint it teal is removing
+ * the disabled fill itself, which is the mutation that kills the e2e test. The
+ * twins are kept because "correct only because of the order Tailwind happens to
+ * emit variants in" is a fact about a dependency, not a decision this file made.
+ *
  * FOURTH — the disabled paint, and why alpha alone was a bug rather than a
  * shortcut. Disabled used to be `disabled:opacity-50` and nothing else. Measured
  * with `getComputedStyle` on the deployed build's endpoint-detail Save button,

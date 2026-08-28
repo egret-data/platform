@@ -147,10 +147,15 @@ describe("Button — disabled is a paint change, not an alpha change", () => {
       expect(classes).toContain("disabled:inset-ring-border");
       expect(classes).toContain("disabled:shadow-none");
 
-      // The paint must survive a hover. A disabled button is still hit-testable
-      // here on purpose (that is what keeps its `title` tooltip reachable), so
-      // the variant's `hover:bg-*` still matches and would otherwise repaint a
-      // disabled Save back to full teal under the pointer.
+      // A disabled button is still hit-testable here on purpose (that is what
+      // keeps its `title` tooltip reachable), so the variant's `hover:bg-*`
+      // still matches it. This pins the belt-and-braces twin, and it is
+      // labelled as such: mutation testing showed that DELETING it changes
+      // nothing a browser can see, because `disabled:bg-secondary` already
+      // outranks `hover:bg-primary/90` on emission order at equal specificity.
+      // The behaviour it guards is asserted in real Chrome
+      // (`tests/e2e/disabled-button-paint.spec.ts`); what fails there is the
+      // loss of the fill, not the loss of this twin.
       expect(classes).toContain("disabled:hover:bg-secondary");
 
       // And the defect itself: alpha is no longer carrying the state.
@@ -328,9 +333,12 @@ describe("Button — a dark-mode fill must say what it becomes when disabled", (
   test.each(hoverDarkFill.map((e) => e.name))(
     "`%s` paints a background under dark:hover: and overrides that too",
     (name) => {
-      // Same reason as in light mode: a disabled button is still hit-testable
-      // here, on purpose, so `dark:hover:bg-*` would otherwise repaint it under
-      // the pointer.
+      // The same belt-and-braces as in light mode, and measured to be exactly
+      // that: with these four classes deleted, a real hover over a disabled
+      // `outline` button in dark Chrome still reports
+      // `oklch(0.27 0.01 286.1)`. They are pinned so the paint does not depend
+      // on the order Tailwind happens to emit `dark:hover:` and `dark:disabled:`
+      // in, which is all that decides it between two 0-3-0 selectors.
       const { classes } = entries.find((e) => e.name === name)!;
       expect(classes).toMatch(/dark:disabled:hover:bg-/);
       expect(classes).toMatch(/dark:aria-disabled:hover:bg-/);

@@ -304,8 +304,13 @@ test.describe("A disabled button is painted disabled, in both themes", () => {
     expect(hovered.matchesHover).toBe(true);
     expect(hovered.cursor).toBe("not-allowed");
     // The variant's `hover:bg-primary/90` matches a disabled button too, because
-    // hit-testing is what decides `:hover`. Without the `disabled:hover:*` twin
-    // it would repaint the disabled Save back to full teal under the pointer.
+    // hit-testing is what decides `:hover`. What this catches, measured by
+    // mutation: with the disabled FILL removed (back to `opacity-50` alone) this
+    // line reports `oklab(0.66 -0.129505 -0.0113303)` — the hover teal — against
+    // a resting value that was the plain teal. Removing only the
+    // `disabled:hover:*` twin does NOT fail it, because `disabled:` is emitted
+    // after `hover:` at equal specificity; the twin is insurance against that
+    // order, and this assertion is honest about which of the two it pins.
     expect(hovered.background, "hovering a disabled button does not repaint it").toBe(atRest);
   });
 });
