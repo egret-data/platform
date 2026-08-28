@@ -29,6 +29,11 @@ import type { DataApiEndpointListItemDto } from "@/api/generated/model";
 // The exact string `RelativeTime` puts in its `title` — imported rather than
 // hardcoded so the assertion does not silently become timezone-dependent.
 import { fullTimestamp } from "@/lib/relativeTime";
+// The folderless bucket's collapse key, imported rather than retyped: the
+// stranded-collapse test below seeds localStorage with exactly what
+// `useCollapsed` will look for, and a hardcoded "__uncat__" would keep
+// passing against a page that had stopped using this key at all.
+import { UNCATEGORIZED_KEY } from "@/components/explore/folders";
 import Endpoints from "@/routes/explore/dataapi/Endpoints";
 
 function mockList(over: Partial<{ data: unknown; isError: boolean; isLoading: boolean; error: unknown }> = {}) {
@@ -1426,6 +1431,192 @@ describe("Endpoints — folders", () => {
     await waitFor(() => expect(toast.error).toHaveBeenCalled());
     expect(toast.success).not.toHaveBeenCalled();
   });
+/**
+ * Folder SECTION HEADERS, which are not the same thing as folder grouping
+ * (task 7, item 1).
+ *
+ * The live audit found a workspace holding one endpoint and no folders at all
+ * rendering "▸ Uncategorized (1)" above its single row: a taxonomy the
+ * workspace does not have, spelled out as a collapsible section, over a list
+ * that is not divided into anything. "Uncategorized" carries information only
+ * beside a NAMED folder — alone it is the whole list wearing a label, and a
+ * collapse control whose only effect is to hide everything.
+ *
+ * Every fixture below comes in a with-folders / without-folders PAIR. A block
+ * that only ever mocked `mockFolders([])` could not tell "no header when there
+ * are no folders" apart from "no headers, ever", and the second is a
+ * regression that would hide every named folder on the page.
+ *
+ * This is deliberately AHEAD of `Charts.tsx`, `Datasets.tsx`, `Dashboards.tsx`,
+ * `Notebooks.tsx` and `Alerts.tsx`, which all render the bucket's header
+ * unconditionally — the same relationship §1.5 of `docs/en/ui-conventions.md`
+ * records for `role="rowheader"` on `Clients.tsx`. See the comment on
+ * `showFolderHeaders` in `Endpoints.tsx`.
+ */
+describe("Endpoints — a folder header needs a folder", () => {
+  const REPORTING = { id: "f-1", name: "Reporting" };
+  const LOOSE_A = makeEndpoint({ id: "ep-a", name: "Ad hoc query", folder_id: null });
+  const LOOSE_B = makeEndpoint({ id: "ep-b", name: "Second query", folder_id: null });
+  const IN_REPORTING = makeEndpoint({ id: "ep-r", name: "Daily report", folder_id: "f-1" });
+
+  /** `useCollapsed`'s storage key for this page: `folders:${ws}:${FOLDER_KIND}`. */
+  const COLLAPSE_KEY = "folders:eng:data_api_endpoints";
+
+  it("heads no section at all in a workspace with no folders", async () => {
+    mockList({ data: { status: 200, data: [LOOSE_A] } });
+    mockFolders([]);
+    renderEndpoints();
+
+    // The row is there…
+    expect(await screen.findByText("Ad hoc query")).toBeInTheDocument();
+    // …and under nothing. `Toggle Uncategorized` is `FolderHeaderRow`'s own
+    // accessible name, so this asks whether the HEADER ROW exists rather than
+    // whether the word happens to appear somewhere on the page.
+    expect(screen.queryByRole("button", { name: "Toggle Uncategorized" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Uncategorized")).not.toBeInTheDocument();
+  });
+
+  it("still heads Uncategorized once there is a real folder to contrast it with", async () => {
+    mockList({ data: { status: 200, data: [IN_REPORTING, LOOSE_A] } });
+    mockFolders([REPORTING]);
+    renderEndpoints();
+
+    expect(await screen.findByRole("button", { name: "Toggle Reporting" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Toggle Uncategorized" })).toBeInTheDocument();
+    // Both sections' rows, so this is not passing on an empty table.
+    expect(screen.getByText("Daily report")).toBeInTheDocument();
+    expect(screen.getByText("Ad hoc query")).toBeInTheDocument();
+  });
+
+  it("collapses the Uncategorized section wherever it IS headed", async () => {
+    mockList({ data: { status: 200, data: [IN_REPORTING, LOOSE_A] } });
+    mockFolders([REPORTING]);
+    const user = userEvent.setup();
+    renderEndpoints();
+    await screen.findByText("Ad hoc query");
+
+    await user.click(screen.getByRole("button", { name: "Toggle Uncategorized" }));
+
+    expect(screen.queryByText("Ad hoc query")).not.toBeInTheDocument();
+    // The named folder is untouched by that click — a collapse that took the
+    // whole table with it would satisfy the line above just as well.
+    expect(screen.getByText("Daily report")).toBeInTheDocument();
+  });
+
+  it("does not strand rows behind a collapse state whose header is no longer rendered", async () => {
+    // What a previous session left behind: Uncategorized collapsed, from back
+    // when this workspace still had folders. `useCollapsed` reads that out of
+    // localStorage at mount, and it survives the folders being deleted.
+    localStorage.setItem(COLLAPSE_KEY, JSON.stringify([UNCATEGORIZED_KEY]));
+    mockList({ data: { status: 200, data: [LOOSE_A, LOOSE_B] } });
+    mockFolders([]);
+    const user = userEvent.setup();
+    renderEndpoints();
+
+    // Rendering the rows is only half of it. `visibleRows` — what bulk select
+    // acts on — is derived from `groups` and the SAME collapse state in a
+    // separate `useMemo`, so dropping the header in the render loop alone
+    // leaves "Select all" sweeping zero rows while two sit in front of the
+    // user, with no header left anywhere to expand.
+    expect(await screen.findByText("Ad hoc query")).toBeInTheDocument();
+    expect(screen.getByText("Second query")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Bulk select" }));
+    await user.click(screen.getByRole("checkbox", { name: "Select all" }));
+
+    expect(screen.getByText("2 selected")).toBeInTheDocument();
+  });
+});
+
+/**
+ * The header's four icon-only controls (task 7, item 2).
+ *
+ * They stay icon-only: §1.2 of `docs/en/ui-conventions.md` fixes the order and
+ * the Explore idiom keeps these compact, so everything that tells them apart
+ * is either a glyph or an accessible name.
+ *
+ * The name half is asserted through `getByRole(…, { name })`, which runs the
+ * REAL accessible-name computation. A hand-rolled `aria-label ?? textContent`
+ * read agrees with it on today's markup and disagrees the moment one of these
+ * is named by another element — a prior task in this programme shipped that
+ * approximation. It is also why these assertions are not written against
+ * `aria-hidden` on the glyph: `lucide-react` sets that itself, so such a test
+ * would pin the library rather than this page.
+ *
+ * jsdom does no layout, so nothing here claims anything about SPACING. What it
+ * can see is order and structure: a `separator` element standing between the
+ * view controls and the destructive one, and no separator where there is
+ * nothing to its left.
+ */
+describe("Endpoints — the header's icon controls", () => {
+  const TRASHED = makeEndpoint({
+    id: "ep-t", name: "Trashed alpha", deleted_at: "2026-08-18T09:00:00Z",
+  } as Partial<DataApiEndpointListItemDto>);
+
+  /** The `<header>` `ListPageShell` puts the title and both slots in. */
+  function pageHeader(): HTMLElement {
+    const el = screen.getByRole("heading", { level: 1 }).closest("header");
+    if (!el) throw new Error("ListPageShell renders its title inside a <header>");
+    return el;
+  }
+
+  it("gives every one of them an accessible name", async () => {
+    mockList({ data: { status: 200, data: [LOOSE_ROW] } });
+    mockFolders([]);
+    renderEndpoints();
+    await screen.findByText("Ad hoc query");
+
+    const h = pageHeader();
+    for (const name of ["Bookmarks", "Bulk select", "New folder", "Trash"]) {
+      expect(within(h).getByRole("button", { name })).toBeInTheDocument();
+    }
+  });
+
+  it("puts a separator between the view controls and the destructive one", async () => {
+    mockList({ data: { status: 200, data: [LOOSE_ROW] } });
+    mockFolders([]);
+    renderEndpoints();
+    await screen.findByText("Ad hoc query");
+
+    const h = pageHeader();
+    const separator = within(h).getByRole("separator");
+    const newFolder = within(h).getByRole("button", { name: "New folder" });
+    const trash = within(h).getByRole("button", { name: "Trash" });
+
+    // Existence alone would be satisfied by a divider parked anywhere in the
+    // header, including after Trash — the whole point is WHICH controls it
+    // stands between.
+    expect(newFolder.compareDocumentPosition(separator) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+    expect(separator.compareDocumentPosition(trash) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+  });
+
+  it("renders no separator over an empty list, where nothing stands to its left", async () => {
+    mockList({ data: { status: 200, data: [] } });
+    mockFolders([]);
+    renderEndpoints();
+    await screen.findByText(/no endpoints yet/i);
+
+    const h = pageHeader();
+    // The view controls are gated on `hasData`; Trash is not (§1.2), so it is
+    // alone up there and a divider would be separating it from nothing.
+    expect(within(h).getByRole("button", { name: "Trash" })).toBeInTheDocument();
+    expect(within(h).queryByRole("separator")).not.toBeInTheDocument();
+  });
+
+  it("renders no separator in the trash either, which offers none of the view controls", async () => {
+    mockListByView([LOOSE_ROW], [TRASHED]);
+    const user = userEvent.setup();
+    renderEndpoints();
+    await screen.findByText("Ad hoc query");
+    // Present in the normal view — otherwise its absence below proves nothing.
+    expect(within(pageHeader()).getByRole("separator")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Trash" }));
+    await screen.findByText("Trashed alpha");
+
+    expect(within(pageHeader()).queryByRole("separator")).not.toBeInTheDocument();
+  });
+});
 });
 
 /**

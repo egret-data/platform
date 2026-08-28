@@ -227,6 +227,32 @@ export default function Endpoints() {
   const groups = useMemo(() => groupByFolder(rows, folders, filtering), [rows, folders, filtering]);
 
   /**
+   * Whether the table is drawn with folder SECTION HEADERS at all — which is
+   * not the same question as whether it is grouped. `groupByFolder` always
+   * returns at least the folderless bucket, so a workspace that has never made
+   * a folder still gets one group; heading it turns a plain list of endpoints
+   * into "Uncategorized (1)", a collapsible section introducing a taxonomy the
+   * workspace does not use. "Uncategorized" only carries information beside a
+   * NAMED folder; on its own it labels the whole list after the one thing it
+   * is not, and its collapse control's only effect is to hide everything.
+   *
+   * **This page leads its siblings here.** `Charts.tsx`, `Datasets.tsx`,
+   * `Dashboards.tsx`, `Notebooks.tsx` and `Alerts.tsx` all render
+   * `FolderHeaderRow` unconditionally for every group `groupByFolder` returns,
+   * so all five show a lone "Uncategorized" header in a folderless workspace.
+   * That is the same relationship §1.5 of `docs/en/ui-conventions.md` already
+   * records for `role="rowheader"` on `Clients.tsx`: a gap in those five, not a
+   * licence for this one to reproduce it. The divergence is invisible in any
+   * workspace that HAS a folder, where this page groups exactly as they do.
+   *
+   * Read off `folders`, not off `groups.length`: with a filter engaged
+   * `groupByFolder` drops empty named folders, so a search matching only
+   * folderless rows would collapse `groups` to one and make the header blink
+   * out mid-keystroke, then back on deletion of the last character.
+   */
+  const showFolderHeaders = !showTrash && folders.length > 0;
+
+  /**
    * The rows actually ON SCREEN — not `rows`, which is only what survived
    * filtering and sorting: a collapsed folder's rows are in `groups` but not in
    * front of the user.
@@ -238,12 +264,18 @@ export default function Endpoints() {
    */
   const visibleRows = useMemo(
     () =>
-      // The trash is a flat table — no folder headers, so nothing is collapsed
-      // and `rows` IS what is on screen.
-      showTrash
-        ? rows
-        : groups.flatMap((g) => (collapse.isCollapsed(g.folder?.id ?? UNCATEGORIZED_KEY) ? [] : g.rows)),
-    [showTrash, rows, groups, collapse],
+      // Keyed off the same flag the table renders from, deliberately. Without
+      // a header there is no collapse control, so nothing CAN be collapsed and
+      // `rows` is what is on screen — that covers the trash (a flat table) and
+      // the folderless workspace alike. Reading the collapse state here anyway
+      // would strand rows: `useCollapsed` restores from localStorage, so a
+      // visitor who collapsed Uncategorized while the workspace still had
+      // folders would come back after the last one was deleted to two rows on
+      // screen that "Select all" cannot reach and no header left to expand.
+      showFolderHeaders
+        ? groups.flatMap((g) => (collapse.isCollapsed(g.folder?.id ?? UNCATEGORIZED_KEY) ? [] : g.rows))
+        : rows,
+    [showFolderHeaders, rows, groups, collapse],
   );
 
   // One list behind both the count and the delete: `bulk.selectedIds` is
@@ -495,6 +527,21 @@ export default function Endpoints() {
               <BookmarkToggle active={onlyBookmarked} onToggle={() => setOnlyBookmarked((v) => !v)} />
               <BulkToggle active={bulk.bulkMode} onToggle={() => bulk.setBulkMode(!bulk.bulkMode)} />
               <FolderToolbar onNewFolder={() => setFolderDialog({ mode: "new" })} />
+              {/* Trash is the odd one out in this row and the only one whose
+                  glyph reads as "destroy something": the three above change
+                  what this list SHOWS, it changes which list is being shown,
+                  and next to them at an identical size it is one mis-click
+                  from a filter. `role="separator"` rather than a bare styled
+                  div so the boundary is announced and not merely drawn — the
+                  same idiom `RefreshMenu.tsx` and `DashboardActionsMenu` use
+                  between a menu's safe and unsafe halves.
+
+                  Rendered INSIDE this gate, not beside it: the three controls
+                  and the divider that follows them appear and disappear
+                  together, so the trash view and an empty list — where Trash
+                  stands alone — cannot show a divider with nothing to its
+                  left. */}
+              <div role="separator" aria-orientation="vertical" className="mx-1 h-5 w-px bg-border" />
             </>
           )}
           {/* The one toolbar control that is NOT gated on `hasData`. It does not
@@ -653,12 +700,14 @@ export default function Endpoints() {
                   <th className="w-8" />
                 </tr>
               </thead>
-              {/* Flat in the trash. Folders organise work in progress; a
-                  trashed row's folder is what it will go BACK to, not where it
-                  is now, and grouping the trash by it would hide rows behind
-                  collapsible headers in the one view whose whole job is to let
-                  the author find something they deleted. */}
-              {showTrash ? (
+              {/* Flat wherever there is nothing to head — see
+                  `showFolderHeaders`. That is the trash, always (folders
+                  organise work in progress; a trashed row's folder is what it
+                  will go BACK to, not where it is now, and grouping the trash
+                  by it would hide rows behind collapsible headers in the one
+                  view whose whole job is to let the author find something they
+                  deleted) and a workspace that has no folders at all. */}
+              {!showFolderHeaders ? (
                 <tbody>{rows.map(renderRow)}</tbody>
               ) : (
                 groups.map((group) => {
