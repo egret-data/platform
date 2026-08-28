@@ -59,12 +59,26 @@ export function Caveat({
       {/* `list-none` plus an explicit chevron rather than the UA marker, which
           renders at a different size and offset per browser and cannot be
           aligned with what sits above it. Same idiom as `Query.tsx`'s strip. */}
-      <summary className="flex cursor-pointer list-none items-start gap-1 text-muted-foreground hover:text-foreground">
+      {/* `whitespace-normal`, and it is load-bearing rather than defensive.
+          The shared `TableCell` is `whitespace-nowrap` (its own comment in
+          `AccessSection` says so, which is why that `<th>` sets
+          `whitespace-normal` by hand), and a `Caveat` is DESIGNED to sit in a
+          cell — `TryIt` puts one in the Service-account row's Value cell.
+          Inherited, `nowrap` made the summary wider than its column: measured
+          live at a 1440px viewport, the 64-character summary rendered 388px
+          inside a 320px cell, so the sentence was clipped mid-phrase on screen
+          AND the whole `Setting | Details | Value` table overflowed (1092 vs
+          1016), putting a horizontal scrollbar under a settings table on a
+          desktop viewport. `min-w-0` on the text is the other half: a flex
+          child will not shrink below its content without it, so the wrap has
+          somewhere to happen. Where there is room the summary still sets on one
+          line, so no caller that fit before changes. */}
+      <summary className="flex cursor-pointer list-none items-start gap-1 whitespace-normal text-muted-foreground hover:text-foreground">
         <ChevronRight
           className="mt-px h-3 w-3 shrink-0 transition-transform group-open:rotate-90"
           aria-hidden="true"
         />
-        <span className="underline decoration-dotted underline-offset-2">{summary}</span>
+        <span className="min-w-0 underline decoration-dotted underline-offset-2">{summary}</span>
       </summary>
       <div className="mt-1 pl-4 text-muted-foreground">{children}</div>
     </details>

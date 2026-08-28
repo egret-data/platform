@@ -544,29 +544,40 @@ export default function Endpoints() {
               <BookmarkToggle active={onlyBookmarked} onToggle={() => setOnlyBookmarked((v) => !v)} />
               <BulkToggle active={bulk.bulkMode} onToggle={() => bulk.setBulkMode(!bulk.bulkMode)} />
               <FolderToolbar onNewFolder={() => setFolderDialog({ mode: "new" })} />
-              {/* Trash is the odd one out in this row and the only one whose
-                  glyph reads as "destroy something": the three above change
-                  what this list SHOWS, it changes which list is being shown,
-                  and next to them at an identical size it is one mis-click
-                  from a filter. `role="separator"` rather than a bare styled
-                  div so the boundary is announced and not merely drawn — the
-                  same idiom `RefreshMenu.tsx` and `DashboardActionsMenu` use
-                  between a menu's safe and unsafe halves.
-
-                  Rendered INSIDE this gate, not beside it: the three controls
-                  and the divider that follows them appear and disappear
-                  together, so the trash view and an empty list — where Trash
-                  stands alone — cannot show a divider with nothing to its
-                  left. */}
-              <div role="separator" aria-orientation="vertical" className="mx-1 h-5 w-px bg-border" />
             </>
           )}
-          {/* The one toolbar control that is NOT gated on `hasData`. It does not
-              filter the rows in front of the user, it switches to a different
-              server query — and an empty endpoint list says nothing about
-              whether the trash is empty. Gated, it would also be the way OUT of
-              an empty trash, removed exactly when it is needed. */}
-          <ListToolbarButton icon={Trash2} label="Trash" active={showTrash} filled onClick={toggleTrash} />
+          {/* Trash is the odd one out in this row and the only one whose glyph
+              reads as "destroy something": the three above change what this
+              list SHOWS, it changes which list is being shown, and next to
+              them at an identical size it is one mis-click from a filter.
+              `role="separator"` rather than a bare styled div so the boundary
+              is announced and not merely drawn — the same idiom
+              `RefreshMenu.tsx` and `DashboardActionsMenu` use between a menu's
+              safe and unsafe halves.
+
+              The divider and Trash are ONE flex item, not two siblings, and
+              that is a wrapping fix rather than a nesting preference. The
+              shell's action group is `flex flex-wrap` (`ListPageShell.tsx`), so
+              as siblings the line could break between them — measured live at a
+              320px viewport, it did: the first row ended on a 1px hairline with
+              nothing after it and Trash dropped to the next line, which reads
+              as a stray mark rather than as a boundary. A flex item wraps whole,
+              so there is no width at which they can be separated.
+
+              The divider still appears and disappears with the three controls
+              above — same condition, so the trash view and an empty list, where
+              Trash stands alone, still cannot show a divider with nothing to
+              its left. Trash itself stays UNGATED: it does not filter the rows
+              in front of the user, it switches to a different server query, and
+              an empty endpoint list says nothing about whether the trash is
+              empty. Gated, it would also be the way OUT of an empty trash,
+              removed exactly when it is needed. */}
+          <div className="flex items-center gap-2">
+            {!showTrash && hasData && (
+              <div role="separator" aria-orientation="vertical" className="mx-1 h-5 w-px bg-border" />
+            )}
+            <ListToolbarButton icon={Trash2} label="Trash" active={showTrash} filled onClick={toggleTrash} />
+          </div>
         </>
       }
       action={
