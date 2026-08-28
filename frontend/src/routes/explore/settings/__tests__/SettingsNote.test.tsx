@@ -44,12 +44,16 @@ describe("SettingsNote", () => {
     expect(container.querySelector('[role="note"]')).not.toBeNull();
   });
 
-  it("marks its icon decorative, so the sentence is not prefixed by an image", () => {
-    // An `Info` glyph with no `aria-hidden` lands in the note's accessible
-    // text. There is nothing for a reader to do with it.
-    const { container } = render(<SettingsNote>Anything.</SettingsNote>);
-    const icon = container.querySelector("svg");
-    expect(icon).not.toBeNull();
-    expect(icon).toHaveAttribute("aria-hidden", "true");
-  });
+  /**
+   * There is deliberately no third test here, and the missing one is worth
+   * naming: "marks its icon decorative" was written, and the mutation run
+   * deleted `aria-hidden="true"` from `SettingsNote.tsx` and it still passed.
+   * `lucide-react` adds the attribute itself when no a11y prop is given
+   * (`hasA11yProp` in its `Icon`), so the assertion pinned the LIBRARY's
+   * default and nothing this file owns — §8, an assertion a hardcoded
+   * implementation would also pass. The `aria-hidden` in the component is
+   * therefore redundant rather than load-bearing; it stays because deleting
+   * shipped markup on that reasoning is a change in its own right, but no test
+   * here pretends to be guarding it.
+   */
 });
