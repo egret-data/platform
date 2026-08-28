@@ -12,7 +12,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ConfigTable, ConfigTableRow } from "@/components/config/ConfigTable";
-import { SettingsNote } from "@/routes/explore/settings/SettingsNote";
+import { Caveat } from "./Caveat";
 import { useDataApiListServiceAccounts, useDataApiTryEndpoint } from "@/api/generated/data-api/data-api";
 import type { DataApiServiceAccountDto, TryRequestParams, TryResponse } from "@/api/generated/model";
 import { useEndpointDetail } from "../EndpointDetail";
@@ -85,8 +85,8 @@ function CopyButton({ value }: { value: string }) {
  * says the same thing from the other side, and the two were measured to differ
  * live on kind (`who=admin` from a preview, `who=svc-kind-smoke-bot` from a
  * trial, same endpoint and same SQL). That is why both features exist, so the
- * copy carrying it is load-bearing: the section description, the Service
- * account row's Details cell, and the note beside Run all say it.
+ * copy carrying it is load-bearing: the section description, the `Caveat` under
+ * the Service-account picker, and the note beside Run all say it.
  *
  * **The shape is `Query`'s** (`docs/en/ui-conventions.md` §11): settings in
  * tables, a vertical `Group` whose two panels hold the setup and the result,
@@ -95,14 +95,28 @@ function CopyButton({ value }: { value: string }) {
  * scroll, so a re-run meant scroll down to read, scroll back up to change a
  * value, scroll down again. The two halves are now on screen at once.
  *
- * **No `<details>` strip, unlike `Query`.** Query collapses one because its
- * strip holds `ParamEditor`, which measured 370px of a 615px section. The setup
- * here is one picker and one short row per parameter, and the prose is a
- * WARNING — a trial spends the rate limit, writes the access log and fills the
- * cache for real. `PreviewBlock` already recorded why that class of copy travels
- * with the button rather than living somewhere the reader must go and find it,
- * and a drawer closed by default is worse than a scroll. So the note sits in the
- * result panel beside Run, and nothing here is collapsed.
+ * **No `<details>` strip, unlike `Query`** — the SETUP is not collapsed. Query
+ * collapses its strip because it holds `ParamEditor`, which measured 370px of a
+ * 615px section; the setup here is one picker and one short row per parameter,
+ * and there is nothing to win.
+ *
+ * **The PROSE is, and that reverses half of what this comment used to say.**
+ * It said the trial warning could not be collapsed at all, on `PreviewBlock`'s
+ * rule: a reader who has to go and find "this is a real call" has already
+ * pressed the button. That rule is still right and the conclusion did not
+ * follow — it argues against hiding the FACT, not against hiding the four
+ * sentences of mechanism under it. The audit measured what the old reading
+ * cost: ~950 characters of standing prose over one dropdown and one button.
+ *
+ * So both blocks are `Caveat`s (§4.4): the consequence is the summary and is on
+ * screen with nothing clicked — "A trial is a real call, not a dry run", beside
+ * Run — and the rate-limit, access-log and cache mechanics are behind it.
+ * Nothing was deleted; every sentence is one gesture away, and the gesture
+ * works on a trashed endpoint because a `<summary>` is not a form control.
+ *
+ * The published-version note stays PLAIN TEXT, and that is the same rule
+ * pointing the other way: two lines with no explanation to hold would cost a
+ * click to reveal nothing. Collapse a caveat because it is big.
  */
 export default function TryIt() {
   const { ws, id, endpoint, trashed } = useEndpointDetail();
@@ -261,9 +275,19 @@ export default function TryIt() {
                 <ConfigTableRow
                   label="Service account"
                   htmlFor="try-account"
+                  // ONE sentence, which is the §4.4 cap — this cell held 314
+                  // characters, and the Details column is the one column
+                  // `table-fixed` hands every surplus pixel to (§5.2), so a
+                  // paragraph here sets very wide and pushes the picker away
+                  // from the label naming it. The two sentences that were here
+                  // are in the `Caveat` under the picker, not gone.
+                  //
                   // A plain string: `details` renders no markup and backticks
-                  // arrive as literal characters (§6).
-                  details="The identity the trial authenticates as. A real 60-second token is minted for this account server-side and driven through the actual serving path, so the answer is the one that account would get. Preview in Query runs as you instead, which is why a green preview does not prove a consumer can call this endpoint."
+                  // arrive as literal characters (§6). That is also why the
+                  // disclosure cannot live in this cell — `details` is
+                  // deliberately not a `ReactNode` — so it goes in the Value
+                  // cell, which is beside the control it is about anyway.
+                  details="The identity the trial authenticates as."
                 >
                   <div className="space-y-2">
                     <Select value={accountId} onValueChange={setAccountId}>
@@ -306,6 +330,25 @@ export default function TryIt() {
                         </p>
                       )
                     )}
+
+                    {/* The distinction this whole section exists to make, split
+                        at its own hinge: the CONSEQUENCE is the summary and is
+                        on screen unclicked, the mechanism is behind it. It is
+                        the second of the three places that say a trial runs as
+                        a SERVICE ACCOUNT rather than as you (the section
+                        description and the note beside Run are the others), and
+                        `PreviewBlock` says the same thing from the other side.
+                        Measured live on kind: `who=admin` from a preview,
+                        `who=svc-kind-smoke-bot` from a trial, same endpoint and
+                        same SQL. */}
+                    <Caveat
+                      summary="A green preview does not prove a consumer can call this endpoint"
+                      className="text-xs"
+                    >
+                      A real 60-second token is minted for this account server-side and driven
+                      through the actual serving path, so the answer is the one that account would
+                      get. Preview in Query runs as you instead.
+                    </Caveat>
                   </div>
                 </ConfigTableRow>
               </ConfigTable>
@@ -431,22 +474,28 @@ export default function TryIt() {
             </div>
 
             <div className="min-h-0 flex-1 space-y-4 overflow-auto px-1 pt-3">
-              {/* The note travels WITH the button, `PreviewBlock`'s rule: it is
-                  the only place that says a trial is a real call with real
-                  rate-limit, access-log and cache effects, and a reader who has
-                  to scroll — or open a drawer — to find that has already pressed
-                  the button. */}
-              <SettingsNote>
-                A trial is a real call, not a dry run, and it runs as the service account above rather
-                than as you. It spends the endpoint-wide rate-limit bucket for real — the per-client
-                bucket it counts against is only this trial&apos;s own, so a click here cannot throttle
-                a live consumer. It also writes to the access log and appears in Activity&apos;s call
-                list under &quot;Include trial runs&quot;. And on a cached endpoint it can populate the
-                cache real consumers read, including a per-account (
+              {/* The note travels WITH the button, `PreviewBlock`'s rule — and
+                  the headline is what that rule is actually about. "A trial is
+                  a real call, not a dry run" is on screen with nothing clicked,
+                  so a reader cannot press Run without having been told; the
+                  four sentences of mechanism under it are what a reader goes
+                  looking for once the headline has stopped them, and as
+                  standing prose they were ~500 characters over one button.
+
+                  Not a Radix disclosure: the shell disables this section for a
+                  trashed endpoint and a Radix trigger is a `<button>`. Reading
+                  is not editing. */}
+              <Caveat summary="A trial is a real call, not a dry run" className="max-w-prose text-xs">
+                It runs as the service account above rather than as you. It spends the endpoint-wide
+                rate-limit bucket for real — the per-client bucket it counts against is only this
+                trial&apos;s own, so a click here cannot throttle a live consumer. It also writes to
+                the access log and appears in Activity&apos;s call list under &quot;Include trial
+                runs&quot;. And on a cached endpoint it can populate the cache real consumers read,
+                including a per-account (
                 <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">per_principal</code>)
                 entry for this same account, not only{" "}
                 <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">shared</code> ones.
-              </SettingsNote>
+              </Caveat>
 
               {runError && (
                 <Alert variant="destructive">

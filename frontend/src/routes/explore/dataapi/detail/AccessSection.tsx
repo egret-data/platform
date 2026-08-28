@@ -1,6 +1,4 @@
 import { useCallback, useState } from "react";
-import type { ReactNode } from "react";
-import { ChevronRight } from "lucide-react";
 import { Link } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -8,7 +6,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { SettingsNote } from "@/routes/explore/settings/SettingsNote";
+import { Caveat } from "./Caveat";
 import {
   getDataApiGetOpenapiQueryKey,
   getDataApiListEndpointGrantsQueryKey,
@@ -98,8 +96,11 @@ type InvokeStatus =
  *
  * The sentence is a statement about egret and Ranger **in general**, not about
  * the account in the row — a section-level fact wearing a per-row costume. So
- * it is section-level copy now, above the table, and it says why the column is
- * absent. The genuinely per-row part of condition 2 was never the sentence: it
+ * it is section-level copy now, and it says why the column is absent. It sits
+ * in the Invoke column's HEADER, behind that column's `Caveat`: the audit found
+ * it and the page-level note saying overlapping things about invoke-right
+ * versus data-access, and one merged block attached to the column beats two
+ * standing ones above it. The genuinely per-row part of condition 2 was never the sentence: it
  * is the `Try it` link, which carries `?service_account=<id>` so the trial runs
  * as THAT account. That is an action, and it moved to the actions column where
  * the other per-row action already lives.
@@ -250,13 +251,6 @@ export default function AccessSection() {
         </p>
       </div>
 
-      <SettingsNote>
-        Publishing an endpoint does not grant data access. A call runs as the service account against the
-        workspace connection, under whatever the engine enforces — so an admin must also grant that
-        account on the underlying tables in Ranger. Invoke and data access are two separate permissions
-        and only the first one is on this page.
-      </SettingsNote>
-
       <div className="space-y-2">
         <h3 className="text-sm font-medium">Service accounts</h3>
 
@@ -295,18 +289,6 @@ export default function AccessSection() {
           </p>
         )}
 
-        {/* Condition 2, said ONCE. It was a column, and every cell in it held
-            this same sentence — 288px of width to repeat a fact about egret on
-            every row (see the module doc for the measurement). It also explains
-            the absent column, so a reader who expects a second condition here
-            is told where it went rather than left to assume it was dropped. */}
-        <p className="text-sm text-muted-foreground">
-          egret cannot check whether these accounts may read the underlying tables — that is
-          Ranger&apos;s answer, not egret&apos;s, and it is the same unknown for every account here,
-          which is why it is not a column. Run <strong className="font-medium">Try it</strong> on a row
-          to find out for real.
-        </p>
-
         {/* `table-fixed` so the Invoke column keeps a fixed measure instead of
             being resized by whichever row happens to hold the longest caveat
             (§5.2's rule, applied to a plain table). Invoke is the unsized
@@ -315,7 +297,53 @@ export default function AccessSection() {
           <TableHeader>
             <TableRow>
               <TableHead className="w-48">Service account</TableHead>
-              <TableHead>Invoke</TableHead>
+              {/* The one distinction this whole section turns on, beside the
+                  column where it bites — and said ONCE.
+
+                  It used to be TWO standing blocks: a page-level `SettingsNote`
+                  ("publishing does not grant data access") and a paragraph over
+                  the table ("egret cannot check whether these accounts may read
+                  the underlying tables"). Measured on the deployed build that
+                  was ~550 characters of prose above a table whose first row is
+                  one line, and the two overlapped — both were saying that the
+                  invoke right on this page is not the data access a call needs.
+                  Merged, they are one paragraph; attached to the header, they
+                  qualify the answers in the column rather than the page.
+
+                  Nothing was cut, and the collapsed half is chosen the way §4.4
+                  chooses it: the CONSEQUENCE is the summary and is on screen
+                  with nothing clicked, the reasons are behind it. It also still
+                  explains the absent second column, so a reader who expects one
+                  is told where it went rather than left to assume it was
+                  dropped.
+
+                  A native `<details>` (the shared `Caveat`), never
+                  `ui/collapsible`: the shell's `<fieldset disabled={trashed}>`
+                  would kill a Radix trigger, and an admin deciding whether to
+                  restore a trashed endpoint is exactly the reader who needs
+                  this. */}
+              {/* `aria-label`, and it is not decoration. A `<th>` names every
+                  cell in its column, so without it a screen-reader user hears
+                  the whole caveat before each row's answer — the audio form of
+                  exactly the defect §4.3 measured when this sentence was a
+                  column. The name stays the one word; the caveat is still in
+                  the header row for anyone reading it, and `getAllByRole`
+                  ("columnheader") still sees `Invoke`. */}
+              <TableHead className="whitespace-normal align-top" aria-label="Invoke">
+                <div className="space-y-1">
+                  <div>Invoke</div>
+                  <Caveat summary="Invoke is not data access" className="max-w-prose text-xs font-normal">
+                    Publishing an endpoint does not grant data access. A call runs as the service
+                    account against the workspace connection, under whatever the engine enforces — so
+                    an admin must also grant that account on the underlying tables in Ranger. Invoke
+                    and data access are two separate permissions and only the first one is on this
+                    page. egret cannot check whether these accounts may read the underlying tables —
+                    that is Ranger&apos;s answer, not egret&apos;s, and it is the same unknown for
+                    every account here, which is why it is not a column. Run{" "}
+                    <strong className="font-medium">Try it</strong> on a row to find out for real.
+                  </Caveat>
+                </div>
+              </TableHead>
               {/* Named for a screen reader, invisible on screen: a visible
                   heading over a column of one small button reads as louder than
                   what it labels. */}
@@ -444,6 +472,10 @@ function AccessRow({
    * `fieldset` — which greys them identically to a pending mutation and gives
    * the reader no way to tell the two apart. The section states the reason
    * once, above the table.
+   *
+   * (That trashed sentence is one of the two paragraphs still standing above
+   * the table; both are conditional STATE explanations that exist only while
+   * the thing they describe is true, which is why neither is collapsed.)
    */
   trashed: boolean;
   busy: boolean;
@@ -501,7 +533,8 @@ function AccessRow({
         <div className="space-y-1.5">
           {/* Deliberately NOT `success` (green). A green tick on the invoke
               line reads as "this call will work", and condition 2 — stated
-              above the table — is the one egret cannot answer at all. The
+              once, in this column's header — is the one egret cannot answer at
+              all. The
               wording carries the state; the colour does not overstate it. */}
           <div>
             {status.kind === "granted" && <Badge variant="secondary">Granted on this endpoint</Badge>}
@@ -629,53 +662,5 @@ function AccessRow({
         </div>
       </TableCell>
     </TableRow>
-  );
-}
-
-/**
- * A row-scoped caveat: **the consequence in the summary, the explanation behind
- * it.**
- *
- * The browser pass measured the cost of not doing this. At a 786px content box
- * one granted row carrying 155 characters of caveat was 293px tall against a
- * 89px neighbour — the rows disagreed visually for a reason that was not about
- * importance, and ten accounts would not have been a list anyone could scan.
- *
- * **Why this is not the "drawer closed by default" mistake.** `TryIt`'s module
- * doc records the opposite ruling for its own warning copy: a reader who has to
- * open something to learn a call is real has already pressed the button. That
- * rule holds here too, and the split is what satisfies it — the load-bearing
- * fact ("Revoking will not remove access") is the SUMMARY and is on screen
- * without any interaction. What is behind the disclosure is the *why* and the
- * *where to go instead*, which is what a reader goes looking for once the
- * headline has stopped them. Collapsing the headline itself would be the
- * mistake; collapsing the paragraph under it is the point.
- *
- * **Native `<details>`/`<summary>`, never `ui/collapsible`** (§11.2). The shell
- * wraps every section in `<fieldset disabled={trashed}>`, which disables every
- * BUTTON under it — a Radix trigger included — so on a trashed endpoint a Radix
- * collapsible could not be opened and the caveat would be unreachable. A
- * `<summary>` is not a form control and the fieldset does not touch it.
- *
- * It is also not a hover affordance: `<summary>` is focusable and toggles on
- * Enter/Space, so keyboard and touch reach it the same way a pointer does. A
- * `title` tooltip would have been cheaper and would have hidden the caveat from
- * both.
- */
-function Caveat({ summary, children }: { summary: string; children: ReactNode }) {
-  return (
-    <details className="group">
-      {/* `list-none` plus an explicit chevron rather than the UA marker, which
-          renders at a different size and offset per browser and cannot be
-          aligned with the badge above it. Same idiom as `Query.tsx`'s strip. */}
-      <summary className="flex cursor-pointer list-none items-start gap-1 text-muted-foreground hover:text-foreground">
-        <ChevronRight
-          className="mt-px h-3 w-3 shrink-0 transition-transform group-open:rotate-90"
-          aria-hidden="true"
-        />
-        <span className="underline decoration-dotted underline-offset-2">{summary}</span>
-      </summary>
-      <div className="mt-1 pl-4 text-muted-foreground">{children}</div>
-    </details>
   );
 }

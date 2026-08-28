@@ -3,7 +3,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { SettingsNote } from "@/routes/explore/settings/SettingsNote";
+import { Caveat } from "./Caveat";
 import { useDataApiPreviewEndpoint } from "@/api/generated/data-api/data-api";
 import type { DataApiPreviewDto, StatementSource } from "@/api/generated/model";
 import { useEndpointDetail } from "../EndpointDetail";
@@ -209,19 +209,29 @@ export const PreviewBlock = forwardRef<PreviewHandle, PreviewBlockProps>(functio
       </div>
 
       <div className="min-h-0 flex-1 space-y-3 overflow-auto px-1 pt-3">
-        {/* The note travels WITH the button: it is the only place that says a
-            preview saves nothing, spends no rate limit and leaves no trace in
-            Activity, and a reader who has to scroll to find that has already
-            pressed the button. */}
-        <SettingsNote>
+        {/* The note travels WITH the button — and the HEADLINE is what that
+            rule is about. A reader who has to scroll, or open something, to
+            learn what the button does has already pressed it, so the one
+            sentence that changes what an author concludes from a green run is
+            on screen with nothing clicked. The other four are behind it: as
+            standing prose this was ~570 characters over one button, in the
+            panel that also has to hold the rows.
+
+            A native `<details>` (the shared `Caveat`), never `ui/collapsible`:
+            `Query` renders inside the shell's `<fieldset disabled={trashed}>`,
+            which kills a Radix trigger, and reading is not editing. */}
+        <Caveat
+          summary="A green preview does not prove a consumer can call this endpoint"
+          className="max-w-prose text-xs"
+        >
           Preview runs the {statementName ? <>statement <span className="font-mono">{statementName}</span></> : "SQL"}{" "}
           and parameters as they are on screen right now — including edits you
           have not saved — as you, against the database above, and returns up to {PREVIEW_MAX_ROWS}{" "}
           rows. It does not save, publish, spend a rate limit, fill the cache, or appear in Activity.
           Column names come from the engine, not from the published contract — see Response for the names a
-          consumer receives. And because it runs as you rather than as a service account, a green
-          preview does not prove a consumer can call this endpoint; Try it answers that.
-        </SettingsNote>
+          consumer receives. It runs as you rather than as a service account, which is why Try it is
+          what answers whether a consumer can call this endpoint.
+        </Caveat>
 
         {form.params.length > 0 && (
           <div className="grid grid-cols-2 gap-3">

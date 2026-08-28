@@ -141,7 +141,18 @@ function ContextProvider({ ctx }: { ctx: Partial<EndpointDetailContext> }) {
   return <Outlet context={ctx} />;
 }
 
-function renderTryIt(opts: { endpoint?: DataApiEndpointDto; search?: string; trashed?: boolean } = {}) {
+/**
+ * `fieldset: true` reproduces the shell's `<fieldset disabled={trashed}>`
+ * WITHOUT mounting `EndpointDetail` (whose nav collides with this section's
+ * links — see `ContextProvider`). It exists for one class of test only: a
+ * `<details>` is exempt from `fieldset[disabled]` and a Radix trigger is not,
+ * and that difference is invisible unless a disabled fieldset is really in the
+ * tree. Everything else renders WITHOUT one, so `toBeDisabled()` cannot pass by
+ * walking up to an ancestor this section did not put there.
+ */
+function renderTryIt(
+  opts: { endpoint?: DataApiEndpointDto; search?: string; trashed?: boolean; fieldset?: boolean } = {},
+) {
   const endpoint = opts.endpoint ?? makeEndpoint();
   const search = opts.search ?? `?service_account=${SA_1.id}`;
   const ctx: Partial<EndpointDetailContext> = {
@@ -152,7 +163,7 @@ function renderTryIt(opts: { endpoint?: DataApiEndpointDto; search?: string; tra
   };
 
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  const utils = render(
+  const tree = (
     <QueryClientProvider client={qc}>
       <MemoryRouter initialEntries={[`/try${search}`]}>
         <Routes>
@@ -161,8 +172,9 @@ function renderTryIt(opts: { endpoint?: DataApiEndpointDto; search?: string; tra
           </Route>
         </Routes>
       </MemoryRouter>
-    </QueryClientProvider>,
+    </QueryClientProvider>
   );
+  const utils = render(opts.fieldset ? <fieldset disabled>{tree}</fieldset> : tree);
   return { ...utils, qc };
 }
 
@@ -247,6 +259,10 @@ describe("TryIt", () => {
   it("states the three consequences a trial has: rate limit, access log, and cache", () => {
     mockTry(OK);
     renderTryIt();
+    // Behind the consequence that heads them (Task 3), so this opens the
+    // disclosure first: finding the text inside a closed `<details>` would
+    // prove the sentence is in the DOM, not that a reader can get to it.
+    fireEvent.click(screen.getByText("A trial is a real call, not a dry run"));
     expect(screen.getByText(/rate-limit bucket/i)).toBeInTheDocument();
     expect(screen.getByText(/cannot throttle a live consumer/i)).toBeInTheDocument();
     expect(screen.getByText(/access log/i)).toBeInTheDocument();
@@ -495,8 +511,14 @@ describe("TryIt — the split, and the shortcut named in the result header", () 
     // spends a rate limit and writes an access-log row has already pressed the
     // button. jsdom cannot judge that the note is on screen — it can judge that
     // it is in the same panel as Run, which is the wiring the rule reduces to.
-    expect(within(panels[1]).getByRole("note")).toHaveTextContent(/rate-limit bucket/i);
-    expect(within(panels[0]).queryByRole("note")).toBeNull();
+    //
+    // Task 3 turned the note into a `Caveat`, so the assertion is on the
+    // headline — the half that is on screen unclicked — plus the mechanism
+    // behind it. Asserting the collapsed text alone would say nothing about
+    // which panel a reader finds it in.
+    const summary = within(panels[1]).getByText("A trial is a real call, not a dry run");
+    expect(summary.closest("details")).toHaveTextContent(/rate-limit bucket/i);
+    expect(within(panels[0]).queryByText(/rate-limit bucket/i)).toBeNull();
   });
 });
 
@@ -554,11 +576,18 @@ describe("TryIt — says whose identity a trial runs as", () => {
     renderTryIt();
 
     expect(screen.getByText(/as a chosen service account/i)).toBeInTheDocument();
-    // `ConfigTableRow` renders its help twice — the Details cell at `lg`, and
-    // inline under the label below it — so this is `getAllByText` by
-    // construction, not by hedging.
-    expect(screen.getAllByText(/Preview in Query runs as you/i).length).toBeGreaterThan(0);
-    expect(screen.getByRole("note")).toHaveTextContent(/runs as the service account above rather than as you/i);
+    // The second and third places are behind their own disclosures now (Task
+    // 3), so this OPENS them: text found inside a closed `<details>` proves the
+    // sentence is in the DOM, not that a reader can reach it.
+    const picker = screen.getByText("A green preview does not prove a consumer can call this endpoint");
+    fireEvent.click(picker);
+    expect(picker.closest("details")).toHaveAttribute("open");
+    expect(within(picker.closest("details")!).getByText(/Preview in Query runs as you/i)).toBeInTheDocument();
+
+    const run = screen.getByText("A trial is a real call, not a dry run");
+    fireEvent.click(run);
+    expect(run.closest("details")).toHaveAttribute("open");
+    expect(run.closest("details")).toHaveTextContent(/runs as the service account above rather than as you/i);
   });
 });
 
@@ -586,5 +615,127 @@ describe("TryIt — width", () => {
     const { container } = renderTryIt();
     const heading = screen.getByRole("heading", { name: "Try it", level: 2 });
     expectSectionCapsItsOwnWidth(container, heading);
+  });
+});
+
+/**
+ * Task 3 — prose moves beside the control it describes.
+ *
+ * The audit measured ~950 characters of standing prose on this screen against
+ * one dropdown and one button. Nothing here was deleted: the rule applied is
+ * `docs/en/ui-conventions.md` §4.4 — **the consequence in the summary, the
+ * reason behind it** — so every sentence is still on the page and every one of
+ * them is still reachable without leaving it.
+ *
+ * These tests assert REACHABILITY, not presence. jsdom does not hide a closed
+ * `<details>` (§11.3), so `getByText` finds a sentence a user cannot see; the
+ * only observable that distinguishes the two is the `open` attribute plus the
+ * activation that sets it.
+ */
+describe("TryIt — the prose sits beside the control it describes", () => {
+  /** The `<details>` that contains `text`, asserted to be genuinely collapsed. */
+  function collapsedDisclosureAround(el: HTMLElement): HTMLDetailsElement {
+    const details = el.closest("details") as HTMLDetailsElement | null;
+    expect(details).not.toBeNull();
+    expect(details).not.toHaveAttribute("open");
+    return details!;
+  }
+
+  it("keeps the Service account Details cell to one sentence and the rest beside the picker", () => {
+    mockTry(OK);
+    renderTryIt();
+
+    // The Details cell itself. `ConfigTableRow` renders its help text TWICE —
+    // once in the Details column at `lg`, once under the label below it — so
+    // this counts both rather than asserting a single node.
+    const kept = screen.getAllByText("The identity the trial authenticates as.");
+    expect(kept.length).toBeGreaterThan(0);
+    // The rule §4.4 caps at about two lines. The failing shape is the 314-char
+    // literal this replaced, so assert the CELL is short rather than that some
+    // node somewhere holds the short sentence.
+    for (const node of kept) {
+      expect(node.textContent!.length).toBeLessThan(120);
+    }
+
+    // …and the two sentences that were cut from it are still here, behind a
+    // disclosure whose summary carries the consequence.
+    const summary = screen.getByText("A green preview does not prove a consumer can call this endpoint");
+    const details = collapsedDisclosureAround(summary);
+    const body = within(details).getByText(/60-second token is minted/i);
+    expect(body.closest("summary")).toBeNull();
+    expect(body).toHaveTextContent(/Preview in Query runs as you instead/i);
+
+    // Reachable: the gesture a user makes opens it.
+    fireEvent.click(summary);
+    expect(details).toHaveAttribute("open");
+  });
+
+  it("puts the trial's consequences behind the consequence, in the panel that holds Run", () => {
+    mockTry(OK);
+    renderTryIt();
+
+    const resultPanel = screen.getAllByTestId("panel")[1];
+    // The load-bearing half, on screen with nothing clicked. `PreviewBlock`'s
+    // rule survives the move: a reader who must open something to learn a call
+    // is real has already pressed the button, so THAT sentence is the summary.
+    const summary = within(resultPanel).getByText("A trial is a real call, not a dry run");
+    const details = collapsedDisclosureAround(summary);
+    expect(within(resultPanel).getByRole("button", { name: /^run$/i })).toBeInTheDocument();
+
+    // Every consequence still reachable, none of it standing.
+    for (const re of [/rate-limit bucket/i, /cannot throttle a live consumer/i, /access log/i, /Include trial runs/i, /per_principal/]) {
+      const node = within(details).getByText(re);
+      expect(node.closest("summary")).toBeNull();
+    }
+
+    fireEvent.click(summary);
+    expect(details).toHaveAttribute("open");
+  });
+
+  /**
+   * §11.2's trap, on this section for the first time. The shell wraps the body
+   * in `<fieldset disabled={trashed}>`; a Radix `Collapsible` trigger is a
+   * `<button>` and would be dead there, and every text assertion above would
+   * still pass because jsdom does not hide a closed disclosure either way.
+   *
+   * `fireEvent`, not `userEvent`: `userEvent.click` refuses a click under a
+   * disabled fieldset even though `fieldset[disabled]` disables only
+   * form-associated descendants and `<summary>` is not one. The failure mode is
+   * a FALSE NEGATIVE.
+   */
+  it("keeps both disclosures openable inside a disabled fieldset", () => {
+    mockTry(OK);
+    renderTryIt({ trashed: true, fieldset: true });
+
+    for (const label of [
+      "A green preview does not prove a consumer can call this endpoint",
+      "A trial is a real call, not a dry run",
+    ]) {
+      const summary = screen.getByText(label);
+      // Guard the premise: the fieldset really is disabled, so this is a test
+      // about surviving it and not one where nothing was disabled.
+      const fieldset = summary.closest("fieldset");
+      expect(fieldset).not.toBeNull();
+      expect(fieldset).toBeDisabled();
+
+      const details = summary.closest("details")!;
+      // A `ui/collapsible` renders a `<button>` here, which the fieldset kills.
+      expect(within(details).queryByRole("button")).not.toBeInTheDocument();
+      expect(details).not.toHaveAttribute("open");
+      fireEvent.click(summary);
+      expect(details).toHaveAttribute("open");
+    }
+  });
+
+  /**
+   * The counter-rule, and the reason this section did not collapse everything.
+   * §11.2: collapse a caveat because it is BIG, not because its neighbour is.
+   * Two lines with no explanation to hold costs a click to reveal nothing.
+   */
+  it("leaves the short published-version note as plain text, not as an empty disclosure", () => {
+    mockTry(OK);
+    renderTryIt();
+    const note = screen.getByText(/a trial runs the published version/i);
+    expect(note.closest("details")).toBeNull();
   });
 });
