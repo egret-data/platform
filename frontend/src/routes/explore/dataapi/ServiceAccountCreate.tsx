@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { ArrowLeft } from "lucide-react";
 
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -83,13 +82,20 @@ export default function ServiceAccountCreate() {
     <ListPageShell
       title="New service account"
       description="A machine identity for the Data API. Once it exists, issue it OAuth2 clients and grant it endpoints from the Clients list."
-      toolbar={
-        <Button asChild variant="ghost">
-          <Link to={`/explore/${ws}/data-api/clients`}>
-            <ArrowLeft className="h-4 w-4" />
-            Clients
-          </Link>
-        </Button>
+      back={
+        /* Top-left, above the title, the same slot `EndpointCreate` moved to
+           and the same shape every detail screen uses. It was still in
+           `toolbar`, which `ListPageShell` renders into the SAME right-hand
+           group as `action` — so on this page "leave without creating
+           anything" sat one control away from "create it" while its sibling
+           create page put it in the opposite corner. Seen side by side in the
+           browser, the two pages disagreed about where the way out is. */
+        <Link
+          className="text-sm text-muted-foreground hover:underline"
+          to={`/explore/${ws}/data-api/clients`}
+        >
+          ← Clients
+        </Link>
       }
       action={
         <Button onClick={() => void submit()} disabled={!canSubmit || create.isPending}>

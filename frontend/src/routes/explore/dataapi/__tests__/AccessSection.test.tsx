@@ -842,16 +842,41 @@ describe("AccessSection — the row-scoped caveat", () => {
     expect(details).toHaveAttribute("open");
   });
 
-  // A six-word transient status has no explanation to hold, so collapsing it
-  // would cost a click to reveal nothing — §11.2's rule applied per caveat
-  // rather than per section: collapse a thing because it is big.
-  it("leaves the short transient states as plain text, not as an empty disclosure", async () => {
-    setup({ accounts: [SA_NONE], grants: [] });
+  /**
+   * §4.3, and TWO accounts because one cannot show the defect.
+   *
+   * Every row used to carry "Workspace-inherited invoke is unchecked while this
+   * endpoint is not live." That renders on `reason === "not-live"`, which is
+   * `!probeEnabled`, which is `!isLive` — the same expression that renders the
+   * paragraph above the table, so the two can never disagree — and that
+   * paragraph already says egret cannot check workspace-inherited invoke, plus
+   * the draft-versus-disabled distinction the row cannot make. A strict subset,
+   * once per row.
+   *
+   * Measured in a browser at seven service accounts: seven identical lines
+   * under the sentence that had just said it. At the ONE account the audit ran
+   * against it was one line and looked deliberate, which is why the fixture
+   * here has two — a single-account fixture would pass over the restored bug.
+   */
+  it("says the not-live explanation once above the table, not once per row", async () => {
+    setup({ accounts: [SA_NONE, SA_NONE_2], grants: [] });
     renderAccess(makeEndpoint({ state: "draft", live_version_id: null }));
 
-    const row = await screen.findByTestId(`access-row-${SA_NONE.id}`);
-    const line = within(row).getByText(/Workspace-inherited invoke is unchecked/i);
-    expect(line.closest("details")).toBeNull();
+    // The section-level sentence is there, exactly once.
+    expect(
+      await screen.findByText(/egret cannot check workspace-inherited invoke rights against it/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getAllByText(/cannot check workspace-inherited invoke rights against it/i),
+    ).toHaveLength(1);
+
+    // And neither row repeats it.
+    for (const account of [SA_NONE, SA_NONE_2]) {
+      const row = screen.getByTestId(`access-row-${account.id}`);
+      expect(
+        within(row).queryByText(/workspace-inherited invoke is unchecked/i),
+      ).not.toBeInTheDocument();
+    }
   });
 });
 

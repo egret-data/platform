@@ -352,4 +352,28 @@ describe("ClientCreate", () => {
     await screen.findByRole("heading", { level: 1, name: /no longer available/i });
     expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
   });
+
+  it("puts the way back above the title, not against the primary action", () => {
+    // The same assertion `EndpointCreate.test.tsx` carries. Seen in a browser
+    // at 1440px, `← Clients` sat directly beside the "Create client" primary
+    // here while the sibling `New endpoint` page put its way out in the
+    // opposite corner — the `back` slot exists to remove exactly that, and this
+    // page had not been converted with it.
+    //
+    // Two assertions because either alone can be satisfied by the defect: DOM
+    // order alone is true of a link rendered first INSIDE the action group, and
+    // "not in the action group" alone is true of a link dropped anywhere below
+    // the header.
+    const { container } = renderCreate();
+
+    const back = screen.getByRole("link", { name: /clients/i });
+    const h1 = screen.getByRole("heading", { level: 1 });
+    const submit = screen.getByRole("button", { name: /create client/i });
+
+    expect(back.compareDocumentPosition(h1) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    const actionGroup = container.querySelector("header")!.lastElementChild as HTMLElement;
+    expect(actionGroup).toContainElement(submit);
+    expect(actionGroup).not.toContainElement(back);
+  });
 });

@@ -590,18 +590,26 @@ function AccessRow({
               </Link>
             </Caveat>
           )}
-          {status.kind === "unchecked" && status.reason === "not-live" && (
-            <span className="block text-muted-foreground">
-              {/* State-neutral on purpose: the row does not know whether the
-                  endpoint is a draft or a disabled one, and "until it is
-                  published" is false for the second. The section-level
-                  sentence above the table carries that distinction.
+          {/* NOTHING is rendered for `reason === "not-live"`, and that is the
+              §4.3 rule this file already applies to the mutations two blocks
+              up: a sentence true of every row is section-level copy in
+              disguise.
 
-                  One line, and it IS the whole fact — nothing to put behind a
-                  summary. */}
-              Workspace-inherited invoke is unchecked while this endpoint is not live.
-            </span>
-          )}
+              It used to say "Workspace-inherited invoke is unchecked while this
+              endpoint is not live." once per row. `probeEnabled` IS `isLive`,
+              so `reason === "not-live"` holds for exactly the rows on exactly
+              the endpoints where the paragraph above the table renders — the
+              two conditions are the same expression and can never disagree —
+              and that paragraph already says "egret cannot check
+              workspace-inherited invoke rights against it", plus the
+              draft-versus-disabled distinction the row explicitly cannot make.
+              A strict subset, repeated.
+
+              Invisible at the one service account the audit ran against;
+              measured in the browser at seven, it was seven identical lines
+              directly under the paragraph that had just said it. The `granted`
+              arm's "Revoking may not remove access" caveat stays: that one
+              qualifies a control the row actually offers. */}
           {status.kind === "unchecked" && status.reason === "loading" && (
             <span className="block text-muted-foreground">Checking workspace-inherited invoke…</span>
           )}
