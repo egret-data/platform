@@ -5,6 +5,7 @@
  * egret unified data portal HTTP API.
  * OpenAPI spec version: 0.1.0
  */
+import type { StatementSource } from './statementSource';
 
 /**
  * One of an endpoint's N SQL definitions, as an author writes it (M2). The
@@ -19,11 +20,22 @@
  * `^[a-z][a-z0-9_]*$` so the key never needs quoting in JSON and never reads
  * as private, and uniqueness within the endpoint so the key is unambiguous.
  *
- * `#[serde(deny_unknown_fields)]` for the same reason as [`ParamSpec`] and
- * its four siblings: this is a type an AUTHOR fills in, so a typo in the
- * request body must be a 400, not a silently-ignored field.
+ * Unknown keys are refused for the same reason as [`ParamSpec`] and its four
+ * siblings: this is a type an AUTHOR fills in, so a typo in the request body
+ * must be a 400, not a silently-ignored field. It is NOT
+ * `#[serde(deny_unknown_fields)]` any more — see the hand-written
+ * [`Deserialize`] impl below for what replaced it and why.
+ *
+ * **The PUBLISHED schema cannot state that rule, and this is not an oversight
+ * to fix later.** Flattening makes this an `allOf`, and each branch of an
+ * `allOf` validates the whole object on its own — so an
+ * `additionalProperties: false` branch listing only `name` would reject every
+ * body carrying `sql`, which is all of them. The construct that expresses it
+ * is `unevaluatedProperties`, and utoipa 5.5 cannot emit one (the string does
+ * not occur in its source). So the refusal lives in the reader, where it is
+ * tested; the document states the one-of and loses only the typo class. Same
+ * for [`PreviewEndpointInput`], for the same reason.
  */
-export interface StatementSpec {
+export type StatementSpec = StatementSource & {
   name: string;
-  sql: string;
-}
+};

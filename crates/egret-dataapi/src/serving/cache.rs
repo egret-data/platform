@@ -811,9 +811,10 @@ mod tests {
         EndpointSnapshot {
             statements: vec![egret_dataapi_api::StatementSnapshot {
                 name: "main".into(),
-                sql: "SELECT 1".into(),
+                source: egret_dataapi_api::StatementSource::Sql("SELECT 1".into()),
                 columns: vec![],
             }],
+            iterated: Vec::new(),
             method: "GET".into(),
             path: "/x".into(),
             database_id: Uuid::nil(),

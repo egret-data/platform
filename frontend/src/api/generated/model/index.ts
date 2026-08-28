@@ -337,6 +337,7 @@ export * from './startImpersonation';
 export * from './startWsImpersonation';
 export * from './statementMeta';
 export * from './statementSnapshot';
+export * from './statementSource';
 export * from './statementSpec';
 export * from './statusBody';
 export * from './storageDto';

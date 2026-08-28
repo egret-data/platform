@@ -97,6 +97,23 @@ pub(crate) struct Resolved {
     /// `params["region"] == None` gets an answer instead of a KeyError, and the
     /// dict always carries exactly the endpoint's declared names.
     pub json: BTreeMap<String, serde_json::Value>,
+    /// The same resolved parameters again, in the ONE shape a `build_sql`
+    /// script is ever handed — see [`crate::transform::GenerationParams`].
+    ///
+    /// A fourth projection rather than a reuse of [`Resolved::json`], and the
+    /// difference is the point. `json` follows `as_list` below, which is right
+    /// for a response transform: publish probes a transform AFTER the SQL
+    /// exists, so `lifecycle::probe_transform` wraps exactly the same set and
+    /// the two agree. Generation runs BEFORE any SQL exists, so publish has no
+    /// `iterated` to follow and hands the script scalars — and a serving dict
+    /// that followed `as_list` would hand it a list for the same parameter.
+    /// That disagreement was package S's one Critical: a silent wrong branch.
+    ///
+    /// So this one never carries a list, and cannot: its builder takes at most
+    /// one [`Param`] per name. A parameter supplied several times reaches the
+    /// script as its FIRST value and reaches the RENDER as all of them, which
+    /// is what keeps `IN (?, ?, ?)` working for a scripted endpoint.
+    pub generation: crate::transform::GenerationParams,
 }
 
 /// Resolve a request's query string against a snapshot's declared parameters.
@@ -127,7 +144,31 @@ pub(crate) fn resolve(
     if snap.statements.is_empty() {
         return Err(ServingError::internal("snapshot carries no statements"));
     }
-    let sqls: Vec<&str> = snap.statements.iter().map(|s| s.sql.as_str()).collect();
+    // The shape decision. Package S Task 6 moved it: publish freezes the set it
+    // decided across every template of every statement, and this reads it —
+    // through `resolve_supplied_with`, the same entry point preview uses, for
+    // the same reason both of them cannot compute it here.
+    //
+    // **A scripted statement cannot be scanned for it.** Its SQL is generated
+    // from the caller's parameters, and this decision is what says whether
+    // `?regions=EU` reaches the script (and the renderer) as a scalar or as a
+    // one-element list — so the text does not exist until after the answer is
+    // needed. See `EndpointSnapshot::iterated`.
+    //
+    // Empty means "published before the field existed", and it means "nothing
+    // is iterated"; the fallback below answers the same set in both cases, which
+    // is why one test can serve for both. A pre-S snapshot carries only written
+    // statements, so scanning their text is exactly what this function did
+    // before — byte for byte, through the same
+    // `render::iterated_params_union`.
+    if !snap.iterated.is_empty() {
+        return resolve_supplied_with(&supplied, &snap.iterated, &snap.params);
+    }
+    let sqls: Vec<&str> = snap
+        .statements
+        .iter()
+        .filter_map(|s| s.source.sql())
+        .collect();
     resolve_supplied(&supplied, &sqls, &snap.params)
 }
 
@@ -223,6 +264,7 @@ pub(crate) fn resolve_supplied_with(
     let mut values = ParamValues::new();
     let mut key: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut json: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+    let mut generation = crate::transform::GenerationParams::default();
     let mut has_repeats = false;
 
     for spec in specs {
@@ -262,6 +304,9 @@ pub(crate) fn resolve_supplied_with(
                 // `params["region"]` gets `None` rather than a KeyError, which
                 // is the same distinction the renderer draws.
                 json.insert(spec.name.clone(), serde_json::Value::Null);
+                // And `None` to a GENERATING script too, for the same reason —
+                // through the one constructor that decides that dict's shape.
+                generation.insert(spec.name.clone(), None);
                 continue;
             }
         };
@@ -336,6 +381,14 @@ pub(crate) fn resolve_supplied_with(
         // answer for `json` is precisely the seam the transform design exists to
         // close: `{{ region }}` binding a scalar while `params["region"]` is a
         // one-element list is a disagreement no error names.
+        // A GENERATING script is handed the first value and never a list,
+        // whatever `as_list` decides one line down. Not an oversight and not a
+        // second answer to the same question: publish generates before any SQL
+        // exists, so there is no `iterated` set for it to follow, and a script
+        // shown a scalar at publish that meets a list at serve is the silent
+        // wrong branch described on `crate::transform::GenerationParams`. The
+        // renderer's shape is unaffected — every repeat still binds.
+        generation.insert(spec.name.clone(), params.first());
         let as_list = params.len() != 1 || iterated.iter().any(|n| n == &spec.name);
         json.insert(
             spec.name.clone(),
@@ -357,6 +410,7 @@ pub(crate) fn resolve_supplied_with(
         key,
         has_repeats,
         json,
+        generation,
     })
 }
 
@@ -858,13 +912,32 @@ mod tests {
         }
     }
 
+    /// The written SQL of a fixture's only statement.
+    ///
+    /// Every fixture in this module is written SQL — the file is about resolving
+    /// a REQUEST's parameters, which happens before any statement exists — so
+    /// the `expect` here is a statement about the fixtures rather than a
+    /// possibility. A scripted statement has no text to render at this point at
+    /// all; that is `router::statement_texts`' subject.
+    fn written(snap: &EndpointSnapshot, i: usize) -> &str {
+        snap.statements[i]
+            .source
+            .sql()
+            .expect("these fixtures are written SQL")
+    }
+
+    fn sole_sql(snap: &EndpointSnapshot) -> &str {
+        written(snap, 0)
+    }
+
     fn snap(sql: &str, params: Vec<ParamSpec>) -> EndpointSnapshot {
         EndpointSnapshot {
             statements: vec![egret_dataapi_api::StatementSnapshot {
                 name: "main".into(),
-                sql: sql.into(),
+                source: egret_dataapi_api::StatementSource::Sql(sql.into()),
                 columns: vec![],
             }],
+            iterated: Vec::new(),
             method: "GET".into(),
             path: "/x".into(),
             database_id: Uuid::nil(),
@@ -908,12 +981,12 @@ mod tests {
         s.statements = vec![
             egret_dataapi_api::StatementSnapshot {
                 name: "total".into(),
-                sql: PAGINATION_TOTAL_SQL.into(),
+                source: egret_dataapi_api::StatementSource::Sql(PAGINATION_TOTAL_SQL.into()),
                 columns: vec![],
             },
             egret_dataapi_api::StatementSnapshot {
                 name: "rows".into(),
-                sql: PAGINATION_ROWS_SQL.into(),
+                source: egret_dataapi_api::StatementSource::Sql(PAGINATION_ROWS_SQL.into()),
                 columns: vec![],
             },
         ];
@@ -922,7 +995,7 @@ mod tests {
 
     fn rendered(query: &str, s: &EndpointSnapshot) -> (String, Vec<Param>) {
         let r = resolve(Some(query), s).expect("resolve");
-        crate::render::render(&s.statements[0].sql, &r.values).expect("render")
+        crate::render::render(sole_sql(s), &r.values).expect("render")
     }
 
     /// **Step 2's property, at the level where it is decided.** The percent-
@@ -1000,8 +1073,8 @@ mod tests {
         assert!(absent.key.is_empty(), "an absent parameter is omitted");
 
         // And the reason it matters: the two DO render differently.
-        let a = crate::render::render(&s.statements[0].sql, &present.values).expect("render");
-        let b = crate::render::render(&s.statements[0].sql, &absent.values).expect("render");
+        let a = crate::render::render(sole_sql(&s), &present.values).expect("render");
+        let b = crate::render::render(sole_sql(&s), &absent.values).expect("render");
         assert_ne!(a, b);
         assert!(b.1.is_empty(), "an absent parameter binds nothing");
     }
@@ -1083,8 +1156,8 @@ mod tests {
                     continue;
                 }
                 assert_eq!(
-                    crate::render::render(&s.statements[0].sql, &ra.values).expect("render a"),
-                    crate::render::render(&s.statements[0].sql, &rb.values).expect("render b"),
+                    crate::render::render(sole_sql(&s), &ra.values).expect("render a"),
+                    crate::render::render(sole_sql(&s), &rb.values).expect("render b"),
                     "`?{a}` and `?{b}` share a cache key but render differently"
                 );
             }
@@ -1763,7 +1836,7 @@ mod tests {
         let r = resolve(Some("day=3"), &s).expect("resolve");
         assert_eq!(r.json["day"], serde_json::json!(3));
         assert!(!r.has_repeats);
-        let (_, binds) = crate::render::render(&s.statements[0].sql, &r.values).expect("render");
+        let (_, binds) = crate::render::render(sole_sql(&s), &r.values).expect("render");
         assert_eq!(binds, vec![Param::I64(3)], "one value, one bind");
 
         // 2. A declared parameter the caller did not supply is `None` to the
@@ -1777,7 +1850,7 @@ mod tests {
             r.json
         );
         assert_eq!(r.json["day"], serde_json::Value::Null);
-        let (_, binds) = crate::render::render(&s.statements[0].sql, &r.values).expect("render");
+        let (_, binds) = crate::render::render(sole_sql(&s), &r.values).expect("render");
         assert!(
             binds.is_empty(),
             "the `{{% if day %}}` block did not render"
@@ -1797,7 +1870,7 @@ mod tests {
             "the script's side: both values, in the order the caller sent them"
         );
         assert_eq!(
-            crate::render::render(&s.statements[0].sql, &r.values).unwrap_err(),
+            crate::render::render(sole_sql(&s), &r.values).unwrap_err(),
             crate::render::RenderError::SequenceBind,
             "the SQL's side: `{{{{ day }}}}` cannot bind a sequence, so this \
              request is refused before a transform is reached",
@@ -1817,8 +1890,7 @@ mod tests {
             serde_json::json!([3, 4]),
             "uncollapsed — the script is told what the caller actually sent"
         );
-        let (sql, binds) =
-            crate::render::render(&unused.statements[0].sql, &r.values).expect("render");
+        let (sql, binds) = crate::render::render(sole_sql(&unused), &r.values).expect("render");
         assert_eq!(sql, "SELECT 1 AS n", "the statement never mentions it");
         assert!(
             binds.is_empty(),
@@ -1838,7 +1910,7 @@ mod tests {
             serde_json::json!([3]),
             "a one-element LIST, exactly as the definition iterates it"
         );
-        let (_, binds) = crate::render::render(&s.statements[1].sql, &r.values).expect("render");
+        let (_, binds) = crate::render::render(written(&s, 1), &r.values).expect("render");
         assert_eq!(binds, vec![Param::I64(3)], "and the loop bound it");
     }
 }

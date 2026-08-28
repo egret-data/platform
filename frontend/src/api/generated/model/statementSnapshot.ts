@@ -6,6 +6,7 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { ColumnSpec } from './columnSpec';
+import type { StatementSource } from './statementSource';
 
 /**
  * The frozen form of a [`StatementSpec`]: what a publish freezes into
@@ -15,9 +16,29 @@ import type { ColumnSpec } from './columnSpec';
  * No `deny_unknown_fields` — like [`EndpointSnapshot`] and [`ColumnSpec`],
  * the server writes this for itself; a typo here is not possible the way one
  * is in a request body.
+ *
+ * # It freezes the SOURCE, not the generated text (package S Task 6)
+ *
+ * This carried `sql: String` until serving learnt to generate. For a scripted
+ * statement that string was the text `build_sql` returned under publish's
+ * REPRESENTATIVE parameter values — one branch of a script whose whole purpose
+ * is to take a different one per request. Freezing it and serving it would
+ * have made every parameter a scripted statement branches on inert: the
+ * endpoint would answer the representative branch's SQL to every caller, with
+ * a `200` and no error anywhere. So the version freezes what publish validated
+ * — the author's text, or the author's script — and serving generates from it,
+ * per request, with the caller's own values.
+ *
+ * **The generated text is deliberately not kept beside the script.** A
+ * statement carrying both a script and a frozen rendering of it is two
+ * definitions with no rule for which one runs — the shape [`StatementSpec`]
+ * refuses at the wire, refused here for the same reason and with a sharper
+ * edge: the failure would be a silent wrong answer rather than an error. What
+ * publish measured about the OTHER branches survives where it is actually
+ * used: `columns` is the union across every template, and
+ * [`EndpointSnapshot::iterated`] is the shape decision made across them all.
  */
-export interface StatementSnapshot {
+export type StatementSnapshot = StatementSource & {
   name: string;
-  sql: string;
   columns: ColumnSpec[];
-}
+};

@@ -35,6 +35,46 @@ export interface EndpointSnapshot {
      * refuses an explicitly empty list.
      */
   statements: StatementSnapshot[];
+  /**
+     * Which declared parameters SOME statement iterates — the endpoint's one
+     * shape decision, made at publish and frozen here (package S Task 6).
+     *
+     * # Why this is frozen rather than re-derived, and why package S forced it
+     *
+     * `serving::params::resolve` used to compute this itself, by scanning every
+     * statement's `sql` for a `{% for x in NAME %}` header
+     * (`render::iterated_params_union`, the one function it shares with
+     * publish). That works only while the text exists before the request does.
+     *
+     * **A scripted statement makes it circular.** Its SQL is generated from the
+     * caller's parameters, so there is no text to scan until the parameters are
+     * resolved — and resolving them needs this decision first, because it is
+     * what makes `?regions=EU` a one-element LIST rather than a scalar (a
+     * `{% for %}` over a scalar is "plain is not iterable", a 500 on an
+     * ordinary request). Deriving it from the one template publish happened to
+     * generate would repeat M2's own bug one level down: a set decided from one
+     * text of several, disagreeing with the union publish validated against.
+     *
+     * So publish freezes the set it decided across EVERY template of EVERY
+     * statement, and serving hands it to `params::resolve_supplied_with` — the
+     * same entry point preview already uses, for the same reason.
+     *
+     * `#[serde(default)]` for the snapshots published before this field
+     * existed. Empty is also what publish writes for an endpoint that iterates
+     * nothing, and the two are deliberately indistinguishable: the reader falls
+     * back to deriving from the written statements' text, which answers empty
+     * in exactly those cases. A pre-S snapshot has no scripted statement (no
+     * path could publish one), so the fallback is complete for every row that
+     * can carry it.
+     *
+     * `skip_serializing_if` for the same reason the reader has a default: a
+     * snapshot published before this field existed must round-trip through this
+     * type BYTE for byte, and without it a re-serialised pre-S row gains
+     * `"iterated": []`. There is a single writer today, so nothing re-serialises
+     * a stored row in practice — which is exactly the kind of "harmless today"
+     * that stops being true quietly.
+     */
+  iterated?: string[];
   method: string;
   path: string;
   database_id: string;

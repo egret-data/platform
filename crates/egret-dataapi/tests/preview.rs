@@ -971,3 +971,254 @@ async fn preview_shows_the_statements_own_rows_and_says_a_transform_is_declared(
         "preview answers with the statement's own rows, not the script's output: {out}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Package S Task 7 — a statement whose SQL a SCRIPT builds.
+// ---------------------------------------------------------------------------
+
+/// A script that emits a DIFFERENT template for `region = "US"`.
+///
+/// Branching is what makes the assertions below non-vacuous. Publish generates
+/// with `lifecycle::representative_value` (`"x"` for a string) and probes with a
+/// sentinel, so **no publish-time evaluation ever takes the `US` arm** — a
+/// preview that showed the author the baseline template would show it for every
+/// test value they typed, and the two-value comparison below is what catches
+/// that.
+const BRANCHING: &str = "def build_sql(params):\n    \
+     if params[\"region\"] == \"US\":\n        \
+     return \"SELECT n FROM t WHERE country = {{ region }}\"\n    \
+     return \"SELECT n FROM t WHERE region = {{ region }}\"\n";
+
+/// A preview body whose statement is `script` rather than `sql`, with one
+/// required string parameter `region` at `value`.
+fn scripted(f: &serving_common::Fixture, script: &str, value: &str) -> serde_json::Value {
+    serde_json::json!({
+        "script": script,
+        "params": [{
+            "name": "region",
+            "type": "string",
+            "location": "query",
+            "required": true,
+        }],
+        "values": { "region": [value] },
+        "output": {},
+        "database_id": f.database_id,
+    })
+}
+
+/// **Package S Task 7: preview shows the SQL the script produced, and runs it.**
+///
+/// Three claims in one test because they are one property — the artefact on
+/// screen has to be the artefact that ran:
+///
+/// * the response carries the template `build_sql` returned, `{{ }}` intact,
+///   which is the thing an author debugging a branching script cannot otherwise
+///   see;
+/// * it is generated from the author's OWN test values, so the two calls below
+///   disagree. Generating from publish's representative values would make both
+///   answers the baseline branch and is the defect this asserts against;
+/// * the engine ran the rendered form of exactly that text, with the value
+///   BOUND rather than interpolated — the same guarantee written SQL has.
+#[tokio::test]
+async fn preview_shows_the_generated_sql_and_runs_it() {
+    let Some(f) = fixture().await else { return };
+
+    let (status, us) = f
+        .mgmt_post(&preview_path(&f), Some(scripted(&f, BRANCHING, "US")))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{us}");
+    assert_eq!(
+        us["generated_sql"].as_str(),
+        Some("SELECT n FROM t WHERE country = {{ region }}"),
+        "the answer must carry the template the script built, braces intact: {us}"
+    );
+    // What the engine was actually asked to run is the RENDERED form of that
+    // template — same statement, placeholder replaced by a bind marker.
+    let (sql, binds) = f.port.last();
+    assert!(
+        sql.contains("country"),
+        "the engine must have been sent the branch the author's value takes, got {sql:?}"
+    );
+    assert!(
+        !sql.contains("US"),
+        "the value must not be interpolated into the generated statement, got {sql:?}"
+    );
+    assert_eq!(
+        bind_signature(&binds),
+        bind_signature(&[egret_query_api::Param::Str("US".into())]),
+        "a generated statement must bind the author's value exactly as a written one does"
+    );
+    assert_eq!(
+        us["rows"][0][0].as_i64(),
+        Some(marker(UserId(f.author)) + bind_signature(&binds)),
+        "the rows must be the ones that SQL returned, for the author's own principal: {us}"
+    );
+
+    // The other branch, from the same script and a different test value.
+    let (status, eu) = f
+        .mgmt_post(&preview_path(&f), Some(scripted(&f, BRANCHING, "EU")))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{eu}");
+    assert_eq!(
+        eu["generated_sql"].as_str(),
+        Some("SELECT n FROM t WHERE region = {{ region }}"),
+        "a different test value must show the branch it takes, not the one the last \
+         call took and not publish's representative branch: {eu}"
+    );
+}
+
+/// A statement the author TYPED generates nothing, and the answer says so.
+///
+/// `null` rather than an echo of the body: the author is looking at that text in
+/// the editor, and a field that always carries something gives the UI no way to
+/// tell "this is what your script built" from "this is what you typed".
+#[tokio::test]
+async fn a_written_statement_generates_nothing_to_show() {
+    let Some(f) = fixture().await else { return };
+    let (status, body) = f
+        .mgmt_post(&preview_path(&f), Some(draft(&f, "SELECT 1 AS n")))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // The key must be THERE and null. `body["generated_sql"].is_null()` alone is
+    // also true of a key that does not exist, so it would pass with the field
+    // deleted from the DTO — and it did, before this line, while the field was
+    // still unimplemented.
+    assert_eq!(
+        body.get("generated_sql"),
+        Some(&serde_json::Value::Null),
+        "a written statement has no generated SQL to show, and the answer must say so \
+         rather than omit the field: {body}"
+    );
+}
+
+/// **The branch publish's probes never take is gated HERE too.**
+///
+/// `serving::router::generate_one` re-applies two publish rules to text
+/// generated per request, because a script may branch on a value no probe
+/// supplies. Preview generates from the author's test values, which is the same
+/// situation and the same risk in both directions: the statement below is not a
+/// read at all, and preview runs as the AUTHOR against a real engine.
+///
+/// Both halves are asserted. The refusal, and that **nothing reached the
+/// engine** — "a 400" and "a 400 after running DML" are the same status code and
+/// very different events.
+#[tokio::test]
+async fn preview_refuses_a_generated_branch_that_is_not_a_read() {
+    let Some(f) = fixture().await else { return };
+    let script = "def build_sql(params):\n    \
+         if params[\"region\"] == \"XX\":\n        \
+         return \"DELETE FROM t\"\n    \
+         return \"SELECT n FROM t WHERE region = {{ region }}\"\n";
+
+    // The control: the baseline branch previews green, so the refusal below is
+    // about the branch and not about the script.
+    let (status, ok) = f
+        .mgmt_post(&preview_path(&f), Some(scripted(&f, script, "EU")))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{ok}");
+
+    let before = f.port.executions();
+    let (status, out) = f
+        .mgmt_post(&preview_path(&f), Some(scripted(&f, script, "XX")))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a generated branch that is not a single read must be refused: {out}"
+    );
+    assert_eq!(
+        f.port.executions(),
+        before,
+        "nothing may reach the engine once generation is refused"
+    );
+}
+
+/// **Every template the script can emit is scanned, not only the one the
+/// author's values reach.**
+///
+/// `lifecycle::GeneratedSql::probe` runs the script again with a sentinel and
+/// then with the parameter ABSENT, and publish scans everything those runs
+/// emitted — a branch that is not a read is refused there even when the
+/// representative values do not take it. Preview has to reach the same verdict
+/// or the author is told "fine" and then told "no" at publish, which is the one
+/// thing this route exists not to do.
+///
+/// The test value below takes the SELECT branch, so `generate_one`'s per-value
+/// gate is satisfied and cannot be what refuses this. Only the scan over the
+/// absent-parameter template can.
+#[tokio::test]
+async fn preview_scans_every_template_the_script_can_emit() {
+    let Some(f) = fixture().await else { return };
+    let script = "def build_sql(params):\n    \
+         if params[\"region\"] == None:\n        \
+         return \"DELETE FROM t\"\n    \
+         return \"SELECT n FROM t WHERE region = {{ region }}\"\n";
+
+    let before = f.port.executions();
+    let (status, out) = f
+        .mgmt_post(&preview_path(&f), Some(scripted(&f, script, "EU")))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a branch that is not a read must be refused even when the author's own test \
+         value does not take it — publish refuses it, so preview must: {out}"
+    );
+    assert_eq!(
+        f.port.executions(),
+        before,
+        "nothing may reach the engine once a template is refused"
+    );
+}
+
+/// **A misspelt field is a refusal at the wire, not an ignored key.**
+///
+/// The unit tests beside the `Deserialize` impl pin the rule; this pins what it
+/// is FOR, end to end. `sibling` for `siblings` reads as an endpoint with no
+/// other statements, so the shape decision becomes the union of one — and a
+/// draft whose real sibling loops the same parameter previews GREEN and is then
+/// refused at publish for `SequenceBind`. Told "fine", then told "no".
+///
+/// The body below is exactly that draft: `region` is a scalar in the statement
+/// on screen and iterated by the sibling the author meant to send.
+#[tokio::test]
+async fn preview_refuses_a_misspelt_field_rather_than_ignoring_it() {
+    let Some(f) = fixture().await else { return };
+    let looping = "SELECT n FROM t WHERE region IN (\
+         {% for x in region %}{{ x }}{% if not loop.last %},{% endif %}{% endfor %})";
+    let mut body = serde_json::json!({
+        "sql": "SELECT n FROM t WHERE region = {{ region }}",
+        "params": [{ "name": "region", "type": "string", "location": "query", "required": true }],
+        "values": { "region": ["EU"] },
+        "output": {},
+        "database_id": f.database_id,
+    });
+
+    // Spelled correctly, the sibling is heard and the draft is refused for the
+    // shape — which is publish's answer, and the control that says the typo
+    // below really does change the verdict.
+    body["siblings"] = serde_json::json!([looping]);
+    let (heard, out) = f.mgmt_post(&preview_path(&f), Some(body.clone())).await;
+    assert_eq!(
+        heard,
+        StatusCode::BAD_REQUEST,
+        "a sibling that iterates the parameter must reach the shape decision: {out}"
+    );
+
+    let before = f.port.executions();
+    let obj = body.as_object_mut().expect("an object");
+    obj.remove("siblings");
+    obj.insert("sibling".into(), serde_json::json!([looping]));
+    let (status, out) = f.mgmt_post(&preview_path(&f), Some(body)).await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a misspelt field must be refused by the extractor; ignoring it previews GREEN a \
+         draft publish refuses: {out}"
+    );
+    assert_eq!(
+        f.port.executions(),
+        before,
+        "nothing may reach the engine for a body that was not understood"
+    );
+}

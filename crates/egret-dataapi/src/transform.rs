@@ -65,6 +65,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use egret_dataapi_api::TransformSpec;
+use egret_query_api::Param;
 use starlark::environment::{Globals, Module};
 use starlark::eval::Evaluator;
 use starlark::syntax::{AstModule, Dialect, DialectTypes};
@@ -270,6 +271,73 @@ const ENTRY_POINT: &str = "transform";
 /// The number of arguments [`ENTRY_POINT`] must take: `params` and `statements`.
 const ENTRY_POINT_ARITY: usize = 2;
 
+/// The function a script must define to build a statement's SQL template.
+///
+/// A name distinct from [`ENTRY_POINT`] on purpose: a script that builds SQL
+/// and a script that reshapes a response are two different contracts called
+/// through two different shapes, and [`eval_inner`] tells them apart by which
+/// of these two names it is asked to look up — never by guessing from arity.
+const BUILD_SQL_ENTRY_POINT: &str = "build_sql";
+
+/// The number of arguments [`BUILD_SQL_ENTRY_POINT`] must take: `params`
+/// alone.
+///
+/// No `statements` — a script building SQL runs *before* any statement has
+/// executed, so there are no rows yet to hand it. That is the whole reason
+/// this is a separate entry point rather than a `statements=None` case of
+/// [`ENTRY_POINT`]: the absence is structural, not optional.
+const BUILD_SQL_ENTRY_POINT_ARITY: usize = 1;
+
+/// Which of the crate's two entry-point contracts a script is being held to.
+///
+/// # Why this is a value rather than three locals
+///
+/// [`eval_inner`] used to pick `(entry_name, arity, is_build_sql)` apart into
+/// three parallel locals, and the two refusals an author actually reads —
+/// [`TransformError::MissingEntryPoint`] and [`TransformError::WrongArity`] —
+/// took none of them: they rendered `` `transform` `` and `(params,
+/// statements)` from constants, so a script that failed to define `build_sql`
+/// was told to define `transform`. That was invisible while [`build_sql`] had
+/// no non-test caller and became visible the moment publish acquired one.
+///
+/// Carrying the contract *in the error* is what makes the message impossible
+/// to get wrong: there is no second place holding the name, so the name cannot
+/// disagree with the lookup that failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryPoint {
+    /// [`ENTRY_POINT`] — an endpoint's response transform.
+    Transform,
+    /// [`BUILD_SQL_ENTRY_POINT`] — a statement's SQL template.
+    BuildSql,
+}
+
+impl EntryPoint {
+    /// The name [`eval_inner`] looks up in the evaluated module.
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Transform => ENTRY_POINT,
+            Self::BuildSql => BUILD_SQL_ENTRY_POINT,
+        }
+    }
+
+    /// How many positional arguments the entry point is called with.
+    pub(crate) const fn arity(self) -> usize {
+        match self {
+            Self::Transform => ENTRY_POINT_ARITY,
+            Self::BuildSql => BUILD_SQL_ENTRY_POINT_ARITY,
+        }
+    }
+
+    /// The parameter list an author should have written, spelled as they would
+    /// write it — so the refusal is a line they can copy.
+    pub(crate) const fn signature(self) -> &'static str {
+        match self {
+            Self::Transform => "(params, statements)",
+            Self::BuildSql => "(params)",
+        }
+    }
+}
+
 /// Ceiling on the transform's response body, measured on the **serialised**
 /// bytes rather than on any structure count.
 ///
@@ -295,6 +363,85 @@ const ENTRY_POINT_ARITY: usize = 2;
 /// [`crate::lifecycle::ValidationError::TransformOutputExceedsRowLimit`] for
 /// what that projection can and cannot prove.
 pub(crate) const MAX_TRANSFORM_OUTPUT_BYTES: usize = 1 << 20;
+
+/// Ceiling on the template a [`build_sql`] script emits, in bytes (spec §5).
+///
+/// # Measured to a BAND; 65536 is chosen inside it
+///
+/// Said plainly, because the alternative is a claim of measurement stronger
+/// than the evidence. `tests::a_realistic_branching_statement_sizes_the_generated_sql_cap`
+/// measures spec §1's shape scaled to an honest analytics query — four optional
+/// dimensions, six metrics, two CTEs, three joins, a grain chosen from a dict
+/// and two optional filters — at an **1862-byte script emitting 948 bytes**,
+/// and holds the cap to `[40x, 100x]` of it: **[37.9 KiB, 94.8 KiB]**.
+///
+/// That band is what the measurement decides, and it is decided in **both**
+/// directions, which is the part a floor alone cannot do. The bottom is C2's
+/// ratio — a cap an honest script bumps into refuses work that should have been
+/// allowed. The top is C2's own sentence turned around: "a cap an honest script
+/// never approaches is not a cap at all", and past it the only thing bounding a
+/// generated statement is `render::MAX_SQL_BYTES` again, which is where this
+/// started.
+///
+/// 65536 is then a round number **chosen** inside that band, at ~69x. Nothing
+/// measured distinguishes it from 48 KiB or 80 KiB, and this comment does not
+/// pretend otherwise. What the test does guarantee is that raising it to
+/// 512 KiB or 1 MiB — the realistic future edit, made to unblock one author —
+/// goes red.
+///
+/// # Why not simply reuse 1 MiB, which is this crate's other answer
+///
+/// [`MAX_TRANSFORM_OUTPUT_BYTES`]'s doc says a third number "would only invite
+/// the question of why", so here is why. 1 MiB is `render::MAX_SQL_BYTES`, and
+/// that is a **backstop** — the point past which a string has stopped being SQL
+/// — reached at render time, after the text has been built, stored and
+/// described. It is not a budget an author should be able to sit inside: a
+/// statement an engine is asked to *plan* is a few KB, and by the time a
+/// generated one is a megabyte the author's mistake is several screens behind
+/// them.
+///
+/// **`MAX_STATEMENTS x 64 KiB` also happens to be 1 MiB, and that is arithmetic
+/// rather than a property.** It is recorded here only so the next reader does
+/// not mistake it for one: the 16 templates are never rendered as one string,
+/// nothing sums them against any limit, and a single 64 KiB template carrying a
+/// `{% for %}` can render past 1 MiB on its own — which is precisely the case
+/// `render::MAX_SQL_BYTES` exists for. This cap bounds the template; that one
+/// bounds the render. Neither contains the other.
+///
+/// # Where it is enforced, and why there is only one place
+///
+/// Inside [`eval_inner`]'s [`EntryPoint::BuildSql`] arm, on the value the
+/// script returned, before it is copied off the starlark heap. That arm is
+/// reachable only through [`build_sql`], and [`build_sql`] is the only
+/// generator in the crate — publish
+/// ([`crate::lifecycle::GeneratedSql::build_after`], and its sentinel probes),
+/// preview (both of those) and per-request serving
+/// (`crate::serving::router::generate_one`) all pass through it. Three
+/// call-site checks would be three chances to drift; this is one site none of
+/// them can go around.
+///
+/// # What a refusal looks like on each path, including the case publish misses
+///
+/// On publish and preview it is an author-facing 400
+/// ([`crate::lifecycle::ValidationError::StatementScriptFailed`], which carries
+/// this rule's own sentence). On serving it is a 500, and that is the right
+/// answer rather than an oversight: a script may emit its long template only on
+/// a branch no sentinel probe reached, so an endpoint CAN publish green and
+/// then fail per request. The caller's request was valid and the ENDPOINT
+/// failed — the identical judgement `generate_one` already makes for a
+/// generated `DELETE` on an unprobed branch. Nothing else could be true of a
+/// text that does not exist until the request supplies its value.
+///
+/// **The serving case is only ever a branch publish never GENERATED.** A branch
+/// publish did generate — every sentinel probe
+/// ([`crate::lifecycle::GeneratedSql::probe`]) — is refused there, by name and
+/// with this cap's sentence, even though that function otherwise reads a failed
+/// evaluation as *inconclusive*. It is the single exception to that rule and it
+/// is about evidence: a length refusal means the script ran to completion and
+/// this process measured what it returned, so publish is holding the defect
+/// rather than guessing at it. Swallowing it was a green publish and a 500 for
+/// the first caller to take the branch.
+pub(crate) const MAX_GENERATED_SQL_BYTES: usize = 64 * 1024;
 
 /// Ceiling on how deeply JSON may nest, **in both directions**.
 ///
@@ -525,27 +672,76 @@ pub enum TransformError {
     #[error("the transform script did not parse: {0}")]
     Parse(String),
     /// The script parsed and ran, but never defined a callable named
-    /// [`ENTRY_POINT`].
+    /// [`EntryPoint::name`] for the contract it was evaluated under.
     ///
-    /// Also what a *non-callable* `transform` produces — `transform = 1` leaves
+    /// Also what a *non-callable* entry point produces — `transform = 1` leaves
     /// the endpoint with no transform function just as surely as omitting it,
     /// and the author's next move is the same line either way.
-    #[error("the transform script must define `{ENTRY_POINT}(params, statements)`")]
-    MissingEntryPoint,
-    /// [`ENTRY_POINT`] exists but does not take the two arguments it is called
+    ///
+    /// **The contract is carried, not assumed.** Both entry points reach this
+    /// arm, and until package S wired a caller onto [`build_sql`] the message
+    /// named `` `transform` `` unconditionally — so an author whose statement
+    /// script was missing `build_sql` was told to define a function this phase
+    /// never looks up. See [`EntryPoint`].
+    #[error("the script must define `{}{}`", .0.name(), .0.signature())]
+    MissingEntryPoint(EntryPoint),
+    /// The entry point exists but does not take the arguments it is called
     /// with.
     ///
     /// Separate from [`TransformError::MissingEntryPoint`] deliberately: "you
     /// named it wrong" and "you took the wrong arguments" send an author to
     /// different lines. Without the distinction both arrive as a generic
     /// call-failed message from starlark.
+    ///
+    /// Carries its [`EntryPoint`] for the same reason
+    /// [`TransformError::MissingEntryPoint`] does — a wrong-arity `build_sql`
+    /// must be told about `build_sql(params)`, not about
+    /// `transform(params, statements)`.
     #[error(
-        "`{ENTRY_POINT}` must take exactly {ENTRY_POINT_ARITY} arguments \
-         (params, statements), but takes {found}"
+        "`{}` must take exactly {} arguments {}, but takes {found}",
+        .entry.name(), .entry.arity(), .entry.signature()
     )]
     WrongArity {
-        /// How many parameters the script's `transform` actually declares.
+        /// Which contract's signature the script failed to match.
+        entry: EntryPoint,
+        /// How many parameters the script's entry point actually declares.
         found: usize,
+    },
+    /// [`BUILD_SQL_ENTRY_POINT`] ran to completion but returned something
+    /// other than a string.
+    ///
+    /// A refusal rather than a coercion: the whole safety argument for a
+    /// build-SQL script is that its template goes through the same
+    /// `render()` a hand-written statement's SQL does, so stringifying a
+    /// dict or a list here would hand the renderer text that was never meant
+    /// to be a template, and the failure it caused would surface far from
+    /// this, its real cause. Carries what came back, spelled the way
+    /// [`starlark::values::Value::get_type`] spells it — `"dict"`, `"list"`,
+    /// `"int"` — so an author reads the kind of their mistake rather than a
+    /// dump of the value.
+    #[error("build_sql must return a string template, but returned a {0}")]
+    BuildSqlNotAString(String),
+    /// [`BUILD_SQL_ENTRY_POINT`] returned a string longer than
+    /// [`MAX_GENERATED_SQL_BYTES`].
+    ///
+    /// Carries **both** numbers, for the reason
+    /// [`TransformError::OutputTooLarge`] does: "too large" without the size
+    /// tells an author nothing about how much to cut. Exact rather than "at
+    /// least" — the template is one string already in hand, so counting it
+    /// costs nothing and promises nothing this cannot keep.
+    ///
+    /// **The message names no parameter and no value.** It reaches a caller
+    /// only through `ServingError::Internal`, which does not surface its
+    /// source, but the rule this crate holds itself to is that a serving
+    /// refusal never spells out an endpoint's own shape — so this sentence is
+    /// safe wherever it lands.
+    #[error("build_sql returned a {bytes} byte template, over the {cap} byte cap")]
+    GeneratedSqlTooLarge {
+        /// The emitted template's length in bytes.
+        bytes: usize,
+        /// [`MAX_GENERATED_SQL_BYTES`], repeated here so the message is
+        /// self-contained.
+        cap: usize,
     },
     /// The script parsed but failed while running — an unbound name, a type
     /// error, an explicit `fail()`.
@@ -623,6 +819,114 @@ struct TransformCall<'a> {
     statements: &'a BTreeMap<String, Vec<serde_json::Value>>,
 }
 
+/// What [`eval_inner`] does once the module's top level has run.
+///
+/// `None` — a probe — evaluates the module and stops. `Some` names which of
+/// the crate's two entry-point contracts to call: [`ENTRY_POINT`] with a
+/// row-shaped [`TransformCall`], or [`BUILD_SQL_ENTRY_POINT`] with `params`
+/// alone. One enum rather than a `statements: Option<_>` on [`TransformCall`]
+/// because a build-SQL script categorically cannot see rows — Starlark has no
+/// way to express "the second argument does not exist", so the type doing the
+/// refusing is the one honest way to keep a script from being handed
+/// `statements` on the phase that runs before any statement has.
+enum Entry<'a> {
+    Transform(TransformCall<'a>),
+    BuildSql { params: &'a GenerationParams },
+}
+
+/// The `params` dict a `build_sql` script is handed — on **every** path.
+///
+/// # Why this is a type and not a `BTreeMap`
+///
+/// Publish and serving must not be able to disagree about the type a generating
+/// script sees. They used to: publish built the dict from
+/// [`crate::lifecycle::representative_value`], one scalar per declared
+/// parameter, while serving reused [`crate::serving::params::Resolved::json`],
+/// whose shape follows the endpoint's frozen `iterated` set and the caller's
+/// arity — so a parameter any statement loops over, or one a caller simply
+/// repeated, reached the script as a one-element `Value::Array` where publish
+/// had shown the author a string. `params["region"] == "ALL"` was then true for
+/// the author and false for every caller, and the script silently took the
+/// other branch: a 200 with the wrong rows, both texts legitimate `SELECT`s, so
+/// every scan and both serve-time gates passed.
+///
+/// The fix is the constructor's signature rather than a rule two call sites
+/// have to remember. [`GenerationParams::insert`] takes **at most one**
+/// [`Param`], and `Param` is a scalar enum with no list case — so "hand a
+/// generating script a list" is not something any caller can express, and
+/// [`build_sql`] takes this type rather than a map so no caller can route
+/// around it. `Resolved::json` no longer type-checks at either generation site.
+///
+/// # What that costs, stated rather than implied
+///
+/// A script cannot see how many values a caller supplied for one parameter. It
+/// gets the first, which is exactly the shape publish probed it with, and the
+/// RENDER still receives every value — `{% for r in region %}` over an iterated
+/// parameter binds each repeat, unchanged (`serving::params::resolve`'s
+/// `as_list`). A script that decides structure from the multiplicity is
+/// therefore not expressible; a script that emits the loop and lets the
+/// renderer bind the list — the only shape the design asks for (spec §4.3) —
+/// is unaffected. The alternative, refusing the repeat outright, would take
+/// `IN (?, ?, ?)` away from every scripted endpoint to close a case the
+/// renderer already answers.
+///
+/// # And what it buys, in spec terms
+///
+/// §8's tripwire is "if a script's SQL can depend on anything other than
+/// `params`, §3 collapses". Following the shape decision would have made a
+/// script's SQL depend on the frozen `iterated` set — a set derived FROM the
+/// statements' SQL, which for a scripted statement does not exist until
+/// generation has already run. This shape depends on nothing but the declared
+/// parameter list and the values supplied for it, which both sides hold before
+/// generation, so the ordering problem does not arise at all.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct GenerationParams(BTreeMap<String, serde_json::Value>);
+
+impl GenerationParams {
+    /// Declare `name`, carrying `value` — or Starlark `None` when there is none.
+    ///
+    /// `Option<&Param>` rather than a JSON value, and that is the whole point of
+    /// the type: `Param` cannot be a list, and `None` is the absent case the
+    /// renderer draws the same distinction for (`ParamValues::insert_absent`).
+    /// A declared name is always present in the dict, so a script reading
+    /// `params["region"]` gets an answer rather than a KeyError.
+    pub(crate) fn insert(&mut self, name: String, value: Option<&Param>) {
+        self.0
+            .insert(name, value.map_or(serde_json::Value::Null, param_json));
+    }
+
+    /// This dict with `name` replaced — what
+    /// [`crate::lifecycle::GeneratedSql::probe`] substitutes into.
+    ///
+    /// A copy rather than a mutation because the probes all vary ONE parameter
+    /// from the same base, and a base that could be left mutated is a probe
+    /// whose meaning depends on the order they ran in.
+    pub(crate) fn with(&self, name: &str, value: Option<&Param>) -> Self {
+        let mut out = self.clone();
+        out.insert(name.to_owned(), value);
+        out
+    }
+}
+
+/// Convert `params` into a starlark dict on `heap`, polling the input budgets
+/// once afterward.
+///
+/// The one conversion both [`Entry`] variants need — [`run_transform`]'s
+/// `params` and [`build_sql`]'s are the same shape — factored out so there is
+/// one place that remembers to poll [`poll_input_budgets`], not two.
+fn alloc_params<'v>(
+    params: &BTreeMap<String, serde_json::Value>,
+    heap: starlark::values::Heap<'v>,
+    deadline: Instant,
+) -> Result<Value<'v>, TransformError> {
+    let mut items = Vec::with_capacity(params.len());
+    for (name, value) in params {
+        items.push((heap.alloc(name.as_str()), json_to_starlark(value, heap, 0)?));
+    }
+    poll_input_budgets(heap, deadline)?;
+    Ok(heap.alloc(AllocDict(items)))
+}
+
 /// Run an endpoint's response transform.
 ///
 /// **This is the single evaluator.** Publish, preview and serving all call this
@@ -684,8 +988,76 @@ pub(crate) fn run_transform(
     eval_inner(
         &spec.script,
         Budgets::default(),
-        Some(TransformCall { params, statements }),
+        Some(Entry::Transform(TransformCall { params, statements })),
     )
+}
+
+/// Run a statement's SQL-building script and return the template it built.
+///
+/// **The third entry point onto [`eval_inner`]**, alongside [`eval_probe`]
+/// (module top level only) and [`run_transform`] (`transform(params,
+/// statements)`). Same evaluator, same budgets, same globals, same dialect,
+/// same panic containment — only the call shape differs, via [`Entry`]. A
+/// second evaluator here would need a second parse, and
+/// `tests::there_is_exactly_one_place_that_parses_starlark` is what would
+/// catch that.
+///
+/// # What comes back is a template, never finished SQL
+///
+/// The script defines `build_sql(params)` and returns a string; whatever it
+/// returns is handed back **verbatim** — `{{ region }}` survives exactly as
+/// written. That is the whole safety argument for a build-SQL statement: the
+/// path a caller's bound value takes to the engine is unchanged, because the
+/// text this returns still goes through the same `render()` that runs a
+/// hand-written statement's SQL. This function never renders anything itself.
+///
+/// # The script sees `params` and nothing else
+///
+/// And it sees them as [`GenerationParams`], which is the type that stops
+/// publish and serving handing the same script different types for the same
+/// parameter — see there.
+///
+/// No `statements` — a build-SQL script runs *before* any statement has
+/// executed, so there is nothing to hand it, and [`Entry::BuildSql`] has no
+/// field to hand it even by mistake. No `db`, `http`, `tx`, `cache`, clock or
+/// randomness either: the globals are [`transform_globals`], unchanged from
+/// [`run_transform`]'s, and the dialect is [`transform_dialect`], likewise
+/// unchanged.
+///
+/// # Why a non-string return is refused, not stringified
+///
+/// A script returning a dict or a list is an author mistake. Coercing it to
+/// text would hand the renderer something that was never meant to be SQL and
+/// let the failure surface far from its cause — see
+/// [`TransformError::BuildSqlNotAString`].
+///
+/// # The one thing this checks about the template, and where every caller
+/// inherits it
+///
+/// Its LENGTH, against [`MAX_GENERATED_SQL_BYTES`] — nothing else. This
+/// function does not scan the text, and must not: a byte scanner guarding a
+/// template language is the mistake P4.5 paid for five times over, which is why
+/// the identifier rule is a behavioural probe
+/// ([`crate::lifecycle::GeneratedSql::probe`]) and the head-word and
+/// comparison rules are re-applied by their own owners
+/// (`crate::serving::router::generate_one`).
+///
+/// The length is different in kind: it is a fact about the string rather than a
+/// judgement about its content, so it is decided once, here, by the only
+/// generator the crate has. Publish, preview and serving reach generation
+/// through this function, so none of them has to remember the cap and none of
+/// them can drift off it.
+pub(crate) fn build_sql(script: &str, params: &GenerationParams) -> Result<String, TransformError> {
+    match eval_inner(script, Budgets::default(), Some(Entry::BuildSql { params }))? {
+        serde_json::Value::String(s) => Ok(s),
+        // `eval_inner`'s `Entry::BuildSql` arm only ever returns `Ok` with a
+        // `Value::String` — anything else it converts to
+        // `TransformError::BuildSqlNotAString` before returning. Reachable
+        // only if that invariant breaks.
+        other => {
+            unreachable!("eval_inner's BuildSql arm must return a JSON string on Ok, got {other:?}")
+        }
+    }
 }
 
 /// Does `value` satisfy the endpoint's declared `returns`?
@@ -892,7 +1264,7 @@ const PANIC_INJECTION_MESSAGE: &str = "injected panic: transform containment pro
 fn eval_inner(
     src: &str,
     budgets: Budgets,
-    call: Option<TransformCall<'_>>,
+    call: Option<Entry<'_>>,
 ) -> Result<serde_json::Value, TransformError> {
     let ast = AstModule::parse("transform.star", src.to_owned(), &transform_dialect())
         .map_err(|e| TransformError::Parse(e.to_string()))?;
@@ -948,15 +1320,23 @@ fn eval_inner(
 
             eval.eval_module(ast, &globals).map_err(classify)?;
 
-            let Some(call) = call else {
+            let Some(entry_call) = call else {
                 // A sandbox probe: the module ran, and there is nothing to call.
                 return Ok(serde_json::Value::Null);
             };
 
+            // Which of the crate's two entry-point contracts this call is —
+            // decided once, before the lookup, so a script missing EITHER
+            // name reports `MissingEntryPoint` against the one it was
+            // actually asked to define.
+            let contract = match &entry_call {
+                Entry::Transform(_) => EntryPoint::Transform,
+                Entry::BuildSql { .. } => EntryPoint::BuildSql,
+            };
             let entry = module
-                .get(ENTRY_POINT)
-                .ok_or(TransformError::MissingEntryPoint)?;
-            check_arity(entry)?;
+                .get(contract.name())
+                .ok_or(TransformError::MissingEntryPoint(contract))?;
+            check_arity(entry, contract)?;
 
             // Converting the inputs allocates on the SAME heap the script will
             // use, but it is Rust code: it consumes no ticks, so nothing starlark
@@ -966,29 +1346,34 @@ fn eval_inner(
             // So the two budgets that CAN be polled from here are polled from
             // here, every `INPUT_POLL_ROWS` rows.
             let heap = module.heap();
-            let mut param_items = Vec::with_capacity(call.params.len());
-            for (name, value) in call.params {
-                param_items.push((heap.alloc(name.as_str()), json_to_starlark(value, heap, 0)?));
-            }
-            poll_input_budgets(heap, deadline)?;
-            let params = heap.alloc(AllocDict(param_items));
 
-            let mut statement_items = Vec::with_capacity(call.statements.len());
-            for (name, rows) in call.statements {
-                let mut converted = Vec::with_capacity(rows.len());
-                for (i, row) in rows.iter().enumerate() {
-                    if i % INPUT_POLL_ROWS == 0 {
-                        poll_input_budgets(heap, deadline)?;
+            let returned = match entry_call {
+                Entry::Transform(TransformCall { params, statements }) => {
+                    let params_v = alloc_params(params, heap, deadline)?;
+
+                    let mut statement_items = Vec::with_capacity(statements.len());
+                    for (name, rows) in statements {
+                        let mut converted = Vec::with_capacity(rows.len());
+                        for (i, row) in rows.iter().enumerate() {
+                            if i % INPUT_POLL_ROWS == 0 {
+                                poll_input_budgets(heap, deadline)?;
+                            }
+                            converted.push(json_to_starlark(row, heap, 0)?);
+                        }
+                        statement_items.push((heap.alloc(name.as_str()), heap.alloc(converted)));
                     }
-                    converted.push(json_to_starlark(row, heap, 0)?);
-                }
-                statement_items.push((heap.alloc(name.as_str()), heap.alloc(converted)));
-            }
-            let statements = heap.alloc(AllocDict(statement_items));
+                    let statements_v = heap.alloc(AllocDict(statement_items));
 
-            let returned = eval
-                .eval_function(entry, &[params, statements], &[])
-                .map_err(classify)?;
+                    eval.eval_function(entry, &[params_v, statements_v], &[])
+                        .map_err(classify)?
+                }
+                // No `statements` — see `Entry::BuildSql`.
+                Entry::BuildSql { params } => {
+                    let params_v = alloc_params(&params.0, heap, deadline)?;
+                    eval.eval_function(entry, &[params_v], &[])
+                        .map_err(classify)?
+                }
+            };
 
             // The output phase's deadline. `None` — every shipped build — is
             // the same instant the evaluation ran under, so a script does not
@@ -1001,7 +1386,38 @@ fn eval_inner(
                 Some(window) => Instant::now() + window,
             };
 
-            serialise_output(returned, output_deadline)
+            if contract == EntryPoint::BuildSql {
+                // A template, not JSON: `serialise_output`'s shape walk is for
+                // a transform's structured return and does not apply here —
+                // there is no tree to descend, no depth to bound and nothing to
+                // serialise. What the deadline above still bounds is the one
+                // thing that could be slow before this point, the evaluation
+                // that produced `returned`, which is exactly what
+                // `build_sql_is_bounded_by_the_same_budgets_as_a_transform`
+                // exercises.
+                //
+                // The BYTE half of that walk does apply, and this is where it
+                // is taken (package S Task 8.5, spec S5). Measured before the
+                // copy off the starlark heap, so a script that emitted a
+                // megabyte is refused without this process allocating a second
+                // one. `MAX_GENERATED_SQL_BYTES` carries why the number is what
+                // it is, why this is the only site, and what each caller does
+                // with the refusal.
+                match returned.unpack_str() {
+                    Some(s) if s.len() > MAX_GENERATED_SQL_BYTES => {
+                        Err(TransformError::GeneratedSqlTooLarge {
+                            bytes: s.len(),
+                            cap: MAX_GENERATED_SQL_BYTES,
+                        })
+                    }
+                    Some(s) => Ok(serde_json::Value::String(s.to_owned())),
+                    None => Err(TransformError::BuildSqlNotAString(
+                        returned.get_type().to_owned(),
+                    )),
+                }
+            } else {
+                serialise_output(returned, output_deadline)
+            }
         })
     }));
 
@@ -1050,8 +1466,13 @@ fn classify(err: starlark::Error) -> TransformError {
     }
 }
 
-/// `transform` exists — does it take the arguments it is about to be called
-/// with?
+/// The entry point exists — does it take the contract's arguments?
+///
+/// `contract` is supplied by the caller in [`eval_inner`] rather than read from
+/// a constant here, because which contract is being checked is a fact only the
+/// caller has — this function only has a `Value`. It carries the arity AND the
+/// name, so the refusal it builds cannot name one contract while the lookup
+/// that produced `entry` used the other.
 ///
 /// # Why the parameters are read out of the value's documentation
 ///
@@ -1070,11 +1491,11 @@ fn classify(err: starlark::Error) -> TransformError {
 /// so a well-formed `def` puts every parameter in `pos_or_named`; `*args` and
 /// `**kwargs` still parse, and are counted so that `def transform(*args)`
 /// reports what it is rather than reporting zero.
-fn check_arity(entry: Value<'_>) -> Result<(), TransformError> {
+fn check_arity(entry: Value<'_>, contract: EntryPoint) -> Result<(), TransformError> {
     let params = match entry.documentation() {
         starlark::docs::DocItem::Member(starlark::docs::DocMember::Function(f)) => f.params,
         // Not a function at all — `transform = 1`. See `MissingEntryPoint`.
-        _ => return Err(TransformError::MissingEntryPoint),
+        _ => return Err(TransformError::MissingEntryPoint(contract)),
     };
 
     let positional = params.pos_only.len() + params.pos_or_named.len();
@@ -1083,14 +1504,18 @@ fn check_arity(entry: Value<'_>) -> Result<(), TransformError> {
         + usize::from(params.args.is_some())
         + usize::from(params.kwargs.is_some());
 
-    // `positional`, not `found`, decides: the entry point is called with two
-    // positional arguments, so two positional parameters and nothing else is the
-    // only signature that works. `found` is what the message reports, because it
-    // is what the author wrote.
-    if positional == ENTRY_POINT_ARITY && found == ENTRY_POINT_ARITY {
+    // `positional`, not `found`, decides: the entry point is called with
+    // exactly `contract.arity()` positional arguments, so that many positional
+    // parameters and nothing else is the only signature that works. `found` is
+    // what the message reports, because it is what the author wrote.
+    let arity = contract.arity();
+    if positional == arity && found == arity {
         Ok(())
     } else {
-        Err(TransformError::WrongArity { found })
+        Err(TransformError::WrongArity {
+            entry: contract,
+            found,
+        })
     }
 }
 
@@ -2293,10 +2718,10 @@ mod tests {
             Budgets::default()
                 .with_wall_clock(Duration::from_secs(300))
                 .with_output_wall_clock(Duration::ZERO),
-            Some(TransformCall {
+            Some(Entry::Transform(TransformCall {
                 params: &params,
                 statements: &statements,
-            }),
+            })),
         )
         .expect_err("an output phase whose deadline has already passed must be refused");
         assert!(
@@ -2315,6 +2740,20 @@ mod transform_tests {
     use super::*;
     use serde_json::json;
     use std::collections::BTreeMap;
+
+    /// A [`GenerationParams`] from a list of scalars, for the `build_sql` tests
+    /// below.
+    ///
+    /// Through the real constructor rather than a literal map, so a test cannot
+    /// hand a generating script a shape production cannot produce — which is
+    /// the property the type exists for.
+    fn gp(entries: &[(&str, Param)]) -> GenerationParams {
+        let mut out = GenerationParams::default();
+        for (name, value) in entries {
+            out.insert((*name).to_owned(), Some(value));
+        }
+        out
+    }
 
     /// [`run_transform`] with the budgets spelled out, for the three tests
     /// whose subject is a guard in the OUTPUT phase.
@@ -2342,10 +2781,10 @@ mod transform_tests {
         eval_inner(
             &spec.script,
             budgets,
-            Some(TransformCall {
+            Some(Entry::Transform(TransformCall {
                 params: &params,
                 statements: &statements,
-            }),
+            })),
         )
     }
 
@@ -2431,7 +2870,7 @@ mod transform_tests {
         };
         assert!(matches!(
             run_transform(&spec, &BTreeMap::new(), &BTreeMap::new()),
-            Err(TransformError::MissingEntryPoint)
+            Err(TransformError::MissingEntryPoint(EntryPoint::Transform))
         ));
     }
 
@@ -2445,7 +2884,10 @@ mod transform_tests {
         };
         assert!(matches!(
             run_transform(&spec, &BTreeMap::new(), &BTreeMap::new()),
-            Err(TransformError::WrongArity { found: 1 })
+            Err(TransformError::WrongArity {
+                entry: EntryPoint::Transform,
+                found: 1
+            })
         ));
     }
 
@@ -2506,7 +2948,7 @@ mod transform_tests {
         };
         assert!(matches!(
             run_transform(&spec, &BTreeMap::new(), &BTreeMap::new()),
-            Err(TransformError::MissingEntryPoint)
+            Err(TransformError::MissingEntryPoint(EntryPoint::Transform))
         ));
     }
 
@@ -2521,7 +2963,10 @@ mod transform_tests {
             returns: vec![],
         };
         match run_transform(&spec, &BTreeMap::new(), &BTreeMap::new()) {
-            Err(TransformError::WrongArity { found: 1 }) => {}
+            Err(TransformError::WrongArity {
+                entry: EntryPoint::Transform,
+                found: 1,
+            }) => {}
             other => panic!("expected WrongArity {{ found: 1 }}, got {other:?}"),
         }
     }
@@ -3079,5 +3524,369 @@ mod transform_tests {
             text.bytes().all(|b| b == b'z'),
             "the payload must be intact"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // `build_sql`: the third entry point.
+    // ---------------------------------------------------------------------
+
+    /// The template a script builds must reach the caller unrendered.
+    ///
+    /// `{{ region }}` is the whole safety argument for this package: the
+    /// braces have to survive `build_sql` verbatim so the bound value still
+    /// goes through `render()` later, exactly as it would for a
+    /// hand-written statement's SQL.
+    #[test]
+    fn build_sql_returns_the_template_the_script_built() {
+        let script = "def build_sql(params):\n  return \"SELECT {{ region }} AS r\"";
+        let out = build_sql(script, &GenerationParams::default()).expect("runs");
+        assert_eq!(
+            out, "SELECT {{ region }} AS r",
+            "the braces must survive verbatim"
+        );
+    }
+
+    /// `params` reaches the script, and the script can branch on it — the
+    /// same dict shape `run_transform` hands `transform`, minus `statements`.
+    #[test]
+    fn build_sql_sees_params_and_can_branch_on_them() {
+        let script = "def build_sql(params):\n  \
+                      if params[\"grain\"] == \"daily\":\n    return \"SELECT 1 AS daily\"\n  \
+                      return \"SELECT 1 AS hourly\"";
+        let daily = gp(&[("grain", Param::Str("daily".into()))]);
+        let hourly = gp(&[("grain", Param::Str("hourly".into()))]);
+        assert_eq!(build_sql(script, &daily).unwrap(), "SELECT 1 AS daily");
+        assert_eq!(build_sql(script, &hourly).unwrap(), "SELECT 1 AS hourly");
+    }
+
+    /// A script that never defines `build_sql` is refused by the same
+    /// variant a missing `transform` is — see [`TransformError::MissingEntryPoint`]
+    /// — carrying [`EntryPoint::BuildSql`] rather than the transform contract.
+    ///
+    /// Named `_for_build_sql` rather than reusing
+    /// `a_script_without_the_entry_point_is_refused_by_name` verbatim: that
+    /// name is already taken above, by the same assertion against
+    /// `run_transform`. Same behaviour, different entry point, so both keep
+    /// their own name rather than one shadowing the other.
+    #[test]
+    fn a_script_without_the_entry_point_is_refused_by_name_for_build_sql() {
+        assert!(matches!(
+            build_sql("x = 1", &GenerationParams::default()),
+            Err(TransformError::MissingEntryPoint(EntryPoint::BuildSql))
+        ));
+    }
+
+    /// **The message an author reads names the function they were asked to
+    /// write.** Task 2 shipped `MissingEntryPoint` and `WrongArity` rendering
+    /// `` `transform` `` and `(params, statements)` unconditionally, which was
+    /// unobservable while `build_sql` had no non-test caller and became a
+    /// wrong sentence the moment publish acquired one.
+    ///
+    /// Asserted on the rendered TEXT, not on the variant: the variant was
+    /// already right, and it is the text that would have sent an author to
+    /// define a function this phase never looks up. The transform half is
+    /// asserted alongside so that "name the contract" cannot be satisfied by
+    /// swapping which of the two is wrong.
+    #[test]
+    fn a_refusal_names_the_entry_point_the_author_was_asked_to_write() {
+        let missing_build_sql = build_sql("x = 1", &GenerationParams::default())
+            .expect_err("`x = 1` defines no `build_sql`")
+            .to_string();
+        assert_eq!(
+            missing_build_sql,
+            "the script must define `build_sql(params)`"
+        );
+
+        let wrong_arity_build_sql = build_sql(
+            "def build_sql(params, statements):\n  return \"\"",
+            &GenerationParams::default(),
+        )
+        .expect_err("`build_sql` takes one argument")
+        .to_string();
+        assert_eq!(
+            wrong_arity_build_sql,
+            "`build_sql` must take exactly 1 arguments (params), but takes 2"
+        );
+
+        let spec = TransformSpec {
+            script: "x = 1".into(),
+            returns: vec![],
+        };
+        assert_eq!(
+            run_transform(&spec, &BTreeMap::new(), &BTreeMap::new())
+                .expect_err("`x = 1` defines no `transform`")
+                .to_string(),
+            "the script must define `transform(params, statements)`",
+            "the transform contract must keep its own wording"
+        );
+
+        let spec = TransformSpec {
+            script: "def transform(params):\n  return {}".into(),
+            returns: vec![],
+        };
+        assert_eq!(
+            run_transform(&spec, &BTreeMap::new(), &BTreeMap::new())
+                .expect_err("`transform` takes two arguments")
+                .to_string(),
+            "`transform` must take exactly 2 arguments (params, statements), but takes 1"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Package S Task 8.5: the emitted template's length (spec S5).
+    // ---------------------------------------------------------------------
+
+    /// **The measurement behind [`MAX_GENERATED_SQL_BYTES`], in the code.**
+    ///
+    /// Spec S5 says this cap needs measuring rather than choosing, so the
+    /// measurement lives here where the suite re-takes it, not only in a
+    /// report. The script is spec S1's shape scaled to a statement an analyst
+    /// would actually publish: four optional dimensions, six metrics, two CTEs,
+    /// three joins, a grain chosen from a dict, two optional filters, and every
+    /// caller value left as `{{ }}` for the renderer.
+    ///
+    /// The band is narrow on purpose. This is a fixture, so its size is a
+    /// constant — a test that only asserted "under the cap" would keep passing
+    /// while the thing being measured drifted, and the ratio below would then
+    /// be a ratio to nothing.
+    /// The bottom of the band [`MAX_GENERATED_SQL_BYTES`] must sit in, as a
+    /// multiple of a realistic generated statement. C2's ratio: a cap an honest
+    /// script bumps into refuses work that should have been allowed.
+    const HEADROOM_MIN: usize = 40;
+
+    /// The top of it. `2.5x` C2's ratio, and the reason there is a top at all is
+    /// in the assertion that uses it.
+    const HEADROOM_MAX: usize = 100;
+
+    #[test]
+    fn a_realistic_branching_statement_sizes_the_generated_sql_cap() {
+        let script = r#"
+DIMENSIONS = {
+    "region": "c.region",
+    "segment": "c.segment",
+    "channel": "b.channel",
+    "category": "p.category",
+}
+METRICS = {
+    "revenue": "sum(b.total)",
+    "orders": "count(*)",
+    "customers": "count(distinct b.customer_id)",
+    "aov": "sum(b.total) / nullif(count(*), 0)",
+    "refunds": "sum(b.refund_total)",
+    "units": "sum(l.quantity)",
+}
+GRAIN = {
+    "day": "date_trunc('day', o.ordered_at)",
+    "week": "date_trunc('week', o.ordered_at)",
+    "month": "date_trunc('month', o.ordered_at)",
+}
+
+def build_sql(params):
+    dims = [DIMENSIONS[d] for d in sorted(DIMENSIONS) if params.get("by_" + d)]
+    metrics = [METRICS[m] + " AS " + m for m in sorted(METRICS)]
+    where = ["o.ordered_at >= {{ from_date }}", "o.ordered_at < {{ to_date }}"]
+    if params.get("channel"):
+        where.append("o.channel = {{ channel }}")
+    if params.get("min_total"):
+        where.append("o.total >= {{ min_total }}")
+    select = ["b.bucket"] + dims + metrics
+    group = ["b.bucket"] + dims
+    return ("WITH base AS (\n" +
+        "  SELECT o.id, o.customer_id, o.channel, o.total, o.refund_total,\n" +
+        "         " + GRAIN[params["grain"]] + " AS bucket\n" +
+        "  FROM sales.orders o\n" +
+        "  WHERE " + "\n    AND ".join(where) + "\n" +
+        "    AND o.status IN ('complete', 'shipped')\n" +
+        "), enriched AS (\n" +
+        "  SELECT b.*, l.quantity, c.region, c.segment, p.category\n" +
+        "  FROM base b\n" +
+        "  JOIN sales.order_lines l ON l.order_id = b.id\n" +
+        "  JOIN sales.customers c ON c.id = b.customer_id\n" +
+        "  JOIN sales.products p ON p.id = l.product_id\n" +
+        ")\n" +
+        "SELECT " + ", ".join(select) + "\n" +
+        "FROM enriched b\n" +
+        "GROUP BY " + ", ".join(group) + "\n" +
+        "ORDER BY b.bucket\n" +
+        "LIMIT {{ row_limit }}")
+"#;
+        let params = gp(&[
+            ("grain", Param::Str("month".into())),
+            ("by_region", Param::Bool(true)),
+            ("by_segment", Param::Bool(true)),
+            ("by_channel", Param::Bool(true)),
+            ("by_category", Param::Bool(true)),
+            ("channel", Param::Str("web".into())),
+            ("min_total", Param::I64(10)),
+        ]);
+        let sql = build_sql(script, &params).expect("a realistic script runs");
+
+        // The script is itself a quarter of `MAX_TRANSFORM_SCRIPT_BYTES`, which
+        // is what makes it a fair sample of the upper end rather than a toy.
+        assert!(
+            (1800..1950).contains(&script.len()),
+            "the fixture drifted: {} bytes",
+            script.len()
+        );
+        assert!(
+            (900..1000).contains(&sql.len()),
+            "the emitted template drifted: {} bytes",
+            sql.len()
+        );
+        assert!(
+            sql.contains("{{ region }}") || sql.contains("{{ channel }}"),
+            "the caller's values must still be unrendered placeholders: {sql}"
+        );
+        // BOTH directions. A floor alone is not a cap: it is satisfied by 1 MiB,
+        // by 16 MiB and by `usize::MAX`, so a test carrying only the floor
+        // cannot fail in the direction a cap exists for — someone raising the
+        // number to unblock an author would keep every test green. The ceiling
+        // is C2's own argument turned around: "a cap an honest script never
+        // approaches is not a cap at all".
+        //
+        // The band is what the measurement actually decides. It does NOT decide
+        // 65536 — see `MAX_GENERATED_SQL_BYTES`, which says so.
+        assert!(
+            MAX_GENERATED_SQL_BYTES >= HEADROOM_MIN * sql.len(),
+            "the cap ({MAX_GENERATED_SQL_BYTES}) must leave a realistic \
+             statement ({}) the same order of headroom \
+             MAX_TRANSFORM_SCRIPT_BYTES leaves C2's example",
+            sql.len()
+        );
+        assert!(
+            MAX_GENERATED_SQL_BYTES <= HEADROOM_MAX * sql.len(),
+            "the cap ({MAX_GENERATED_SQL_BYTES}) is more than {HEADROOM_MAX}x a \
+             realistic statement ({}) — at that distance it stops being a cap \
+             and the only thing bounding a generated statement is \
+             render::MAX_SQL_BYTES again",
+            sql.len()
+        );
+
+        // The SCRIPT's own cap, sized against the same fixture in the same
+        // call, because the two numbers are decided by the same measurement and
+        // splitting them across two tests is how a fixture drifts under one of
+        // them. Two-sided for the reason above: a floor alone is satisfied by
+        // axum's 2 MB, which is exactly the state this cap was added to leave.
+        //
+        // A DIFFERENT band from `MAX_GENERATED_SQL_BYTES`', and deliberately:
+        // this cap is also the multiplier on publish's 1040 parses, so the
+        // ceiling is what stops those becoming gigabytes. See
+        // `egret_dataapi_api::MAX_STATEMENT_SCRIPT_BYTES`.
+        const SCRIPT_HEADROOM_MIN: usize = 4;
+        const SCRIPT_HEADROOM_MAX: usize = 16;
+        assert!(
+            egret_dataapi_api::MAX_STATEMENT_SCRIPT_BYTES >= SCRIPT_HEADROOM_MIN * script.len(),
+            "the script cap ({}) leaves a realistic generating script ({}) less \
+             than {SCRIPT_HEADROOM_MIN}x room for comments, a helper `def` and \
+             a second branch",
+            egret_dataapi_api::MAX_STATEMENT_SCRIPT_BYTES,
+            script.len()
+        );
+        assert!(
+            egret_dataapi_api::MAX_STATEMENT_SCRIPT_BYTES <= SCRIPT_HEADROOM_MAX * script.len(),
+            "the script cap ({}) is more than {SCRIPT_HEADROOM_MAX}x a realistic \
+             generating script ({}) — and this one multiplies: publish parses a \
+             statement's script up to 1040 times",
+            egret_dataapi_api::MAX_STATEMENT_SCRIPT_BYTES,
+            script.len()
+        );
+        // The third relation — that the script cap is at least the transform's —
+        // is not here: it is two constants, so it is a `const _: () = assert!`
+        // beside `MAX_TRANSFORM_SCRIPT_BYTES` and fails the BUILD rather than a
+        // test run.
+    }
+
+    /// A template past [`MAX_GENERATED_SQL_BYTES`] is refused, with both
+    /// numbers.
+    ///
+    /// The evaluator's existing budgets do not reach this: `"z" * 70000` is one
+    /// instruction and a few tens of kilobytes against a 64 MiB heap, so a
+    /// script can emit a megabyte well inside every limit C2 installed. The
+    /// only backstop before this rule was `render::MAX_SQL_BYTES`, a downstream
+    /// error at render time rather than the author-facing cap spec S5 asks for.
+    #[test]
+    fn a_template_over_the_cap_is_refused_by_the_cap_not_by_a_budget() {
+        let over = MAX_GENERATED_SQL_BYTES + 1;
+        let script = format!("def build_sql(params):\n  return \"z\" * {over}");
+        let err = build_sql(&script, &GenerationParams::default()).expect_err("over the cap");
+        match &err {
+            TransformError::GeneratedSqlTooLarge { bytes, cap } => {
+                assert_eq!(*bytes, over, "the exact size, not a lower bound");
+                assert_eq!(*cap, MAX_GENERATED_SQL_BYTES);
+            }
+            other => panic!("expected a length refusal, not a budget one: {other:?}"),
+        }
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "build_sql returned a {over} byte template, over the \
+                 {MAX_GENERATED_SQL_BYTES} byte cap"
+            ),
+            "both numbers, so an author knows how much to cut"
+        );
+    }
+
+    /// The boundary is inclusive: exactly the cap is a template, one more is
+    /// not.
+    ///
+    /// Two assertions rather than one because an off-by-one here is invisible
+    /// to a test that only pushes something obviously huge through — and this
+    /// cap is the sole reason the size of a generated statement is bounded at
+    /// all, so its edge is worth naming.
+    #[test]
+    fn a_template_of_exactly_the_cap_is_accepted() {
+        let script = format!("def build_sql(params):\n  return \"z\" * {MAX_GENERATED_SQL_BYTES}");
+        let sql = build_sql(&script, &GenerationParams::default()).expect("exactly the cap fits");
+        assert_eq!(sql.len(), MAX_GENERATED_SQL_BYTES);
+    }
+
+    /// The cap counts BYTES, not characters.
+    ///
+    /// `MAX_TRANSFORM_SCRIPT_BYTES` and `render::MAX_SQL_BYTES` are both byte
+    /// counts, and a `.chars().count()` here would let a script emitting
+    /// multi-byte text produce up to four times the memory those numbers
+    /// bound. Starlark strings are UTF-8, so this is `str::len` and the test
+    /// says which one it is.
+    #[test]
+    fn the_cap_counts_bytes_rather_than_characters() {
+        // Two bytes each, so half the cap in characters is exactly the cap in
+        // bytes, and one character more is over it.
+        let chars = MAX_GENERATED_SQL_BYTES / 2 + 1;
+        let script = format!("def build_sql(params):\n  return \"\\u00e9\" * {chars}");
+        match build_sql(&script, &GenerationParams::default()).expect_err("over the cap in BYTES") {
+            TransformError::GeneratedSqlTooLarge { bytes, .. } => {
+                assert_eq!(bytes, chars * 2, "a character count would say {chars}");
+            }
+            other => panic!("expected a length refusal: {other:?}"),
+        }
+    }
+
+    /// A script returning a dict or a list is an author mistake. Coercing it
+    /// would hand the renderer something that is not SQL and let the failure
+    /// surface far from its cause.
+    #[test]
+    fn a_script_returning_a_non_string_is_refused_rather_than_stringified() {
+        let script = "def build_sql(params):\n  return {\"sql\": \"SELECT 1\"}";
+        assert!(build_sql(script, &GenerationParams::default()).is_err());
+    }
+
+    /// The evaluator is C2's. An unbounded loop must be refused, not run —
+    /// and this test must FAIL rather than hang if that stops being true, so
+    /// it evaluates on its own thread with a deadline: Rust has no per-test
+    /// timeout, and a budget regression here would otherwise stall the suite
+    /// rather than fail one test.
+    #[test]
+    fn build_sql_is_bounded_by_the_same_budgets_as_a_transform() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(build_sql(
+                "def build_sql(params):\n  for i in range(1, 1000000000):\n    pass\n  return \"x\"",
+                &GenerationParams::default(),
+            ));
+        });
+        let outcome = rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the tick budget did not stop an unbounded loop within 30s");
+        assert!(outcome.is_err(), "an unbounded loop must be refused");
     }
 }

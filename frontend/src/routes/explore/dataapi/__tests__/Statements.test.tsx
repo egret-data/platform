@@ -626,3 +626,60 @@ describe("the statement limit does not drift between the contract and the UI", (
     expect(declared).toBe(MAX_STATEMENTS);
   });
 });
+
+/**
+ * Package S: a statement's SQL is TEXT or a SCRIPT, and the two are separate
+ * from the statement's IDENTITY.
+ *
+ * The property here is not "a script can be edited" — Task 8's own block in
+ * `Query.test.tsx` is where the mode switch lives — it is that **the author's
+ * script survives every operation that is not about its content**. The first
+ * version of Task 1 rebuilt the edited statement as `{ name, sql: sqlOf(s) }`,
+ * which for a scripted statement is `sql: ""`: a pure RENAME, which never
+ * touches SQL, silently destroyed the script and sent a text statement in its
+ * place. Silent data loss on a rename is worse than a refusal, which is what
+ * both tests below are here to keep true.
+ */
+describe("Query section — a statement whose SQL a script builds", () => {
+  const SCRIPT = 'def build_sql(params):\n  return "SELECT 1"';
+  const scripted = makeEndpoint({
+    statements: [
+      { name: "rows", sql: "SELECT * FROM t" },
+      { name: "total", script: SCRIPT },
+    ],
+  } as Partial<DataApiEndpointDto>);
+
+  it("keeps the script when the statement is renamed", async () => {
+    renderQuery(scripted);
+    await screen.findByLabelText("SQL");
+    await userEvent.click(screen.getByRole("tab", { name: "total" }));
+    await userEvent.clear(screen.getByLabelText("Statement name"));
+    await userEvent.type(screen.getByLabelText("Statement name"), "row_count");
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(updateMutateAsync).toHaveBeenCalled());
+    // A deep equal on the WHOLE list: the renamed entry must still carry
+    // `script` and must NOT have grown an `sql` key beside it, because a
+    // statement carrying both is refused by the backend reader.
+    expect(savedStatements()).toEqual([
+      { name: "rows", sql: "SELECT * FROM t" },
+      { name: "row_count", script: SCRIPT },
+    ]);
+  });
+
+  it("shows the script editor for a scripted statement and the SQL editor for a text one", async () => {
+    renderQuery(scripted);
+    // The discriminating half FIRST, on the text statement, so that neither
+    // absence below can be something this section does to every statement.
+    expect(await screen.findByLabelText("SQL")).toHaveValue("SELECT * FROM t");
+    expect(screen.queryByLabelText("SQL script")).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("tab", { name: "total" }));
+
+    // The editor that does not apply is REMOVED, not disabled — there is no
+    // `sql` on this statement to show read-only, and a box showing one would be
+    // showing a value the save cannot carry.
+    expect(screen.getByLabelText("SQL script")).toHaveValue(SCRIPT);
+    expect(screen.queryByLabelText("SQL")).not.toBeInTheDocument();
+  });
+});

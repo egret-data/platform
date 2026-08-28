@@ -1046,8 +1046,19 @@ fn collect_aliases(body: &str, ctx: &ParamValues, aliases: &mut Vec<String>) {
 /// Five separate reviews found five bypasses of the comparison rule — `{%+`,
 /// `{# {% #}`, `{% raw %}`, `(mode)`, `regions[0] / | first` — and every one was
 /// the same defect: **this module's scanner disagreeing with minijinja's lexer
-/// about the same bytes.** A sixth spelling exists; nobody has written it down
-/// yet. The scanner is fixed for the five, and it is still a scanner.
+/// about the same bytes.** The scanner is fixed for the five, and it is still a
+/// scanner.
+///
+/// **The sixth is now written down**: `{% if [p, 'x'][0] == 'lit' %}` passes
+/// [`check_static`] today — the parameter is inside a list literal, so it never
+/// stands in comparison position for the scanner — and is caught here. It is
+/// pinned by `tests::a_parameter_wrapped_in_a_list_literal_is_caught_only_by_the_gate`,
+/// which also records what serving it would have done: the comparison is
+/// silently false, the `{% if %}` it guards is dropped, and the statement is
+/// executed with its filter missing. It is deliberately NOT fixed in the
+/// scanner. That would be the sixth round of the game this gate exists to stop
+/// playing, and a seventh spelling would then be the one nobody has written
+/// down.
 ///
 /// So the real gate is measured from behaviour instead. A parameter reaches the
 /// template as an opaque [`Cell`] (so its SQL type survives), and minijinja
@@ -1076,19 +1087,28 @@ fn collect_aliases(body: &str, ctx: &ParamValues, aliases: &mut Vec<String>) {
 /// does not happen to trigger; a missed spelling in the scanner was a rule that
 /// did not run at all. The failure modes are not the same shape.
 ///
-/// # It has no production caller yet
+/// # Where it runs
 ///
-/// Task 7 wires this into publish. Until it does, **this gate delivers nothing
-/// at runtime** — the serving path runs [`check_static`] and the invariant, and
-/// nothing else. When it is wired, the published snapshot should record that it
-/// passed, so a version frozen before the gate existed can be refused at serve
-/// time rather than relying on an operator remembering to re-publish it.
+/// At publish, through `lifecycle::check_render_rules`, over every template of
+/// every statement; `EndpointSnapshot::param_gate` records that a version passed
+/// it, so a version frozen before the gate existed is refused at serve time
+/// rather than relying on an operator remembering to re-publish.
+///
+/// **And at serve, on GENERATED text only** (package S Task 6,
+/// `serving::router::generate_one`). That is not a reversal of the paragraph
+/// below: a scripted statement's SQL is built from the caller's parameters, so
+/// the bytes a request executes may be a branch no publish ever saw, and for
+/// those bytes "publish already gated it" is simply false.
 ///
 /// # Deliberately not called by [`render`]
 ///
-/// It renders the definition many times. That is right at publish, where it
-/// happens once per version, and wrong per request. The serving path keeps
-/// [`check_static`] and the invariant.
+/// It renders the definition many times — measured at 106 µs for a
+/// one-parameter statement with no literals and 9.9 ms for four parameters with
+/// fourteen harvested literals (debug build). That is right at publish, where it
+/// happens once per version, and wrong per request for a WRITTEN statement,
+/// whose exact bytes publish has already gated. `render` therefore keeps
+/// [`check_static`] and the invariant, and the one caller that pays this per
+/// request is the one whose text nothing else has ever looked at.
 pub fn check_publish(sql: &str, ctx: &ParamValues) -> Result<(), RenderError> {
     check_static(sql, ctx)?;
     check_dynamic(sql, ctx)
@@ -1997,6 +2017,48 @@ mod tests {
              so the branch it guards was never described"
         );
         assert!(cands.contains(&Param::Bool(true)));
+    }
+
+    /// **The sixth bypass spelling, written down.**
+    ///
+    /// [`check_publish`]'s doc records five spellings of one comparison that got
+    /// past [`check_static`], each found by a separate review. This is a sixth,
+    /// found while package S was deciding what serving owes a template publish
+    /// never saw: wrapping the parameter in a list literal means it never stands
+    /// in comparison position for the scanner, while minijinja compares the
+    /// opaque `Cell` against the string and answers FALSE.
+    ///
+    /// The second half is the one that matters. The definition does not fail to
+    /// render — it renders to a statement with **the guarded filter missing and
+    /// no binds at all**, which an engine answers with over-broad rows under a
+    /// `200`. No error is raised anywhere. That is why the behavioural gate has
+    /// to reach every text that will be executed, and it is why
+    /// `serving::router::generate_one` pays for it per request on generated SQL.
+    ///
+    /// Deliberately not fixed in the scanner — see [`check_publish`].
+    #[test]
+    fn a_parameter_wrapped_in_a_list_literal_is_caught_only_by_the_gate() {
+        let sql = "SELECT n FROM t WHERE 1=1 \
+                   {% if [region, 'x'][0] == 'EU' %} AND region = {{ region }}{% endif %}";
+        let mut ctx = ParamValues::new();
+        ctx.insert("region", Param::Str("EU".into()));
+
+        check_static(sql, &ctx)
+            .expect("the scanner does not see a parameter inside a list literal");
+
+        // What serving would have done with it, stated as a value rather than
+        // described: the filter is GONE and nothing is bound.
+        let (rendered, binds) = render(sql, &ctx).expect("it renders, which is the problem");
+        assert_eq!(rendered, "SELECT n FROM t WHERE 1=1 ");
+        assert!(
+            binds.is_empty(),
+            "the comparison was silently false and took the filter with it: {binds:?}"
+        );
+
+        assert_eq!(
+            check_dynamic(sql, &ctx).expect_err("the gate must catch what the scanner missed"),
+            RenderError::ParameterInspected
+        );
     }
 
     /// Regression for a fix-round-1 defect: an early `return` for booleans in

@@ -8,19 +8,25 @@
 import type { OutputSpec } from './outputSpec';
 import type { ParamSpec } from './paramSpec';
 import type { PreviewEndpointInputValues } from './previewEndpointInputValues';
+import type { StatementSource } from './statementSource';
 
 /**
  * The on-screen draft, as the request carries it.
  *
  * No `cache`, `limits` or `rate_limit`: preview does not consult any of them,
  * and accepting fields it ignores would invite the reader to think it did.
+ * # Unknown keys, `sql`-or-`script`, and why [`Deserialize`] is hand-written
+ *
+ * Package S Task 7 gave this body the same two-case source
+ * [`egret_dataapi_api::StatementSpec`] has, flattened onto the object the same
+ * way: `{"sql": …}` or `{"script": …}`, never both and never neither. That
+ * shape and `#[serde(deny_unknown_fields)]` are the pair serde documents as not
+ * composing, so this impl states all three rules itself — exactly what
+ * `StatementSpec` does, for the reasons measured there. A body an older client
+ * sends is unchanged: `sql` is still `sql`, in the same position, with the same
+ * type.
  */
-export interface PreviewEndpointInput {
-  /**
-     * What is in the editor right now — not what is stored. **The only
-     * statement this route runs.**
-     */
-  sql: string;
+export type PreviewEndpointInput = StatementSource & {
   /**
      * The SQL text of the endpoint's OTHER statements, as they are on screen.
      *
@@ -60,4 +66,4 @@ export interface PreviewEndpointInput {
      * is exactly the shape that could name someone else's connection.
      */
   database_id: string;
-}
+};

@@ -41,4 +41,38 @@ export interface DataApiPreviewDto {
      * does.
      */
   transform_declared: boolean;
+  /**
+     * The template the statement's `build_sql` script returned — `{{ }}`
+     * intact, before any render — or `None` when the author wrote the SQL
+     * themselves (package S Task 7).
+     *
+     * **Showing it is the point of previewing a script at all.** A script that
+     * branches emits a different statement per parameter value, and until this
+     * field the only way an author could see which one their draft produced was
+     * to publish it and read the engine's error. C2's response transform could
+     * not be previewed and this route says so (`transform_declared`); here the
+     * artefact exists, so it is on screen.
+     *
+     * # It is the TEMPLATE, not what the engine ran
+     *
+     * The rendered form has the author's values replaced by bind markers, which
+     * is the one thing they cannot edit and did not write. The template is what
+     * they would have typed by hand, so it is directly comparable with the
+     * editor beside it — and it is the artefact the script is responsible for.
+     *
+     * # It is generated from the author's own test `values`
+     *
+     * Not from publish's representative ones. A preview that showed the
+     * baseline branch while binding the author's values would show a statement
+     * their values do not take — the "told fine, then told no" defect this
+     * route exists to invert, in its quietest form.
+     *
+     * # `None`, not an echo, for a written statement
+     *
+     * The author is looking at that text in the editor. A field that always
+     * carried something would give the UI no way to tell "this is what your
+     * script built" from "this is what you typed".
+     * @nullable
+     */
+  generated_sql?: string | null;
 }
