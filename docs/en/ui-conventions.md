@@ -166,9 +166,20 @@ because only one page of rows was ever mounted. Grouping removed the pagination,
 now explicit (`GROUP_PAGE`, a "Show N more" button), and its test asserts the number of
 distinct accounts queried on first paint — not just what is on screen.
 
-Group headers carry `role="rowheader"` on the spanning cell, the same idiom §4.1 records for
-`ConfigTableGroup`, and for the same reason: a group row that reads as another data cell is
-the confusion the shape exists to remove.
+**`role="rowheader"` on the group header is this page's addition, not yet the siblings'
+practice — and this section would otherwise be a convention its own reference implementation
+violates.** `Clients.tsx` puts the role on the header's spanning cell, the same idiom §4.1
+records for `ConfigTableGroup` and for the same reason: a group row that reads as another data
+cell is the confusion the shape exists to remove. But `FolderHeaderRow.tsx` — the shared
+component Charts, Datasets, Dashboards and Endpoints group with — does **not** set it, so four
+of the five grouped tables in Explore currently announce their folder header as an ordinary
+cell.
+
+That is a gap in those four, not a licence for the next one. A new grouped table sets the
+role, and `FolderHeaderRow` should adopt it: it is a one-attribute change, held back only
+because the task that wrote this section was scoped to a single page. It is stated here rather
+than left implicit so that nobody reads the reference implementation's silence as the
+convention.
 
 ---
 

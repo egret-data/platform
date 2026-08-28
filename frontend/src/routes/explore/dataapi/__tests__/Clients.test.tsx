@@ -623,20 +623,40 @@ describe("Clients — cache invalidation", () => {
    */
   it("revoking invalidates the owning ACCOUNT's client list, not a key built from the client id", async () => {
     const user = userEvent.setup();
-    const { qc } = renderClients([makeAccount({ id: "sa-9", name: "billing-bot" })]);
+    // TWO accounts, and the revoke happens in the SECOND. With one account the
+    // fixture is degenerate: the handler's `a` and the first rendered account
+    // are the same object, so substituting one for the other changes nothing
+    // and the test passes over a page that always invalidates group zero.
+    // Sorted by name, so `alpha-bot` renders first and `billing-bot` second.
+    mockClientsByAccount({
+      "sa-8": [makeClient({ id: "cl-alpha", name: "alpha-client" })],
+      "sa-9": [makeClient({ id: "cl-billing", name: "billing-client" })],
+    });
+    const { qc } = renderClients([
+      makeAccount({ id: "sa-8", name: "alpha-bot", email: "sa-8@service.egret.local" }),
+      makeAccount({ id: "sa-9", name: "billing-bot", email: "sa-9@service.egret.local" }),
+    ]);
     const spy = vi.spyOn(qc, "invalidateQueries");
-    await screen.findByText("etl");
+    await screen.findByText("billing-client");
 
-    await user.click(screen.getByRole("button", { name: "Actions for etl" }));
+    await user.click(screen.getByRole("button", { name: "Actions for billing-client" }));
     await user.click(await screen.findByRole("menuitem", { name: /revoke/i }));
     await user.type(screen.getByPlaceholderText("revoke"), "revoke");
     await user.click(screen.getByRole("button", { name: /^revoke$/i }));
 
     await waitFor(() => {
-      expect(spy).toHaveBeenCalledWith(
-        expect.objectContaining({ queryKey: ["dataApiListClients", "eng", "sa-9"] }),
-      );
+      expect(revokeMutateAsync).toHaveBeenCalledWith({ workspace: "eng", id: "cl-billing" });
     });
+    expect(spy).toHaveBeenCalledWith(
+      expect.objectContaining({ queryKey: ["dataApiListClients", "eng", "sa-9"] }),
+    );
+    // The other group's list is left alone. Without this, a handler hoisted out
+    // of the `.map()` — invalidating whichever account happens to be first —
+    // still satisfies the assertion above only by accident of ordering; here it
+    // invalidates `sa-8` and dies.
+    expect(spy).not.toHaveBeenCalledWith(
+      expect.objectContaining({ queryKey: ["dataApiListClients", "eng", "sa-8"] }),
+    );
   });
 });
 
@@ -744,5 +764,26 @@ describe("Clients — the per-account request fan-out stays capped", () => {
     renderClients([makeAccount()]);
     await screen.findByText("reporting-bot");
     expect(screen.queryByRole("button", { name: /show .* more/i })).not.toBeInTheDocument();
+  });
+
+  it("puts the cap back when the search changes, in both directions", async () => {
+    const user = userEvent.setup();
+    renderClients(MANY);
+    await screen.findByText("bot-00");
+    await user.click(screen.getByRole("button", { name: /show 5 more service accounts/i }));
+    await screen.findByText("bot-29");
+
+    // Searching after a "Show more" must not carry the raised limit into a
+    // result set it was never about…
+    const box = screen.getByPlaceholderText(/search service accounts/i);
+    await user.type(box, "bot-2");
+    expect(screen.queryByRole("button", { name: /show .* more/i })).not.toBeInTheDocument();
+
+    // …and clearing it must not leave the cap silently off, which is the
+    // direction that matters: it is the per-account request fan-out.
+    await user.clear(box);
+    await screen.findByText("bot-00");
+    expect(screen.queryByText("bot-29")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /show 5 more service accounts/i })).toBeInTheDocument();
   });
 });

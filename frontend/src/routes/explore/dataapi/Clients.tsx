@@ -49,6 +49,14 @@ import { ServiceAccountActionsMenu } from "./ServiceAccountActionsMenu";
  * be kept explicitly or a workspace with two hundred accounts fires two
  * hundred requests on first paint. 25 is the number every control-plane list
  * page uses for the same reason (`Workspaces.tsx`, `Warehouses.tsx`).
+ *
+ * **The "Show N more service accounts" button is load-bearing, not decorative.**
+ * The summary strip counts every account the search matched, while the table
+ * renders only the first `GROUP_PAGE` of them, so 30 accounts read as "30
+ * service accounts" over 25 visible groups. Those two numbers reconcile only
+ * because the button names the remainder — drop it (or replace it with an
+ * infinite scroll that has no count) and the strip becomes a number the page
+ * contradicts.
  */
 const GROUP_PAGE = 25;
 
@@ -196,7 +204,14 @@ export default function Clients() {
               className="pl-8"
               placeholder="Search service accounts…"
               value={query}
-              onChange={(e) => setQuery(e.target.value)}
+              // The reveal resets with the query. Searching after a "Show more"
+              // otherwise carries the raised limit into a result set it was
+              // never about, and — worse in the other direction — clearing a
+              // search leaves the page showing everything, so the cap this
+              // button exists to enforce is silently off. Done in the handler
+              // rather than an effect: a `setState` in an effect body is what
+              // `react-hooks/set-state-in-effect` is for.
+              onChange={(e) => { setQuery(e.target.value); setVisible(GROUP_PAGE); }}
             />
           </div>
         </div>
