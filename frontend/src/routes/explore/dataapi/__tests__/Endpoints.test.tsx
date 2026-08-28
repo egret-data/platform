@@ -1503,6 +1503,29 @@ describe("Endpoints — a folder header needs a folder", () => {
     expect(screen.getByText("Daily report")).toBeInTheDocument();
   });
 
+  it("keeps the header up while a filter empties every named folder", async () => {
+    // The alternative gate — "more than one group" — reads the same as
+    // `folders.length > 0` on every fixture above, and differs here:
+    // `groupByFolder` drops empty NAMED folders while a filter is engaged, so
+    // a search matching only folderless rows collapses `groups` to one. Gated
+    // on that, the header would blink out mid-keystroke and back on deleting
+    // the last character, in a workspace whose folders never went anywhere.
+    mockList({ data: { status: 200, data: [IN_REPORTING, LOOSE_A] } });
+    mockFolders([REPORTING]);
+    const user = userEvent.setup();
+    renderEndpoints();
+    await screen.findByText("Ad hoc query");
+
+    await user.type(screen.getByPlaceholderText("Search endpoints…"), "Ad hoc");
+
+    // The named folder has no matching rows left and is gone from the table…
+    await waitFor(() => expect(screen.queryByText("Daily report")).not.toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "Toggle Reporting" })).not.toBeInTheDocument();
+    // …but the workspace still has folders, so the surviving section keeps its
+    // heading rather than losing it for the length of a search.
+    expect(screen.getByRole("button", { name: "Toggle Uncategorized" })).toBeInTheDocument();
+  });
+
   it("does not strand rows behind a collapse state whose header is no longer rendered", async () => {
     // What a previous session left behind: Uncategorized collapsed, from back
     // when this workspace still had folders. `useCollapsed` reads that out of
