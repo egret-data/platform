@@ -38,11 +38,11 @@ import { useEndpointDetail } from "../EndpointDetail";
  * empty on every endpoint that has never been published.
  */
 export default function VersionsSection() {
-  // `dirty` is read here, not just in Definition: the five sections share ONE
+  // `dirty` is read here, not just in Query: the five sections share ONE
   // form that survives section navigation (`EndpointDetail` keys the Outlet by
-  // id, not by pathname), so an author can edit SQL in Definition, walk over
+  // id, not by pathname), so an author can edit SQL in Query, walk over
   // here with "Unsaved changes" still in the header, and publish — freezing
-  // the SAVED draft, not the one on screen. Definition already guards the far
+  // the SAVED draft, not the one on screen. Config already guards the far
   // cheaper Validate this way; Publish changes what every deployed consumer
   // receives and has more reason to.
   const { ws, id, dirty, trashed, refetch } = useEndpointDetail();
@@ -92,7 +92,7 @@ export default function VersionsSection() {
           <h2 className="text-lg font-semibold">Versions</h2>
           <p className="text-sm text-muted-foreground">
             Every frozen snapshot of this endpoint&apos;s contract. A consumer only ever receives the one
-            marked Live — never the draft sitting in Definition.
+            marked Live — never the draft sitting in Query.
           </p>
         </div>
         {/* `trashed` beside `dirty`, and stated on screen rather than only in a

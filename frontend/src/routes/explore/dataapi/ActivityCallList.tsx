@@ -240,7 +240,7 @@ export default function ActivityCallList({ ws, range }: { ws: string; range: Act
               {entries.length === 0 && (
                 <TableRow className="hover:bg-transparent">
                   <TableCell colSpan={7} className="py-8 text-center text-muted-foreground">
-                    No calls in range.
+                    No calls in this range.
                   </TableCell>
                 </TableRow>
               )}

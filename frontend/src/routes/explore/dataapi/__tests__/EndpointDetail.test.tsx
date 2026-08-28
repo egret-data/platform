@@ -1645,6 +1645,22 @@ describe("VersionsSection", () => {
     expect(screen.queryByText(/never been published/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/could not load/i)).not.toBeInTheDocument();
   });
+
+  // The section this sentence names has to be one the shell puts in its nav.
+  // It used to say "Definition", which was renamed to Query before this
+  // section shipped — so the copy pointed an author at a tab that is not on
+  // the screen while they are reading it.
+  it("names a section that exists", () => {
+    renderVersions();
+
+    const blurb = screen.getByText(/frozen snapshot/i);
+    expect(blurb.textContent).not.toContain("Definition");
+    expect(blurb).toHaveTextContent("Query");
+    // …and "Query" is not just a nicer word: the shell renders it as a nav
+    // link, so the reader can act on the sentence.
+    expect(screen.getByRole("link", { name: "Query" })).toBeInTheDocument();
+  });
+
 });
 
 /**

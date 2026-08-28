@@ -311,12 +311,12 @@ describe("Activity — call list", () => {
     renderActivity();
     await screen.findByTestId("tile-calls");
     expect(await screen.findByText(/calls boom/i)).toBeInTheDocument();
-    expect(screen.queryByText(/no calls in range/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/no calls in this range/i)).not.toBeInTheDocument();
   });
 
   it("shows an empty state distinct from the error state when there are genuinely no calls", async () => {
     renderActivity();
-    expect(await screen.findByText(/no calls in range/i)).toBeInTheDocument();
+    expect(await screen.findByText(/no calls in this range/i)).toBeInTheDocument();
   });
 
   it("renders a call row with endpoint, status, duration, cache hit and request id", async () => {
@@ -499,5 +499,30 @@ describe("Activity — page scaffold", () => {
     const { container } = renderActivity();
     await screen.findByRole("heading", { level: 1, name: "Activity" });
     expect(container.firstElementChild?.className ?? "").toMatch(/\bp-4\b/);
+  });
+});
+
+/**
+ * Both tables on this page mean the same thing by "empty": the selected range
+ * produced no calls. They said it in two different sentences, which reads as
+ * two different conditions on one screen.
+ */
+describe("Activity — one wording for one empty state", () => {
+  it("uses the same sentence in the per-endpoint table and the call list", async () => {
+    mockSummary({
+      data: {
+        status: 200,
+        data: { ...DEFAULT_SUMMARY, endpoints: [] } satisfies ActivitySummaryDto,
+      },
+    });
+    mockCalls([]);
+    renderActivity();
+
+    // Both empty rows are on screen at once, so this is a direct comparison
+    // rather than two renders that could each drift on their own.
+    await waitFor(() =>
+      expect(screen.getAllByText("No calls in this range.")).toHaveLength(2),
+    );
+    expect(screen.queryByText("No calls in range.")).not.toBeInTheDocument();
   });
 });

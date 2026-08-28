@@ -14,7 +14,7 @@ import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
 /**
  * The subset of `DataApiEndpointDto` an author edits. Deliberately every
  * config field (`output` included, even though only the Response section —
- * Task 4 — puts a control on it), not just what Definition renders: this is
+ * Task 4 — puts a control on it), not just what Query renders: this is
  * ONE form backing ALL five detail sections, so a field a later section owns
  * still needs to survive a Save made from a different section.
  *

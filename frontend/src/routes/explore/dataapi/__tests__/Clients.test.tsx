@@ -397,3 +397,24 @@ describe("Clients — page scaffold", () => {
     expect(container.firstElementChild?.className ?? "").toMatch(/\bp-4\b/);
   });
 });
+
+/**
+ * One service account is the ordinary state of this page — most workspaces run
+ * a single bot — and it rendered "1 service accounts".
+ */
+describe("Clients — the summary strip agrees with itself about number", () => {
+  it("counts one service account without an s", async () => {
+    renderClients([makeAccount()]);
+    await screen.findByText("reporting-bot");
+
+    expect(screen.getByText("service account").textContent).toBe("1service account");
+    expect(screen.queryByText("service accounts")).not.toBeInTheDocument();
+  });
+
+  it("keeps the s for two", async () => {
+    renderClients([makeAccount(), makeAccount({ id: "sa-2", name: "etl-bot", email: "sa-2@service.egret.local" })]);
+    await screen.findByText("etl-bot");
+
+    expect(screen.getByText("service accounts").textContent).toBe("2service accounts");
+  });
+});

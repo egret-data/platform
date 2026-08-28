@@ -1885,3 +1885,43 @@ describe("Endpoints — trash", () => {
     );
   });
 });
+
+/**
+ * The strip counts rows, so a one-row workspace is the common first-run case,
+ * not an edge one — and it rendered "1 endpoints total".
+ */
+describe("Endpoints — the summary strip agrees with itself about number", () => {
+  it("counts one endpoint without an s", async () => {
+    mockList({ data: { status: 200, data: [makeEndpoint({ id: "e1", name: "only one" })] } });
+    renderEndpoints();
+    await screen.findByText("only one");
+
+    // `getByText` matches on an element's own text nodes, so this finds the
+    // strip item and `.textContent` then reads the number beside it — the
+    // sentence as a user sees it, not the label constant.
+    expect(screen.getByText("endpoint total").textContent).toBe("1endpoint total");
+    expect(screen.queryByText("endpoints total")).not.toBeInTheDocument();
+  });
+
+  it("keeps the s for every other count, zero included", async () => {
+    // Guards the other direction: a naive `s`-stripper would render
+    // "0 endpoint total" and "2 endpoint total".
+    mockList({
+      data: {
+        status: 200,
+        data: [makeEndpoint({ id: "e1", name: "one" }), makeEndpoint({ id: "e2", name: "two" })],
+      },
+    });
+    const { unmount } = renderEndpoints();
+    await screen.findByText("one");
+    expect(screen.getByText("endpoints total").textContent).toBe("2endpoints total");
+    unmount();
+
+    mockList({ data: { status: 200, data: [] } });
+    renderEndpoints();
+    // An empty workspace shows the first-run CTA instead of the strip, so
+    // there is no "0 endpoints total" on screen to assert — the CTA is what
+    // this state must render.
+    expect(await screen.findByText(/no endpoints yet/i)).toBeInTheDocument();
+  });
+});

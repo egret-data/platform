@@ -170,7 +170,9 @@ export default function Clients() {
         </div>
 
         <div className="mb-3">
-          <SummaryStrip items={[{ label: "service accounts", value: rows.length }]} />
+          <SummaryStrip
+            items={[{ label: rows.length === 1 ? "service account" : "service accounts", value: rows.length }]}
+          />
         </div>
 
         <FilterableTable

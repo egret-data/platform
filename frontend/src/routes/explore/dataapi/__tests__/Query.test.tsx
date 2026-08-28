@@ -1137,7 +1137,7 @@ describe("Query section — ParamEditor", () => {
     it("keeps the empty state, and the sentence that says where a parameter comes from", async () => {
       renderParams([]);
       expect(await screen.findByText(/No parameters yet/i)).toBeInTheDocument();
-      expect(screen.getByText(":name")).toBeInTheDocument();
+      expect(screen.getByText("{{ name }}")).toBeInTheDocument();
       // The columns stay on screen with no rows: they are what tells an author
       // what a parameter is made of before they add one.
       expect(screen.getByRole("columnheader", { name: "Name" })).toBeInTheDocument();
