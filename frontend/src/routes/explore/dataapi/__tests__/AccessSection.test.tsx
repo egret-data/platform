@@ -763,9 +763,10 @@ describe("AccessSection — the shape", () => {
   /**
    * Access had no width guard at all, and neither did `Try it` — which is how
    * `Try it` shipped a `max-w-5xl` that nothing was holding in place.
-   * `docs/en/ui-conventions.md` §5.1 lists this section among the four that cap
-   * themselves; the assertion lives in `sectionWidth.ts` so all five sections
-   * make it the same way.
+   * `docs/en/ui-conventions.md` §5.1 lists this section among the three that cap
+   * themselves — Access, Try it and Versions; Config and Response leave width to
+   * the page. The assertion lives in `sectionWidth.ts` so all five sections make
+   * it the same way.
    */
   it("caps its own width, as §5.1 says this section does", async () => {
     setup({ accounts: [SA_GRANTED], grants: [] });
