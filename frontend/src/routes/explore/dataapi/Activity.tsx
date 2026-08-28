@@ -1,10 +1,11 @@
 import { type ReactNode, useState } from "react";
-import { useParams } from "react-router-dom";
+import { Inbox } from "lucide-react";
+import { Link, useParams } from "react-router-dom";
 
 import { useDataApiActivitySummary } from "@/api/generated/data-api/data-api";
 import type { ActivityRange, ActivityRow } from "@/api/generated/model";
-import { ListSkeleton } from "@/components/explore/ListSkeleton";
-import { Alert, AlertDescription } from "@/components/ui/alert";
+import { EmptyState } from "@/components/explore/EmptyState";
+import { ListStates } from "@/components/explore/ListStates";
 import { Button } from "@/components/ui/button";
 import {
   Table,
@@ -15,6 +16,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import ActivityCallList from "./ActivityCallList";
+import { Caveat } from "./detail/Caveat";
 
 const RANGES: ActivityRange[] = ["1h", "24h", "7d", "30d"];
 
@@ -46,14 +48,33 @@ const RANGE_DAYS: Record<ActivityRange, number> = {
 export default function Activity() {
   const ws = useParams().workspace!;
   const [range, setRange] = useState<ActivityRange>("24h");
+  // Lifted out of `ActivityCallList` so the empty state can offer it. The
+  // summary EXCLUDES trials (`activity.rs`: "Trials (`actor_user_id IS NOT
+  // NULL`) are excluded here and shown only in the call list"), so a range
+  // whose only traffic was Try-it runs reads as empty on this page, and this
+  // toggle is the one control that can reach those rows.
+  const [includeTrials, setIncludeTrials] = useState(false);
 
   const summaryQuery = useDataApiActivitySummary(ws, { range }, { query: { retry: false } });
   const summary = summaryQuery.data?.status === 200 ? summaryQuery.data.data : undefined;
   const retentionDays = summary?.retention_days ?? null;
 
-  const summaryErrorMessage =
-    (summaryQuery.error as { message?: string } | null)?.message ??
-    "Could not load activity statistics.";
+  // Either signal means the range produced calls: the grand total and the
+  // per-endpoint rows come out of one `GROUPING SETS` query, so they agree —
+  // and requiring BOTH would blank a page that has rows to show the day one of
+  // them is wrong.
+  const hasCalls = summary != null && (summary.total.calls > 0 || summary.endpoints.length > 0);
+
+  // Built before the branch rather than inside `ListStates`' children, which
+  // are constructed whether or not that branch is taken — `summary` is not
+  // narrowed across the JSX boundary and would be read while undefined.
+  const summaryBlock =
+    summary && hasCalls ? (
+      <>
+        <Tiles total={summary.total} />
+        <EndpointTable rows={summary.endpoints} />
+      </>
+    ) : null;
 
   return (
     // Canonical Explore list-page scaffold (same as Charts.tsx/Datasets.tsx):
@@ -71,24 +92,61 @@ export default function Activity() {
         <RangePicker range={range} onChange={setRange} retentionDays={retentionDays} />
       </div>
 
-      {/* Two failure modes, handled separately (resolution #3): a 500 must
-          never render as "no calls yet". */}
-      {summaryQuery.isError ? (
-        <Alert variant="destructive">
-          <AlertDescription>{summaryErrorMessage}</AlertDescription>
-        </Alert>
-      ) : summaryQuery.isLoading || !summary ? (
-        <ListSkeleton cols={4} />
-      ) : (
-        <div className="space-y-6">
-          <Tiles total={summary.total} />
-          <EndpointTable rows={summary.endpoints} />
-        </div>
-      )}
+      {/* Four states, in `ListStates`' order — `isError` BEFORE `hasData`, and
+          error may never fold into empty (§2.1/§2.2). A 500 must not render as
+          "No calls in this range."
 
-      <div className="mt-8">
-        <ActivityCallList ws={ws} range={range} />
-      </div>
+          `isLoading` also covers "settled with no payload": react-query clears
+          `isLoading` on ANY settle, so a result nobody has would otherwise fall
+          straight into the empty branch and assert something about the world
+          from nothing. The `!summaryQuery.isError` guard keeps the error branch
+          reachable — `ListStates` checks loading first. */}
+      <ListStates
+        isLoading={summaryQuery.isLoading || (!summary && !summaryQuery.isError)}
+        isError={summaryQuery.isError}
+        // The generated hook types its error as the response SHAPE; the mutator
+        // throws the real `ApiError`. `ListStates` takes `unknown`.
+        error={summaryQuery.error}
+        errorText="Could not load activity statistics."
+        hasData={hasCalls || includeTrials}
+        skeletonCols={4}
+        empty={
+          // ONE empty state, not four metric cards showing an em dash over two
+          // tables each saying "empty" in its own words. An empty dashboard is
+          // not an empty state.
+          <EmptyState
+            variant="dashed"
+            icon={Inbox}
+            title="No calls in this range"
+            description="Nothing has called this workspace's endpoints in the selected range. Try-it runs are not counted here."
+            action={
+              <div className="flex flex-wrap items-center justify-center gap-2">
+                {/* The escape hatch, not decoration: trials are excluded from
+                    every number on this page, so without this the rows a
+                    Try-it run produced are unreachable from the screen whose
+                    job is to show calls. */}
+                <Button variant="outline" onClick={() => setIncludeTrials(true)}>
+                  Show trial runs
+                </Button>
+                <Button asChild variant="ghost">
+                  <Link to={`/explore/${ws}/data-api/endpoints`}>View endpoints</Link>
+                </Button>
+              </div>
+            }
+          />
+        }
+      >
+        <div className="space-y-6">
+          {summaryBlock}
+          <ActivityCallList
+            ws={ws}
+            range={range}
+            hasCalls={hasCalls}
+            includeTrials={includeTrials}
+            onIncludeTrialsChange={setIncludeTrials}
+          />
+        </div>
+      </ListStates>
     </div>
   );
 }
@@ -103,7 +161,7 @@ function RangePicker({
   retentionDays: number | null;
 }) {
   return (
-    <div className="space-y-1">
+    <div data-testid="activity-range" className="space-y-1.5">
       <div className="flex items-center gap-2">
         {RANGES.map((r) => {
           // The SELECTED preset is never disabled, even when it exceeds
@@ -129,10 +187,17 @@ function RangePicker({
         })}
       </div>
       {retentionDays != null && (
-        <p className="text-xs text-muted-foreground">
-          Data is kept for {retentionDays} day{retentionDays === 1 ? "" : "s"}; ranges longer than
-          that are disabled above so a thinning tail is never mistaken for falling traffic.
-        </p>
+        // §4.4: the consequence in the summary, the reason behind it. The
+        // load-bearing half — how long data is kept — is on screen with nothing
+        // clicked; what is collapsed is WHY presets are disabled. A full-width
+        // paragraph under a four-button strip was the whole of it before.
+        <Caveat
+          className="text-xs"
+          summary={`Data is kept for ${retentionDays} day${retentionDays === 1 ? "" : "s"}`}
+        >
+          Ranges longer than that are disabled above so a thinning tail is never mistaken for
+          falling traffic.
+        </Caveat>
       )}
     </div>
   );
@@ -209,7 +274,7 @@ function EndpointTable({ rows }: { rows: ActivityRow[] }) {
   const unmatched = rows.find((r) => r.endpoint_id == null);
 
   return (
-    <div className="space-y-1.5">
+    <div data-testid="activity-per-endpoint" className="space-y-1.5">
       <h2 className="text-sm font-semibold">Per endpoint</h2>
       <div className="overflow-x-auto rounded-md border">
         <Table>
@@ -237,11 +302,11 @@ function EndpointTable({ rows }: { rows: ActivityRow[] }) {
           </TableBody>
         </Table>
       </div>
-      <p className="text-xs text-muted-foreground">
-        Rows here can sum to less than the total above: any request that matched no endpoint is
-        grouped into the final "No matching endpoint" row rather than the per-endpoint count — the
-        screen isn't inconsistent, those calls just never resolved to one.
-      </p>
+      <Caveat className="text-xs" summary="Rows here can sum to less than the total above">
+        Any request that matched no endpoint is grouped into the final "No matching endpoint" row
+        rather than the per-endpoint count — the screen isn't inconsistent, those calls just never
+        resolved to one.
+      </Caveat>
     </div>
   );
 }
