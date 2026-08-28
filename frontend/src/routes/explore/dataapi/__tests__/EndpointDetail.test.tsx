@@ -437,6 +437,42 @@ describe("Config — config table Details column", () => {
    * renders as `0` and never shows a placeholder) and the third was simply
    * false.
    */
+  /**
+   * The row above the rate limits carries the same nullish trap and a THIRD
+   * sentinel, and its `placeholder="unlimited"` was false twice over. From the
+   * backend, not from the shape of the neighbouring rows:
+   *
+   *   - `crates/egret-dataapi-api/src/lib.rs:172-183` — `LimitsSpec` defaults
+   *     `max_rows` to **10,000** and `timeout_seconds` to **30**, not to `0`.
+   *     So a blank box is the default, not "no limit".
+   *   - `crates/egret-dataapi/src/serving/router.rs:2054-2057` — serving clamps
+   *     both: `max_rows.clamp(1, MAX_ROWS_CEILING)` and
+   *     `timeout_seconds.clamp(1, TIMEOUT_CEILING_SECS)`. So `0` means ONE ROW
+   *     and ONE SECOND — the opposite of unlimited — and `:2718`'s own test
+   *     spells it out: "a 0 cap must not mean 'return nothing'".
+   *   - `router.rs:239`, `:244` — the ceilings are 1,000,000 rows and 300
+   *     seconds. **There is no value that means unlimited.**
+   */
+  it("says what the row and time limits default to, and that neither 0 means unlimited", async () => {
+    renderConfig();
+    const maxRows = await screen.findByLabelText("Max rows");
+    const timeout = screen.getByLabelText("Timeout (seconds)");
+    const rowText = (el: HTMLElement) => (el.closest("tr") as HTMLElement).textContent ?? "";
+
+    // What the empty box does, and what the value an author might type as
+    // "no limit" actually does.
+    expect(rowText(maxRows)).toMatch(/10,000/);
+    expect(rowText(maxRows)).toMatch(/one row/i);
+    expect(rowText(timeout)).toMatch(/\b30\b/);
+    expect(rowText(timeout)).toMatch(/one second/i);
+
+    // The word that was there before, on a setting where it is not reachable
+    // at all. This is the assertion that fails on the shipped copy.
+    expect(rowText(maxRows)).not.toMatch(/\bunlimited\b/i);
+    expect(maxRows).toHaveAttribute("placeholder", "10,000 — the default");
+    expect(timeout).toHaveAttribute("placeholder", "30 — the default");
+  });
+
   it("says what a rate limit of 0 does, and does not say the same thing for Burst", async () => {
     renderConfig();
     const perCaller = await screen.findByLabelText("Per caller (qps)");

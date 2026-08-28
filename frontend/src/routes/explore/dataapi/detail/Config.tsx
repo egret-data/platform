@@ -239,18 +239,37 @@ export default function Config() {
           </>
         )}
 
+        {/* # `Limits` is a THIRD sentinel, and it is the opposite of the rate
+            limits' one — do not unify the three groups' copy.
+
+            `LimitsSpec` does not default to `0`
+            (`crates/egret-dataapi-api/src/lib.rs:172-183`): `max_rows` defaults
+            to 10,000 and `timeout_seconds` to 30, so a blank box is the
+            DEFAULT, not "no limit". And serving clamps both rather than reading
+            them literally — `router.rs:2054-2057` is
+            `max_rows.clamp(1, MAX_ROWS_CEILING)` and
+            `timeout_seconds.clamp(1, TIMEOUT_CEILING_SECS)` — so `0` means ONE
+            ROW and ONE SECOND. `router.rs:2718`'s test says it in as many
+            words: "a 0 cap must not mean 'return nothing'".
+
+            **There is no value here that means unlimited**, which is what the
+            `placeholder="unlimited"` these two rows shipped with claimed. The
+            ceilings (1,000,000 rows, 300 seconds) are named in the Details
+            cells because an author who types more gets silently less — the
+            same "a limit that silently is not one" the ceiling constants exist
+            to prevent, pointed the other way. */}
         <ConfigTableGroup label="Limits" />
         <ConfigTableRow
           label="Max rows"
           htmlFor="cfg-max-rows"
-          details="Hard cap on rows returned. A result larger than this fails the call rather than being silently truncated."
+          details="Hard cap on rows returned. A result larger than this fails the call rather than being silently truncated. Blank means the default, 10,000; 0 serves one row rather than everything; above 1,000,000 is clamped to it."
         >
           <Input
             id="cfg-max-rows"
             className="w-full"
             type="number"
             min={0}
-            placeholder="unlimited"
+            placeholder="10,000 — the default"
             value={form.limits.max_rows ?? ""}
             onChange={(e) =>
               setForm((f) => ({
@@ -263,14 +282,14 @@ export default function Config() {
         <ConfigTableRow
           label="Timeout (seconds)"
           htmlFor="cfg-timeout"
-          details="How long the engine may take before the call is abandoned."
+          details="How long the engine may take before the call is abandoned. Blank means the default, 30; 0 becomes one second rather than no timeout; above 300 is clamped to it."
         >
           <Input
             id="cfg-timeout"
             className="w-full"
             type="number"
             min={0}
-            placeholder="default"
+            placeholder="30 — the default"
             value={form.limits.timeout_seconds ?? ""}
             onChange={(e) =>
               setForm((f) => ({
