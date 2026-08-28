@@ -436,6 +436,14 @@ Two things that came out of converting `Versions` and `Access`:
   `AccessSection.test.tsx` asserts the columnheaders by **accessible name** rather than
   `textContent`, because `textContent` would have passed on exactly that regression.
 
+  **Let the library compute that name; do not approximate it.** The first version of that
+  assertion mapped headers through `aria-label ?? textContent`, which agrees with the naming
+  algorithm today and diverges the moment a header uses `aria-labelledby` — a stand-in for the
+  thing being tested, in a test whose whole subject is naming. `getByRole(role, { name })` runs
+  the real computation, so pinning **order and name together** is
+  `expect(headers[n]).toBe(screen.getByRole("columnheader", { name: … }))` with nothing
+  reimplemented.
+
 **What the labels buy.** `Access`'s Invoke condition used to be a `<dt>` inside each row's
 `<dl>`, which repeated the word on every row and left each row's answer at a different
 vertical offset from the one above it. As a column the label is written once and the answers
@@ -956,6 +964,15 @@ assert the `<details>` is closed, `fireEvent.click` it, assert `open`, and asser
 is inside that element and NOT inside the `<summary>`. Do it inside a genuinely disabled
 `<fieldset>` at least once per section, which is the only place the `<details>`-vs-Radix
 choice is observable.
+
+**All five steps, or none of them counts.** One of those four rewrites clicked the summary and
+then asserted the sentences were in the document, and that is not a reachability test — a
+click is not an observable. Review mutated `Caveat` to a plain `<div>`/`<div>`, `tsc` clean:
+fifteen tests in the feature died and that one stayed green. The two steps it was missing are
+the two that carry the meaning — `open` after the click (else a Radix collapsible with
+`forceMount` plus CSS hiding passes) and containment (else a `<summary>` that swallowed the
+paragraph passes). **Asserting `not.toHaveAttribute("open")` BEFORE the click is the third**,
+without which `<details open>` — a disclosure that collapses nothing — passes too.
 
 ---
 

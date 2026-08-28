@@ -469,9 +469,14 @@ describe("AccessSection — condition 2, Ranger", () => {
     // `<details>` — so a `getByText` alone would pass on copy no reader can get
     // to. Open it the way a reader does, then assert.
     const summary = await screen.findByText("Invoke is not data access");
+    const details = summary.closest("details")!;
+    // Closed FIRST. Without this the test passes on `<details open>` — a
+    // disclosure that collapses nothing — and "reachable" would be asserting
+    // only that a click did not break anything.
+    expect(details).not.toHaveAttribute("open");
     fireEvent.click(summary);
-    expect(summary.closest("details")).toHaveAttribute("open");
-    expect(within(summary.closest("details")!).getByText(/egret cannot check/i)).toBeInTheDocument();
+    expect(details).toHaveAttribute("open");
+    expect(within(details).getByText(/egret cannot check/i)).toBeInTheDocument();
     expect(screen.getAllByRole("link", { name: /try it/i }).length).toBeGreaterThan(0);
   });
 
@@ -663,26 +668,31 @@ describe("AccessSection — the shape", () => {
     // same sentence; the browser pass measured what that cost (see the
     // component's doc) and it is section-level copy now.
     //
-    // Their ACCESSIBLE NAMES, not their `textContent`. A `<th>` names every
-    // cell in its column, so once the Invoke header gained the invoke-vs-data
-    // caveat (Task 3) `textContent` would have made this assertion pass on a
-    // header that reads 550 characters at a screen-reader user before each
-    // row's answer — the audio form of the very defect that took the `Data`
-    // column out. The name is what has to stay one word.
-    expect(
-      (await screen.findAllByRole("columnheader")).map((h) => h.getAttribute("aria-label") ?? h.textContent),
-    ).toEqual([
-      "Service account",
-      "Invoke",
-      // Named for a screen reader and hidden on screen — a visible heading over
-      // one small button is louder than what it labels.
-      "Actions",
-    ]);
+    // Their ACCESSIBLE NAMES, and computed by the library rather than
+    // approximated here. A `<th>` names every cell in its column, so once the
+    // Invoke header gained the invoke-vs-data caveat (Task 3) a `textContent`
+    // assertion would have passed on a header that reads 550 characters at a
+    // screen-reader user before each row's answer — the audio form of the very
+    // defect that took the `Data` column out.
+    //
+    // The first version of this fix read `aria-label ?? textContent`, which is
+    // a hand-rolled stand-in for the naming algorithm: it agrees with it today
+    // and would disagree the moment the header used `aria-labelledby`, which is
+    // exactly the sort of change this assertion exists to survive. `getByRole`
+    // runs the real computation, so the identity checks below say "the header
+    // in position N is the one the accessibility tree calls X" — order and name
+    // in one, with nothing reimplemented.
+    const headers = await screen.findAllByRole("columnheader");
+    expect(headers).toHaveLength(3);
+    expect(headers[0]).toBe(screen.getByRole("columnheader", { name: "Service account" }));
+    expect(headers[1]).toBe(screen.getByRole("columnheader", { name: "Invoke" }));
+    // Named for a screen reader and hidden on screen — a visible heading over
+    // one small button is louder than what it labels.
+    expect(headers[2]).toBe(screen.getByRole("columnheader", { name: "Actions" }));
+
     // …and the caveat is still IN that header, reachable by anyone reading the
     // header row itself. Naming the column is not hiding the sentence.
-    expect(
-      within(screen.getByRole("columnheader", { name: "Invoke" })).getByText("Invoke is not data access"),
-    ).toBeInTheDocument();
+    expect(within(headers[1]).getByText("Invoke is not data access")).toBeInTheDocument();
 
     // Positions, not merely presence: a header row that says "Invoke" over the
     // account name is a table that reads as wrong while every text assertion in

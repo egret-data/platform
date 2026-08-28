@@ -256,18 +256,43 @@ describe("TryIt", () => {
     );
   });
 
+  /**
+   * Task 3 moved these behind the consequence that heads them, so this test
+   * had to change — and the FIRST rewrite of it was wrong in the way that
+   * matters. It clicked the summary and then asserted the five sentences were
+   * in the document, which is the presence assertion this file was supposed to
+   * stop making: mutating `Caveat` to a `<div>`/`<div>` (standing prose again,
+   * `tsc` clean) killed 15 tests in this feature and left THIS one green.
+   *
+   * A click is not a reachability assertion. The observable is what the click
+   * CHANGED — the `open` attribute — plus where the sentences live. Without
+   * both, a `Caveat` swapped for a Radix collapsible with `forceMount` and CSS
+   * hiding passes here while the copy is unreachable.
+   */
   it("states the three consequences a trial has: rate limit, access log, and cache", () => {
     mockTry(OK);
     renderTryIt();
-    // Behind the consequence that heads them (Task 3), so this opens the
-    // disclosure first: finding the text inside a closed `<details>` would
-    // prove the sentence is in the DOM, not that a reader can get to it.
-    fireEvent.click(screen.getByText("A trial is a real call, not a dry run"));
-    expect(screen.getByText(/rate-limit bucket/i)).toBeInTheDocument();
-    expect(screen.getByText(/cannot throttle a live consumer/i)).toBeInTheDocument();
-    expect(screen.getByText(/access log/i)).toBeInTheDocument();
-    expect(screen.getByText(/Include trial runs/i)).toBeInTheDocument();
-    expect(screen.getByText(/per_principal/)).toBeInTheDocument();
+
+    const summary = screen.getByText("A trial is a real call, not a dry run");
+    const details = summary.closest("details");
+    expect(details).not.toBeNull();
+    expect(details).not.toHaveAttribute("open");
+
+    fireEvent.click(summary);
+    expect(details).toHaveAttribute("open");
+
+    // Inside the disclosure the click opened, and not in its `<summary>` —
+    // a summary that swallowed the paragraph would hide nothing.
+    for (const re of [
+      /rate-limit bucket/i,
+      /cannot throttle a live consumer/i,
+      /access log/i,
+      /Include trial runs/i,
+      /per_principal/,
+    ]) {
+      const node = within(details!).getByText(re);
+      expect(node.closest("summary")).toBeNull();
+    }
   });
 
   it("treats a 413 as 'too large to display', not a truncated answer", async () => {
