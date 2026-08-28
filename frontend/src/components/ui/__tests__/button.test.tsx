@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
+
 import { render, screen } from "@testing-library/react";
 import { Button } from "@/components/ui/button";
 
@@ -77,4 +80,260 @@ describe("Button — a disabled Slot cannot be left interactive", () => {
     expect(link).not.toHaveAttribute("aria-disabled");
     expect(link).not.toHaveAttribute("tabindex");
   });
+});
+
+/**
+ * ── A DISABLED BUTTON MUST LOOK DISABLED IN BOTH THEMES ──────────────────────
+ *
+ * Disabled used to be encoded by ALPHA ALONE: `disabled:opacity-50` in the base,
+ * nothing else. Measured with `getComputedStyle` on the endpoint-detail Save
+ * button of the deployed build, in dark mode:
+ *
+ *     disabled = true
+ *     opacity  = 0.5
+ *     background = oklch(0.66 0.13 185)   // unchanged from enabled
+ *     color      = oklch(0.1 0 0)         // unchanged
+ *
+ * Alpha is not a colour change, it is a blend with whatever is behind. On white
+ * that blend washes the teal out to a pastel and reads unavailable; on the
+ * near-black dark ground the same 50% leaves a saturated teal that reads READY.
+ * So the identical class produced opposite meanings in the two themes, and in
+ * dark a user could not see that Save does nothing.
+ *
+ * The fix changes the paint, not the alpha: a disabled button loses its fill
+ * (`bg-secondary`), takes a token border (`inset-ring-border`, inset so the box
+ * does not grow by 2px and jitter as the form goes dirty/clean), drops its
+ * shadow, and takes muted label ink. Ghost and link have no fill to lose, so
+ * they take the muted ink plus a modest alpha and keep their transparent ground.
+ *
+ * ── What these assertions are, and are NOT ───────────────────────────────────
+ *
+ * They are CLASS assertions. jsdom runs no layout, paints nothing and does not
+ * resolve `oklch()`, so nothing in this file can measure a contrast ratio — a
+ * jsdom "contrast test" would pass with the fix reverted (`docs/en/ui-conventions.md`
+ * §10). The ratios are measured in real Chrome; they live in
+ * `tests/e2e/disabled-button-paint.spec.ts` and in the task report.
+ *
+ * What these DO settle is that the treatment is wired to every variant and is
+ * not alpha-only, which is the part that got lost. Each was mutation-checked.
+ *
+ * Every render below is deliberately OUTSIDE any `<fieldset>`: `toBeDisabled()`
+ * walks ancestors and is satisfied by a `fieldset[disabled]`, so a guard test can
+ * pass with the guard deleted. The absence is asserted first, before the state.
+ */
+describe("Button — disabled is a paint change, not an alpha change", () => {
+  const classesOf = (name: string) => {
+    const btn = screen.getByRole("button", { name });
+    // Assert the absence FIRST: nothing but this element's own `disabled`
+    // attribute may be what makes `toBeDisabled()` true.
+    expect(btn.closest("fieldset")).toBeNull();
+    expect(btn).toBeDisabled();
+    return [...btn.classList];
+  };
+
+  test.each(["default", "destructive", "secondary", "outline", "ai"] as const)(
+    "the %s variant loses its fill and takes a token border when disabled",
+    (variant) => {
+      render(
+        <Button variant={variant} disabled>
+          Save
+        </Button>,
+      );
+      const classes = classesOf("Save");
+
+      expect(classes).toContain("disabled:bg-secondary");
+      expect(classes).toContain("disabled:text-muted-foreground");
+      expect(classes).toContain("disabled:inset-ring-1");
+      expect(classes).toContain("disabled:inset-ring-border");
+      expect(classes).toContain("disabled:shadow-none");
+
+      // The paint must survive a hover. A disabled button is still hit-testable
+      // here on purpose (that is what keeps its `title` tooltip reachable), so
+      // the variant's `hover:bg-*` still matches and would otherwise repaint a
+      // disabled Save back to full teal under the pointer.
+      expect(classes).toContain("disabled:hover:bg-secondary");
+
+      // And the defect itself: alpha is no longer carrying the state.
+      expect(classes.filter((c) => c.startsWith("disabled:opacity-"))).toEqual([]);
+      expect(classes).not.toContain("disabled:opacity-50");
+    },
+  );
+
+  test.each(["ghost", "link"] as const)(
+    "the %s variant has no fill to lose, so it dims its ink instead of gaining a box",
+    (variant) => {
+      render(
+        <Button variant={variant} disabled>
+          Save
+        </Button>,
+      );
+      const classes = classesOf("Save");
+
+      expect(classes).toContain("disabled:text-muted-foreground");
+      // The inverse of the assertion above, and the reason it is here: giving a
+      // borderless variant the filled treatment would make every disabled
+      // toolbar icon a grey box — and in dark mode `--secondary` and `--accent`
+      // are the same value, so that box would be pixel-identical to this
+      // button's own HOVER state. A disabled control that looks hovered is worse
+      // than the bug being fixed.
+      expect(classes).not.toContain("disabled:bg-secondary");
+      expect(classes).not.toContain("disabled:inset-ring-1");
+      expect(classes).toContain("disabled:hover:bg-transparent");
+    },
+  );
+
+  test("the gradient variant also drops its gradient, which a background-COLOR cannot cover", () => {
+    render(
+      <Button variant="ai" disabled>
+        Save
+      </Button>,
+    );
+    const classes = classesOf("Save");
+    // `bg-secondary` sets `background-color`; the gradient is a
+    // `background-image` and paints on top of it. Without `bg-none` the disabled
+    // ai button stays purple→orange at full strength.
+    expect(classes).toContain("disabled:bg-none");
+    // Same shape one level down: `[&_svg]:text-white` colours the icon from a
+    // rule of its own, so the button's `color` change never reaches it.
+    expect(classes).toContain("disabled:[&_svg]:text-muted-foreground");
+  });
+
+  test("`aria-disabled` gets the same paint — it is the only signal the asChild path has", () => {
+    // `disabled` is an attribute of <button> and nothing else, so the `asChild`
+    // path conveys the state with `aria-disabled` instead. If only `disabled:*`
+    // were painted, a disabled <Button asChild> would look fully enabled.
+    render(
+      <Button asChild disabled>
+        <a href="/nowhere">Go</a>
+      </Button>,
+    );
+    const link = screen.getByText("Go");
+    expect(link.closest("fieldset")).toBeNull();
+    const classes = [...link.classList];
+    expect(link).toHaveAttribute("aria-disabled", "true");
+    expect(classes).toContain("aria-disabled:bg-secondary");
+    expect(classes).toContain("aria-disabled:text-muted-foreground");
+    expect(classes).toContain("aria-disabled:inset-ring-1");
+    expect(classes.filter((c) => c.startsWith("aria-disabled:opacity-"))).toEqual([]);
+  });
+});
+
+/**
+ * The trap this repo has already fallen into once: a token that is spelled
+ * correctly, passes tsc, passes every render test, and resolves to NOTHING in
+ * one of the two themes — because it was only ever defined in the other. Nothing
+ * downstream can catch that; jsdom does not evaluate custom properties and
+ * TypeScript never sees a class string. So it is caught here, at the source.
+ *
+ * This reads the two files as text rather than rendering anything: every colour
+ * the disabled treatment names must exist in `:root` AND in `.dark`, and must be
+ * mapped into `@theme inline` so Tailwind emits a utility for it at all.
+ */
+describe("Button — the disabled treatment names only tokens that exist in both themes", () => {
+  const source = readFileSync(path.resolve(__dirname, "../button.tsx"), "utf8").replace(
+    /\/\*[\s\S]*?\*\//g,
+    "",
+  );
+  const css = readFileSync(path.resolve(__dirname, "../../../index.css"), "utf8").replace(
+    /\/\*[\s\S]*?\*\//g,
+    "",
+  );
+  const block = (selector: string) =>
+    css.match(new RegExp(`(?:^|\\n)${selector}\\s*\\{([\\s\\S]*?)\\n\\}`))![1];
+  const root = block(":root");
+  const dark = block("\\.dark");
+  const themeInline = block("@theme inline");
+
+  // `disabled:bg-secondary`, `aria-disabled:hover:text-muted-foreground`,
+  // `disabled:[&_svg]:text-muted-foreground` → the colour name at the end.
+  const named = [
+    ...source.matchAll(
+      /(?:disabled|aria-disabled):[a-z0-9:&_[\]-]*?(?:bg|text|inset-ring|border)-([a-z][a-z-]*)/g,
+    ),
+  ].map((m) => m[1]);
+
+  test("the treatment names at least one colour, so the loop below cannot be vacuously green", () => {
+    expect(named.length).toBeGreaterThan(5);
+  });
+
+  test.each([...new Set(named)])("`%s` is a real token in light and dark", (name) => {
+    // Keywords, not tokens: they need no declaration.
+    if (["none", "transparent", "current", "inherit"].includes(name)) return;
+    expect(themeInline).toContain(`--color-${name}: var(--${name})`);
+    expect(root).toMatch(new RegExp(`--${name}:\\s*oklch`));
+    expect(dark).toMatch(new RegExp(`--${name}:\\s*oklch`));
+  });
+});
+
+/**
+ * THE ONE THAT WAS ALREADY BROKEN WHEN THIS TEST WAS WRITTEN.
+ *
+ * `dark:bg-destructive/60` and `disabled:bg-secondary` have the SAME specificity
+ * — `.dark .dark\:bg-destructive\/60` and `.disabled\:bg-secondary:disabled` are
+ * both 0-2-0 — so neither wins on merit and the tie goes to whichever Tailwind
+ * emits later. It emits `dark:` later. Measured in real Chrome on the first cut
+ * of this change, the disabled destructive button in dark mode reported
+ * `background-color: oklab(0.7 0.175878 0.0718819 / 0.6)`: its full enabled red,
+ * with a muted label sitting on it. The variant that most needs to look
+ * unavailable was the one variant that did not.
+ *
+ * A `dark:disabled:*` twin scores 0-3-0 and settles it. This test is the
+ * invariant rather than the instance: any variant that paints a background under
+ * `dark:` must also say what that background becomes when the control is
+ * disabled, in both spellings of disabled. It fails on the code that shipped the
+ * measurement above.
+ */
+describe("Button — a dark-mode fill must say what it becomes when disabled", () => {
+  const source = readFileSync(path.resolve(__dirname, "../button.tsx"), "utf8").replace(
+    /\/\*[\s\S]*?\*\//g,
+    "",
+  );
+  const variantBlock = source.match(/variants:\s*\{\s*variant:\s*\{([\s\S]*?)\n {6}\},/)![1];
+  const entries = [...variantBlock.matchAll(/(\w+):\s*(?:`([^`]*)`|"([^"]*)")/g)].map((m) => ({
+    name: m[1],
+    classes: m[2] ?? m[3],
+  }));
+
+  test("the variant table was parsed, so the loop below is not vacuous", () => {
+    expect(entries.map((e) => e.name).sort()).toEqual([
+      "ai",
+      "default",
+      "destructive",
+      "ghost",
+      "link",
+      "outline",
+      "secondary",
+    ]);
+  });
+
+  // A RESTING dark fill (`dark:bg-*`, not `dark:hover:bg-*`) is the one that
+  // silently survives into the disabled state.
+  const restingDarkFill = entries.filter((e) => /(?:^|\s)dark:bg-/.test(e.classes));
+  const hoverDarkFill = entries.filter((e) => /dark:hover:bg-/.test(e.classes));
+
+  test("both lists below are non-empty, so neither `each` is vacuously green", () => {
+    expect(restingDarkFill.length).toBeGreaterThan(0);
+    expect(hoverDarkFill.length).toBeGreaterThan(0);
+  });
+
+  test.each(restingDarkFill.map((e) => e.name))(
+    "`%s` paints a background under dark: and says what it becomes under dark:disabled:",
+    (name) => {
+      const { classes } = entries.find((e) => e.name === name)!;
+      expect(classes).toMatch(/dark:disabled:bg-/);
+      expect(classes).toMatch(/dark:aria-disabled:bg-/);
+    },
+  );
+
+  test.each(hoverDarkFill.map((e) => e.name))(
+    "`%s` paints a background under dark:hover: and overrides that too",
+    (name) => {
+      // Same reason as in light mode: a disabled button is still hit-testable
+      // here, on purpose, so `dark:hover:bg-*` would otherwise repaint it under
+      // the pointer.
+      const { classes } = entries.find((e) => e.name === name)!;
+      expect(classes).toMatch(/dark:disabled:hover:bg-/);
+      expect(classes).toMatch(/dark:aria-disabled:hover:bg-/);
+    },
+  );
 });
