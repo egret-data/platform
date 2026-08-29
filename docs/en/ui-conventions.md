@@ -791,38 +791,78 @@ assert on.
 
 ## 5. Width
 
-### 5.1 No page-level cap on a route that hosts settings tables
+### 5.1 One width for all six tabs of a detail route
 
 `src/routes/explore/dataapi/EndpointDetail.tsx` — the `<Outlet/>` wrapper carries no
-`max-w-*`, and there is a test that says so.
+`max-w-*`, **and neither does any of the six sections it hosts**. There is a test per section
+saying so, and one in a real browser saying they agree.
 
-**The defect.** That wrapper used to carry `max-w-3xl`, which left the right third of the
-page empty while Config's Details column wrapped to three lines. A single page-level cap is
-the wrong instrument: the six sections do not want the same width. Config and Query should use
-the page — Config holds the two widest controls of any tab, Query a SQL editor and a result
-grid; Access, Try it and Versions are prose, short-column lists and short controls
-that read worse stretched across a wide monitor.
+**The first defect.** That wrapper used to carry `max-w-3xl`, which left the right third of the
+page empty while Config's Details column wrapped to three lines. A single page-level cap was
+the wrong instrument — the sections did not all want 768px — so the cap moved out of the route
+and into the sections that wanted one. Query gained the most: its SQL editor went from 768px to
+1424px (measured during the width pass, not by this document; the same applies to the figures
+in §5.4 and §5.5).
 
-**`Response` used to be named in that second list and has been taken out of it**, because it
-moved to the first — see the criterion two paragraphs down and §5.4b. The sentence stayed
-behind for four revisions of this section, so a reader met "Response reads worse stretched" in
-the present tense ten lines above "Response uses the page", with nothing saying which was
-current. `ResponseSection.tsx`'s ROOT carries no `max-w-*` today (its prose still does, §5.4b),
-and that is the tiebreaker: **where this document and the tree disagree, the tree is the fact
-and the document is the bug.**
+**The second defect, which is what this section now records.** Moving the cap into the sections
+fixed the page and broke the tab set. Measured on the deployed build at 1600×1000 with seeded
+data, all six tabs get the same 1296px content box, and the widest block in each was:
 
-**So sections own their own caps**, on their own root element, visible next to the layout they
-constrain: `AccessSection.tsx`, `TryIt.tsx` and `Versions.tsx` use `max-w-5xl`. Query needs none
-and gained the most —
-its SQL editor went from 768px to 1424px (measured during the width pass, not by this
-document; the same applies to the figures in §5.4 and §5.5).
+| tab | available | widest block |
+|---|---|---|
+| Query | 1296 | 1296 |
+| Config | 1296 | 1296 |
+| Response | 1296 | 1296 |
+| Access | 1296 | **1024** |
+| Try it | 1296 | **1024** |
+| Versions | 1296 | **1024** |
 
-**The criterion is what a section HOLDS, and it is what moved `Response` from one group to the
-other** — see §5.4b. Config and Query use the page because they hold settings tables and code
-editors; Access, Try it and Versions cap themselves because they hold prose, short-column lists
-and short controls that read worse stretched across a wide monitor. Response was measured while
-it was the second kind and has since been given both of the first kind's things, so it now uses
-the page too, and its frozen-column table gave up its own `max-w-xl` with it.
+**The content edge moves 272px when you switch tabs** — three times, in a six-item nav, with
+nothing on screen to explain it. So: **every section of a detail route leaves width to the
+page.** `AccessSection.tsx`, `TryIt.tsx` and `Versions.tsx` gave up their `max-w-5xl`;
+`Config`, `Query` and `ResponseSection` already had none.
+
+#### The part of this section that was reversed, and why
+
+Until this task §5.1 said the opposite, and said it as a considered ruling rather than an
+oversight. **The criterion was what a section HOLDS:** Config and Query use the page because
+they hold the widest controls of any tab and a SQL editor; Access, Try it and Versions cap
+themselves at `max-w-5xl` because they hold prose, short-column lists and short controls **that
+read worse stretched across a wide monitor**. §5.4a and §5.4b are that criterion being applied
+carefully — Response was measured as the second kind, capped, and then moved to the first kind
+when what it held changed.
+
+**Nothing in that argument became false.** Each of the three sections still reads better at
+1024px than at 1296px taken on its own; §5.4a's measurement of Selects sitting ~1260px from
+their labels is still a real complaint, and `Versions` really is five short columns.
+
+**What it lost to is that a reader does not see one section, they see six in sequence.** The
+per-section optimum and the whole-route consistency were both in the ruling's scope and only
+one of them was measured. A 272px jump between siblings is a defect a reader can see without
+knowing anything about the page; a section being 272px wider than its ideal is one they
+cannot. When those two conflict, the route wins.
+
+**Two things follow, and they are what keeps this from being a taste argument:**
+
+- **The per-section complaints do not disappear; they move to the instrument that fits them.**
+  "The picker is a screen away from the label" is a COLUMN width, and `ConfigTable`'s
+  `valueClassName` answers it without starving the section — that is exactly the resolution
+  §5.4b reached for Response, where the same complaint had earned the same cap. "The sentence
+  sets as one very long line" is a PROSE measure, and `max-w-prose` answers it (§5.2, "cap the
+  prose, not the column"). A section-root cap was answering both of those with the one tool
+  that also breaks the tab set.
+- **A section may still cap its own CHILDREN** (§5.5), and one does: `ResponseSection`'s
+  editable `returns` grid keeps `max-w-xl`, because a row of four form controls stretched wide
+  puts the delete button an arm's length from the row it acts on. That is the narrow, still-live
+  form of the argument this section reversed. As of this task it is the only non-prose
+  `max-w-*` under `detail/`.
+
+**This document has twice shipped a §5 section describing a rule its own reference
+implementation violated** — the "Response reads worse stretched" sentence that outlived §5.4b
+by four revisions, and §11.2's claim about `Access`'s paragraphs. The check that would have
+caught both is mechanical and is the check this task ran: **grep the tree for the class the
+rule is about, and reconcile every hit with what the section says.** Where this document and
+the tree disagree, the tree is the fact and the document is the bug.
 
 ### 5.2 Removing the cap is not enough, because `ConfigTable` is `table-fixed`
 
@@ -889,7 +929,8 @@ absorbs the phantom column rather than splitting with it.
 at a ~1470px content box: Setting 288 / Value 208 / Details ~975, with `max-w-prose` stopping the
 sentence near 585px — ~390px of empty column, and the Shape and Key-naming Selects ~1260px right
 of the labels they answer to, where the old route cap put them at ~560px. That is the same
-complaint that earned `Versions` its cap, so the fix wave gave Response the same `max-w-5xl` root
+complaint that earned `Versions` its cap (`Versions` has no cap any more — §5.1's reversal took
+all three — but it had one when this was written), so the fix wave gave Response the same `max-w-5xl` root
 (~816px), which also reined in the `Frozen columns` and `OpenAPI document` Cards — the frozen
 *table* had `max-w-xl`, its Card did not. (Those two Cards are gone as of §4.2's reversal. The
 measurement is kept: it is why the section root WAS capped, and "the frame stretched further than
@@ -918,7 +959,11 @@ with the sidebar expanded, against the shipped stylesheet:
 **The cap was not wrong when it was applied; the section stopped being the kind of section it was
 applied to.** §5.4a capped it as a prose-and-short-lists tab. It has since gained a
 `Setting | Details | Value` table (§4.2) and a Monaco editor for the response transform — the two
-things §5.1 gives as the reason Config and Query use the page. So the cap came off, and:
+things §5.1 THEN gave as the reason Config and Query use the page. (That what-a-section-HOLDS
+criterion is retired: §5.1 now says one width for all six, so there are no groups to move
+between. This section is kept because it is still the reason THIS cap came off first, and
+because everything below it about `valueClassName`, the frozen table and the `lg` regime is
+unaffected by the reversal.) So the cap came off, and:
 
 - **Removing it is half the change** (§5.2). `ConfigTable` is `table-fixed`, so all 272 new pixels
   would have gone to Details, the only unsized column, and the three Selects would have stayed at
@@ -927,7 +972,8 @@ things §5.1 gives as the reason Config and Query use the page. So the cap came 
 - **The frozen table's cap was not buying what it was added for.** The rationale for `max-w-xl`
   — that `bigint` sat far from the name it describes — was never in this document; it is in
   `ResponseSection.tsx`'s own comment on that table, which is also where the correction now
-  lives. (§5.1 and §5.4a mention the cap, neither gives that reason. Citing a section for a
+  lives. (§5.4a mentions the cap and does not give that reason; §5.1 did too, until this task's
+  rewrite dropped every mention of a section-root cap. Citing a section for a
   rationale it does not contain is the §9 failure happening to a cross-reference: the claim
   reads as sourced and is not.) Measured: `w-full` AUTO layout inside that cap gave
   `Name` 443.9px of 576, so the type started 444px in and would drift further with the longest
@@ -972,34 +1018,88 @@ sentinel guard and every other Config test: 230/230 green. `Versions` had a guar
 *owns* its cap; `Config`, the tab the whole width pass was motivated by, had no counterpart. It
 has one now — the inverse assertion, that Config's own root carries no `max-w-*` (responsive
 prefixes included) — and it was mutation-checked with that exact mutation, which now fails one
-test and only that one. `Response` is pinned the same way, in the other direction: §5.4b moved it
-into the uses-the-page group, so its guard is `expectSectionLeavesWidthToThePage` — the same
-assertion Config's carries, and the reversal is stated in the test's own name.
+test and only that one.
+
+**All six sections now carry that same inverse assertion**, since §5.1's reversal left one rule
+instead of two. `Response` moved to it in §5.4b; `Access`, `Try it` and `Versions` moved to it
+with the reversal, and each test states the reversal in its own name rather than quietly
+changing meaning. `Query` had NO guard at all until then — it was the tab the width pass was
+for, so nobody thought it could regress, which is the reasoning that had left `Config`
+unguarded. "All six leave width to the page" is not a claim five assertions can make.
 
 The test's own comment is honest about its limits: the class-name assertions are weak and are
 meant to be — they exist only so a cap cannot come back, or vanish, silently. **Whether the
 width is well spent is a question only a browser can answer.** See §10.
 
-### 5.6 The section guard is one helper, not one copy per section
+### 5.6 The section guard is one helper, and now one form
 
-`src/routes/explore/dataapi/__tests__/sectionWidth.ts` —
-`expectSectionCapsItsOwnWidth` / `expectSectionLeavesWidthToThePage`.
+`src/routes/explore/dataapi/__tests__/sectionWidth.ts` — `expectSectionLeavesWidthToThePage`.
 
 Three sections had the walk in §5.5 copy-pasted and **two had no guard at all**: `Try it` and
-`Access`. That is how `Try it` shipped a `max-w-5xl` nothing was holding in place — §5.1
-lists it among the three sections that cap themselves, and nothing said so in code. The walk,
-the host resolution and the two regexes now live in one module and all five sections call it.
+`Access`. That is how `Try it` shipped a `max-w-5xl` nothing was holding in place — §5.1 listed
+it among the sections that cap themselves, and nothing said so in code. The walk, the host
+resolution and the regex now live in one module.
 
-Two details are load-bearing and were preserved from the copies:
+**Six call sites, not five, and one exported form, not two.** §5.1's reversal changed both
+numbers, and they moved for different reasons:
 
-- **The two regexes differ, on purpose.** The positive form is unprefixed
-  (`/(?:^|\s)max-w-/`), because a section capped only at `lg:` is uncapped on exactly the
-  narrow viewports nobody measured. The negative form includes responsive prefixes, because
-  `lg:max-w-3xl` wastes the page on exactly the wide ones the pass *did* measure.
-- **The host is resolved, not assumed**, so the same helper works under the real
-  `EndpointDetail` shell (walk stops at the `fieldset`) and under a harness that stubs the
-  context and renders the section under a bare `Outlet` (`TryIt.test.tsx`), where the section
-  root is a child of the render container.
+- **The count went 5 → 6.** `Query` was the only section with no width guard of any kind. It
+  was the tab the width pass existed for, so nobody thought it could regress — the same
+  reasoning that had left `Config` unguarded until a restored `max-w-3xl` on its own root
+  passed 230/230. Under one rule for all six, five assertions cannot state it.
+- **`expectSectionCapsItsOwnWidth` was DELETED, not left unused.** After the reversal it had
+  zero callers. Keeping it "for a future section" was the alternative and was rejected: an
+  exported helper named *caps its own width* is an executable statement that some section is
+  supposed to, so a reader would reasonably infer the two-group rule still stands. That is
+  precisely the failure §5.1 was reversed to stop — a description outliving the thing it
+  described — and it is the third time this document has had to fix one. A section that
+  genuinely needs a cap on its own children has §5.5 and `ResponseSection`'s `returns` grid as
+  the live precedent; it does not need a dormant helper.
+
+One detail from the deleted form was preserved in the module comment because it is a trap and
+not a preference. **The two regexes differed on purpose.** The deleted positive form was
+unprefixed (`/(?:^|\s)max-w-/`), because a section capped only at `lg:` is uncapped on exactly
+the narrow viewports nobody measured. The surviving negative form includes responsive prefixes,
+because `lg:max-w-3xl` wastes the page on exactly the wide ones the pass *did* measure.
+Reinstating the positive form as a copy of the negative one's regex would be the bug.
+
+**The host is resolved, not assumed**, so the same helper works under the real `EndpointDetail`
+shell (walk stops at the `fieldset`) and under a harness that stubs the context and renders the
+section under a bare `Outlet` (`TryIt.test.tsx`), where the section root is a child of the
+render container. And the walk is a walk, never `parentElement.parentElement`: overshooting onto
+the `fieldset` is a SILENT pass, because the fieldset carries no `max-w-*` whatever the section
+does — so `sectionRootOf` hard-fails on it.
+
+### 5.7 Six class assertions are not the claim; the browser spec is
+
+`tests/e2e/data-api-detail-tab-widths.spec.ts` (opt-in:
+`EGRET_E2E_DATAAPI_WIDTH=1 npx playwright test data-api-detail-tab-widths`).
+
+§5.1's rule is "the six tabs agree on a width". **jsdom cannot see that claim at all** (§10):
+it implements no CSS, every box is 0×0, and `expectSectionLeavesWidthToThePage` compares a
+string. Six passing string comparisons would also pass on six tabs that disagreed — one section
+could reach a different width through a flex parent, a grid, or a child that overflows, none of
+which is a `max-w-*` on the root.
+
+So the rule is measured in Chromium: navigate all six tabs at 1600×1000 and assert the widest
+block in each equals the available content width, and equals the other five.
+
+**Two ways the sibling width spec went green on a broken page**, both found live and both
+guarded against here rather than merely remembered:
+
+- **A counted DOM hop.** `data-api-response-width.spec.ts` first reached the section root with
+  `parentElement.parentElement`. One extra wrapper `div` inside the section makes that resolve
+  to the *host* instead — at which point `root === available` is tautologically true and the
+  spec passes on a section that has regressed. The fix is the same walk `sectionWidth.ts` uses,
+  plus a hard stop if the walk lands on the host.
+- **A `getByRole` name that matched by substring.** Playwright matches accessible names by
+  case-insensitive substring unless told `exact: true`. `name: "Response"` also matched the
+  spec's own fixture, `E2E response width`, and the run died on strict mode before measuring
+  anything. Every heading lookup here is `exact: true`, and the fixture is named so that a
+  substring match against a TAB name would be caught rather than silently satisfied.
+
+A third, general one: **assert the count before iterating.** A `for` over a selector that has
+stopped matching asserts nothing and reports green.
 
 ---
 
@@ -1447,8 +1547,14 @@ not exist yet:
 - The split of §11 — **2** sections, both Data API endpoint detail (`Query`, `TryIt`); `react-resizable-panels` itself is also used by `components/sqllab/SqlTab.tsx`, which is
   where the idiom came from. `Versions` and `Access` are deliberately not splits: neither is
   "configure, run, read the result" — there is nothing to run.
-- The section-width guard of §5.6 — **5** sections (`Config`, `Response`, `Versions`,
-  `Try it`, `Access`), one helper. It was 3 copies and 2 absences before this phase.
+- The section-width guard of §5.6 — **6** sections (`Query`, `Config`, `Response`, `Access`,
+  `Try it`, `Versions`), one helper, **one form**. It was 3 copies and 2 absences before the
+  width phase, then 5 call sites across two forms; §5.1's reversal to one width added `Query`
+  — the last unguarded section — and deleted `expectSectionCapsItsOwnWidth`, which the reversal
+  left with zero callers. **Sections whose ROOT carries a `max-w-*`: 0.** Sections capping a
+  CHILD: 1, `ResponseSection`'s `returns` grid (§5.5), and
+  `grep -rn 'max-w-' src/routes/explore/dataapi/detail` returning nothing else but `max-w-prose`
+  is what makes that a count and not a recollection (§9).
 - `ConfigSection` — 13 files, down from **15** at the merge base. This is the fifth count of
   this number in the programme and the first measured at both ends:
   `grep -rl 'from "@/components/form/ConfigSection"' src` gives 15 at `63a4fb90` and 13 at

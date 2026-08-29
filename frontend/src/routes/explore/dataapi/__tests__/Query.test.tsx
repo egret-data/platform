@@ -159,6 +159,7 @@ import EndpointDetail from "@/routes/explore/dataapi/EndpointDetail";
 import Query from "@/routes/explore/dataapi/detail/Query";
 import Config from "@/routes/explore/dataapi/detail/Config";
 import VersionsSection from "@/routes/explore/dataapi/detail/Versions";
+import { expectSectionLeavesWidthToThePage } from "./sectionWidth";
 
 // Copied verbatim from `EndpointDetail.test.tsx` (near the top of that file)
 // rather than imported — that file does not export it, and duplicating a
@@ -599,6 +600,32 @@ describe("Query section — layout", () => {
     } as never);
     vi.mocked(dataApi.useUpdateEndpoint).mockReturnValue({ mutateAsync: vi.fn(), isPending: false } as never);
     vi.mocked(api.useDataApiPreviewEndpoint).mockReturnValue({ mutateAsync: vi.fn(), isPending: false } as never);
+  });
+
+  /**
+   * The sixth guard, added when §5.1 was reversed to one width for all six
+   * tabs. Five sections had this assertion and `Query` had none — it was the
+   * tab the width pass was FOR, so nobody thought it could regress, which is
+   * the same reasoning that left `Config` unguarded until a restored
+   * `max-w-3xl` on its own root passed 230/230 (§5.5).
+   *
+   * "All six leave width to the page" is not a claim five assertions can make.
+   *
+   * Class name only (§5.5); the six agreeing is measured in
+   * `tests/e2e/data-api-detail-tab-widths.spec.ts`.
+   */
+  it("leaves width to the page, like all six tabs (§5.1, as reversed)", async () => {
+    const endpoint = makeEndpoint();
+    vi.mocked(api.useDataApiGetEndpoint).mockReturnValue({
+      data: { status: 200, data: endpoint },
+      isLoading: false,
+      isError: false,
+      refetch: vi.fn(),
+    } as never);
+
+    const { container } = renderQuery(endpoint);
+    const heading = await screen.findByRole("heading", { name: "Query", level: 2 });
+    expectSectionLeavesWidthToThePage(container, heading);
   });
 
   it("holds the database picker, the SQL editor and the parameter declarations", async () => {

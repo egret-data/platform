@@ -82,11 +82,23 @@ export default function VersionsSection() {
   const [rollbackTarget, setRollbackTarget] = useState<DataApiEndpointVersionDto | null>(null);
 
   return (
-    // Capped here, not by the route (§5.1). The history table is five short
-    // columns — `v3`, a truncated note, an email, a relative time, one button.
-    // Uncapped it is a mostly-empty band the width of the monitor with the Roll
-    // back button marooned at the far right of the row it belongs to.
-    <div className="max-w-5xl space-y-6">
+    // Uncapped, like every other tab on this route (§5.1, as reversed). This
+    // used to carry `max-w-5xl` on the argument that the history table is five
+    // short columns — `v3`, a truncated note, an email, a relative time, one
+    // button — and reads as a mostly-empty band at monitor width. The argument
+    // still describes this table correctly. What outweighed it is the tab set:
+    // at 1600×1000 in a 1296px content box, Versions stopped at 1024 while
+    // Config, Query and Response took all 1296, so switching tabs moved the
+    // content edge 272px for a reason no reader could see. One measure across
+    // the six beats a per-section optimum.
+    //
+    // Where the 272px actually go, checked and not assumed (§5.2 — the table
+    // below is `table-fixed`): `Note` is the only unsized column, so all of it
+    // lands there, and Note is the one column here that was being truncated.
+    // The old comment's other half stands and is accepted rather than fixed:
+    // `Actions` is `w-32` and right-aligned, so Roll back is now 272px further
+    // from the version it acts on.
+    <div className="space-y-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h2 className="text-lg font-semibold">Versions</h2>

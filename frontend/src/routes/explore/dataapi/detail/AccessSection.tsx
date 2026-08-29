@@ -237,12 +237,26 @@ export default function AccessSection() {
   const empty = accounts.length === 0 && orphanGrants.length === 0;
 
   return (
-    // Capped here, not by the route (§5.1) — this tab is a note, a short account
-    // list and two conditions per row. Uncapped, the explanatory note above sets
-    // as one very long line and each row's action ends up a monitor's width from
-    // the account it acts on. `max-w-5xl` is still well past the `max-w-3xl` the
-    // whole route used to sit under.
-    <div className="max-w-5xl space-y-6">
+    // Uncapped, like every other tab on this route (§5.1, as reversed). This
+    // used to carry `max-w-5xl` on the argument that a note, a short account
+    // list and two conditions per row read worse stretched across a wide
+    // monitor. That argument was not wrong about THIS tab; it was wrong about
+    // the tab set. Measured at 1600×1000 in a 1296px content box, Access
+    // stopped at 1024 while Query, Config and Response took all 1296 — so a
+    // reader clicking along the nav watched the content edge jump 272px, three
+    // times, for reasons no single tab could explain. One measure across the
+    // six beats a per-section optimum.
+    //
+    // What the removed cap was buying, checked rather than assumed (§5.2 —
+    // removing a cap is only half a change, because the table below is
+    // `table-fixed`): the 272 new pixels all land on `Invoke`, the one unsized
+    // column, and `Invoke` is the column this section exists to answer. That is
+    // the good half. The honest other half: `Actions` is `w-36` and
+    // right-aligned, so a row's Revoke button now sits 272px further
+    // from the account it acts on than it did — the old comment's complaint,
+    // made worse rather than answered. It is accepted, not fixed, because the
+    // fix is a row layout and not a width; see the task report.
+    <div className="space-y-6">
       <div>
         <h2 className="text-lg font-semibold">Access</h2>
         <p className="text-sm text-muted-foreground">

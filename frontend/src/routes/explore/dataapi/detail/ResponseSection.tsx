@@ -427,8 +427,16 @@ function ReturnsEditor({
           controls — a name input, a type input, a checkbox and a delete — and
           four controls stretched across a wide page put the delete button an
           arm's length from the row it acts on. §5.5 records that a section may
-          legitimately cap its own children, and `Try it`'s parameter grid is
-          the precedent. */}
+          legitimately cap its own children, and that is the rule this leans on.
+
+          It used to cite `Try it`'s parameter grid as the precedent. That was
+          never true and is now checkably false: that grid is a bare
+          `<Table className="table-fixed">` with no cap of its own — it was
+          sitting inside `TryIt`'s section cap, which §5.1's reversal removed.
+          Grepped after that removal, this `max-w-xl` is the ONLY non-prose
+          `max-w-*` left anywhere under `detail/`, so it has no precedent and
+          stands on the argument above alone. §9: a citation that reads as
+          sourced and is not is worse than no citation. */}
       <Table className="max-w-xl table-fixed">
         <TableHeader>
           <TableRow>
@@ -660,12 +668,16 @@ export default function ResponseSection() {
   }
 
   return (
-    // Uncapped, like `Config` and `Query` and unlike the three sections this
-    // one used to be grouped with. §5.1's criterion is what a section HOLDS,
-    // and what this one holds changed after it was measured: it has a
+    // Uncapped, like all five sibling tabs (§5.1). This section reached that
+    // state first and for its own reason, and the reason has since been
+    // superseded: §5.1 used to sort sections by what they HOLD — settings
+    // tables and code editors use the page, prose and short lists cap
+    // themselves — and this section moved groups when it gained a
     // `Setting | Details | Value` table (§4.2) and a Monaco editor for the
-    // response transform — the two things §5.1 gives as the reason Config and
-    // Query use the page.
+    // response transform. That criterion is retired: Access, Try it and
+    // Versions are uncapped now too, so there are no longer two groups to sort
+    // into. Kept because the measurement below is still why THIS section's cap
+    // came off, and the `valueClassName` half of the change depends on it.
     //
     // Measured in Chromium at 1600×1000 with the sidebar expanded, before this
     // change: `max-w-5xl` stopped the section at 1024px inside a 1296px content

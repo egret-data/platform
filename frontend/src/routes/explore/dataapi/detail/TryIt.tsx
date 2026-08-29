@@ -229,16 +229,22 @@ export default function TryIt() {
   const notGranted = !!result && result.status === 403 && refusal?.code === "not_granted";
 
   return (
-    // Capped, and still capped after the split. The result body and the curl
-    // line do read better with room, but they scroll inside a panel of their
-    // own now, so they never needed the page width; the setup above does not
-    // want it at all — a `Setting | Details | Value` table stretched across a
-    // wide monitor puts the picker a screen away from the label that names it,
-    // which is the complaint §5.4a records against an uncapped Response.
+    // Uncapped, like every other tab on this route (§5.1, as reversed). This
+    // used to carry `max-w-5xl` on §5.4a's complaint — a
+    // `Setting | Details | Value` table stretched across a wide monitor puts
+    // the picker a screen away from the label that names it. That complaint is
+    // real, and it is not what the cap was costing. At 1600×1000 in a 1296px
+    // content box, Try it stopped at 1024 while Config, Query and Response took
+    // all 1296, so the content edge jumped 272px on a tab change. One measure
+    // across the six beats a per-section optimum, and the picker-to-label
+    // distance is a COLUMN width, answerable by `valueClassName` (§5.2) without
+    // starving the section — which is exactly the resolution §5.4b reached for
+    // Response, where the same complaint had earned the same cap.
+    //
     // `h-full` is what lets the split have a height at all: the route wraps its
     // `Outlet` in a `min-h-0 flex-1` fieldset inside an `h-screen` column, so
     // this resolves against a definite box rather than collapsing to zero.
-    <div className="flex h-full max-w-5xl flex-col">
+    <div className="flex h-full flex-col">
       {/* On one line, as `Query`'s is: every section opens with its own `h2`,
           and it is the only thing that names the section for a reader who
           arrived by URL rather than by clicking the nav. The sentence is also

@@ -32,7 +32,6 @@ import Config from "@/routes/explore/dataapi/detail/Config";
 import ResponseSection from "@/routes/explore/dataapi/detail/ResponseSection";
 import VersionsSection from "@/routes/explore/dataapi/detail/Versions";
 import {
-  expectSectionCapsItsOwnWidth,
   expectSectionLeavesWidthToThePage,
 } from "./sectionWidth";
 
@@ -938,8 +937,9 @@ describe("ResponseSection", () => {
    * endpoint published before this branch, and every endpoint whose definition
    * does not branch, has `required` true on every column — so a `Required`
    * column would hold one repeated word in every cell of the common case,
-   * while costing width in the one table §5.1 measured down to `max-w-xl`
-   * *because* the type had drifted away from the name it describes. Marking
+   * while costing width in the one table that was measured down to `max-w-xl`
+   * *because* the type had drifted away from the name it describes (§5.4b —
+   * §5.1 carried that measurement until its reversal moved it out). Marking
    * only the exceptions leaves that case byte-identical to what it renders
    * today, which is why neither test above changed.
    *
@@ -1836,31 +1836,42 @@ describe("EndpointDetail — width", () => {
     expect(capped).toEqual([]);
   });
 
-  it("leaves Versions constraining its own width, now that the route does not", async () => {
-    // Removing the route cap moved responsibility for width into the sections,
-    // and this is the one where full width was worst: five short columns
-    // (`v3`, a truncated note, an email, a relative time, one button) spread
-    // across a wide monitor, with Roll back marooned at the far right of the
-    // row it acts on. The point is that a section owning its own cap cannot
-    // lose it silently, not that any particular number is correct.
+  it("leaves Versions on the page's width, like all six tabs (§5.1, as reversed)", async () => {
+    // REVERSED, and the reversal is the point of the assertion. This used to
+    // say Versions CAPS its own width — it was the tab where full width read
+    // worst: five short columns (`v3`, a truncated note, an email, a relative
+    // time, one button) spread across a wide monitor, with Roll back marooned
+    // at the far right of the row it acts on.
     //
-    // The walk that finds the section root — and the reason it is a walk and
-    // not a count — now lives in `sectionWidth.ts`, because five sections need
-    // this assertion and only three had it.
+    // That description of THIS tab is still accurate; §5.1's reversal is that
+    // it stopped being the deciding fact. Measured on the deployed build at
+    // 1600×1000 with seeded data: content box 1296px on all six tabs, widest
+    // block 1296 on Query/Config/Response and 1024 on Access/Try it/Versions —
+    // the content edge moved 272px on a tab change, three times over, for a
+    // reason no single tab could explain. The superseded argument is kept in
+    // §5.1 rather than edited away.
+    //
+    // Class name only (§5.5). That the six tabs actually AGREE is a browser
+    // claim and lives in `tests/e2e/data-api-detail-tab-widths.spec.ts`.
     const { container } = renderVersions();
     const heading = await screen.findByRole("heading", { name: "Versions", level: 2 });
-    expectSectionCapsItsOwnWidth(container, heading);
+    expectSectionLeavesWidthToThePage(container, heading);
   });
 
-  it("leaves Response's own root uncapped, like Config, now that it hosts a settings table and an editor", async () => {
-    // REVERSED from "caps Response on its own root", and the reversal is the
-    // point of the assertion rather than a detail of it. §5.1's criterion is
-    // what a section HOLDS: Config and Query use the page because they hold
-    // settings tables and code editors; Access, Try it and Versions cap
-    // themselves because they hold prose and short lists. Response was in the
-    // second group when it was measured, and has since been given both of the
-    // first group's things — a `Setting | Details | Value` table (§4.2) and a
-    // Monaco editor for the response transform.
+  it("leaves Response's own root uncapped, like all six tabs (§5.1, as reversed)", async () => {
+    // REVERSED TWICE, and the second reversal subsumed the first.
+    //
+    // It first said "caps Response on its own root". §5.4b flipped it on
+    // §5.1's what-a-section-HOLDS criterion — settings tables and code editors
+    // use the page, prose and short lists cap themselves — because Response
+    // gained a `Setting | Details | Value` table (§4.2) and a Monaco editor
+    // for the response transform, moving it from the second group to the
+    // first.
+    //
+    // That criterion is now retired: §5.1 was reversed to ONE width for all
+    // six tabs, so there are no groups to sort into and this section is no
+    // longer uncapped for a reason special to itself. The measurement below is
+    // kept because it is still why THIS cap came off first.
     //
     // Measured in Chromium at 1600×1000, sidebar expanded, before this change:
     // the section stopped at 1024px inside a 1296px content box, leaving a

@@ -53,7 +53,7 @@ import { ApiError } from "@/api/client";
 import { ParamLocation, ParamType, type DataApiEndpointDto, type DataApiServiceAccountDto } from "@/api/generated/model";
 import type { EndpointDetailContext } from "@/routes/explore/dataapi/EndpointDetail";
 import TryIt from "@/routes/explore/dataapi/detail/TryIt";
-import { expectSectionCapsItsOwnWidth } from "./sectionWidth";
+import { expectSectionLeavesWidthToThePage } from "./sectionWidth";
 
 function makeEndpoint(overrides: Partial<DataApiEndpointDto> = {}): DataApiEndpointDto {
   return {
@@ -617,12 +617,17 @@ describe("TryIt — says whose identity a trial runs as", () => {
 });
 
 /**
- * `Try it` carries `max-w-5xl` and, until this test, nothing held it there.
- * `Versions` and `Response` each had a guard saying they cap themselves and
- * `Config` had the inverse, so this section and `Access` were the two that
- * could lose (or grow) a cap in silence — the same hole
- * `docs/en/ui-conventions.md` §5.5 records for `Config`, where restoring
- * `max-w-3xl` to the section's own root passed 230/230.
+ * REVERSED. This test used to say `Try it` caps its own width at `max-w-5xl`,
+ * on `docs/en/ui-conventions.md` §5.1's two-group rule — and the guard existed
+ * because until it was written nothing held that cap in place at all, the same
+ * hole §5.5 records for `Config`, where restoring `max-w-3xl` to the section's
+ * own root passed 230/230.
+ *
+ * §5.1 was reversed: one width for all six tabs. Measured on the deployed
+ * build at 1600×1000, the content box is 1296px on every tab while the widest
+ * block was 1024 here and 1296 on Query/Config/Response — a 272px jump on a
+ * tab change. The per-section reading argument was not wrong about this tab;
+ * it lost to the fact that a reader sees the six in sequence.
  *
  * The walk lives in `sectionWidth.ts` rather than being written a fourth time.
  * It resolves the host, so it works both under the real `EndpointDetail` shell
@@ -635,11 +640,11 @@ describe("TryIt — says whose identity a trial runs as", () => {
  * was what caught an editor squeezed to 107px that every test had passed.
  */
 describe("TryIt — width", () => {
-  it("caps its own width, as §5.1 says this section does", () => {
+  it("leaves width to the page, like all six tabs (§5.1, as reversed)", () => {
     mockTry(OK);
     const { container } = renderTryIt();
     const heading = screen.getByRole("heading", { name: "Try it", level: 2 });
-    expectSectionCapsItsOwnWidth(container, heading);
+    expectSectionLeavesWidthToThePage(container, heading);
   });
 });
 

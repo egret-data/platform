@@ -17,7 +17,7 @@ import type {
 import EndpointDetail from "@/routes/explore/dataapi/EndpointDetail";
 import type { EndpointDetailContext } from "@/routes/explore/dataapi/EndpointDetail";
 import AccessSection from "@/routes/explore/dataapi/detail/AccessSection";
-import { expectSectionCapsItsOwnWidth } from "./sectionWidth";
+import { expectSectionLeavesWidthToThePage } from "./sectionWidth";
 
 function makeEndpoint(overrides: Partial<DataApiEndpointDto> = {}): DataApiEndpointDto {
   return {
@@ -761,18 +761,33 @@ describe("AccessSection — the shape", () => {
   });
 
   /**
-   * Access had no width guard at all, and neither did `Try it` — which is how
-   * `Try it` shipped a `max-w-5xl` that nothing was holding in place.
-   * `docs/en/ui-conventions.md` §5.1 lists this section among the three that cap
-   * themselves — Access, Try it and Versions; Config and Response leave width to
-   * the page. The assertion lives in `sectionWidth.ts` so all five sections make
-   * it the same way.
+   * REVERSED, and the reversal is the point of the assertion rather than a
+   * detail of it. This test used to say Access CAPS its own width, on
+   * `docs/en/ui-conventions.md` §5.1's two-group rule: Config, Query and
+   * Response used the page; Access, Try it and Versions capped themselves at
+   * `max-w-5xl` because they hold prose and short lists that read worse
+   * stretched across a wide monitor.
+   *
+   * That per-section argument lost to a whole-route one. Measured on the
+   * deployed build at 1600×1000 with seeded data, the content box is 1296px on
+   * every tab, but the widest block was 1296 on Query/Config/Response and 1024
+   * on Access/Try it/Versions — so the content edge moved 272px on a tab
+   * change, three times, with nothing on screen explaining it. §5.1 now says
+   * one width for all six; the superseded argument is kept there under "The
+   * part of this section that was reversed, and why".
+   *
+   * `expectSectionCapsItsOwnWidth` was deleted along with the rule — see
+   * `sectionWidth.ts`.
+   *
+   * A class name, not a layout (§5.5): jsdom has no CSS, so this cannot see
+   * whether six tabs agree on a width. `tests/e2e/data-api-detail-tab-widths.spec.ts`
+   * measures that in a browser; this only stops a cap coming back silently.
    */
-  it("caps its own width, as §5.1 says this section does", async () => {
+  it("leaves width to the page, like all six tabs (§5.1, as reversed)", async () => {
     setup({ accounts: [SA_GRANTED], grants: [] });
     const { container } = renderAccess();
     const heading = await screen.findByRole("heading", { name: "Access", level: 2 });
-    expectSectionCapsItsOwnWidth(container, heading);
+    expectSectionLeavesWidthToThePage(container, heading);
   });
 });
 
