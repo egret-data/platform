@@ -753,7 +753,7 @@ here, not the ruling it used to support, and the split is what satisfies it — 
 fact is the summary and is on screen with nothing clicked. What is collapsed is the *why* and the
 *where to go instead*, which is what a reader goes looking for once the headline has stopped
 them. **Collapsing the headline would be the mistake; collapsing the paragraph under it is
-the point.**
+the point.** ("The split" here is the split between summary and body, not §11's layout one.)
 
 Three constraints on the form, all load-bearing:
 
@@ -846,14 +846,16 @@ cannot. When those two conflict, the route wins.
 
 - **The per-section complaints do not disappear; they move to the instrument that fits them.**
   A section-root cap was answering ALL of them with the one tool that also breaks the tab set;
-  each has a narrower instrument. **There are THREE such moves, not two, and they are in three
-  different states — measured, not asserted.** An earlier revision of this bullet named only two
-  and reported "one done, one owed", which was the fourth time this document described a rule
-  its own tree did not implement. The failure it sets up is specific: close the `Try it` debt
-  below, read "one done, one owed", and mark the reversal fully mitigated while `Versions` still
-  ships a live regression. The check that finds it is the one this section prescribes — grep the
-  class the rule is about and reconcile every hit — which returns exactly two right-aligned
-  action columns, one fixed and one not.
+  each has a narrower instrument. **There are THREE such moves, not two, and one of them is
+  still open — measured, not asserted.** An earlier revision of this bullet named only two and
+  reported "one done, one owed", which was the fourth time this document described a rule its
+  own tree did not implement. The failure it set up was specific, and the half of it that could
+  still happen is the half that matters now: the `Try it` debt below is CLOSED as of this task,
+  and reading that as "the reversal is mitigated" would leave `Versions` shipping a live
+  regression. It is not. **Two of the three are done; the third is done on `Access` and open on
+  `Versions`.** The check that finds it is the one this section prescribes — grep the class the
+  rule is about and reconcile every hit — which returns exactly two right-aligned action
+  columns, one fixed and one not.
 
   - **Prose: DONE.** "The sentence sets as one very long line" is a PROSE measure and
     `max-w-prose` answers it (§5.2, "cap the prose, not the column"). Every section intro
@@ -862,15 +864,49 @@ cannot. When those two conflict, the route wins.
     BY the reversal and fixed in the same breath** — three of those six intros were bounded at
     1024 by the caps this section removed, so uncapping the roots un-capped them too, and at
     1920 with the rail collapsed they ran past 1700px.
-  - **Column width: NOT DONE on `Try it`, and this is a debt, not a resolution.** "The picker is
-    a screen away from the label" is a COLUMN width and `ConfigTable`'s `valueClassName` answers
-    it — that is the resolution §5.4b reached for `Response`, which carries `w-52 lg:w-96`.
-    `Try it` still carries the `w-52 lg:w-80` it had before the reversal, so it got §5.2's trap
-    in full: measured with and without its cap, `Details` — the only unsized column — went
-    **408 → 680px, taking all 272 freed pixels**, while `Value` stayed at 320px. The picker is
-    no further from its label than it was, but it is no closer either, and the width went to
-    muted help text. Owed by a later task in this programme; recorded here rather than papered
-    over, because a mitigation named as the reason a reversal is not taste has to actually exist.
+  - **Column width: DONE.** "The picker is a screen away from the label" is a COLUMN width and
+    `ConfigTable`'s `valueClassName` answers it — the resolution §5.4b reached for `Response`,
+    which carries `w-52 lg:w-96`. `Try it` kept the `w-52 lg:w-80` it had before the reversal for
+    two tasks and got §5.2's trap in full: measured with and without its cap, `Details` — the only
+    unsized column — went **408 → 680px, taking all 272 freed pixels**, while `Value` stayed at
+    320px, so the picker was no further from its label than before and no closer, and the width
+    went to muted help text.
+
+    It now carries `w-52 lg:w-96`, the same as `Config` and `Response`. Measured in Chromium at
+    1600×1000, **against the post-reversal row** (§5.1's labelling rule — the baseline is the
+    uncapped section, not the capped one):
+
+    | | Setting | Details | Value | table |
+    |---|---|---|---|---|
+    | `Try it` before, `lg:w-80` | 288 | **680** | 320 | 1288 |
+    | `Try it` after, `lg:w-96` | 288 | 616 | **384** | 1288 |
+    | `Response` / `Config`, `lg:w-96` | 288 | 624 | 384 | 1296 |
+
+    The 64px moved from `Details` to `Value`; the 8px `Details` still differs by is `Try it`'s own
+    `px-1` inset on both of its halves, and `Details` is the unsized remainder that absorbs it.
+    The dead space in `Details` — the part its own `max-w-prose` sentence can never occupy, which
+    lays out at 532px — went **148px → 84px**.
+
+    **A wider column measures better in isolation and is deliberately not taken, which is the
+    point of recording the number.** At `Value` = 448px the caveat's summary in that cell drops
+    from two lines to one (the row 85 → 69px) and the dead space in `Details` falls to 20px; at
+    512px `Details` (488) is finally narrower than the 532px measure and starts squeezing the
+    prose, so 448 is the local optimum and it is real. It loses to this section's own finding:
+    three adjacent tabs render one `Setting | Details | Value` grid, a reader sees them in
+    sequence, and a fourth width for one grid is the defect §5.1 was reversed to remove in
+    miniature. It is also worse where the breakpoint engages — at a 1024px viewport `Details` is
+    already down to 40px at `lg:w-96`.
+
+    **Reconciling every hit of the grep, as this section prescribes.** `valueClassName` is passed
+    at six call sites. Three are the detail tabs this rule governs and they now agree:
+    `Config.tsx`, `ResponseSection.tsx`, `TryIt.tsx`, all `w-52 lg:w-96`. Three are
+    `ScheduleEditor.tsx` at `w-52 lg:w-80`, which is the Alerts editor and not a detail route —
+    out of this rule's scope, named so that a future grep does not read them as violations. The
+    remaining hit is the one worth writing down: **`Query.tsx` passes `w-64` and no
+    `detailsClassName`.** That is a fourth width and an uncapped Details cell, and it is left
+    alone on purpose — it is a one-row strip inside a collapsed `<details>` that already carries
+    its own `max-h-[40vh]` scroll box, not a section-level settings grid — but "left alone on
+    purpose" is a decision, so it is recorded rather than omitted.
   - **Row action distance: DONE on `Access`, NOT DONE on `Versions`.** This is the move the
     earlier revision omitted entirely, and it is the one the reversal actively CAUSED rather than
     merely failed to help. Both tabs put their row action in a narrow, right-aligned last column
@@ -1490,13 +1526,13 @@ Practical rules that fall out of this:
 
 ---
 
-## 11. "Configure, run, read the result" is a split, not a stack
+## 11. "Configure, run, read the result" is one screen — a split only sometimes
 
 `src/routes/explore/dataapi/detail/Query.tsx` (the first), `detail/TryIt.tsx` (the second).
 
 Two sections of the endpoint editor have the same shape — set something up, run it, read what
-came back — and both are now a vertical `Group` from `react-resizable-panels` with a drag
-handle between the halves, rather than a page that scrolls.
+came back — and both put the two halves on screen at once rather than down a page that
+scrolls.
 
 **The defect.** Stacked, the result sits below the setup and off-screen: run it, scroll down,
 read, scroll back up to change a value, scroll down again. `Query`'s preview was below
@@ -1504,21 +1540,63 @@ read, scroll back up to change a value, scroll down again. `Query`'s preview was
 version of the split was worse still — the strip of tables took 370px of a 615px section and
 left the SQL editor 107px, about four lines, which no test could see.
 
-The parts, all four load-bearing:
+The parts, all three load-bearing:
 
 - **The setup is tables** (§4) — a `ConfigTable` row for a setting, a plain `Table` for a list.
   `TryIt`'s service-account picker is one `ConfigTableRow`; its per-parameter trial *values*
   are a plain table, one row each.
-- **The result is the lower panel, and it owns the run control.** The button and the shortcut
-  live in the *result* panel's header, not with the setup: `PreviewBlock` and `TryIt` both put
-  `Run` there, and the header stays put while the body scrolls.
+- **The result is the lower half, and it owns the run control.** The button and the shortcut
+  live in the *result*'s header, not with the setup: `PreviewBlock` and `TryIt` both put `Run`
+  there, and the header stays put while the body scrolls.
 - **The shortcut is named beside the button it fires.** `⌘↵`, in the header. An affordance
   nobody can see is not an affordance. `Query` registers it as a Monaco command (`SqlEditor`'s
   `onRun`); `TryIt` has no editor, so it uses a `window` `keydown` listener, the idiom
   `components/sqllab/SqlTab.tsx` already uses for `⌘K`.
-- **Sizes are percent STRINGS.** In `react-resizable-panels` v4 a bare number means *pixels*,
-  so `defaultSize={55}` is a 55-pixel editor that reads as correct in the source. Both sections
-  are tested for the string *type*, not only the value.
+
+### 11.0 The split is the implementation, not the shape — and it fits only one of the two
+
+**This section used to say "both are now a vertical `Group`", and that is what turned out to be
+wrong.** A `react-resizable-panels` `Group` divides a definite height by a FRACTION. That is
+right when a half must be *handed* a height and cannot state its own, and wrong when a half's
+height is decided by its content.
+
+- **`Query` keeps its split.** Its upper half is a Monaco editor: an auto-height editor is 0px
+  tall, so something has to hand it a number. `Query.tsx`'s own comment states the rule that
+  follows from this and it is the rule that condemns the other case — *"the strip can be
+  expanded at any window height, so any fixed split has a window that defeats it."*
+- **`TryIt` dropped its split.** Its three parts are *Run as*, *Parameter values* and *Result*,
+  and only the last grows without bound; the first two are sized by their content. Measured in
+  Chromium at 1600×1000, the `40%` setup pane's `clientHeight` was **230 whatever it held**,
+  against a `scrollHeight` of 277 / 297 / 342 / 432 / 612 for 0 / 1 / 2 / 4 / 8 declared
+  parameters. It clipped **47px on an endpoint declaring no parameters at all** and 202px on
+  four — slicing the `Parameter | Type | Value` header row through the middle so that not one
+  parameter row was on screen — while the result pane below it, 389px, held a header and one
+  collapsed caveat. There was no fixture for which the fraction was right.
+
+  It is now a flex column: the setup `shrink-0` at its own height with no scroll box of its
+  own, the result `flex-1` with a `min-h-64` floor and the section's only `overflow-auto`. When
+  an endpoint declares more parameters than the section is tall, the whole section overflows
+  the shell's `overflow-auto` fieldset — which scrolls, and is reachable — instead of a pane
+  clipping inside a page that does not move. Measured after: nothing in the section hides
+  anything before a run, at 0/1/2/4/8/16 parameters.
+
+  **The split could not be repaired in place, which is why the answer is removal rather than a
+  better fraction.** `react-resizable-panels` v4 has no content-sizing mode — `defaultSize`
+  takes %, px, em, rem, vh or vw — so "size the top pane to its content" means measuring the
+  content and calling `panelRef.resize()` on mount and on every parameter change: machinery
+  whose only job is to imitate normal flow.
+
+- **Sizes are percent STRINGS, wherever a `Group` is still used.** In `react-resizable-panels`
+  v4 a bare number means *pixels*, so `defaultSize={55}` is a 55-pixel editor that reads as
+  correct in the source. `Query` is tested for the string *type*, not only the value.
+  `TryIt.test.tsx` keeps the library's stub after removing the import, precisely so a
+  reintroduced split is observable in jsdom rather than silently passing an assertion that no
+  longer has anything to match.
+
+**Naming the halves.** With no `Panel` to point at, `TryIt`'s two halves are
+`<section aria-labelledby=…>` — real landmarks with the `h3` each already had as its name.
+That is what lets a test say "Run is in the *result*" by identity instead of by
+`getAllByTestId("panel")[1]`, which is a counted hop wearing a different hat.
 
 ### 11.1 The shortcut is not covered by any of the guards the button has
 
@@ -1596,10 +1674,24 @@ this sentence was the error.
 ### 11.3 What a test can say about any of this
 
 jsdom does no layout (§10), so the drag, the heights and the widths are a browser check. What
-is testable is the wiring, and it is where the regressions were: which panel each half is in
-(`within(panels[0])` / `within(panels[1])`), that the handle is *between* them
-(`compareDocumentPosition`), that the sizes are strings, that the shortcut fires the mutation
+is testable is the wiring, and it is where the regressions were: which half each thing is in,
+that the sizes are strings wherever a `Group` survives, that the shortcut fires the mutation
 with the on-screen values, and that it fires nothing when a guard in §11.1 should stop it.
+
+**Name the half, do not index it.** `Query` still has panels and `within(panels[0])` /
+`within(panels[1])` reads them; `TryIt` does not, and its halves are resolved by accessible
+name (`getByRole("region", { name: "Result" })`). Prefer the name even where the index works:
+an index is a counted hop, and §5.6/§5.7 record twice that a counted hop re-points silently
+onto something that satisfies the assertion for the wrong reason.
+
+**And a class chain is the strongest thing jsdom can say about a height.** `TryIt`'s clipping
+was 47–382px of hidden content, and no jsdom assertion can see one pixel of it. What its tests
+pin instead is the mechanism: walk from the parameter table up to the section root and assert
+that no ancestor scrolls vertically or caps its height. Two cautions came out of writing it —
+the regex must exclude `overflow-x-*`, because `ui/table.tsx` wraps every `<Table>` in
+`overflow-x-auto` by design (§5.3) and catching it would fail a section with nothing wrong;
+and the walk must end at the root by IDENTITY, because a chain that silently runs past it
+asserts about the shell.
 
 **jsdom does not hide a closed `<details>`** — it has no layout to hide it with, and Testing
 Library does not exclude its contents. Assert the `open` **attribute**; `toBeVisible` passes
@@ -1735,9 +1827,13 @@ not exist yet:
   is no second part to put behind a summary. (This bullet used to name `Access`'s conditional
   state paragraphs here too; they are `Caveat`s, and are two of the four counted above. See
   §11.2.)
-- The split of §11 — **2** sections, both Data API endpoint detail (`Query`, `TryIt`); `react-resizable-panels` itself is also used by `components/sqllab/SqlTab.tsx`, which is
-  where the idiom came from. `Versions` and `Access` are deliberately not splits: neither is
-  "configure, run, read the result" — there is nothing to run.
+- The shape of §11 — **2** sections, both Data API endpoint detail (`Query`, `TryIt`).
+  **Only ONE of them is a `react-resizable-panels` split**: `Query`, whose upper half is a
+  Monaco editor that must be handed a height. `TryIt` is a flex column (§11.0) — its parts are
+  content-sized, and the fraction clipped them at every parameter count measured. The library
+  is also used by `components/sqllab/SqlTab.tsx`, which is where the idiom came from.
+  `Versions` and `Access` are neither: they are not "configure, run, read the result" — there
+  is nothing to run.
 - The section-width guard of §5.6 — **6** sections (`Query`, `Config`, `Response`, `Access`,
   `Try it`, `Versions`), one helper, **one form**. It was 3 copies and 2 absences before the
   width phase, then 5 call sites across two forms; §5.1's reversal to one width added `Query`

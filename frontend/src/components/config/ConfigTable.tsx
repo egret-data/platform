@@ -194,7 +194,7 @@ export function ConfigTableRow({
       {/* `whitespace-normal` is load-bearing here, not defensive symmetry with
           the two cells above. The shared `TableCell` is `whitespace-nowrap`
           (`ui/table.tsx`), and the Value column is the narrowest one this table
-          sizes — 208px by default, 320px at `TryIt`'s `w-52 lg:w-80`. A caller
+          sizes — 208px by default, 384px at `TryIt`'s `w-52 lg:w-96`. A caller
           may legitimately put a sentence in it: `TryIt` puts three there (the
           failed-fetch `Alert`, the no-service-accounts note, and a `Caveat`'s
           disclosure body), because each is about the picker in this cell and

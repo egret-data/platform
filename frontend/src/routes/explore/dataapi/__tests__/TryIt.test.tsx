@@ -6,20 +6,24 @@ import { MemoryRouter, Outlet, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 /**
- * `react-resizable-panels`, stubbed to the three props `TryIt` passes — the
- * same stub, and for the same reason, as `Query.test.tsx`.
+ * `react-resizable-panels`, stubbed — and as of this task `TryIt` no longer
+ * imports it, which makes this a **tripwire rather than a stand-in**.
  *
- * **Not for convenience: the real one is unusable here.** With no layout engine
- * every rect in jsdom is 0×0, so the library's `Separator` wins the hit-test for
- * a click anywhere in the group and takes focus. Every `userEvent.type` in this
- * file would then go to the drag handle instead of the field, and the section
- * would silently read as if nothing could be typed into it. That is an artifact
- * of the environment, not of the product — the drag itself is a browser check.
+ * It stays for exactly one reason: it is the only thing in jsdom that can
+ * OBSERVE the split coming back. The stub marks every `Group`, `Panel` and
+ * `Separator` it renders, so `renders no resizable split` below fails the
+ * moment this section reintroduces one — whereas deleting the mock would leave
+ * that assertion with nothing to match and it would pass either way, on a
+ * section that had regressed. (Deleting it would also put the REAL library into
+ * jsdom, where every rect is 0×0 and its `Separator` wins the hit-test for a
+ * click anywhere in the group: every `userEvent.type` in this file would go to
+ * a drag handle instead of a field. That was this stub's original job.)
  *
  * The stub echoes the SIZES back as attributes rather than swallowing them,
- * because those are exactly what a reader cannot verify by eye: in v4 a bare
- * number means PIXELS and a string means percent, so `defaultSize={40}` is a
- * 40-pixel setup pane that still looks right in the source.
+ * because those are what a reader cannot verify by eye: in v4 a bare number
+ * means PIXELS and a string means percent, so `defaultSize={40}` is a 40-pixel
+ * pane that still looks right in the source. Kept so that a reintroduced split
+ * fails LOUDLY on its geometry as well as on its presence.
  */
 vi.mock("react-resizable-panels", () => ({
   Group: ({ children, className, orientation }: { children?: React.ReactNode; className?: string; orientation?: string }) => (
@@ -53,7 +57,7 @@ import { ApiError } from "@/api/client";
 import { ParamLocation, ParamType, type DataApiEndpointDto, type DataApiServiceAccountDto } from "@/api/generated/model";
 import type { EndpointDetailContext } from "@/routes/explore/dataapi/EndpointDetail";
 import TryIt from "@/routes/explore/dataapi/detail/TryIt";
-import { expectSectionIntroCapsItsProse, expectSectionLeavesWidthToThePage } from "./sectionWidth";
+import { expectSectionIntroCapsItsProse, expectSectionLeavesWidthToThePage, sectionRootOf } from "./sectionWidth";
 
 function makeEndpoint(overrides: Partial<DataApiEndpointDto> = {}): DataApiEndpointDto {
   return {
@@ -448,58 +452,181 @@ describe("TryIt — the payload a trial carries", () => {
 });
 
 /**
- * `react-resizable-panels` is stubbed at the top of this file precisely because
- * its real behaviour cannot be exercised in jsdom. What IS testable, and where
- * the regressions live, is the wiring: which panel each half is in, that the
- * sizes are percent STRINGS rather than v4's pixel numbers, and that the
- * shortcut named in the header actually runs the trial.
+ * **The split is gone, and this block is what says so.**
+ *
+ * `Try it` used to have `Query`'s shape: a vertical `Group` whose two panels
+ * held the setup and the result, at a fixed `40%` / `60%`. A fraction cannot
+ * size a part whose height is decided by its CONTENT, and measured in real
+ * Chromium at 1600x1000 it never once did:
+ *
+ * | declared parameters | setup pane clientHeight | its scrollHeight | hidden |
+ * |---|---|---|---|
+ * | 0 | 230 | 277 | 47 |
+ * | 1 | 230 | 297 | 67 |
+ * | 2 | 230 | 342 | 112 |
+ * | 4 | 230 | 432 | 202 |
+ * | 8 | 230 | 612 | 382 |
+ *
+ * The FIRST row is the damning one: the pane clipped its own content on an
+ * endpoint that declares no parameters at all, so there was no fixture for
+ * which the fraction was right. Meanwhile the result pane below it measured
+ * 389px and, before a run, held a header and one collapsed caveat.
+ *
+ * `Query` keeps its split for a reason that does not transfer. Its top half is
+ * a Monaco editor, which must be HANDED a height — an auto-height editor is
+ * 0px — and `Query.tsx` already states the general rule in its own comment:
+ * "the strip can be expanded at any window height, so any fixed split has a
+ * window that defeats it". `Try it`'s top half is a table; a table has an
+ * intrinsic height and needs no fraction. Nor can the split be repaired in
+ * place: `react-resizable-panels` v4 has no content-sizing mode (its
+ * `defaultSize` takes %, px, em, rem, vh or vw — read off the shipped `.d.ts`),
+ * so "size the top pane to its content" means measuring the content and
+ * calling `panelRef.resize()` on mount and on every parameter change, which is
+ * machinery whose only job is to imitate normal flow.
+ *
+ * So: one column. The setup takes its own height and never scrolls; the result
+ * takes what is left and is the only part that does.
+ *
+ * **What jsdom can and cannot say about that.** It cannot say anything is
+ * clipped: no layout, every box 0x0 (§10), so an assertion about the pixels
+ * above passes with the split still in place. What it CAN pin is the chain
+ * that produced them — an `overflow-auto` box between the parameter table and
+ * the section root, and a `Panel` around it. The pixels are measured in
+ * `tests/e2e/data-api-try-it-height.spec.ts`.
  */
-describe("TryIt — the split, and the shortcut named in the result header", () => {
-  it("splits the section vertically — setup above, result below — and sizes it in PERCENT", () => {
-    mockTry(OK);
-    renderTryIt();
+describe("TryIt — one column: the setup at its own height, the result taking the rest", () => {
+  /** The section's own root, by the same walk `sectionWidth.ts` uses. */
+  function rootOf(container: HTMLElement) {
+    return sectionRootOf(container, screen.getByRole("heading", { name: "Try it", level: 2 }));
+  }
 
-    const group = screen.getByTestId("panel-group");
-    // `orientation`, not `direction` — v4 renamed it, and a wrong prop name is
-    // silently accepted and silently horizontal.
-    expect(group).toHaveAttribute("data-orientation", "vertical");
-    // `min-h-0` is what lets the group give height back; without it the flex
-    // item refuses to shrink below its content and the panels grow the page.
-    expect(group.className).toMatch(/min-h-0/);
-
-    const panels = screen.getAllByTestId("panel");
-    expect(panels).toHaveLength(2);
-    // The setup is in the FIRST panel and the result in the SECOND. The Run
-    // button lives with the RESULT, as Query's Preview button does.
-    expect(within(panels[0]).getByLabelText("Service account")).toBeInTheDocument();
-    expect(within(panels[1]).getByRole("button", { name: /^run$/i })).toBeInTheDocument();
-    expect(within(panels[0]).queryByRole("button", { name: /^run$/i })).toBeNull();
-
-    // And the handle is between them, not before or after both.
-    const handle = screen.getByTestId("panel-separator");
-    expect(panels[0].compareDocumentPosition(handle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(panels[1].compareDocumentPosition(handle) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
-
-    // STRINGS, and percentages. In react-resizable-panels v4 a bare number is
-    // PIXELS — `defaultSize={40}` is a 40-pixel setup pane that reads as
-    // correct in the source. The type assertion is the load-bearing half.
-    for (const panel of panels) {
-      expect(panel).toHaveAttribute("data-default-size-type", "string");
-      expect(panel).toHaveAttribute("data-min-size-type", "string");
-      expect(panel.getAttribute("data-default-size")).toMatch(/^\d+%$/);
-      expect(panel.getAttribute("data-min-size")).toMatch(/^\d+%$/);
+  /**
+   * Every ancestor of `el` strictly between it and the section root.
+   *
+   * A WALK with a hard stop, never a counted hop: `parentElement.parentElement`
+   * re-points at something else the moment a wrapper is added, and the trap
+   * this branch already hit twice is that the re-pointed assertion still
+   * passes. If the walk leaves the section without meeting the root, that is a
+   * failure here rather than an empty chain nothing can be asserted about.
+   */
+  function ancestorsUpToRoot(container: HTMLElement, el: HTMLElement) {
+    const root = rootOf(container);
+    const chain: HTMLElement[] = [];
+    let n: HTMLElement | null = el.parentElement;
+    while (n && n !== root) {
+      chain.push(n);
+      n = n.parentElement;
     }
-    expect(panels[0]).toHaveAttribute("data-default-size", "40%");
-    expect(panels[1]).toHaveAttribute("data-default-size", "60%");
+    expect(n, "the walk up from the parameter table reached the section root").toBe(root);
+    // Premise: there IS a chain. An empty one makes the loop below vacuous.
+    expect(chain.length).toBeGreaterThan(0);
+    return chain;
+  }
+
+  /** The parameter table, resolved from its own heading rather than picked. */
+  function paramTableOf() {
+    const h4 = screen.getByRole("heading", { name: "Parameter values", level: 4 });
+    const table = h4.parentElement!.querySelector("table");
+    expect(table, "the Parameter values heading introduces a table").not.toBeNull();
+    return table as HTMLTableElement;
+  }
+
+  /**
+   * VERTICAL scrolling only — `overflow-auto` and `overflow-y-auto`, never
+   * `overflow-x-auto`. That distinction is load-bearing rather than pedantic:
+   * `ui/table.tsx` wraps every `<Table>` in `relative w-full overflow-x-auto`,
+   * which is §5.3's deliberate answer to a wide settings grid on a narrow
+   * screen. Catching it here would fail on a section with nothing wrong with
+   * it, and the obvious "fix" would be to unwrap the tables. Same regex
+   * `EndpointDetail.test.tsx` uses for the shell's single scroll region.
+   */
+  const SCROLLS = /(?:^|\s)(?:[a-z0-9]+:)*overflow(?:-y)?-(?:auto|scroll)(?:\s|$)/;
+  const CAPPED_HEIGHT = /(?:^|\s)(?:[a-z0-9]+:)*max-h-/;
+
+  function classOf(el: Element) {
+    return el.getAttribute("class") ?? "";
+  }
+
+  it("puts nothing between the parameter table and the section root that can clip it", () => {
+    mockTry(OK);
+    const { container } = renderTryIt({ endpoint: makeEndpoint({ params: TWO_PARAMS }) });
+
+    // Class names, not geometry — see the block comment. This is the exact
+    // chain that hid 47-382px of the setup: a `min-h-0 flex-1 overflow-auto`
+    // box, sized by a `Panel` to a fraction of the section.
+    for (const a of ancestorsUpToRoot(container, paramTableOf())) {
+      expect(classOf(a), `an ancestor of the parameter table scrolls: ${classOf(a)}`).not.toMatch(SCROLLS);
+      expect(classOf(a), `an ancestor of the parameter table caps its height: ${classOf(a)}`).not.toMatch(CAPPED_HEIGHT);
+    }
   });
 
-  it("names the shortcut in the result panel's header, beside the button it fires", () => {
+  it("sizes the setup to its content and hands the remainder to the result", () => {
+    mockTry(OK);
+    const { container } = renderTryIt({ endpoint: makeEndpoint({ params: TWO_PARAMS }) });
+    const root = rootOf(container);
+
+    const setup = screen.getByRole("region", { name: "Run as" });
+    const result = screen.getByRole("region", { name: "Result" });
+
+    // Both are the section's own children — nothing wraps them in a pane.
+    expect(setup.parentElement).toBe(root);
+    expect(result.parentElement).toBe(root);
+
+    // `shrink-0` is the half that regresses silently: a flex item shrinks by
+    // default, so without it a tall result squeezes the setup back to the
+    // clipped state this task removed. And the setup must NOT be flexible —
+    // taking a share of the height is precisely what it stopped doing.
+    expect(setup).toHaveClass("shrink-0");
+    expect(classOf(setup)).not.toMatch(/(?:^|\s)(?:[a-z0-9]+:)*flex-1(?:\s|$)/);
+
+    // The result is the flexible one, with a floor so that a setup taller than
+    // the section cannot squeeze it to nothing (the whole section overflows the
+    // shell's scroll box instead, which is reachable; a squeezed panel is not).
+    expect(result).toHaveClass("flex-1");
+    expect(classOf(result)).toMatch(/(?:^|\s)min-h-\S+/);
+  });
+
+  it("keeps every scrolling box inside the result, and none around the setup", () => {
+    mockTry(OK);
+    const { container } = renderTryIt({ endpoint: makeEndpoint({ params: TWO_PARAMS }) });
+    const root = rootOf(container);
+    const setup = screen.getByRole("region", { name: "Run as" });
+    const result = screen.getByRole("region", { name: "Result" });
+
+    const scrollers = [...root.querySelectorAll("*")].filter((el) => SCROLLS.test(classOf(el)));
+    // Premise, not decoration: with no scrolling box anywhere the loop below
+    // asserts nothing and reports green — the vacuous pass this branch's specs
+    // have hit before.
+    expect(scrollers.length, "the section still has a scrolling result body").toBeGreaterThan(0);
+    for (const el of scrollers) {
+      expect(result.contains(el), `a scroll box outside the result: ${classOf(el)}`).toBe(true);
+      expect(setup.contains(el), `a scroll box around the setup: ${classOf(el)}`).toBe(false);
+    }
+  });
+
+  it("renders no resizable split", () => {
     mockTry(OK);
     renderTryIt();
-    const panels = screen.getAllByTestId("panel");
+    // Matched against the STUB at the top of this file, which marks anything
+    // the library renders. Re-import `Group`/`Panel` here and these populate.
+    expect(screen.queryByTestId("panel-group")).toBeNull();
+    expect(screen.queryAllByTestId("panel")).toHaveLength(0);
+    expect(screen.queryByTestId("panel-separator")).toBeNull();
+  });
+
+  it("names the shortcut in the result's header, beside the button it fires", () => {
+    mockTry(OK);
+    renderTryIt();
+    const result = screen.getByRole("region", { name: "Result" });
     // An affordance nobody can see is not an affordance, and the only place a
     // reader looks for it is next to Run.
-    expect(within(panels[1]).getByText("⌘↵")).toBeInTheDocument();
+    expect(within(result).getByText("⌘↵")).toBeInTheDocument();
+    expect(within(result).getByRole("button", { name: /^run$/i })).toBeInTheDocument();
+    // Run belongs to the result half, as Query's Preview button does — not to
+    // the setup half where the picker is.
+    const setup = screen.getByRole("region", { name: "Run as" });
+    expect(within(setup).getByLabelText("Service account")).toBeInTheDocument();
+    expect(within(setup).queryByRole("button", { name: /^run$/i })).toBeNull();
   });
 
   it("runs the trial from ⌘↵, carrying the values on screen", async () => {
@@ -549,22 +676,22 @@ describe("TryIt — the split, and the shortcut named in the result header", () 
     await waitFor(() => expect(mutateAsync).not.toHaveBeenCalled());
   });
 
-  it("keeps what a trial costs in the panel with the button that spends it", () => {
+  it("keeps what a trial costs beside the button that spends it", () => {
     mockTry(OK);
     renderTryIt();
-    const panels = screen.getAllByTestId("panel");
+    const result = screen.getByRole("region", { name: "Result" });
+    const setup = screen.getByRole("region", { name: "Run as" });
     // `PreviewBlock`'s rule: a reader who has to scroll to find out that this
     // spends a rate limit and writes an access-log row has already pressed the
     // button. jsdom cannot judge that the note is on screen — it can judge that
-    // it is in the same panel as Run, which is the wiring the rule reduces to.
+    // it is in the same half as Run, which is the wiring the rule reduces to.
     //
-    // Task 3 turned the note into a `Caveat`, so the assertion is on the
-    // headline — the half that is on screen unclicked — plus the mechanism
-    // behind it. Asserting the collapsed text alone would say nothing about
-    // which panel a reader finds it in.
-    const summary = within(panels[1]).getByText("A trial is a real call, not a dry run");
+    // The assertion is on the HEADLINE (the half that is on screen unclicked)
+    // plus the mechanism behind it. Asserting the collapsed text alone would
+    // say nothing about which half a reader finds it in.
+    const summary = within(result).getByText("A trial is a real call, not a dry run");
     expect(summary.closest("details")).toHaveTextContent(/rate-limit bucket/i);
-    expect(within(panels[0]).queryByText(/rate-limit bucket/i)).toBeNull();
+    expect(within(setup).queryByText(/rate-limit bucket/i)).toBeNull();
   });
 });
 
@@ -683,6 +810,49 @@ describe("TryIt — width", () => {
     const heading = screen.getByRole("heading", { name: "Try it", level: 2 });
     expectSectionLeavesWidthToThePage(container, heading);
   });
+
+  /**
+   * §5.2, and the debt §5.1 recorded as OWED by this exact section.
+   *
+   * Removing the cap above is only half a change: `ConfigTable` is
+   * `table-fixed`, so every pixel the section gained went to `Details` — the
+   * only unsized column — while the picker stayed where it was. Measured in
+   * Chromium at 1600x1000 with the cap gone and this table still at
+   * `w-52 lg:w-80`: `Setting` 288, `Details` **680**, `Value` **320**, and the
+   * sentence inside `Details` laid out at 532px (its own `max-w-prose`
+   * measure), leaving **148px of that column dead**.
+   *
+   * At `w-52 lg:w-96` the same measurement gives 288 / 616 / **384**, the
+   * picker 368px wide, and the dead space in `Details` down to 84px — and it
+   * is the SAME measure `Config` and `Response` carry, which is the point:
+   * three adjacent tabs render this identical three-column grid, and §5.1's
+   * whole finding is that a reader sees the tabs in sequence.
+   *
+   * A wider column measures better in isolation and is deliberately not taken:
+   * at 448px the caveat's summary drops from two lines to one (row 85 -> 69px)
+   * and `Details`'s dead space falls to 20px, but that is a fourth width for
+   * one grid, and at a 1024px viewport — where `lg:` has just engaged —
+   * `Details` is already down to 40px at `w-96` and would be crushed. The
+   * numbers are in the task report.
+   *
+   * Both halves asserted, as `Config`'s and `Response`'s guards do: below `lg`
+   * the sized columns do not shrink, they scroll (§5.3), so a flat `w-96` is a
+   * different and worse thing than `w-52 lg:w-96`.
+   */
+  it("gives its Value column the same measure as Config's and Response's (§5.2)", () => {
+    mockTry(OK);
+    renderTryIt();
+    // BY IDENTITY. This section renders TWO tables with a "Value" column — the
+    // `Setting | Details | Value` settings grid and the `Parameter | Type |
+    // Value` list — so a bare `getByRole("columnheader", { name: "Value" })` is
+    // ambiguous, and picking `[0]` out of `getAllBy` would silently follow
+    // whichever table happens to come first. The one this rule is about is the
+    // `ConfigTable`, resolved as the table that also has a "Setting" column.
+    const settingsTable = screen.getByRole("columnheader", { name: "Setting" }).closest("table")!;
+    const valueHead = within(settingsTable).getByRole("columnheader", { name: "Value" });
+    expect(valueHead).toHaveClass("lg:w-96");
+    expect(valueHead).toHaveClass("w-52");
+  });
 });
 
 /**
@@ -737,11 +907,11 @@ describe("TryIt — the prose sits beside the control it describes", () => {
     expect(details).toHaveAttribute("open");
   });
 
-  it("puts the trial's consequences behind the consequence, in the panel that holds Run", () => {
+  it("puts the trial's consequences behind the consequence, in the half that holds Run", () => {
     mockTry(OK);
     renderTryIt();
 
-    const resultPanel = screen.getAllByTestId("panel")[1];
+    const resultPanel = screen.getByRole("region", { name: "Result" });
     // The load-bearing half, on screen with nothing clicked. `PreviewBlock`'s
     // rule survives the move: a reader who must open something to learn a call
     // is real has already pressed the button, so THAT sentence is the summary.
