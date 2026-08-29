@@ -1216,11 +1216,38 @@ describe("Activity — an error rate carries its severity", () => {
     const mid = errorRateOf("Some 4xx");
     expect(within(mid).getByText(/elevated/i)).toBeInTheDocument();
     expect(mid.querySelector("svg")).not.toBeNull();
-    // Three readings, three different words — not one marked state and two
-    // spellings of the same one.
-    expect(mid.querySelector(".text-highlight")).not.toBeNull();
-    expect(errorRateOf("Spend pacing").querySelector(".text-highlight")).toBeNull();
-    expect(errorRateOf("Quiet export").querySelector(".text-highlight")).toBeNull();
+    // Three readings, three different treatments — not one marked state and two
+    // spellings of the same one. The middle tier wears the amber on its BORDER
+    // rather than as ink: `--highlight` measures 2.56:1 as text on this
+    // surface, which the browser spec caught and no class assertion could (see
+    // `ERROR_RATE_INK`).
+    expect(mid.querySelector('[class*="highlight"]')).not.toBeNull();
+    expect(mid.querySelector(".text-destructive")).toBeNull();
+    expect(errorRateOf("Spend pacing").querySelector(".text-destructive")).not.toBeNull();
+    expect(errorRateOf("Spend pacing").querySelector('[class*="highlight"]')).toBeNull();
+    expect(errorRateOf("Quiet export").querySelector('[class*="highlight"]')).toBeNull();
+  });
+
+  it("separates elevated from failing by the ICON, not by the colour of one icon", async () => {
+    // The only channel left for a reader who has neither colour nor a screen
+    // reader: a greyscale print, a monochrome display, a glance down a column.
+    // One glyph in two hues would collapse to one glyph.
+    mockSummaryRows([
+      makeRow({ endpoint_id: "ep-mid", endpoint_name: "Some 4xx", calls: 1000, errors: 20 }),
+      makeRow({ endpoint_id: "ep-bad", endpoint_name: "Spend pacing", calls: 100, errors: 20 }),
+    ]);
+    renderActivity();
+    await screen.findByTestId("activity-per-endpoint");
+
+    const midIcon = errorRateOf("Some 4xx").querySelector("svg")!;
+    const badIcon = errorRateOf("Spend pacing").querySelector("svg")!;
+    expect(midIcon).not.toBeNull();
+    expect(badIcon).not.toBeNull();
+    // lucide stamps the glyph name onto the class list, so this compares the
+    // SHAPES rather than two references to the same element.
+    expect(badIcon.getAttribute("class")).not.toBe(midIcon.getAttribute("class"));
+    expect(midIcon.getAttribute("class")).toMatch(/triangle/i);
+    expect(badIcon.getAttribute("class")).toMatch(/octagon/i);
   });
 
   it("gives the Error rate tile the same severity as the table", async () => {

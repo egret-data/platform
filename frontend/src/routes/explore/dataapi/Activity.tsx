@@ -1,5 +1,5 @@
 import { type ReactNode, useRef, useState } from "react";
-import { AlertTriangle } from "lucide-react";
+import { AlertTriangle, OctagonAlert } from "lucide-react";
 import { useParams } from "react-router-dom";
 
 import { useDataApiActivitySummary } from "@/api/generated/data-api/data-api";
@@ -264,31 +264,70 @@ export function errorRateTier(errors: number, calls: number): ErrorRateTier {
   return errors / calls >= ERROR_RATE_ALERT ? "failing" : "elevated";
 }
 
-/** The ink each tier is painted in. Exported because
- * `tests/e2e/activity-error-rate-severity.spec.ts` measures what these
- * actually PAINT, in a real browser, over the surface they sit on — jsdom
- * resolves no `oklch()` and would return the same answer with the tokens
- * swapped (`docs/en/ui-conventions.md` §10).
+/**
+ * The ink each tier is painted in. Exported because
+ * `tests/e2e/activity-error-rate-severity.spec.ts` measures what these actually
+ * PAINT, in a real browser, over the surface they sit on — jsdom resolves no
+ * `oklch()` and would return the same answer with the tokens swapped
+ * (`docs/en/ui-conventions.md` §10).
  *
- * `--accent` is not among them: it is reserved for hover/focus, and a value
- * that is permanently painted in the hover colour reads as permanently
- * hovered. */
+ * `--accent` is not among them: it is reserved for hover/focus, and a reading
+ * permanently painted in the hover colour reads as permanently hovered.
+ *
+ * `elevated` is NOT amber ink, and that is a measurement rather than a
+ * preference. `--highlight` is a FILL token — `oklch(0.72 …)` in light,
+ * `oklch(0.78 …)` in dark, and its own comment in `index.css` describes it as a
+ * badge/marker colour with `--highlight-foreground` as the ink to put ON it.
+ * Used as ink on the card it measures 2.56:1 in Chrome, against WCAG 1.4.3's
+ * 4.5:1 — the browser spec above rejected that first draft, which every jsdom
+ * class assertion had passed. There is no amber INK in this token set (the
+ * `-foreground` half is near-black and fails in dark), so the middle tier keeps
+ * the amber as a wash and a border and puts the NUMBER in body ink. Its
+ * severity is carried by form, which is the channel that does not depend on a
+ * hue being legible.
+ */
 export const ERROR_RATE_INK: Record<ErrorRateTier, string> = {
   unmeasured: "text-muted-foreground",
   none: "text-success",
-  elevated: "text-highlight",
+  elevated: "text-foreground",
   failing: "text-destructive",
 };
 
-/** The FORM half, which is the half that survives greyscale, a projector and
- * every kind of colour blindness. `failing` is filled, `elevated` is outlined
- * and `none` is neither — the same filled/outline/plain ladder `Clients.tsx`
- * uses to separate Active, Expired and Revoked without leaning on hue. */
+/**
+ * The FORM half, which is the half that survives greyscale, a projector and
+ * every kind of colour blindness: nothing, a soft outline, a full-strength
+ * outline. Read down the column it is an ordering even with every colour
+ * removed.
+ *
+ * NEITHER marked tier is filled, and that too came back from the browser rather
+ * than from taste. `bg-destructive/15 text-destructive` — the tinted-chip idiom
+ * this repo uses in `Clients.tsx`, in `ActivityCallList`'s own status column and
+ * in a dozen other places — measures 3.68:1 in light mode: the wash lifts the
+ * background out from under an ink that clears 4.81:1 on the bare card. The
+ * solid alternative (`bg-destructive text-destructive-foreground`, what
+ * `Button variant="destructive"` ships) inverts the problem and measures 2.83:1
+ * in DARK. Ink on the unwashed card is the only treatment that clears WCAG
+ * 1.4.3 in both themes, so the fill is spent on the border instead, where no
+ * text sits on it. The severity ordering is carried by border strength, by ink,
+ * and by two different icons — see `ERROR_RATE_ICON`.
+ */
 export const ERROR_RATE_PILL: Record<ErrorRateTier, string> = {
   unmeasured: "",
   none: "",
   elevated: "border border-highlight/50",
-  failing: "bg-destructive/15",
+  failing: "border border-destructive font-semibold",
+};
+
+/**
+ * Two different icons, not one icon in two colours. This is the only channel
+ * that separates `elevated` from `failing` for a reader who has neither colour
+ * nor the `sr-only` word — a greyscale print, a failing display, a colour-blind
+ * reader glancing at the column. A triangle warns; an octagon is the shape
+ * every road on earth uses for STOP.
+ */
+const ERROR_RATE_ICON: Record<"elevated" | "failing", typeof AlertTriangle> = {
+  elevated: AlertTriangle,
+  failing: OctagonAlert,
 };
 
 /** And the WORD, which is the only half that reaches a screen reader at all.
@@ -328,6 +367,7 @@ function ErrorRate({
     return <span className={ERROR_RATE_INK.unmeasured}>{formatRate(errors, calls)}</span>;
   }
   const marked = tier === "elevated" || tier === "failing";
+  const Icon = marked ? ERROR_RATE_ICON[tier] : null;
   return (
     <span
       className={cn(
@@ -337,8 +377,8 @@ function ErrorRate({
         size === "cell" && ERROR_RATE_PILL[tier],
       )}
     >
-      {marked && (
-        <AlertTriangle className={size === "tile" ? "h-5 w-5 shrink-0" : "h-3 w-3 shrink-0"} aria-hidden />
+      {Icon && (
+        <Icon className={size === "tile" ? "h-5 w-5 shrink-0" : "h-3 w-3 shrink-0"} aria-hidden />
       )}
       <span>{formatRate(errors, calls)}</span>
       {/* A comma, not an em dash: `—` is this table's word for "no
