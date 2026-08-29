@@ -82,42 +82,128 @@ export default function VersionsSection() {
   const [rollbackTarget, setRollbackTarget] = useState<DataApiEndpointVersionDto | null>(null);
 
   return (
-    // Capped here, not by the route (§5.1). The history table is five short
-    // columns — `v3`, a truncated note, an email, a relative time, one button.
-    // Uncapped it is a mostly-empty band the width of the monitor with the Roll
-    // back button marooned at the far right of the row it belongs to.
-    <div className="max-w-5xl space-y-6">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h2 className="text-lg font-semibold">Versions</h2>
-          <p className="text-sm text-muted-foreground">
-            Every frozen snapshot of this endpoint&apos;s contract. A consumer only ever receives the one
-            marked Live — never the draft sitting in Query.
-          </p>
-        </div>
-        {/* `trashed` beside `dirty`, and stated on screen rather than only in a
-            `title`. Publishing a trashed endpoint is a 409 naming restore
-            (`lifecycle.rs`'s guard), so an enabled button here can only spend a
-            round trip to produce a red toast — and for a trashed DISABLED
-            endpoint the pre-guard behaviour was worse than that: the publish
-            SUCCEEDED and froze a new version into the trash. The shell's
-            `fieldset` would disable this button on its own; the explicit check
-            is what puts the reason next to it. */}
-        <div className="text-right">
+    // Uncapped, like every other tab on this route (§5.1, as reversed). This
+    // used to carry `max-w-5xl` on the argument that the history table is five
+    // short columns — `v3`, a truncated note, an email, a relative time, one
+    // button — and reads as a mostly-empty band at monitor width. The argument
+    // still describes this table correctly. What outweighed it is the tab set:
+    // at 1600×1000 in a 1296px content box, Versions stopped at 1024 while
+    // Config, Query and Response took all 1296, so switching tabs moved the
+    // content edge 272px for a reason no reader could see. One measure across
+    // the six beats a per-section optimum.
+    //
+    // Where the 272px actually go, checked and not assumed (§5.2 — the table
+    // below is `table-fixed`): `Note` is the only unsized column, so all of it
+    // lands there.
+    //
+    // # The row-action half, which this task closes
+    //
+    // The old comment ended "`Actions` is `w-32` and right-aligned, so Roll
+    // back is now 272px further from the version it acts on", accepted and not
+    // fixed. Measured in real Chromium at 1600×1000 against a five-version
+    // fixture, with the cap put BACK as a negative control, that number is
+    // exactly right and it is measuring the wrong thing:
+    //
+    //   capped  (1024px)  columns 128/416/224/128/128   Roll back at x=1198
+    //   uncapped(1296px)  columns 128/688/224/128/128   Roll back at x=1470
+    //
+    // 272px, reproduced. But the distance that a reader crosses is from the
+    // row's last TEXT to its action, and that is **83px** here, in both
+    // states — and it is STRUCTURALLY FORCED, not merely measured. `When` is a
+    // fixed `w-32` column immediately left of a `text-right` action in a
+    // `table-fixed` table, so the gap is `158 − (the width of "a month ago")`
+    // at ANY viewport: 128 of `When` plus the action cell's padding and the
+    // button's inset, none of which depends on the section's width. The cap
+    // could not have improved it and removing the cap could not have worsened
+    // it. (`Access`, whose equivalent regression §5.1 records as fixed,
+    // measured ~643px on the same metric — from a one-account stub, so take
+    // the shape and not the number. This table was never the one with the
+    // hole.)
+    //
+    // So this half of §5.1's mitigation is WITHDRAWN, not fixed: `Roll back`
+    // is at x=1470 before and after. The complaint was mis-specified.
+    //
+    // What the 272px actually did is put them all into `Note`, which on a row
+    // with no note is 680px of blank in the MIDDLE of the row, while `Who` was
+    // cutting realistic addresses at 224px on two of five rows. So the
+    // instrument is the one `Access` used — size the row table's own columns so
+    // the width lands where content wants it — and it is applied to `Who`
+    // below, not to `Actions`.
+    //
+    // Two things deliberately NOT done, both measured rather than assumed:
+    //
+    // - Widening `Actions` moves nothing. The cell is `text-right` and the
+    //   button is 82px, so its left edge is `columnRight − 8 − 82` at any
+    //   column width; `w-32` → `w-52` leaves it at x=1470.
+    // - Sizing all five columns does not stop `Note` hoarding. Under
+    //   `table-layout: fixed` a shortfall is shared PROPORTIONALLY, measured in
+    //   Chromium: 128/512/288/128/128 in a 1296px box lays out as
+    //   140/553/312/140/140. `Note` stays the unsized remainder instead.
+    //
+    // The residual — a right-aligned action in a full-width table sits at the
+    // page's right edge — is not a column-sizing problem and is shared with
+    // every other action column on this route. Left-aligning this one would
+    // fix the arithmetic and make `Versions` the only tab in the set that
+    // aligns its action differently, which is the defect §5.1 was reversed to
+    // remove, in miniature.
+    <div className="space-y-6">
+      {/* The same heading block as THREE of the five sibling sections — a bare
+          `<div>` holding the `h2` and one capped paragraph, as `Config`,
+          `Response` and `Access` do. This comment used to say "the five", and
+          it was wrong: `Query.tsx:403` and `TryIt.tsx:305` put the intro
+          BESIDE the `h2` in a `flex … items-baseline` row, because both hand
+          the rest of their height to a sized child and cannot afford two
+          stacked lines. Four of six is still the majority shape and this row
+          belongs in it; the count is corrected rather than the layout.
+
+          Worth knowing when changing either shape: **no width spec can tell
+          them apart.** They all resolve the intro as `h2`'s sibling `<p>` and
+          measure left and right edges, which are identical in both — so a
+          section silently switching shapes is a review question, not a test
+          failure. This one used to wrap that
+          in a `flex … justify-between` row with a filled primary `Publish`
+          pinned to its right — directly under the shell's own `Save`, so the
+          page's top-right corner carried two primary-looking buttons doing
+          unrelated things, on the one tab of six that did that.
+
+          Publish moved to the `History` heading line instead, which is
+          `Config.tsx`'s `Validate` shape and is where it belongs on its own
+          merits: what Publish does is add a row to that table. */}
+      <div>
+        <h2 className="text-lg font-semibold">Versions</h2>
+        <p className="max-w-prose text-sm text-muted-foreground">
+          Every frozen snapshot of this endpoint&apos;s contract. A consumer only ever receives the one
+          marked Live — never the draft sitting in Query.
+        </p>
+      </div>
+
+      <div className="space-y-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <h3 className="text-sm font-medium">History</h3>
+          {/* `trashed` beside `dirty`, and stated on screen rather than only in
+              a `title`. Publishing a trashed endpoint is a 409 naming restore
+              (`lifecycle.rs`'s guard), so an enabled button here can only spend
+              a round trip to produce a red toast — and for a trashed DISABLED
+              endpoint the pre-guard behaviour was worse than that: the publish
+              SUCCEEDED and froze a new version into the trash. The shell's
+              `fieldset` would disable this button on its own; the explicit
+              check is what puts the reason next to it.
+
+              `size="sm"` on the heading line, like `Validate`; still the
+              default (filled) variant, unlike `Validate`, because this one IS
+              this tab's primary action — the shape is what unifies, not the
+              weight. */}
           <Button
             type="button"
+            size="sm"
             onClick={() => setPublishOpen(true)}
             disabled={dirty || trashed}
             title={dirty && !trashed ? "Save your changes before publishing — Publish freezes the saved draft." : undefined}
           >
             Publish saved draft
           </Button>
-          {trashed && <p className="mt-1 text-xs text-muted-foreground">Restore it first</p>}
+          {trashed && <span className="text-xs text-muted-foreground">Restore it first</span>}
         </div>
-      </div>
-
-      <div className="space-y-2">
-        <h3 className="text-sm font-medium">History</h3>
         {/* `table-fixed`, so the Note column's `truncate` is real: under the
             default auto layout a `max-w` on a cell is advisory and a long note
             simply widens the table instead of ellipsing. The sized columns do
@@ -135,7 +221,23 @@ export default function VersionsSection() {
                   applied to a column instead of a card. */}
               <TableHead className="w-32">Version</TableHead>
               <TableHead>Note</TableHead>
-              <TableHead className="w-56">Who</TableHead>
+              {/* §5.1's last open mitigation, and the same instrument
+                  `AccessSection` used: the freed width goes to the column that
+                  is CUTTING its content, not to the one that merely has room.
+                  Measured in Chromium at 1600×1000 with five versions, this
+                  column laid out `priyanka.venkataraman@egret.local` (33
+                  characters) at 231px against 224px of column and truncated it
+                  on two of the five rows, while `Note` was being handed 688.
+                  `w-80` is 320px, which holds the realistic band; a note is
+                  unbounded prose that no finite width fixes, and it keeps the
+                  `title` fallback it already had.
+
+                  Gated at `xl` for §5.3's reason: `table-fixed` scrolls rather
+                  than shrinks, so an ungated widening costs the narrow regime
+                  64px of horizontal scroll to fix a wide-screen complaint. At
+                  `xl` the content box is 976px and the four sized columns take
+                  704, leaving `Note` 272. */}
+              <TableHead className="w-56 xl:w-80">Who</TableHead>
               <TableHead className="w-32">When</TableHead>
               {/* Named for a screen reader, invisible on screen: a visible
                   "Actions" heading over a column of one small button reads as
@@ -197,11 +299,30 @@ export default function VersionsSection() {
                   <TableCell className="truncate py-2 text-muted-foreground" title={v.note || undefined}>
                     {v.note || "—"}
                   </TableCell>
-                  <TableCell className="truncate py-2 text-muted-foreground">
-                    {(v.created_by && userEmailById.get(v.created_by)) ??
-                      v.created_by?.slice(0, 8) ??
-                      "—"}
-                  </TableCell>
+                  {/* `title`, like the `Note` cell above — and it is not
+                      symmetry. This cell is `truncate`, and the `xl` gate on
+                      its column means that BELOW `xl` it is exactly the 224px
+                      column that was cutting realistic addresses. Without a
+                      `title` there is no route at all to the clipped value in
+                      the regime the widening deliberately does not reach: the
+                      defect the fix is named after, left whole wherever the
+                      fix does not land. `Access` makes the same call for the
+                      one address its own widened column still cuts.
+
+                      Computed once so the attribute and the text cannot
+                      drift — the fallback chain is three-deep and a second
+                      copy of it in a `title=` is a copy that will be edited
+                      alone. `undefined` for the em-dash placeholder: a
+                      tooltip reading "—" is noise. */}
+                  {(() => {
+                    const who =
+                      (v.created_by && userEmailById.get(v.created_by)) ?? v.created_by?.slice(0, 8) ?? null;
+                    return (
+                      <TableCell className="truncate py-2 text-muted-foreground" title={who ?? undefined}>
+                        {who ?? "—"}
+                      </TableCell>
+                    );
+                  })()}
                   <TableCell className="py-2 text-muted-foreground">
                     <RelativeTime iso={v.created_at} />
                   </TableCell>

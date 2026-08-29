@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -32,7 +32,7 @@ import Config from "@/routes/explore/dataapi/detail/Config";
 import ResponseSection from "@/routes/explore/dataapi/detail/ResponseSection";
 import VersionsSection from "@/routes/explore/dataapi/detail/Versions";
 import {
-  expectSectionCapsItsOwnWidth,
+  expectSectionIntroCapsItsProse,
   expectSectionLeavesWidthToThePage,
 } from "./sectionWidth";
 
@@ -815,6 +815,44 @@ describe("ResponseSection", () => {
     }
   });
 
+  /**
+   * `OpenAPI document` is an ACTION, not a setting (§4.2), so it stays out of
+   * the settings table — and this task did not change that. What changed is
+   * the SHAPE it takes outside the table. It was a heading, a paragraph, then
+   * a button on a line of its own: a third block layout on a tab that already
+   * has a read-only listing and a settings table, which is the "four shapes"
+   * complaint this task exists to answer.
+   *
+   * `Config.tsx`'s `Validate` block is the same KIND of thing — an action at
+   * the end of a settings tab — and it puts the heading and the button on ONE
+   * line under a `border-t`. That is the shape on the tab the user called
+   * fine, so this one takes it rather than inventing a third.
+   *
+   * Asserted as a SHARED PARENT rather than as a class: the identity holds
+   * only while the two are on one line, and it cannot be satisfied by the
+   * section root, which the second assertion rules out by naming something
+   * the root does hold and that line must not.
+   */
+  it("ends the tab with the OpenAPI action on its heading line, the way Config's Validate block does", async () => {
+    vi.mocked(api.useDataApiGetOpenapi).mockReturnValue(
+      { data: { status: 200, data: OPENAPI_FIXTURE }, isError: false } as unknown as
+        ReturnType<typeof api.useDataApiGetOpenapi>,
+    );
+    renderResponse();
+
+    const heading = await screen.findByRole("heading", { name: "OpenAPI document" });
+    const button = screen.getByRole("button", { name: "Download OpenAPI" });
+    expect(button.parentElement).toBe(heading.parentElement);
+    // The heading LINE, not the whole block: the explanatory sentence is a
+    // sibling of that line, so a parent holding a `<p>` means the button was
+    // dropped back into the block (or that both are sitting in the section
+    // root, which holds the intro paragraph).
+    expect((heading.parentElement as HTMLElement).querySelector("p")).toBeNull();
+    // …and the sentence is still on the page. Without this, the assertion
+    // above passes just as well on a block that lost its explanation.
+    expect(screen.getByText(/Generated per service account/i)).toBeInTheDocument();
+  });
+
   // The frozen column list is a LIST (§4.3), so it is the shared `Table`, and
   // its states are rows INSIDE it rather than a branch that replaces it. That
   // is not a cosmetic difference: with the card gone, a branch that replaced
@@ -938,8 +976,9 @@ describe("ResponseSection", () => {
    * endpoint published before this branch, and every endpoint whose definition
    * does not branch, has `required` true on every column — so a `Required`
    * column would hold one repeated word in every cell of the common case,
-   * while costing width in the one table §5.1 measured down to `max-w-xl`
-   * *because* the type had drifted away from the name it describes. Marking
+   * while costing width in the one table that was measured down to `max-w-xl`
+   * *because* the type had drifted away from the name it describes (§5.4b —
+   * §5.1 carried that measurement until its reversal moved it out). Marking
    * only the exceptions leaves that case byte-identical to what it renders
    * today, which is why neither test above changed.
    *
@@ -1243,6 +1282,36 @@ function renderVersions(
   );
 }
 
+/**
+ * The two sibling blocks that hold `a` and `b`: walk both up until they share
+ * a parent, and return each one's ancestor that is a direct child of it.
+ *
+ * Written because `parentElement` (and worse, `parentElement.parentElement`)
+ * answers a question about the tree the author EXPECTED. `Versions`' first
+ * heading guard asserted `title.parentElement` held no button and was green on
+ * the very layout it was written to forbid — at the base the `h2` was in a
+ * bare inner div and the button was that div's sibling. This resolves the
+ * block from the tree that is actually rendered, and throws rather than
+ * degrading if the two share no ancestor.
+ */
+function blocksOf(a: HTMLElement, b: HTMLElement): [HTMLElement, HTMLElement] {
+  const chain = (el: HTMLElement) => {
+    const out: HTMLElement[] = [];
+    for (let n: HTMLElement | null = el; n; n = n.parentElement) out.push(n);
+    return out;
+  };
+  const ca = chain(a);
+  const cb = chain(b);
+  const common = ca.find((n) => cb.includes(n));
+  if (!common) throw new Error("blocksOf: the two elements share no ancestor");
+  const childOf = (c: HTMLElement[]) => {
+    const found = c.find((n) => n.parentElement === common);
+    if (!found) throw new Error("blocksOf: no direct child of the shared ancestor");
+    return found;
+  };
+  return [childOf(ca), childOf(cb)];
+}
+
 const publishMutateAsync = vi.fn();
 const rollbackMutateAsync = vi.fn();
 
@@ -1356,6 +1425,61 @@ describe("VersionsSection", () => {
 
     expect(await screen.findByText("priya@egret.local")).toBeInTheDocument();
     expect(screen.queryByText(PUBLISHER_ID)).not.toBeInTheDocument();
+  });
+
+  /**
+   * The other half of the `Who` widening, and the half the widening cannot do.
+   *
+   * That column is `truncate`, and its `w-80` is gated at `xl` (§5.3) — so
+   * BELOW `xl` it is exactly the 224px column that was cutting realistic
+   * addresses, unchanged. Without a `title` there is then no route at all to
+   * the clipped value: the defect the fix is named after, left whole wherever
+   * the fix does not reach. `Note` beside it has carried one since it shipped.
+   *
+   * Asserted on the CELL, not on the row, and with the em-dash case as the
+   * negative half — an unconditional `title={who ?? "—"}` would satisfy the
+   * first assertion and put a tooltip reading "—" on every unattributed row.
+   */
+  it("keeps a route to an address the narrow regime still clips", async () => {
+    const PUBLISHER_ID = "5513767f-8cdd-4e48-9cf3-c493a74b683e";
+    const LONG = "priyanka.venkataraman@egret.local";
+    vi.mocked(accessApi.listUsers).mockResolvedValue([
+      { id: PUBLISHER_ID, email: LONG, name: "P V" },
+    ] as unknown as accessApi.AccessUser[]);
+    vi.mocked(api.useDataApiListEndpointVersions).mockReturnValue(
+      {
+        data: {
+          status: 200,
+          data: [
+            makeVersion({ id: "v-2", version: 2, is_live: true, created_by: PUBLISHER_ID }),
+            // A note, so the row's only em-dash is the one this test is about
+            // — `Note` renders the same placeholder and `getByText` cannot
+            // tell two of them apart.
+            makeVersion({
+              id: "v-1",
+              version: 1,
+              is_live: false,
+              note: "first cut",
+              created_by: null as unknown as string,
+            }),
+          ],
+        },
+        isLoading: false,
+        isError: false,
+      } as unknown as ReturnType<typeof api.useDataApiListEndpointVersions>,
+    );
+    renderVersions();
+
+    const address = await screen.findByText(LONG);
+    const cell = address.closest("td") as HTMLElement;
+    expect(cell).toHaveAttribute("title", LONG);
+    // …and the cell is the truncating one, so the `title` is on the element
+    // that does the clipping rather than on an ancestor of it.
+    expect(cell).toHaveClass("truncate");
+
+    // No author: the placeholder carries no tooltip.
+    const unattributed = within(screen.getByTestId("version-row-v-1")).getByText("—");
+    expect(unattributed.closest("td")).not.toHaveAttribute("title");
   });
 
   // A viewer-level operator may not be permitted `listUsers` (it's a
@@ -1749,6 +1873,105 @@ describe("VersionsSection", () => {
     expect(screen.getByRole("link", { name: "Query" })).toBeInTheDocument();
   });
 
+  /**
+   * The heading treatment, which is what made this tab read differently from
+   * its five siblings in the nav.
+   *
+   * Every other section opens with a bare `<div>` holding the `h2` and one
+   * capped paragraph; `Versions` alone wrapped that in a
+   * `flex … justify-between` row with a filled primary button pinned to the
+   * right of it — directly under the shell's own `Save`, so the top-right
+   * corner of the page carried two primary-looking buttons that do unrelated
+   * things. `Config.tsx` already ships the shape this section wanted: its
+   * `Validate` action sits on the heading line of the block it acts on, not
+   * on the section title.
+   *
+   * Publish belongs on `History`'s line for a reason beyond symmetry — what
+   * it does is add a row to that table, so it is the same relationship
+   * `Validate` has to the block under it.
+   *
+   * Both halves are asserted, and the second is what makes the first mean
+   * something: "the title's block holds no button" passes just as well on a
+   * section that lost Publish entirely.
+   *
+   * # The first version of the first half was GREEN ON THE DEFECT
+   *
+   * It read `title.parentElement.querySelector("button")`, which is trap #1
+   * from this branch's own spec header — a counted DOM hop — and it was not a
+   * near miss. At `9fd2e493` the `h2` sat in a BARE INNER `<div>` with the
+   * paragraph, and Publish was that div's SIBLING inside the
+   * `flex … justify-between` row; `title.parentElement` was therefore the
+   * inner div, which never held a button, before or after. The red run proves
+   * it: this test failed on `div.text-right ≠ div.space-y-2` — the *second*
+   * assertion — and never on the first.
+   *
+   * The fix is not another hop. `blocksOf` walks BOTH headings up until they
+   * are siblings and returns the two direct children of whatever they share,
+   * so "the block that holds the title" is resolved by identity from the tree
+   * that exists rather than counted from the tree that was expected. At the
+   * base structure that block is the flex row and it DOES contain Publish, so
+   * the assertion fails there — which is the whole point of it.
+   */
+  it("gives Versions the same heading block as its five siblings, with Publish on the History line", async () => {
+    renderVersions();
+
+    const title = await screen.findByRole("heading", { name: "Versions", level: 2 });
+    const history = screen.getByRole("heading", { name: "History", level: 3 });
+    const publish = screen.getByRole("button", { name: /publish saved draft/i });
+
+    const [titleBlock, historyBlock] = blocksOf(title, history);
+    // The section title's own block carries the title and its paragraph and
+    // nothing to press. Asserted against the button by IDENTITY, not against
+    // "a button" — a section that grew an unrelated control in its intro is a
+    // different failure and should read as one.
+    expect(titleBlock.contains(publish)).toBe(false);
+    expect(titleBlock.contains(title)).toBe(true);
+    expect(historyBlock.contains(publish)).toBe(true);
+
+    // …and inside that block, on the heading's own line.
+    expect(publish.parentElement).toBe(history.parentElement);
+    // The heading LINE, not the block: the table is a sibling of that line, so
+    // a parent holding it means the button landed in the block instead.
+    expect((history.parentElement as HTMLElement).querySelector("table")).toBeNull();
+  });
+
+  /**
+   * §5.1's last open mitigation. Removing this section's `max-w-5xl` handed
+   * all 272 freed pixels to `Note` — the only unsized column of a
+   * `table-fixed` table — and the instrument for that is the one `Access`
+   * used: size the row table's own columns so the width lands where content
+   * wants it.
+   *
+   * Measured in Chromium at 1600×1000 with five versions: `Who` laid out a
+   * realistic 33-character address at 231px against 224px of column and cut
+   * it, on two of five rows, while `Note` was handed 688px. `w-80` (320px)
+   * fits the realistic band; a note is unbounded prose that no finite width
+   * fixes, and it keeps the `title` fallback it already had.
+   *
+   * Gated at `xl` for §5.3's reason — `table-fixed` scrolls rather than
+   * shrinks, so a column that is wide at every width costs the narrow regime
+   * the widening was never meant to touch. Both halves asserted: a flat
+   * `w-80` is a different and worse thing than `w-56 xl:w-80`.
+   */
+  it("widens Who where there is room, so the freed width lands on the addresses it was cutting", async () => {
+    renderVersions();
+
+    const who = await screen.findByRole("columnheader", { name: "Who" });
+    expect(who).toHaveClass("w-56");
+    expect(who).toHaveClass("xl:w-80");
+    // `Note` stays the unsized remainder — this is a REALLOCATION, not a
+    // second sized column, and sizing all five would let fixed layout hand the
+    // surplus back proportionally (measured: 128/512/288/128/128 in a 1296px
+    // box lays out as 140/553/312/140/140).
+    // `max-w-` as well as `w-`: the first version of this guard anchored on a
+    // word boundary, so `max-w-96` — the obvious way somebody would try to
+    // bound this column — slipped through the very assertion written to catch
+    // a sizing.
+    const noteClass = screen.getByRole("columnheader", { name: "Note" }).className;
+    expect(noteClass).not.toMatch(/(?:^|\s)(?:[a-z]+:)*w-\d/);
+    expect(noteClass).not.toMatch(/(?:^|\s)(?:[a-z]+:)*max-w-/);
+  });
+
 });
 
 /**
@@ -1785,6 +2008,104 @@ describe("EndpointDetail — document heading", () => {
  * muted Details prose that `table-fixed` would otherwise hand all of it to.
  */
 describe("EndpointDetail — width", () => {
+  /**
+   * Local, and it is a BUG FIX rather than tidying.
+   *
+   * Four of the tests below render `ResponseSection` or `Versions`, both of
+   * which call `useDataApiListServiceAccounts` and
+   * `useDataApiListEndpointVersions`. Neither mock was set here — they were
+   * LEAKING from `describe("ResponseSection")`'s own `beforeEach` further up
+   * this file. There is no `clearMocks`/`mockReset` in `vitest.config.ts`, so a
+   * `mockReturnValue` set by an earlier describe survives into this one, and
+   * these four tests were passing on state they never asked for.
+   *
+   * Measured on the clean, all-green tree: unfiltered, the four Data API detail
+   * files give 185 passed / 0 failed; the same four with `-t "width"` give
+   * **4 failed**, every one a `TypeError` inside `ResponseSection` for a hook
+   * that returned `undefined`.
+   *
+   * Two things follow, and the second is the one that bites:
+   *
+   *  - **No `-t`-filtered count in this suite is a result.** Filtering skips
+   *    the tests whose side effects the survivors depend on, so a filtered run
+   *    reports failures that do not exist and can equally hide ones that do.
+   *  - **It was an ORDER DEPENDENCY, not a filtering curiosity.** Anything that
+   *    changes which tests run before these — `.only`, `--shard`, a bisect, or
+   *    splitting this 1900-line file, which is a standing temptation — turned
+   *    three real width guards red for a reason having nothing to do with
+   *    width. That is a guard failing for the wrong reason, which is only one
+   *    step better than passing for the wrong reason.
+   *
+   * Setting them here makes this block self-contained. The last test overrides
+   * `useDataApiListEndpointVersions` for its own fixture, which still works:
+   * `beforeEach` runs first and the test body's `mockReturnValue` wins.
+   */
+  beforeEach(() => {
+    vi.mocked(api.useDataApiListEndpointVersions).mockReturnValue(
+      { data: { status: 200, data: [] }, isLoading: false, isError: false } as unknown as
+        ReturnType<typeof api.useDataApiListEndpointVersions>,
+    );
+    vi.mocked(api.useDataApiListServiceAccounts).mockReturnValue(
+      {
+        data: {
+          status: 200,
+          data: [{ id: "sa-1", name: "svc", description: "", email: "svc@x", created_at: "2026-01-01T00:00:00Z" }],
+        },
+        isLoading: false,
+        isError: false,
+      } as unknown as ReturnType<typeof api.useDataApiListServiceAccounts>,
+    );
+    vi.mocked(api.useDataApiGetOpenapi).mockReturnValue(
+      { data: undefined, isError: false } as unknown as ReturnType<typeof api.useDataApiGetOpenapi>,
+    );
+    // `Versions` renders `PublishDialog`, which reads `isPending` off both
+    // mutations on first paint — these were leaking from
+    // `describe("VersionsSection")` in exactly the same way.
+    vi.mocked(api.useDataApiPublishEndpoint).mockReturnValue(
+      { mutateAsync: vi.fn(), isPending: false } as unknown as
+        ReturnType<typeof api.useDataApiPublishEndpoint>,
+    );
+    vi.mocked(api.useDataApiRollbackEndpoint).mockReturnValue(
+      { mutateAsync: vi.fn(), isPending: false } as unknown as
+        ReturnType<typeof api.useDataApiRollbackEndpoint>,
+    );
+    vi.mocked(api.getDataApiListEndpointVersionsQueryKey).mockImplementation(
+      (ws, id) => ["dataApiListEndpointVersions", ws, id] as unknown as
+        ReturnType<typeof api.getDataApiListEndpointVersionsQueryKey>,
+    );
+  });
+
+  /**
+   * §5.1's intro rule for the three sections this file renders, pinned where
+   * the class actually is — one test rather than three, because the claim is
+   * about all of them and a per-section copy is what let `Try it` and `Access`
+   * ship with no guard at all (§5.6).
+   *
+   * The class assertion is the RIGHT instrument here rather than a stand-in for
+   * a measurement — see `expectSectionIntroCapsItsProse`. Before this test the
+   * only guard was a Playwright spec that has never executed, plus a population
+   * count `Response` could satisfy with its intro uncapped, because it renders
+   * three unconditional `max-w-prose` paragraphs.
+   */
+  it("caps each section intro at a reading measure, not the section's (§5.1)", async () => {
+    renderConfig();
+    expectSectionIntroCapsItsProse(
+      await screen.findByRole("heading", { name: "Config", level: 2 }),
+    );
+    cleanup();
+
+    renderResponse();
+    expectSectionIntroCapsItsProse(
+      await screen.findByRole("heading", { name: "Response", level: 2 }),
+    );
+    cleanup();
+
+    renderVersions();
+    expectSectionIntroCapsItsProse(
+      await screen.findByRole("heading", { name: "Versions", level: 2 }),
+    );
+  });
+
   it("wraps the Outlet in nothing that caps the width", async () => {
     // The subject is the ROUTE, so the section is a sentinel rather than a real
     // one. Two earlier shapes of this guard were wrong in opposite directions
@@ -1793,7 +2114,15 @@ describe("EndpointDetail — width", () => {
     //
     //  - `container.querySelector(".max-w-3xl")` scanned the whole subtree, so
     //    it forbade one class name to an entire page. A section may legitimately
-    //    cap its own children (Try it's parameter grid does).
+    //    cap its own children — `ResponseSection`'s editable `returns` grid
+    //    (`max-w-xl`) does, and as of §5.1's reversal it is the only one.
+    //
+    //    This line used to cite `Try it`'s parameter grid instead. That was
+    //    never true: `TryIt.tsx:389` is a bare `<Table className="table-fixed">`
+    //    with no cap of its own — it was sitting inside `Try it`'s SECTION cap,
+    //    which the reversal removed. The same false precedent was written in
+    //    `ResponseSection.tsx`'s own comment on the `returns` grid, so it
+    //    existed in two places and was corrected in both.
     //  - Walking up from a real section's content and stopping at "the child of
     //    the route container" reads the wrapper we are hunting AS the section
     //    root whenever it exists — measured: a restored `max-w-3xl` around the
@@ -1836,31 +2165,42 @@ describe("EndpointDetail — width", () => {
     expect(capped).toEqual([]);
   });
 
-  it("leaves Versions constraining its own width, now that the route does not", async () => {
-    // Removing the route cap moved responsibility for width into the sections,
-    // and this is the one where full width was worst: five short columns
-    // (`v3`, a truncated note, an email, a relative time, one button) spread
-    // across a wide monitor, with Roll back marooned at the far right of the
-    // row it acts on. The point is that a section owning its own cap cannot
-    // lose it silently, not that any particular number is correct.
+  it("leaves Versions on the page's width, like all six tabs (§5.1, as reversed)", async () => {
+    // REVERSED, and the reversal is the point of the assertion. This used to
+    // say Versions CAPS its own width — it was the tab where full width read
+    // worst: five short columns (`v3`, a truncated note, an email, a relative
+    // time, one button) spread across a wide monitor, with Roll back marooned
+    // at the far right of the row it acts on.
     //
-    // The walk that finds the section root — and the reason it is a walk and
-    // not a count — now lives in `sectionWidth.ts`, because five sections need
-    // this assertion and only three had it.
+    // That description of THIS tab is still accurate; §5.1's reversal is that
+    // it stopped being the deciding fact. Measured on the deployed build at
+    // 1600×1000 with seeded data: content box 1296px on all six tabs, widest
+    // block 1296 on Query/Config/Response and 1024 on Access/Try it/Versions —
+    // the content edge moved 272px on a tab change, three times over, for a
+    // reason no single tab could explain. The superseded argument is kept in
+    // §5.1 rather than edited away.
+    //
+    // Class name only (§5.5). That the six tabs actually AGREE is a browser
+    // claim and lives in `tests/e2e/data-api-detail-tab-widths.spec.ts`.
     const { container } = renderVersions();
     const heading = await screen.findByRole("heading", { name: "Versions", level: 2 });
-    expectSectionCapsItsOwnWidth(container, heading);
+    expectSectionLeavesWidthToThePage(container, heading);
   });
 
-  it("leaves Response's own root uncapped, like Config, now that it hosts a settings table and an editor", async () => {
-    // REVERSED from "caps Response on its own root", and the reversal is the
-    // point of the assertion rather than a detail of it. §5.1's criterion is
-    // what a section HOLDS: Config and Query use the page because they hold
-    // settings tables and code editors; Access, Try it and Versions cap
-    // themselves because they hold prose and short lists. Response was in the
-    // second group when it was measured, and has since been given both of the
-    // first group's things — a `Setting | Details | Value` table (§4.2) and a
-    // Monaco editor for the response transform.
+  it("leaves Response's own root uncapped, like all six tabs (§5.1, as reversed)", async () => {
+    // REVERSED TWICE, and the second reversal subsumed the first.
+    //
+    // It first said "caps Response on its own root". §5.4b flipped it on
+    // §5.1's what-a-section-HOLDS criterion — settings tables and code editors
+    // use the page, prose and short lists cap themselves — because Response
+    // gained a `Setting | Details | Value` table (§4.2) and a Monaco editor
+    // for the response transform, moving it from the second group to the
+    // first.
+    //
+    // That criterion is now retired: §5.1 was reversed to ONE width for all
+    // six tabs, so there are no groups to sort into and this section is no
+    // longer uncapped for a reason special to itself. The measurement below is
+    // kept because it is still why THIS cap came off first.
     //
     // Measured in Chromium at 1600×1000, sidebar expanded, before this change:
     // the section stopped at 1024px inside a 1296px content box, leaving a

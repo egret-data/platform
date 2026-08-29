@@ -599,18 +599,84 @@ form at the fold. Both were tried on this editor and both were wrong.
 
 ### 4.2 A read-only listing is not a setting, and an action is not a setting
 
-`src/routes/explore/dataapi/detail/ResponseSection.tsx`. Only `Output shape` was
-config-shaped, and only it became a `ConfigTableGroup` + rows. The other two blocks are not
-rows of that table, and the reason is the durable part of this section:
+`src/routes/explore/dataapi/detail/ResponseSection.tsx`. The section's SETTINGS are one
+`ConfigTable` with group rows — `Response transform`, then `Output shape` — and two blocks
+are not rows of it. The reason those two are out is the durable part of this section:
 
 - **Frozen columns** — a read-only `Name | Type` listing of the *published* contract. There
   is no Value to edit. Forcing it into the shared table would either fabricate a Value column
   or nest a table inside a cell, and would make read-only output look editable.
+
+  **"Nest a table inside a cell" means inside a cell that must ALIGN with its siblings**, and
+  that exemption is now load-bearing, because this same tab nests one: `ReturnsEditor`'s grid
+  sits inside the transform's `colSpan={3}` row. Nothing aligns across a full-width row — it
+  spans every column, so there is no neighbour for its contents to line up with — and the
+  objection here is precisely about a listing whose `Name` column would have to agree with
+  `Setting` while its `Type` column agreed with `Value`. A nested table in a spanning row is not
+  the thing this bullet forbids; a nested table in a `Setting`/`Details`/`Value` cell is.
 - **OpenAPI document** — a paragraph, a download button, and a derived base URL. An action,
   not a setting.
 
 **The rule:** the complaint that removed the `ConfigSection`s was about cards framing
 near-empty tables (§4.1), not about cards.
+
+#### The premise for `Frozen columns`, measured rather than argued
+
+The two arguments above are about kind. When the tab was re-read against "one table with
+group rows" there was a third option nobody had weighed — `Setting | Details | Value` maps
+onto `name | why | type` without fabricating anything, because the type genuinely IS the
+listing's value — and it loses on geometry, which is checkable:
+
+`ColumnTable` is `table-fixed` with `w-72` on Name, so a type starts **288px** after the name
+it describes, at any table width. That number is the whole reason the frame was rewritten:
+under auto layout inside `max-w-xl` it was 444px, and "`bigint` sat far from the name it
+describes" was the reported complaint. In a `ConfigTable` the Value column sits after
+`Setting` (288) **and** `Details` (624 at a 1296px content box), so the type would start
+**912px** after the name — three times the distance the current frame exists to produce. A
+`Details` cell cannot collapse per row; the column is sized once for the table.
+
+So the conclusion survives, and it now rests on a number instead of only on a kind.
+
+#### The `Response transform` block, which was NOT one of the two and has moved in
+
+Until the detail-tabs pass this section shipped beside `Output shape` as a titled block of its
+own: an `h3`, a paragraph, a checkbox, and — only when enabled — a Monaco editor and an
+editable returns grid. Its recorded argument was that "the script and its returns table are
+the `ParamEditor` shape … not a single `Setting | Details | Value` row", which is true of the
+script and the grid and was never true of the **toggle**. The toggle is a checkbox with a
+sentence of help beside it, which is the shape this table exists for, and on an endpoint with
+no transform the toggle is the *only* part of the block on screen — so the tab was carrying a
+titled block, permanently, to house one checkbox.
+
+It is a `ConfigTableGroup` + one `ConfigTableRow` now, **above** `Output shape` because
+turning it on removes `Shape` and `Naming` from the rows below it, and a control whose effect
+is to delete two rows reads above them. The script and the returns grid take a **full-width
+`colSpan={3}` row of the same table** — the device that table already used for the
+`SettingsNote` standing in for those two rows — because `valueClassName` is 384px at `lg` and
+a code editor is not a 384px thing. The row is not rendered at all without a transform.
+
+**What this does NOT license.** "It is a checkbox, so it is a setting" is the argument, not
+"fold everything in". The two blocks above are still out, and the OpenAPI block stayed out on
+its own kind while changing shape (§4.2a).
+
+#### 4.2a An action at the end of a settings tab has a shape, and `Config` already had it
+
+`OpenAPI document` is an action and is not a row of the table — unchanged. What changed is the
+shape it takes outside the table. It was a heading, then a paragraph, then a button on a line
+of its own: read down the page that was a third block layout on a tab that already had a
+read-only listing and a settings table, which is the complaint the whole detail-tabs pass
+answers ("Config is fine, the other tabs are not").
+
+`Config.tsx`'s `Validate` block is the same KIND of thing — an action at the end of a settings
+tab — and it is `space-y-2 border-t border-border pt-4` with the heading and a `size="sm"`
+button on ONE line and whatever the action produced beneath. `ResponseSection`'s OpenAPI block
+takes that shape, and `Versions`'s `Publish saved draft` takes it too (§5.1). Three call sites,
+one shape, on the tab set whose complaint was that it had four.
+
+**Guarded as a shared parent, not as a class**: `EndpointDetail.test.tsx`'s "ends the tab with
+the OpenAPI action on its heading line" asserts `button.parentElement === heading.parentElement`
+and that that parent holds no `<p>` — the second half is what stops the section root from
+satisfying it, since the root does hold one.
 
 #### The part of this section that was reversed, and why
 
@@ -753,7 +819,7 @@ here, not the ruling it used to support, and the split is what satisfies it — 
 fact is the summary and is on screen with nothing clicked. What is collapsed is the *why* and the
 *where to go instead*, which is what a reader goes looking for once the headline has stopped
 them. **Collapsing the headline would be the mistake; collapsing the paragraph under it is
-the point.**
+the point.** ("The split" here is the split between summary and body, not §11's layout one.)
 
 Three constraints on the form, all load-bearing:
 
@@ -791,38 +857,263 @@ assert on.
 
 ## 5. Width
 
-### 5.1 No page-level cap on a route that hosts settings tables
+### 5.1 One width for all six tabs of a detail route
 
 `src/routes/explore/dataapi/EndpointDetail.tsx` — the `<Outlet/>` wrapper carries no
-`max-w-*`, and there is a test that says so.
+`max-w-*`, **and neither does any of the six sections it hosts**. There is a test per section
+saying so, and one in a real browser saying they agree.
 
-**The defect.** That wrapper used to carry `max-w-3xl`, which left the right third of the
-page empty while Config's Details column wrapped to three lines. A single page-level cap is
-the wrong instrument: the six sections do not want the same width. Config and Query should use
-the page — Config holds the two widest controls of any tab, Query a SQL editor and a result
-grid; Access, Try it and Versions are prose, short-column lists and short controls
-that read worse stretched across a wide monitor.
+**The first defect.** That wrapper used to carry `max-w-3xl`, which left the right third of the
+page empty while Config's Details column wrapped to three lines. A single page-level cap was
+the wrong instrument — the sections did not all want 768px — so the cap moved out of the route
+and into the sections that wanted one. Query gained the most: its SQL editor went from 768px to
+1424px (measured during the width pass, not by this document; the same applies to the figures
+in §5.4 and §5.5).
 
-**`Response` used to be named in that second list and has been taken out of it**, because it
-moved to the first — see the criterion two paragraphs down and §5.4b. The sentence stayed
-behind for four revisions of this section, so a reader met "Response reads worse stretched" in
-the present tense ten lines above "Response uses the page", with nothing saying which was
-current. `ResponseSection.tsx`'s ROOT carries no `max-w-*` today (its prose still does, §5.4b),
-and that is the tiebreaker: **where this document and the tree disagree, the tree is the fact
-and the document is the bug.**
+**The second defect, which is what this section now records.** Moving the cap into the sections
+fixed the page and broke the tab set. Measured on the deployed build at 1600×1000 with seeded
+data, all six tabs get the same 1296px content box, and the widest block in each was:
 
-**So sections own their own caps**, on their own root element, visible next to the layout they
-constrain: `AccessSection.tsx`, `TryIt.tsx` and `Versions.tsx` use `max-w-5xl`. Query needs none
-and gained the most —
-its SQL editor went from 768px to 1424px (measured during the width pass, not by this
-document; the same applies to the figures in §5.4 and §5.5).
+| tab | available | widest block |
+|---|---|---|
+| Query | 1296 | 1296 |
+| Config | 1296 | 1296 |
+| Response | 1296 | 1296 |
+| Access | 1296 | **1024** |
+| Try it | 1296 | **1024** |
+| Versions | 1296 | **1024** |
 
-**The criterion is what a section HOLDS, and it is what moved `Response` from one group to the
-other** — see §5.4b. Config and Query use the page because they hold settings tables and code
-editors; Access, Try it and Versions cap themselves because they hold prose, short-column lists
-and short controls that read worse stretched across a wide monitor. Response was measured while
-it was the second kind and has since been given both of the first kind's things, so it now uses
-the page too, and its frozen-column table gave up its own `max-w-xl` with it.
+**The content edge moves 272px when you switch tabs** — three times, in a six-item nav, with
+nothing on screen to explain it. So: **every section of a detail route leaves width to the
+page.** `AccessSection.tsx`, `TryIt.tsx` and `Versions.tsx` gave up their `max-w-5xl`;
+`Config`, `Query` and `ResponseSection` already had none.
+
+#### The part of this section that was reversed, and why
+
+Until this task §5.1 said the opposite, and said it as a considered ruling rather than an
+oversight. **The criterion was what a section HOLDS:** Config and Query use the page because
+they hold the widest controls of any tab and a SQL editor; Access, Try it and Versions cap
+themselves at `max-w-5xl` because they hold prose, short-column lists and short controls **that
+read worse stretched across a wide monitor**. §5.4a and §5.4b are that criterion being applied
+carefully — Response was measured as the second kind, capped, and then moved to the first kind
+when what it held changed.
+
+**Nothing in that argument became false.** Each of the three sections still reads better at
+1024px than at 1296px taken on its own; §5.4a's measurement of Selects sitting ~1260px from
+their labels is still a real complaint, and `Versions` really is five short columns.
+
+**What it lost to is that a reader does not see one section, they see six in sequence.** The
+per-section optimum and the whole-route consistency were both in the ruling's scope and only
+one of them was measured. A 272px jump between siblings is a defect a reader can see without
+knowing anything about the page; a section being 272px wider than its ideal is one they
+cannot. When those two conflict, the route wins.
+
+**Two things follow, and they are what keeps this from being a taste argument:**
+
+- **The per-section complaints do not disappear; they move to the instrument that fits them.**
+  A section-root cap was answering ALL of them with the one tool that also breaks the tab set;
+  each has a narrower instrument. **There are THREE such moves, not two. Two are DONE and the
+  third is WITHDRAWN — measured, not asserted, and the difference between those two words is
+  load-bearing.** An earlier revision of this bullet named only two and
+  reported "one done, one owed", which was the fourth time this document described a rule its
+  own tree did not implement; a later one carried three with the row-action move open on
+  `Versions`. Both are closed as of the detail-tabs pass — the third by being **withdrawn as
+  mis-specified**, not by being fixed: `Roll back` is at x=1470 before and after. Read the bullet,
+  not the label. The check that finds any of this is
+  the one this section prescribes — **grep the class the rule is about, reconcile every hit,
+  then check your count against the list you just wrote**. Run for the row-action move over
+  `src/routes/explore/dataapi`, `text-right` returns **19** hits: **two** are action columns and
+  both are fixed (`detail/AccessSection.tsx:414` and `detail/Versions.tsx:233`, plus each one's
+  matching body cell, 721 and 317); ten are numeric columns in `Activity.tsx` and
+  `ActivityCallList.tsx` (Calls, Error rate, p50/p95, Cache-hit rate, Duration, and their
+  `tabular-nums` cells); two are `Clients.tsx`, a list page rather than a detail route; **two**
+  are prose — `Versions.tsx:113` and `:135`, its own comment explaining why widening a
+  `text-right` column moves nothing; and one is a test asserting the header
+  (`__tests__/EndpointDetail.test.tsx`).
+  2 headers + 2 body cells + 10 numeric + 2 list-page + 2 comment + 1 test = 19.
+
+  **This enumeration had gone stale, and the way it went stale is the argument for the check.**
+  It read 17 with `2+2+10+2+1`, and it was correct when it was written at `2fc228d0`. Then
+  `fa89ab73` — a fix round of the same task — added a second comment line about `text-right` and
+  moved the two cited sites down the file, so by the time the branch was reviewed the doc named
+  a count the tree did not return and cited two line numbers (`:224`, `:289`) that no longer
+  pointed at anything. Nobody re-ran the check after the last commit that could invalidate it.
+  **A prescribed check is only worth the last time it was run**; re-run this one whenever a
+  commit touches either file, not only when the rule changes.
+
+  - **Prose: DONE.** "The sentence sets as one very long line" is a PROSE measure and
+    `max-w-prose` answers it (§5.2, "cap the prose, not the column"). Every section intro
+    carries it. Measured in Chromium: each intro went from filling the content box to 532px
+    (Query 419px, which is its text ending before the cap). **This was a regression introduced
+    BY the reversal and fixed in the same breath** — three of those six intros were bounded at
+    1024 by the caps this section removed, so uncapping the roots un-capped them too, and at
+    1920 with the rail collapsed they ran past 1700px.
+  - **Column width: DONE.** "The picker is a screen away from the label" is a COLUMN width and
+    `ConfigTable`'s `valueClassName` answers it — the resolution §5.4b reached for `Response`,
+    which carries `w-52 lg:w-96`. `Try it` kept the `w-52 lg:w-80` it had before the reversal for
+    two tasks and got §5.2's trap in full: measured with and without its cap, `Details` — the only
+    unsized column — went **408 → 680px, taking all 272 freed pixels**, while `Value` stayed at
+    320px, so the picker was no further from its label than before and no closer, and the width
+    went to muted help text.
+
+    It now carries `w-52 lg:w-96`, the same as `Config` and `Response`. Measured in Chromium at
+    1600×1000, **against the post-reversal row** (§5.1's labelling rule — the baseline is the
+    uncapped section, not the capped one):
+
+    | | Setting | Details | Value | table |
+    |---|---|---|---|---|
+    | `Try it` before, `lg:w-80` | 288 | **680** | 320 | 1288 |
+    | `Try it` after, `lg:w-96` | 288 | 616 | **384** | 1288 |
+    | `Response` / `Config`, `lg:w-96` | 288 | 624 | 384 | 1296 |
+
+    The 64px moved from `Details` to `Value`; the 8px `Details` still differs by is `Try it`'s own
+    `px-1` inset on both of its halves, and `Details` is the unsized remainder that absorbs it.
+    The dead space in `Details` — the part its own `max-w-prose` sentence can never occupy, which
+    lays out at 532px — went **148px → 84px**.
+
+    **A wider column measures better in isolation and is deliberately not taken, which is the
+    point of recording the number.** At `Value` = 448px the caveat's summary in that cell drops
+    from two lines to one (the row 85 → 69px) and the dead space in `Details` falls to 20px; at
+    512px `Details` (488) is finally narrower than the 532px measure and starts squeezing the
+    prose, so 448 is the local optimum and it is real. It loses to this section's own finding:
+    three adjacent tabs render one `Setting | Details | Value` grid, a reader sees them in
+    sequence, and a fourth width for one grid is the defect §5.1 was reversed to remove in
+    miniature. It is also worse where the breakpoint engages — at a 1024px viewport `Details` is
+    already down to 40px at `lg:w-96`.
+
+    **Reconciling every hit of the grep, as this section prescribes.** `valueClassName` is passed
+    at **seven** call sites — 3 + 3 + 1, and an earlier revision of this paragraph said "six"
+    while enumerating seven. The enumeration was complete and the arithmetic was not, which in a
+    section whose whole subject is "grep the class and reconcile every hit" is the failure itself
+    in miniature: **state the count and then check it against the list you just wrote.** Three are
+    the detail tabs this rule governs and they now agree:
+    `Config.tsx`, `ResponseSection.tsx`, `TryIt.tsx`, all `w-52 lg:w-96`. Three are
+    `ScheduleEditor.tsx` at `w-52 lg:w-80`, which is the Alerts editor and not a detail route —
+    out of this rule's scope, named so that a future grep does not read them as violations. The
+    remaining hit is the one worth writing down: **`Query.tsx` passes `w-64` and no
+    `detailsClassName`.** That is a fourth width and an uncapped Details cell, and it is left
+    alone on purpose — it is a one-row strip inside a collapsed `<details>` that already carries
+    its own `max-h-[40vh]` scroll box, not a section-level settings grid — but "left alone on
+    purpose" is a decision, so it is recorded rather than omitted.
+  - **Row action distance: WITHDRAWN on BOTH tabs; what is DONE on `Access` is row height and
+    identity legibility — and both withdrawals corrected a claim in this document.** The label
+    read "DONE on `Access`" until the live check measured the same metric there and got 643px
+    (see below); the distance was never the thing either fix moved. "Withdrawn" and not "done":
+    the metric the old bullet named did not move. `Roll back` is at **x=1470 both before and after** this task, and no
+    column sizing can move it. What changed is that the complaint was re-measured and found to be
+    about the wrong distance, and the defect that IS there — the width piling into `Note` while
+    `Who` cut addresses — was fixed with `Access`'s instrument. A reader who greps this list for
+    open items should take "withdrawn" as "the record was corrected", never as "the button
+    moved". This is the move the earlier revision omitted entirely, and it is the one the
+    reversal actively CAUSED rather than merely failed to help. Both tabs put their row action in
+    a narrow, right-aligned last column of a `table-fixed` table, so every pixel the section
+    gained went to the one unsized column. The instrument is neither of the two above: it is
+    **sizing the row table's own columns** so the width lands on the columns that want it.
+    `AccessSection.tsx` does that — `Service account` went `w-48` → `w-48 xl:w-96` and `Actions`
+    `w-36` → `w-52`, on the measurement that `Invoke`, the unsized column, laid out its widest
+    row at 183px while being handed 960.
+
+    `Versions.tsx` now does it too — `Who` went `w-56` → `w-56 xl:w-80` — and getting there
+    found that the sentence this bullet used to carry about it was measuring the wrong thing.
+    Measured in real Chromium at 1600×1000 against a five-version fixture, **with the removed cap
+    put back as a negative control**:
+
+    | | Version | Note | Who | When | Actions | Roll back at |
+    |---|---|---|---|---|---|---|
+    | capped (1024px), the pre-reversal layout | 128 | 416 | 224 | 128 | 128 | x=1198 |
+    | uncapped (1296px), before this task | 128 | **688** | 224 | 128 | 128 | x=1470 |
+    | after this task | 128 | 592 | **320** | 128 | 128 | x=1470 |
+
+    The 272px is real and reproduces exactly. **What it is not is a gap the reader crosses**: the
+    distance from a row's last TEXT to its action is **83px** in every one of those three states,
+    because `When` sits immediately left of the action column and is never empty.
+
+    **And that 83px is structurally forced, not merely observed** — which is the strongest form
+    of the claim and the one the first revision of this bullet under-stated. `When` is a fixed
+    `w-32` column immediately left of a `text-right` action in a `table-fixed` table, so the gap
+    is `158 − (the width of "a month ago")` **at any viewport**: 128px of `When` plus the action
+    cell's 8px padding and the button's own inset, none of which depends on how wide the section
+    is. The cap could never have improved it and removing the cap could never have worsened it.
+
+    On the same metric `Access` measures **643px** after its own fix. That figure used to be
+    marked "indicative — a one-account stub whose `Invoke` cell holds two badges, not a number to
+    quote". **It is now a measurement**: taken on the deployed kind build at 1600×1000 against
+    the `demo` workspace's EIGHT real service accounts, whose `Invoke` cells hold ONE badge each,
+    the distance from a row's last text to the left edge of `Try it` is 643px on all eight rows.
+    The stub was right, and it was right for a reason the stub could not show.
+
+    **And it is structurally forced in exactly the way `Versions`' 83px is** — which is what
+    settles the comparison rather than merely pointing at its direction. `Invoke` is a sized
+    `xl:` column (704px of the 1296px table) immediately left of a `text-right` action, so the
+    gap is `704 − (the width of the status badge) + the action cell's inset` at any viewport at
+    or above `xl`. Sizing the row's columns moved it — `Invoke` was handed 960px before — but no
+    column sizing closes it, because the width `Invoke` keeps is width its OTHER states need: the
+    `granted` row carries a caveat disclosure, and the `unchecked` row carries a full sentence.
+
+    **So the label above says "DONE on `Access`" about row HEIGHT and identity legibility, not
+    about action distance.** On action distance the complaint is withdrawn on BOTH tabs, for the
+    same reason: a left-aligned column beside a right-aligned action produces a gap that is a
+    property of the column, not of the section's width, and neither the cap nor its removal was
+    ever going to touch it. `Access` differs from `Versions` only in the size of the number
+    (643px against 83px), because its neighbouring column is 704px wide and `When` is 128px.
+
+    What the 272px actually did was pile into `Note` — 680px of blank in the MIDDLE of a row
+    whose note is empty — while `Who` cut realistic addresses (a 33-character address lays out at
+    231px against 224px of column) on two of five rows. That is the same defect `Access` had, in
+    the same place, and the same instrument fixes it: the width goes to the column that is
+    cutting its content. A note is unbounded prose that no finite width fixes and it keeps its
+    `title`; `Note` therefore stays the unsized remainder.
+
+    **Two things measured and deliberately NOT done**, recorded so they are not re-opened:
+
+    - **Widening `Actions` moves nothing.** The cell is `text-right` and the button is 82px, so
+      its left edge is `columnRight − 8 − 82` at any column width. `w-32` → `w-52` leaves Roll
+      back at x=1470. (On `Access` that same widening DID matter, and for a different reason: it
+      has two controls and they were wrapping to two lines.)
+    - **Sizing all five columns does not bound `Note`.** Under `table-layout: fixed` a shortfall
+      is shared PROPORTIONALLY — measured in Chromium, `128/512/288/128/128` inside a 1296px box
+      lays out as `140/553/312/140/140`, so every column including `Actions` grows and `Note`
+      still takes the largest share.
+
+    **The residual is not a column-sizing problem and is not owed.** A right-aligned action in a
+    full-width table sits at the page's right edge; that is what the shape means, and every
+    action column on this route shares it. Left-aligning this one would fix the arithmetic and
+    make `Versions` the only tab in the set that aligns its action differently — the defect §5.1
+    was reversed to remove, in miniature.
+
+    **State the baseline with the number, because there are two and they disagree by 272.**
+    `Access`'s three columns at a 1600px viewport, `Setting | Invoke | Actions`:
+
+    | | identity | Invoke | actions | available |
+    |---|---|---|---|---|
+    | before the reversal (capped) | 192 | 688 | 144 | 1024 |
+    | after the reversal | 192 | **960** | 144 | 1296 |
+    | after the row fix | **384** | 704 | **208** | 1296 |
+
+    Both of these are true and they are not the same sentence: measured against the row before it,
+    the fix moved **192 to identity, 64 to actions and −256 from Invoke**; measured against the
+    pre-reversal layout, the net is **+192 identity, +64 actions, +16 Invoke**, which is the 272
+    the reversal freed, finally spent.
+
+    **This is a labelling rule, not a correction — nothing above was ever miscalculated.** Every
+    row sums to its own available width and both delta sets are right against their own baseline.
+    The rule earns its place anyway: a review of this programme raised the two figures as an
+    arithmetic error, checked them, and withdrew it. That is the cost of an unlabelled baseline —
+    a correct number that reads as wrong, and reviewer time spent proving it is not, with a real
+    chance that someone eventually "fixes" it. **Whenever a width delta appears in §5, it says
+    which row it is measured from.**
+- **A section may still cap its own CHILDREN** (§5.5), and one does: `ResponseSection`'s
+  editable `returns` grid keeps `max-w-xl`, because a row of four form controls stretched wide
+  puts the delete button an arm's length from the row it acts on. That is the narrow, still-live
+  form of the argument this section reversed. As of this task it is the only non-prose
+  `max-w-*` under `detail/`.
+
+**This document has twice shipped a §5 section describing a rule its own reference
+implementation violated** — the "Response reads worse stretched" sentence that outlived §5.4b
+by four revisions, and §11.2's claim about `Access`'s paragraphs. The check that would have
+caught both is mechanical and is the check this task ran: **grep the tree for the class the
+rule is about, and reconcile every hit with what the section says.** Where this document and
+the tree disagree, the tree is the fact and the document is the bug.
 
 ### 5.2 Removing the cap is not enough, because `ConfigTable` is `table-fixed`
 
@@ -857,6 +1148,28 @@ scrolls instead. At a 500px viewport the content box is 356px, so the table alre
 140px at `w-52`; a flat `w-96` would have pushed that to 316px. Gating the widening at `lg`
 leaves the narrow regime exactly as it was.
 
+**A gate is not always the safe default, and `Access`'s two widened columns gate DIFFERENTLY on
+purpose.** The rule above cuts both ways: because `table-fixed` scrolls rather than shrinks, a
+column that is wide at every width costs the narrow regime, but a column that is *gated* leaves
+the narrow regime with the layout the widening was meant to fix. Which one wins is a
+measurement, and the two columns measured opposite:
+
+- **Identity is gated, and at `xl` rather than `lg`.** The widened column has to leave `Invoke`
+  enough room at the breakpoint it turns on. Measured available width: at a 1280px viewport
+  976px, so Invoke keeps 384px; at 1024px it would be 720px, leaving Invoke 128px against content
+  that lays out at 183px. `lg` would have traded a truncated address for a wrapped badge.
+- **The actions column is UNCONDITIONAL**, and the asymmetry is the measurement, not an
+  oversight. Gated, the action group wraps onto two lines everywhere below `xl`, and two stacked
+  32px controls are TALLER than the 32px-plus-16px stack the change removed: seven rows measured
+  **651px gated at a 1024px viewport, against 451px ungated and 543px before the change**. So the
+  gate would have cost height at exactly the widths where height is scarcest.
+
+`AccessSection.test.tsx` asserts the actions column carries no responsive prefix at all, which is
+a deliberate **ban on re-gating it** rather than an incidental class check — somebody tidying the
+two columns into a matching `xl:` pair is the specific regression it exists to stop. Recorded
+here because a ban whose only rationale lives in a test comment reads as pedantry at the moment
+someone has a reason to violate it.
+
 ### 5.4 A dead column below `lg`, introduced by this phase
 
 Recorded so nobody "fixes" the widths without knowing about it, and documented in full in
@@ -867,7 +1180,8 @@ Value. Measured at a 1010px viewport (content box 706px): columns 288/0/208 with
 deleting the four group rows from that same live table gives 410/0/296 and no dead space.
 
 **It is not pre-existing, and three places in this document used to say it was.**
-`ConfigTableGroup` is new in this phase and is the only source of `colSpan={3}` inside a `ConfigTable` in the tree:
+`ConfigTableGroup` is new in this phase, and at the time this was written it was the only source
+of `colSpan={3}` inside a `ConfigTable` in the tree:
 measured at the merge base (`63a4fb90`), no file importing `ConfigTable` contained a `colSpan`
 at all — so relative to `main` there was no phantom column, on any page. The narrower thing
 that *is* true: the group rows landed in the earlier tasks, so the column was already there
@@ -880,7 +1194,20 @@ the old cap gave 272px (measured during the width pass). The fix is to make Valu
 unsized column below `lg`; it is deferred because it is **unverified** that an unsized Value
 absorbs the phantom column rather than splitting with it.
 
-`ResponseSection` has the same phantom column, from its one `Output shape` group row.
+**That "only source" is no longer true, and this branch is what falsified it.** The detail-tabs
+pass moved `Response transform` into the grid, so `ResponseSection.tsx` now renders TWO group
+rows (`:869` `Response transform`, `:955` `Output shape`) **and two hand-written
+`<TableCell colSpan={3}>` rows of its own** (`:907`, `:967`) carrying the transform's editors —
+plus three more in `AccessSection.tsx` (`:427`, `:437`, `:449`) and one in `TryIt.tsx` (`:477`).
+`Config.tsx:109` says "only source" too and is wrong for the same reason. **Both sentences are
+left standing above with their date rather than quietly edited**, because the fact they record —
+that the phantom column arrived with this phase and is not inherited from `main` — is still
+true, and it is the fact §5.4 exists to carry.
+
+What changes for a reader re-tuning widths: the phantom column is produced by **any**
+`colSpan={3}` row, not only by `ConfigTableGroup`, so counting group rows undercounts it.
+`ResponseSection` has the same phantom column from **two** group rows plus two editor rows, not
+from "its one `Output shape` group row" as this section used to say.
 
 ### 5.4a The section that fell between two tasks
 
@@ -889,7 +1216,8 @@ absorbs the phantom column rather than splitting with it.
 at a ~1470px content box: Setting 288 / Value 208 / Details ~975, with `max-w-prose` stopping the
 sentence near 585px — ~390px of empty column, and the Shape and Key-naming Selects ~1260px right
 of the labels they answer to, where the old route cap put them at ~560px. That is the same
-complaint that earned `Versions` its cap, so the fix wave gave Response the same `max-w-5xl` root
+complaint that earned `Versions` its cap (`Versions` has no cap any more — §5.1's reversal took
+all three — but it had one when this was written), so the fix wave gave Response the same `max-w-5xl` root
 (~816px), which also reined in the `Frozen columns` and `OpenAPI document` Cards — the frozen
 *table* had `max-w-xl`, its Card did not. (Those two Cards are gone as of §4.2's reversal. The
 measurement is kept: it is why the section root WAS capped, and "the frame stretched further than
@@ -909,16 +1237,32 @@ with the sidebar expanded, against the shipped stylesheet:
 
 | | width | right edge |
 |---|---|---|
-| content box | 1296 | 1576 |
+| content box | 1296 | **1560** (was recorded as 1576 — see below) |
 | section root (`max-w-5xl`) | 1024 | 1288 |
 | frozen `Name \| Type` table (`max-w-xl`) | 576 | 840 |
 | `Setting \| Details \| Value` table | 1024 | 1288 |
 | the two block paragraphs (`max-w-prose`) | 532 | 796 |
 
+**One number in that table was wrong, and the arithmetic is what settles it.** The content box's
+right edge was recorded as 1576, which puts its left edge at 1576 − 1296 = **280**. Every other
+row implies **264**: 1288 − 1024, 840 − 576, 796 − 532. A child box cannot start 16px to the
+LEFT of the parent that contains it, so 1576 is the outlier and the true right edge is **1560**.
+The gutter is therefore **272px**, not the 288 this section derived from the bad figure — and
+272 is also what the deployed-build audit in §5.1 reports (1296 − 1024) and what a re-measurement
+in Chromium reproduces. **Nothing downstream moves:** every conclusion in this section was
+computed from the WIDTHS, which were right; only the one derived gutter figure was wrong.
+
 **The cap was not wrong when it was applied; the section stopped being the kind of section it was
 applied to.** §5.4a capped it as a prose-and-short-lists tab. It has since gained a
 `Setting | Details | Value` table (§4.2) and a Monaco editor for the response transform — the two
-things §5.1 gives as the reason Config and Query use the page. So the cap came off, and:
+things §5.1 THEN gave as the reason Config and Query use the page. (Those are now ONE thing: the
+transform is a group of that table and its editor is a full-width row of it — §4.2. The four
+blocks this section counted are two plus a read-only listing, and only the listing and the
+`max-w-prose` sentences are not on the page's measure.) (That what-a-section-HOLDS
+criterion is retired: §5.1 now says one width for all six, so there are no groups to move
+between. This section is kept because it is still the reason THIS cap came off first, and
+because everything below it about `valueClassName`, the frozen table and the `lg` regime is
+unaffected by the reversal.) So the cap came off, and:
 
 - **Removing it is half the change** (§5.2). `ConfigTable` is `table-fixed`, so all 272 new pixels
   would have gone to Details, the only unsized column, and the three Selects would have stayed at
@@ -927,7 +1271,8 @@ things §5.1 gives as the reason Config and Query use the page. So the cap came 
 - **The frozen table's cap was not buying what it was added for.** The rationale for `max-w-xl`
   — that `bigint` sat far from the name it describes — was never in this document; it is in
   `ResponseSection.tsx`'s own comment on that table, which is also where the correction now
-  lives. (§5.1 and §5.4a mention the cap, neither gives that reason. Citing a section for a
+  lives. (§5.4a mentions the cap and does not give that reason; §5.1 did too, until this task's
+  rewrite dropped every mention of a section-root cap. Citing a section for a
   rationale it does not contain is the §9 failure happening to a cross-reference: the claim
   reads as sourced and is not.) Measured: `w-full` AUTO layout inside that cap gave
   `Name` 443.9px of 576, so the type started 444px in and would drift further with the longest
@@ -972,34 +1317,245 @@ sentinel guard and every other Config test: 230/230 green. `Versions` had a guar
 *owns* its cap; `Config`, the tab the whole width pass was motivated by, had no counterpart. It
 has one now — the inverse assertion, that Config's own root carries no `max-w-*` (responsive
 prefixes included) — and it was mutation-checked with that exact mutation, which now fails one
-test and only that one. `Response` is pinned the same way, in the other direction: §5.4b moved it
-into the uses-the-page group, so its guard is `expectSectionLeavesWidthToThePage` — the same
-assertion Config's carries, and the reversal is stated in the test's own name.
+test and only that one.
+
+**All six sections now carry that same inverse assertion**, since §5.1's reversal left one rule
+instead of two. `Response` moved to it in §5.4b; `Access`, `Try it` and `Versions` moved to it
+with the reversal, and each test states the reversal in its own name rather than quietly
+changing meaning. `Query` had NO guard at all until then — it was the tab the width pass was
+for, so nobody thought it could regress, which is the reasoning that had left `Config`
+unguarded. "All six leave width to the page" is not a claim five assertions can make.
 
 The test's own comment is honest about its limits: the class-name assertions are weak and are
 meant to be — they exist only so a cap cannot come back, or vanish, silently. **Whether the
 width is well spent is a question only a browser can answer.** See §10.
 
-### 5.6 The section guard is one helper, not one copy per section
+### 5.6 The section guard is one helper, and now one form
 
-`src/routes/explore/dataapi/__tests__/sectionWidth.ts` —
-`expectSectionCapsItsOwnWidth` / `expectSectionLeavesWidthToThePage`.
+`src/routes/explore/dataapi/__tests__/sectionWidth.ts` — `expectSectionLeavesWidthToThePage` and
+`expectSectionIntroCapsItsProse`.
 
 Three sections had the walk in §5.5 copy-pasted and **two had no guard at all**: `Try it` and
-`Access`. That is how `Try it` shipped a `max-w-5xl` nothing was holding in place — §5.1
-lists it among the three sections that cap themselves, and nothing said so in code. The walk,
-the host resolution and the two regexes now live in one module and all five sections call it.
+`Access`. That is how `Try it` shipped a `max-w-5xl` nothing was holding in place — §5.1 listed
+it among the sections that cap themselves, and nothing said so in code. The walk, the host
+resolution and the regex now live in one module.
 
-Two details are load-bearing and were preserved from the copies:
+**Six call sites, not five, and one exported form, not two.** §5.1's reversal changed both
+numbers, and they moved for different reasons:
 
-- **The two regexes differ, on purpose.** The positive form is unprefixed
-  (`/(?:^|\s)max-w-/`), because a section capped only at `lg:` is uncapped on exactly the
-  narrow viewports nobody measured. The negative form includes responsive prefixes, because
-  `lg:max-w-3xl` wastes the page on exactly the wide ones the pass *did* measure.
-- **The host is resolved, not assumed**, so the same helper works under the real
-  `EndpointDetail` shell (walk stops at the `fieldset`) and under a harness that stubs the
-  context and renders the section under a bare `Outlet` (`TryIt.test.tsx`), where the section
-  root is a child of the render container.
+- **The count went 5 → 6.** `Query` was the only section with no width guard of any kind. It
+  was the tab the width pass existed for, so nobody thought it could regress — the same
+  reasoning that had left `Config` unguarded until a restored `max-w-3xl` on its own root
+  passed 230/230. Under one rule for all six, five assertions cannot state it.
+- **`expectSectionCapsItsOwnWidth` was DELETED, not left unused.** After the reversal it had
+  zero callers. Keeping it "for a future section" was the alternative and was rejected: an
+  exported helper named *caps its own width* is an executable statement that some section is
+  supposed to, so a reader would reasonably infer the two-group rule still stands. That is
+  precisely the failure §5.1 was reversed to stop — a description outliving the thing it
+  described — and it is the third time this document has had to fix one. A section that
+  genuinely needs a cap on its own children has §5.5 and `ResponseSection`'s `returns` grid as
+  the live precedent; it does not need a dormant helper.
+
+One detail from the deleted form was preserved in the module comment because it is a trap and
+not a preference. **The two regexes differed on purpose.** The deleted positive form was
+unprefixed (`/(?:^|\s)max-w-/`), because a section capped only at `lg:` is uncapped on exactly
+the narrow viewports nobody measured. The surviving negative form includes responsive prefixes,
+because `lg:max-w-3xl` wastes the page on exactly the wide ones the pass *did* measure.
+Reinstating the positive form as a copy of the negative one's regex would be the bug.
+
+**A third export, and the one case where a class assertion is the RIGHT tool.**
+`expectSectionIntroCapsItsProse` pins each section intro's `max-w-prose` (§5.1). Everywhere else
+in §5 a class name is a weak stand-in for geometry — but this rule *is* the class: §5.2's "cap
+the prose, not the column" says the paragraph opts out of the section's measure, and carrying
+`max-w-prose` is the whole of what it must do. jsdom cannot measure the width; it does not need
+to.
+
+It exists because for a while **five of the six intro caps were pinned by nothing runnable** —
+the only guard was two Playwright specs that had at that point never executed, so deleting the
+class from `Query`, `Config`, `Response`, `Try it` or `Versions` left all 5025 tests green.
+(Those specs have since been run, §5.7; the helper is still the reason a deleted cap fails in
+the suite everyone runs rather than only in the one nobody does.)
+
+**By identity, never by population — this was got wrong twice, in opposite directions.** The
+browser spec first left its prose loop unguarded ("not every tab has capped prose"), which is a
+`for` over a possibly-empty list. The fix for that was `proseRights.length > 0` — **also wrong**,
+because `Response` and `Access` each render THREE unconditional `max-w-prose` paragraphs, so
+deleting the intro's cap leaves two behind and the count still passes. Only `Query`, with exactly
+one, was ever genuinely guarded, and a guard that holds for one of six is indistinguishable from
+one that holds for all six. **A count over a population can be satisfied by any member of it**;
+both the jsdom helper and the browser spec now resolve the intro as a specific element — the `<p>`
+beside the section's own `h2` — so only the thing the rule is about can satisfy the assertion.
+
+**The host is resolved, not assumed**, so the same helper works under the real `EndpointDetail`
+shell (walk stops at the `fieldset`) and under a harness that stubs the context and renders the
+section under a bare `Outlet` (`TryIt.test.tsx`), where the section root is a child of the
+render container. And the walk is a walk, never `parentElement.parentElement`: overshooting onto
+the `fieldset` is a SILENT pass, because the fieldset carries no `max-w-*` whatever the section
+does — so `sectionRootOf` hard-fails on it.
+
+### 5.6a Mock state leaks between `describe`s, and the two things `mockReset` finds
+
+`src/routes/explore/dataapi/__tests__/EndpointDetail.test.tsx`, `describe("EndpointDetail — width")`,
+and `TryIt.test.tsx`'s file-level `beforeEach`.
+
+`frontend/vitest.config.ts` sets no `clearMocks` and no `mockReset`, so a `mockReturnValue` set in
+one block survives into the next. Two blocks were passing on exactly that. Measured on the clean,
+all-green tree: the four Data API detail files give **185 passed / 0 failed** unfiltered and
+**5 failed** under `-t "width"`, every one a `TypeError` for a hook that returned `undefined`. It
+took **six** mocks to make the width block self-contained, each surfacing only after the previous
+was fixed.
+
+**No `-t`-filtered count in this suite is a result**, and — the part that bites — this is an
+**order dependency**: `.only`, `--shard`, a bisect, or splitting a 1900-line file turns real
+guards red for reasons unrelated to what they guard.
+
+#### `clearMocks` is the wrong instrument
+
+It calls `mockClear()`, which resets call history and **leaves the implementation in place** — and
+a leaked `mockReturnValue` *is* an implementation. Verified directly rather than reasoned about:
+with the local `beforeEach` removed and `clearMocks: true` set, the filtered run fails
+**identically**. Flipping it would look like a fix, cost a red test (`monaco.test.ts`), and change
+nothing. `mockReset()` is the one that drops implementations.
+
+#### `mockReset: true` finds TWO different things, and the difference is the whole planning problem
+
+Turning it on globally is what surfaced the leaks above. It also breaks tests that are not broken.
+**An earlier revision of this section called all twelve failures "the same defect" and described
+the follow-up as "12 leaks, fix them". That was wrong**, and wrong in the way §9 warns about: the
+error messages looked alike (`reading 'status'`, `reading 'isPending'`, `reading '0'`), and
+matching shapes were read as a matching cause without opening the files. Opened, they are two
+populations:
+
+| | files | tests | what it is |
+|---|---|---|---|
+| **Leaks** — fixed | 1 (`TryIt.test.tsx`) | 4 | tests calling `renderTryIt()` with no `mockTry(...)`, running on an implementation left by an earlier test |
+| **By design** — not defects | 4 | 8 | module-scope mocks the file deliberately preserves |
+
+The second group cannot be fixed by adding a mock, because nothing is missing:
+
+- `src/lib/__tests__/monaco.test.ts` asserts `configSpy.mock.calls[0][0]` — a call made at
+  **module-import time**, which happens once per process. A per-test reset erases history that
+  cannot be recreated; there is no mock to add.
+- `src/api/__tests__/dashboards.duplicate.test.tsx`, `dashboards.publishdetail.test.tsx` and
+  `components/chart/dashboard/__tests__/DashboardViewActionRows.test.tsx` each hold a module-scope
+  `vi.fn().mockResolvedValue(...)` and each `beforeEach`s with `mockClear`/`clearAllMocks` —
+  **choosing the flag that preserves implementations**. `mockReset` breaks them by design
+  conflict, not by defect.
+
+**So the flag is an AUDIT TOOL, not a setting to switch on.** Used as one it earned its keep
+immediately: it found the four real leaks, they were fixed, and re-measuring gives **8 failures
+across 4 files, all in the by-design group** — which is the useful conclusion, because it says
+**the suite has no remaining detectable implementation leaks**. Adopting it permanently is a
+different and larger job: restructuring four files that legitimately depend on module-scope mock
+state, or giving them a per-file opt-out. Whoever scopes that should budget for restructuring, not
+for adding missing mocks.
+
+**What deferring was and was not justified by.** The earlier revision deferred on the grounds of
+not owning the affected files, while naming only four areas — 8 of the 12. **The other four were
+in `TryIt.test.tsx`, a file this same work was editing.** Those are fixed here. What is deferred
+now is only the part genuinely outside this work's reach, and it is a different kind of work than
+the number alone suggested.
+
+### 5.7 Six class assertions are not the claim; the browser spec is
+
+`tests/e2e/data-api-detail-tab-widths.spec.ts` (opt-in:
+`EGRET_E2E_DATAAPI_WIDTH=1 npx playwright test data-api-detail-tab-widths`).
+
+§5.1's rule is "the six tabs agree on a width". **jsdom cannot see that claim at all** (§10):
+it implements no CSS, every box is 0×0, and `expectSectionLeavesWidthToThePage` compares a
+string. Six passing string comparisons would also pass on six tabs that disagreed — one section
+could reach a different width through a flex parent, a grid, or a child that overflows, none of
+which is a `max-w-*` on the root.
+
+So the rule is measured in Chromium: navigate all six tabs at 1600×1000 and assert the widest
+block in each equals the available content width, and equals the other five.
+
+**Two ways the sibling width spec went green on a broken page**, both found live and both
+guarded against here rather than merely remembered:
+
+- **A counted DOM hop.** `data-api-response-width.spec.ts` first reached the section root with
+  `parentElement.parentElement`. One extra wrapper `div` inside the section makes that resolve
+  to the *host* instead — at which point `root === available` is tautologically true and the
+  spec passes on a section that has regressed. The fix is the same walk `sectionWidth.ts` uses,
+  plus a hard stop if the walk lands on the host.
+- **A `getByRole` name that matched by substring.** Playwright matches accessible names by
+  case-insensitive substring unless told `exact: true`. `name: "Response"` also matched the
+  spec's own fixture, `E2E response width`, and the run died on strict mode before measuring
+  anything. Every heading lookup here is `exact: true`, and the fixture is named so that a
+  substring match against a TAB name would be caught rather than silently satisfied.
+
+A third, general one: **assert the count before iterating.** A `for` over a selector that has
+stopped matching asserts nothing and reports green.
+
+**What has actually been run, stated separately from what the spec claims.** At the time §5.1
+was reversed this spec had **not** been executed against a live seeded stack — the backend was
+not running in the authoring environment — so it was committed as the regression artifact and
+"it passes" was not among the claims made for it. **It has since been run against the deployed
+kind stack (2026-08-29) and passes**, and the same walk was repeated by hand on a seeded
+endpoint: all six tabs measured `available = root right = widest frame` at 1600, 900 and 700,
+in light and in dark, with no page-level horizontal overflow at any of them. The geometry had
+also been verified before that in headless
+Chromium against the Vite dev server with the API stubbed at the network layer: real browser,
+real stylesheet, synthetic JSON. All six tabs measured a right edge of 1560 against an available
+right edge of 1560, and — the part that makes it evidence — **a negative control put the three
+`max-w-5xl`s back and the 272px split reappeared**: Access, Try it and Versions dropped to 1288
+while the other three stayed at 1560. Six numbers agreeing prove nothing on their own; six
+numbers that agree *and* stop agreeing when the defect is reinstated are a measurement. §8.
+
+**Those are RIGHT EDGES, not widths, and an earlier revision of this paragraph got that wrong** —
+it glossed the 1560 as "the harness has no seeded sidebar, hence 1560 rather than 1296".
+Re-measured: the content box is L=264, R=1560, **WIDTH 1296** on all six tabs, which is the
+deployed figure exactly, and 1288 is where a `max-w-5xl` root ends (264 + 1024). The harness
+reproduces the deployed geometry rather than approximating it. The gloss was the weaker claim
+AND the false one, which is the usual shape: a number that looks off invites an explanation, and
+inventing one is cheaper than re-measuring. The same arithmetic — every box shares the left edge
+264 — is what identified §5.4b's 1576 as wrong.
+
+### 5.8 The fourth browser spec, and the helper that would have made it a ReferenceError
+
+`tests/e2e/data-api-detail-one-grid.spec.ts` (opt-in:
+`EGRET_E2E_DATAAPI_ONE_GRID=1 npx playwright test data-api-detail-one-grid`).
+
+It carries what jsdom cannot judge about the detail-tabs pass: that `Versions`' widened `Who`
+column actually holds a realistic address (laid out in a detached span with the cell's own
+computed font — `scrollWidth` reads the same number whether the text is clipped or not once it
+FITS, so it would pass vacuously); that `Note` is still the unsized remainder; that Publish
+shares the `History` heading's line (a shared vertical CENTRE, not an equal `top` — the button
+is taller than the heading, so `top` reports two lines for one); and that `Response` renders
+exactly one `Setting | Details | Value` grid whose transform row spans the whole table.
+
+**Two things it got wrong before it ran, both caught by running its own measure functions
+against the real page:**
+
+- **A shared helper inside `page.evaluate`.** `page.evaluate` ships the evaluated function's
+  own source to the browser and nothing else, so a module-scope helper called from inside one is
+  `undefined` there. The section-root walk is written out in BOTH measure functions on purpose;
+  the duplication is the price of a spec that can run at all, and a `ReferenceError` at the first
+  assertion reads exactly like a missing element.
+- **A blanket `querySelectorAll("table")`.** `ReturnsEditor` renders a `max-w-xl` table INSIDE a
+  cell of the settings grid, which §5.5 exempts deliberately — so "every frame ends at the
+  section's right edge" has to exclude nested frames, and the spec asserts that there IS exactly
+  one nested frame so the exclusion cannot go vacuous.
+
+**It has now been run against a live stack (kind, 2026-08-29), and the first run FAILED on a
+third bug of the same family — a `page.route` glob that matched nothing.** It intercepted
+`**/api/access/users`, which is the name of the frontend module the call comes from
+(`src/api/access.ts`), not the route it issues: `listUsers()` reaches
+`/api/control-plane/users`. A glob that matches nothing does not throw. The real request went
+through, `Who` fell back to `created_by.slice(0, 8)`, and the run died fifteen seconds later on
+"element not found" — indistinguishable from the column regression the file exists to catch, and
+invisible to a stubbed harness because the harness answers every request itself.
+
+The fix also asserts that the intercept FIRED — and the spec says exactly what that buys, because
+re-breaking the glob as a mutation showed the run still dies at the address-visibility wait, not
+at the counter. The counter covers the case that wait cannot see: a stack whose real user list
+happens to hold the fixture's address, where the wait passes over a dead intercept and every
+width below is measured against the backend's data rather than the fixture's.
+
+Before that run, every number in it was measured in headless Chromium against the Vite dev
+server with the API stubbed at the network layer, by running the spec's own `measureVersions`
+and `measureResponse` — compiled from the spec's source with esbuild rather than retyped — so
+what was verified is the code that ships, not a paraphrase of it.
 
 ---
 
@@ -1199,13 +1755,13 @@ Practical rules that fall out of this:
 
 ---
 
-## 11. "Configure, run, read the result" is a split, not a stack
+## 11. "Configure, run, read the result" is one screen — a split only sometimes
 
 `src/routes/explore/dataapi/detail/Query.tsx` (the first), `detail/TryIt.tsx` (the second).
 
 Two sections of the endpoint editor have the same shape — set something up, run it, read what
-came back — and both are now a vertical `Group` from `react-resizable-panels` with a drag
-handle between the halves, rather than a page that scrolls.
+came back — and both put the two halves on screen at once rather than down a page that
+scrolls.
 
 **The defect.** Stacked, the result sits below the setup and off-screen: run it, scroll down,
 read, scroll back up to change a value, scroll down again. `Query`'s preview was below
@@ -1213,21 +1769,95 @@ read, scroll back up to change a value, scroll down again. `Query`'s preview was
 version of the split was worse still — the strip of tables took 370px of a 615px section and
 left the SQL editor 107px, about four lines, which no test could see.
 
-The parts, all four load-bearing:
+The parts, all three load-bearing:
 
 - **The setup is tables** (§4) — a `ConfigTable` row for a setting, a plain `Table` for a list.
   `TryIt`'s service-account picker is one `ConfigTableRow`; its per-parameter trial *values*
   are a plain table, one row each.
-- **The result is the lower panel, and it owns the run control.** The button and the shortcut
-  live in the *result* panel's header, not with the setup: `PreviewBlock` and `TryIt` both put
-  `Run` there, and the header stays put while the body scrolls.
+- **The result is the lower half, and it owns the run control.** The button and the shortcut
+  live in the *result*'s header, not with the setup: `PreviewBlock` and `TryIt` both put `Run`
+  there, and the header stays put **while the result's own body scrolls**.
+
+  **That last clause used to say "while the body scrolls", full stop, and for `TryIt` it is now
+  too strong.** A `Group`'s panes cannot exceed the section, so under the split `Run` was on
+  screen at every parameter count. `TryIt`'s column can overflow the shell's scroll box, and
+  then the result's header goes below the fold with it — measured, 5px under at 8 declared
+  parameters and ~355px under at 16. The header still stays put *within the result*; what it no
+  longer does is stay on the *page*. §11.0 records what was put in its place, and what was tried
+  and did not work.
 - **The shortcut is named beside the button it fires.** `⌘↵`, in the header. An affordance
   nobody can see is not an affordance. `Query` registers it as a Monaco command (`SqlEditor`'s
   `onRun`); `TryIt` has no editor, so it uses a `window` `keydown` listener, the idiom
   `components/sqllab/SqlTab.tsx` already uses for `⌘K`.
-- **Sizes are percent STRINGS.** In `react-resizable-panels` v4 a bare number means *pixels*,
-  so `defaultSize={55}` is a 55-pixel editor that reads as correct in the source. Both sections
-  are tested for the string *type*, not only the value.
+
+### 11.0 The split is the implementation, not the shape — and it fits only one of the two
+
+**This section used to say "both are now a vertical `Group`", and that is what turned out to be
+wrong.** A `react-resizable-panels` `Group` divides a definite height by a FRACTION. That is
+right when a half must be *handed* a height and cannot state its own, and wrong when a half's
+height is decided by its content.
+
+- **`Query` keeps its split.** Its upper half is a Monaco editor: an auto-height editor is 0px
+  tall, so something has to hand it a number. `Query.tsx`'s own comment states the rule that
+  follows from this and it is the rule that condemns the other case — *"the strip can be
+  expanded at any window height, so any fixed split has a window that defeats it."*
+- **`TryIt` dropped its split.** Its three parts are *Run as*, *Parameter values* and *Result*,
+  and only the last grows without bound; the first two are sized by their content. Measured in
+  Chromium at 1600×1000, the `40%` setup pane's `clientHeight` was **230 whatever it held**,
+  against a `scrollHeight` of 277 / 297 / 342 / 432 / 612 for 0 / 1 / 2 / 4 / 8 declared
+  parameters. It clipped **47px on an endpoint declaring no parameters at all** and 202px on
+  four — slicing the `Parameter | Type | Value` header row through the middle so that not one
+  parameter row was on screen — while the result pane below it, 389px, held a header and one
+  collapsed caveat. There was no fixture for which the fraction was right.
+
+  It is now a flex column: the setup `shrink-0` at its own height with no scroll box of its
+  own, the result `flex-1` with a `min-h-64` floor and the section's only `overflow-auto`. When
+  an endpoint declares more parameters than the section is tall, the whole section overflows
+  the shell's `overflow-auto` fieldset — which scrolls, and is reachable — instead of a pane
+  clipping inside a page that does not move. Measured after: nothing in the section hides
+  anything before a run, at 0/1/2/4/8/16 parameters.
+
+  **The split could not be repaired in place, which is why the answer is removal rather than a
+  better fraction.** `react-resizable-panels` v4 has no content-sizing mode — `defaultSize`
+  takes %, px, em, rem, vh or vw — so "size the top pane to its content" means measuring the
+  content and calling `panelRef.resize()` on mount and on every parameter change: machinery
+  whose only job is to imitate normal flow.
+
+  **What the removal COST, stated rather than netted out.** The split guaranteed `Run` was on
+  screen at every parameter count. The column does not: measured, the result's header starts 5px
+  below the fold at 8 declared parameters and ~355px below it at 16. That is not cosmetic,
+  because §11.1's shortcut is bound to `window` — ⌘↵ fires wherever the page is scrolled, a REAL
+  trial runs (a serving-path call, a rate-limit token, an `access_log` row), and **nothing
+  visible changes**, so the reader presses it again.
+
+  **`sticky top-0` on the result's header is the obvious answer and it is measurably inert
+  here.** The section is `flex-1` in an `h-full` column, so its height is
+  `max(256, available − setup)` — never more than the scroll box — and a box that fits can never
+  be scrolled past its own top, which is the only condition under which sticky engages. Built,
+  then measured at 8 and 16 parameters across four scroll offsets each: the header's top equalled
+  the section's top **every time**. It was removed rather than shipped, because a class assertion
+  passing over a no-op is the failure §8 exists for.
+
+  Two facts hold instead, and both were measured rather than argued:
+
+  - **`Run` is always reachable**, because that same "never taller than the box" property means
+    scrolling to the bottom always brings the result fully into view.
+  - **`onRun` scrolls the result into view when a run starts** (`block: "nearest"`, so it is a
+    no-op for every run started by clicking a button that was already visible), placed BEHIND the
+    `canRun` guard so a refused run does not yank the page. From `scrollTop: 0`, ⌘↵ left `Run`
+    inside the visible box at 6, 8 and 16 parameters — where at rest, 8 and 16 had it outside.
+
+- **Sizes are percent STRINGS, wherever a `Group` is still used.** In `react-resizable-panels`
+  v4 a bare number means *pixels*, so `defaultSize={55}` is a 55-pixel editor that reads as
+  correct in the source. `Query` is tested for the string *type*, not only the value.
+  `TryIt.test.tsx` keeps the library's stub after removing the import, precisely so a
+  reintroduced split is observable in jsdom rather than silently passing an assertion that no
+  longer has anything to match.
+
+**Naming the halves.** With no `Panel` to point at, `TryIt`'s two halves are
+`<section aria-labelledby=…>` — real landmarks with the `h3` each already had as its name.
+That is what lets a test say "Run is in the *result*" by identity instead of by
+`getAllByTestId("panel")[1]`, which is a counted hop wearing a different hat.
 
 ### 11.1 The shortcut is not covered by any of the guards the button has
 
@@ -1305,10 +1935,31 @@ this sentence was the error.
 ### 11.3 What a test can say about any of this
 
 jsdom does no layout (§10), so the drag, the heights and the widths are a browser check. What
-is testable is the wiring, and it is where the regressions were: which panel each half is in
-(`within(panels[0])` / `within(panels[1])`), that the handle is *between* them
-(`compareDocumentPosition`), that the sizes are strings, that the shortcut fires the mutation
+is testable is the wiring, and it is where the regressions were: which half each thing is in,
+that the sizes are strings wherever a `Group` survives, that the shortcut fires the mutation
 with the on-screen values, and that it fires nothing when a guard in §11.1 should stop it.
+
+**Name the half, do not index it.** `Query` still has panels and `within(panels[0])` /
+`within(panels[1])` reads them; `TryIt` does not, and its halves are resolved by accessible
+name (`getByRole("region", { name: "Result" })`). Prefer the name even where the index works:
+an index is a counted hop, and §5.6/§5.7 record twice that a counted hop re-points silently
+onto something that satisfies the assertion for the wrong reason.
+
+**`Query.test.tsx` still indexes, and that is recorded rather than quietly left.** Its panels
+carry no accessible name — `Query`'s halves are bare `<div>`s inside `<Panel>`, not
+`<section aria-labelledby>` — so `getAllByTestId("panel")[1]` is the only handle there is today.
+Naming them the way `TryIt` names its halves is the fix and it is **owed**, not done: it is a
+change to `Query.tsx`, and the task that rewrote this section owned `TryIt.tsx`. Until then the
+index is a known counted hop in a file this section tells you not to write one in.
+
+**And a class chain is the strongest thing jsdom can say about a height.** `TryIt`'s clipping
+was 47–382px of hidden content, and no jsdom assertion can see one pixel of it. What its tests
+pin instead is the mechanism: walk from the parameter table up to the section root and assert
+that no ancestor scrolls vertically or caps its height. Two cautions came out of writing it —
+the regex must exclude `overflow-x-*`, because `ui/table.tsx` wraps every `<Table>` in
+`overflow-x-auto` by design (§5.3) and catching it would fail a section with nothing wrong;
+and the walk must end at the root by IDENTITY, because a chain that silently runs past it
+asserts about the shell.
 
 **jsdom does not hide a closed `<details>`** — it has no layout to hide it with, and Testing
 Library does not exclude its contents. Assert the `open` **attribute**; `toBeVisible` passes
@@ -1444,11 +2095,24 @@ not exist yet:
   is no second part to put behind a summary. (This bullet used to name `Access`'s conditional
   state paragraphs here too; they are `Caveat`s, and are two of the four counted above. See
   §11.2.)
-- The split of §11 — **2** sections, both Data API endpoint detail (`Query`, `TryIt`); `react-resizable-panels` itself is also used by `components/sqllab/SqlTab.tsx`, which is
-  where the idiom came from. `Versions` and `Access` are deliberately not splits: neither is
-  "configure, run, read the result" — there is nothing to run.
-- The section-width guard of §5.6 — **5** sections (`Config`, `Response`, `Versions`,
-  `Try it`, `Access`), one helper. It was 3 copies and 2 absences before this phase.
+- The shape of §11 — **2** sections, both Data API endpoint detail (`Query`, `TryIt`).
+  **Only ONE of them is a `react-resizable-panels` split**: `Query`, whose upper half is a
+  Monaco editor that must be handed a height. `TryIt` is a flex column (§11.0) — its parts are
+  content-sized, and the fraction clipped them at every parameter count measured. The library
+  is also used by `components/sqllab/SqlTab.tsx`, which is where the idiom came from.
+  `Versions` and `Access` are neither: they are not "configure, run, read the result" — there
+  is nothing to run.
+- The section-width guard of §5.6 — **6** sections (`Query`, `Config`, `Response`, `Access`,
+  `Try it`, `Versions`), one helper, **one form**. It was 3 copies and 2 absences before the
+  width phase, then 5 call sites across two forms; §5.1's reversal to one width added `Query`
+  — the last unguarded section — and deleted `expectSectionCapsItsOwnWidth`, which the reversal
+  left with zero callers. **Sections whose ROOT carries a `max-w-*`: 0.** Sections capping a
+  CHILD: 1, `ResponseSection`'s `returns` grid (§5.5), and
+  and `grep -rn 'className="[^"]*max-w-' src/routes/explore/dataapi/detail` is what makes that a
+  count and not a recollection (§9). **Narrowed to `className=` on purpose:** the bare
+  `grep -rn 'max-w-'` this bullet used to quote also returns the `max-w-xl` line itself plus nine
+  COMMENT lines that discuss caps without applying any, so re-running it reads as drift that is
+  not there — a check nobody trusts gets skipped.
 - `ConfigSection` — 13 files, down from **15** at the merge base. This is the fifth count of
   this number in the programme and the first measured at both ends:
   `grep -rl 'from "@/components/form/ConfigSection"' src` gives 15 at `63a4fb90` and 13 at

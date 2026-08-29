@@ -207,6 +207,43 @@ interface OpenApiDocPreview {
  * reachable through the API and invisible to whoever publishes the endpoint —
  * the same gap `required` had, and had to be come back for.
  *
+ * # One table for the settings, and a measured premise for what stays out
+ *
+ * The reported complaint about this tab was that `Config` carries the same
+ * amount of material as ONE table with group rows while this section stacked
+ * four blocks, each with a flat `text-sm` heading and a shape of its own.
+ * Three of the four were re-read against that:
+ *
+ * - **`Response transform` moved IN**, as a `ConfigTableGroup` plus one
+ *   `ConfigTableRow`, above `Output shape`. Its old argument — the script and
+ *   the returns grid are `ParamEditor`-shaped, not one
+ *   `Setting | Details | Value` row — is true of the script and the grid and
+ *   was never true of the TOGGLE, which is a checkbox with a sentence of help
+ *   beside it. On an endpoint with no transform the toggle is the only part of
+ *   the block on screen, so the tab was carrying a titled block, permanently,
+ *   to house one checkbox. The script and the grid take a full-width
+ *   `colSpan={3}` row of the same table — the device this table already used
+ *   for the `SettingsNote` that stands in for `Shape` and `Naming` — because
+ *   `valueClassName` is 384px at `lg` and a code editor is not a 384px thing.
+ *
+ * - **`Frozen columns` stays out, and the premise is now a number.** There is
+ *   a third option the §4.3 argument above never weighed: `name | why | type`
+ *   maps onto `Setting | Details | Value` without fabricating anything,
+ *   because the type genuinely IS this listing's value. It loses on geometry.
+ *   `ColumnTable` is `table-fixed` with `w-72` on Name, so the type starts
+ *   288px after the name at any table width — and that number is the whole
+ *   reason this frame was rewritten (see its own comment: under auto layout
+ *   inside `max-w-xl` it was 444px, and "`bigint` sat far from the name"
+ *   was the complaint). In a `ConfigTable` the Value column sits after
+ *   `Setting` (288) AND `Details` (624 at a 1296px content box), so the type
+ *   would start 912px after the name. A `Details` cell cannot collapse per
+ *   row; the column is sized once for the table.
+ *
+ * - **`OpenAPI document` stays out on kind and changed SHAPE.** An action is
+ *   not a setting — unchanged. What it stopped being is a third block layout:
+ *   it is now `Config.tsx`'s `Validate` shape, a `border-t` block with the
+ *   heading and a `size="sm"` button on one line. See its own comment below.
+ *
  * # What a frozen column's `required` adds, and why it is a badge
  *
  * A conditional definition describes EVERY branch at publish and freezes the
@@ -427,8 +464,16 @@ function ReturnsEditor({
           controls — a name input, a type input, a checkbox and a delete — and
           four controls stretched across a wide page put the delete button an
           arm's length from the row it acts on. §5.5 records that a section may
-          legitimately cap its own children, and `Try it`'s parameter grid is
-          the precedent. */}
+          legitimately cap its own children, and that is the rule this leans on.
+
+          It used to cite `Try it`'s parameter grid as the precedent. That was
+          never true and is now checkably false: that grid is a bare
+          `<Table className="table-fixed">` with no cap of its own — it was
+          sitting inside `TryIt`'s section cap, which §5.1's reversal removed.
+          Grepped after that removal, this `max-w-xl` is the ONLY non-prose
+          `max-w-*` left anywhere under `detail/`, so it has no precedent and
+          stands on the argument above alone. §9: a citation that reads as
+          sourced and is not is worse than no citation. */}
       <Table className="max-w-xl table-fixed">
         <TableHeader>
           <TableRow>
@@ -660,12 +705,16 @@ export default function ResponseSection() {
   }
 
   return (
-    // Uncapped, like `Config` and `Query` and unlike the three sections this
-    // one used to be grouped with. §5.1's criterion is what a section HOLDS,
-    // and what this one holds changed after it was measured: it has a
+    // Uncapped, like all five sibling tabs (§5.1). This section reached that
+    // state first and for its own reason, and the reason has since been
+    // superseded: §5.1 used to sort sections by what they HOLD — settings
+    // tables and code editors use the page, prose and short lists cap
+    // themselves — and this section moved groups when it gained a
     // `Setting | Details | Value` table (§4.2) and a Monaco editor for the
-    // response transform — the two things §5.1 gives as the reason Config and
-    // Query use the page.
+    // response transform. That criterion is retired: Access, Try it and
+    // Versions are uncapped now too, so there are no longer two groups to sort
+    // into. Kept because the measurement below is still why THIS section's cap
+    // came off, and the `valueClassName` half of the change depends on it.
     //
     // Measured in Chromium at 1600×1000 with the sidebar expanded, before this
     // change: `max-w-5xl` stopped the section at 1024px inside a 1296px content
@@ -680,7 +729,7 @@ export default function ResponseSection() {
     <div className="space-y-6">
       <div>
         <h2 className="text-lg font-semibold">Response</h2>
-        <p className="text-sm text-muted-foreground">
+        <p className="max-w-prose text-sm text-muted-foreground">
           What a consumer actually receives when they call this endpoint.
         </p>
       </div>
@@ -776,87 +825,6 @@ export default function ResponseSection() {
         )}
       </div>
 
-      {/* An author's response transform — a Starlark script plus the `returns`
-          it promises (`spec §3`, Tasks 1–8). Placed above "Output shape"
-          rather than folded into that `ConfigTable`: the script and its
-          returns table are the `ParamEditor` shape (a titled block holding a
-          multi-row table and, here, a code editor), not a single
-          `Setting | Details | Value` row, and the two Selects it makes inert
-          read better with the thing that disables them right above them than
-          below. */}
-      <div className="space-y-3">
-        <div>
-          <h3 className="text-sm font-medium">Response transform</h3>
-          {/* The second sentence is conditional because it points AT something.
-              With a transform on, Shape and Naming are not "below" — they are
-              not on the page at all (see the note in `Output shape`), so
-              telling an author to prefer two controls that are not there sat
-              directly above a note explaining that they had gone. Seen in a
-              browser, 2026-08-27. */}
-          <p className="max-w-prose text-sm text-muted-foreground">
-            An optional Starlark script that builds <span className="font-mono text-xs">data</span>{" "}
-            itself once every statement has run, for a shape no SQL projection can express.{" "}
-            {hasTransform
-              ? "Most endpoints do not need one — renaming and objects-vs-arrays are what Shape and Naming are for, and unticking this brings them back."
-              : "Most endpoints do not need one — Shape and Naming below already cover renaming and objects-vs-arrays."}
-          </p>
-        </div>
-        <label className="flex items-center gap-2 text-sm" htmlFor="resp-transform-enabled">
-          <Checkbox
-            id="resp-transform-enabled"
-            checked={hasTransform}
-            onCheckedChange={(v) => (v === true ? enableTransform() : disableTransform())}
-          />
-          Build the response with a script
-        </label>
-        {hasTransform && transform && (
-          <div className="space-y-4 pl-6">
-            <div className="space-y-1.5">
-              <p className="text-sm font-medium">Script</p>
-              {/* Fixed height, not `CellEditor`'s grow-with-content: this
-                  section is an ordinary scrolling document (`fieldset` in
-                  `EndpointDetail`), not a bounded split pane like `Query`'s,
-                  so a script that grows the editor also grows the page under
-                  it rather than fighting a sibling pane for height. */}
-              <div className="h-64 overflow-hidden rounded-md border border-border">
-                <MonacoEditor
-                  height="100%"
-                  defaultLanguage="python"
-                  value={transform.script}
-                  onChange={(v) => updateTransform({ script: v ?? "" })}
-                  options={{
-                    minimap: { enabled: false },
-                    fontSize: 13,
-                    scrollBeyondLastLine: false,
-                    padding: { top: 10, bottom: 10 },
-                    renderLineHighlight: "line",
-                    ariaLabel: "Response transform script",
-                  }}
-                />
-              </div>
-              <p className={`text-xs ${scriptOverCap ? "text-destructive" : "text-muted-foreground"}`}>
-                {scriptBytes.toLocaleString()} / {MAX_TRANSFORM_SCRIPT_BYTES.toLocaleString()} bytes
-                {scriptOverCap &&
-                  " — over the cap. A response transform reshapes what a statement already returned; it is not where an endpoint's business logic belongs, and publish will refuse this script."}
-              </p>
-            </div>
-
-            <div className="space-y-1.5">
-              <p className="text-sm font-medium">Declared returns</p>
-              <p className="max-w-prose text-sm text-muted-foreground">
-                What <span className="font-mono text-xs">data</span> looks like once the script
-                runs — checked against the script&rsquo;s own output at publish, and enforced on
-                every request after.
-              </p>
-              <ReturnsEditor
-                returns={transform.returns}
-                onChange={(returns) => updateTransform({ returns })}
-              />
-            </div>
-          </div>
-        )}
-      </div>
-
       {/* `valueClassName`, not just the removed cap above: `ConfigTable` is
           `table-fixed`, so every pixel the section gains goes to Details — the
           only unsized column — and the three Selects stay at the shared 208px
@@ -871,6 +839,119 @@ export default function ResponseSection() {
           widening is taken only where there is room to take it. The same pair
           `Config` opts into, on the tab beside this one. */}
       <ConfigTable valueClassName="w-52 lg:w-96" detailsClassName="max-w-prose">
+        {/* An author's response transform — a Starlark script plus the `returns`
+            it promises (`spec §3`, Tasks 1–8).
+
+            # It used to be a titled block above this table, and that is the
+            # defect this task removes
+
+            The recorded argument was that "the script and its returns table
+            are the `ParamEditor` shape (a titled block holding a multi-row
+            table and, here, a code editor), not a single
+            `Setting | Details | Value` row". That is true of the SCRIPT and
+            the RETURNS. It was never true of the TOGGLE, which is a checkbox
+            with a sentence of help beside it — the exact shape this table
+            exists for — and the toggle is the only part of the block a reader
+            sees on the endpoints that have no transform, which is most of
+            them. So the tab was carrying a titled block, permanently, to
+            house one checkbox.
+
+            §4.2's ruling holds for the other two blocks on this tab and is
+            unchanged: a read-only listing is not a setting and an action is
+            not a setting. This block was neither of those things — it is a
+            setting — and it is here now.
+
+            Above `Output shape`, and that is load-bearing rather than
+            alphabetical: turning this on REMOVES `Shape` and `Naming` from
+            the rows below (see the note in that group), and a control whose
+            effect is to delete two rows reads above them rather than under
+            them. */}
+        <ConfigTableGroup label="Response transform" />
+        {/* The second sentence is conditional because it points AT something.
+            With a transform on, Shape and Naming are not "below" — they are
+            not on the page at all, so telling an author to prefer two controls
+            that are not there sat directly above a note explaining that they
+            had gone. Seen in a browser, 2026-08-27.
+
+            A plain string, no markup: `details` is typed `string | null` and
+            backticks render as literal backticks (§6). The word `data` was
+            `<span className="font-mono text-xs">data</span>` while this was a
+            paragraph; in a Details cell it is spelled out instead. */}
+        <ConfigTableRow
+          label="Build the response with a script"
+          htmlFor="resp-transform-enabled"
+          details={
+            hasTransform
+              ? "An optional Starlark script that builds the response's data itself once every statement has run, for a shape no SQL projection can express. Most endpoints do not need one — renaming and objects-vs-arrays are what Shape and Naming are for, and unticking this brings them back."
+              : "An optional Starlark script that builds the response's data itself once every statement has run, for a shape no SQL projection can express. Most endpoints do not need one — Shape and Naming below already cover renaming and objects-vs-arrays."
+          }
+        >
+          <Checkbox
+            id="resp-transform-enabled"
+            checked={hasTransform}
+            onCheckedChange={(v) => (v === true ? enableTransform() : disableTransform())}
+          />
+        </ConfigTableRow>
+        {/* The script and the returns grid take a FULL-WIDTH row of this same
+            table rather than a Value cell, and that is what let the toggle
+            move at all: `valueClassName` is 384px at `lg` and a code editor
+            and a four-column editable grid are not 384px things. `colSpan={3}`
+            is the device this table already uses for the `SettingsNote` below,
+            so it is not a new one.
+
+            Rendered only when there IS a transform — not rendered-and-hidden.
+            An author with no transform sees one checkbox row, which is the
+            whole point of moving it. */}
+        {hasTransform && transform && (
+          <TableRow className="hover:bg-transparent">
+            <TableCell colSpan={3} className="whitespace-normal pt-0 pb-4">
+              <div className="space-y-4">
+                <div className="space-y-1.5">
+                  <p className="text-sm font-medium">Script</p>
+                  {/* Fixed height, not `CellEditor`'s grow-with-content: this
+                      section is an ordinary scrolling document (`fieldset` in
+                      `EndpointDetail`), not a bounded split pane like `Query`'s,
+                      so a script that grows the editor also grows the page under
+                      it rather than fighting a sibling pane for height. */}
+                  <div className="h-64 overflow-hidden rounded-md border border-border">
+                    <MonacoEditor
+                      height="100%"
+                      defaultLanguage="python"
+                      value={transform.script}
+                      onChange={(v) => updateTransform({ script: v ?? "" })}
+                      options={{
+                        minimap: { enabled: false },
+                        fontSize: 13,
+                        scrollBeyondLastLine: false,
+                        padding: { top: 10, bottom: 10 },
+                        renderLineHighlight: "line",
+                        ariaLabel: "Response transform script",
+                      }}
+                    />
+                  </div>
+                  <p className={`text-xs ${scriptOverCap ? "text-destructive" : "text-muted-foreground"}`}>
+                    {scriptBytes.toLocaleString()} / {MAX_TRANSFORM_SCRIPT_BYTES.toLocaleString()} bytes
+                    {scriptOverCap &&
+                      " — over the cap. A response transform reshapes what a statement already returned; it is not where an endpoint's business logic belongs, and publish will refuse this script."}
+                  </p>
+                </div>
+
+                <div className="space-y-1.5">
+                  <p className="text-sm font-medium">Declared returns</p>
+                  <p className="max-w-prose text-sm text-muted-foreground">
+                    What <span className="font-mono text-xs">data</span> looks like once the script
+                    runs — checked against the script&rsquo;s own output at publish, and enforced on
+                    every request after.
+                  </p>
+                  <ReturnsEditor
+                    returns={transform.returns}
+                    onChange={(returns) => updateTransform({ returns })}
+                  />
+                </div>
+              </div>
+            </TableCell>
+          </TableRow>
+        )}
         <ConfigTableGroup label="Output shape" />
         {/* Neither row below is merely disabled while a transform is present
             — it is not rendered at all. `openapi_gen.rs`'s own generated
@@ -969,30 +1050,51 @@ export default function ResponseSection() {
         </ConfigTableRow>
       </ConfigTable>
 
-      <div className="space-y-2">
-        <h3 className="text-sm font-medium">OpenAPI document</h3>
+      {/* The tab's one ACTION, and §4.2's ruling on it is unchanged: an action
+          is not a setting, so it is not a row of the table above. What changed
+          is the shape it takes OUTSIDE that table.
+
+          It used to be a heading, then a paragraph, then a button on a line of
+          its own — a third block layout on a tab that already has a read-only
+          listing and a settings table, which is the "four shapes" complaint
+          this task answers. `Config.tsx` ships the same KIND of thing at the
+          end of the tab beside this one (`Validate`: an action over the block
+          it acts on) and gives it `border-t border-border pt-4` with the
+          heading and the button on ONE line. That is the shape on the tab the
+          user called fine, so this takes it rather than inventing a third.
+
+          The sentence moves BELOW that line for the same reason `Config`'s
+          validation result sits below its own: the line is the action, and the
+          prose is what the action produced or explains. */}
+      <div className="space-y-2 border-t border-border pt-4">
+        <div className="flex flex-wrap items-center gap-2">
+          <h3 className="text-sm font-medium">OpenAPI document</h3>
+          {/* The only control in this block, and a plain `<button>`, so the
+              shell's `<fieldset disabled={trashed}>` reaches it — unlike the
+              `window` keydown listener §11.1 records. It opens a dialog and
+              writes nothing, so it needs no `trashed` check of its own.
+
+              `size="sm"` beside a `text-sm` heading, exactly as `Config`'s
+              `Validate` button is: a default-height button on a heading line
+              sets the line's height from the control rather than from the
+              heading. */}
+          <Button type="button" variant="outline" size="sm" onClick={() => setDownloadOpen(true)}>
+            Download OpenAPI
+          </Button>
+          {baseUrl && <span className="font-mono text-xs text-muted-foreground">{baseUrl}</span>}
+        </div>
         {/* `max-w-prose` is the one class the §4.2 conversion ADDED, and it
             replaced something the card had been doing rather than changing the
             block: the `CardContent`'s `p-6` was what stopped this sentence
             short. Free of the frame it would run the section's whole width —
-            now the page's — where the Details column two blocks up caps at
-            exactly this measure (`detailsClassName="max-w-prose"`) for the same
+            now the page's — where the Details column above caps at exactly
+            this measure (`detailsClassName="max-w-prose"`) for the same
             reason. Prose is the section's one exception to a single measure;
             see the note on the root element. */}
         <p className="max-w-prose text-sm text-muted-foreground">
           Generated per service account — the document lists exactly the endpoints that account may
           invoke. Choose one to download this endpoint&apos;s contract.
         </p>
-        <div className="flex flex-wrap items-center gap-3">
-          {/* The only control in this block, and a plain `<button>`, so the
-              shell's `<fieldset disabled={trashed}>` reaches it — unlike the
-              `window` keydown listener §11.1 records. It opens a dialog and
-              writes nothing, so it needs no `trashed` check of its own. */}
-          <Button type="button" variant="outline" onClick={() => setDownloadOpen(true)}>
-            Download OpenAPI
-          </Button>
-          {baseUrl && <span className="font-mono text-xs text-muted-foreground">{baseUrl}</span>}
-        </div>
         {oaQuery.isError && (
           <Alert variant="destructive">
             <AlertDescription>

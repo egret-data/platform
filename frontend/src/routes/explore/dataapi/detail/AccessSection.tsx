@@ -237,15 +237,35 @@ export default function AccessSection() {
   const empty = accounts.length === 0 && orphanGrants.length === 0;
 
   return (
-    // Capped here, not by the route (§5.1) — this tab is a note, a short account
-    // list and two conditions per row. Uncapped, the explanatory note above sets
-    // as one very long line and each row's action ends up a monitor's width from
-    // the account it acts on. `max-w-5xl` is still well past the `max-w-3xl` the
-    // whole route used to sit under.
-    <div className="max-w-5xl space-y-6">
+    // Uncapped, like every other tab on this route (§5.1, as reversed). This
+    // used to carry `max-w-5xl` on the argument that a note, a short account
+    // list and two conditions per row read worse stretched across a wide
+    // monitor. That argument was not wrong about THIS tab; it was wrong about
+    // the tab set. Measured at 1600×1000 in a 1296px content box, Access
+    // stopped at 1024 while Query, Config and Response took all 1296 — so a
+    // reader clicking along the nav watched the content edge jump 272px, three
+    // times, for reasons no single tab could explain. One measure across the
+    // six beats a per-section optimum.
+    //
+    // What the removed cap was buying, checked rather than assumed (§5.2 —
+    // removing a cap is only half a change, because the table below is
+    // `table-fixed`): with nothing else changed, all 272 new pixels landed on
+    // `Invoke`, the one unsized column — while `Actions` stayed `w-36` and
+    // right-aligned, so a row's Revoke button sat 272px further from the
+    // account it acts on than it had. That was recorded here as accepted and
+    // not fixed. **It is fixed now**, and the two halves of the fix are the
+    // column widths below and the row's action group at the bottom of this
+    // file; the 272px are spent rather than absorbed.
+    //
+    // Measured in real Chromium at 1600×1000 with seven accounts, `Invoke`
+    // never wanted them: its widest row content lays out at 183px, against the
+    // 960px it was being handed. The columns that did want them are the two
+    // that were pinned — the identity, which was cutting every address, and
+    // the actions, which was too narrow to put two controls on one line.
+    <div className="space-y-6">
       <div>
         <h2 className="text-lg font-semibold">Access</h2>
-        <p className="text-sm text-muted-foreground">
+        <p className="max-w-prose text-sm text-muted-foreground">
           What each service account can actually do with this endpoint — the invoke right egret owns, and
           the data access it does not.
         </p>
@@ -259,7 +279,7 @@ export default function AccessSection() {
             the only place that distinguishes a draft from a disabled endpoint.
             The rows deliberately stay state-neutral (see `AccessRow`). */}
         {!isLive && (
-          <p className="text-sm text-muted-foreground">
+          <p className="max-w-prose text-sm text-muted-foreground">
             {wasDisabled
               ? "This endpoint is disabled, so it is serving nothing and egret cannot check workspace-inherited invoke rights against it. Grants recorded here are real and apply again when it is re-enabled."
               : "This endpoint is not live, so nothing is being served yet and egret cannot check workspace-inherited invoke rights against it. Grants recorded here are real and take effect when it is published."}
@@ -282,7 +302,7 @@ export default function AccessSection() {
             account read the data", and a trial is still the only thing that
             answers it. */}
         {trashed && (
-          <p className="text-sm text-muted-foreground">
+          <p className="max-w-prose text-sm text-muted-foreground">
             This endpoint is in the trash, so invoke cannot be granted or revoked here — restore it
             first. Grants already recorded are untouched and still apply. Try it still runs, so an
             account&apos;s data access can be checked before deciding whether to restore.
@@ -296,7 +316,32 @@ export default function AccessSection() {
         <Table className="table-fixed">
           <TableHeader>
             <TableRow>
-              <TableHead className="w-48">Service account</TableHead>
+              {/* Wide enough to READ an address, above `xl`.
+
+                  `w-48` gave 176px of content. The addresses this column holds
+                  are synthesised by the backend as
+                  `svc.<slug>@<ws-slug>.service.egret.local`
+                  (`crates/egret-dataapi/src/routes.rs`), so 29 characters are
+                  spent before the account is even named. Measured in Chromium
+                  against the shipped `font-mono text-xs`, seven seeded
+                  accounts laid out at 246 / 311 / 419 / 303 / 289 / 296 /
+                  311px — all seven cut, on the page whose subject is which
+                  identity may invoke. `w-96` gives 368px, which fits the
+                  realistic band (a name up to ~48 characters); the outlier
+                  keeps `title`, which is what a fallback is for.
+
+                  Gated at `xl`, and the gate is measured rather than a habit
+                  (§5.3 makes the same call at `lg` for a different table).
+                  `table-fixed` does not shrink a sized column — it scrolls the
+                  table — so this column has to leave `Invoke` enough at the
+                  width it turns on. Available content box, by viewport:
+                  1600→1296, 1280→976, 1024→720. At `xl` the two sized columns
+                  take 592 and `Invoke` keeps 384, comfortably over the 183px it
+                  wants. At `lg` it would keep 128, and the badges would wrap —
+                  a truncated address traded for a wrapped answer. Below the
+                  gate this column is `w-48` exactly as it was, and the address
+                  is recovered by `title` exactly as it was. */}
+              <TableHead className="w-48 xl:w-96">Service account</TableHead>
               {/* The one distinction this whole section turns on, beside the
                   column where it bites — and said ONCE.
 
@@ -345,9 +390,28 @@ export default function AccessSection() {
                 </div>
               </TableHead>
               {/* Named for a screen reader, invisible on screen: a visible
-                  heading over a column of one small button reads as louder than
-                  what it labels. */}
-              <TableHead className="w-36 text-right">
+                  heading over a column of small buttons reads as louder than
+                  what it labels.
+
+                  `w-36` (128px of content) held ONE control, which is why the
+                  row's two actions were stacked. Measured, the widest pair
+                  (`Try it` + `Grant invoke`, gap included) needs 167px, so
+                  `w-52` — 192px of content, and the same width `ConfigTable`'s
+                  Value column already uses — clears it by 25px. `w-48` would
+                  clear it by 9, which is inside the margin a different UI font
+                  could eat.
+
+                  **Unconditional, unlike its neighbour, and that is measured
+                  too.** The obvious symmetry (`w-36 xl:w-52`, matching the
+                  identity column's gate) is worse at every width between `lg`
+                  and `xl`: the group wraps back onto two lines there, and two
+                  32px controls stacked are TALLER than the 32px-plus-16px stack
+                  this change removed. Seven-row table span, measured:
+                  gated 651px at 1024, ungated 451px — against 543px before the
+                  change. Widening only the identity column at `xl` and letting
+                  this one keep its width everywhere is what makes the row
+                  shorter at 900, 1024 and 1100 as well as at 1600. */}
+              <TableHead className="w-52 text-right">
                 <span className="sr-only">Actions</span>
               </TableHead>
             </TableRow>
@@ -528,24 +592,31 @@ function AccessRow({
 
   return (
     <TableRow className="align-top" data-testid={`access-row-${account.id}`}>
-      {/* `title` on both lines, and it is the cheap half of a two-part fix.
-          This column is `w-48` in a `table-fixed` table, so `truncate` cuts at
-          192px no matter the viewport — measured live at seven accounts, EVERY
-          email was cut. Identity is this screen's subject: the whole job here
-          is comparing accounts, and an address the reader cannot finish reading
-          is one they cannot check.
+      {/* `title` on both lines — and it is now the SECOND half of the fix, not
+          the whole of it. It used to be the whole of it: this column was `w-48`
+          in a `table-fixed` table, so `truncate` cut at 176px of content no
+          matter the viewport, and measured at seven accounts EVERY address was
+          cut. Identity is this screen's subject — the whole job here is
+          comparing accounts, and an address the reader cannot finish reading is
+          one they cannot check — so a pointer-only tooltip was never the right
+          answer to it.
 
-          The column widths are deliberately NOT rebalanced. The 688px Invoke
-          neighbour is not slack — on a draft or disabled endpoint it carries a
-          sentence per row (the `Caveat`s below), so taking width from it trades
-          one truncation for another, on prose rather than on an identifier.
+          **The reason it was left at that, recorded here, was wrong.** It said
+          the widths were deliberately not rebalanced because the Invoke
+          neighbour's 688px "is not slack — on a draft or disabled endpoint it
+          carries a sentence per row". Measured in Chromium rather than reasoned
+          about (§10): the widest thing any Invoke cell wants is 183px, caveat
+          rows included, because those sentences are `Caveat` SUMMARIES and the
+          bodies are collapsed. The column was ~500px of genuine slack, and the
+          argument for keeping it was a §9 recollection. The `<th>` above widens
+          this column at `xl`; the addresses fit.
 
-          `title` is not the whole answer and is not claimed to be: it is
-          pointer-only, and the value still cannot be copied without selecting
-          it by hand. A copy affordance beside the address is the follow-on. It
-          is recorded rather than done here because it adds a control to every
-          row of a table whose row height is already the thing §4.4 was written
-          to protect. */}
+          `title` still earns its place for the outlier — a 33-character account
+          name still overruns 368px — but it is a fallback now rather than the
+          plan. It remains pointer-only, and the value still cannot be copied
+          without selecting it by hand; a copy affordance beside the address is
+          the follow-on, still not taken here because it adds a control to every
+          row of a table whose height is the thing §4.4 exists to protect. */}
       <TableCell className="py-3 whitespace-normal">
         <div className="truncate text-sm font-medium" title={account.name}>
           {account.name}
@@ -648,12 +719,84 @@ function AccessRow({
       </TableCell>
 
       <TableCell className="py-3 text-right">
-        <div className="flex flex-col items-end gap-1.5">
+        {/* One ROW of actions, not a stack.
+
+            Measured at seven accounts before this change: every row was 79px,
+            and the height was the stack — a 32px button with a 16px link under
+            it. Side by side the pair is one control's height, and the row is
+            what the identity in it needs rather than what two lines of controls
+            need.
+
+            `flex-wrap`, not a plain `flex-row`: below the `xl` gate on this
+            column the two do not fit on one line, and wrapping there is the
+            right answer (the old layout, reached by width rather than by
+            declaration) instead of a cell that overflows into its neighbour.
+
+            `items-center` so the two share a baseline box; the old
+            `items-end` was aligning a full-height button against a bare line of
+            text, which only ever looked deliberate because they were stacked. */}
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          {/* FIRST, and the order is §1.2's rule read into a row: view controls
+              before the primary action. The mutation is what changes something
+              here, so it takes the outer right edge — the same slot the primary
+              action takes in the page header above.
+
+              Condition 2's only per-row part: `?service_account=<id>`
+              preselects THIS account, so the trial answers the Ranger question
+              for it rather than for whichever account the picker happened to
+              hold. `TryIt.tsx` reads that exact key and says so on its side too.
+
+              **Still a `<Link>`, and that is load-bearing.** It navigates, and
+              it must stay reachable on a TRASHED endpoint — the shell's
+              `<fieldset disabled={trashed}>` reaches form controls only, so a
+              real `<button>` here would be greyed exactly when a trial is the
+              only thing that can answer "could this account read the data" for
+              an endpoint an admin is deciding whether to restore. `asChild`
+              keeps the anchor and takes only the paint; no `disabled` is passed,
+              so `Button`'s `inertSlot` path (which would add `aria-disabled`
+              and `tabIndex={-1}`) never engages.
+
+              **`ghost`, not a second `outline`.** The section's own prose ends
+              "Run **Try it** on a row to find out for real", so this cannot go
+              on being the smallest and faintest thing in the row — at `text-xs`
+              underlined muted it was 12px under a 13px button. Routed through
+              the shared `Button` it is a peer in size, hit area and text; as
+              `ghost` it carries no border and no fill, so it is quieter than
+              the mutation without being smaller than it. (`--accent` appears
+              only as that variant's hover/focus paint, which is what it is
+              reserved for.)
+
+              Not rendered for an orphaned grant: there is no account left to
+              run a trial as, so the link would send the reader to a screen that
+              cannot answer. That row's Revoke is the useful action. */}
+          {!orphaned && (
+            <Button asChild size="sm" variant="ghost">
+              <Link to={tryItHref}>Try it</Link>
+            </Button>
+          )}
+          {/* `min-w-28` on both mutations, for two reasons that happen to want
+              the same number.
+
+              It keeps `Try it` at the same offset on every row: measured,
+              `Revoke` is 78px and `Grant invoke` 104px, so without a floor the
+              link to their left jitters 26px down the page — on the screen
+              whose entire job is reading down a column and comparing accounts
+              (§4.3). And it stops the button resizing under the cursor when its
+              own label changes mid-mutation (`Revoke` → `Revoking…`), which
+              would move `Try it` at exactly the moment the reader is watching
+              that row.
+
+              112px, because it has to clear the widest of the four labels
+              (`Grant invoke`, 104px). Not applied to a placeholder on the
+              inherited row, which has no mutation at all: §4.3 says do not hold
+              a slot empty for symmetry, so that row's single action sits at the
+              outer edge. */}
           {status.kind === "granted" && (
             <Button
               type="button"
               size="sm"
               variant="outline"
+              className="min-w-28"
               disabled={busy || trashed}
               onClick={() => onRevoke(account.id)}
             >
@@ -668,30 +811,12 @@ function AccessRow({
               type="button"
               size="sm"
               variant="outline"
+              className="min-w-28"
               disabled={busy || trashed}
               onClick={() => onGrant(account.id)}
             >
               {busy ? "Granting…" : "Grant invoke"}
             </Button>
-          )}
-          {/* Condition 2's only per-row part: `?service_account=<id>` preselects
-              THIS account, so the trial answers the Ranger question for it
-              rather than for whichever account the picker happened to hold.
-              `TryIt.tsx` reads that exact key and says so on its side too.
-
-              A `<Link>`, not a `<Button>`: it navigates, and it must stay
-              reachable on a TRASHED endpoint — the shell's
-              `<fieldset disabled={trashed}>` would grey a button, and a trial
-              is the only way to answer condition 2 for an endpoint an admin is
-              deciding whether to restore.
-
-              Not rendered for an orphaned grant: there is no account left to
-              run a trial as, so the link would send the reader to a screen that
-              cannot answer. That row's Revoke is the useful action. */}
-          {!orphaned && (
-            <Link className="text-xs underline text-muted-foreground" to={tryItHref}>
-              Try it
-            </Link>
           )}
         </div>
       </TableCell>

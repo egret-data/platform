@@ -8,25 +8,40 @@ import { expect } from "vitest";
  *
  * `EndpointDetail.test.tsx`'s route guard mounts a **sentinel** as the nested
  * route and walks up from it, so every element it sees belongs to the route.
- * That is deliberate — it is what lets one section cap itself while another
- * does not — and it is also a hole exactly the shape of the defect the width
- * pass removed: re-applying `max-w-3xl` to `Config`'s OWN root passed the
- * sentinel guard and all 230 other Config tests. So each section needs its own
- * assertion, and `docs/en/ui-conventions.md` §5.1 records which way round it
- * goes for each: `Config`, `Query` and `Response` use the page, `Access`,
- * `Try it` and `Versions` cap themselves at `max-w-5xl`. Response moved groups
- * in §5.4b, once it held a settings table and a code editor — the criterion is
- * what a section HOLDS, not which tab it is.
+ * It is scoped to the route by design, and that is a hole exactly the shape of
+ * the defect the width pass removed: re-applying `max-w-3xl` to `Config`'s OWN
+ * root passed the sentinel guard and all 230 other Config tests. So each
+ * section needs its own assertion.
  *
- * Three sections had that assertion copy-pasted and two (`Try it`, `Access`)
- * had none at all — which is how `Try it` shipped a `max-w-5xl` nothing was
- * holding in place. One helper, five call sites.
+ * # There is only one form left, because there is only one rule left
+ *
+ * This module used to export a matching pair — `expectSectionCapsItsOwnWidth`
+ * and `expectSectionLeavesWidthToThePage` — because `docs/en/ui-conventions.md`
+ * §5.1 sorted the six tabs into two groups: `Config`, `Query` and `Response`
+ * used the page; `Access`, `Try it` and `Versions` capped themselves at
+ * `max-w-5xl`.
+ *
+ * **§5.1 was reversed and the positive form was deleted with it.** All six
+ * sections leave width to the page now, so the capping helper had zero callers.
+ * It was deleted rather than kept unused: an exported helper named "caps its
+ * own width" is an executable statement that some section is supposed to, and
+ * a reader finding it would reasonably conclude the two-group rule still
+ * stands. That is the same failure §5.1 itself is being fixed for — a
+ * description outliving the thing it described.
+ *
+ * One thing from it is worth keeping, for whoever reinstates a section cap:
+ * **its regex was deliberately unprefixed** (`/(?:^|\s)max-w-/`), the opposite
+ * of the surviving one, because a section capped only at `lg:` is uncapped on
+ * exactly the narrow viewports nobody measured. Reinstating it as a copy of
+ * the negative form's regex would be the bug.
  *
  * # What it can and cannot say
  *
  * A class name, not a layout: jsdom implements no CSS (§10), so whether the
  * width is well spent is a browser question. This exists only so a cap cannot
- * come back, or vanish, silently.
+ * come back silently — and `tests/e2e/data-api-detail-tab-widths.spec.ts` is
+ * where the claim that the six tabs actually AGREE is measured, because this
+ * file structurally cannot see it.
  */
 
 /**
@@ -51,9 +66,8 @@ function hostOf(container: HTMLElement): HTMLElement {
  *
  * Walked, never counted with `parentElement.parentElement`: an extra wrapper
  * added inside the section must break the walk rather than quietly re-point the
- * assertion one level up — which for the negative form would mean asserting
- * about the fieldset, an element that satisfies "no cap" no matter what the
- * section does to itself.
+ * assertion one level up — which would mean asserting about the fieldset, an
+ * element that satisfies "no cap" no matter what the section does to itself.
  */
 export function sectionRootOf(container: HTMLElement, heading: HTMLElement): HTMLElement {
   const host = hostOf(container);
@@ -61,29 +75,68 @@ export function sectionRootOf(container: HTMLElement, heading: HTMLElement): HTM
   while (root && root.parentElement !== host) root = root.parentElement;
   expect(root).not.toBeNull();
   // The walk overshooting the section and landing on the host itself is the
-  // failure mode both forms share, and it is silent in the negative form.
+  // failure mode, and it is SILENT: the fieldset carries no `max-w-*`, so the
+  // assertion passes on an element that is not the section.
   expect(root!.tagName).not.toBe("FIELDSET");
   return root!;
 }
 
 /**
- * The section owns a width cap on its own root.
+ * The section leaves the width to the page — the one rule, for all six.
  *
- * Deliberately unprefixed: a section whose cap were only `lg:max-w-5xl` would
- * be uncapped on exactly the narrow viewports nobody measured.
- */
-export function expectSectionCapsItsOwnWidth(container: HTMLElement, heading: HTMLElement) {
-  expect(sectionRootOf(container, heading).className).toMatch(/(?:^|\s)max-w-/);
-}
-
-/**
- * The section leaves the width to the page.
- *
- * Responsive prefixes included here, the opposite way round: `lg:max-w-3xl`
- * would waste the page on exactly the wide viewports the width pass measured.
+ * Responsive prefixes are included on purpose: `lg:max-w-3xl` would waste the
+ * page on exactly the wide viewports the width pass measured, and would slip
+ * past an unprefixed pattern.
  */
 export function expectSectionLeavesWidthToThePage(container: HTMLElement, heading: HTMLElement) {
   expect(sectionRootOf(container, heading).className).not.toMatch(
     /(?:^|\s)(?:[a-z0-9]+:)*max-w-/,
   );
+}
+
+/**
+ * The section's intro paragraph caps its own reading measure.
+ *
+ * # Why this is a class assertion and not an apology for one
+ *
+ * Most of §5's claims are about GEOMETRY, and a class name is a poor stand-in
+ * for those — `sectionRootOf`'s callers say so, and §10 says so. This one is
+ * different in kind. §5.1's rule for the intro is not "it renders at some
+ * width", it is literally "it carries `max-w-prose`": the whole point of §5.2's
+ * "cap the prose, not the column" is that the paragraph opts out of the
+ * section's measure and takes the reader's. jsdom cannot measure the resulting
+ * width, but the thing being asserted IS the class, so here a class assertion
+ * is the right instrument rather than a substitute for the right one.
+ *
+ * # Why it exists at all
+ *
+ * The six intro caps went in as a regression fix — uncapping the section roots
+ * (§5.1) un-capped the three intros those roots had been bounding, and at 1920
+ * with the rail collapsed those lines ran past 1700px. For a while afterwards
+ * **five of the six were pinned by nothing runnable**: the only guard was two
+ * Playwright specs that have never executed, so deleting `max-w-prose` from
+ * Query, Config, Response, Try it or Versions left all 5025 tests green.
+ *
+ * # By identity, never by population
+ *
+ * The browser spec first guarded this with `proseRights.length > 0` over every
+ * `p.max-w-prose` in the section. That is a POPULATION count, and it is
+ * partly vacuous by construction: `Response` and `Access` each render three
+ * unconditional capped paragraphs, so deleting the cap from the intro leaves
+ * two behind and the count still passes. Only `Query`, with exactly one, was
+ * genuinely guarded. This helper resolves the intro by IDENTITY — the `<p>`
+ * beside the section's own `h2` — so it can only be satisfied by the element
+ * it is about.
+ */
+export function expectSectionIntroCapsItsProse(heading: HTMLElement) {
+  const wrapper = heading.parentElement;
+  expect(wrapper, `the "${heading.textContent}" heading has a wrapper`).not.toBeNull();
+  // The intro is the paragraph the heading is introduced BY, so it is resolved
+  // from the heading's own wrapper rather than from the section root — a
+  // section-wide `querySelector("p")` would drift onto whatever paragraph
+  // happens to come first if the intro were ever removed, and quietly assert
+  // about that instead.
+  const intro = wrapper!.querySelector("p");
+  expect(intro, `the "${heading.textContent}" section renders an intro <p>`).not.toBeNull();
+  expect(intro!.className).toMatch(/(?:^|\s)max-w-prose(?:\s|$)/);
 }

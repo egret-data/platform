@@ -17,7 +17,7 @@ import type {
 import EndpointDetail from "@/routes/explore/dataapi/EndpointDetail";
 import type { EndpointDetailContext } from "@/routes/explore/dataapi/EndpointDetail";
 import AccessSection from "@/routes/explore/dataapi/detail/AccessSection";
-import { expectSectionCapsItsOwnWidth } from "./sectionWidth";
+import { expectSectionIntroCapsItsProse, expectSectionLeavesWidthToThePage } from "./sectionWidth";
 
 function makeEndpoint(overrides: Partial<DataApiEndpointDto> = {}): DataApiEndpointDto {
   return {
@@ -49,8 +49,28 @@ function makeEndpoint(overrides: Partial<DataApiEndpointDto> = {}): DataApiEndpo
   } as unknown as DataApiEndpointDto;
 }
 
+/**
+ * The address form the BACKEND synthesises, not a short one that happens to fit.
+ *
+ * `crates/egret-dataapi/src/routes.rs` builds every service account's `email` as
+ * `svc.<name-slug>@<workspace-slug>.service.egret.local` — a 25-character fixed
+ * tail plus `svc.`, so the shortest address a workspace can have is already 29
+ * characters before the account is named. The fixtures used to be
+ * `${id}@svc.local`, which is 18 characters and fits `w-48` with room to spare:
+ * a degenerate fixture that cannot tell a column wide enough to read an address
+ * from one that is not (the trap `docs/en/ui-conventions.md` §8 names).
+ *
+ * Measured in real Chromium against the shipped `font-mono text-xs`, seven
+ * seeded accounts: these lay out at 246–419px, against 176px of column content.
+ */
 function makeAccount(id: string, name: string): DataApiServiceAccountDto {
-  return { id, name, description: "", email: `${id}@svc.local`, created_at: "2026-01-01T00:00:00Z" };
+  return {
+    id,
+    name,
+    description: "",
+    email: `svc.${name}@demo.service.egret.local`,
+    created_at: "2026-01-01T00:00:00Z",
+  };
 }
 
 function makeGrant(serviceAccountId: string, name: string): DataApiEndpointGrantDto {
@@ -761,18 +781,51 @@ describe("AccessSection — the shape", () => {
   });
 
   /**
-   * Access had no width guard at all, and neither did `Try it` — which is how
-   * `Try it` shipped a `max-w-5xl` that nothing was holding in place.
-   * `docs/en/ui-conventions.md` §5.1 lists this section among the three that cap
-   * themselves — Access, Try it and Versions; Config and Response leave width to
-   * the page. The assertion lives in `sectionWidth.ts` so all five sections make
-   * it the same way.
+   * REVERSED, and the reversal is the point of the assertion rather than a
+   * detail of it. This test used to say Access CAPS its own width, on
+   * `docs/en/ui-conventions.md` §5.1's two-group rule: Config, Query and
+   * Response used the page; Access, Try it and Versions capped themselves at
+   * `max-w-5xl` because they hold prose and short lists that read worse
+   * stretched across a wide monitor.
+   *
+   * That per-section argument lost to a whole-route one. Measured on the
+   * deployed build at 1600×1000 with seeded data, the content box is 1296px on
+   * every tab, but the widest block was 1296 on Query/Config/Response and 1024
+   * on Access/Try it/Versions — so the content edge moved 272px on a tab
+   * change, three times, with nothing on screen explaining it. §5.1 now says
+   * one width for all six; the superseded argument is kept there under "The
+   * part of this section that was reversed, and why".
+   *
+   * `expectSectionCapsItsOwnWidth` was deleted along with the rule — see
+   * `sectionWidth.ts`.
+   *
+   * A class name, not a layout (§5.5): jsdom has no CSS, so this cannot see
+   * whether six tabs agree on a width. `tests/e2e/data-api-detail-tab-widths.spec.ts`
+   * measures that in a browser; this only stops a cap coming back silently.
    */
-  it("caps its own width, as §5.1 says this section does", async () => {
+
+  /**
+   * §5.1's intro rule, pinned where the class actually is.
+   *
+   * The class assertion is the RIGHT instrument here rather than a stand-in for
+   * a measurement — see `expectSectionIntroCapsItsProse`. Before this test the
+   * only guard on this cap was a Playwright spec that has never executed, and a
+   * population count that `Response` and `Access` could satisfy without their
+   * intro being capped at all.
+   */
+  it("caps its intro at a reading measure, not the section's (§5.1)", async () => {
+    setup({ accounts: [SA_GRANTED], grants: [] });
+    renderAccess();
+    expectSectionIntroCapsItsProse(
+      await screen.findByRole("heading", { name: "Access", level: 2 }),
+    );
+  });
+
+  it("leaves width to the page, like all six tabs (§5.1, as reversed)", async () => {
     setup({ accounts: [SA_GRANTED], grants: [] });
     const { container } = renderAccess();
     const heading = await screen.findByRole("heading", { name: "Access", level: 2 });
-    expectSectionCapsItsOwnWidth(container, heading);
+    expectSectionLeavesWidthToThePage(container, heading);
   });
 });
 
@@ -1063,5 +1116,262 @@ describe("AccessSection — a trashed endpoint", () => {
     // survives here too — this is where that is provable, since there is no
     // fieldset to have spared it by accident.
     expect(within(trashed.container).getAllByRole("link", { name: /try it/i })).toHaveLength(2);
+  });
+});
+
+/**
+ * Task 2 — the row that fits, and an identity you can read.
+ *
+ * # What was measured, and where
+ *
+ * Real Chromium, the shipped stylesheet, seven service accounts with the
+ * addresses the backend synthesises, 1600×1000, on the tree this task started
+ * from (`82ce049e`, i.e. with Task 1's cap already removed):
+ *
+ *   available 1296   columns 192 / 960 / 144   seven rows, 543px of table
+ *   row heights 79, 79, 79, 79, 69, 79, 79
+ *   the two row actions on TWO lines: a 32px 13px button, then a 16px 12px link
+ *   every address cut: 246, 311, 419, 303, 289, 296, 311 against 176px of cell
+ *
+ * Three things follow, and only the third is one jsdom can hold at all:
+ *
+ * 1. The actions were STACKED, which is what made the row 79px, and the one the
+ *    section's own prose points at ("Run **Try it** on a row to find out for
+ *    real") was the smallest and faintest thing in it.
+ * 2. The identity column was `w-48` — 176px of content — on the page whose
+ *    subject *is* which identity may invoke. `title` recovers the value on
+ *    hover; it is a fallback, not a fix.
+ * 3. Removing the cap moved `Grant invoke` 272px further from the account it
+ *    acts on. The row layout is what answers that, which is why 1 and 3 are one
+ *    change.
+ *
+ * # Why almost none of that is asserted below
+ *
+ * jsdom implements no CSS (§10): every box is 0×0, so a row height, a column
+ * width and a truncation all measure the same whether the fix is present or
+ * not, and a test for them passes either way. The measurements live in
+ * `tests/e2e/data-api-access-row.spec.ts`, with a negative control that puts
+ * the old layout back and reproduces the numbers above.
+ *
+ * What is left here is the part that is real in a DOM: which elements are
+ * siblings, in what order, and what each one IS. The two class assertions are
+ * labelled as canaries where they appear — they stop a silent revert, they do
+ * not make the claim.
+ */
+describe("AccessSection — a row that fits, and an identity you can read", () => {
+  const TRASHED = { state: "disabled", deleted_at: "2026-08-18T09:00:00Z" } as Partial<DataApiEndpointDto>;
+
+  /**
+   * Both actions in one group, and `Try it` FIRST.
+   *
+   * Membership alone says nothing — they were siblings before this change too,
+   * in a `flex-col`. The order is the falsifiable half, and it is §1.2's rule
+   * (view controls first, primary action last) applied to a row: the mutation
+   * is the primary action and sits at the outer right edge, where the same
+   * control sits in the page header above it.
+   *
+   * Run over BOTH kinds of row. The mutation is a different button on a granted
+   * row than on an ungranted one, and a fixture with one of them cannot say the
+   * rule holds for the other.
+   */
+  it("puts the row's two actions in one group, with the mutation last", async () => {
+    setup({
+      accounts: [SA_NONE, SA_GRANTED],
+      grants: [makeGrant(SA_GRANTED.id, SA_GRANTED.name)],
+      canInvoke: {},
+    });
+    renderAccess();
+
+    const cases = [
+      { account: SA_NONE, mutation: /grant invoke/i },
+      { account: SA_GRANTED, mutation: /revoke/i },
+    ] as const;
+
+    for (const { account, mutation } of cases) {
+      const row = await screen.findByTestId(`access-row-${account.id}`);
+      const tryIt = within(row).getByRole("link", { name: /try it/i });
+      const button = within(row).getByRole("button", { name: mutation });
+
+      const group = button.parentElement!;
+      expect(tryIt.parentElement, `${account.name}: one group, not two blocks`).toBe(group);
+
+      const order = [...group.children];
+      expect(
+        order.indexOf(tryIt),
+        `${account.name}: Try it comes before the mutation (§1.2)`,
+      ).toBeLessThan(order.indexOf(button));
+
+      // Both mutations carry the SAME width floor, which is what keeps the link
+      // to their left at one offset down the page: measured, `Revoke` is 78px
+      // and `Grant invoke` 104px, so without it `Try it` moves 26px between
+      // rows. It also stops the button resizing under the cursor when its own
+      // label becomes "Revoking…". A class canary — the offsets themselves are
+      // measured in `data-api-access-row.spec.ts`; what makes it worth pinning
+      // here is that it has to be the same on BOTH arms, which is why this loop
+      // runs over both.
+      expect(button.className, `${account.name}: shares the mutation width floor`).toMatch(
+        /\bmin-w-28\b/,
+      );
+    }
+
+    // The canary for the geometry, and ONLY a canary: "beside each other" is a
+    // browser question (§10), measured in `data-api-access-row.spec.ts`. What a
+    // DOM can say is that the group is no longer declared as a column, which is
+    // the declaration that stacked them.
+    const group = within(await screen.findByTestId(`access-row-${SA_NONE.id}`))
+      .getByRole("button", { name: /grant invoke/i })
+      .parentElement!;
+    expect(group.className).toMatch(/\bflex\b/);
+    expect(group.className).not.toMatch(/flex-col/);
+  });
+
+  /**
+   * `Try it` is a peer of the mutation, not the row's smallest text.
+   *
+   * Asserted through the component both controls come from rather than through
+   * two class strings that agree today (§7.2): `data-slot="button"` is
+   * `src/components/ui/button.tsx`'s own marker, so sharing it is sharing a
+   * height, a hit area and a text size by construction.
+   *
+   * Everything that makes it QUIETER than the mutation — no border, no fill —
+   * is paint, and paint is the browser spec's job. The one class named here is
+   * the exact one the defect wore.
+   */
+  it("gives Try it the shared control treatment instead of the row's smallest text", async () => {
+    setup({ accounts: [SA_NONE], grants: [], canInvoke: {} });
+    renderAccess();
+
+    const row = await screen.findByTestId(`access-row-${SA_NONE.id}`);
+    const tryIt = within(row).getByRole("link", { name: /try it/i });
+    const button = within(row).getByRole("button", { name: /grant invoke/i });
+
+    // The premise: the mutation really does carry that marker, so "they agree"
+    // is not two elements agreeing on nothing.
+    expect(button).toHaveAttribute("data-slot", "button");
+    expect(tryIt).toHaveAttribute("data-slot", "button");
+
+    // …and it is still a LINK. It navigates, and it has to outlive the shell's
+    // `<fieldset disabled={trashed}>`, which reaches form controls only — so
+    // dressing it as a control must not turn it into one.
+    expect(tryIt.tagName).toBe("A");
+    expect(tryIt).toHaveAttribute("href");
+    expect(tryIt).not.toHaveAttribute("aria-disabled");
+    expect(tryIt).not.toHaveAttribute("disabled");
+
+    // Canary, named after the defect: `text-xs` on a 12px link under a 13px
+    // button is how it became the faintest thing in the row.
+    expect(tryIt.className).not.toMatch(/\btext-xs\b/);
+  });
+
+  /**
+   * Still true on a TRASHED endpoint, which is the case the treatment change
+   * could plausibly break: `Button` renders `aria-disabled` + `tabIndex={-1}`
+   * on the `asChild` path when it is given `disabled`, and inheriting that from
+   * anywhere would silently kill the one control this section deliberately
+   * keeps alive.
+   */
+  it("keeps Try it live and activatable when it wears the control treatment", async () => {
+    setup({
+      accounts: [SA_GRANTED],
+      grants: [makeGrant(SA_GRANTED.id, SA_GRANTED.name)],
+      canInvoke: {},
+    });
+    renderAccess(makeEndpoint(TRASHED));
+
+    const row = await screen.findByTestId(`access-row-${SA_GRANTED.id}`);
+    // The premise: the button beside it really is dead.
+    expect(within(row).getByRole("button", { name: /revoke/i })).toBeDisabled();
+
+    const tryIt = within(row).getByRole("link", { name: /try it/i });
+    expect(tryIt).toHaveAttribute(
+      "href",
+      `/explore/eng/data-api/endpoints/ep-1/try?service_account=${SA_GRANTED.id}`,
+    );
+    expect(tryIt).not.toHaveAttribute("aria-disabled");
+    // Not taken out of the tab order — the half `aria-disabled` alone would not
+    // have shown.
+    expect(tryIt).not.toHaveAttribute("tabindex");
+  });
+
+  /**
+   * The identity column gets room, and the narrow regime does not.
+   *
+   * A CLASS assertion, and it is not the claim (§5.5): jsdom lays nothing out,
+   * so this only stops the column narrowing again without anyone noticing. What
+   * the width has to BE — a synthesised address fitting inside the column, in
+   * the shipped mono face — is measured in `data-api-access-row.spec.ts`.
+   *
+   * The identity gate is `xl`, not `lg`, and that is measured too.
+   * `table-fixed` does not shrink a sized column, it scrolls the table
+   * (§5.3), so the widened column has to leave Invoke enough at the
+   * breakpoint it turns on at. Measured available width: 1280px viewport →
+   * 976px, so Invoke keeps 384px; 1024px viewport → 720px, which would leave
+   * it 128px against content that lays out at 183px. `lg` would have traded a
+   * truncated address for a wrapped badge.
+   *
+   * The actions column is UNCONDITIONAL, and the asymmetry is a measurement
+   * rather than an oversight — asserting it is what stops somebody tidying it
+   * into a matching `xl:` gate. Gated, the action group wraps back onto two
+   * lines everywhere below `xl`, and two 32px controls stacked are TALLER than
+   * the 32px-plus-16px stack this change removed: seven rows measured 651px
+   * gated at a 1024px viewport, against 451px ungated and 543px before the
+   * change.
+   */
+  it("widens the identity column above xl, and the actions column at every width", async () => {
+    setup({ accounts: [SA_GRANTED], grants: [] });
+    renderAccess();
+
+    const identity = await screen.findByRole("columnheader", { name: "Service account" });
+    expect(identity.className).toMatch(/\bw-48\b/);
+    expect(identity.className).toMatch(/\bxl:w-96\b/);
+
+    // Measured, the widest pair (`Try it` + `Grant invoke`, gap included) needs
+    // 167px. `w-52` gives 192px of content; `w-36` gave 128, which is why the
+    // two were stacked. The negative assertions are the ones with teeth: a
+    // column that narrows again, or gains a breakpoint, wraps the group.
+    const actions = screen.getByRole("columnheader", { name: "Actions" });
+    expect(actions.className).toMatch(/\bw-52\b/);
+    expect(actions.className).not.toMatch(/\bw-36\b/);
+    expect(actions.className).not.toMatch(/:w-/);
+  });
+
+  /**
+   * The other half of what Task 1's cap was buying, and the one that is prose
+   * rather than layout.
+   *
+   * §5.2: cap the prose, not the column. With the section root uncapped these
+   * three paragraphs run the full content box — measured at 1920 with the
+   * sidebar collapsed they pass 1700px, roughly triple a comfortable measure.
+   * `max-w-prose` is the spelling the sibling sections already use
+   * (`ResponseSection.tsx`), and `tests/e2e/data-api-detail-tab-widths.spec.ts`
+   * asserts capped prose stops SHORT of the section root, so this is the
+   * deliberate exception to §5.1's one width rather than a second cap.
+   *
+   * All three in one render, and that is why the fixture is trashed AND not
+   * live: the two conditional paragraphs exist only while their state holds, so
+   * a fixture that renders one of them cannot say anything about the other.
+   */
+  it("caps every standing paragraph at a reading measure (§5.2)", async () => {
+    setup({ accounts: [SA_NONE], grants: [] });
+    renderAccess(makeEndpoint(TRASHED));
+
+    const paragraphs = [
+      await screen.findByText(/What each service account can actually do/i),
+      screen.getByText(/This endpoint is disabled, so it is serving nothing/i),
+      // NOT `/This endpoint is in the trash/` — the shell renders its own
+      // trashed banner with that same opening, so the loose matcher finds two
+      // elements and dies before asserting anything. This clause is the
+      // section's own.
+      screen.getByText(/so invoke cannot be granted or revoked here/i),
+    ];
+
+    for (const p of paragraphs) {
+      // Found as a `<p>`, so a matcher that drifted onto a wrapping `div` would
+      // fail loudly instead of asserting a class on the wrong element.
+      expect(p.tagName, `"${p.textContent?.slice(0, 40)}…" is a paragraph`).toBe("P");
+      expect(p.className, `"${p.textContent?.slice(0, 40)}…" is capped`).toMatch(
+        /\bmax-w-prose\b/,
+      );
+    }
   });
 });
