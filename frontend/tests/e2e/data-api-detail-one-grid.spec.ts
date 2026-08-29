@@ -369,7 +369,17 @@ function measureResponse() {
     // this one and into `data-api-access-row.spec.ts`. A count over a
     // population is satisfied by any member of it.
     intro: (() => {
-      const el = heading.parentElement?.querySelector<HTMLElement>("p") ?? null;
+      // The `h2` is resolved AGAIN here rather than reused: `sectionRootOf`
+      // scopes its own `heading` local, and referring to it from this IIFE is
+      // a `ReferenceError` INSIDE THE BROWSER — which surfaces as the whole
+      // evaluate throwing, i.e. as "the page is broken", not as a typo. This
+      // file's header already records the module-scope-helper form of that
+      // trap; this is the same trap wearing a different hat, and it was caught
+      // by running the spec rather than by reading it.
+      const h2 = [...document.querySelectorAll("h2")].find(
+        (h) => h.textContent?.trim() === "Response",
+      );
+      const el = h2?.parentElement?.querySelector<HTMLElement>("p") ?? null;
       if (!el) return null;
       const b = el.getBoundingClientRect();
       return {
