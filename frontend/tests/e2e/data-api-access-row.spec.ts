@@ -186,6 +186,9 @@ function measure(outlier: string) {
           natural: natural(address),
           available: address.clientWidth,
           isOutlier: (address.textContent ?? "").includes(outlier),
+          // The route to the value when the column cannot hold it — the only
+          // one below `xl`, where the column drops back to `w-48`.
+          title: address.getAttribute("title"),
         },
         actions: {
           labels: controls.map((c) => c.textContent?.trim() ?? ""),
@@ -214,6 +217,27 @@ function measure(outlier: string) {
       width: round(p.getBoundingClientRect().width),
       right: round(p.getBoundingClientRect().right),
     })),
+    // THE INTRO, RESOLVED AS ONE ELEMENT — and the population above is NOT a
+    // substitute for it. `AccessSection.tsx` renders FOUR unconditional
+    // `max-w-prose` paragraphs, so deleting the cap from the intro leaves three
+    // behind and any `prose.length > 0` guard still passes. That is verbatim
+    // the revision-2 mistake `data-api-detail-tab-widths.spec.ts:295-301`
+    // records against itself; it was fixed there and the two later specs copied
+    // the broken form, so this is the same defect shipping a THIRD time. A
+    // count over a population can be satisfied by any member of it.
+    intro: (() => {
+      const heading = [...document.querySelectorAll("h2")].find(
+        (h) => h.textContent?.trim() === "Access",
+      );
+      const el = heading?.parentElement?.querySelector<HTMLElement>("p") ?? null;
+      if (!el) return null;
+      const b = el.getBoundingClientRect();
+      return {
+        width: round(b.width),
+        right: round(b.right),
+        capped: /(?:^|\s)max-w-prose(?:\s|$)/.test(el.className),
+      };
+    })(),
     sectionRight: (() => {
       // A WALK from the section's own `h2` up to the child of the host, never
       // a counted hop — see the file header, trap 1.
@@ -459,6 +483,22 @@ test.describe("Data API — the Access row fits, and its identity is readable", 
 
       // ── 5. The prose is capped, though the section is not ────────────────
       expect(m.sectionRight, "the section root was resolved by the walk").not.toBeNull();
+      // BY IDENTITY FIRST — see the `intro` comment in `measure`. The count
+      // below is kept because widening the OTHER three paragraphs is a real
+      // regression too, but it is not what pins the intro and is not written as
+      // if it were.
+      expect(m.intro, "found the section's intro paragraph").not.toBeNull();
+      // Geometry first; the class is a canary, asserted last. A later
+      // `max-w-none` keeps the class and loses the cap, and a hidden intro
+      // reports 0 for both width and right, so neither is caught by a regex
+      // or by `<` alone.
+      expect(m.intro!.width, "the intro is laid out at all").toBeGreaterThan(0);
+      expect(m.intro!.width, "the intro keeps a reading measure").toBeLessThan(700);
+      expect(
+        m.intro!.right,
+        "the intro stops short of the section's measure",
+      ).toBeLessThan(m.sectionRight!);
+      expect(m.intro!.capped, "the intro still carries max-w-prose (§5.1)").toBe(true);
       expect(m.prose.length, "the section's standing prose is capped").toBeGreaterThan(0);
       for (const p of m.prose) {
         expect(p.right, "capped prose stops short of the section").toBeLessThan(m.sectionRight!);
@@ -467,6 +507,66 @@ test.describe("Data API — the Access row fits, and its identity is readable", 
         // change and tight enough to fail a cap that was deleted.
         expect(p.width, "capped prose keeps a reading measure").toBeLessThan(700);
       }
+
+      // ── 6. BELOW `xl`: the regime nothing was driving ────────────────────
+      //
+      // Second viewport, same fixture and same login. `AccessSection.tsx:344`
+      // is `w-48 xl:w-96`, so under 1280px this column is back to the width
+      // that produced the original complaint — and until now every spec in
+      // this branch ran only at 1600, which left that regime pinned by
+      // nothing. This does NOT re-assert the wide contract: below `xl` the
+      // addresses genuinely do not fit, and a spec claiming they do would be
+      // written against a page that does not exist.
+      //
+      // Two things must hold, and they are the two the narrow layout was
+      // designed for: the actions still wrap rather than overflow into the
+      // neighbouring column (`flex-wrap` is there precisely for this width),
+      // and every clipped address still carries its full value in `title`.
+      await page.setViewportSize({ width: 1100, height: 1000 });
+      await expect
+        .poll(async () =>
+          page.evaluate(() => {
+            const th = [...document.querySelectorAll("th")].find(
+              (t) => t.textContent?.trim() === "Service account",
+            );
+            return th ? Math.round(th.getBoundingClientRect().width) : -1;
+          }),
+        )
+        .toBe(192);
+
+      const narrow = await page.evaluate(measure, OUTLIER);
+      expect(narrow.error, "the Access table was measured below xl").toBeNull();
+      if (narrow.error) throw new Error(narrow.error);
+      expect(narrow.rows.length, "all seven accounts are still on screen at 1100").toBe(
+        NAMES.length,
+      );
+
+      // NON-VACUITY: at this width the column really is too narrow for these
+      // addresses, which is what makes the `title` assertion mean something.
+      const cutBelowXl = narrow.rows.filter((r) => r.address.natural > r.address.available);
+      expect(
+        cutBelowXl.length,
+        "below xl the column genuinely cuts addresses (otherwise `title` proves nothing)",
+      ).toBeGreaterThan(0);
+      for (const r of cutBelowXl) {
+        expect(r.address.title, `${r.address.text}: carries its full address in title`).toBe(
+          r.address.text.trim(),
+        );
+      }
+
+      // The actions cell must not overflow into its neighbour at this width;
+      // wrapping to two lines here is the deliberate answer, so lines are NOT
+      // asserted to be 1 — only that nothing spills.
+      for (const r of narrow.rows) {
+        expect(
+          r.actions.overflows,
+          `${r.address.text}: the actions cell does not overflow below xl`,
+        ).toBe(false);
+      }
+      expect(
+        narrow.tableScroll.scroll,
+        "the table does not scroll sideways at 1100 either",
+      ).toBeLessThanOrEqual(narrow.tableScroll.client);
     } finally {
       // Best-effort: a failed assertion must not leave the shared workspace
       // holding a throwaway endpoint. The connection is NOT deleted here and

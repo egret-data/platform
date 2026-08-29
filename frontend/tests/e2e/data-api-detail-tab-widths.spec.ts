@@ -112,6 +112,18 @@ const ENABLED = process.env.EGRET_E2E_DATAAPI_WIDTH === "1";
  * The index route is `Query` (`App.tsx` mounts it with `index`), so its
  * segment is the empty string.
  */
+/**
+ * Two viewports, and the second one is the point.
+ *
+ * 1600 is where §5.1's table was taken. 1100 is BELOW the `xl` breakpoint, and
+ * until the live check nothing in this branch drove it — while both row fixes
+ * are `xl`-gated (`Versions.tsx:228` `w-56 xl:w-80`, `AccessSection.tsx:344`
+ * `w-48 xl:w-96`), so under 1280px the tabs render a different page than the
+ * one every spec measured. The width rule is supposed to hold at BOTH; that is
+ * exactly the claim a single-viewport spec cannot make.
+ */
+const VIEWPORTS = [1600, 1100] as const;
+
 const TABS = [
   { segment: "", heading: "Query" },
   { segment: "/config", heading: "Config" },
@@ -163,7 +175,6 @@ test.describe("Data API — the six detail tabs are on one width", () => {
 
       const base = `/explore/${ws.slug}/data-api/endpoints/${endpointId}`;
 
-      await page.setViewportSize({ width: 1600, height: 1000 });
 
       /**
        * The right edge the route gives a section, the right edge of the
@@ -224,9 +235,21 @@ test.describe("Data API — the six detail tabs are on one width", () => {
           return {
             available,
             frames,
+            // Reported separately from `frames`, which is seeded with the root
+            // and therefore can never be empty — see the assertion site.
+            tableCount: root.querySelectorAll("table").length,
             intro: introEl
               ? {
                   right: right(introEl),
+                  // MEASURED, not read off `className`. `capped` below is a
+                  // class assertion in a file whose own header says a class
+                  // assertion is not the claim, and it is wrong in two
+                  // directions: a later `max-w-none` overrides the cap and the
+                  // regex still matches, and a `display:none` intro reports
+                  // width 0 and right 0 so the `<` comparison passes too. The
+                  // width is what the rule is about; the class is kept only as
+                  // a named canary for a silent revert.
+                  width: round(introEl.getBoundingClientRect().width),
                   capped: /(?:^|\s)max-w-prose(?:\s|$)/.test(introEl.className),
                 }
               : null,
@@ -234,120 +257,151 @@ test.describe("Data API — the six detail tabs are on one width", () => {
           };
         }, headingText);
 
-      const measured: { tab: string; available: number; widest: number }[] = [];
+      for (const width of VIEWPORTS) {
+        await page.setViewportSize({ width, height: 1000 });
+        const measured: { tab: string; available: number; widest: number }[] = [];
 
-      for (const { segment, heading } of TABS) {
-        await page.goto(`${base}${segment}`);
-        // `exact: true` — see the file header, trap 2.
-        await expect(
-          page.getByRole("heading", { name: heading, level: 2, exact: true }),
-        ).toBeVisible({ timeout: 30_000 });
-        // The tab's own content, not the previous tab's still on screen.
-        await page.waitForTimeout(400);
+        for (const { segment, heading } of TABS) {
+          await page.goto(`${base}${segment}`);
+          // `exact: true` — see the file header, trap 2.
+          await expect(
+            page.getByRole("heading", { name: heading, level: 2, exact: true }),
+          ).toBeVisible({ timeout: 30_000 });
+          // The tab's own content, not the previous tab's still on screen.
+          await page.waitForTimeout(400);
 
-        const m = await measure(heading);
-        expect(m, `${heading}: measured`).toBeTruthy();
-        expect(
-          "error" in m ? m.error : null,
-          `${heading}: resolved its section root`,
-        ).toBeNull();
-        if ("error" in m) throw new Error(`${heading}: ${m.error}`);
-
-        // Count before comparing: a section with no frames would otherwise
-        // contribute a vacuous pass to the cross-tab check below.
-        expect(m.frames.length, `${heading}: found at least the section root`).toBeGreaterThan(0);
-
-        for (const f of m.frames) {
+          const m = await measure(heading);
+          expect(m, `${heading}: measured`).toBeTruthy();
           expect(
-            f.right,
-            `${heading}: ${f.what} does not overflow the page`,
-          ).toBeLessThanOrEqual(m.available);
+            "error" in m ? m.error : null,
+            `${heading}: resolved its section root`,
+          ).toBeNull();
+          if ("error" in m) throw new Error(`${heading}: ${m.error}`);
+
+          // Count before comparing — and count THE THING THAT CAN VANISH.
+          //
+          // This assertion used to read `m.frames.length > 0`, described as
+          // catching "a section with no frames". IT COULD NEVER FAIL: `frames` is
+          // seeded unconditionally with the section root a few lines above, so
+          // the length is at least 1 by construction, whatever the page did. The
+          // state it was meant to catch is the `querySelectorAll("table")` beside
+          // that seed matching NOTHING — at which point the loop below compares
+          // one box with itself and a tab whose grids had all disappeared would
+          // still report green. So the tables are counted separately, and all six
+          // tabs render at least one (measured live: Query 2, Config 1,
+          // Response 2, Access 1, Try it 2, Versions 1).
+          //
+          // Same family as the prose guard below and as the two count guards in
+          // the sibling specs: a number that a population satisfies for free is
+          // not a guard.
+          expect(m.frames.length, `${heading}: found at least the section root`).toBeGreaterThan(0);
+          expect(
+            m.tableCount,
+            `${heading}: the section still renders a grid to measure`,
+          ).toBeGreaterThan(0);
+
+          for (const f of m.frames) {
+            expect(
+              f.right,
+              `${heading}: ${f.what} does not overflow the page`,
+            ).toBeLessThanOrEqual(m.available);
+          }
+
+          // §5.1, per tab: the section takes the width it is given.
+          //
+          // 1px of slack, and the reasoning is worth stating because the sibling
+          // spec uses exact equality. These are two INDEPENDENTLY ROUNDED edges:
+          // `available` subtracts a parsed `padding-right` from one fractional
+          // rect, `root.right` rounds a different fractional rect. Sub-pixel
+          // layout — a fractional scrollbar, a zoom level, a font metric that
+          // shifts a flex line — can leave them 1 apart while the section is
+          // taking exactly the width it was given. This file has never executed
+          // against a live stack, so exact equality here would be a spurious
+          // failure waiting for its first run rather than a real finding. The
+          // defect being guarded is 272px; 1px of tolerance cannot hide it.
+          const root = m.frames[0]!;
+          expect(
+            Math.abs(root.right - m.available),
+            `${heading}: the section leaves no gutter (root ${root.right} vs available ${m.available})`,
+          ).toBeLessThanOrEqual(1);
+
+          // The exception, asserted rather than skipped (§5.2): prose stops at
+          // its own reading measure while the frames take the page.
+          //
+          // BY IDENTITY, NOT BY POPULATION — and this file has now got that wrong
+          // twice, in opposite ways, which is why the reasoning is written out.
+          //
+          //  1. First revision: no guard at all on the loop below, because "not
+          //     every tab has capped prose". A `for` over a possibly-empty list
+          //     asserts nothing — the vacuous pass this file's own header warns
+          //     about, in the file that warns about it.
+          //  2. Second revision: `proseRights.length > 0`, claiming an intro
+          //     losing its cap would shorten the list and fail here. **Also
+          //     false.** `Response` and `Access` each render THREE unconditional
+          //     `max-w-prose` paragraphs, so deleting the cap from the intro
+          //     leaves two behind and the count still passes. Only `Query`, with
+          //     exactly one, was ever genuinely guarded — a guard that holds for
+          //     one of six looks identical to one that holds for all six.
+          //
+          // A count over a population can be satisfied by any member of it. The
+          // intro is therefore resolved as a specific ELEMENT — the `<p>` beside
+          // this section's `h2` — and asserted on directly, so only the thing the
+          // rule is about can satisfy it. Same reasoning as
+          // `__tests__/sectionWidth.ts`'s `expectSectionIntroCapsItsProse`, which
+          // is the jsdom half of this guard.
+          expect(m.intro, `${heading}: found the section's intro paragraph`).not.toBeNull();
+          // Geometry first: on screen at all, and held to a reading measure. 700
+          // is the same bound the sibling specs use — loose enough to survive a
+          // font change, tight enough that an uncapped intro (which would take
+          // the section's full 1560) fails.
+          expect(m.intro!.width, `${heading}: the intro is laid out at all`).toBeGreaterThan(0);
+          expect(
+            m.intro!.width,
+            `${heading}: the intro keeps a reading measure`,
+          ).toBeLessThan(700);
+          expect(
+            m.intro!.right,
+            `${heading}: the intro stops short of the section's measure`,
+          ).toBeLessThan(root.right);
+          // The canary, asserted last and labelled as such — see `measure`.
+          expect(m.intro!.capped, `${heading}: the intro still carries max-w-prose (§5.1)`).toBe(true);
+
+          // The remaining capped paragraphs, still asserted — widening them is
+          // the obvious wrong fix and would otherwise pass.
+          for (const r of m.proseRights) {
+            expect(r, `${heading}: prose keeps its own reading measure`).toBeLessThan(root.right);
+          }
+
+          measured.push({
+            tab: heading,
+            available: m.available,
+            widest: Math.max(...m.frames.map((f) => f.right)),
+          });
         }
 
-        // §5.1, per tab: the section takes the width it is given.
+        // The count guard for the OUTER loop: six tabs, or the cross-tab claim
+        // below is made about fewer than it says.
+        expect(measured.length, "measured all six tabs").toBe(TABS.length);
+
+        // The claim itself, and the one no jsdom test can make: the six agree.
         //
-        // 1px of slack, and the reasoning is worth stating because the sibling
-        // spec uses exact equality. These are two INDEPENDENTLY ROUNDED edges:
-        // `available` subtracts a parsed `padding-right` from one fractional
-        // rect, `root.right` rounds a different fractional rect. Sub-pixel
-        // layout — a fractional scrollbar, a zoom level, a font metric that
-        // shifts a flex line — can leave them 1 apart while the section is
-        // taking exactly the width it was given. This file has never executed
-        // against a live stack, so exact equality here would be a spurious
-        // failure waiting for its first run rather than a real finding. The
-        // defect being guarded is 272px; 1px of tolerance cannot hide it.
-        const root = m.frames[0]!;
+        // Reported as a SPREAD rather than a pairwise walk, so one failure
+        // message carries every tab and its number instead of dying on the first
+        // mismatched pair — and so the number in the message is the thing §5.1 is
+        // about (how far apart the tabs are) rather than an index.
+        //
+        // Same 1px tolerance and same reasoning as the per-tab check above: six
+        // independently rounded edges, a defect measured in hundreds of pixels.
+        // The spread was 272 before this rule; 1px cannot hide that.
+        const edges = measured.map((m) => m.widest);
+        const spread = Math.max(...edges) - Math.min(...edges);
         expect(
-          Math.abs(root.right - m.available),
-          `${heading}: the section leaves no gutter (root ${root.right} vs available ${m.available})`,
+          spread,
+          `at ${width}px all six tabs end at the same right edge — measured: ${measured
+            .map((m) => `${m.tab}=${m.widest}/${m.available}`)
+            .join(", ")}`,
         ).toBeLessThanOrEqual(1);
-
-        // The exception, asserted rather than skipped (§5.2): prose stops at
-        // its own reading measure while the frames take the page.
-        //
-        // BY IDENTITY, NOT BY POPULATION — and this file has now got that wrong
-        // twice, in opposite ways, which is why the reasoning is written out.
-        //
-        //  1. First revision: no guard at all on the loop below, because "not
-        //     every tab has capped prose". A `for` over a possibly-empty list
-        //     asserts nothing — the vacuous pass this file's own header warns
-        //     about, in the file that warns about it.
-        //  2. Second revision: `proseRights.length > 0`, claiming an intro
-        //     losing its cap would shorten the list and fail here. **Also
-        //     false.** `Response` and `Access` each render THREE unconditional
-        //     `max-w-prose` paragraphs, so deleting the cap from the intro
-        //     leaves two behind and the count still passes. Only `Query`, with
-        //     exactly one, was ever genuinely guarded — a guard that holds for
-        //     one of six looks identical to one that holds for all six.
-        //
-        // A count over a population can be satisfied by any member of it. The
-        // intro is therefore resolved as a specific ELEMENT — the `<p>` beside
-        // this section's `h2` — and asserted on directly, so only the thing the
-        // rule is about can satisfy it. Same reasoning as
-        // `__tests__/sectionWidth.ts`'s `expectSectionIntroCapsItsProse`, which
-        // is the jsdom half of this guard.
-        expect(m.intro, `${heading}: found the section's intro paragraph`).not.toBeNull();
-        expect(m.intro!.capped, `${heading}: the intro carries max-w-prose (§5.1)`).toBe(true);
-        expect(
-          m.intro!.right,
-          `${heading}: the intro stops short of the section's measure`,
-        ).toBeLessThan(root.right);
-
-        // The remaining capped paragraphs, still asserted — widening them is
-        // the obvious wrong fix and would otherwise pass.
-        for (const r of m.proseRights) {
-          expect(r, `${heading}: prose keeps its own reading measure`).toBeLessThan(root.right);
-        }
-
-        measured.push({
-          tab: heading,
-          available: m.available,
-          widest: Math.max(...m.frames.map((f) => f.right)),
-        });
       }
-
-      // The count guard for the OUTER loop: six tabs, or the cross-tab claim
-      // below is made about fewer than it says.
-      expect(measured.length, "measured all six tabs").toBe(TABS.length);
-
-      // The claim itself, and the one no jsdom test can make: the six agree.
-      //
-      // Reported as a SPREAD rather than a pairwise walk, so one failure
-      // message carries every tab and its number instead of dying on the first
-      // mismatched pair — and so the number in the message is the thing §5.1 is
-      // about (how far apart the tabs are) rather than an index.
-      //
-      // Same 1px tolerance and same reasoning as the per-tab check above: six
-      // independently rounded edges, a defect measured in hundreds of pixels.
-      // The spread was 272 before this rule; 1px cannot hide that.
-      const edges = measured.map((m) => m.widest);
-      const spread = Math.max(...edges) - Math.min(...edges);
-      expect(
-        spread,
-        `all six tabs end at the same right edge — measured: ${measured
-          .map((m) => `${m.tab}=${m.widest}/${m.available}`)
-          .join(", ")}`,
-      ).toBeLessThanOrEqual(1);
     } finally {
       // Best-effort: a failed assertion must not leave the shared workspace
       // holding a throwaway endpoint or connection.

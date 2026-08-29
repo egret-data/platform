@@ -147,8 +147,20 @@ export default function VersionsSection() {
     // aligns its action differently, which is the defect §5.1 was reversed to
     // remove, in miniature.
     <div className="space-y-6">
-      {/* The same heading block as the five sibling sections: a bare `<div>`
-          holding the `h2` and one capped paragraph. This one used to wrap that
+      {/* The same heading block as THREE of the five sibling sections — a bare
+          `<div>` holding the `h2` and one capped paragraph, as `Config`,
+          `Response` and `Access` do. This comment used to say "the five", and
+          it was wrong: `Query.tsx:403` and `TryIt.tsx:305` put the intro
+          BESIDE the `h2` in a `flex … items-baseline` row, because both hand
+          the rest of their height to a sized child and cannot afford two
+          stacked lines. Four of six is still the majority shape and this row
+          belongs in it; the count is corrected rather than the layout.
+
+          Worth knowing when changing either shape: **no width spec can tell
+          them apart.** They all resolve the intro as `h2`'s sibling `<p>` and
+          measure left and right edges, which are identical in both — so a
+          section silently switching shapes is a review question, not a test
+          failure. This one used to wrap that
           in a `flex … justify-between` row with a filled primary `Publish`
           pinned to its right — directly under the shell's own `Save`, so the
           page's top-right corner carried two primary-looking buttons doing

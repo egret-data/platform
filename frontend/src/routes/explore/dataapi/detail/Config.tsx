@@ -106,13 +106,23 @@ export default function Config() {
           410/0/296 and no dead space.
 
           Do not read that as "pre-existing". `ConfigTableGroup` is new in this
-          phase and is the only source of `colSpan={3}` inside a `ConfigTable` in the tree: at the
-          merge base, no file importing `ConfigTable` contained a `colSpan` at
-          all, so relative to `main` there was no phantom column on any page.
-          It was already there when the WIDTH pass measured — the group rows had
-          landed in the earlier tasks — and that is the only sense in which it
-          pre-dates anything. `ResponseSection` has the same phantom column from
-          its one group row.
+          phase: at the merge base, no file importing `ConfigTable` contained a
+          `colSpan` at all, so relative to `main` there was no phantom column on
+          any page. It was already there when the WIDTH pass measured — the
+          group rows had landed in the earlier tasks — and that is the only
+          sense in which it pre-dates anything.
+
+          This comment used to add "and is the only source of `colSpan={3}`
+          inside a `ConfigTable` in the tree". THAT IS NO LONGER TRUE, and the
+          detail-tabs pass is what falsified it: `ResponseSection.tsx` now
+          carries two hand-written `<TableCell colSpan={3}>` rows for the
+          transform's editors (:907, :967) beside its TWO group rows (:869,
+          :955), `AccessSection.tsx` three (:427, :437, :449) and `TryIt.tsx`
+          one (:477). The consequence for anyone re-tuning these widths is the
+          part that matters: the phantom column is produced by ANY
+          `colSpan={3}` row, so counting `ConfigTableGroup` rows undercounts
+          it. `ResponseSection` has the same phantom column from two group rows
+          plus two editor rows — not from "its one group row".
 
           The width pass did not create it, then, but it does make it bigger in
           one sub-regime, and that depends on something easy to miss: the

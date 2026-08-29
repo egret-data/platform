@@ -922,13 +922,24 @@ cannot. When those two conflict, the route wins.
   not the label. The check that finds any of this is
   the one this section prescribes — **grep the class the rule is about, reconcile every hit,
   then check your count against the list you just wrote**. Run for the row-action move over
-  `src/routes/explore/dataapi`, `text-right` returns 17 hits: **two** are action columns and
-  both are fixed (`detail/AccessSection.tsx:414` and `detail/Versions.tsx:224`, plus each one's
-  matching body cell, 721 and 289); ten are numeric columns in `Activity.tsx` and
+  `src/routes/explore/dataapi`, `text-right` returns **19** hits: **two** are action columns and
+  both are fixed (`detail/AccessSection.tsx:414` and `detail/Versions.tsx:233`, plus each one's
+  matching body cell, 721 and 317); ten are numeric columns in `Activity.tsx` and
   `ActivityCallList.tsx` (Calls, Error rate, p50/p95, Cache-hit rate, Duration, and their
-  `tabular-nums` cells); two are `Clients.tsx`, a list page rather than a detail route; and one
-  is prose — a line of `Versions.tsx`'s own comment explaining why widening a `text-right`
-  column moves nothing. 2 headers + 2 body cells + 10 numeric + 2 list-page + 1 comment = 17.
+  `tabular-nums` cells); two are `Clients.tsx`, a list page rather than a detail route; **two**
+  are prose — `Versions.tsx:113` and `:135`, its own comment explaining why widening a
+  `text-right` column moves nothing; and one is a test asserting the header
+  (`__tests__/EndpointDetail.test.tsx`).
+  2 headers + 2 body cells + 10 numeric + 2 list-page + 2 comment + 1 test = 19.
+
+  **This enumeration had gone stale, and the way it went stale is the argument for the check.**
+  It read 17 with `2+2+10+2+1`, and it was correct when it was written at `2fc228d0`. Then
+  `fa89ab73` — a fix round of the same task — added a second comment line about `text-right` and
+  moved the two cited sites down the file, so by the time the branch was reviewed the doc named
+  a count the tree did not return and cited two line numbers (`:224`, `:289`) that no longer
+  pointed at anything. Nobody re-ran the check after the last commit that could invalidate it.
+  **A prescribed check is only worth the last time it was run**; re-run this one whenever a
+  commit touches either file, not only when the rule changes.
 
   - **Prose: DONE.** "The sentence sets as one very long line" is a PROSE measure and
     `max-w-prose` answers it (§5.2, "cap the prose, not the column"). Every section intro
@@ -1169,7 +1180,8 @@ Value. Measured at a 1010px viewport (content box 706px): columns 288/0/208 with
 deleting the four group rows from that same live table gives 410/0/296 and no dead space.
 
 **It is not pre-existing, and three places in this document used to say it was.**
-`ConfigTableGroup` is new in this phase and is the only source of `colSpan={3}` inside a `ConfigTable` in the tree:
+`ConfigTableGroup` is new in this phase, and at the time this was written it was the only source
+of `colSpan={3}` inside a `ConfigTable` in the tree:
 measured at the merge base (`63a4fb90`), no file importing `ConfigTable` contained a `colSpan`
 at all — so relative to `main` there was no phantom column, on any page. The narrower thing
 that *is* true: the group rows landed in the earlier tasks, so the column was already there
@@ -1182,7 +1194,20 @@ the old cap gave 272px (measured during the width pass). The fix is to make Valu
 unsized column below `lg`; it is deferred because it is **unverified** that an unsized Value
 absorbs the phantom column rather than splitting with it.
 
-`ResponseSection` has the same phantom column, from its one `Output shape` group row.
+**That "only source" is no longer true, and this branch is what falsified it.** The detail-tabs
+pass moved `Response transform` into the grid, so `ResponseSection.tsx` now renders TWO group
+rows (`:869` `Response transform`, `:955` `Output shape`) **and two hand-written
+`<TableCell colSpan={3}>` rows of its own** (`:907`, `:967`) carrying the transform's editors —
+plus three more in `AccessSection.tsx` (`:427`, `:437`, `:449`) and one in `TryIt.tsx` (`:477`).
+`Config.tsx:109` says "only source" too and is wrong for the same reason. **Both sentences are
+left standing above with their date rather than quietly edited**, because the fact they record —
+that the phantom column arrived with this phase and is not inherited from `main` — is still
+true, and it is the fact §5.4 exists to carry.
+
+What changes for a reader re-tuning widths: the phantom column is produced by **any**
+`colSpan={3}` row, not only by `ConfigTableGroup`, so counting group rows undercounts it.
+`ResponseSection` has the same phantom column from **two** group rows plus two editor rows, not
+from "its one `Output shape` group row" as this section used to say.
 
 ### 5.4a The section that fell between two tasks
 

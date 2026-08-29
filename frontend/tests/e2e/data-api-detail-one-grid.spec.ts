@@ -103,8 +103,20 @@ const NOTES = [
 /** What `w-56` gave the `Who` column: 224px minus the shared `TableCell`'s `px-2`. */
 const OLD_WHO_CONTENT_WIDTH = 208;
 
-/** The four sized columns of the history table, in px: Version, Who, When, Actions. */
+/**
+ * The four sized columns of the history table, in px: Version, Who, When,
+ * Actions — at and below the `xl` breakpoint, because `Who` is `w-56 xl:w-80`
+ * and the two regimes are genuinely different pages.
+ *
+ * **Both are named because BOTH are driven.** Until the live check every spec
+ * in this branch ran only at 1600, and both row fixes are `xl`-gated
+ * (`Versions.tsx:228` `w-56 xl:w-80`, `AccessSection.tsx:344` `w-48 xl:w-96`),
+ * so below 1280px the product sits in its pre-fix state with nothing watching
+ * it. Worse, arithmetic hard-coded to the `xl` numbers made the suite
+ * fail-by-design at a narrow viewport rather than report on one.
+ */
 const SIZED_COLUMNS_AT_XL = 128 + 320 + 128 + 128;
+const SIZED_COLUMNS_BELOW_XL = 128 + 224 + 128 + 128;
 
 /**
  * The walk from a section's own `h2` up to the child of the scrolling host,
@@ -246,6 +258,9 @@ function measureVersions(longAuthor: string) {
             return round(who.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight));
           })(),
           isLong: (who.textContent ?? "").trim() === longAuthor,
+          // The route to the value when the column cannot hold it. Below `xl`
+          // this is the ONLY route — see the sub-`xl` block in the test.
+          title: who.getAttribute("title"),
         },
         lastTextRight: lastTextRight(row, cells),
         actionLeft: action ? round(action.getBoundingClientRect().left) : null,
@@ -345,6 +360,24 @@ function measureResponse() {
       width: round(p.getBoundingClientRect().width),
       right: round(p.getBoundingClientRect().right),
     })),
+    // THE INTRO, RESOLVED AS ONE ELEMENT, because the count above cannot pin
+    // it: `ResponseSection.tsx` renders NINE unconditional `max-w-prose`
+    // paragraphs, so deleting the intro's cap leaves eight and
+    // `proseRights.length > 0` still passes. That is exactly the revision-2
+    // mistake `data-api-detail-tab-widths.spec.ts:295-301` records against
+    // itself — corrected in the file that found it, then copied un-fixed into
+    // this one and into `data-api-access-row.spec.ts`. A count over a
+    // population is satisfied by any member of it.
+    intro: (() => {
+      const el = heading.parentElement?.querySelector<HTMLElement>("p") ?? null;
+      if (!el) return null;
+      const b = el.getBoundingClientRect();
+      return {
+        width: round(b.width),
+        right: round(b.right),
+        capped: /(?:^|\s)max-w-prose(?:\s|$)/.test(el.className),
+      };
+    })(),
   };
 }
 
@@ -406,15 +439,13 @@ test.describe("Data API — one grid down the tab, and a history row that spends
     // this file exists to catch. On a stubbed harness it could never have been
     // noticed, because the harness answered every request itself.
     //
-    // `interceptedUsers` guards the OTHER half, and it is worth being exact
-    // about which: re-breaking the glob was run as a mutation, and the run dies
-    // at the `LONG_AUTHOR` visibility wait below, NOT here — so this counter is
-    // not what catches a rename, and saying so would be the kind of guard this
-    // branch keeps finding green on the defect it names. What it does catch is
-    // the case the visibility wait CANNOT see: a stack whose real user list
-    // happens to contain that address, where the wait passes, the intercept is
-    // dead anyway, and every width below is measured against whatever the
-    // backend holds rather than against the fixture this file documents.
+    // `interceptedUsers` is asserted BEFORE the address wait, and that ordering
+    // was itself a correction. Written after it, the counter could never
+    // report: re-breaking the glob as a mutation killed the run at the address
+    // wait, fifteen seconds earlier, so the one line naming the real cause
+    // never executed — a diagnostic placed where the thing it diagnoses has
+    // already ended the test. Moved in front, a dead glob now fails AT the
+    // counter, saying so.
     let interceptedUsers = 0;
     await page.route("**/api/control-plane/users", (route) => {
       interceptedUsers += 1;
@@ -434,14 +465,22 @@ test.describe("Data API — one grid down the tab, and a history row that spends
       timeout: 30_000,
     });
     await expect(page.getByTestId("version-row-e2e-ver-5")).toBeVisible();
-    // The author column resolves through a second query; wait for the value
-    // this spec measures rather than for a timeout.
+    // FIRST, and the order is the whole point of it. This used to sit AFTER the
+    // address wait below, where it could never report: a dead glob fails that
+    // wait fifteen seconds earlier with "element not found", and the counter —
+    // the one line that names the actual cause — never runs. Polled rather than
+    // read once, because the user list is a second query that has not
+    // necessarily resolved when the first row paints.
+    await expect
+      .poll(() => interceptedUsers, {
+        message: "the user-list intercept fired — if this is 0 the route glob no longer matches",
+      })
+      .toBeGreaterThan(0);
+    // The author column resolves through that query; wait for the value this
+    // spec measures rather than for a timeout. It also covers what the counter
+    // cannot: a stack whose REAL user list happens to hold the fixture's
+    // address would satisfy the counter's absence, not its presence.
     await expect(page.getByText(LONG_AUTHOR, { exact: true }).first()).toBeVisible();
-    // Asserted before the measurements, not after: if the user list were served
-    // by the real backend the addresses below would be whoever the stack holds,
-    // and every width claim would be about a different fixture than the one
-    // this file documents.
-    expect(interceptedUsers, "the user-list intercept actually fired").toBeGreaterThan(0);
 
     const m = await page.evaluate(measureVersions, LONG_AUTHOR);
     expect(m.error, "the history table was measured").toBeNull();
@@ -492,6 +531,66 @@ test.describe("Data API — one grid down the tab, and a history row that spends
     expect(m.heading.publishCentre, "Publish shares the History line").toBe(m.heading.historyCentre);
     expect(m.heading.publishAboveTable, "…and that line is above the table").toBe(true);
     expect(m.heading.titleBlockHoldsPublish, "the section title's block holds no control").toBe(false);
+
+    // ── BELOW `xl`: the regime nothing was driving ─────────────────────────
+    //
+    // Same fixture, same login, second viewport — 1100px, inside the `lg`
+    // regime and below the `xl` gate. This block exists because every spec in
+    // this branch ran only at 1600 while BOTH row fixes are `xl`-gated, so the
+    // narrow regime was pinned by nothing at all. What it asserts is NOT the
+    // wide contract repeated: below `xl` the column really is back to `w-56`
+    // and the long address really does not fit, and pretending otherwise would
+    // be a spec written against a page that does not exist.
+    //
+    // What must hold here is the MITIGATION — `title` — which is the only
+    // route to the value when the column cannot hold it, was added by Task 4's
+    // fix round, and until now was verified only by hand.
+    await page.setViewportSize({ width: 1100, height: 1000 });
+    // A resize is not a render; wait for the column to actually be narrow
+    // rather than measuring the previous layout.
+    await expect
+      .poll(async () =>
+        page.evaluate(() => {
+          const th = [...document.querySelectorAll("th")].find((t) => t.textContent?.trim() === "Who");
+          return th ? Math.round(th.getBoundingClientRect().width) : -1;
+        }),
+      )
+      .toBe(224);
+
+    const narrow = await page.evaluate(measureVersions, LONG_AUTHOR);
+    expect(narrow.error, "the history table was measured below xl").toBeNull();
+    if (narrow.error) throw new Error(narrow.error);
+
+    // The fixture still has the rows the claim is about, at this viewport too.
+    const narrowLong = narrow.rows.filter((r) => r.who.isLong);
+    expect(narrowLong.length, "the long-address rows are still on screen at 1100").toBe(
+      longRows.length,
+    );
+
+    for (const r of narrowLong) {
+      // Stated as the defect it is, not skipped: the column cannot hold it here.
+      expect(
+        r.who.natural,
+        `${r.who.text}: below xl the column genuinely cannot hold it`,
+      ).toBeGreaterThan(r.who.available);
+      // …and this is the assertion that earns the block. `title` carries the
+      // WHOLE value, so a reader below `xl` still has a route to it.
+      expect(r.who.title, `${r.who.text}: carries the full address in title`).toBe(r.who.text);
+    }
+
+    // `Note` is still the unsized remainder against the NARROW sizing — the
+    // arithmetic that used to be hard-coded to the `xl` numbers, which is what
+    // made a narrow run fail by design instead of reporting.
+    const narrowNote = narrow.columns.find((c) => c.name === "Note")!;
+    expect(narrowNote.width, "Note keeps the remainder below xl").toBe(
+      narrow.tableScroll.client - SIZED_COLUMNS_BELOW_XL,
+    );
+
+    // §5.1 still holds at this width: the frame ends at the section's edge.
+    expect(
+      Math.abs(narrow.tableRight - narrow.sectionRight),
+      "the table still ends at the section's edge below xl",
+    ).toBeLessThanOrEqual(1);
   });
 
   test("Response renders one settings grid, with the transform's editors in a row that spans it", async ({
@@ -570,6 +669,20 @@ test.describe("Data API — one grid down the tab, and a history row that spends
     for (const right of m.frameRights) {
       expect(Math.abs(right - m.sectionRight), "a frame ends at the section's edge").toBeLessThanOrEqual(1);
     }
+    // BY IDENTITY FIRST — see the `intro` comment in `measureResponse`. The
+    // count that follows is kept because widening the other eight paragraphs
+    // would be a real regression too, but it is not what pins the intro.
+    expect(m.intro, "found the section's intro paragraph").not.toBeNull();
+    // Geometry first; the class is a canary, asserted last. A later
+    // `max-w-none` keeps the class and loses the cap, and a hidden intro
+    // reports 0 for both width and right, so neither is caught by a regex
+    // or by `<` alone.
+    expect(m.intro!.width, "the intro is laid out at all").toBeGreaterThan(0);
+    expect(m.intro!.width, "the intro keeps a reading measure").toBeLessThan(700);
+    expect(m.intro!.capped, "the intro still carries max-w-prose (§5.1)").toBe(true);
+    expect(m.intro!.right, "the intro stops short of the section's measure").toBeLessThan(
+      m.sectionRight,
+    );
     expect(m.proseRights.length, "the section has capped prose").toBeGreaterThan(0);
     for (const p of m.proseRights) {
       expect(p.width, "prose stops at a reading measure").toBeLessThanOrEqual(700);
