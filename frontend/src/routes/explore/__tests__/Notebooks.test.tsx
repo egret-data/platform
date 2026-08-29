@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { folderCollapseKey, UNCATEGORIZED_KEY } from "@/components/explore/folders";
 
 // ── Mock factories ────────────────────────────────────────────────────────────
 
@@ -599,5 +600,61 @@ describe("Notebooks — the summary strip says `1 notebook`, not `1 notebooks`",
     renderAt();
     expect(screen.getByText("notebooks")).toBeInTheDocument();
     expect(screen.getByText("folders")).toBeInTheDocument();
+  });
+});
+
+/*
+ * Item 2: the folderless-header gate, lifted from `dataapi/Endpoints.tsx` and
+ * `sqllab/SavedTab.tsx` (the original precedent) into the five siblings that
+ * headed the folderless bucket unconditionally.
+ *
+ * Both fixtures matter and neither is optional. Without folders is the case
+ * being fixed; WITH a folder is what tells a working gate apart from one
+ * wired permanently off, which the first test alone cannot see.
+ */
+describe("Notebooks — no folders, no folderless header", () => {
+  it("draws a flat table when the workspace has no folders", () => {
+    foldersMock.mockReturnValue({ data: [] });
+    renderAt();
+    expect(screen.getByText("My Analysis")).toBeInTheDocument();
+    expect(screen.getByText("Shared Report")).toBeInTheDocument();
+    // "Uncategorized" beside nothing labels the whole list after the one thing
+    // it is not, and its collapse control's only effect is to hide everything.
+    expect(screen.queryByRole("button", { name: "Toggle Uncategorized" })).not.toBeInTheDocument();
+  });
+
+  it("still heads the folderless bucket beside a real folder", () => {
+    notebooksMock.mockReturnValue({ data: [{ ...mockNb1, folder_id: "f1" }, mockNb2], isLoading: false, isError: false, error: null });
+    foldersMock.mockReturnValue({ data: [{ id: "f1", name: "Revenue" }] });
+    renderAt();
+    expect(screen.getByRole("button", { name: "Toggle Revenue" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Toggle Uncategorized" })).toBeInTheDocument();
+  });
+
+  it("does not strand rows behind a collapse state whose header is no longer rendered", async () => {
+    // What a previous session left behind: Uncategorized collapsed, from back
+    // when this workspace still had folders. `useCollapsed` reads that out of
+    // localStorage at mount and it survives the folders being deleted.
+    //
+    // Both halves are DERIVED, never spelled out: `folderCollapseKey` is the
+    // same function the page hands `useCollapsed`, `UNCATEGORIZED_KEY` the same
+    // constant it collapses under. A hardcoded key would land the seed where
+    // nothing reads it and this test would still pass, because a seed that
+    // misses is indistinguishable from a page that correctly ignored it.
+    //
+    // Rendering the rows is only half of it. `visibleRows` — what bulk select
+    // acts on — is a SEPARATE derivation over the same collapse state, so
+    // gating the render loop alone leaves "Select all" sweeping zero rows while
+    // two sit in front of the user with no header left anywhere to expand.
+    localStorage.setItem(folderCollapseKey("eng", "notebooks"), JSON.stringify([UNCATEGORIZED_KEY]));
+    foldersMock.mockReturnValue({ data: [] });
+    const user = userEvent.setup();
+    renderAt();
+    expect(screen.getByText("My Analysis")).toBeInTheDocument();
+    expect(screen.getByText("Shared Report")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Bulk select" }));
+    await user.click(screen.getByLabelText("Select all"));
+    expect(screen.getByRole("button", { name: "Move 2 to Trash" })).toBeInTheDocument();
   });
 });

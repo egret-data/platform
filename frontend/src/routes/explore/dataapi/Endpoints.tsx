@@ -21,7 +21,7 @@ import { BookmarkToggle, BookmarkStar } from "@/components/explore/BookmarkToggl
 import { ListToolbarButton } from "@/components/explore/ListToolbarButton";
 import { FacetSelect, FACET_ALL } from "@/components/explore/FacetSelect";
 import { useBulkSelect } from "@/hooks/useBulkSelect";
-import { groupByFolder, useCollapsed, UNCATEGORIZED_KEY } from "@/components/explore/folders";
+import { folderCollapseKey as sharedFolderCollapseKey, groupByFolder, showFolderSections, useCollapsed, UNCATEGORIZED_KEY } from "@/components/explore/folders";
 import { useFoldersFoldersList } from "@/api/generated/folders/folders";
 import { useFolderMutations } from "@/api/folders";
 import { useDatabases } from "@/api/databases";
@@ -50,8 +50,13 @@ const FOLDER_KIND = "data_api_endpoints";
  * a key nothing reads — and that test would keep passing, because a seed that
  * misses looks exactly like a page that correctly ignored it. Deriving it from
  * here is what keeps the guard able to fail.
+ *
+ * The FORMAT now lives in `showFolderSections`' module beside the collapse
+ * hook that consumes it, because the same argument applies across the seven
+ * grouped lists and not only across this page and its test. This stays as a
+ * one-argument alias so `FOLDER_KIND` is still bound in exactly one place.
  */
-export const folderCollapseKey = (ws: string) => `folders:${ws}:${FOLDER_KIND}`;
+export const folderCollapseKey = (ws: string) => sharedFolderCollapseKey(ws, FOLDER_KIND);
 
 
 /**
@@ -241,33 +246,18 @@ export default function Endpoints() {
 
   /**
    * Whether the table is drawn with folder SECTION HEADERS at all — which is
-   * not the same question as whether it is grouped. `groupByFolder` always
-   * returns at least the folderless bucket, so a workspace that has never made
-   * a folder still gets one group; heading it turns a plain list of endpoints
-   * into "Uncategorized (1)", a collapsible section introducing a taxonomy the
-   * workspace does not use. "Uncategorized" only carries information beside a
-   * NAMED folder; on its own it labels the whole list after the one thing it
-   * is not, and its collapse control's only effect is to hide everything.
+   * not the same question as whether it is grouped. The full argument, and the
+   * reasons it is read off `folders` rather than off `groups.length` and never
+   * applied to the trash, now live on `showFolderSections`
+   * (`src/components/explore/folders.ts`).
    *
-   * **`SavedTab.tsx:134` is the precedent, and this is the second application
-   * of it, not a deviation.** That file already branches
-   * `folders.length === 0 ? <flat list> : groups.map(…)` around the same
-   * `groupByFolder`/`FolderHeader` pair, for the same reason. Do not "restore
-   * consistency" by deleting this gate: `Charts.tsx`, `Datasets.tsx`,
-   * `Dashboards.tsx`, `Notebooks.tsx` and `Alerts.tsx` DO render their header
-   * unconditionally, so those five are the ones out of step, and dropping this
-   * brings back a lone "Uncategorized (1)" over a folderless workspace's only
-   * row. The split is a gap in those five, not a licence for this one to
-   * reproduce it — the same reading §1.5 of `docs/en/ui-conventions.md`
-   * applies to `role="rowheader"`. It is invisible in any workspace that HAS a
-   * folder, where every one of these pages groups identically.
-   *
-   * Read off `folders`, not off `groups.length`: with a filter engaged
-   * `groupByFolder` drops empty named folders, so a search matching only
-   * folderless rows would collapse `groups` to one and make the header blink
-   * out mid-keystroke, then back on deletion of the last character.
+   * This page and `sqllab/SavedTab.tsx` were the only two that had the gate;
+   * `Charts.tsx`, `Datasets.tsx`, `Dashboards.tsx`, `Notebooks.tsx` and
+   * `Alerts.tsx` headed the folderless bucket unconditionally until the gate
+   * was lifted into the shared helper all seven now call. Nothing is left to
+   * "restore consistency" with by deleting it.
    */
-  const showFolderHeaders = !showTrash && folders.length > 0;
+  const showFolderHeaders = showFolderSections(folders, showTrash);
 
   /**
    * The rows actually ON SCREEN — not `rows`, which is only what survived

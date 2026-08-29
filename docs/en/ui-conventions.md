@@ -215,6 +215,57 @@ because the task that wrote this section was scoped to a single page. It is stat
 than left implicit so that nobody reads the reference implementation's silence as the
 convention.
 
+### 1.5a A workspace with no folders gets no section header
+
+`src/components/explore/folders.ts` — `showFolderSections(folders, showTrash)`
+
+`groupByFolder` always returns at least the folderless bucket, so "is this list grouped" is
+**not** the question "does this list get section headers". A workspace that has never made a
+folder still gets one group, and heading it turns a plain list into a collapsible
+"Uncategorized (1)" — a section introducing a taxonomy the workspace is not using, whose
+collapse control's only effect is to hide everything. "Uncategorized" carries information only
+beside a NAMED folder; alone, it labels the whole list after the one thing it is not.
+
+```tsx
+const showFolderHeaders = showFolderSections(folders, showTrash);
+```
+
+**Read off `folders`, never off `groups.length`.** With a filter engaged `groupByFolder` drops
+empty named folders, so a search matching only folderless rows collapses `groups` to one and
+would make the header blink out mid-keystroke and back on deleting the character.
+
+**The trash is never sectioned.** A trashed row's folder is where it will go BACK to, not where
+it is, and the trash is the one view whose whole job is to let the author find something they
+deleted.
+
+**Feed the one flag to the render loop AND to `visibleRows`.** Those are two derivations of the
+same question. Gating only the render leaves a collapse state that `useCollapsed` restored from
+localStorage — it outlives the folder that produced it — hiding rows from "Select all" that are
+in plain sight, with no header left anywhere to expand.
+
+**The defect.** `sqllab/SavedTab.tsx` wrote this gate first and `dataapi/Endpoints.tsx` second;
+`Charts.tsx`, `Datasets.tsx`, `Dashboards.tsx`, `Notebooks.tsx` and `Alerts.tsx` headed the
+folderless bucket unconditionally. Two copies of a rule and five pages without it is how the
+rule was going to be deleted for "consistency", so the gate is a shared helper now and the
+call sites cannot drift.
+
+**`folderCollapseKey(ws, kind)` for the same reason.** Every one of these pages spelled
+`` `folders:${ws}:${kind}` `` inline, and its test spelled it again. A test that seeds
+localStorage under a key the page does not read **passes anyway**, because a seed that misses is
+indistinguishable from a page that correctly ignored it. Its parameter is `FolderKind`, not
+`EntityKind`: `data_api_endpoints` has folders but no `PATCH …/{id}/folder` route, so it exists
+only in the wider type. `Endpoints.tsx` keeps its one-argument export as a thin wrapper so
+`FOLDER_KIND` stays bound in one place.
+
+**Counted from the tree, not from this paragraph:**
+
+```bash
+grep -rl 'showFolderSections' frontend/src   # 9: folders.ts, its test, and the 7 grouped lists
+```
+
+**Both fixtures, on every page.** A page tested only without folders cannot tell a working gate
+from one wired permanently off; a page tested only with folders cannot see the gate at all.
+
 ### 1.6 `SummaryStrip` owns the singular, and the pages own the words
 
 `src/components/explore/SummaryStrip.tsx`

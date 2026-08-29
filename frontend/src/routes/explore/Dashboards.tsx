@@ -20,7 +20,7 @@ import { DashboardActionsMenu } from "@/components/chart/dashboard/DashboardActi
 import { ShareDialog } from "@/components/sharing/ShareDialog";
 import { useBulkSelect } from "@/hooks/useBulkSelect";
 import { useFolders, useFolderMutations, useSetFolder } from "@/api/folders";
-import { groupByFolder, useCollapsed, UNCATEGORIZED_KEY } from "@/components/explore/folders";
+import { folderCollapseKey, groupByFolder, showFolderSections, useCollapsed, UNCATEGORIZED_KEY } from "@/components/explore/folders";
 import { FolderHeaderRow } from "@/components/explore/FolderHeaderRow";
 
 type SortKey = "name" | "card_count" | "updated_at";
@@ -34,7 +34,7 @@ export default function Dashboards() {
   const { data: folders = [] } = useFolders(ws, "dashboards");
   const setFolder = useSetFolder(ws, "dashboards");
   const { create: createFolder, rename: renameFolder, remove: removeFolder } = useFolderMutations(ws, "dashboards");
-  const collapse = useCollapsed(`folders:${ws}:dashboards`);
+  const collapse = useCollapsed(folderCollapseKey(ws, "dashboards"));
   const [searchParams] = useSearchParams();
   const focusFolder = searchParams.get("folder");
   // The info sidebar's "Saved in" link lands here. Reveal that section once on arrival; the
@@ -94,6 +94,21 @@ export default function Dashboards() {
   const groups = useMemo(() => groupByFolder(rows, folders, filtering), [rows, folders, filtering]);
 
   /**
+   * Whether this table is drawn with folder SECTION HEADERS at all. The gate
+   * and its full argument live in `showFolderSections`
+   * (`src/components/explore/folders.ts`); `dataapi/Endpoints.tsx` and
+   * `sqllab/SavedTab.tsx` had it and these five did not, so a workspace with no
+   * folders met a lone collapsible "Uncategorized (1)" introducing a taxonomy
+   * it is not using.
+   *
+   * One flag, read by BOTH the render loop below and `visibleRows` — they are
+   * two derivations of the same question, and gating only the render strands
+   * rows behind a collapse state restored from localStorage after the last
+   * folder was deleted.
+   */
+  const showFolderHeaders = showFolderSections(folders, showTrash);
+
+  /**
    * The rows actually ON SCREEN — not `rows`, which is only what survived
    * filtering and sorting: a collapsed folder's rows are in `groups` but not in
    * front of the user.
@@ -105,12 +120,14 @@ export default function Dashboards() {
    */
   const visibleRows = useMemo(
     () =>
-      // The trash is a flat table — no folder headers, so nothing is collapsed
-      // and `rows` IS what is on screen.
-      showTrash
-        ? rows
-        : groups.flatMap((g) => (collapse.isCollapsed(g.folder?.id ?? UNCATEGORIZED_KEY) ? [] : g.rows)),
-    [showTrash, rows, groups, collapse],
+      // Keyed off the same flag the table renders from, deliberately. Without
+      // a header there is no collapse control, so nothing CAN be collapsed and
+      // `rows` is what is on screen — that covers the trash (a flat table) and
+      // the folderless workspace alike.
+      showFolderHeaders
+        ? groups.flatMap((g) => (collapse.isCollapsed(g.folder?.id ?? UNCATEGORIZED_KEY) ? [] : g.rows))
+        : rows,
+    [showFolderHeaders, rows, groups, collapse],
   );
 
   // One list behind both the count and the trash: `bulk.selectedIds` is derived
@@ -311,7 +328,10 @@ export default function Dashboards() {
                   <th className="w-8" />
                 </tr>
               </thead>
-              {showTrash ? (
+              {/* Flat wherever there is nothing to head — see
+                  `showFolderHeaders`: the trash always, and a workspace that has
+                  no folders at all. */}
+              {!showFolderHeaders ? (
                 <tbody>{rows.map(renderRow)}</tbody>
               ) : (
                 groups.map((group) => {
