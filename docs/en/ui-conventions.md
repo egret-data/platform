@@ -844,10 +844,16 @@ cannot. When those two conflict, the route wins.
 
 **Two things follow, and they are what keeps this from being a taste argument:**
 
-- **The per-section complaints do not disappear; they move to the instrument that fits them —
-  and one of the two moves is done, the other is owed.** A section-root cap was answering both
-  complaints with the one tool that also breaks the tab set; each has a narrower instrument.
-  **State of the tree, measured, not asserted:**
+- **The per-section complaints do not disappear; they move to the instrument that fits them.**
+  A section-root cap was answering ALL of them with the one tool that also breaks the tab set;
+  each has a narrower instrument. **There are THREE such moves, not two, and they are in three
+  different states — measured, not asserted.** An earlier revision of this bullet named only two
+  and reported "one done, one owed", which was the fourth time this document described a rule
+  its own tree did not implement. The failure it sets up is specific: close the `Try it` debt
+  below, read "one done, one owed", and mark the reversal fully mitigated while `Versions` still
+  ships a live regression. The check that finds it is the one this section prescribes — grep the
+  class the rule is about and reconcile every hit — which returns exactly two right-aligned
+  action columns, one fixed and one not.
 
   - **Prose: DONE.** "The sentence sets as one very long line" is a PROSE measure and
     `max-w-prose` answers it (§5.2, "cap the prose, not the column"). Every section intro
@@ -865,6 +871,35 @@ cannot. When those two conflict, the route wins.
     no further from its label than it was, but it is no closer either, and the width went to
     muted help text. Owed by a later task in this programme; recorded here rather than papered
     over, because a mitigation named as the reason a reversal is not taste has to actually exist.
+  - **Row action distance: DONE on `Access`, NOT DONE on `Versions`.** This is the move the
+    earlier revision omitted entirely, and it is the one the reversal actively CAUSED rather than
+    merely failed to help. Both tabs put their row action in a narrow, right-aligned last column
+    of a `table-fixed` table, so every pixel the section gained went to the one unsized column and
+    the action slid 272px further from the row it acts on. The instrument is neither of the two
+    above: it is **sizing the row table's own columns** so the width lands on the columns that
+    want it. `AccessSection.tsx` does that now — `Service account` went `w-48` → `w-48 xl:w-96`
+    and `Actions` `w-36` → `w-52`, on the measurement that `Invoke`, the unsized column, laid out
+    its widest row at 183px while being handed 960. **`Versions.tsx` still has the defect**, and
+    its own comment says so in as many words: `Actions` is `w-32`, `Note` is the only unsized
+    column, and Roll back sits 272px further from the version it rolls back than before the
+    reversal. Owed, and owed more urgently than the `Try it` debt, because this one is a
+    regression rather than an unbanked improvement.
+
+    **State the baseline with the number, because there are two and they disagree by 272.**
+    `Access`'s three columns at a 1600px viewport, `Setting | Invoke | Actions`:
+
+    | | identity | Invoke | actions | available |
+    |---|---|---|---|---|
+    | before the reversal (capped) | 192 | 688 | 144 | 1024 |
+    | after the reversal | 192 | **960** | 144 | 1296 |
+    | after the row fix | **384** | 704 | **208** | 1296 |
+
+    Both of these are true and they are not the same sentence: measured against the row before it,
+    the fix moved **192 to identity, 64 to actions and −256 from Invoke**; measured against the
+    pre-reversal layout, the net is **+192 identity, +64 actions, +16 Invoke**, which is the 272
+    the reversal freed, finally spent. Quoting the second next to a table showing the first reads
+    as an arithmetic error and invites someone to "correct" a figure that is right. Whenever a
+    width delta appears in this section, it says which row it is measured from.
 - **A section may still cap its own CHILDREN** (§5.5), and one does: `ResponseSection`'s
   editable `returns` grid keeps `max-w-xl`, because a row of four form controls stretched wide
   puts the delete button an arm's length from the row it acts on. That is the narrow, still-live
@@ -910,6 +945,28 @@ Below `lg`, Details is `hidden` but the two sized columns do **not** shrink to f
 scrolls instead. At a 500px viewport the content box is 356px, so the table already scrolled
 140px at `w-52`; a flat `w-96` would have pushed that to 316px. Gating the widening at `lg`
 leaves the narrow regime exactly as it was.
+
+**A gate is not always the safe default, and `Access`'s two widened columns gate DIFFERENTLY on
+purpose.** The rule above cuts both ways: because `table-fixed` scrolls rather than shrinks, a
+column that is wide at every width costs the narrow regime, but a column that is *gated* leaves
+the narrow regime with the layout the widening was meant to fix. Which one wins is a
+measurement, and the two columns measured opposite:
+
+- **Identity is gated, and at `xl` rather than `lg`.** The widened column has to leave `Invoke`
+  enough room at the breakpoint it turns on. Measured available width: at a 1280px viewport
+  976px, so Invoke keeps 384px; at 1024px it would be 720px, leaving Invoke 128px against content
+  that lays out at 183px. `lg` would have traded a truncated address for a wrapped badge.
+- **The actions column is UNCONDITIONAL**, and the asymmetry is the measurement, not an
+  oversight. Gated, the action group wraps onto two lines everywhere below `xl`, and two stacked
+  32px controls are TALLER than the 32px-plus-16px stack the change removed: seven rows measured
+  **651px gated at a 1024px viewport, against 451px ungated and 543px before the change**. So the
+  gate would have cost height at exactly the widths where height is scarcest.
+
+`AccessSection.test.tsx` asserts the actions column carries no responsive prefix at all, which is
+a deliberate **ban on re-gating it** rather than an incidental class check — somebody tidying the
+two columns into a matching `xl:` pair is the specific regression it exists to stop. Recorded
+here because a ban whose only rationale lives in a test comment reads as pedantry at the moment
+someone has a reason to violate it.
 
 ### 5.4 A dead column below `lg`, introduced by this phase
 
@@ -1056,7 +1113,8 @@ width is well spent is a question only a browser can answer.** See §10.
 
 ### 5.6 The section guard is one helper, and now one form
 
-`src/routes/explore/dataapi/__tests__/sectionWidth.ts` — `expectSectionLeavesWidthToThePage`.
+`src/routes/explore/dataapi/__tests__/sectionWidth.ts` — `expectSectionLeavesWidthToThePage` and
+`expectSectionIntroCapsItsProse`.
 
 Three sections had the walk in §5.5 copy-pasted and **two had no guard at all**: `Try it` and
 `Access`. That is how `Try it` shipped a `max-w-5xl` nothing was holding in place — §5.1 listed
@@ -1086,12 +1144,76 @@ the narrow viewports nobody measured. The surviving negative form includes respo
 because `lg:max-w-3xl` wastes the page on exactly the wide ones the pass *did* measure.
 Reinstating the positive form as a copy of the negative one's regex would be the bug.
 
+**A third export, and the one case where a class assertion is the RIGHT tool.**
+`expectSectionIntroCapsItsProse` pins each section intro's `max-w-prose` (§5.1). Everywhere else
+in §5 a class name is a weak stand-in for geometry — but this rule *is* the class: §5.2's "cap
+the prose, not the column" says the paragraph opts out of the section's measure, and carrying
+`max-w-prose` is the whole of what it must do. jsdom cannot measure the width; it does not need
+to.
+
+It exists because for a while **five of the six intro caps were pinned by nothing runnable** —
+the only guard was two Playwright specs that have never executed, so deleting the class from
+`Query`, `Config`, `Response`, `Try it` or `Versions` left all 5025 tests green.
+
+**By identity, never by population — this was got wrong twice, in opposite directions.** The
+browser spec first left its prose loop unguarded ("not every tab has capped prose"), which is a
+`for` over a possibly-empty list. The fix for that was `proseRights.length > 0` — **also wrong**,
+because `Response` and `Access` each render THREE unconditional `max-w-prose` paragraphs, so
+deleting the intro's cap leaves two behind and the count still passes. Only `Query`, with exactly
+one, was ever genuinely guarded, and a guard that holds for one of six is indistinguishable from
+one that holds for all six. **A count over a population can be satisfied by any member of it**;
+both the jsdom helper and the browser spec now resolve the intro as a specific element — the `<p>`
+beside the section's own `h2` — so only the thing the rule is about can satisfy the assertion.
+
 **The host is resolved, not assumed**, so the same helper works under the real `EndpointDetail`
 shell (walk stops at the `fieldset`) and under a harness that stubs the context and renders the
 section under a bare `Outlet` (`TryIt.test.tsx`), where the section root is a child of the
 render container. And the walk is a walk, never `parentElement.parentElement`: overshooting onto
 the `fieldset` is a SILENT pass, because the fieldset carries no `max-w-*` whatever the section
 does — so `sectionRootOf` hard-fails on it.
+
+### 5.6a Mock state leaks between `describe`s, and why the global switch is the wrong fix
+
+`src/routes/explore/dataapi/__tests__/EndpointDetail.test.tsx`, `describe("EndpointDetail — width")`.
+
+Four of that block's tests render `ResponseSection` or `Versions` and were passing on mocks
+**leaked from other `describe`s in the same file**. `frontend/vitest.config.ts` sets no
+`clearMocks` and no `mockReset`, so a `mockReturnValue` set in one block survives into the next.
+Measured on the clean, all-green tree: the four Data API detail files give **185 passed / 0
+failed** unfiltered, and **4 failed** under `-t "width"`, every one a `TypeError` for a hook that
+returned `undefined`. It took **six** mocks to make the block self-contained, and each one
+surfaced only after the previous was fixed.
+
+**No `-t`-filtered count in this suite is a result**, and — the part that bites — this was an
+**order dependency**, not a filtering curiosity: `.only`, `--shard`, a bisect, or splitting a
+1900-line file turns three real width guards red for reasons unrelated to width.
+
+**The global switch was measured rather than assumed, and rejected on the measurement.**
+
+| | fixes the leak? | full suite |
+|---|---|---|
+| `clearMocks: true` | **no** | 1 file / 1 test red |
+| `mockReset: true` | yes | **5 files / 12 tests red, 9 errors** |
+| neither (today) | n/a | 436 files / 5025 green |
+
+- **`clearMocks` is the wrong instrument, and this is the load-bearing fact.** It calls
+  `mockClear()`, which resets call history and leaves the IMPLEMENTATION in place — and a leaked
+  `mockReturnValue` is exactly an implementation. Verified directly: with the local `beforeEach`
+  removed and `clearMocks: true` set, the filtered run fails **identically**, 4 failed. Flipping
+  it would have looked like a fix, cost a red test, and changed nothing about this bug class.
+- **`mockReset` does address the class** — it drops implementations before each test, so no block
+  can inherit another's — at a cost of 12 tests across 5 files. Those 12 were inspected, not
+  counted: every one is the SAME defect (`reading 'status'`, `reading 'isPending'`,
+  `reading 'then'`, `reading '0'`, and spies asserted after being reset). So the flag is not
+  incompatible with the suite; it is a **detector**, and the 5 files are 5 more instances.
+
+**Decision: not flipped here, and the reason is scope, not doubt.** Turning it on lands 12
+failures in four areas (`api/dashboards` ×2, `chart/dashboard`, `lib/monaco`) that this task
+neither owns nor can review properly, and the gate for this work is green. It is recorded as a
+dedicated follow-up with its exact cost already measured, so the next person starts from a number
+rather than a guess. **The estimate that would have been wrong is "it is probably fine" — it is
+not; it is 12 tests.** And the one that would have been worse is flipping `clearMocks` because it
+is cheap, which buys nothing at all.
 
 ### 5.7 Six class assertions are not the claim; the browser spec is
 

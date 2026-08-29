@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -32,6 +32,7 @@ import Config from "@/routes/explore/dataapi/detail/Config";
 import ResponseSection from "@/routes/explore/dataapi/detail/ResponseSection";
 import VersionsSection from "@/routes/explore/dataapi/detail/Versions";
 import {
+  expectSectionIntroCapsItsProse,
   expectSectionLeavesWidthToThePage,
 } from "./sectionWidth";
 
@@ -1849,6 +1850,37 @@ describe("EndpointDetail — width", () => {
     vi.mocked(api.getDataApiListEndpointVersionsQueryKey).mockImplementation(
       (ws, id) => ["dataApiListEndpointVersions", ws, id] as unknown as
         ReturnType<typeof api.getDataApiListEndpointVersionsQueryKey>,
+    );
+  });
+
+  /**
+   * §5.1's intro rule for the three sections this file renders, pinned where
+   * the class actually is — one test rather than three, because the claim is
+   * about all of them and a per-section copy is what let `Try it` and `Access`
+   * ship with no guard at all (§5.6).
+   *
+   * The class assertion is the RIGHT instrument here rather than a stand-in for
+   * a measurement — see `expectSectionIntroCapsItsProse`. Before this test the
+   * only guard was a Playwright spec that has never executed, plus a population
+   * count `Response` could satisfy with its intro uncapped, because it renders
+   * three unconditional `max-w-prose` paragraphs.
+   */
+  it("caps each section intro at a reading measure, not the section's (§5.1)", async () => {
+    renderConfig();
+    expectSectionIntroCapsItsProse(
+      await screen.findByRole("heading", { name: "Config", level: 2 }),
+    );
+    cleanup();
+
+    renderResponse();
+    expectSectionIntroCapsItsProse(
+      await screen.findByRole("heading", { name: "Response", level: 2 }),
+    );
+    cleanup();
+
+    renderVersions();
+    expectSectionIntroCapsItsProse(
+      await screen.findByRole("heading", { name: "Versions", level: 2 }),
     );
   });
 

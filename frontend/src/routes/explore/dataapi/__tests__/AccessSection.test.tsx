@@ -17,7 +17,7 @@ import type {
 import EndpointDetail from "@/routes/explore/dataapi/EndpointDetail";
 import type { EndpointDetailContext } from "@/routes/explore/dataapi/EndpointDetail";
 import AccessSection from "@/routes/explore/dataapi/detail/AccessSection";
-import { expectSectionLeavesWidthToThePage } from "./sectionWidth";
+import { expectSectionIntroCapsItsProse, expectSectionLeavesWidthToThePage } from "./sectionWidth";
 
 function makeEndpoint(overrides: Partial<DataApiEndpointDto> = {}): DataApiEndpointDto {
   return {
@@ -803,6 +803,24 @@ describe("AccessSection — the shape", () => {
    * whether six tabs agree on a width. `tests/e2e/data-api-detail-tab-widths.spec.ts`
    * measures that in a browser; this only stops a cap coming back silently.
    */
+
+  /**
+   * §5.1's intro rule, pinned where the class actually is.
+   *
+   * The class assertion is the RIGHT instrument here rather than a stand-in for
+   * a measurement — see `expectSectionIntroCapsItsProse`. Before this test the
+   * only guard on this cap was a Playwright spec that has never executed, and a
+   * population count that `Response` and `Access` could satisfy without their
+   * intro being capped at all.
+   */
+  it("caps its intro at a reading measure, not the section's (§5.1)", async () => {
+    setup({ accounts: [SA_GRANTED], grants: [] });
+    renderAccess();
+    expectSectionIntroCapsItsProse(
+      await screen.findByRole("heading", { name: "Access", level: 2 }),
+    );
+  });
+
   it("leaves width to the page, like all six tabs (§5.1, as reversed)", async () => {
     setup({ accounts: [SA_GRANTED], grants: [] });
     const { container } = renderAccess();

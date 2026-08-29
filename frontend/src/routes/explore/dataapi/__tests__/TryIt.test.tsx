@@ -53,7 +53,7 @@ import { ApiError } from "@/api/client";
 import { ParamLocation, ParamType, type DataApiEndpointDto, type DataApiServiceAccountDto } from "@/api/generated/model";
 import type { EndpointDetailContext } from "@/routes/explore/dataapi/EndpointDetail";
 import TryIt from "@/routes/explore/dataapi/detail/TryIt";
-import { expectSectionLeavesWidthToThePage } from "./sectionWidth";
+import { expectSectionIntroCapsItsProse, expectSectionLeavesWidthToThePage } from "./sectionWidth";
 
 function makeEndpoint(overrides: Partial<DataApiEndpointDto> = {}): DataApiEndpointDto {
   return {
@@ -640,6 +640,22 @@ describe("TryIt — says whose identity a trial runs as", () => {
  * was what caught an editor squeezed to 107px that every test had passed.
  */
 describe("TryIt — width", () => {
+
+  /**
+   * §5.1's intro rule, pinned where the class actually is.
+   *
+   * The class assertion is the RIGHT instrument here rather than a stand-in for
+   * a measurement — see `expectSectionIntroCapsItsProse`. Before this test the
+   * only guard on this cap was a Playwright spec that has never executed, and a
+   * population count that `Response` and `Access` could satisfy without their
+   * intro being capped at all.
+   */
+  it("caps its intro at a reading measure, not the section's (§5.1)", () => {
+    mockTry(OK);
+    renderTryIt();
+    expectSectionIntroCapsItsProse(screen.getByRole("heading", { name: "Try it", level: 2 }));
+  });
+
   it("leaves width to the page, like all six tabs (§5.1, as reversed)", () => {
     mockTry(OK);
     const { container } = renderTryIt();

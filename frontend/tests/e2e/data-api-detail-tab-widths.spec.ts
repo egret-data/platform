@@ -216,9 +216,21 @@ test.describe("Data API — the six detail tabs are on one width", () => {
             frames.push({ what: `table ${i}`, right: right(t) });
           });
 
+          // The section's INTRO specifically, resolved by identity: the `<p>`
+          // beside the section's own `h2`. Not "some capped paragraph in the
+          // section" — see the assertion site for why that distinction is the
+          // whole point.
+          const introEl = heading.parentElement?.querySelector("p") ?? null;
+
           return {
             available,
             frames,
+            intro: introEl
+              ? {
+                  right: right(introEl),
+                  capped: /(?:^|\s)max-w-prose(?:\s|$)/.test(introEl.className),
+                }
+              : null,
             proseRights: [...root.querySelectorAll("p.max-w-prose")].map(right),
           };
         }, headingText);
@@ -274,18 +286,36 @@ test.describe("Data API — the six detail tabs are on one width", () => {
         // The exception, asserted rather than skipped (§5.2): prose stops at
         // its own reading measure while the frames take the page.
         //
-        // COUNTED FIRST, and that is not boilerplate here. An earlier revision
-        // of this file left the loop below unguarded on the reasoning that
-        // "not every tab has capped prose" — which made it a `for` over a
-        // possibly-empty list, the exact vacuous-pass this file's own header
-        // warns about, in the file that warns about it. It is now false that a
-        // tab might have none: every one of the six section intros carries
-        // `max-w-prose` (§5.1), so an intro losing its cap makes this list
-        // shorter and fails HERE rather than passing silently.
+        // BY IDENTITY, NOT BY POPULATION — and this file has now got that wrong
+        // twice, in opposite ways, which is why the reasoning is written out.
+        //
+        //  1. First revision: no guard at all on the loop below, because "not
+        //     every tab has capped prose". A `for` over a possibly-empty list
+        //     asserts nothing — the vacuous pass this file's own header warns
+        //     about, in the file that warns about it.
+        //  2. Second revision: `proseRights.length > 0`, claiming an intro
+        //     losing its cap would shorten the list and fail here. **Also
+        //     false.** `Response` and `Access` each render THREE unconditional
+        //     `max-w-prose` paragraphs, so deleting the cap from the intro
+        //     leaves two behind and the count still passes. Only `Query`, with
+        //     exactly one, was ever genuinely guarded — a guard that holds for
+        //     one of six looks identical to one that holds for all six.
+        //
+        // A count over a population can be satisfied by any member of it. The
+        // intro is therefore resolved as a specific ELEMENT — the `<p>` beside
+        // this section's `h2` — and asserted on directly, so only the thing the
+        // rule is about can satisfy it. Same reasoning as
+        // `__tests__/sectionWidth.ts`'s `expectSectionIntroCapsItsProse`, which
+        // is the jsdom half of this guard.
+        expect(m.intro, `${heading}: found the section's intro paragraph`).not.toBeNull();
+        expect(m.intro!.capped, `${heading}: the intro carries max-w-prose (§5.1)`).toBe(true);
         expect(
-          m.proseRights.length,
-          `${heading}: found the section's capped prose (its intro at minimum)`,
-        ).toBeGreaterThan(0);
+          m.intro!.right,
+          `${heading}: the intro stops short of the section's measure`,
+        ).toBeLessThan(root.right);
+
+        // The remaining capped paragraphs, still asserted — widening them is
+        // the obvious wrong fix and would otherwise pass.
         for (const r of m.proseRights) {
           expect(r, `${heading}: prose keeps its own reading measure`).toBeLessThan(root.right);
         }

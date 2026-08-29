@@ -93,3 +93,50 @@ export function expectSectionLeavesWidthToThePage(container: HTMLElement, headin
     /(?:^|\s)(?:[a-z0-9]+:)*max-w-/,
   );
 }
+
+/**
+ * The section's intro paragraph caps its own reading measure.
+ *
+ * # Why this is a class assertion and not an apology for one
+ *
+ * Most of §5's claims are about GEOMETRY, and a class name is a poor stand-in
+ * for those — `sectionRootOf`'s callers say so, and §10 says so. This one is
+ * different in kind. §5.1's rule for the intro is not "it renders at some
+ * width", it is literally "it carries `max-w-prose`": the whole point of §5.2's
+ * "cap the prose, not the column" is that the paragraph opts out of the
+ * section's measure and takes the reader's. jsdom cannot measure the resulting
+ * width, but the thing being asserted IS the class, so here a class assertion
+ * is the right instrument rather than a substitute for the right one.
+ *
+ * # Why it exists at all
+ *
+ * The six intro caps went in as a regression fix — uncapping the section roots
+ * (§5.1) un-capped the three intros those roots had been bounding, and at 1920
+ * with the rail collapsed those lines ran past 1700px. For a while afterwards
+ * **five of the six were pinned by nothing runnable**: the only guard was two
+ * Playwright specs that have never executed, so deleting `max-w-prose` from
+ * Query, Config, Response, Try it or Versions left all 5025 tests green.
+ *
+ * # By identity, never by population
+ *
+ * The browser spec first guarded this with `proseRights.length > 0` over every
+ * `p.max-w-prose` in the section. That is a POPULATION count, and it is
+ * partly vacuous by construction: `Response` and `Access` each render three
+ * unconditional capped paragraphs, so deleting the cap from the intro leaves
+ * two behind and the count still passes. Only `Query`, with exactly one, was
+ * genuinely guarded. This helper resolves the intro by IDENTITY — the `<p>`
+ * beside the section's own `h2` — so it can only be satisfied by the element
+ * it is about.
+ */
+export function expectSectionIntroCapsItsProse(heading: HTMLElement) {
+  const wrapper = heading.parentElement;
+  expect(wrapper, `the "${heading.textContent}" heading has a wrapper`).not.toBeNull();
+  // The intro is the paragraph the heading is introduced BY, so it is resolved
+  // from the heading's own wrapper rather than from the section root — a
+  // section-wide `querySelector("p")` would drift onto whatever paragraph
+  // happens to come first if the intro were ever removed, and quietly assert
+  // about that instead.
+  const intro = wrapper!.querySelector("p");
+  expect(intro, `the "${heading.textContent}" section renders an intro <p>`).not.toBeNull();
+  expect(intro!.className).toMatch(/(?:^|\s)max-w-prose(?:\s|$)/);
+}

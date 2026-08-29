@@ -159,7 +159,7 @@ import EndpointDetail from "@/routes/explore/dataapi/EndpointDetail";
 import Query from "@/routes/explore/dataapi/detail/Query";
 import Config from "@/routes/explore/dataapi/detail/Config";
 import VersionsSection from "@/routes/explore/dataapi/detail/Versions";
-import { expectSectionLeavesWidthToThePage } from "./sectionWidth";
+import { expectSectionIntroCapsItsProse, expectSectionLeavesWidthToThePage } from "./sectionWidth";
 
 // Copied verbatim from `EndpointDetail.test.tsx` (near the top of that file)
 // rather than imported — that file does not export it, and duplicating a
@@ -614,6 +614,27 @@ describe("Query section — layout", () => {
    * Class name only (§5.5); the six agreeing is measured in
    * `tests/e2e/data-api-detail-tab-widths.spec.ts`.
    */
+
+  /**
+   * §5.1's intro rule, pinned where the class actually is.
+   *
+   * The class assertion is the RIGHT instrument here rather than a stand-in for
+   * a measurement — see `expectSectionIntroCapsItsProse`. Before this test the
+   * only guard on this cap was a Playwright spec that has never executed, and a
+   * population count that `Response` and `Access` could satisfy without their
+   * intro being capped at all.
+   */
+  it("caps its intro at a reading measure, not the section's (§5.1)", async () => {
+    const endpoint = makeEndpoint();
+    vi.mocked(api.useDataApiGetEndpoint).mockReturnValue({
+      data: { status: 200, data: endpoint }, isLoading: false, isError: false, refetch: vi.fn(),
+    } as never);
+    renderQuery(endpoint);
+    expectSectionIntroCapsItsProse(
+      await screen.findByRole("heading", { name: "Query", level: 2 }),
+    );
+  });
+
   it("leaves width to the page, like all six tabs (§5.1, as reversed)", async () => {
     const endpoint = makeEndpoint();
     vi.mocked(api.useDataApiGetEndpoint).mockReturnValue({
