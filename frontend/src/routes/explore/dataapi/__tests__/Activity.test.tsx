@@ -521,17 +521,24 @@ describe("Activity — call list", () => {
 });
 
 /**
- * Activity is a top-level sidebar item now, not a section nested under a
+ * Activity is a top-level sidebar item, not a section nested under a
  * `DataApiLayout` shell — that shell was removed once Data API got its own
- * sidebar group (Endpoints/Clients/Activity), so this page owns its own `h1`
- * and `p-4`, exactly like `Charts.tsx`. No subtitle paragraph either way.
+ * sidebar group (Endpoints/Clients/Activity), so the `h1` and the `p-4` belong
+ * to this route. They come from `ListPageShell` (§1.1), which is how that
+ * ownership is discharged rather than a departure from it; these assertions
+ * are unchanged from when the page hand-wrote them, because the invariant they
+ * pin was never about which file emits the element. No subtitle paragraph.
  */
 describe("Activity — page scaffold", () => {
-  it("uses the top-level idiom: its own h1, no subtitle paragraph", async () => {
+  it("uses the top-level idiom: exactly one h1, no subtitle paragraph", async () => {
     renderActivity();
     const h1 = await screen.findByRole("heading", { level: 1, name: "Activity" });
     expect(h1.className).toContain("text-lg");
     expect(h1.className).toContain("font-semibold");
+    // §1.1 is that the shell owns THE SINGLE `h1`, so counting is the actual
+    // rule: a page that kept a hand-written heading beside the shell's would
+    // satisfy `findByRole` and every class assertion above it.
+    expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
     expect(screen.queryByRole("heading", { level: 2, name: "Activity" })).not.toBeInTheDocument();
   });
 

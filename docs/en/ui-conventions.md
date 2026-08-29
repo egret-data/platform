@@ -1296,13 +1296,37 @@ without which `<details open>` — a disclosure that collapses nothing — passe
 Honest scope, measured on the current tree, so nobody reads this as describing code that does
 not exist yet:
 
-- `ListPageShell` — **9** route files: 5 Data API (`Endpoints`, `Clients`, `EndpointCreate`,
-  `ServiceAccountCreate`, `ClientCreate`) and 4 Explore list pages (`Datasets`, `Charts`,
-  `Dashboards`, `Alerts`), converted by package U on 2026-08-22. Measured with
+- `ListPageShell` — **10** route files: 6 Data API (`Endpoints`, `Clients`, `Activity`,
+  `EndpointCreate`, `ServiceAccountCreate`, `ClientCreate`) and 4 Explore list pages
+  (`Datasets`, `Charts`, `Dashboards`, `Alerts`). Nine were converted by package U on
+  2026-08-22; `Activity.tsx` followed on 2026-08-29. Measured with
   `grep -rl 'from "@/components/explore/ListPageShell"' src --include='*.tsx' | grep -v __tests__ | wc -l`
   from `frontend/`. **`Notebooks.tsx` still hand-writes its header** (735 lines, `aria-pressed`
   = 0). It was named in neither §1.3's list of four nor package U's scope, and is recorded
   here so this section is not read as "every Explore list page is converted".
+
+  **`Activity.tsx` was the last hand-written copy, and the reason it survived is worth more
+  than the conversion.** It carried a comment saying the page "owns its own heading and padding
+  again", which reads as a decision to decline the shell and was defended as one. It is not:
+  the comment was written in #511 on 2026-08-17, one day *before* `ListPageShell` existed
+  (#518, 2026-08-18), so it cannot have weighed a component that did not exist. What it
+  actually decided was that this route has a heading **at all**, rather than inheriting one
+  from the `DataApiLayout` shell that had just been deleted — a question about ownership, not
+  about spelling, and the shell is how that ownership is discharged. `dataapi/Clients.tsx`
+  carries the same paragraph and already ends it "they just come from the shared shell now".
+  The comment also called itself "same as `Charts.tsx`/`Datasets.tsx`" while both of those had
+  moved to the shell, so its own claim of parity had gone stale without anything editing it.
+
+  **A comment that records a decision still has to be re-read against the date it was written.**
+  Neither "a review called it drift" nor "a comment calls it deliberate" settles anything; the
+  commit dates and the sibling that resolved the identical paragraph did.
+
+  The 1h/24h/7d/30d strip stayed in the page body rather than moving to the shell's `toolbar`
+  slot. §1.2 classes it a view **switch**, and the consequence of that classification is that
+  it is never gated on `hasData` — a rule about *when* it renders, not *where*. It is also not
+  a toolbar control in shape: `RangePicker` is a button strip over a `<details>` retention
+  caveat, two rows, and moving that into the header's `flex flex-wrap items-center` group is a
+  layout change no jsdom test can check (§10).
 - `ListStates` — **6** route files (`Endpoints`, `Clients`, `Datasets`, `Charts`, `Dashboards`,
   `Alerts`). Measured with
   `grep -rl 'from "@/components/explore/ListStates"' src --include='*.tsx' | grep -v __tests__ | wc -l`
