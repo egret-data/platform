@@ -1,4 +1,4 @@
-import { type Ref, useImperativeHandle, useMemo, useRef, useState } from "react";
+import { type Ref, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { Check, Copy, Inbox } from "lucide-react";
 import { Link } from "react-router-dom";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
@@ -97,9 +97,24 @@ export default function ActivityCallList({
   // to focus). The Endpoint filter is also the control that UNDOES the choice,
   // so it is the right place to be standing afterwards.
   const endpointTrigger = useRef<HTMLButtonElement>(null);
+  // No dependency array, deliberately, and for `PreviewBlock.tsx`'s reason: a
+  // handle that is rebuilt every render can never be stale, whereas `[]` freezes
+  // whatever it closed over and goes silently wrong the day someone adds a
+  // non-stable capture. Everything it touches today (two setters, one ref) is
+  // stable anyway, so the array would buy nothing and cost that.
   useImperativeHandle(ref, () => ({
     showCallsFor: (id: string) => {
       setEndpointId(id);
+      // The Request ID filter is cleared, and ONLY that one. A request id is a
+      // point lookup — it names exactly one call — so intersecting it with
+      // "show me this endpoint's calls" can only ever yield that one call or
+      // nothing, and a control captioned `Show calls for X` that lands on an
+      // empty list is a control that lied. Status code and error code are
+      // cross-cutting predicates an operator may well want to carry INTO an
+      // endpoint ("show me the 500s, now just this endpoint"), so they survive;
+      // if they miss, the list already says "No calls match the current
+      // filters" with both inputs visible directly above it.
+      setRequestId("");
       endpointTrigger.current?.focus();
     },
   }));
@@ -477,6 +492,11 @@ function CallRow({
  */
 function CopyIdButton({ value, label }: { value: string; label: string }) {
   const [copied, setCopied] = useState(false);
+  const revert = useRef<number | undefined>(undefined);
+  // The rows under this component are paginated and DO unmount — "Load more"
+  // replaces nothing, but a filter change throws the whole list away — so the
+  // 1.5s revert has to be cancellable or it fires into a dead component.
+  useEffect(() => () => window.clearTimeout(revert.current), []);
   return (
     <Button
       type="button"
@@ -485,9 +505,26 @@ function CopyIdButton({ value, label }: { value: string; label: string }) {
       className="h-6 w-6 shrink-0 p-0 text-muted-foreground"
       aria-label={label}
       onClick={() => {
-        void navigator.clipboard?.writeText(value);
-        setCopied(true);
-        window.setTimeout(() => setCopied(false), 1500);
+        // `writeText` REJECTS — denied permission, a document that is not
+        // focused, no clipboard API at all over plain http. The four existing
+        // copies of this idiom in the repo (`Clients.tsx:483`, `TryIt.tsx`,
+        // `ClientCreate.tsx`, `WarehouseDetail.tsx`) all `void` the promise and
+        // flip to "Copied" regardless, which tells the user the id is on their
+        // clipboard when it is not — and the id is the whole point of the
+        // button. This fifth copy waits for the promise instead. The other four
+        // are recorded in the task report rather than edited here.
+        void navigator.clipboard
+          ?.writeText(value)
+          .then(() => {
+            setCopied(true);
+            window.clearTimeout(revert.current);
+            revert.current = window.setTimeout(() => setCopied(false), 1500);
+          })
+          .catch(() => {
+            // Nothing claimed. Silence is not ideal, but a button that stays
+            // un-ticked is at least not a lie, and there is no toast host on
+            // this page to put a better answer in.
+          });
       }}
     >
       {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}

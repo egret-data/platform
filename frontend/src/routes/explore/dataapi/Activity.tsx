@@ -248,15 +248,31 @@ export const ERROR_RATE_ALERT = 0.05;
 export type ErrorRateTier = "unmeasured" | "none" | "elevated" | "failing";
 
 /**
- * Three states, and the third is forced rather than tidy.
+ * Three states, and the middle one earns its place by being FEW rather than
+ * MANY. Nothing more than that.
  *
- * `errors` is `count(*) FILTER (WHERE al.status_code >= 400)` — it counts 4xx
- * as well as 5xx, so a nonzero rate conflates "consumers are sending bad
- * requests, or hitting the rate limit" with "this endpoint is broken". Folding
- * those together into one marked state would either alarm on normal traffic or
- * hide a real fault behind the same treatment as a few 404s. `none` is separate
- * from `elevated` for the opposite reason: a clean endpoint is the one an
- * operator can skip, and that is worth being able to see at a glance.
+ * An earlier draft of this comment claimed the third tier was forced by
+ * `errors` counting 4xx as well as 5xx
+ * (`count(*) FILTER (WHERE al.status_code >= 400)`,
+ * `crates/egret-dataapi/src/activity.rs:207`). The premise is true and the
+ * conclusion does not follow, so it is recorded here as a wrong turn rather
+ * than deleted: **a threshold on a rate cannot separate 4xx from 5xx.** One 500
+ * in 1000 calls is 0.1% and lands in `elevated`; six hundred 404s from one
+ * misconfigured consumer is 60% and lands in `failing`. Whatever this ladder
+ * separates, it is not client mistakes from server faults.
+ *
+ * What it does separate is a trickle from a flood, which is worth three states
+ * because the operator's next action differs across all three: `none` is the
+ * endpoint to skip, `elevated` is the one to keep an eye on, `failing` is the
+ * one to open now. Two states would force the trickle to be either invisible
+ * or alarming, and both are wrong.
+ *
+ * Separating 4xx from 5xx is a real and different want, and it needs data this
+ * page does not have: `ActivityRow` carries one `errors` count and no 5xx
+ * breakdown. Doing it properly means a second `count(*) FILTER (WHERE
+ * al.status_code >= 500)` in that query, a field on the DTO, and a decision
+ * about which of the two the rate column reports — not a different threshold
+ * here.
  */
 export function errorRateTier(errors: number, calls: number): ErrorRateTier {
   if (calls === 0) return "unmeasured";
@@ -333,6 +349,25 @@ const ERROR_RATE_ICON: Record<"elevated" | "failing", typeof AlertTriangle> = {
 /** And the WORD, which is the only half that reaches a screen reader at all.
  * Rendered `sr-only`: the number is already on screen and repeating "failing"
  * in ink beside it would cost a column's width on every row. */
+/**
+ * The short form, shown VISIBLY beside the figure in a tile.
+ *
+ * A tile has no pill — a `text-xs` outline inside a `text-2xl` figure is a
+ * badge pretending to be a headline — and `ERROR_RATE_INK.elevated` is
+ * `text-foreground`, the tile's own ink. So an elevated tile rendered like a
+ * cell would have carried exactly ONE channel: a small triangle. Review caught
+ * that; the two tile tests only covered `failing` and `none`, where the ink
+ * does differ, so nothing here would have.
+ *
+ * The word is the second channel, and at tile scale it fits where it would not
+ * in a table column. It replaces the `sr-only` span rather than doubling it: a
+ * screen reader must not read "Elevated" twice.
+ */
+const ERROR_RATE_LABEL: Record<"elevated" | "failing", string> = {
+  elevated: "Elevated",
+  failing: "Failing",
+};
+
 const ERROR_RATE_WORD: Record<ErrorRateTier, string> = {
   unmeasured: "not measurable",
   none: "no errors",
@@ -358,8 +393,8 @@ function ErrorRate({
   errors: number;
   calls: number;
   /** `tile` is a 2xl figure — a `text-xs` pill inside it would be a badge
-   * pretending to be a headline, so the tile takes the ink and the icon and
-   * skips the pill. */
+   * pretending to be a headline, so the tile skips the pill and spends the
+   * second channel on a visible word instead (see `ERROR_RATE_LABEL`). */
   size: "cell" | "tile";
 }) {
   const tier = errorRateTier(errors, calls);
@@ -381,10 +416,14 @@ function ErrorRate({
         <Icon className={size === "tile" ? "h-5 w-5 shrink-0" : "h-3 w-3 shrink-0"} aria-hidden />
       )}
       <span>{formatRate(errors, calls)}</span>
-      {/* A comma, not an em dash: `—` is this table's word for "no
-          measurement" and the sr-only text must not put one inside a cell
-          whose whole point is that it HAS one. */}
-      <span className="sr-only">, {ERROR_RATE_WORD[tier]}</span>
+      {size === "tile" && marked ? (
+        <span className="text-xs font-medium">{ERROR_RATE_LABEL[tier]}</span>
+      ) : (
+        /* A comma, not an em dash: `—` is this table's word for "no
+           measurement" and the sr-only text must not put one inside a cell
+           whose whole point is that it HAS one. */
+        <span className="sr-only">, {ERROR_RATE_WORD[tier]}</span>
+      )}
     </span>
   );
 }

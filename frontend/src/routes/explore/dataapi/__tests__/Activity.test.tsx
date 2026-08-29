@@ -1076,6 +1076,60 @@ describe("Activity — a per-endpoint row reaches its own calls", () => {
     expect(filter).toHaveTextContent("Daily report");
   });
 
+  it("clears a typed request id, which cannot coexist with browsing an endpoint", async () => {
+    // A request id names exactly one call, so intersecting it with "show me
+    // this endpoint's calls" yields that one call or nothing — a control
+    // captioned `Show calls for X` landing on an empty list. Cross-cutting
+    // filters are a different case and survive: see the next test.
+    const user = userEvent.setup();
+    renderActivity();
+    await screen.findByText("req-weekly");
+
+    // Exact label, not `/request id/i`: every call row now carries a
+    // "Copy request id …" button, so the loose matcher this file uses
+    // elsewhere finds the input AND every button beside one.
+    await user.type(screen.getByLabelText("Request ID"), "req-from-an-error-body");
+    await waitFor(() =>
+      expect(api.dataApiActivityCalls).toHaveBeenLastCalledWith(
+        "eng",
+        expect.objectContaining({ request_id: "req-from-an-error-body" }),
+      ),
+    );
+
+    await user.click(screen.getByRole("button", { name: "Show calls for Daily report" }));
+
+    expect(screen.getByLabelText("Request ID")).toHaveValue("");
+    await waitFor(() =>
+      expect(api.dataApiActivityCalls).toHaveBeenLastCalledWith(
+        "eng",
+        expect.objectContaining({ endpoint_id: "ep-1", request_id: undefined }),
+      ),
+    );
+    // And the endpoint's calls are actually on screen, which is what the
+    // button promised — asserted by identity, not by the request that was sent.
+    expect(await screen.findByText("req-daily")).toBeInTheDocument();
+  });
+
+  it("keeps a status-code filter, which an operator may be carrying INTO the endpoint", async () => {
+    // "Show me the 500s → now just this endpoint" is a real path, and clearing
+    // everything would break it. The rule is not "a jump resets the form"; it
+    // is that a point lookup and a browse are different modes.
+    const user = userEvent.setup();
+    renderActivity();
+    await screen.findByText("req-weekly");
+
+    await user.type(screen.getByLabelText(/status code/i), "500");
+    await user.click(screen.getByRole("button", { name: "Show calls for Daily report" }));
+
+    expect(screen.getByLabelText(/status code/i)).toHaveValue("500");
+    await waitFor(() =>
+      expect(api.dataApiActivityCalls).toHaveBeenLastCalledWith(
+        "eng",
+        expect.objectContaining({ endpoint_id: "ep-1", status_code: 500 }),
+      ),
+    );
+  });
+
   it("does not offer the unmatched bucket as a filter — the dropdown cannot express it", async () => {
     // `endpoint_id: null` is every request that resolved no endpoint. There is
     // no id to filter by, so the row stays inert rather than becoming a control
@@ -1129,12 +1183,25 @@ describe("Activity — a per-endpoint row reaches its own calls", () => {
 // Severity: an error rate that says how bad it is.
 // ---------------------------------------------------------------------------
 
-/** The cell an error-rate reading lives in, found through its row rather than
- * by position: `getByText("20.0%")` alone would also match the same figure in
- * another column of another row. */
+/** The cell under a named COLUMN, in a named row.
+ *
+ * Both halves are looked up rather than counted. `getByText("20.0%")` alone
+ * would match the same figure in another column of another row, and the
+ * `[2]` this used to be was a counted hop: insert a column and every severity
+ * assertion silently starts measuring p50/p95 while staying green. The index
+ * now comes from the header the product renders, so it moves when the table
+ * does. */
+function cellUnder(columnName: string, endpointName: string): HTMLElement {
+  const table = screen.getByTestId("activity-per-endpoint");
+  const headers = within(table).getAllByRole("columnheader");
+  const column = headers.findIndex((h) => h.textContent?.trim() === columnName);
+  expect(column, `no column headed "${columnName}"`).toBeGreaterThanOrEqual(0);
+  const row = within(table).getByText(endpointName).closest("tr")!;
+  return within(row).getAllByRole("cell")[column];
+}
+
 function errorRateOf(endpointName: string): HTMLElement {
-  const row = screen.getByText(endpointName).closest("tr")!;
-  return within(row).getAllByRole("cell")[2];
+  return cellUnder("Error rate", endpointName);
 }
 
 describe("Activity — an error rate carries its severity", () => {
@@ -1176,8 +1243,7 @@ describe("Activity — an error rate carries its severity", () => {
     expect(within(cell).getByText("0.0%")).toBeInTheDocument();
     expect(cell).not.toHaveTextContent("—");
     // And the cell that IS unmeasured, on the same row, still says so.
-    const cacheCell = within(screen.getByText("Quiet export").closest("tr")!).getAllByRole("cell")[4];
-    expect(cacheCell).toHaveTextContent("—");
+    expect(cellUnder("Cache-hit rate", "Quiet export")).toHaveTextContent("—");
   });
 
   it("draws the alert line at 5% of calls: 5.0% is failing, 4.9% is not", async () => {
@@ -1200,11 +1266,11 @@ describe("Activity — an error rate carries its severity", () => {
     expect(within(under).queryByText(/failing/i)).not.toBeInTheDocument();
   });
 
-  it("still marks a rate below the line, because a 4xx is counted as an error", async () => {
-    // `errors` is `status_code >= 400`, so a nonzero rate can be consumers
-    // sending bad requests rather than the endpoint breaking. That is worth
-    // seeing and not worth alarming: a third state, forced by what the number
-    // conflates rather than added for symmetry.
+  it("marks a trickle differently from a flood, rather than collapsing to two states", async () => {
+    // The middle tier separates FEW from MANY, and nothing else. It is not
+    // "4xx versus 5xx" — a threshold on a rate cannot see the difference (see
+    // `errorRateTier`). What it buys is that a trickle is neither invisible nor
+    // alarming, which is the operator's third distinct next action.
     mockSummaryRows([
       makeRow({ endpoint_id: "ep-mid", endpoint_name: "Some 4xx", calls: 1000, errors: 20 }),
       makeRow({ endpoint_id: "ep-ok", endpoint_name: "Quiet export", calls: 100, errors: 0 }),
@@ -1258,6 +1324,49 @@ describe("Activity — an error rate carries its severity", () => {
     expect(tile).toHaveTextContent("20.0%");
     expect(within(tile).getByText(/failing/i)).toBeInTheDocument();
     expect(tile.querySelector("svg")).not.toBeNull();
+  });
+
+  it("gives the elevated TILE a second channel, not one lonely triangle", async () => {
+    // The tile has no pill, and `ERROR_RATE_INK.elevated` is the tile's own
+    // ink — so without a visible word this reading would be an ordinary number
+    // plus a small triangle, one channel where the other two tiers have two.
+    // Review found that; the tile tests covered only `failing` and `none`,
+    // where the ink differs, so nothing here could have.
+    mockSummaryRows([makeRow({ calls: 1000, errors: 20 })]);
+    renderActivity();
+
+    const tile = await screen.findByTestId("tile-error-rate");
+    expect(tile).toHaveTextContent("2.0%");
+    expect(tile.querySelector("svg"), "the icon channel").not.toBeNull();
+    const word = within(tile).getByText("Elevated");
+    // VISIBLE, not `sr-only` — an sr-only word is not a second channel for a
+    // reader who has the screen and not a screen reader, which is the case
+    // this assertion exists for. jsdom applies no stylesheet, so the class
+    // that does the hiding is the only thing that can be asked.
+    expect(word.className).not.toMatch(/\bsr-only\b/);
+    // And it is not doubled: a visible word plus the sr-only one would have a
+    // screen reader say "Elevated" twice.
+    expect(within(tile).getAllByText(/elevated/i)).toHaveLength(1);
+  });
+
+  it("renders a dash for an endpoint with no calls to divide by", async () => {
+    // `unmeasured` — the one tier the backend cannot currently produce for a
+    // row (a row exists because calls exist), so it is only reachable through
+    // this fixture. It is still the branch that decides `—` versus `0.0%`, and
+    // the whole point of the treatment is that those two mean different things.
+    mockSummaryRows([
+      makeRow({ endpoint_id: "ep-quiet", endpoint_name: "Never called", calls: 0, errors: 0 }),
+    ]);
+    renderActivity();
+    await screen.findByTestId("activity-per-endpoint");
+
+    const cell = errorRateOf("Never called");
+    expect(cell).toHaveTextContent("—");
+    expect(within(cell).queryByText("0.0%")).not.toBeInTheDocument();
+    // No severity marking on an absence: nothing was measured, so nothing is
+    // good and nothing is bad.
+    expect(cell.querySelector("svg")).toBeNull();
+    expect(cell.querySelector(".text-success")).toBeNull();
   });
 
   it("leaves the tile unmarked when the range produced no errors at all", async () => {
@@ -1316,6 +1425,50 @@ describe("Activity — a call row's ids can be copied", () => {
     await user.click(screen.getByRole("button", { name: "Copy request id req-second" }));
 
     expect(await navigator.clipboard.readText()).toBe("req-second");
+  });
+
+  it("does not claim 'Copied' when the clipboard write fails", async () => {
+    // `writeText` rejects on a denied permission, an unfocused document, or
+    // plain http with no clipboard API. The four other copies of this idiom in
+    // the repo `void` the promise and tick regardless, telling the user an id
+    // is on their clipboard when it is not — and the id is the entire point of
+    // the button.
+    const user = userEvent.setup();
+    // AFTER `setup()`, which installs its own stub: patching before it would
+    // be overwritten, and the test would pass over a component that ticks.
+    const writeText = vi
+      .spyOn(navigator.clipboard, "writeText")
+      .mockRejectedValue(new Error("denied"));
+    mockCalls([makeCall({ request_id: "req-denied" })]);
+    renderActivity();
+    await screen.findByText("req-denied");
+
+    const button = screen.getByRole("button", { name: "Copy request id req-denied" });
+    await user.click(button);
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("req-denied"));
+
+    // The tick is the claim, and lucide names its glyphs in the class list —
+    // so this asks which SHAPE is on screen rather than trusting a state flag.
+    await waitFor(() => expect(button.querySelector("svg")?.getAttribute("class")).toMatch(/copy/i));
+    expect(button.querySelector("svg")?.getAttribute("class")).not.toMatch(/check/i);
+    writeText.mockRestore();
+  });
+
+  it("ticks only after the write has actually landed", async () => {
+    // The other half: with the tick gated on a promise, "it never ticks at all"
+    // would satisfy the test above. This is the same assertion in the opposite
+    // direction, so neither can pass alone on a broken button.
+    const user = userEvent.setup();
+    mockCalls([makeCall({ request_id: "req-ok" })]);
+    renderActivity();
+    await screen.findByText("req-ok");
+
+    const button = screen.getByRole("button", { name: "Copy request id req-ok" });
+    await user.click(button);
+
+    await waitFor(() =>
+      expect(button.querySelector("svg")?.getAttribute("class")).toMatch(/check/i),
+    );
   });
 
   it("offers no client-id copy on a trial row, which carries no client identity", async () => {
