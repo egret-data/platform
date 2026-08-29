@@ -1101,6 +1101,18 @@ guarded against here rather than merely remembered:
 A third, general one: **assert the count before iterating.** A `for` over a selector that has
 stopped matching asserts nothing and reports green.
 
+**What has actually been run, stated separately from what the spec claims.** At the time §5.1
+was reversed this spec had **not** been executed against a live seeded stack — the backend was
+not running in the authoring environment — so it is committed as the regression artifact and
+"it passes" is not among the claims made for it. The geometry itself was verified in headless
+Chromium against the Vite dev server with the API stubbed at the network layer: real browser,
+real stylesheet, synthetic JSON. All six tabs measured 1560/1560 (that harness has no seeded
+sidebar, hence 1560 rather than 1296), and — the part that makes it evidence — **a negative
+control put the three `max-w-5xl`s back and the 272px split reappeared**: Access, Try it and
+Versions dropped to 1288 while the other three stayed at 1560. Six numbers agreeing prove
+nothing on their own; six numbers that agree *and* stop agreeing when the defect is reinstated
+are a measurement. §8.
+
 ---
 
 ## 6. `ConfigTableRow.details` is a plain string
