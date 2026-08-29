@@ -1434,6 +1434,38 @@ AND the false one, which is the usual shape: a number that looks off invites an 
 inventing one is cheaper than re-measuring. The same arithmetic — every box shares the left edge
 264 — is what identified §5.4b's 1576 as wrong.
 
+### 5.8 The fourth browser spec, and the helper that would have made it a ReferenceError
+
+`tests/e2e/data-api-detail-one-grid.spec.ts` (opt-in:
+`EGRET_E2E_DATAAPI_ONE_GRID=1 npx playwright test data-api-detail-one-grid`).
+
+It carries what jsdom cannot judge about the detail-tabs pass: that `Versions`' widened `Who`
+column actually holds a realistic address (laid out in a detached span with the cell's own
+computed font — `scrollWidth` reads the same number whether the text is clipped or not once it
+FITS, so it would pass vacuously); that `Note` is still the unsized remainder; that Publish
+shares the `History` heading's line (a shared vertical CENTRE, not an equal `top` — the button
+is taller than the heading, so `top` reports two lines for one); and that `Response` renders
+exactly one `Setting | Details | Value` grid whose transform row spans the whole table.
+
+**Two things it got wrong before it ran, both caught by running its own measure functions
+against the real page:**
+
+- **A shared helper inside `page.evaluate`.** `page.evaluate` ships the evaluated function's
+  own source to the browser and nothing else, so a module-scope helper called from inside one is
+  `undefined` there. The section-root walk is written out in BOTH measure functions on purpose;
+  the duplication is the price of a spec that can run at all, and a `ReferenceError` at the first
+  assertion reads exactly like a missing element.
+- **A blanket `querySelectorAll("table")`.** `ReturnsEditor` renders a `max-w-xl` table INSIDE a
+  cell of the settings grid, which §5.5 exempts deliberately — so "every frame ends at the
+  section's right edge" has to exclude nested frames, and the spec asserts that there IS exactly
+  one nested frame so the exclusion cannot go vacuous.
+
+The same caveat as §5.7 applies and is stated in the file: **it has not been executed against a
+live seeded stack.** Every number in it was measured in headless Chromium against the Vite dev
+server with the API stubbed at the network layer, by running the spec's own `measureVersions`
+and `measureResponse` — compiled from the spec's source with esbuild rather than retyped — so
+what was verified is the code that ships, not a paraphrase of it.
+
 ---
 
 ## 6. `ConfigTableRow.details` is a plain string
