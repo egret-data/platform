@@ -109,8 +109,13 @@ export function SqlEditor({ value, onChange, schemaWords, schema, onRun, onSelec
   wordsRef.current = schemaWords;
   const schemaRef = useRef(schema ?? emptySchemaIndex());
   schemaRef.current = schema ?? emptySchemaIndex();
+  // **A read-only editor has no run callback.** Folded into the ref the command
+  // already reads rather than checked inside it, so the unsafe pair cannot exist
+  // at the point of use — and kept in a ref rather than captured because
+  // `handleMount` runs once and `readOnly` can turn on afterwards: an endpoint
+  // can be moved to the trash while its editor is on screen.
   const onRunRef = useRef(onRun);
-  onRunRef.current = onRun;
+  onRunRef.current = readOnly ? undefined : onRun;
   const onSelRef = useRef(onSelectionChange);
   onSelRef.current = onSelectionChange;
   const disposables = useRef<{ dispose: () => void }[]>([]);
@@ -130,6 +135,18 @@ export function SqlEditor({ value, onChange, schemaWords, schema, onRun, onSelec
       }),
     );
     // Cmd/Ctrl+Enter → run the selection (if any) else the whole editor.
+    //
+    // **Inert while `readOnly`, and that has to be the component's job rather
+    // than every caller's.** `readOnly`/`domReadOnly` stop TYPING; neither
+    // unregisters a keybinding, and a surrounding `<fieldset disabled>` never
+    // sees a keystroke — so a read-only editor given an `onRun` would run from
+    // the keyboard while its own surface refuses edits and its Run button is
+    // disabled. `Query.tsx` avoids that by passing `onRun={trashed ? undefined
+    // : …}`, which is correct and is pinned by its own test, but it left the
+    // safety as something every future caller has to remember. The `onRunRef`
+    // assignment above is what makes the unsafe pair unrepresentable at the
+    // point of use. Registered-but-inert rather than not registered: the
+    // command binds once at mount, and read-only can arrive after that.
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => {
       onRunRef.current?.(pickRunSql(editor.getValue(), selectedText(editor)));
     });

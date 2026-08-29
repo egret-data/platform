@@ -178,3 +178,35 @@ describe("ParamEditor constraint fields", () => {
     expect(typeof lastParams[0].minimum).toBe("string");
   });
 });
+
+/**
+ * The empty state is the only place the editor tells an author how to reference
+ * a parameter from SQL, and it used to teach `:name` — a syntax the renderer
+ * has never had. `crates/egret-dataapi/src/render.rs` is minijinja with a bind
+ * formatter and contains no `:name` handling at all, so an author who followed
+ * the hint wrote a template referencing nothing and was refused at publish for
+ * an unreferenced parameter.
+ */
+describe("ParamEditor empty state", () => {
+  it("tells the author the placeholder syntax the renderer actually accepts", () => {
+    render(<ParamEditor params={[]} onChange={vi.fn()} />);
+
+    // The whole sentence, as rendered — the `<code>` is a child element, so
+    // reading the cell is what proves the hint reaches the screen.
+    const hint = screen.getByText(/no parameters yet/i);
+    expect(hint).toHaveTextContent("{{ name }}");
+    // Not merely "the new string is present": the wrong one must be gone.
+    expect(hint.textContent).not.toContain(":name");
+  });
+
+  it("still says where the value comes from", () => {
+    // The clause either side of the placeholder stayed true and must survive
+    // the edit — `location` defaults to `query` and the empty state is the
+    // only statement of that on this screen.
+    render(<ParamEditor params={[]} onChange={vi.fn()} />);
+
+    expect(screen.getByText(/no parameters yet/i)).toHaveTextContent(
+      "read from the query string",
+    );
+  });
+});

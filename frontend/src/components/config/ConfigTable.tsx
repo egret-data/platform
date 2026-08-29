@@ -191,7 +191,31 @@ export function ConfigTableRow({
       <TableCell className="hidden align-top whitespace-normal break-words text-sm text-muted-foreground lg:table-cell">
         {detailsClassName && helpNode ? <div className={detailsClassName}>{helpNode}</div> : helpNode}
       </TableCell>
-      <TableCell className="align-top">{children}</TableCell>
+      {/* `whitespace-normal` is load-bearing here, not defensive symmetry with
+          the two cells above. The shared `TableCell` is `whitespace-nowrap`
+          (`ui/table.tsx`), and the Value column is the narrowest one this table
+          sizes — 208px by default, 320px at `TryIt`'s `w-52 lg:w-80`. A caller
+          may legitimately put a sentence in it: `TryIt` puts three there (the
+          failed-fetch `Alert`, the no-service-accounts note, and a `Caveat`'s
+          disclosure body), because each is about the picker in this cell and
+          §4.3 keeps an explanation beside the control it is about.
+
+          Measured in Chromium at 1440px before this line existed, with the
+          Value column at 304px: the caveat body laid out at 1103px, the empty
+          note at 498px and the alert at 807px — clipped with no ellipsis
+          (`text-overflow` is `clip`), and the whole `Setting | Details | Value`
+          table overflowed its `overflow-x-auto` wrapper (1807, 1202 and 1512
+          against 1016), putting a horizontal scrollbar under a settings table
+          on a desktop viewport. Two of the three need nothing clicked.
+
+          It belongs HERE and not in the callers: an earlier pass fixed the same
+          inheritance on `Caveat`'s `<summary>` alone, and every other block in
+          the same cell kept clipping. `break-words` for the other half — a
+          server error message this cell renders verbatim can be one
+          unbreakable token, and wrapping cannot help a word with no break
+          opportunity in it. Controls are unaffected: `Button`, `Badge` and the
+          `Select` trigger all carry their own `whitespace-nowrap`. */}
+      <TableCell className="align-top whitespace-normal break-words">{children}</TableCell>
     </TableRow>
   );
 }

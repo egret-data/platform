@@ -1137,7 +1137,7 @@ describe("Query section — ParamEditor", () => {
     it("keeps the empty state, and the sentence that says where a parameter comes from", async () => {
       renderParams([]);
       expect(await screen.findByText(/No parameters yet/i)).toBeInTheDocument();
-      expect(screen.getByText(":name")).toBeInTheDocument();
+      expect(screen.getByText("{{ name }}")).toBeInTheDocument();
       // The columns stay on screen with no rows: they are what tells an author
       // what a parameter is made of before they add one.
       expect(screen.getByRole("columnheader", { name: "Name" })).toBeInTheDocument();
@@ -1474,16 +1474,39 @@ describe("Query section — the editor, the split and the preview", () => {
     expect(previewMutateAsync.mock.calls[0][0].data.sql).toBe("SELECT 1 -- edited");
   });
 
+  /**
+   * Task 3: the ~570-character note became a disclosure headed by the one
+   * sentence a reader must not miss. The panel is unchanged — it still travels
+   * with the button, which is `PreviewBlock`'s rule — and the reason the
+   * headline is NOT collapsed with the rest is that same rule: a reader who has
+   * to open something to learn what the button does has already pressed it.
+   */
   it("keeps the preview's note in the panel with the button it describes", async () => {
     show(makeEndpoint());
     await screen.findByLabelText("SQL");
 
     const previewPanel = screen.getAllByTestId("panel")[1];
-    // The note is the only place that says a preview saves nothing and leaves
-    // no trace. Beside the button, or a reader has already pressed it.
-    expect(
-      within(previewPanel).getByText(/does not save, publish, spend a rate limit/i),
-    ).toBeInTheDocument();
+    // The load-bearing sentence, on screen with nothing clicked.
+    const summary = within(previewPanel).getByText(
+      "A green preview does not prove a consumer can call this endpoint",
+    );
+    const details = summary.closest("details")!;
+    expect(details).not.toHaveAttribute("open");
+
+    // The rest is still here and still reachable — nothing was cut.
+    for (const re of [
+      /as they are on screen right now/i,
+      /including edits you have not saved/i,
+      /does not save, publish, spend a rate limit/i,
+      /Column names come from the engine/i,
+      /rather than as a service account/i,
+    ]) {
+      const node = within(details).getByText(re);
+      expect(node.closest("summary")).toBeNull();
+    }
+    fireEvent.click(summary);
+    expect(details).toHaveAttribute("open");
+
     // …and the shortcut is written down where it can be discovered.
     expect(within(previewPanel).getByText("⌘↵")).toBeInTheDocument();
   });
@@ -1989,13 +2012,80 @@ describe("Query section — a statement's SQL from a script", () => {
     show(makeEndpoint({ statements: [{ name: "main", sql: "SELECT 1" }] } as Partial<DataApiEndpointDto>));
 
     await screen.findByLabelText("SQL");
+    // Task 3: one line beside the checkbox — the CONSEQUENCE — with the limit
+    // of the undo behind it. Three lines of standing prose above a Monaco
+    // editor is height subtracted from the editor on every render.
     const warning = screen.getByText(/discards this statement.s SQL/i);
-    expect(warning).toHaveTextContent(/leaving this section or reloading the page does not/i);
+    expect(warning.closest("summary")).not.toBeNull();
+    const details = warning.closest("details")!;
+    expect(details).not.toHaveAttribute("open");
+    // Still here, still reachable — and INSIDE the disclosure, or nothing has
+    // been taken off the editor's height.
+    const body = within(details).getByText(/leaving this section or reloading the page does not/i);
+    expect(body.closest("summary")).toBeNull();
+    expect(body).toHaveTextContent(/a statement has one body, not both/i);
+    fireEvent.click(warning);
+    expect(details).toHaveAttribute("open");
 
     // And it follows the mode: after the switch it is the SCRIPT that the next
     // switch would discard, so that is what it names.
     await userEvent.click(modeToggle());
     expect(await screen.findByText(/discards this statement.s script/i)).toBeInTheDocument();
+  });
+
+  /**
+   * The other block that stood above the editor: the script's template rule,
+   * 330 characters explaining one checkbox's ON state. Its first sentence IS
+   * the rule, so it heads the disclosure and the mechanics sit behind it.
+   */
+  it("heads the script's template rule and holds the mechanics behind it", async () => {
+    show(makeEndpoint({ statements: [{ name: "main", script: "def build_sql(params):\n    return \"SELECT 1\"\n" }] } as Partial<DataApiEndpointDto>));
+
+    await screen.findByLabelText("SQL script");
+    const summary = screen.getByText(/returns this statement.s SQL as a template/i);
+    expect(summary.closest("summary")).not.toBeNull();
+    const details = summary.closest("details")!;
+    expect(details).not.toHaveAttribute("open");
+
+    for (const re of [/bound on every call/i, /refused at publish/i]) {
+      const node = within(details).getByText(re);
+      expect(node.closest("summary")).toBeNull();
+    }
+    fireEvent.click(summary);
+    expect(details).toHaveAttribute("open");
+  });
+
+  /**
+   * §11.2's trap. This section renders inside the shell's
+   * `<fieldset disabled={trashed}>`, which disables every BUTTON under it — a
+   * Radix `Collapsible` trigger included — so on a trashed endpoint these
+   * caveats would be unopenable, and every text assertion above would still
+   * pass because jsdom does not hide a closed disclosure either way.
+   *
+   * `fireEvent`, not `userEvent`: `userEvent.click` refuses a click under a
+   * disabled fieldset even though `fieldset[disabled]` reaches only
+   * form-associated descendants, and `<summary>` is not one. The failure mode
+   * is a false negative.
+   */
+  it("keeps the caveats openable on a trashed endpoint", async () => {
+    show(
+      makeEndpoint({
+        statements: [{ name: "main", sql: "SELECT 1" }],
+        state: "disabled",
+        deleted_at: "2026-08-18T09:00:00Z",
+      } as Partial<DataApiEndpointDto>),
+    );
+
+    await screen.findByLabelText("SQL");
+    const summary = screen.getByText(/discards this statement.s SQL/i);
+    const fieldset = summary.closest("fieldset");
+    expect(fieldset).not.toBeNull();
+    expect(fieldset).toBeDisabled();
+
+    const details = summary.closest("details")!;
+    expect(within(details).queryByRole("button")).not.toBeInTheDocument();
+    fireEvent.click(summary);
+    expect(details).toHaveAttribute("open");
   });
 
   it("says nothing about discarding when there is nothing to discard", async () => {

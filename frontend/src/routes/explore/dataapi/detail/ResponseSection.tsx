@@ -224,8 +224,9 @@ interface OpenApiDocPreview {
  * snapshots keep exact-match semantics — and so does every endpoint whose
  * definition does not branch, which is most of them. A `Required` column would
  * therefore hold one repeated word in every cell of the common case, and would
- * spend width in the one table §5.1 measured down to `max-w-xl` *because* the
- * type had drifted away from the name it describes. Marking only the exceptions
+ * put a third column between a name and the type it describes in the one table
+ * on this page whose whole job is to keep those two side by side. Marking only
+ * the exceptions
  * leaves the common case rendering byte-identically to what it did before, and
  * the two tests that already pinned this table's grid did not have to change.
  *
@@ -262,11 +263,28 @@ function mayBeAbsent(column: { required?: boolean }): boolean {
 /**
  * The `Name | Type` frame, with whatever rows it is given.
  *
- * Two short columns — a column name and a type. Left at the shared `Table`'s
- * `w-full`, `bigint` sat a screen-width away from the column it describes even
- * inside the section cap, so it keeps the `max-w-xl` the width pass gave it
- * (§5.1). Auto layout, not `table-fixed`: nothing here truncates, and the state
- * rows are sentences that want to wrap rather than scroll.
+ * # Why it is `table-fixed` with a sized Name, and no longer `max-w-xl`
+ *
+ * Two short columns — a column name and a type — and the complaint the cap was
+ * added for was that `bigint` sat far from the name it describes. Measured in
+ * Chromium at 1600×1000, the cap did not actually fix that: `w-full` AUTO
+ * layout inside `max-w-xl` gave Name 443.9px of the table's 576, so the type
+ * started 444px in. Auto layout sizes columns from their content, so the gap
+ * grew with the longest column name and the cap only bounded it.
+ *
+ * `table-fixed` with `w-72` on Name puts the type 288px in at ANY table width,
+ * which is both closer and stable — and `w-72` is the width the
+ * `Setting | Details | Value` table below uses for its own first column, so the
+ * two read as one grid down the section instead of as two tables that happen to
+ * be stacked. That is what lets the frame follow the section's measure (the
+ * page) rather than needing a cap of its own: the audit measured this table at
+ * 575px against the settings table's 1020px, one of the four widths the section
+ * stacked.
+ *
+ * The name cell therefore wraps rather than scrolls (`whitespace-normal
+ * break-all` there): the shared `TableCell` is `whitespace-nowrap`, and under
+ * fixed layout a long identifier would otherwise overflow a column that can no
+ * longer grow to hold it.
  *
  * A component rather than a copy per branch because a several-statement
  * contract renders one of these PER STATEMENT, and the headers are what say
@@ -274,10 +292,10 @@ function mayBeAbsent(column: { required?: boolean }): boolean {
  */
 function ColumnTable({ children }: { children: ReactNode }) {
   return (
-    <Table className="max-w-xl">
+    <Table className="table-fixed">
       <TableHeader>
         <TableRow>
-          <TableHead>Name</TableHead>
+          <TableHead className="w-72">Name</TableHead>
           <TableHead>Type</TableHead>
         </TableRow>
       </TableHeader>
@@ -298,16 +316,16 @@ function ColumnRows({ columns }: { columns: ColumnSpec[] }) {
               endpoint published before the branching-columns work, plus every
               endpoint whose definition does not branch, has every column
               guaranteed, so a third column would hold one repeated word in
-              every cell of the common case while costing width in the one table
-              §5.1 measured down to `max-w-xl` precisely because the type had
-              drifted away from the name it describes.
+              every cell of the common case, in the one table on this page
+              whose sized `Name` column exists precisely to keep the type beside
+              the name it describes.
 
               Text, not a colour or an icon: it has to be legible without a
               hover and to a reader who is not reading visually. The Name cell
               keeps its own `font-mono text-xs` on the name alone — the badge's
               label is prose. */}
-          <TableCell className="py-2">
-            <span className="flex items-center gap-2">
+          <TableCell className="py-2 whitespace-normal break-all">
+            <span className="flex flex-wrap items-center gap-2">
               <span className="font-mono text-xs">{c.name}</span>
               {mayBeAbsent(c) && (
                 <Badge variant="outline" className="text-muted-foreground">
@@ -403,6 +421,14 @@ function ReturnsEditor({
           </AlertDescription>
         </Alert>
       )}
+      {/* Keeps a cap of its own where the frozen list above gave one up, and
+          the difference is what each table IS. That one is a read-down LISTING
+          whose frame belongs on the section's measure; this is a row of form
+          controls — a name input, a type input, a checkbox and a delete — and
+          four controls stretched across a wide page put the delete button an
+          arm's length from the row it acts on. §5.5 records that a section may
+          legitimately cap its own children, and `Try it`'s parameter grid is
+          the precedent. */}
       <Table className="max-w-xl table-fixed">
         <TableHeader>
           <TableRow>
@@ -634,16 +660,24 @@ export default function ResponseSection() {
   }
 
   return (
-    // Capped like `Access`, `Try it` and `Versions`, and for the same reason:
-    // removing the route cap moved width into the sections, and this section
-    // was measured in neither the pass that built it (there was no cap to
-    // remove yet) nor the pass that measured Config and the tabs it rebuilt.
-    // Uncapped at a ~1470px content box, `table-fixed` gives Setting 288 /
-    // Value 208 / Details ~975 while `max-w-prose` stops the sentence near
-    // 585px — ~390px of empty column, with the two Selects sitting ~1260px
-    // right of the labels they answer to. `max-w-5xl` puts them back at
-    // ~816px, and it is the same cap the three sibling sections already use.
-    <div className="max-w-5xl space-y-6">
+    // Uncapped, like `Config` and `Query` and unlike the three sections this
+    // one used to be grouped with. §5.1's criterion is what a section HOLDS,
+    // and what this one holds changed after it was measured: it has a
+    // `Setting | Details | Value` table (§4.2) and a Monaco editor for the
+    // response transform — the two things §5.1 gives as the reason Config and
+    // Query use the page.
+    //
+    // Measured in Chromium at 1600×1000 with the sidebar expanded, before this
+    // change: `max-w-5xl` stopped the section at 1024px inside a 1296px content
+    // box — a 288px gutter no block could ever use — while the four blocks
+    // ended at 840 / 796 / 1288 / 796. One measure means the frames now share
+    // the page's right edge, and PROSE is the single deliberate exception:
+    // `max-w-prose` caps a sentence because a line of text has a readable
+    // measure of its own (§5.2, "cap the prose, not the column").
+    //
+    // Removing the cap is not enough on its own — see the `valueClassName` on
+    // the `ConfigTable` below, which is the other half of this change.
+    <div className="space-y-6">
       <div>
         <h2 className="text-lg font-semibold">Response</h2>
         <p className="text-sm text-muted-foreground">
@@ -665,9 +699,10 @@ export default function ResponseSection() {
             per-row noise a badge was chosen over a third column to avoid.
 
             `max-w-prose`, matching the OpenAPI block's sentence two blocks
-            down: the table is capped at `max-w-xl` (§5.1) for a reason about
-            two short cells, and prose held to that measure would run
-            unnecessarily tall. */}
+            down. It is the one thing in this section that does NOT take the
+            page's measure, and deliberately: a table frame can span whatever it
+            is given, but a line of running text has a readable measure of its
+            own (§5.2, "cap the prose, not the column"). */}
         {hasOptionalColumn && (
           <p className="max-w-prose text-sm text-muted-foreground">
             Columns marked <span className="font-medium">May be absent</span> come from a branch that
@@ -775,7 +810,7 @@ export default function ResponseSection() {
           Build the response with a script
         </label>
         {hasTransform && transform && (
-          <div className="max-w-2xl space-y-4 pl-6">
+          <div className="space-y-4 pl-6">
             <div className="space-y-1.5">
               <p className="text-sm font-medium">Script</p>
               {/* Fixed height, not `CellEditor`'s grow-with-content: this
@@ -822,7 +857,20 @@ export default function ResponseSection() {
         )}
       </div>
 
-      <ConfigTable detailsClassName="max-w-prose">
+      {/* `valueClassName`, not just the removed cap above: `ConfigTable` is
+          `table-fixed`, so every pixel the section gains goes to Details — the
+          only unsized column — and the three Selects stay at the shared 208px
+          however wide the page is (§5.2). Measured in Chromium at 1600×1000:
+          the trigger was 192px inside a 208px column and is 368px inside a
+          384px one, and Details went 528 → 624 rather than taking all 720.
+
+          `lg:` and not a flat `w-96`, which is a measurement rather than a
+          hunch (§5.3): below `lg` the Details column is hidden but the two
+          sized columns do not shrink to fit — fixed layout honours their pixel
+          widths and the shadcn `Table` wrapper scrolls instead — so the
+          widening is taken only where there is room to take it. The same pair
+          `Config` opts into, on the tab beside this one. */}
+      <ConfigTable valueClassName="w-52 lg:w-96" detailsClassName="max-w-prose">
         <ConfigTableGroup label="Output shape" />
         {/* Neither row below is merely disabled while a transform is present
             — it is not rendered at all. `openapi_gen.rs`'s own generated
@@ -923,13 +971,14 @@ export default function ResponseSection() {
 
       <div className="space-y-2">
         <h3 className="text-sm font-medium">OpenAPI document</h3>
-        {/* `max-w-prose` is the one class this conversion ADDED, and it
-            replaces something the card was doing rather than changing the
-            block: the `CardContent`'s `p-6` inside a card inside the section
-            cap was what stopped this sentence short of ~816px. Free of the
-            frame it would run the full `max-w-5xl`, wider than the Details
-            column two blocks up — which caps at exactly this measure
-            (`detailsClassName="max-w-prose"`) for the same reason. */}
+        {/* `max-w-prose` is the one class the §4.2 conversion ADDED, and it
+            replaced something the card had been doing rather than changing the
+            block: the `CardContent`'s `p-6` was what stopped this sentence
+            short. Free of the frame it would run the section's whole width —
+            now the page's — where the Details column two blocks up caps at
+            exactly this measure (`detailsClassName="max-w-prose"`) for the same
+            reason. Prose is the section's one exception to a single measure;
+            see the note on the root element. */}
         <p className="max-w-prose text-sm text-muted-foreground">
           Generated per service account — the document lists exactly the endpoints that account may
           invoke. Choose one to download this endpoint&apos;s contract.

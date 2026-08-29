@@ -464,7 +464,19 @@ describe("AccessSection — condition 2, Ranger", () => {
     setup({ accounts: [SA_GRANTED], grants: [makeGrant(SA_GRANTED.id, SA_GRANTED.name)] });
     renderAccess();
 
-    expect(await screen.findByText(/egret cannot check/i)).toBeInTheDocument();
+    // Reachable, not merely present: the sentence now lives behind the Invoke
+    // column's disclosure (Task 3), and jsdom does not hide a closed
+    // `<details>` — so a `getByText` alone would pass on copy no reader can get
+    // to. Open it the way a reader does, then assert.
+    const summary = await screen.findByText("Invoke is not data access");
+    const details = summary.closest("details")!;
+    // Closed FIRST. Without this the test passes on `<details open>` — a
+    // disclosure that collapses nothing — and "reachable" would be asserting
+    // only that a click did not break anything.
+    expect(details).not.toHaveAttribute("open");
+    fireEvent.click(summary);
+    expect(details).toHaveAttribute("open");
+    expect(within(details).getByText(/egret cannot check/i)).toBeInTheDocument();
     expect(screen.getAllByRole("link", { name: /try it/i }).length).toBeGreaterThan(0);
   });
 
@@ -517,11 +529,15 @@ describe("AccessSection — condition 2, Ranger", () => {
 
     expect(screen.getAllByText(/egret cannot check whether these accounts may read/i)).toHaveLength(1);
 
-    // …and it is above the table, not inside any row — which is what makes the
-    // count independent of how many accounts there are.
+    // …and it is in the Invoke COLUMN HEADER, not inside any row — which is
+    // what makes the count independent of how many accounts there are. It
+    // moved into the header in Task 3 ("beside the column where the
+    // distinction bites"), so `closest("table")` is no longer the discriminator
+    // it was; the row is.
     const sentence = screen.getByText(/egret cannot check whether these accounts may read/i);
-    expect(sentence.closest("table")).toBeNull();
     expect(sentence.closest("[data-testid^=\"access-row-\"]")).toBeNull();
+    expect(sentence.closest("th")).not.toBeNull();
+    expect(sentence.closest("th")).toHaveTextContent("Invoke");
   });
 
   // The per-row half of condition 2 is the only part that was ever per-row: the
@@ -549,17 +565,82 @@ describe("AccessSection — condition 2, Ranger", () => {
   });
 });
 
-describe("AccessSection — the §5.3 warning", () => {
-  it("states that publishing does not grant data access, as a neutral note rather than amber emphasis", async () => {
+/**
+ * Task 3. The page-level `SettingsNote` and the `Service accounts` paragraph
+ * said overlapping things about invoke-right versus data-access — ~550
+ * characters standing above a table whose first row is one line. They are now
+ * ONE disclosure, headed by the distinction and attached to the Invoke column,
+ * which is where that distinction bites.
+ *
+ * Nothing was cut. These tests are what says so: every sentence from both
+ * blocks is asserted inside the disclosure, and the disclosure is asserted
+ * openable — including on a trashed endpoint, which is the case §11.2 exists
+ * for.
+ */
+describe("AccessSection — invoke is not data access, said once", () => {
+  it("heads the distinction on the Invoke column and holds both blocks' sentences behind it", async () => {
     setup({ accounts: [SA_GRANTED], grants: [] });
     renderAccess();
 
-    const note = await screen.findByRole("note");
-    expect(note).toHaveTextContent(/publishing.*does not grant data access/i);
-    // SettingsNote's neutral surface. `--highlight` (amber) is reserved for a
-    // page's single primary emphasis, and a standing passive note is not that.
-    expect(note.className).toContain("bg-muted/40");
-    expect(note.className).not.toContain("highlight");
+    const summary = await screen.findByText("Invoke is not data access");
+    // Beside the column, not above the table: the answers this qualifies are
+    // the ones in that column.
+    const header = summary.closest("th");
+    expect(header).not.toBeNull();
+    expect(within(header!).getByText("Invoke")).toBeInTheDocument();
+
+    const details = summary.closest("details")!;
+    expect(details).not.toHaveAttribute("open");
+
+    // Every sentence from BOTH blocks, none of them in the summary.
+    for (const re of [
+      /Publishing an endpoint does not grant data access/i,
+      /under whatever the engine enforces/i,
+      /two separate permissions and only the first one is on this page/i,
+      /egret cannot check whether these accounts may read the underlying tables/i,
+      /which is why it is not a column/i,
+      /to find out for real/i,
+    ]) {
+      const node = within(details).getByText(re);
+      expect(node.closest("summary")).toBeNull();
+    }
+
+    fireEvent.click(summary);
+    expect(details).toHaveAttribute("open");
+  });
+
+  it("says it once, not once above the table and again beside the column", async () => {
+    setup({ accounts: [SA_GRANTED, SA_NONE], grants: [] });
+    renderAccess();
+
+    await screen.findByTestId(`access-row-${SA_GRANTED.id}`);
+    // The merge is the point: two blocks became one, so each sentence appears
+    // exactly once in the whole section — and it stays one no matter how many
+    // accounts there are.
+    expect(screen.getAllByText(/Publishing an endpoint does not grant data access/i)).toHaveLength(1);
+    expect(screen.getAllByText("Invoke is not data access")).toHaveLength(1);
+    // The standing `role="note"` box this replaced is gone; the sentences are
+    // not.
+    expect(screen.queryByRole("note")).not.toBeInTheDocument();
+  });
+
+  it("stays openable on a trashed endpoint, where a Radix trigger could not be", async () => {
+    setup({ accounts: [SA_GRANTED], grants: [] });
+    renderAccess(
+      makeEndpoint({ state: "disabled", deleted_at: "2026-08-18T09:00:00Z" } as Partial<DataApiEndpointDto>),
+    );
+
+    const summary = await screen.findByText("Invoke is not data access");
+    const fieldset = summary.closest("fieldset");
+    expect(fieldset).not.toBeNull();
+    expect(fieldset).toBeDisabled();
+
+    const details = summary.closest("details")!;
+    expect(within(details).queryByRole("button")).not.toBeInTheDocument();
+    // `fireEvent`, not `userEvent` — see the caveat tests below for why the
+    // difference is a false negative and not a product failure.
+    fireEvent.click(summary);
+    expect(details).toHaveAttribute("open");
   });
 });
 
@@ -586,13 +667,32 @@ describe("AccessSection — the shape", () => {
     // THREE columns, not four. `Data` was one and every cell in it held the
     // same sentence; the browser pass measured what that cost (see the
     // component's doc) and it is section-level copy now.
-    expect((await screen.findAllByRole("columnheader")).map((h) => h.textContent)).toEqual([
-      "Service account",
-      "Invoke",
-      // Named for a screen reader and hidden on screen — a visible heading over
-      // one small button is louder than what it labels.
-      "Actions",
-    ]);
+    //
+    // Their ACCESSIBLE NAMES, and computed by the library rather than
+    // approximated here. A `<th>` names every cell in its column, so once the
+    // Invoke header gained the invoke-vs-data caveat (Task 3) a `textContent`
+    // assertion would have passed on a header that reads 550 characters at a
+    // screen-reader user before each row's answer — the audio form of the very
+    // defect that took the `Data` column out.
+    //
+    // The first version of this fix read `aria-label ?? textContent`, which is
+    // a hand-rolled stand-in for the naming algorithm: it agrees with it today
+    // and would disagree the moment the header used `aria-labelledby`, which is
+    // exactly the sort of change this assertion exists to survive. `getByRole`
+    // runs the real computation, so the identity checks below say "the header
+    // in position N is the one the accessibility tree calls X" — order and name
+    // in one, with nothing reimplemented.
+    const headers = await screen.findAllByRole("columnheader");
+    expect(headers).toHaveLength(3);
+    expect(headers[0]).toBe(screen.getByRole("columnheader", { name: "Service account" }));
+    expect(headers[1]).toBe(screen.getByRole("columnheader", { name: "Invoke" }));
+    // Named for a screen reader and hidden on screen — a visible heading over
+    // one small button is louder than what it labels.
+    expect(headers[2]).toBe(screen.getByRole("columnheader", { name: "Actions" }));
+
+    // …and the caveat is still IN that header, reachable by anyone reading the
+    // header row itself. Naming the column is not hiding the sentence.
+    expect(within(headers[1]).getByText("Invoke is not data access")).toBeInTheDocument();
 
     // Positions, not merely presence: a header row that says "Invoke" over the
     // account name is a table that reads as wrong while every text assertion in
@@ -620,11 +720,53 @@ describe("AccessSection — the shape", () => {
   });
 
   /**
+   * The identity column is `w-48` inside a `table-fixed` table, so both of its
+   * lines `truncate` at 192px at every viewport — measured live at seven
+   * accounts, every email was cut. `title` is the cheap recovery: the full
+   * value is still readable without rebalancing a column whose neighbour
+   * genuinely carries a sentence per row.
+   *
+   * The assertion is that the tooltip equals the RENDERED text, not that a
+   * tooltip merely exists. A `title` holding something else — the id, a
+   * stale prop, an empty string — is a tooltip that lies, and `toHaveAttribute`
+   * with no expected value would pass on all three. jsdom can say this: `title`
+   * is an attribute, not a layout fact (§10), so the truncation itself stays a
+   * browser question and only the recovery is pinned here.
+   */
+  it("makes the truncated account name and email recoverable on hover", async () => {
+    setup({ accounts: [SA_GRANTED], grants: [] });
+    renderAccess();
+
+    const row = await screen.findByTestId(`access-row-${SA_GRANTED.id}`);
+    expect(within(row).getByText(SA_GRANTED.name)).toHaveAttribute("title", SA_GRANTED.name);
+    expect(within(row).getByText(SA_GRANTED.email!)).toHaveAttribute("title", SA_GRANTED.email);
+  });
+
+  /**
+   * The second line is not always an address. An orphaned grant — a grant whose
+   * service account this workspace no longer lists — renders an explanation
+   * there instead, and the component hands the same binding to the text and to
+   * the `title` so the two cannot drift. Pinned because the obvious shape
+   * (`title={account.email}` beside a conditional child) is wrong in exactly
+   * this row and right everywhere else, so nothing else in this file would
+   * catch it.
+   */
+  it("points the tooltip at what an orphaned row actually says", async () => {
+    setup({ accounts: [], grants: [makeGrant("sa-gone", "deleted-bot")] });
+    renderAccess();
+
+    const row = await screen.findByTestId("access-row-sa-gone");
+    const line = within(row).getByText("no longer a service account in this workspace");
+    expect(line).toHaveAttribute("title", "no longer a service account in this workspace");
+  });
+
+  /**
    * Access had no width guard at all, and neither did `Try it` — which is how
    * `Try it` shipped a `max-w-5xl` that nothing was holding in place.
-   * `docs/en/ui-conventions.md` §5.1 lists this section among the four that cap
-   * themselves; the assertion lives in `sectionWidth.ts` so all five sections
-   * make it the same way.
+   * `docs/en/ui-conventions.md` §5.1 lists this section among the three that cap
+   * themselves — Access, Try it and Versions; Config and Response leave width to
+   * the page. The assertion lives in `sectionWidth.ts` so all five sections make
+   * it the same way.
    */
   it("caps its own width, as §5.1 says this section does", async () => {
     setup({ accounts: [SA_GRANTED], grants: [] });
@@ -742,16 +884,41 @@ describe("AccessSection — the row-scoped caveat", () => {
     expect(details).toHaveAttribute("open");
   });
 
-  // A six-word transient status has no explanation to hold, so collapsing it
-  // would cost a click to reveal nothing — §11.2's rule applied per caveat
-  // rather than per section: collapse a thing because it is big.
-  it("leaves the short transient states as plain text, not as an empty disclosure", async () => {
-    setup({ accounts: [SA_NONE], grants: [] });
+  /**
+   * §4.3, and TWO accounts because one cannot show the defect.
+   *
+   * Every row used to carry "Workspace-inherited invoke is unchecked while this
+   * endpoint is not live." That renders on `reason === "not-live"`, which is
+   * `!probeEnabled`, which is `!isLive` — the same expression that renders the
+   * paragraph above the table, so the two can never disagree — and that
+   * paragraph already says egret cannot check workspace-inherited invoke, plus
+   * the draft-versus-disabled distinction the row cannot make. A strict subset,
+   * once per row.
+   *
+   * Measured in a browser at seven service accounts: seven identical lines
+   * under the sentence that had just said it. At the ONE account the audit ran
+   * against it was one line and looked deliberate, which is why the fixture
+   * here has two — a single-account fixture would pass over the restored bug.
+   */
+  it("says the not-live explanation once above the table, not once per row", async () => {
+    setup({ accounts: [SA_NONE, SA_NONE_2], grants: [] });
     renderAccess(makeEndpoint({ state: "draft", live_version_id: null }));
 
-    const row = await screen.findByTestId(`access-row-${SA_NONE.id}`);
-    const line = within(row).getByText(/Workspace-inherited invoke is unchecked/i);
-    expect(line.closest("details")).toBeNull();
+    // The section-level sentence is there, exactly once.
+    expect(
+      await screen.findByText(/egret cannot check workspace-inherited invoke rights against it/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getAllByText(/cannot check workspace-inherited invoke rights against it/i),
+    ).toHaveLength(1);
+
+    // And neither row repeats it.
+    for (const account of [SA_NONE, SA_NONE_2]) {
+      const row = screen.getByTestId(`access-row-${account.id}`);
+      expect(
+        within(row).queryByText(/workspace-inherited invoke is unchecked/i),
+      ).not.toBeInTheDocument();
+    }
   });
 });
 

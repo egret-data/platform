@@ -249,7 +249,7 @@ function ConstraintFields({
 }
 
 /**
- * The `:name` parameters a caller supplies on the query string — **one table
+ * The `{{ name }}` parameters a caller supplies on the query string — **one table
  * row per declaration**, not one card per declaration.
  *
  * The card-per-parameter stack this replaced put a `grid grid-cols-2` inside a
@@ -369,7 +369,8 @@ export function ParamEditor({
                   the whole table rather than as a value in the Name column. */}
               <TableCell colSpan={6} className="text-sm text-muted-foreground">
                 No parameters yet. Every parameter is read from the query string — write it into the
-                SQL as <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">:name</code>.
+                SQL as{" "}
+                <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">{"{{ name }}"}</code>.
               </TableCell>
             </TableRow>
           )}

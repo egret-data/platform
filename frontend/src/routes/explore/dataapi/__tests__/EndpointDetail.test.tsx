@@ -414,6 +414,94 @@ describe("Config — config table Details column", () => {
       ).length,
     ).toBeGreaterThan(0);
   });
+
+  /**
+   * A rate limit of `0` is the value every endpoint has until somebody sets
+   * one, and on a security-shaped setting "unlimited" and "blocked" are
+   * opposites. The answer is not a matter of taste — it is in
+   * `crates/egret-dataapi/src/serving/ratelimit.rs`:
+   *
+   *   - `Rate::from_spec` (`:86-88`) returns `None` for `qps == 0`, and
+   *     `check_request` (`:202`, `:214`) then installs no bucket at all. So `0`
+   *     on either qps field means NO LIMIT. Its own doc says so (`:73-81`):
+   *     "Treating that as 'zero requests per second' would make every default
+   *     endpoint unreachable; it means unlimited."
+   *   - `burst == 0` is a DIFFERENT sentinel (`:91-95`): the burst becomes the
+   *     qps, i.e. one second of allowance. Not unlimited, and not zero. And it
+   *     is passed only for the per-KEY bucket — `:214` hard-codes `0` for the
+   *     endpoint-wide one — so a burst with no `per_key_qps` does nothing at
+   *     all.
+   *
+   * The three rows shipped one placeholder, "unlimited", on all three. Two were
+   * right for the wrong reason (they described the EMPTY box, and a stored `0`
+   * renders as `0` and never shows a placeholder) and the third was simply
+   * false.
+   */
+  /**
+   * The row above the rate limits carries the same nullish trap and a THIRD
+   * sentinel, and its `placeholder="unlimited"` was false twice over. From the
+   * backend, not from the shape of the neighbouring rows:
+   *
+   *   - `crates/egret-dataapi-api/src/lib.rs:172-183` — `LimitsSpec` defaults
+   *     `max_rows` to **10,000** and `timeout_seconds` to **30**, not to `0`.
+   *     So a blank box is the default, not "no limit".
+   *   - `crates/egret-dataapi/src/serving/router.rs:2054-2057` — serving clamps
+   *     both: `max_rows.clamp(1, MAX_ROWS_CEILING)` and
+   *     `timeout_seconds.clamp(1, TIMEOUT_CEILING_SECS)`. So `0` means ONE ROW
+   *     and ONE SECOND — the opposite of unlimited — and `:2718`'s own test
+   *     spells it out: "a 0 cap must not mean 'return nothing'".
+   *   - `router.rs:239`, `:244` — the ceilings are 1,000,000 rows and 300
+   *     seconds. **There is no value that means unlimited.**
+   */
+  it("says what the row and time limits default to, and that neither 0 means unlimited", async () => {
+    renderConfig();
+    const maxRows = await screen.findByLabelText("Max rows");
+    const timeout = screen.getByLabelText("Timeout (seconds)");
+    const rowText = (el: HTMLElement) => (el.closest("tr") as HTMLElement).textContent ?? "";
+
+    // What the empty box does, and what the value an author might type as
+    // "no limit" actually does.
+    expect(rowText(maxRows)).toMatch(/10,000/);
+    expect(rowText(maxRows)).toMatch(/one row/i);
+    expect(rowText(timeout)).toMatch(/\b30\b/);
+    expect(rowText(timeout)).toMatch(/one second/i);
+
+    // The word that was there before, on a setting where it is not reachable
+    // at all. This is the assertion that fails on the shipped copy.
+    expect(rowText(maxRows)).not.toMatch(/\bunlimited\b/i);
+    expect(maxRows).toHaveAttribute("placeholder", "10,000 — the default");
+    expect(timeout).toHaveAttribute("placeholder", "30 — the default");
+  });
+
+  it("says what a rate limit of 0 does, and does not say the same thing for Burst", async () => {
+    renderConfig();
+    const perCaller = await screen.findByLabelText("Per caller (qps)");
+    const burst = screen.getByLabelText("Burst");
+    const perEndpoint = screen.getByLabelText("Endpoint-wide (qps)");
+
+    // The row's text, not the Details cell's: the copy renders twice (the
+    // `lg:table-cell` column and the `lg:hidden` inline copy), which is how
+    // this file already asserts Details copy above.
+    const rowText = (el: HTMLElement) => (el.closest("tr") as HTMLElement).textContent ?? "";
+
+    expect(rowText(perCaller)).toMatch(/no per-caller limit/i);
+    expect(rowText(perEndpoint)).toMatch(/no endpoint-wide limit/i);
+
+    // Burst's zero is the other sentinel, and the row has to say both halves:
+    // what 0 means, and that it is inert without a per-caller rate.
+    expect(rowText(burst)).toMatch(/one second of the per-caller rate/i);
+    expect(rowText(burst)).toMatch(/per caller \(qps\)/i);
+
+    // The discriminating half. All three rows said "unlimited" before, so a
+    // test that only checked the two qps rows would pass on the copy that was
+    // wrong — and would pass again the next time somebody "makes the three
+    // rows consistent".
+    expect(rowText(burst)).not.toMatch(/\bunlimited\b/i);
+    expect(perCaller).toHaveAttribute("placeholder", "0 — unlimited");
+    expect(perEndpoint).toHaveAttribute("placeholder", "0 — unlimited");
+    expect(burst.getAttribute("placeholder")).not.toBe("0 — unlimited");
+    expect(burst.getAttribute("placeholder")).toMatch(/per-caller rate/i);
+  });
 });
 
 function renderResponse(endpoint: DataApiEndpointDto = makeEndpoint()) {
@@ -1645,6 +1733,22 @@ describe("VersionsSection", () => {
     expect(screen.queryByText(/never been published/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/could not load/i)).not.toBeInTheDocument();
   });
+
+  // The section this sentence names has to be one the shell puts in its nav.
+  // It used to say "Definition", which was renamed to Query before this
+  // section shipped — so the copy pointed an author at a tab that is not on
+  // the screen while they are reading it.
+  it("names a section that exists", () => {
+    renderVersions();
+
+    const blurb = screen.getByText(/frozen snapshot/i);
+    expect(blurb.textContent).not.toContain("Definition");
+    expect(blurb).toHaveTextContent("Query");
+    // …and "Query" is not just a nicer word: the shell renders it as a nav
+    // link, so the reader can act on the sentence.
+    expect(screen.getByRole("link", { name: "Query" })).toBeInTheDocument();
+  });
+
 });
 
 /**
@@ -1748,16 +1852,72 @@ describe("EndpointDetail — width", () => {
     expectSectionCapsItsOwnWidth(container, heading);
   });
 
-  it("caps Response on its own root, like its three sibling sections", async () => {
-    // Added in the fix wave: Response was built before there was a route cap to
-    // remove and was not in the set the width pass measured, so it was the one
-    // section left uncapped that wanted a cap. Uncapped at a ~1470px content
-    // box its two Selects sat ~1260px right of their labels — the same
-    // complaint that earned `Versions` its cap. Class name only; jsdom cannot
-    // judge the geometry (§5.5), the browser measurement is in the report.
+  it("leaves Response's own root uncapped, like Config, now that it hosts a settings table and an editor", async () => {
+    // REVERSED from "caps Response on its own root", and the reversal is the
+    // point of the assertion rather than a detail of it. §5.1's criterion is
+    // what a section HOLDS: Config and Query use the page because they hold
+    // settings tables and code editors; Access, Try it and Versions cap
+    // themselves because they hold prose and short lists. Response was in the
+    // second group when it was measured, and has since been given both of the
+    // first group's things — a `Setting | Details | Value` table (§4.2) and a
+    // Monaco editor for the response transform.
+    //
+    // Measured in Chromium at 1600×1000, sidebar expanded, before this change:
+    // the section stopped at 1024px inside a 1296px content box, leaving a
+    // 288px gutter that no block could ever use, while its four blocks ended at
+    // 840 / 796 / 1288 / 796 — the ragged edge the audit reported. Class name
+    // only here; jsdom judges no geometry (§5.5), and the browser numbers are
+    // in `tests/e2e/data-api-response-width.spec.ts` and the task report.
     const { container } = renderResponse();
     const heading = await screen.findByRole("heading", { name: "Response", level: 2 });
-    expectSectionCapsItsOwnWidth(container, heading);
+    expectSectionLeavesWidthToThePage(container, heading);
+  });
+
+  it("gives Response's Value column more than the shared default, like Config's", async () => {
+    // §5.2, and the reason this line has to exist next to the one above:
+    // removing a cap is not enough. `ConfigTable` is `table-fixed`, so every
+    // pixel the section gains goes to Details — the only unsized column — and
+    // the three Selects stay at the shared 208px however wide the page is.
+    // Measured in Chromium at 1600×1000: 192px trigger before, 368px after,
+    // with the column itself 208 → 384.
+    //
+    // Both halves asserted for the same reason Config's guard asserts both:
+    // below `lg` the sized columns do not shrink, they scroll (§5.3), so a
+    // flat `w-96` is a different and worse thing than `w-52 lg:w-96`.
+    renderResponse();
+    await screen.findByLabelText("Envelope");
+    const valueHead = screen.getByRole("columnheader", { name: "Value" });
+    expect(valueHead).toHaveClass("lg:w-96");
+    expect(valueHead).toHaveClass("w-52");
+  });
+
+  it("puts the frozen column list on the page's measure, with Name on the settings grid", async () => {
+    // The frozen `Name | Type` table carried `max-w-xl` because, left at the
+    // shared `w-full` with AUTO layout, `bigint` sat far from the name it
+    // describes. Measured in Chromium, that cap did not actually fix it: at
+    // 576px the auto layout gave Name 444px, so `Type` started 444px into a
+    // 576px table. `table-fixed` with a sized Name column is what puts the type
+    // beside the name — 288px in, at any table width — which is also the
+    // column the `Setting | Details | Value` table below uses, so the two read
+    // as one grid down the section.
+    //
+    // Class names, not geometry (§5.5). The `w-72` is the load-bearing half:
+    // `table-fixed` with no sized column splits the surplus evenly and puts the
+    // type back in the middle of the page.
+    vi.mocked(api.useDataApiListEndpointVersions).mockReturnValue(
+      { data: { status: 200, data: [makeVersion()] }, isLoading: false, isError: false } as unknown as
+        ReturnType<typeof api.useDataApiListEndpointVersions>,
+    );
+    vi.mocked(api.useDataApiGetOpenapi).mockReturnValue(
+      { data: undefined, isError: false } as unknown as ReturnType<typeof api.useDataApiGetOpenapi>,
+    );
+    renderResponse(makeEndpoint({ live_version_id: "v-1" }));
+
+    const nameHead = await screen.findByRole("columnheader", { name: "Name" });
+    const table = nameHead.closest("table") as HTMLElement;
+    expect(table).toHaveClass("table-fixed");
+    expect(table.className).not.toMatch(/(?:^|\s)(?:[a-z0-9]+:)*max-w-/);
+    expect(nameHead).toHaveClass("w-72");
   });
 
   it("leaves Config's own root uncapped, which is where the width was meant to go", async () => {

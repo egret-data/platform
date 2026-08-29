@@ -11,6 +11,7 @@ import { Input } from "@/components/ui/input";
 import { Group, Panel, Separator as PanelSeparator } from "react-resizable-panels";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ConfigTable, ConfigTableRow } from "@/components/config/ConfigTable";
+import { Caveat } from "./Caveat";
 import { SqlEditor } from "@/components/sqllab/SqlEditor";
 import MonacoEditor from "@/components/monaco/MonacoEditor";
 import { useIsDark } from "@/hooks/useIsDark";
@@ -639,13 +640,25 @@ export default function Query() {
                     bound on every call. A script that pastes the value into the
                     text instead is refused at publish, by name. */}
                 {scripted && (
-                  <p className="max-w-prose pl-6 pt-1 text-xs text-muted-foreground">
-                    <span className="font-mono">build_sql(params)</span> returns this
-                    statement&rsquo;s SQL as a template. Leave a parameter as{" "}
-                    <span className="font-mono">{"{{ name }}"}</span> — it is bound on every
-                    call, exactly as if you had typed the SQL yourself. A script that puts a
-                    parameter&rsquo;s value into the text is refused at publish.
-                  </p>
+                  // The RULE is the summary and is on screen unclicked; the
+                  // mechanics are behind it. As a standing paragraph this was
+                  // 330 characters directly above a Monaco editor, and every
+                  // line of prose here is height subtracted from the editor
+                  // before anything else is (see the `#stmt-panel` note).
+                  <div className="max-w-prose pl-6 pt-1 text-xs">
+                    <Caveat
+                      summary={
+                        <>
+                          <span className="font-mono">build_sql(params)</span> returns this
+                          statement&rsquo;s SQL as a template
+                        </>
+                      }
+                    >
+                      Leave a parameter as <span className="font-mono">{"{{ name }}"}</span> — it is
+                      bound on every call, exactly as if you had typed the SQL yourself. A script
+                      that puts a parameter&rsquo;s value into the text is refused at publish.
+                    </Caveat>
+                  </div>
                 )}
                 {/* What the NEXT click costs, said before it is clicked.
                     A statement has one body, so switching always discards the
@@ -661,12 +674,24 @@ export default function Query() {
                     empty editor is one an author learns to stop reading, and
                     it would be false — nothing is discarded. */}
                 {body !== "" && (
-                  <p className="max-w-prose pl-6 pt-1 text-xs text-muted-foreground">
-                    Switching discards this statement&rsquo;s{" "}
-                    {scripted ? "script" : "SQL"} — a statement has one body, not both. Switching
-                    back brings it back while you stay in Query; leaving this section or reloading
-                    the page does not.
-                  </p>
+                  // Split at the em dash the sentence already had: what the
+                  // next click COSTS is the summary, the limit of the undo is
+                  // behind it. Three lines above the editor was the audit's
+                  // complaint, and here it is not only noise — it is editor
+                  // height.
+                  //
+                  // A native `<details>`, never `ui/collapsible`: switching
+                  // statements is already a plain-element `role="tab"` here for
+                  // the same reason (the shell's `<fieldset disabled>`), and
+                  // reading a caveat on a trashed endpoint is reading.
+                  <div className="max-w-prose pl-6 pt-1 text-xs">
+                    <Caveat
+                      summary={`Switching discards this statement’s ${scripted ? "script" : "SQL"}`}
+                    >
+                      A statement has one body, not both. Switching back brings it back while you
+                      stay in Query; leaving this section or reloading the page does not.
+                    </Caveat>
+                  </div>
                 )}
               </div>
 

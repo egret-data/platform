@@ -3,8 +3,7 @@ import { useParams } from "react-router-dom";
 
 import { useDataApiActivitySummary } from "@/api/generated/data-api/data-api";
 import type { ActivityRange, ActivityRow } from "@/api/generated/model";
-import { ListSkeleton } from "@/components/explore/ListSkeleton";
-import { Alert, AlertDescription } from "@/components/ui/alert";
+import { ListStates } from "@/components/explore/ListStates";
 import { Button } from "@/components/ui/button";
 import {
   Table,
@@ -15,6 +14,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import ActivityCallList from "./ActivityCallList";
+import { Caveat } from "./detail/Caveat";
 
 const RANGES: ActivityRange[] = ["1h", "24h", "7d", "30d"];
 
@@ -51,9 +51,18 @@ export default function Activity() {
   const summary = summaryQuery.data?.status === 200 ? summaryQuery.data.data : undefined;
   const retentionDays = summary?.retention_days ?? null;
 
-  const summaryErrorMessage =
-    (summaryQuery.error as { message?: string } | null)?.message ??
-    "Could not load activity statistics.";
+  // Either signal means the range produced calls: the grand total and the
+  // per-endpoint rows come out of one `GROUPING SETS` query, so they agree —
+  // and requiring BOTH would blank a page that has rows to show the day one of
+  // them is wrong.
+  const hasCalls = summary != null && (summary.total.calls > 0 || summary.endpoints.length > 0);
+
+  // NOT `!hasCalls`. This is "the summary has SETTLED and says the range
+  // produced nothing", which is a different claim from "we have not measured
+  // yet" — and it is the one the call list gates its filter row on, so a range
+  // switch (which puts the summary back into `isLoading`) must not read as an
+  // empty range for the frame it is in flight.
+  const rangeIsEmpty = summary != null && !hasCalls;
 
   return (
     // Canonical Explore list-page scaffold (same as Charts.tsx/Datasets.tsx):
@@ -71,23 +80,52 @@ export default function Activity() {
         <RangePicker range={range} onChange={setRange} retentionDays={retentionDays} />
       </div>
 
-      {/* Two failure modes, handled separately (resolution #3): a 500 must
-          never render as "no calls yet". */}
-      {summaryQuery.isError ? (
-        <Alert variant="destructive">
-          <AlertDescription>{summaryErrorMessage}</AlertDescription>
-        </Alert>
-      ) : summaryQuery.isLoading || !summary ? (
-        <ListSkeleton cols={4} />
-      ) : (
-        <div className="space-y-6">
-          <Tiles total={summary.total} />
-          <EndpointTable rows={summary.endpoints} />
-        </div>
-      )}
+      <div className="space-y-6">
+        {/* Four states, in `ListStates`' order — `isError` BEFORE `hasData`, and
+            error may never fold into empty (§2.1/§2.2). A 500 must not render
+            as "No calls in this range."
 
-      <div className="mt-8">
-        <ActivityCallList ws={ws} range={range} />
+            `isLoading` also covers "settled with no payload": react-query clears
+            `isLoading` on ANY settle, so a result nobody has would otherwise
+            fall straight into the empty branch and assert something about the
+            world from nothing. The `!summaryQuery.isError` guard keeps the error
+            branch reachable — `ListStates` checks loading first.
+
+            `empty={null}`: this region has no empty state of its own. The
+            page's ONE empty state belongs to the call list below, which is
+            mounted in every state of this query — a second sentence here is the
+            defect this task exists to remove. */}
+        <ListStates
+          isLoading={summaryQuery.isLoading || (!summary && !summaryQuery.isError)}
+          isError={summaryQuery.isError}
+          // The generated hook types its error as the response SHAPE; the
+          // mutator throws the real `ApiError`. `ListStates` takes `unknown`.
+          error={summaryQuery.error}
+          errorText="Could not load activity statistics."
+          hasData={hasCalls}
+          skeletonCols={4}
+          empty={null}
+        >
+          {summary && (
+            <>
+              <Tiles total={summary.total} />
+              {/* Mounted only when there is a breakdown to show, so the table
+                  has no empty state to own. `hasCalls` is also true when the
+                  grand total is positive and this array is somehow not, and a
+                  header row over nothing is not a better answer than no table. */}
+              {summary.endpoints.length > 0 && <EndpointTable rows={summary.endpoints} />}
+            </>
+          )}
+        </ListStates>
+
+        {/* OUTSIDE the branch above, and that placement is the whole point.
+            `range` is in the summary's query key, so every range switch puts it
+            back into `isLoading`; mounted inside those children, this list
+            unmounted on each switch and its four filter `useState`s reset —
+            a request id the operator pasted, gone on the way to a wider window.
+            Out here it also fetches in parallel with the summary instead of
+            queueing behind it. */}
+        <ActivityCallList ws={ws} range={range} rangeIsEmpty={rangeIsEmpty} />
       </div>
     </div>
   );
@@ -103,7 +141,7 @@ function RangePicker({
   retentionDays: number | null;
 }) {
   return (
-    <div className="space-y-1">
+    <div data-testid="activity-range" className="space-y-1.5">
       <div className="flex items-center gap-2">
         {RANGES.map((r) => {
           // The SELECTED preset is never disabled, even when it exceeds
@@ -129,10 +167,17 @@ function RangePicker({
         })}
       </div>
       {retentionDays != null && (
-        <p className="text-xs text-muted-foreground">
-          Data is kept for {retentionDays} day{retentionDays === 1 ? "" : "s"}; ranges longer than
-          that are disabled above so a thinning tail is never mistaken for falling traffic.
-        </p>
+        // §4.4: the consequence in the summary, the reason behind it. The
+        // load-bearing half — how long data is kept — is on screen with nothing
+        // clicked; what is collapsed is WHY presets are disabled. A full-width
+        // paragraph under a four-button strip was the whole of it before.
+        <Caveat
+          className="text-xs"
+          summary={`Data is kept for ${retentionDays} day${retentionDays === 1 ? "" : "s"}`}
+        >
+          Ranges longer than that are disabled above so a thinning tail is never mistaken for
+          falling traffic.
+        </Caveat>
       )}
     </div>
   );
@@ -209,7 +254,7 @@ function EndpointTable({ rows }: { rows: ActivityRow[] }) {
   const unmatched = rows.find((r) => r.endpoint_id == null);
 
   return (
-    <div className="space-y-1.5">
+    <div data-testid="activity-per-endpoint" className="space-y-1.5">
       <h2 className="text-sm font-semibold">Per endpoint</h2>
       <div className="overflow-x-auto rounded-md border">
         <Table>
@@ -227,21 +272,14 @@ function EndpointTable({ rows }: { rows: ActivityRow[] }) {
               <EndpointRow key={r.endpoint_id} row={r} name={r.endpoint_name ?? r.endpoint_id!} />
             ))}
             {unmatched && <EndpointRow key="unmatched" row={unmatched} name="No matching endpoint" muted />}
-            {matched.length === 0 && !unmatched && (
-              <TableRow className="hover:bg-transparent">
-                <TableCell colSpan={5} className="py-8 text-center text-muted-foreground">
-                  No calls in this range.
-                </TableCell>
-              </TableRow>
-            )}
           </TableBody>
         </Table>
       </div>
-      <p className="text-xs text-muted-foreground">
-        Rows here can sum to less than the total above: any request that matched no endpoint is
-        grouped into the final "No matching endpoint" row rather than the per-endpoint count — the
-        screen isn't inconsistent, those calls just never resolved to one.
-      </p>
+      <Caveat className="text-xs" summary="Rows here can sum to less than the total above">
+        Any request that matched no endpoint is grouped into the final "No matching endpoint" row
+        rather than the per-endpoint count — the screen isn't inconsistent, those calls just never
+        resolved to one.
+      </Caveat>
     </div>
   );
 }

@@ -1,12 +1,14 @@
 import { useMemo, useState } from "react";
+import { Inbox } from "lucide-react";
+import { Link } from "react-router-dom";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 
 import { listUsers } from "@/api/access";
 import { dataApiActivityCalls, useDataApiListEndpoints } from "@/api/generated/data-api/data-api";
 import type { ActivityCallDto, ActivityRange } from "@/api/generated/model";
-import { ListSkeleton } from "@/components/explore/ListSkeleton";
+import { EmptyState } from "@/components/explore/EmptyState";
+import { ListStates } from "@/components/explore/ListStates";
 import { RelativeTime } from "@/components/explore/RelativeTime";
-import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -52,13 +54,26 @@ const PAGE_SIZE = 50;
  * free: every filter is part of the query key below, so changing one is a
  * brand-new query to react-query, which starts back at page one on its own.
  */
-export default function ActivityCallList({ ws, range }: { ws: string; range: ActivityRange }) {
+export default function ActivityCallList({
+  ws,
+  range,
+  rangeIsEmpty,
+}: {
+  ws: string;
+  range: ActivityRange;
+  /** The summary has SETTLED and says this range produced no calls — the
+   * unfiltered truth the filter row is gated on (§2.3). False while that query
+   * is in flight, which is not the same claim: gated on `!hasCalls` instead,
+   * the row would blink out of existence on every range switch. */
+  rangeIsEmpty: boolean;
+}) {
   const [endpointId, setEndpointId] = useState("all");
   const [statusCode, setStatusCode] = useState("");
   const [errorCode, setErrorCode] = useState("");
   const [requestId, setRequestId] = useState("");
-  // Off by default (spec §4.8 / brief): a trial is not consumer traffic, so
-  // an operator must opt in to see it mixed into the list.
+  // Off by default (spec §4.8): a trial is not consumer traffic, so an operator
+  // opts in to see it. Local state again, and it survives a range switch
+  // because this component no longer unmounts on one.
   const [includeTrials, setIncludeTrials] = useState(false);
 
   const endpointParam = endpointId === "all" ? undefined : endpointId;
@@ -141,67 +156,38 @@ export default function ActivityCallList({ ws, range }: { ws: string; range: Act
     return merged;
   }, [callsQuery.data]);
 
-  const isInitialLoading = callsQuery.isLoading;
-  const errorMessage =
-    (callsQuery.error as { message?: string } | null)?.message ?? "Could not load the call list.";
+  // The four NARROWING controls, which is what §1.2 gates. "Include trial runs"
+  // is deliberately not one of them (see the header below).
+  const narrowingFiltersEngaged =
+    endpointParam !== undefined ||
+    statusParam !== undefined ||
+    errorCodeParam !== undefined ||
+    requestIdParam !== undefined;
+
+  // §1.2: "a filter or a bulk mode over zero rows is a control that cannot do
+  // anything." The two other disjuncts are what keeps that from becoming a
+  // trap: rows on screen (trials, which the summary never counts) mean the
+  // filters CAN act, and a filter that is engaged must stay reachable even
+  // when it matches nothing — the same argument §1.2 records for the way OUT
+  // of an empty trash.
+  const showFilters = !rangeIsEmpty || entries.length > 0 || narrowingFiltersEngaged;
 
   return (
-    <div className="space-y-3">
-      <h2 className="text-sm font-semibold">Calls</h2>
+    // Testid, not a heading lookup: this list's empty sentence and the page's
+    // own empty state are one word apart on purpose, so every assertion about
+    // this list's states has to be scoped to it — and in the error state there
+    // is no table here to scope by.
+    <div data-testid="activity-call-list" className="space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h2 className="text-sm font-semibold">Calls</h2>
 
-      <div className="flex flex-wrap items-end gap-3">
-        <div className="space-y-1.5">
-          <Label htmlFor="activity-endpoint">Endpoint</Label>
-          <Select value={endpointId} onValueChange={setEndpointId}>
-            <SelectTrigger id="activity-endpoint" className="w-48" aria-label="Endpoint">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All endpoints</SelectItem>
-              {endpoints.map((e) => (
-                <SelectItem key={e.id} value={e.id}>
-                  {e.name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-
-        <div className="space-y-1.5">
-          <Label htmlFor="activity-status">Status code</Label>
-          <Input
-            id="activity-status"
-            value={statusCode}
-            onChange={(e) => setStatusCode(e.target.value)}
-            placeholder="e.g. 404"
-            className="w-28"
-            inputMode="numeric"
-          />
-        </div>
-
-        <div className="space-y-1.5">
-          <Label htmlFor="activity-error-code">Error code</Label>
-          <Input
-            id="activity-error-code"
-            value={errorCode}
-            onChange={(e) => setErrorCode(e.target.value)}
-            placeholder="e.g. rate_limited"
-            className="w-40"
-          />
-        </div>
-
-        <div className="space-y-1.5">
-          <Label htmlFor="activity-request-id">Request ID</Label>
-          <Input
-            id="activity-request-id"
-            value={requestId}
-            onChange={(e) => setRequestId(e.target.value)}
-            placeholder="Look up a request out of an error body"
-            className="w-64"
-          />
-        </div>
-
-        <div className="flex items-center gap-2 pb-2">
+        {/* NOT gated on `hasCalls`, on §1.2's view-switch rule: this does not
+            narrow the rows in front of the reader, it selects a different
+            POPULATION the summary above never counted at all. An empty
+            consumer-call list says nothing about whether there were trials —
+            exactly what an empty endpoint list says about the trash. Gated, it
+            would be removed precisely when it is the only control left. */}
+        <div className="flex items-center gap-2">
           <Checkbox
             id="activity-include-trials"
             checked={includeTrials}
@@ -213,13 +199,100 @@ export default function ActivityCallList({ ws, range }: { ws: string; range: Act
         </div>
       </div>
 
-      {callsQuery.isError ? (
-        <Alert variant="destructive">
-          <AlertDescription>{errorMessage}</AlertDescription>
-        </Alert>
-      ) : isInitialLoading ? (
-        <ListSkeleton cols={7} />
-      ) : (
+      {showFilters && (
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="space-y-1.5">
+            <Label htmlFor="activity-endpoint">Endpoint</Label>
+            <Select value={endpointId} onValueChange={setEndpointId}>
+              <SelectTrigger id="activity-endpoint" className="w-48" aria-label="Endpoint">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All endpoints</SelectItem>
+                {endpoints.map((e) => (
+                  <SelectItem key={e.id} value={e.id}>
+                    {e.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="space-y-1.5">
+            <Label htmlFor="activity-status">Status code</Label>
+            <Input
+              id="activity-status"
+              value={statusCode}
+              onChange={(e) => setStatusCode(e.target.value)}
+              placeholder="e.g. 404"
+              className="w-28"
+              inputMode="numeric"
+            />
+          </div>
+
+          <div className="space-y-1.5">
+            <Label htmlFor="activity-error-code">Error code</Label>
+            <Input
+              id="activity-error-code"
+              value={errorCode}
+              onChange={(e) => setErrorCode(e.target.value)}
+              placeholder="e.g. rate_limited"
+              className="w-40"
+            />
+          </div>
+
+          <div className="space-y-1.5">
+            <Label htmlFor="activity-request-id">Request ID</Label>
+            <Input
+              id="activity-request-id"
+              value={requestId}
+              onChange={(e) => setRequestId(e.target.value)}
+              placeholder="Look up a request out of an error body"
+              className="w-64"
+            />
+          </div>
+        </div>
+      )}
+
+      {/* `isError` before `hasData`, and empty never stands in for a failure
+          (§2.1/§2.2) — the branch order is `ListStates`', not hand-rolled. */}
+      <ListStates
+        isLoading={callsQuery.isLoading}
+        isError={callsQuery.isError}
+        error={callsQuery.error}
+        errorText="Could not load the call list."
+        hasData={entries.length > 0}
+        skeletonCols={7}
+        empty={
+          // Two situations, two sentences (§2.3) — and the predicate is what
+          // the reader can see engaged, nothing else. "Include trial runs" is
+          // NOT in it: it is a view switch over a population the summary never
+          // counted, so an empty result with only that on is an empty range,
+          // not a mismatch. Counting it here had the page reporting "No calls
+          // match the current filters" with no filter set.
+          narrowingFiltersEngaged ? (
+            <p className="py-8 text-center text-muted-foreground">
+              No calls match the current filters.
+            </p>
+          ) : (
+            // The page's ONE empty state. It lives here because this section is
+            // the only one mounted in every state: the tiles and the
+            // per-endpoint table above simply do not render when there is
+            // nothing to put in them.
+            <EmptyState
+              variant="dashed"
+              icon={Inbox}
+              title="No calls in this range"
+              description="Nothing has called this workspace's endpoints in the selected range. Try-it runs are not counted above; include them beside Calls to see them here."
+              action={
+                <Button asChild variant="outline">
+                  <Link to={`/explore/${ws}/data-api/endpoints`}>View endpoints</Link>
+                </Button>
+              }
+            />
+          )
+        }
+      >
         <div className="overflow-x-auto rounded-md border">
           <Table>
             <TableHeader>
@@ -237,17 +310,10 @@ export default function ActivityCallList({ ws, range }: { ws: string; range: Act
               {entries.map((c) => (
                 <CallRow key={c.id} call={c} userEmailById={userEmailById} />
               ))}
-              {entries.length === 0 && (
-                <TableRow className="hover:bg-transparent">
-                  <TableCell colSpan={7} className="py-8 text-center text-muted-foreground">
-                    No calls in range.
-                  </TableCell>
-                </TableRow>
-              )}
             </TableBody>
           </Table>
         </div>
-      )}
+      </ListStates>
 
       {entries.length > 0 && (
         <div className="flex items-center justify-between gap-2 text-sm text-muted-foreground">

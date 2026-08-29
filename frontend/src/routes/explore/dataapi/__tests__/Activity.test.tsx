@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -81,6 +81,28 @@ const DEFAULT_SUMMARY: ActivitySummaryDto = {
   retention_days: null,
 };
 
+/**
+ * A range that produced nothing. Not `DEFAULT_SUMMARY` with `endpoints: []` —
+ * that fixture keeps `total.calls: 120`, which is a state the backend cannot
+ * produce (the grand total and the per-endpoint rows come out of ONE
+ * `GROUPING SETS` query) and which would let a page that only ever consults
+ * `endpoints` pass for one that consults both.
+ */
+const EMPTY_SUMMARY: ActivitySummaryDto = {
+  total: {
+    endpoint_id: null,
+    endpoint_name: null,
+    calls: 0,
+    errors: 0,
+    p50_ms: null,
+    p95_ms: null,
+    cache_hits: 0,
+    cacheable_calls: 0,
+  },
+  endpoints: [],
+  retention_days: null,
+};
+
 function makeCall(overrides: Partial<ActivityCallDto> = {}): ActivityCallDto {
   return {
     id: "call-1",
@@ -119,12 +141,28 @@ function mockSummary(
 // file's header comment on why), so these tests mock the fetcher and let a
 // REAL `QueryClientProvider` drive real pagination, rather than stubbing a
 // hook's return value the way the rest of this file's `mock*` helpers do.
+function mockEmptySummary(over: Partial<ActivitySummaryDto> = {}) {
+  mockSummary({ data: { status: 200, data: { ...EMPTY_SUMMARY, ...over } } });
+}
+
 function mockCalls(data: ActivityCallDto[] = []) {
   vi.mocked(api.dataApiActivityCalls).mockResolvedValue({
     status: 200,
     data,
     headers: new Headers(),
   } as unknown as Awaited<ReturnType<typeof api.dataApiActivityCalls>>);
+}
+
+/** Rows only when the caller asked for trials. A mock that returns the same
+ * array either way cannot tell "the toggle reached the server" from "the row
+ * was always going to render". */
+function mockTrialOnlyCalls(trials: ActivityCallDto[]) {
+  vi.mocked(api.dataApiActivityCalls).mockImplementation(async (_ws, params) => {
+    const asked = (params as { include_trials?: boolean }).include_trials === true;
+    return { status: 200, data: asked ? trials : [], headers: new Headers() } as unknown as Awaited<
+      ReturnType<typeof api.dataApiActivityCalls>
+    >;
+  });
 }
 
 function mockCallsError(message: string) {
@@ -297,26 +335,28 @@ describe("Activity — per-endpoint table", () => {
     renderActivity();
     expect(await screen.findByText("Daily report")).toBeInTheDocument();
   });
-
-  it("explains in a caption why the table's total is smaller than the tile's", async () => {
-    renderActivity();
-    await screen.findByText("No matching endpoint");
-    expect(screen.getByText(/matched no endpoint/i)).toBeInTheDocument();
-  });
 });
 
 describe("Activity — call list", () => {
+  // Both assertions below are scoped to the call list. The per-endpoint table
+  // now renders the SAME sentence, so an unscoped negative here would be
+  // satisfied by whatever that table happens to show — it would fail for a
+  // correct call list the day someone gives the summary fixture no endpoints,
+  // and it would pass for a broken one that leaked an empty row beside its
+  // error.
   it("shows the call-list error state, not an empty table, when it fails", async () => {
     mockCallsError("calls boom");
     renderActivity();
     await screen.findByTestId("tile-calls");
-    expect(await screen.findByText(/calls boom/i)).toBeInTheDocument();
-    expect(screen.queryByText(/no calls in range/i)).not.toBeInTheDocument();
+    const list = await screen.findByTestId("activity-call-list");
+    expect(await within(list).findByText(/calls boom/i)).toBeInTheDocument();
+    expect(within(list).queryByText(/no calls in this range/i)).not.toBeInTheDocument();
   });
 
   it("shows an empty state distinct from the error state when there are genuinely no calls", async () => {
     renderActivity();
-    expect(await screen.findByText(/no calls in range/i)).toBeInTheDocument();
+    const list = await screen.findByTestId("activity-call-list");
+    expect(await within(list).findByText(/no calls in this range/i)).toBeInTheDocument();
   });
 
   it("renders a call row with endpoint, status, duration, cache hit and request id", async () => {
@@ -499,5 +539,390 @@ describe("Activity — page scaffold", () => {
     const { container } = renderActivity();
     await screen.findByRole("heading", { level: 1, name: "Activity" });
     expect(container.firstElementChild?.className ?? "").toMatch(/\bp-4\b/);
+  });
+});
+
+/**
+ * The five steps §11.3 requires of a reachability assertion, in one place.
+ *
+ * `fireEvent.click` followed by `getByText` is a presence test with ceremony in
+ * front of it — jsdom does no layout, so the sentence is in the document
+ * whether or not a reader can reach it. What says something is: the element is
+ * a native `<details>` (a Radix collapsible has no `<summary>` to find and no
+ * `open` to read), it is CLOSED on arrival, the explanation is not inside the
+ * summary, and the click is what changes `open`.
+ */
+function openCaveat(summaryText: HTMLElement, bodyPattern: RegExp): HTMLDetailsElement {
+  const summaryEl = summaryText.closest("summary");
+  expect(summaryEl).not.toBeNull();
+  const details = summaryEl!.closest("details") as HTMLDetailsElement | null;
+  expect(details).not.toBeNull();
+  expect(details!.tagName).toBe("DETAILS");
+
+  expect(details!.open).toBe(false);
+  const body = screen.getByText(bodyPattern);
+  // The explanation is the BODY, not a second line of the headline.
+  expect(summaryEl!.contains(body)).toBe(false);
+
+  fireEvent.click(summaryEl!);
+
+  expect(details!.open).toBe(true);
+  expect(details!.contains(body)).toBe(true);
+  return details!;
+}
+
+describe("Activity — the two footnotes sit behind an info affordance", () => {
+  it("keeps the retention FACT on screen and its reason one click away, beside the range strip", async () => {
+    mockSummary({ data: { status: 200, data: { ...DEFAULT_SUMMARY, retention_days: 7 } } });
+    renderActivity();
+
+    const headline = await screen.findByText(/kept for 7 days/i);
+    const details = openCaveat(headline, /thinning tail/i);
+
+    // "Beside the control it describes": inside the range picker, not floating
+    // full-width under the page.
+    expect(screen.getByTestId("activity-range").contains(details)).toBe(true);
+  });
+
+  it("keeps the per-endpoint caveat beside that table, headed by the consequence", async () => {
+    renderActivity();
+    await screen.findByText("No matching endpoint");
+
+    const headline = screen.getByText(/sum to less than the total above/i);
+    const details = openCaveat(headline, /matched no endpoint/i);
+
+    expect(screen.getByTestId("activity-per-endpoint").contains(details)).toBe(true);
+  });
+
+  it("opens neither disclosure on arrival — the page is not two paragraphs of prose", async () => {
+    mockSummary({ data: { status: 200, data: { ...DEFAULT_SUMMARY, retention_days: 7 } } });
+    const { container } = renderActivity();
+    await screen.findByText("No matching endpoint");
+
+    const all = Array.from(container.querySelectorAll("details"));
+    expect(all).toHaveLength(2);
+    expect(all.every((d) => !(d as HTMLDetailsElement).open)).toBe(true);
+  });
+});
+
+/**
+ * A range with no calls used to be four metric cards each showing an em dash,
+ * a per-endpoint table showing its own empty text, a call list showing
+ * DIFFERENT empty text, and every filter rendered over nothing.
+ */
+describe("Activity — one honest empty state over a range with no calls", () => {
+  it("replaces the four metric tiles with a single empty state", async () => {
+    mockEmptySummary();
+    renderActivity();
+
+    expect(await screen.findByText("No calls in this range")).toBeInTheDocument();
+    for (const id of ["tile-calls", "tile-error-rate", "tile-latency", "tile-cache-hit"]) {
+      expect(screen.queryByTestId(id)).not.toBeInTheDocument();
+    }
+  });
+
+  it("renders no per-endpoint table when there is no breakdown to put in one", async () => {
+    // `hasCalls` is true on the grand total alone, so the table can be reached
+    // with an empty `endpoints`. A header row over nothing is not a better
+    // answer than no table, and it is how the second empty sentence crept back.
+    mockSummary({
+      data: {
+        status: 200,
+        data: { ...EMPTY_SUMMARY, total: { ...EMPTY_SUMMARY.total, calls: 5 } },
+      },
+    });
+    renderActivity();
+
+    expect(await screen.findByTestId("tile-calls")).toHaveTextContent("5");
+    expect(screen.queryByTestId("activity-per-endpoint")).not.toBeInTheDocument();
+    // The call list settles a tick after the summary, so wait for its answer
+    // before counting — a synchronous count here would pass on an absence that
+    // has not happened yet.
+    await screen.findByText("No calls in this range");
+    expect(screen.getAllByText(/no calls in this range/i)).toHaveLength(1);
+  });
+
+  it("says it once, not once per table", async () => {
+    mockEmptySummary();
+    mockCalls([]);
+    renderActivity();
+    await screen.findByText("No calls in this range");
+
+    expect(screen.queryByTestId("activity-per-endpoint")).not.toBeInTheDocument();
+    expect(screen.queryAllByRole("table")).toHaveLength(0);
+    expect(screen.getAllByText(/no calls in this range/i)).toHaveLength(1);
+  });
+
+  it("gates the filter row on the empty range — but never the range strip, a view switch", async () => {
+    // The call list is mounted here (it is mounted in every state), so this
+    // sees the gate itself and not an unmounted subtree.
+    mockEmptySummary();
+    renderActivity();
+    await screen.findByText("No calls in this range");
+
+    expect(screen.queryByRole("combobox", { name: /endpoint/i })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/status code/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/error code/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/request id/i)).not.toBeInTheDocument();
+
+    // §1.2: a view SWITCH is not gated. All four presets are still there, and
+    // the one that is showing is still pressable.
+    for (const r of ["1h", "24h", "7d", "30d"]) {
+      expect(screen.getByRole("button", { name: r })).toBeInTheDocument();
+    }
+    expect(screen.getByRole("button", { name: "24h" })).not.toBeDisabled();
+  });
+
+  it("keeps the one way to reach trial runs, which the summary never counts", async () => {
+    // `activity.rs`: "Trials (`actor_user_id IS NOT NULL`) are excluded here
+    // and shown only in the call list." So a workspace whose only traffic was
+    // Try-it runs reads as an empty range, and gating the trial toggle away
+    // would remove the control exactly when it is the only one that can act.
+    mockEmptySummary();
+    mockTrialOnlyCalls([
+      makeCall({ id: "trial-1", request_id: "req-trial-1", actor_user_id: "user-77", client_id: "trial:sa-9" }),
+    ]);
+    const user = userEvent.setup();
+    renderActivity();
+    await screen.findByText("No calls in this range");
+    // The default view asked for consumer traffic and got none — the trial row
+    // exists and is deliberately not in it.
+    await waitFor(() =>
+      expect(api.dataApiActivityCalls).toHaveBeenCalledWith(
+        "eng",
+        expect.objectContaining({ include_trials: false }),
+      ),
+    );
+    expect(screen.queryByText("req-trial-1")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("checkbox", { name: /include trial runs/i }));
+
+    expect(await screen.findByText("req-trial-1")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(api.dataApiActivityCalls).toHaveBeenCalledWith(
+        "eng",
+        expect.objectContaining({ include_trials: true }),
+      ),
+    );
+    // …and the way back out is on screen, checked.
+    expect(screen.getByRole("checkbox", { name: /include trial runs/i })).toBeChecked();
+    // There are rows now, so the filters can act on them and are back — the
+    // gate is on what is on screen, not on the summary alone.
+    expect(screen.getByLabelText(/status code/i)).toBeInTheDocument();
+  });
+
+  it("can be turned back off from a trial view that found nothing", async () => {
+    // The round trip is the point. The toggle sets a mode; if it lived in the
+    // gated filter row, a trial view with no trials in it would hide the only
+    // way back, and the reader would be left holding a view they cannot leave.
+    mockEmptySummary();
+    mockCalls([]);
+    const user = userEvent.setup();
+    renderActivity();
+    await screen.findByText("No calls in this range");
+
+    const toggle = screen.getByRole("checkbox", { name: /include trial runs/i });
+    await user.click(toggle);
+    expect(toggle).toBeChecked();
+    // Still the honest sentence: a view switch with nothing behind it is an
+    // empty RANGE, not a filter mismatch — nothing is engaged to mismatch.
+    expect(await screen.findByText("No calls in this range")).toBeInTheDocument();
+    expect(screen.queryByText(/no calls match/i)).not.toBeInTheDocument();
+    // The call list IS mounted here, and this is the only state in which its
+    // own gate is observable: no consumer traffic, no trial rows, no filter
+    // engaged. Every other empty case hides the filters by unmounting the
+    // whole list, which would pass with the gate deleted.
+    expect(screen.queryByLabelText(/status code/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/error code/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/request id/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: /endpoint/i })).not.toBeInTheDocument();
+
+    await user.click(toggle);
+
+    expect(await screen.findByText("No calls in this range")).toBeInTheDocument();
+  });
+
+  it("keeps a filter that misses over trial rows, where the range itself is empty", async () => {
+    // The gate has three disjuncts and the obvious fixture only exercises one:
+    // with `hasCalls` true the filter row is on screen whatever else is true,
+    // so a test written over a range that HAS calls cannot tell the way-out
+    // clause from a constant. This is the state where it is the only thing
+    // holding the input up: no consumer traffic, one trial row, then a status
+    // code that matches nothing.
+    mockEmptySummary();
+    mockTrialOnlyCalls([makeCall({ id: "trial-1", request_id: "req-trial-1", actor_user_id: "user-77" })]);
+    const user = userEvent.setup();
+    renderActivity();
+    await screen.findByText("No calls in this range");
+
+    await user.click(screen.getByRole("checkbox", { name: /include trial runs/i }));
+    await screen.findByText("req-trial-1");
+
+    mockCalls([]);
+    await user.type(screen.getByLabelText(/status code/i), "404");
+    await waitFor(() => expect(screen.queryByText("req-trial-1")).not.toBeInTheDocument());
+
+    // Nothing on screen, `hasCalls` false — and the input still there to undo.
+    expect(screen.getByLabelText(/status code/i)).toHaveValue("404");
+    expect(screen.getByRole("combobox", { name: /endpoint/i })).toBeInTheDocument();
+  });
+
+  it("offers the next action rather than a dead end", async () => {
+    mockEmptySummary();
+    renderActivity();
+    await screen.findByText("No calls in this range");
+
+    expect(screen.getByRole("link", { name: /view endpoints/i })).toHaveAttribute(
+      "href",
+      "/explore/eng/data-api/endpoints",
+    );
+  });
+
+  it("does not fold a failed fetch into the empty state, on either query", async () => {
+    // Both fail, which is what a backend that is down looks like. Neither
+    // region may answer with "no calls" — that is a claim about the world,
+    // made from two requests that returned nothing about it.
+    mockSummary({ isError: true, error: { message: "summary boom" }, data: undefined });
+    mockCallsError("calls boom");
+    renderActivity();
+
+    expect(await screen.findByText(/summary boom/i)).toBeInTheDocument();
+    expect(
+      await within(screen.getByTestId("activity-call-list")).findByText(/calls boom/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/no calls in this range/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/no calls match/i)).not.toBeInTheDocument();
+    expect(screen.queryByTestId("tile-calls")).not.toBeInTheDocument();
+  });
+
+  it("does not fold a settled-but-empty-handed query into the empty state either", async () => {
+    // Not loading, not an error, and no payload: react-query clears `isLoading`
+    // on ANY settle. Claiming "no calls in this range" here would be a sentence
+    // about the world, asserted from a result nobody has.
+    mockSummary({ data: undefined, isLoading: false, isError: false });
+    renderActivity();
+
+    expect(screen.getAllByTestId("list-skeleton").length).toBeGreaterThan(0);
+    expect(screen.queryByText(/no calls in this range/i)).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * The call list is mounted in every state of the summary query, and these are
+ * the two things that buys. Both were lost when it lived inside the summary's
+ * `ListStates` children, and neither could be seen by a test whose mocked hook
+ * never flips `isLoading`.
+ */
+describe("Activity — the call list does not depend on the summary", () => {
+  it("keeps the filters the user typed across a range switch that reloads the summary", async () => {
+    // `range` is in the summary's query key, so every switch puts that query
+    // back into `isLoading`. Rendered inside the branch, the whole list
+    // unmounts and its four `useState` filters reset — paste a request id,
+    // find the row in 24h, widen to 7d, and the field is blank.
+    vi.mocked(api.useDataApiActivitySummary).mockImplementation(
+      ((_ws: string, params: { range?: string }) => {
+        const inFlight = params.range === "7d";
+        return {
+          data: inFlight ? undefined : { status: 200, data: DEFAULT_SUMMARY },
+          isLoading: inFlight,
+          isError: false,
+          error: null,
+        };
+      }) as unknown as typeof api.useDataApiActivitySummary,
+    );
+    const user = userEvent.setup();
+    renderActivity();
+    await screen.findByTestId("tile-calls");
+
+    await user.type(screen.getByLabelText(/request id/i), "req-abc-999");
+    await waitFor(() =>
+      expect(api.dataApiActivityCalls).toHaveBeenCalledWith(
+        "eng",
+        expect.objectContaining({ request_id: "req-abc-999" }),
+      ),
+    );
+
+    await user.click(screen.getByRole("button", { name: "7d" }));
+
+    // The summary is a skeleton now…
+    expect(screen.getAllByTestId("list-skeleton").length).toBeGreaterThan(0);
+    // …and the filter the user typed is still on screen, still applied.
+    expect(screen.getByLabelText(/request id/i)).toHaveValue("req-abc-999");
+    await waitFor(() =>
+      expect(api.dataApiActivityCalls).toHaveBeenCalledWith(
+        "eng",
+        expect.objectContaining({ range: "7d", request_id: "req-abc-999" }),
+      ),
+    );
+  });
+
+  it("does not blink the filter row out while a range switch is in flight", async () => {
+    // "Not measured yet" is not "measured and empty". Gated on `!hasCalls` —
+    // which is false for the whole of every reload — the filter row would
+    // vanish and come back on each range switch, with nothing typed to keep
+    // it. Nothing is typed here on purpose: an engaged filter holds the row up
+    // by itself and would hide the bug.
+    vi.mocked(api.useDataApiActivitySummary).mockImplementation(
+      ((_ws: string, params: { range?: string }) => {
+        const inFlight = params.range === "7d";
+        return {
+          data: inFlight ? undefined : { status: 200, data: DEFAULT_SUMMARY },
+          isLoading: inFlight,
+          isError: false,
+          error: null,
+        };
+      }) as unknown as typeof api.useDataApiActivitySummary,
+    );
+    const user = userEvent.setup();
+    renderActivity();
+    await screen.findByTestId("tile-calls");
+    expect(screen.getByLabelText(/status code/i)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "7d" }));
+
+    expect(screen.getAllByTestId("list-skeleton").length).toBeGreaterThan(0);
+    expect(screen.getByLabelText(/status code/i)).toBeInTheDocument();
+  });
+
+  it("still shows the calls when the summary is the query that failed", async () => {
+    mockSummary({ isError: true, error: { message: "summary boom" }, data: undefined });
+    mockCalls([makeCall()]);
+    renderActivity();
+
+    expect(await screen.findByText(/summary boom/i)).toBeInTheDocument();
+    // Two queries, two answers. Hiding a list that loaded because a different
+    // request failed tells the operator less than the screen knows.
+    expect(await screen.findByText("req-fixture-1")).toBeInTheDocument();
+  });
+});
+
+describe("Activity — the filter row when there IS something to filter", () => {
+  it("renders all four filters over a range that produced calls", async () => {
+    renderActivity();
+    await screen.findByTestId("tile-calls");
+
+    expect(screen.getByRole("combobox", { name: /endpoint/i })).toBeInTheDocument();
+    expect(screen.getByLabelText(/status code/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/error code/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/request id/i)).toBeInTheDocument();
+  });
+
+  it("keeps an ENGAGED filter on screen when it matches nothing — the way out", async () => {
+    // Gated on the rows actually returned, a filter miss would remove the input
+    // holding the filter, leaving nothing to un-set (§2.3).
+    mockCalls([makeCall()]);
+    const user = userEvent.setup();
+    renderActivity();
+    await screen.findByText("req-fixture-1");
+
+    mockCalls([]);
+    await user.type(screen.getByLabelText(/status code/i), "404");
+
+    await waitFor(() => expect(screen.queryByText("req-fixture-1")).not.toBeInTheDocument());
+    expect(screen.getByLabelText(/status code/i)).toHaveValue("404");
+    // A miss is a different situation from an empty range, and says so.
+    const list = screen.getByTestId("activity-call-list");
+    expect(within(list).getByText(/no calls match the current filters/i)).toBeInTheDocument();
+    expect(within(list).queryByText(/no calls in this range/i)).not.toBeInTheDocument();
   });
 });

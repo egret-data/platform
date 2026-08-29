@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { ArrowLeft } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -199,13 +198,13 @@ export default function ClientCreate() {
       <ListPageShell
         title="Client secret no longer available"
         description={`A client was already issued${account ? ` to ${account.name}` : ""} from this page. Its secret was shown once and cannot be shown again — reloading cannot bring it back.`}
-        toolbar={
-          <Button asChild variant="ghost">
-            <Link to={clientsHref}>
-              <ArrowLeft className="h-4 w-4" />
-              Clients
-            </Link>
-          </Button>
+        // Top-left, above the title — the `back` slot, not `toolbar`, which
+        // `ListPageShell` renders into the same right-hand group as `action`.
+        // See the form below for the measurement.
+        back={
+          <Link className="text-sm text-muted-foreground hover:underline" to={clientsHref}>
+            ← Clients
+          </Link>
         }
         // Explicit, and it mints nothing on its own: it clears the marker and
         // returns the empty form. A URL that cannot be left forward is worse
@@ -240,13 +239,18 @@ export default function ClientCreate() {
     <ListPageShell
       title={account ? `New client for ${account.name}` : "New client"}
       description="Issues a fresh OAuth2 client_credentials pair. The secret appears on this page the moment it is created, and is never shown again."
-      toolbar={
-        <Button asChild variant="ghost">
-          <Link to={clientsHref}>
-            <ArrowLeft className="h-4 w-4" />
-            Clients
-          </Link>
-        </Button>
+      back={
+        /* Top-left, above the title, the slot `EndpointCreate` moved to. It was
+           in `toolbar`, which `ListPageShell` renders into the SAME right-hand
+           group as `action`: seen in the browser at 1440px, `← Clients` sat
+           directly beside the "Create client" primary, so the way out and the
+           commit were adjacent — while the sibling `New endpoint` page put the
+           way out in the opposite corner. That inconsistency is the reason the
+           `back` slot exists; this page and `ServiceAccountCreate` were simply
+           not converted with it. */
+        <Link className="text-sm text-muted-foreground hover:underline" to={clientsHref}>
+          ← Clients
+        </Link>
       }
       action={
         <Button onClick={() => void submit()} disabled={!canSubmit || issue.isPending}>

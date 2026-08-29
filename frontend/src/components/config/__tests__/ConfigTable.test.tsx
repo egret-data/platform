@@ -118,6 +118,37 @@ describe("ConfigTable — Value column width", () => {
     expect(cell?.querySelector("div")).toBeNull();
   });
 
+  /**
+   * A class-name assertion, and weak on purpose — the same bargain
+   * `docs/en/ui-conventions.md` §5.5 records for the width guards. jsdom does
+   * no layout (§10), so it cannot say the sentence wraps; the real claim is
+   * made in a browser by `tests/e2e/data-api-narrow-and-cells.spec.ts`, which
+   * measured 1103px of caveat body, 498px of empty note and 807px of error
+   * alert inside a 304px cell before this class existed. That spec is opt-in
+   * and `.github/workflows` runs no Playwright step, so nothing in CI would
+   * notice this class being deleted as redundant. This is the line that would.
+   *
+   * All three prose blocks live in ONE cell for a reason (§4.3: an explanation
+   * about a control sits beside that control), so the fix belongs to the cell.
+   * An earlier pass put `whitespace-normal` on `Caveat`'s `<summary>` alone and
+   * the other two blocks kept clipping — which is why this assertion is on the
+   * Value cell of `ConfigTable`, not on any caller.
+   */
+  it("lets prose in the Value cell wrap, rather than inheriting the table's nowrap", () => {
+    render(
+      <ConfigTable>
+        <ConfigTableRow label="Enabled"><span data-testid="ctl" /></ConfigTableRow>
+      </ConfigTable>,
+    );
+    const valueCell = screen.getByTestId("ctl").closest("td");
+    expect(valueCell).toHaveClass("whitespace-normal");
+    // The other half, and not the same claim: `whitespace-normal` gives the text
+    // permission to wrap, `break-words` gives it somewhere to do so. This cell
+    // renders a server error message verbatim, which can arrive as one
+    // unbreakable token that wrapping alone cannot help.
+    expect(valueCell).toHaveClass("break-words");
+  });
+
   it("caps the Details cell's prose at a readable measure when the table asks for it", () => {
     render(
       <ConfigTable detailsClassName="max-w-prose">

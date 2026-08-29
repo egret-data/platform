@@ -13,8 +13,10 @@ import { expect } from "vitest";
  * pass removed: re-applying `max-w-3xl` to `Config`'s OWN root passed the
  * sentinel guard and all 230 other Config tests. So each section needs its own
  * assertion, and `docs/en/ui-conventions.md` §5.1 records which way round it
- * goes for each: `Config` and `Query` use the page, `Access`, `Try it`,
- * `Versions` and `Response` cap themselves at `max-w-5xl`.
+ * goes for each: `Config`, `Query` and `Response` use the page, `Access`,
+ * `Try it` and `Versions` cap themselves at `max-w-5xl`. Response moved groups
+ * in §5.4b, once it held a settings table and a code editor — the criterion is
+ * what a section HOLDS, not which tab it is.
  *
  * Three sections had that assertion copy-pasted and two (`Try it`, `Access`)
  * had none at all — which is how `Try it` shipped a `max-w-5xl` nothing was

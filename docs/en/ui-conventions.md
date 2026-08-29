@@ -83,6 +83,27 @@ only way *out* of an empty trash, removed exactly when it is the only control le
 is `"keeps the way OUT of an empty trash"` in
 `src/routes/explore/dataapi/__tests__/Endpoints.test.tsx`.
 
+`src/routes/explore/dataapi/Activity.tsx` and `ActivityCallList.tsx` are the second
+application, and they read the rule twice over. **The 1h/24h/7d/30d strip is a view switch**:
+it selects the window the whole page is about, and it is how a reader leaves a range that
+turned out to be empty. **So is "Include trial runs"**, which is less obvious and matters
+more. `crates/egret-dataapi/src/activity.rs`'s summary query ends `AND al.actor_user_id IS
+NULL`, so trials are excluded from *every number the page shows* — including the one the
+filter gate is computed from. A workspace whose only traffic was Try-it runs therefore reads
+as an empty range, and gating that toggle would delete the one control that can reach rows
+that exist: both halves of the trash argument, verbatim. It lives in the section's heading
+row rather than in the gated filter row for exactly that reason, and the guards are
+`"keeps the one way to reach trial runs, which the summary never counts"` and
+`"can be turned back off from a trial view that found nothing"`.
+
+**The gate's input is the unfiltered truth, and "not measured yet" is not "empty".** Activity
+gates on `rangeIsEmpty` — *the summary has settled and says the range produced nothing* — not
+on `!hasCalls`, which is also false for the whole of every reload. `range` is in the summary's
+query key, so gating on the weaker predicate blinks the filter row out of existence on each
+range switch. Guarded by `"does not blink the filter row out while a range switch is in
+flight"`, which types nothing first: an engaged filter holds the row up by itself and hides
+the bug.
+
 Everything the trash view does not render is cleared on the way IN, not merely hidden
 (`toggleTrash`): the bookmark filter, both facets and bulk mode. A filter left engaged behind
 a control that is no longer on screen makes the trash report "No endpoints match the current
@@ -114,14 +135,85 @@ now set on every list toolbar toggle in Explore except `Notebooks.tsx`.
 
 Search goes in a toolbar row above the summary strip, where the five sibling Explore pages
 put theirs. `FilterableTable`'s own search box renders *below* the strip, inside the table
-block — the one place no other list page has it — so pages pass `hideSearch` and filter
-`rows` themselves. Two search inputs one row apart would be worse than either.
+block — the one place no other list page has it — so a page that uses that component passes
+`hideSearch` and filters `rows` itself. Two search inputs one row apart would be worse than
+either.
 
-This has a knock-on that is easy to get wrong and is commented in place: with `hideSearch`,
-`FilterableTable`'s internal `q` never leaves `""`, so it can no longer distinguish a
-first-run empty from a search miss and always renders `emptyText`. That is correct **only
-because** the genuine first-run case is `ListStates`' `empty` and never reaches the table.
-See §2.
+`Clients.tsx` no longer uses `FilterableTable` at all (§1.5), so its toolbar is now simply
+the only search box on the page; it kept the `page-toolbar` testid, and its test asserts both
+that the box is *inside* that toolbar and that there is exactly one of it. The `hideSearch`
+escape hatch is documented here because the next page to reach for `FilterableTable` will
+need it — with `hideSearch` set, that component's internal `q` never leaves `""`, so it can
+no longer distinguish a first-run empty from a search miss and always renders `emptyText`,
+which is correct **only** where the genuine first-run case is `ListStates`' `empty` and never
+reaches the table. See §2.
+
+### 1.5 A grouped list is the siblings' hand-rolled `<table>`, never `FilterableTable`
+
+`src/routes/explore/Charts.tsx`, `Datasets.tsx`, `Dashboards.tsx`, `Notebooks.tsx`,
+`Alerts.tsx`, `dataapi/Endpoints.tsx`, `dataapi/Clients.tsx`
+
+`FilterableTable` sorts, searches and paginates **one flat entity**. It cannot model a group,
+so a page whose list has two levels writes the table out by hand, exactly as the BI lists do:
+
+```tsx
+<div className="overflow-x-auto">
+  <table className="w-full text-sm">
+    <thead className="text-left text-muted-foreground">…</thead>
+    {groups.map((g) => <tbody key={g.id}>{/* header row, then its rows */}</tbody>)}
+  </table>
+</div>
+```
+
+One `<tbody>` per group, the group's own heading as the first row in it, `border-t` between
+rows and `hover:bg-accent` on them.
+
+**The defect.** `Clients.tsx` nested a variable-length list of OAuth2 clients inside one cell
+of a `FilterableTable` row — each client a line of running text carrying a name, a
+36-character id, a badge, a last-used phrase and a Revoke — because the page's list is
+two-level and the component is not. Nothing aligned down the page, and an irreversible action
+sat as body text between two timestamps. A client is a row now and the service account is a
+group header, in the hand-rolled table above.
+
+**Do not reach for `FilterableTable` to avoid hand-writing a `<table>`.** Its styling is not
+the siblings': bold dark headers against their muted ones, `border-b` against `border-t`,
+`hover:bg-muted/50` against `hover:bg-accent`. The mismatch is visible in the browser on a
+page that sits next to those siblings in the sidebar, and has been reported as one.
+
+**What the hand-rolled table gives up, and how to keep it.** `FilterableTable` also paginates,
+and a page whose rows each fire their own query was relying on that for more than layout:
+`Clients.tsx`'s `pageSize={25}` capped how many per-account client requests could be in flight,
+because only one page of rows was ever mounted. Grouping removed the pagination, so the cap is
+now explicit (`GROUP_PAGE`, a "Show N more" button), and its test asserts the number of
+distinct accounts queried on first paint — not just what is on screen.
+
+**`role="rowheader"` on the group header is this page's addition, not yet the siblings'
+practice — and this section would otherwise be a convention its own reference implementation
+violates.** `Clients.tsx` puts the role on the header's spanning cell, the same idiom §4.1
+records for `ConfigTableGroup` and for the same reason: a group row that reads as another data
+cell is the confusion the shape exists to remove. But `FolderHeaderRow.tsx` — the shared
+component Charts, Datasets, Dashboards, Notebooks, Alerts and Endpoints group with — does
+**not** set it, so **six** of the seven grouped tables in Explore currently announce their
+folder header as an ordinary cell.
+
+**It was recorded as four, and the counting is worth more than the number.** `Notebooks` was
+named in this section's own file list above and then dropped from the count in this paragraph;
+`Alerts` was in neither, because it was missing from the list the count was read off. The count
+was taken from a prose list in this document instead of from the tree. **Count by resolved
+module:**
+
+```bash
+grep -rln 'from "@/components/explore/FolderHeaderRow"' frontend/src   # 6, plus its own test
+```
+
+Same failure as §7.2's `Caveat` inventory, and the same fix: an inventory in this document is a
+claim about the tree, so it is taken FROM the tree.
+
+That is a gap in those six, not a licence for the next one. A new grouped table sets the
+role, and `FolderHeaderRow` should adopt it: it is a one-attribute change, held back only
+because the task that wrote this section was scoped to a single page. It is stated here rather
+than left implicit so that nobody reads the reference implementation's silence as the
+convention.
 
 ---
 
@@ -179,6 +271,22 @@ never-published endpoint is not misreported either.
 the first-run call-to-action must not appear just because a search missed. A search that
 narrows to zero is the table's own empty body, which is a different sentence for a different
 situation.
+
+`ActivityCallList.tsx` is the second reference, and it splits the same way: "No calls match
+the current filters." when a narrowing control is engaged, and otherwise the page's one
+`EmptyState`, "No calls in this range". **The predicate is what the reader can see engaged and
+nothing else.** Its first version counted the "Include trial runs" view switch as a filter,
+and a range with no trials in it then reported a mismatch with no filter set — the same
+defect class as §2.2, an interface saying something untrue about its own state. Guarded inside
+`"can be turned back off from a trial view that found nothing"`.
+
+**Where the one empty state lives is a consequence of what is mounted.** Activity's tiles and
+per-endpoint table do not render when there is nothing to put in them, so the empty state
+belongs to the call list, the only section mounted in every state of the summary query. That
+list also sits **outside** the summary's `ListStates`, which is what keeps a range switch from
+unmounting it and resetting the four filters the operator typed
+(`"keeps the filters the user typed across a range switch that reloads the summary"`). A
+region with nothing to say passes `empty={null}` rather than a second sentence.
 
 ### 2.4 The empty state itself
 
@@ -419,18 +527,47 @@ Two things that came out of converting `Versions` and `Access`:
   **The test for it:** ask what is left of the column once the constant sentence is hoisted.
   For `Access` it was one thing, the `Try it` link carrying `?service_account=<id>` — and
   that is an *action*, so it joined the actions column and the `Data` column went. **Do not
-  keep a column empty for symmetry.** Say once, above the table, that the condition is not a
-  column and why; a reader who expects it is then told where it went instead of assuming it
-  was dropped.
+  keep a column empty for symmetry.** Say once that the condition is not a column and why; a
+  reader who expects it is then told where it went instead of assuming it was dropped.
+
+  **Where "once" goes: the surviving column's header, not a paragraph above the table.** This
+  said "above the table" until the Data API UI audit, which measured the result: `Access` had
+  a page-level `SettingsNote` *and* that paragraph, ~550 characters of standing prose over a
+  table whose first row is one line — and the two overlapped, both saying the invoke right on
+  the page is not the data access a call needs. Merged into one §4.4 `Caveat` on the `Invoke`
+  `<th>`, the sentence qualifies the answers it is about rather than the page.
+
+  **A `<th>` names every cell in its column, so give it an explicit `aria-label`.** Without
+  one the header's accessible name becomes the whole caveat and a screen-reader user hears
+  550 characters before each row's answer — the audio form of the very defect that removed
+  the `Data` column. `AccessSection.tsx` carries `aria-label="Invoke"`, and
+  `AccessSection.test.tsx` asserts the columnheaders by **accessible name** rather than
+  `textContent`, because `textContent` would have passed on exactly that regression.
+
+  **Let the library compute that name; do not approximate it.** The first version of that
+  assertion mapped headers through `aria-label ?? textContent`, which agrees with the naming
+  algorithm today and diverges the moment a header uses `aria-labelledby` — a stand-in for the
+  thing being tested, in a test whose whole subject is naming. `getByRole(role, { name })` runs
+  the real computation, so pinning **order and name together** is
+  `expect(headers[n]).toBe(screen.getByRole("columnheader", { name: … }))` with nothing
+  reimplemented.
 
 **What the labels buy.** `Access`'s Invoke condition used to be a `<dt>` inside each row's
 `<dl>`, which repeated the word on every row and left each row's answer at a different
 vertical offset from the one above it. As a column the label is written once and the answers
 line up down the page — and comparing accounts is the whole job of that screen.
 
-### 4.4 A row-scoped caveat: the consequence in the summary, the reason behind it
+### 4.4 A caveat: the consequence in the summary, the reason behind it
 
-`src/routes/explore/dataapi/detail/AccessSection.tsx` — `Caveat`.
+`src/routes/explore/dataapi/detail/Caveat.tsx` — used by `AccessSection`, `TryIt`, `Query`
+and `PreviewBlock`.
+
+It was written row-scoped, for one `Access` row, and the Data API UI audit found the same
+shape at SECTION scale — `Try it` carried ~950 characters of standing prose over one dropdown
+and one button. So the rule is not about rows: **an explanation that describes one control
+belongs in that control's `Details` cell, capped at about two lines; an explanation that
+describes a consequence of acting goes behind a disclosure headed by the consequence.** The
+component moved out of `AccessSection.tsx` when the fourth caller wanted it.
 
 Some per-row prose genuinely *is* per-row. `Access`'s "this account also reaches invoke
 through the workspace, so revoking here removes the grant but not the access" is the
@@ -445,10 +582,12 @@ carries the consequence** and whose body carries the explanation:
 > *(open)* This account also reaches invoke through the workspace, so revoking here removes
 > the grant but not the access. [Workspace membership]
 
-**Why this is not the drawer mistake.** §11.2 records the opposite ruling for `TryIt`'s
-warning: a reader who must open something to learn a call is real has already pressed the
-button. That rule holds here, and the split is what satisfies it — the load-bearing fact is
-the summary and is on screen with nothing clicked. What is collapsed is the *why* and the
+**Why this is not the drawer mistake.** §11.2 used to record the opposite RULING for `TryIt`'s
+warning — that it could not be collapsed at all — on the rule that a reader who must open
+something to learn a call is real has already pressed the button. **§11.2 has since reversed
+that ruling, and `TryIt.tsx` ships both of its blocks as `Caveat`s.** The RULE is what holds
+here, not the ruling it used to support, and the split is what satisfies it — the load-bearing
+fact is the summary and is on screen with nothing clicked. What is collapsed is the *why* and the
 *where to go instead*, which is what a reader goes looking for once the headline has stopped
 them. **Collapsing the headline would be the mistake; collapsing the paragraph under it is
 the point.**
@@ -464,6 +603,21 @@ Three constraints on the form, all load-bearing:
 - **Collapse a caveat because it is big, not because its neighbour is.** `Access`'s transient
   "Checking workspace-inherited invoke…" stays plain text: six words, no explanation to hold,
   so a disclosure costs a click to reveal nothing.
+
+**Which test governs, because this section states two and they were read as disagreeing.** The
+rule above is a KIND test — an explanation of a consequence of acting goes behind a disclosure
+headed by that consequence — and the bullet just above it reads as a SIZE test. **The kind test
+governs; size decides nothing on its own.** A `Caveat` is a two-part form, a consequence and the
+explanation under it, so the question is not "is this long?" but "**is there a second part to
+put behind the summary?**" Where there is none there is no caveat to collapse, only a line of
+text — which is why the six-word transient above stays plain, and it would stay plain at sixty
+words.
+
+Read that way the shipped call sites stop disagreeing with each other. `Access`'s conditional
+states — "Revoking may not remove access", "Nothing here to revoke" — each have a consequence
+and a mechanism (or a where-to-go-instead), so they are `Caveat`s (`AccessSection.tsx`).
+`TryIt`'s published-version note is two sentences of one fact with no separable why, so it is a
+`<p>`. Neither is decided by length.
 
 **An action column's header is `sr-only`.** A visible "Actions" heading over one small
 button is louder than what it labels; an unnamed column is worse for anyone not reading it
@@ -483,17 +637,29 @@ assert on.
 page empty while Config's Details column wrapped to three lines. A single page-level cap is
 the wrong instrument: the six sections do not want the same width. Config and Query should use
 the page — Config holds the two widest controls of any tab, Query a SQL editor and a result
-grid; Access, Try it, Versions and Response are prose, short-column lists and short controls
+grid; Access, Try it and Versions are prose, short-column lists and short controls
 that read worse stretched across a wide monitor.
 
+**`Response` used to be named in that second list and has been taken out of it**, because it
+moved to the first — see the criterion two paragraphs down and §5.4b. The sentence stayed
+behind for four revisions of this section, so a reader met "Response reads worse stretched" in
+the present tense ten lines above "Response uses the page", with nothing saying which was
+current. `ResponseSection.tsx`'s ROOT carries no `max-w-*` today (its prose still does, §5.4b),
+and that is the tiebreaker: **where this document and the tree disagree, the tree is the fact
+and the document is the bug.**
+
 **So sections own their own caps**, on their own root element, visible next to the layout they
-constrain: `AccessSection.tsx`, `TryIt.tsx`, `Versions.tsx` and `ResponseSection.tsx` all use
-`max-w-5xl`, and `ResponseSection.tsx`'s frozen-column table adds `max-w-xl` (it kept that cap
-across the §4.2 conversion — the class moved from a hand-written `<table>` onto the shared
-`Table`, which is where the `w-full` it caps comes from). Query needs none
+constrain: `AccessSection.tsx`, `TryIt.tsx` and `Versions.tsx` use `max-w-5xl`. Query needs none
 and gained the most —
 its SQL editor went from 768px to 1424px (measured during the width pass, not by this
 document; the same applies to the figures in §5.4 and §5.5).
+
+**The criterion is what a section HOLDS, and it is what moved `Response` from one group to the
+other** — see §5.4b. Config and Query use the page because they hold settings tables and code
+editors; Access, Try it and Versions cap themselves because they hold prose, short-column lists
+and short controls that read worse stretched across a wide monitor. Response was measured while
+it was the second kind and has since been given both of the first kind's things, so it now uses
+the page too, and its frozen-column table gave up its own `max-w-xl` with it.
 
 ### 5.2 Removing the cap is not enough, because `ConfigTable` is `table-fixed`
 
@@ -563,11 +729,58 @@ of the labels they answer to, where the old route cap put them at ~560px. That i
 complaint that earned `Versions` its cap, so the fix wave gave Response the same `max-w-5xl` root
 (~816px), which also reined in the `Frozen columns` and `OpenAPI document` Cards — the frozen
 *table* had `max-w-xl`, its Card did not. (Those two Cards are gone as of §4.2's reversal. The
-measurement is kept: it is why the section root is capped, which is still true, and "the frame
-stretched further than the content it framed" was one input to removing them.)
+measurement is kept: it is why the section root WAS capped, and "the frame stretched further than
+the content it framed" was one input to removing them. **The cap itself is gone as of §5.4b** —
+not because this measurement was wrong, but because the thing measured changed: the fix for the
+Selects sitting far from their labels is `valueClassName`, which did not exist on `ConfigTable`
+when this was written.)
 
 The general rule: **a task that rebuilds a surface and a task that measures widths must agree on
 the same list of surfaces**, or the difference between the two lists ships.
+
+### 5.4b The same section, measured again after what it holds changed
+
+The 2026-08-28 Data API UI audit measured `Response` in a browser and reported four content
+widths inside one section, with a gutter nothing could use. Reproduced in Chromium at 1600×1000
+with the sidebar expanded, against the shipped stylesheet:
+
+| | width | right edge |
+|---|---|---|
+| content box | 1296 | 1576 |
+| section root (`max-w-5xl`) | 1024 | 1288 |
+| frozen `Name \| Type` table (`max-w-xl`) | 576 | 840 |
+| `Setting \| Details \| Value` table | 1024 | 1288 |
+| the two block paragraphs (`max-w-prose`) | 532 | 796 |
+
+**The cap was not wrong when it was applied; the section stopped being the kind of section it was
+applied to.** §5.4a capped it as a prose-and-short-lists tab. It has since gained a
+`Setting | Details | Value` table (§4.2) and a Monaco editor for the response transform — the two
+things §5.1 gives as the reason Config and Query use the page. So the cap came off, and:
+
+- **Removing it is half the change** (§5.2). `ConfigTable` is `table-fixed`, so all 272 new pixels
+  would have gone to Details, the only unsized column, and the three Selects would have stayed at
+  208px. With `valueClassName="w-52 lg:w-96"` — the pair Config already uses — the trigger went
+  192 → 368px and Details 528 → 624 rather than to 720.
+- **The frozen table's cap was not buying what it was added for.** The rationale for `max-w-xl`
+  — that `bigint` sat far from the name it describes — was never in this document; it is in
+  `ResponseSection.tsx`'s own comment on that table, which is also where the correction now
+  lives. (§5.1 and §5.4a mention the cap, neither gives that reason. Citing a section for a
+  rationale it does not contain is the §9 failure happening to a cross-reference: the claim
+  reads as sourced and is not.) Measured: `w-full` AUTO layout inside that cap gave
+  `Name` 443.9px of 576, so the type started 444px in and would drift further with the longest
+  name. `table-fixed` with `w-72` on Name puts it 288px in at any width — closer, stable, and the
+  same first column the settings table below uses, so the two read as one grid.
+- **Prose is the one deliberate exception to a single measure.** The paragraphs still stop at
+  `max-w-prose` (§5.2's "cap the prose, not the column"): a frame can span whatever it is given,
+  a line of running text cannot. Widening them too is the obvious wrong fix, so the real-browser
+  spec asserts they stop short rather than skipping them.
+- **Below `lg` nothing changed**, which is the point of §5.3's `lg:`. Measured at 900px: Value is
+  208px before and after, and the old cap never bound there either (the content box is 628px).
+
+Two things to carry from this. **A recorded cap binds its measurement, not its conclusion** —
+the §4.2 reversal made the same point about a recorded rationale. And the frozen table is the
+second case in this document where five rounds of reading classes described a table's geometry
+wrongly (§10): the cap everyone cited as fixing the Name/Type gap was leaving 444px of it.
 
 ### 5.5 What the width test can and cannot say
 
@@ -596,7 +809,9 @@ sentinel guard and every other Config test: 230/230 green. `Versions` had a guar
 *owns* its cap; `Config`, the tab the whole width pass was motivated by, had no counterpart. It
 has one now — the inverse assertion, that Config's own root carries no `max-w-*` (responsive
 prefixes included) — and it was mutation-checked with that exact mutation, which now fails one
-test and only that one. `Response`'s new cap is pinned the same way as `Versions`'s.
+test and only that one. `Response` is pinned the same way, in the other direction: §5.4b moved it
+into the uses-the-page group, so its guard is `expectSectionLeavesWidthToThePage` — the same
+assertion Config's carries, and the reversal is stated in the test's own name.
 
 The test's own comment is honest about its limits: the class-name assertions are weak and are
 meant to be — they exist only so a cap cannot come back, or vanish, silently. **Whether the
@@ -609,7 +824,7 @@ width is well spent is a question only a browser can answer.** See §10.
 
 Three sections had the walk in §5.5 copy-pasted and **two had no guard at all**: `Try it` and
 `Access`. That is how `Try it` shipped a `max-w-5xl` nothing was holding in place — §5.1
-lists it among the four sections that cap themselves, and nothing said so in code. The walk,
+lists it among the three sections that cap themselves, and nothing said so in code. The walk,
 the host resolution and the two regexes now live in one module and all five sections call it.
 
 Two details are load-bearing and were preserved from the copies:
@@ -889,13 +1104,40 @@ trashed-caveat test, whose only difference from the passing untrashed test is `d
 **The failure mode is a false negative**, so a test of any non-form affordance inside a
 trashed section must use `fireEvent`, or it reports the product broken when it is not.
 
-**`TryIt` deliberately has no strip**, and the reason generalises: its setup is one picker and
-a short row per parameter, and the prose that would have gone in the drawer is a *warning* —
-a trial spends the rate limit, writes the access log and fills the cache for real.
-`PreviewBlock` already records why that class of copy travels with the button ("a reader who
-has to scroll to find that has already pressed the button"), and a drawer closed by default is
-worse than a scroll. **Collapse a strip because it is big, not because the other section has
-one.**
+**`TryIt` deliberately has no strip**, and the reason still holds for the SETUP: it is one
+picker and a short row per parameter, so there is nothing to win. **Collapse a strip because
+it is big, not because the other section has one.**
+
+#### The part of this section that was reversed, and why
+
+This paragraph used to end differently. It said `TryIt`'s prose could not be collapsed *at
+all*, on `PreviewBlock`'s rule — a reader who has to scroll, or open a drawer, to learn that a
+trial is a real call has already pressed the button — and concluded that the ~500-character
+warning must stand beside Run.
+
+**The argument was right and the conclusion did not follow**, which is the same shape §4.2
+records. That rule argues against hiding the FACT. It says nothing about the four sentences of
+*mechanism* under it, and reading it as "nothing may be collapsed" is what let the section
+reach ~950 characters of standing prose over one dropdown and one button. §4.4 supplies the
+option the old wording never weighed: split at the hinge, headline on screen, mechanism
+behind it. Both `TryIt` blocks and `PreviewBlock`'s note are `Caveat`s now, headed by "A trial
+is a real call, not a dry run" and "A green preview does not prove a consumer can call this
+endpoint" — the sentences the old ruling was actually protecting, still on screen with nothing
+clicked.
+
+What did not move is as informative. `TryIt`'s two-line published-version note stays plain
+text, and `Access`'s transient "Checking workspace-inherited invoke…" with it, on the same rule
+pointing the other way: **there is no second part to put behind a summary**, so a disclosure
+would cost a click to reveal nothing.
+
+**A previous revision of this paragraph also claimed `Access`'s CONDITIONAL STATE paragraphs
+stay plain text. They do not** — "Revoking may not remove access" and "Nothing here to revoke"
+are both `Caveat`s in `AccessSection.tsx`, and have been since §4.4's component landed. The
+claim was wrong in the same way twice (see also §7.2's inventory), and wrong in a way this
+document is especially prone to: it described the section's REASONING, which is correct, and
+then named files as if it had read them. §4.4 now says which test governs so that the two
+sections cannot drift again — kind, not size — and under it the two `Caveat`s are right and
+this sentence was the error.
 
 ### 11.3 What a test can say about any of this
 
@@ -908,6 +1150,24 @@ with the on-screen values, and that it fires nothing when a guard in §11.1 shou
 **jsdom does not hide a closed `<details>`** — it has no layout to hide it with, and Testing
 Library does not exclude its contents. Assert the `open` **attribute**; `toBeVisible` passes
 either way and says nothing.
+
+**So test that a sentence is still REACHABLE, not merely still present.** Once copy moves
+behind a §4.4 disclosure, every pre-existing `getByText` for it keeps passing whether or not a
+reader can get to it — the Data API audit's relocation turned four such tests into assertions
+about the DOM rather than about the product. The form that says something: find the summary,
+assert the `<details>` is closed, `fireEvent.click` it, assert `open`, and assert the sentence
+is inside that element and NOT inside the `<summary>`. Do it inside a genuinely disabled
+`<fieldset>` at least once per section, which is the only place the `<details>`-vs-Radix
+choice is observable.
+
+**All five steps, or none of them counts.** One of those four rewrites clicked the summary and
+then asserted the sentences were in the document, and that is not a reachability test — a
+click is not an observable. Review mutated `Caveat` to a plain `<div>`/`<div>`, `tsc` clean:
+fifteen tests in the feature died and that one stayed green. The two steps it was missing are
+the two that carry the meaning — `open` after the click (else a Radix collapsible with
+`forceMount` plus CSS hiding passes) and containment (else a `<summary>` that swallowed the
+paragraph passes). **Asserting `not.toHaveAttribute("open")` BEFORE the click is the third**,
+without which `<details open>` — a disclosure that collapses nothing — passes too.
 
 ---
 
@@ -964,10 +1224,39 @@ not exist yet:
     each. The plan inherited the same arithmetic ("8 `<Card>`… convert the rest"), and there
     was no rest. A symbol-family count is not a block count — the same trap §7.2 records for
     consumer counts, one level down.
-- The `Caveat` disclosure of §4.4 — **1** file (`AccessSection`), 3 call sites. New, and
-  deliberately narrow: it earns its place where a row-scoped explanation is big enough to set
-  the row height, which so far is one screen. The same file's short transient states stay
-  plain text, which is the rule working rather than an inconsistency.
+- The `Caveat` disclosure of §4.4 — **5** files, **11** call sites (`AccessSection` 4,
+  `TryIt` 2, `Query` 2, `Activity` 2, `PreviewBlock` 1). It was 1 file and 3 call sites for one
+  phase, all in `AccessSection`, where it was written for a row-scoped explanation big enough to
+  set the row height; the Data API UI audit found the same shape at section scale and it moved
+  out of that file into `detail/Caveat.tsx`.
+
+  **This was recorded as 4 files / 9 sites, and the counting method is why.** The previous
+  revision counted `from "./Caveat"` — an import SPECIFIER — and `Activity.tsx` writes
+  `from "./detail/Caveat"` because it sits one directory up. A specifier search structurally
+  cannot see a consumer outside the component's own directory, which is precisely the consumer
+  a "does this belong in `components/`?" question is asking about. **Count by resolved module,
+  not by import string.** For this file that is:
+
+  ```bash
+  grep -rn 'Caveat"' frontend/src --include='*.tsx'   # every specifier that ENDS in Caveat
+  grep -rn '<Caveat' frontend/src --include='*.tsx'   # and the call sites, separately
+  ```
+
+  The second command is separate on purpose: a file count and a call-site count are different
+  questions, and collapsing them is the symbol-family error recorded two bullets up.
+
+  **Does the "deliberately not in `components/`" ruling survive the correction?** Yes, and for a
+  reason the wrong count was hiding rather than supporting. The fifth file is `Activity.tsx`,
+  which is still Data API — a sibling route, not another feature — so the spread is 5 files
+  inside one feature, not 4 inside one directory. The test for promotion is whether the rule has
+  been measured somewhere else, and it has not. Had the fifth consumer been outside Data API,
+  the specifier count would have hidden exactly the evidence that should have moved it.
+
+  What has NOT adopted it is the rule working rather than an inconsistency — `Access`'s short
+  transient states and `TryIt`'s two-line published-version note are plain text, because there
+  is no second part to put behind a summary. (This bullet used to name `Access`'s conditional
+  state paragraphs here too; they are `Caveat`s, and are two of the four counted above. See
+  §11.2.)
 - The split of §11 — **2** sections, both Data API endpoint detail (`Query`, `TryIt`); `react-resizable-panels` itself is also used by `components/sqllab/SqlTab.tsx`, which is
   where the idiom came from. `Versions` and `Access` are deliberately not splits: neither is
   "configure, run, read the result" — there is nothing to run.
