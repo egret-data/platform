@@ -278,8 +278,8 @@ export default function Datasets() {
           <div className="mb-3">
             <SummaryStrip
               items={[
-                { label: "datasets", value: rows.length },
-                ...(folders.length ? [{ label: "folders", value: folders.length }] : []),
+                { label: "datasets", singular: "dataset", value: rows.length },
+                ...(folders.length ? [{ label: "folders", singular: "folder", value: folders.length }] : []),
               ]}
             />
           </div>

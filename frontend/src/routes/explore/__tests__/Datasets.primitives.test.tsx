@@ -101,3 +101,26 @@ describe("Datasets on the Explore primitives", () => {
     expect(screen.getByText("Failed to load datasets.")).toBeInTheDocument();
   });
 });
+
+/*
+ * Item 1: the strip owns the singular. These pages set `singular` beside
+ * `label`; the RULE (only the number one takes it) is tested once, on the
+ * component, in `src/components/explore/__tests__/SummaryStrip.test.tsx`.
+ * What is checked here is the WIRING — that this page passes the pair at all,
+ * which is the half a component test cannot see and the half five pages had
+ * missing.
+ */
+describe("Datasets — the summary strip says `1 dataset`, not `1 datasets`", () => {
+  it("uses the singular for one row", () => {
+    datasets = [DEFAULT_DATASETS[0]];
+    renderAt();
+    expect(screen.getByText("dataset")).toBeInTheDocument();
+    expect(screen.queryByText("datasets")).not.toBeInTheDocument();
+  });
+
+  it("goes back to the plural at two", () => {
+    datasets = [DEFAULT_DATASETS[0], { ...DEFAULT_DATASETS[0], id: "d2", name: "Customers" }];
+    renderAt();
+    expect(screen.getByText("datasets")).toBeInTheDocument();
+  });
+});

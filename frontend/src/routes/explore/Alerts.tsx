@@ -558,7 +558,7 @@ export default function Alerts() {
           <div className="mb-3">
             <SummaryStrip
               items={[
-                { label: `${typeLabel}s`, value: counts.total },
+                { label: `${typeLabel}s`, singular: typeLabel, value: counts.total },
                 // In the bin, "active" and "failing" describe a schedule the
                 // user has discarded — true of the row, but not an answer to
                 // anything they are asking here. Only the count survives.
@@ -569,7 +569,7 @@ export default function Alerts() {
                       { label: "paused", value: counts.paused },
                     ]),
                 ...(folders.length && !showTrash
-                  ? [{ label: "folders", value: folders.length }]
+                  ? [{ label: "folders", singular: "folder", value: folders.length }]
                   : []),
                 // Clicking the failing count filters to it — the one number on
                 // this page you act on the moment it is non-zero.

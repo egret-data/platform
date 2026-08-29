@@ -667,7 +667,7 @@ export default function Endpoints() {
               showTrash
                 ? [{ label: "in Trash", value: endpoints.length }]
                 : [
-                    { label: endpoints.length === 1 ? "endpoint total" : "endpoints total", value: endpoints.length },
+                    { label: "endpoints total", singular: "endpoint total", value: endpoints.length },
                     { label: "live", value: live.length, onClick: () => toggleStateFilter("live"), active: stateFilter === "live" },
                     { label: "draft", value: draft.length, onClick: () => toggleStateFilter("draft"), active: stateFilter === "draft" },
                     { label: "disabled", value: disabled.length, onClick: () => toggleStateFilter("disabled"), active: stateFilter === "disabled" },

@@ -495,3 +495,47 @@ describe("Alerts — dataapi_alert rides the Alerts tab (Task 6 fix round 1)", (
     expect(screen.queryByRole("link", { name: /\+ data api alert/i })).not.toBeInTheDocument();
   });
 });
+
+/*
+ * Item 1: the strip owns the singular. This page sets `singular` beside
+ * `label`; the RULE (only the number one takes it) is tested once, on the
+ * component, in `src/components/explore/__tests__/SummaryStrip.test.tsx`.
+ * What is checked here is the WIRING — that the page passes the pair at all,
+ * which is the half a component test cannot see and the half five pages had
+ * missing.
+ */
+describe("Alerts — the summary strip says `1 alert`, not `1 alerts`", () => {
+  it("uses the singular for one row and one folder", () => {
+    schedulesMock.mockReturnValue({ data: [row()], isLoading: false, isError: false });
+    folders = [{ id: "f1", name: "Revenue" }];
+    renderPage();
+    expect(screen.getByText("alert")).toBeInTheDocument();
+    expect(screen.getByText("folder")).toBeInTheDocument();
+    expect(screen.queryByText("alerts")).not.toBeInTheDocument();
+    expect(screen.queryByText("folders")).not.toBeInTheDocument();
+  });
+
+  it("goes back to the plural at two", () => {
+    schedulesMock.mockReturnValue({
+      data: [row(), row({ id: "s2", name: "Signups flat" })],
+      isLoading: false,
+      isError: false,
+    });
+    folders = [{ id: "f1", name: "Revenue" }, { id: "f2", name: "Ops" }];
+    renderPage();
+    expect(screen.getByText("alerts")).toBeInTheDocument();
+    expect(screen.getByText("folders")).toBeInTheDocument();
+  });
+
+  it("inflects the tab's own noun, not a hard-coded one", async () => {
+    // `label` is `${typeLabel}s` and `singular` is `typeLabel`, so the Reports
+    // tab must read "1 report" — a page that hard-coded "alert" would pass the
+    // two tests above and fail this one.
+    const user = userEvent.setup();
+    schedulesMock.mockReturnValue({ data: [row({ type: "report" })], isLoading: false, isError: false });
+    renderPage();
+    await user.click(screen.getByRole("tab", { name: /reports/i }));
+    expect(screen.getByText("report")).toBeInTheDocument();
+    expect(screen.queryByText("reports")).not.toBeInTheDocument();
+  });
+});

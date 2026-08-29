@@ -573,3 +573,31 @@ describe("Notebooks — bulk select only reaches rows on screen", () => {
     expect(trashMutateAsync).toHaveBeenCalledTimes(1);
   });
 });
+
+/*
+ * Item 1: the strip owns the singular. This page sets `singular` beside
+ * `label`; the RULE (only the number one takes it) is tested once, on the
+ * component, in `src/components/explore/__tests__/SummaryStrip.test.tsx`.
+ * What is checked here is the WIRING — that the page passes the pair at all,
+ * which is the half a component test cannot see and the half five pages had
+ * missing.
+ */
+describe("Notebooks — the summary strip says `1 notebook`, not `1 notebooks`", () => {
+  it("uses the singular for one row and one folder", () => {
+    notebooksMock.mockReturnValue({ data: [mockNb1], isLoading: false, isError: false, error: null });
+    foldersMock.mockReturnValue({ data: [{ id: "f1", name: "Revenue" }] });
+    renderAt();
+    expect(screen.getByText("notebook")).toBeInTheDocument();
+    expect(screen.getByText("folder")).toBeInTheDocument();
+    expect(screen.queryByText("notebooks")).not.toBeInTheDocument();
+    expect(screen.queryByText("folders")).not.toBeInTheDocument();
+  });
+
+  it("goes back to the plural at two", () => {
+    notebooksMock.mockReturnValue({ data: [mockNb1, mockNb2], isLoading: false, isError: false, error: null });
+    foldersMock.mockReturnValue({ data: [{ id: "f1", name: "Revenue" }, { id: "f2", name: "Ops" }] });
+    renderAt();
+    expect(screen.getByText("notebooks")).toBeInTheDocument();
+    expect(screen.getByText("folders")).toBeInTheDocument();
+  });
+});

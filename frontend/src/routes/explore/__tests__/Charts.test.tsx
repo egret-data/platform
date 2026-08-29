@@ -202,3 +202,31 @@ describe("Charts on the Explore primitives", () => {
     expect(screen.getByText("Failed to load charts.")).toBeInTheDocument();
   });
 });
+
+/*
+ * Item 1: the strip owns the singular. These pages set `singular` beside
+ * `label`; the RULE (only the number one takes it) is tested once, on the
+ * component, in `src/components/explore/__tests__/SummaryStrip.test.tsx`.
+ * What is checked here is the WIRING — that this page passes the pair at all,
+ * which is the half a component test cannot see and the half five pages had
+ * missing.
+ */
+describe("Charts — the summary strip says `1 chart`, not `1 charts`", () => {
+  it("uses the singular for one row and one folder", () => {
+    charts = [DEFAULT_CHARTS[0]];
+    folders = [{ id: "f1", name: "Revenue" }];
+    renderAt();
+    expect(screen.getByText("chart")).toBeInTheDocument();
+    expect(screen.getByText("folder")).toBeInTheDocument();
+    expect(screen.queryByText("charts")).not.toBeInTheDocument();
+    expect(screen.queryByText("folders")).not.toBeInTheDocument();
+  });
+
+  it("goes back to the plural at two", () => {
+    charts = DEFAULT_CHARTS;
+    folders = [{ id: "f1", name: "Revenue" }, { id: "f2", name: "Ops" }];
+    renderAt();
+    expect(screen.getByText("charts")).toBeInTheDocument();
+    expect(screen.getByText("folders")).toBeInTheDocument();
+  });
+});

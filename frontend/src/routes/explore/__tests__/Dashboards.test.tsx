@@ -175,3 +175,31 @@ describe("Dashboards on the Explore primitives", () => {
     expect(h1s[0]).toHaveTextContent("Dashboards");
   });
 });
+
+/*
+ * Item 1: the strip owns the singular. These pages set `singular` beside
+ * `label`; the RULE (only the number one takes it) is tested once, on the
+ * component, in `src/components/explore/__tests__/SummaryStrip.test.tsx`.
+ * What is checked here is the WIRING — that this page passes the pair at all,
+ * which is the half a component test cannot see and the half five pages had
+ * missing.
+ */
+describe("Dashboards — the summary strip says `1 dashboard`, not `1 dashboards`", () => {
+  it("uses the singular for one row and one folder", () => {
+    dashboards = [DEFAULT_DASHBOARDS[0]];
+    folders = [{ id: "f1", name: "Revenue" }];
+    renderAt();
+    expect(screen.getByText("dashboard")).toBeInTheDocument();
+    expect(screen.getByText("folder")).toBeInTheDocument();
+    expect(screen.queryByText("dashboards")).not.toBeInTheDocument();
+    expect(screen.queryByText("folders")).not.toBeInTheDocument();
+  });
+
+  it("goes back to the plural at two", () => {
+    dashboards = [DEFAULT_DASHBOARDS[0], { ...DEFAULT_DASHBOARDS[0], id: "d2", name: "Finance" }];
+    folders = [{ id: "f1", name: "Revenue" }, { id: "f2", name: "Ops" }];
+    renderAt();
+    expect(screen.getByText("dashboards")).toBeInTheDocument();
+    expect(screen.getByText("folders")).toBeInTheDocument();
+  });
+});

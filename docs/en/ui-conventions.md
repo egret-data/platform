@@ -215,6 +215,64 @@ because the task that wrote this section was scoped to a single page. It is stat
 than left implicit so that nobody reads the reference implementation's silence as the
 convention.
 
+### 1.6 `SummaryStrip` owns the singular, and the pages own the words
+
+`src/components/explore/SummaryStrip.tsx`
+
+The strip prints `{value}` then a word. **The rule that picks the word lives in the
+component**: the number `1` — and only the number `1` — renders `singular`; every other
+count, zero included, renders `label`.
+
+```tsx
+<SummaryStrip items={[{ label: "charts", singular: "chart", value: rows.length }]} />
+```
+
+**The defect.** Seven Explore list pages render counts through this component and five of
+them read "1 charts", "1 folders", "1 dashboards". The other two — `dataapi/Endpoints.tsx`
+and `dataapi/Clients.tsx` — had been fixed with a ternary *at the call site*, which is how a
+rule ends up applied on two pages and forgotten on five. Both ternaries are gone; all seven
+now pass the pair.
+
+**Why a `singular`/`plural` pair and not a derived plural.** Most labels on this strip are
+not nouns. "live", "draft", "disabled", "active", "paused", "failing", "ok", "granted",
+"queued" are adjectives, "phase" and "auth" are not counts at all, and "endpoints total" and
+"queries run" do not carry the noun at the end. A component that inflected `label` would have
+to tell those apart from "charts" with no information to do it, and English gives it no rule
+to borrow ("bus", "was"). Naming both words at the call site costs one field, needs no
+dictionary and no i18n dependency, handles an irregular ("queries"/"query") for free, and
+makes an adjective gaining an `s` **unrepresentable** rather than merely remembered.
+
+**It also keeps the key stable, and that is not a coincidence.** `SummaryStrip` keys its items
+by `it.label`. Because `singular` is a *separate field*, `label` is count-independent, so the
+rendered word changes at 1↔2 while the key does not. The alternative API — a count-aware
+`label` formatter — would have made the key count-dependent and remounted a focused toggle
+chip the moment its own count crossed one. Guarded by `"keeps the same DOM node across a
+1 -> 2 transition"` in `src/components/explore/__tests__/SummaryStrip.test.tsx`.
+
+`value === 1` is strict identity on a **number**. `value` also carries formatted strings
+(`EngineDetail.tsx` passes `"3/4"` and a phase name), and a string that happens to read `"1"`
+is not a count of one.
+
+**Adoption, counted from the tree and not from this paragraph:**
+
+```bash
+grep -rl 'from "@/components/explore/SummaryStrip"' frontend/src   # 26, one of them the test
+grep -rl 'singular:' frontend/src                                  # 8, one of them the test
+```
+
+25 modules render a strip; **7 pass `singular`** — the seven Explore list pages. The
+remaining 18 are control-plane pages, Explore settings, `MembersPanel.tsx` and
+`DatabasesPage.tsx`, and they still read "1 users", "1 engines", "1 secrets". That is a
+stated gap, not a second convention: the field is opt-in, so those pages are unchanged rather
+than differently-behaved, and the next one to be touched sets the pair.
+
+**Accessible name, unfixed and recorded.** The toggle-chip variant's accessible name is
+`"1folder"`, with no space: the number is in its own `<span>` and the separation on screen
+comes from the flex `gap-1`, which the name computation does not see. It is pre-existing and
+true of every chip on the strip. It is pinned as-is in the component test rather than papered
+over with a hand-written `aria-label`, and not fixed there because inserting a text node into
+an `inline-flex` row adds a flex **item** — a spacing change no jsdom test can check (§10).
+
 ---
 
 ## 2. Loading, empty, error — three states, never two

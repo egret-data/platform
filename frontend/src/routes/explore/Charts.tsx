@@ -256,8 +256,8 @@ export default function Charts() {
           <div className="mb-3">
             <SummaryStrip
               items={[
-                { label: "charts", value: rows.length },
-                ...(folders.length ? [{ label: "folders", value: folders.length }] : []),
+                { label: "charts", singular: "chart", value: rows.length },
+                ...(folders.length ? [{ label: "folders", singular: "folder", value: folders.length }] : []),
               ]}
             />
           </div>

@@ -549,8 +549,8 @@ export default function Notebooks() {
           <div className="mb-3">
             <SummaryStrip
               items={[
-                { label: "notebooks", value: rows.length },
-                ...(folders.length ? [{ label: "folders", value: folders.length }] : []),
+                { label: "notebooks", singular: "notebook", value: rows.length },
+                ...(folders.length ? [{ label: "folders", singular: "folder", value: folders.length }] : []),
               ]}
             />
           </div>

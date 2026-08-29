@@ -293,8 +293,8 @@ export default function Dashboards() {
           <div className="mb-3">
             <SummaryStrip
               items={[
-                { label: "dashboards", value: rows.length },
-                ...(folders.length ? [{ label: "folders", value: folders.length }] : []),
+                { label: "dashboards", singular: "dashboard", value: rows.length },
+                ...(folders.length ? [{ label: "folders", singular: "folder", value: folders.length }] : []),
               ]}
             />
           </div>
