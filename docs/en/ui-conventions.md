@@ -898,7 +898,11 @@ cannot. When those two conflict, the route wins.
     already down to 40px at `lg:w-96`.
 
     **Reconciling every hit of the grep, as this section prescribes.** `valueClassName` is passed
-    at six call sites. Three are the detail tabs this rule governs and they now agree:
+    at **seven** call sites — 3 + 3 + 1, and an earlier revision of this paragraph said "six"
+    while enumerating seven. The enumeration was complete and the arithmetic was not, which in a
+    section whose whole subject is "grep the class and reconcile every hit" is the failure itself
+    in miniature: **state the count and then check it against the list you just wrote.** Three are
+    the detail tabs this rule governs and they now agree:
     `Config.tsx`, `ResponseSection.tsx`, `TryIt.tsx`, all `w-52 lg:w-96`. Three are
     `ScheduleEditor.tsx` at `w-52 lg:w-80`, which is the Alerts editor and not a detail route —
     out of this rule's scope, named so that a future grep does not read them as violations. The
@@ -1547,7 +1551,15 @@ The parts, all three load-bearing:
   are a plain table, one row each.
 - **The result is the lower half, and it owns the run control.** The button and the shortcut
   live in the *result*'s header, not with the setup: `PreviewBlock` and `TryIt` both put `Run`
-  there, and the header stays put while the body scrolls.
+  there, and the header stays put **while the result's own body scrolls**.
+
+  **That last clause used to say "while the body scrolls", full stop, and for `TryIt` it is now
+  too strong.** A `Group`'s panes cannot exceed the section, so under the split `Run` was on
+  screen at every parameter count. `TryIt`'s column can overflow the shell's scroll box, and
+  then the result's header goes below the fold with it — measured, 5px under at 8 declared
+  parameters and ~355px under at 16. The header still stays put *within the result*; what it no
+  longer does is stay on the *page*. §11.0 records what was put in its place, and what was tried
+  and did not work.
 - **The shortcut is named beside the button it fires.** `⌘↵`, in the header. An affordance
   nobody can see is not an affordance. `Query` registers it as a Monaco command (`SqlEditor`'s
   `onRun`); `TryIt` has no editor, so it uses a `window` `keydown` listener, the idiom
@@ -1585,6 +1597,30 @@ height is decided by its content.
   takes %, px, em, rem, vh or vw — so "size the top pane to its content" means measuring the
   content and calling `panelRef.resize()` on mount and on every parameter change: machinery
   whose only job is to imitate normal flow.
+
+  **What the removal COST, stated rather than netted out.** The split guaranteed `Run` was on
+  screen at every parameter count. The column does not: measured, the result's header starts 5px
+  below the fold at 8 declared parameters and ~355px below it at 16. That is not cosmetic,
+  because §11.1's shortcut is bound to `window` — ⌘↵ fires wherever the page is scrolled, a REAL
+  trial runs (a serving-path call, a rate-limit token, an `access_log` row), and **nothing
+  visible changes**, so the reader presses it again.
+
+  **`sticky top-0` on the result's header is the obvious answer and it is measurably inert
+  here.** The section is `flex-1` in an `h-full` column, so its height is
+  `max(256, available − setup)` — never more than the scroll box — and a box that fits can never
+  be scrolled past its own top, which is the only condition under which sticky engages. Built,
+  then measured at 8 and 16 parameters across four scroll offsets each: the header's top equalled
+  the section's top **every time**. It was removed rather than shipped, because a class assertion
+  passing over a no-op is the failure §8 exists for.
+
+  Two facts hold instead, and both were measured rather than argued:
+
+  - **`Run` is always reachable**, because that same "never taller than the box" property means
+    scrolling to the bottom always brings the result fully into view.
+  - **`onRun` scrolls the result into view when a run starts** (`block: "nearest"`, so it is a
+    no-op for every run started by clicking a button that was already visible), placed BEHIND the
+    `canRun` guard so a refused run does not yank the page. From `scrollTop: 0`, ⌘↵ left `Run`
+    inside the visible box at 6, 8 and 16 parameters — where at rest, 8 and 16 had it outside.
 
 - **Sizes are percent STRINGS, wherever a `Group` is still used.** In `react-resizable-panels`
   v4 a bare number means *pixels*, so `defaultSize={55}` is a 55-pixel editor that reads as
@@ -1683,6 +1719,13 @@ with the on-screen values, and that it fires nothing when a guard in §11.1 shou
 name (`getByRole("region", { name: "Result" })`). Prefer the name even where the index works:
 an index is a counted hop, and §5.6/§5.7 record twice that a counted hop re-points silently
 onto something that satisfies the assertion for the wrong reason.
+
+**`Query.test.tsx` still indexes, and that is recorded rather than quietly left.** Its panels
+carry no accessible name — `Query`'s halves are bare `<div>`s inside `<Panel>`, not
+`<section aria-labelledby>` — so `getAllByTestId("panel")[1]` is the only handle there is today.
+Naming them the way `TryIt` names its halves is the fix and it is **owed**, not done: it is a
+change to `Query.tsx`, and the task that rewrote this section owned `TryIt.tsx`. Until then the
+index is a known counted hop in a file this section tells you not to write one in.
 
 **And a class chain is the strongest thing jsdom can say about a height.** `TryIt`'s clipping
 was 47–382px of hidden content, and no jsdom assertion can see one pixel of it. What its tests

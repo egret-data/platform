@@ -604,6 +604,82 @@ describe("TryIt — one column: the setup at its own height, the result taking t
     }
   });
 
+  /**
+   * **The property the split had for free, and that the flex column has to earn
+   * back.** A `40%` / `60%` pane always put `Run` on screen, at every parameter
+   * count, because the panes could not exceed the section. A column that lets
+   * the section overflow the shell's scroll box can push the result's header —
+   * `Run`, the status badge, "Running…" — below the fold: measured, the section
+   * totals `setup + max(256, 715 - setup)` against a 715px box, so at 8
+   * declared parameters the header starts 5px under the fold and at 16 it is
+   * ~355px under it.
+   *
+   * That is not a cosmetic loss. The shortcut is bound to `window` (§11.1), so
+   * ⌘↵ fires wherever the page is scrolled. With the result below the fold a
+   * real trial runs — a real serving-path call, a rate-limit token, an
+   * `access_log` row — and NOTHING on screen changes. The reader presses it
+   * again.
+   *
+   * **`sticky top-0` was the obvious fix and it is measurably a no-op here.**
+   * Built, then measured in Chromium: at 8 and 16 parameters, at four scroll
+   * offsets each, the header's top equalled the result section's top every
+   * time. Sticky engages only when its containing block is scrolled past its
+   * own top, and this section is `flex-1` in an `h-full` column — its height is
+   * `max(256, available − setup)`, never more than the box, so it can never be
+   * scrolled past. It was removed rather than shipped: a class assertion
+   * passing over an inert class is the exact failure this branch keeps finding.
+   *
+   * What works, measured the same way: `onRun` scrolls the result into view.
+   * From `scrollTop: 0`, ⌘↵ at 6 / 8 / 16 parameters leaves `Run` inside the
+   * shell's visible box in all three, where at rest 8 and 16 had it outside.
+   *
+   * jsdom judges no pixel of that. What it judges is the IDENTITY of the
+   * element the product scrolled to, and that the scroll sits behind the guard.
+   * The geometry is `tests/e2e/data-api-try-it-height.spec.ts`.
+   */
+  it("brings the result into view when ⌘↵ starts a run, so a trial cannot fire invisibly", async () => {
+    const mutateAsync = mockTry(OK);
+    renderTryIt({ endpoint: makeEndpoint({ params: TWO_PARAMS }) });
+
+    // BY IDENTITY, not "was it called". The prototype mock exists so nothing
+    // throws (jsdom implements no `scrollIntoView`) AND so it can be asserted
+    // NOT to have fired: an own property on the result element shadows the
+    // prototype, so `onResult` recording the call while `onAnythingElse` stays
+    // at zero is the proof that the product scrolled to the RESULT and not to
+    // some other node that happened to be handy.
+    const onAnythingElse = vi.fn();
+    Element.prototype.scrollIntoView = onAnythingElse;
+    const onResult = vi.fn();
+    const result = screen.getByRole("region", { name: "Result" });
+    (result as unknown as { scrollIntoView: () => void }).scrollIntoView = onResult;
+
+    fireEvent.keyDown(window, { key: "Enter", metaKey: true });
+
+    await waitFor(() => expect(mutateAsync).toHaveBeenCalled());
+    expect(onResult).toHaveBeenCalled();
+    expect(onAnythingElse).not.toHaveBeenCalled();
+  });
+
+  it("does not scroll for a run it refuses", async () => {
+    const mutateAsync = mockTry(OK);
+    renderTryIt({ trashed: true });
+
+    const onAnythingElse = vi.fn();
+    Element.prototype.scrollIntoView = onAnythingElse;
+    const onResult = vi.fn();
+    const result = screen.getByRole("region", { name: "Result" });
+    (result as unknown as { scrollIntoView: () => void }).scrollIntoView = onResult;
+
+    fireEvent.keyDown(window, { key: "Enter", metaKey: true });
+
+    // The scroll must sit BEHIND the `canRun` guard. In front of it, a trashed
+    // endpoint — or a held shortcut during a pending run — yanks the page
+    // toward a result that is not going to change.
+    await waitFor(() => expect(mutateAsync).not.toHaveBeenCalled());
+    expect(onResult).not.toHaveBeenCalled();
+    expect(onAnythingElse).not.toHaveBeenCalled();
+  });
+
   it("renders no resizable split", () => {
     mockTry(OK);
     renderTryIt();

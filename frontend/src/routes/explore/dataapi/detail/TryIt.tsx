@@ -161,6 +161,10 @@ export default function TryIt() {
   const [accountId, setAccountId] = useState(preselected);
   const [paramValues, setParamValues] = useState<Record<string, string>>({});
 
+  // The result half, so a run started by ⌘↵ can bring its own outcome on
+  // screen. See `onRun`.
+  const resultRef = useRef<HTMLElement | null>(null);
+
   const tryMutation = useDataApiTryEndpoint();
   const [result, setResult] = useState<TryResponse | null>(null);
   const [tooLarge, setTooLarge] = useState(false);
@@ -179,6 +183,24 @@ export default function TryIt() {
     // a trial — the shell's `fieldset disabled` greys the button but a window
     // key handler is not a form control and walks straight past it.
     if (!canRun) return;
+    // BEHIND the guard, and that placement is the whole of it: in front, a
+    // trashed endpoint or a held shortcut during a pending run yanks the page
+    // toward a result that is not going to change.
+    //
+    // **Why a scroll at all.** This listener is on `window` (§11.1), so ⌘↵
+    // fires wherever the page is scrolled — and the section may be taller than
+    // the shell's scroll box, which is the price of letting the setup keep its
+    // own height. Measured: at 8 declared parameters the result's header starts
+    // 5px below the fold and at 16 it is ~355px below it. Without this line a
+    // reader at the top of a long parameter list presses ⌘↵, a REAL trial runs
+    // — a real serving-path call, a rate-limit token, an `access_log` row — and
+    // nothing they can see changes, so they press it again. `sticky` on the
+    // header below cannot help here: at scroll-top the result has not been
+    // reached at all, so there is nothing to pin.
+    //
+    // `block: "nearest"` so it is a no-op when the result is already on screen,
+    // which is every run started by clicking the button.
+    resultRef.current?.scrollIntoView({ block: "nearest" });
     // Clear every prior outcome up front, not just the one this branch is
     // about to set — otherwise a second run that hits `413` (or errors)
     // would leave a PREVIOUS run's success `result` rendered alongside
@@ -505,7 +527,31 @@ export default function TryIt() {
           everything stays reachable — rather than this half collapsing to
           nothing inside a page that does not move. 256px holds the header, the
           caveat, a refusal alert and the first lines of a body. */}
-      <section aria-labelledby="try-result-heading" className="mt-4 flex min-h-64 flex-1 flex-col">
+      <section
+        ref={resultRef}
+        aria-labelledby="try-result-heading"
+        className="mt-4 flex min-h-64 flex-1 flex-col"
+      >
+        {/* **Not `sticky top-0`, and that is a measurement rather than an
+            omission.** Review asked for it, as the cheap way to keep `Run` on
+            screen once the section can outgrow the shell's scroll box. I built
+            it, measured it in Chromium, and it never fired ONCE: at 8 and 16
+            declared parameters, at four scroll offsets each, this header's top
+            was equal to the result section's top every time.
+
+            The reason is structural. Sticky engages only when its containing
+            block's top passes above the scroll box's top, and this section is
+            `flex-1` inside an `h-full` column, so its height is
+            `max(256, available − setup)` — never MORE than the box. A box that
+            fits can never be scrolled past its own top, so the class is inert.
+            Shipping it would have been a class assertion passing over a no-op,
+            which is the failure this branch keeps finding.
+
+            What Run's reachability actually rests on is two facts that were
+            measured instead: this section is never taller than the scroll box,
+            so scrolling to the bottom always reveals Run; and `onRun` scrolls
+            the result into view, so a ⌘↵ fired from the top of a long
+            parameter list cannot run invisibly. */}
         <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border px-1 pb-2">
           <h3 id="try-result-heading" className="text-sm font-medium">
             Result

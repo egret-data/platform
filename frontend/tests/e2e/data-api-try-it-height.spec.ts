@@ -41,6 +41,37 @@ import { loginLocalAdmin, firstWorkspace, csrf, postJson } from "./helpers";
  * **negative control that was actually run**, not a recollection: it is the
  * same script against the same dev server at the previous commit.
  *
+ * # What the fix COST, which is the other half this file guards
+ *
+ * The split guaranteed `Run` was on screen at every parameter count, because a
+ * pane could not exceed the section. A column that lets the section overflow
+ * the shell's scroll box can carry the result's header below the fold —
+ * measured, at 8 declared parameters it starts 5px under it and at 16 it is
+ * ~355px under. That matters because the shortcut is bound to `window` (§11.1):
+ * ⌘↵ fires anyway, a real trial runs, and nothing visible changes, so the
+ * reader presses it again and spends a second rate-limit token and a second
+ * `access_log` row.
+ *
+ * **`sticky top-0` on that header was tried and is measurably inert.** The
+ * section is `flex-1` inside an `h-full` column, so its height is
+ * `max(256, available − setup)` — never more than the box — and a box that fits
+ * can never be scrolled past its own top. At 8 and 16 parameters, at four
+ * scroll offsets each, the header's top equalled the section's top every time.
+ * It was removed rather than shipped.
+ *
+ * What holds instead, and what the assertions below pin: **Run is on screen
+ * without scrolling at the default viewport**, **Run is always reachable at the
+ * bottom of the scroll** (because the section never exceeds the box), and — in
+ * `__tests__/TryIt.test.tsx`, by identity — **`onRun` scrolls the result into
+ * view**, so ⌘↵ from the top of a long parameter list cannot run invisibly.
+ * Measured from `scrollTop: 0`, ⌘↵ left Run inside the visible box at 6, 8 and
+ * 16 parameters, where at rest 8 and 16 had it outside.
+ *
+ * An earlier revision of this file guarded that with `setup.bottom <=
+ * result.top`, which **is true when the result is entirely off-screen** — two
+ * boxes that do not overlap say nothing about whether either is visible. That
+ * line is kept, labelled as insufficient, next to the ones that are not.
+ *
  * # The traps this file is built to avoid
  *
  * Three specs on this branch have gone green on a broken page, and all three
@@ -133,7 +164,25 @@ test.describe("Data API — Try it shows the parameters it asks for", () => {
         name: `Wxyz ${runId}`,
         path: `e2e-tryit-height-${runId}`,
         database_id: dbId,
-        statements: [{ name: "main", sql: "SELECT 1 AS total_revenue" }],
+        // Every declared parameter is REFERENCED. Draft validation skips
+        // `UnreferencedParameter` (`lifecycle.rs`), so a statement that ignored
+        // them should still create — but "should" is doing work there, and this
+        // spec has never run against a live backend. Referencing all six makes
+        // the fixture self-consistent, so a create failure would mean something
+        // real rather than a rule this file guessed at.
+        statements: [
+          {
+            name: "main",
+            sql:
+              "SELECT 1 AS total_revenue\n" +
+              "WHERE region = {{ region }}\n" +
+              "  AND channel = {{ channel }}\n" +
+              "  AND segment = {{ segment }}\n" +
+              "  AND currency = {{ currency }}\n" +
+              "  AND since = {{ since }}\n" +
+              "  AND rowlimit = {{ rowlimit }}",
+          },
+        ],
         params: PARAMS,
       });
       endpointId = endpoint.id as string;
@@ -228,10 +277,23 @@ test.describe("Data API — Try it shows the parameters it asks for", () => {
           return { setting: pick("Setting"), details: pick("Details"), value: pick("Value") };
         })();
 
+        // `Run`, resolved from inside the result half rather than from the
+        // page: it is the control whose disappearance is the defect below.
+        const runBtn = [...result.querySelectorAll("button")].find((b) =>
+          ["Run", "Running…"].includes((b.textContent ?? "").trim()),
+        );
+        if (!runBtn) return { error: "no Run button inside the result half" };
+        const inHost = (el: Element) => {
+          const b = el.getBoundingClientRect();
+          return b.top >= hostBox.top - 1 && b.bottom <= hostBox.bottom + 1;
+        };
+
         return {
           host: { top: round(hostBox.top), bottom: round(hostBox.bottom) },
+          hostScroll: { client: host.clientHeight, scroll: host.scrollHeight, top: host.scrollTop },
           setup: box(setup),
           result: box(result),
+          run: { ...box(runBtn), inHost: inHost(runBtn) },
           rows,
           hiding,
           cols,
@@ -281,9 +343,79 @@ test.describe("Data API — Try it shows the parameters it asks for", () => {
 
       // The setup takes its own height rather than a share of the section: it
       // ends where its content ends, which is above the result's top.
+      //
+      // **This line alone is not a guard and the review that said so was
+      // right.** It is satisfied when the result is entirely off-screen — two
+      // boxes that do not overlap say nothing about whether either is visible —
+      // so the assertions that follow are the ones that carry the claim.
       expect(measured.setup.bottom, "the setup ends before the result begins").toBeLessThanOrEqual(
         measured.result.top,
       );
+
+      // ── Run cannot leave the page ─────────────────────────────────────────
+      // The property the split had for free: panes could not exceed the
+      // section, so `Run` was on screen at every parameter count. A column that
+      // lets the section overflow the shell's scroll box can carry it below the
+      // fold, and the shortcut is bound to `window` (§11.1) — so ⌘↵ fires
+      // anyway, a REAL trial runs, and nothing visible changes. The reader
+      // presses again: a second serving-path call, a second rate-limit token, a
+      // second `access_log` row.
+      //
+      // Two things are asserted, and the second is the invariant.
+      //
+      // 1. At the default viewport with six declared parameters, `Run` needs no
+      //    scrolling at all. Measured: 833-865 inside a box of 213-927.
+      expect(
+        measured.run.inHost,
+        `Run is on screen without scrolling (run ${measured.run.top}-${measured.run.bottom}, host ${measured.host.top}-${measured.host.bottom})`,
+      ).toBe(true);
+
+      // 2. **`Run` is always reachable by scrolling** — which holds because
+      //    this section is `flex-1` in an `h-full` column and so is never
+      //    taller than the box it scrolls in. Scrolling the host to its maximum
+      //    must put Run inside it, at any parameter count.
+      //
+      //    Non-vacuity first, because this is the trap: on a page that does not
+      //    overflow, "scroll to the bottom" is a no-op and the assertion is
+      //    satisfied by the at-rest layout it is supposed to be independent of.
+      //    The six-parameter fixture DOES overflow — measured 876 against a
+      //    715px box — and the run fails here if it ever stops.
+      expect(
+        measured.hostScroll.scroll,
+        `the fixture actually overflows the scroll box (${measured.hostScroll.scroll} vs ${measured.hostScroll.client}) — otherwise the scroll check below is a no-op`,
+      ).toBeGreaterThan(measured.hostScroll.client);
+
+      const runAtBottom = await page.evaluate(() => {
+        const routeRoot = document.querySelector<HTMLElement>("main .p-4")!;
+        const host = routeRoot.querySelector<HTMLElement>("fieldset") ?? routeRoot;
+        host.scrollTop = host.scrollHeight;
+        const heading = [...document.querySelectorAll("h2")].find(
+          (h2) => h2.textContent?.trim() === "Try it",
+        )!;
+        let root: HTMLElement | null = heading.parentElement;
+        while (root && root.parentElement !== host) root = root.parentElement;
+        const result = [...root!.querySelectorAll<HTMLElement>("section[aria-labelledby]")].find(
+          (sec) =>
+            document.getElementById(sec.getAttribute("aria-labelledby")!)?.textContent?.trim() ===
+            "Result",
+        )!;
+        const btn = [...result.querySelectorAll("button")].find((b) =>
+          ["Run", "Running…"].includes((b.textContent ?? "").trim()),
+        )!;
+        const hb = host.getBoundingClientRect();
+        const bb = btn.getBoundingClientRect();
+        return {
+          scrolled: host.scrollTop > 0,
+          inHost: bb.top >= hb.top - 1 && bb.bottom <= hb.bottom + 1,
+          run: [Math.round(bb.top), Math.round(bb.bottom)],
+          host: [Math.round(hb.top), Math.round(hb.bottom)],
+        };
+      });
+      expect(runAtBottom.scrolled, "the host really scrolled").toBe(true);
+      expect(
+        runAtBottom.inHost,
+        `Run is reachable at the bottom of the scroll (run ${runAtBottom.run}, host ${runAtBottom.host})`,
+      ).toBe(true);
 
       // ── §5.2: the same settings grid as the tab next door ─────────────────
       // A cross-tab geometry claim, which is the kind only a browser can make.
@@ -313,7 +445,13 @@ test.describe("Data API — Try it shows the parameters it asks for", () => {
       await page.waitForTimeout(400);
       const responseCols = await page.evaluate(() => {
         const round = (n: number) => Math.round(n);
-        const th = [...document.querySelectorAll("th")].find((t) => t.textContent?.trim() === "Setting");
+        // Scoped to the route's own root, not `document`. The shell renders
+        // other tables (and other routes may too), so a global query is one
+        // stray `Setting` header away from measuring a grid this comparison is
+        // not about — the same by-identity rule the rest of this file follows.
+        const routeRoot = document.querySelector<HTMLElement>("main .p-4");
+        if (!routeRoot) return null;
+        const th = [...routeRoot.querySelectorAll("th")].find((t) => t.textContent?.trim() === "Setting");
         if (!th) return null;
         const tbl = th.closest("table")!;
         const pick = (name: string) => {
