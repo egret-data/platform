@@ -271,10 +271,21 @@ test.describe("Data API — the six detail tabs are on one width", () => {
           `${heading}: the section leaves no gutter (root ${root.right} vs available ${m.available})`,
         ).toBeLessThanOrEqual(1);
 
-        // The exception, asserted rather than skipped (§5.2). Not every tab
-        // has capped prose, so this is conditional — but where it exists it
-        // must stop SHORT, or the obvious wrong fix (widen the paragraphs
-        // too) would pass.
+        // The exception, asserted rather than skipped (§5.2): prose stops at
+        // its own reading measure while the frames take the page.
+        //
+        // COUNTED FIRST, and that is not boilerplate here. An earlier revision
+        // of this file left the loop below unguarded on the reasoning that
+        // "not every tab has capped prose" — which made it a `for` over a
+        // possibly-empty list, the exact vacuous-pass this file's own header
+        // warns about, in the file that warns about it. It is now false that a
+        // tab might have none: every one of the six section intros carries
+        // `max-w-prose` (§5.1), so an intro losing its cap makes this list
+        // shorter and fails HERE rather than passing silently.
+        expect(
+          m.proseRights.length,
+          `${heading}: found the section's capped prose (its intro at minimum)`,
+        ).toBeGreaterThan(0);
         for (const r of m.proseRights) {
           expect(r, `${heading}: prose keeps its own reading measure`).toBeLessThan(root.right);
         }
