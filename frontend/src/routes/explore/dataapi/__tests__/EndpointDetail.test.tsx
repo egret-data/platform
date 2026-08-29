@@ -1282,6 +1282,36 @@ function renderVersions(
   );
 }
 
+/**
+ * The two sibling blocks that hold `a` and `b`: walk both up until they share
+ * a parent, and return each one's ancestor that is a direct child of it.
+ *
+ * Written because `parentElement` (and worse, `parentElement.parentElement`)
+ * answers a question about the tree the author EXPECTED. `Versions`' first
+ * heading guard asserted `title.parentElement` held no button and was green on
+ * the very layout it was written to forbid — at the base the `h2` was in a
+ * bare inner div and the button was that div's sibling. This resolves the
+ * block from the tree that is actually rendered, and throws rather than
+ * degrading if the two share no ancestor.
+ */
+function blocksOf(a: HTMLElement, b: HTMLElement): [HTMLElement, HTMLElement] {
+  const chain = (el: HTMLElement) => {
+    const out: HTMLElement[] = [];
+    for (let n: HTMLElement | null = el; n; n = n.parentElement) out.push(n);
+    return out;
+  };
+  const ca = chain(a);
+  const cb = chain(b);
+  const common = ca.find((n) => cb.includes(n));
+  if (!common) throw new Error("blocksOf: the two elements share no ancestor");
+  const childOf = (c: HTMLElement[]) => {
+    const found = c.find((n) => n.parentElement === common);
+    if (!found) throw new Error("blocksOf: no direct child of the shared ancestor");
+    return found;
+  };
+  return [childOf(ca), childOf(cb)];
+}
+
 const publishMutateAsync = vi.fn();
 const rollbackMutateAsync = vi.fn();
 
@@ -1395,6 +1425,61 @@ describe("VersionsSection", () => {
 
     expect(await screen.findByText("priya@egret.local")).toBeInTheDocument();
     expect(screen.queryByText(PUBLISHER_ID)).not.toBeInTheDocument();
+  });
+
+  /**
+   * The other half of the `Who` widening, and the half the widening cannot do.
+   *
+   * That column is `truncate`, and its `w-80` is gated at `xl` (§5.3) — so
+   * BELOW `xl` it is exactly the 224px column that was cutting realistic
+   * addresses, unchanged. Without a `title` there is then no route at all to
+   * the clipped value: the defect the fix is named after, left whole wherever
+   * the fix does not reach. `Note` beside it has carried one since it shipped.
+   *
+   * Asserted on the CELL, not on the row, and with the em-dash case as the
+   * negative half — an unconditional `title={who ?? "—"}` would satisfy the
+   * first assertion and put a tooltip reading "—" on every unattributed row.
+   */
+  it("keeps a route to an address the narrow regime still clips", async () => {
+    const PUBLISHER_ID = "5513767f-8cdd-4e48-9cf3-c493a74b683e";
+    const LONG = "priyanka.venkataraman@egret.local";
+    vi.mocked(accessApi.listUsers).mockResolvedValue([
+      { id: PUBLISHER_ID, email: LONG, name: "P V" },
+    ] as unknown as accessApi.AccessUser[]);
+    vi.mocked(api.useDataApiListEndpointVersions).mockReturnValue(
+      {
+        data: {
+          status: 200,
+          data: [
+            makeVersion({ id: "v-2", version: 2, is_live: true, created_by: PUBLISHER_ID }),
+            // A note, so the row's only em-dash is the one this test is about
+            // — `Note` renders the same placeholder and `getByText` cannot
+            // tell two of them apart.
+            makeVersion({
+              id: "v-1",
+              version: 1,
+              is_live: false,
+              note: "first cut",
+              created_by: null as unknown as string,
+            }),
+          ],
+        },
+        isLoading: false,
+        isError: false,
+      } as unknown as ReturnType<typeof api.useDataApiListEndpointVersions>,
+    );
+    renderVersions();
+
+    const address = await screen.findByText(LONG);
+    const cell = address.closest("td") as HTMLElement;
+    expect(cell).toHaveAttribute("title", LONG);
+    // …and the cell is the truncating one, so the `title` is on the element
+    // that does the clipping rather than on an ancestor of it.
+    expect(cell).toHaveClass("truncate");
+
+    // No author: the placeholder carries no tooltip.
+    const unattributed = within(screen.getByTestId("version-row-v-1")).getByText("—");
+    expect(unattributed.closest("td")).not.toHaveAttribute("title");
   });
 
   // A viewer-level operator may not be permitted `listUsers` (it's a
@@ -1806,17 +1891,44 @@ describe("VersionsSection", () => {
    * `Validate` has to the block under it.
    *
    * Both halves are asserted, and the second is what makes the first mean
-   * something: "the h2's line holds no button" passes just as well on a
+   * something: "the title's block holds no button" passes just as well on a
    * section that lost Publish entirely.
+   *
+   * # The first version of the first half was GREEN ON THE DEFECT
+   *
+   * It read `title.parentElement.querySelector("button")`, which is trap #1
+   * from this branch's own spec header — a counted DOM hop — and it was not a
+   * near miss. At `9fd2e493` the `h2` sat in a BARE INNER `<div>` with the
+   * paragraph, and Publish was that div's SIBLING inside the
+   * `flex … justify-between` row; `title.parentElement` was therefore the
+   * inner div, which never held a button, before or after. The red run proves
+   * it: this test failed on `div.text-right ≠ div.space-y-2` — the *second*
+   * assertion — and never on the first.
+   *
+   * The fix is not another hop. `blocksOf` walks BOTH headings up until they
+   * are siblings and returns the two direct children of whatever they share,
+   * so "the block that holds the title" is resolved by identity from the tree
+   * that exists rather than counted from the tree that was expected. At the
+   * base structure that block is the flex row and it DOES contain Publish, so
+   * the assertion fails there — which is the whole point of it.
    */
   it("gives Versions the same heading block as its five siblings, with Publish on the History line", async () => {
     renderVersions();
 
     const title = await screen.findByRole("heading", { name: "Versions", level: 2 });
-    expect((title.parentElement as HTMLElement).querySelector("button")).toBeNull();
-
     const history = screen.getByRole("heading", { name: "History", level: 3 });
     const publish = screen.getByRole("button", { name: /publish saved draft/i });
+
+    const [titleBlock, historyBlock] = blocksOf(title, history);
+    // The section title's own block carries the title and its paragraph and
+    // nothing to press. Asserted against the button by IDENTITY, not against
+    // "a button" — a section that grew an unrelated control in its intro is a
+    // different failure and should read as one.
+    expect(titleBlock.contains(publish)).toBe(false);
+    expect(titleBlock.contains(title)).toBe(true);
+    expect(historyBlock.contains(publish)).toBe(true);
+
+    // …and inside that block, on the heading's own line.
     expect(publish.parentElement).toBe(history.parentElement);
     // The heading LINE, not the block: the table is a sibling of that line, so
     // a parent holding it means the button landed in the block instead.
@@ -1851,9 +1963,13 @@ describe("VersionsSection", () => {
     // second sized column, and sizing all five would let fixed layout hand the
     // surplus back proportionally (measured: 128/512/288/128/128 in a 1296px
     // box lays out as 140/553/312/140/140).
-    expect(screen.getByRole("columnheader", { name: "Note" }).className).not.toMatch(
-      /(?:^|\s)(?:[a-z]+:)*w-\d/,
-    );
+    // `max-w-` as well as `w-`: the first version of this guard anchored on a
+    // word boundary, so `max-w-96` — the obvious way somebody would try to
+    // bound this column — slipped through the very assertion written to catch
+    // a sizing.
+    const noteClass = screen.getByRole("columnheader", { name: "Note" }).className;
+    expect(noteClass).not.toMatch(/(?:^|\s)(?:[a-z]+:)*w-\d/);
+    expect(noteClass).not.toMatch(/(?:^|\s)(?:[a-z]+:)*max-w-/);
   });
 
 });

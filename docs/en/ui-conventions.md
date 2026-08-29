@@ -606,6 +606,14 @@ are not rows of it. The reason those two are out is the durable part of this sec
 - **Frozen columns** — a read-only `Name | Type` listing of the *published* contract. There
   is no Value to edit. Forcing it into the shared table would either fabricate a Value column
   or nest a table inside a cell, and would make read-only output look editable.
+
+  **"Nest a table inside a cell" means inside a cell that must ALIGN with its siblings**, and
+  that exemption is now load-bearing, because this same tab nests one: `ReturnsEditor`'s grid
+  sits inside the transform's `colSpan={3}` row. Nothing aligns across a full-width row — it
+  spans every column, so there is no neighbour for its contents to line up with — and the
+  objection here is precisely about a listing whose `Name` column would have to agree with
+  `Setting` while its `Type` column agreed with `Value`. A nested table in a spanning row is not
+  the thing this bullet forbids; a nested table in a `Setting`/`Details`/`Value` cell is.
 - **OpenAPI document** — a paragraph, a download button, and a derived base URL. An action,
   not a setting.
 
@@ -904,11 +912,14 @@ cannot. When those two conflict, the route wins.
 
 - **The per-section complaints do not disappear; they move to the instrument that fits them.**
   A section-root cap was answering ALL of them with the one tool that also breaks the tab set;
-  each has a narrower instrument. **There are THREE such moves, not two, and all three are now
-  done — measured, not asserted.** An earlier revision of this bullet named only two and
+  each has a narrower instrument. **There are THREE such moves, not two. Two are DONE and the
+  third is WITHDRAWN — measured, not asserted, and the difference between those two words is
+  load-bearing.** An earlier revision of this bullet named only two and
   reported "one done, one owed", which was the fourth time this document described a rule its
   own tree did not implement; a later one carried three with the row-action move open on
-  `Versions`. Both are closed as of the detail-tabs pass. The check that finds any of this is
+  `Versions`. Both are closed as of the detail-tabs pass — the third by being **withdrawn as
+  mis-specified**, not by being fixed: `Roll back` is at x=1470 before and after. Read the bullet,
+  not the label. The check that finds any of this is
   the one this section prescribes — **grep the class the rule is about, reconcile every hit,
   then check your count against the list you just wrote**. Run for the row-action move over
   `src/routes/explore/dataapi`, `text-right` returns 17 hits: **two** are action columns and
@@ -973,8 +984,14 @@ cannot. When those two conflict, the route wins.
     alone on purpose — it is a one-row strip inside a collapsed `<details>` that already carries
     its own `max-h-[40vh]` scroll box, not a section-level settings grid — but "left alone on
     purpose" is a decision, so it is recorded rather than omitted.
-  - **Row action distance: DONE on both, and the `Versions` half corrected a claim in this
-    document.** This is the move the earlier revision omitted entirely, and it is the one the
+  - **Row action distance: DONE on `Access`, WITHDRAWN on `Versions` — and the withdrawal
+    corrected a claim in this document.** "Withdrawn" and not "done": the metric the old bullet
+    named did not move. `Roll back` is at **x=1470 both before and after** this task, and no
+    column sizing can move it. What changed is that the complaint was re-measured and found to be
+    about the wrong distance, and the defect that IS there — the width piling into `Note` while
+    `Who` cut addresses — was fixed with `Access`'s instrument. A reader who greps this list for
+    open items should take "withdrawn" as "the record was corrected", never as "the button
+    moved". This is the move the earlier revision omitted entirely, and it is the one the
     reversal actively CAUSED rather than merely failed to help. Both tabs put their row action in
     a narrow, right-aligned last column of a `table-fixed` table, so every pixel the section
     gained went to the one unsized column. The instrument is neither of the two above: it is
@@ -996,9 +1013,19 @@ cannot. When those two conflict, the route wins.
 
     The 272px is real and reproduces exactly. **What it is not is a gap the reader crosses**: the
     distance from a row's last TEXT to its action is **83px** in every one of those three states,
-    because `When` sits immediately left of the action column and is never empty. On the same
-    metric `Access` measures **643px** after its own fix. The tab with the hole was never this
-    one.
+    because `When` sits immediately left of the action column and is never empty.
+
+    **And that 83px is structurally forced, not merely observed** — which is the strongest form
+    of the claim and the one the first revision of this bullet under-stated. `When` is a fixed
+    `w-32` column immediately left of a `text-right` action in a `table-fixed` table, so the gap
+    is `158 − (the width of "a month ago")` **at any viewport**: 128px of `When` plus the action
+    cell's 8px padding and the button's own inset, none of which depends on how wide the section
+    is. The cap could never have improved it and removing the cap could never have worsened it.
+
+    On the same metric `Access` measured **643px** after its own fix — but that figure comes from
+    a ONE-ACCOUNT stub whose `Invoke` cell holds two badges, so treat it as indicative of the
+    shape and not as a number to quote. What is solid is the comparison's direction: `Access` has
+    a wide unsized column between its content and its action and `Versions` does not.
 
     What the 272px actually did was pile into `Note` — 680px of blank in the MIDDLE of a row
     whose note is empty — while `Who` cut realistic addresses (a 33-character address lays out at

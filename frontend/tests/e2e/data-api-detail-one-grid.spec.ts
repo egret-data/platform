@@ -39,6 +39,15 @@ import { loginLocalAdmin, firstWorkspace, csrf, postJson } from "./helpers";
  * 1. **A counted DOM hop.** `parentElement.parentElement` re-points the moment
  *    a wrapper `div` is added. Everything here is a query from a named
  *    element, or a WALK that returns an error when it overshoots.
+ *
+ *    **This file shipped one anyway, and it was green on its own defect.** The
+ *    Versions title guard read `title.parentElement`, and at `9fd2e493` the
+ *    `h2` sat in a bare inner `<div>` with the paragraph while Publish was that
+ *    div's SIBLING in the flex row — so the hop landed somewhere that held no
+ *    button before OR after. It is resolved by identity now (walk both
+ *    headings up until they are siblings, then ask whether the title's block
+ *    contains Publish), and the old form was re-run against the restored base
+ *    structure to confirm it passes there while the new one fails.
  * 2. **`getByRole` matching a name by SUBSTRING.** Every lookup passes
  *    `exact: true`, and the fixture is named `Wxyz` — not a substring of
  *    `Response`, `Versions`, `History` or `Who`.
@@ -192,8 +201,29 @@ function measureVersions(longAuthor: string) {
       historyCentre: centre(history),
       publishCentre: centre(publish),
       publishAboveTable: publish.getBoundingClientRect().bottom <= table.getBoundingClientRect().top,
-      // The title's own line must hold no control — that is the sibling shape.
-      titleLineHasButton: (title.parentElement?.querySelectorAll("button").length ?? 0) > 0,
+      // The block that holds the section title must not hold Publish — that is
+      // the sibling shape, and it is resolved by IDENTITY.
+      //
+      // This read `title.parentElement.querySelectorAll("button")` first, and
+      // that was trap #1 in this file's own header, green on the very defect it
+      // names: at `9fd2e493` the `h2` sat in a bare inner `<div>` with the
+      // paragraph and Publish was that div's SIBLING inside the flex row, so
+      // the hop landed on a div that never held a button either way. Proven,
+      // not reasoned: with the base structure restored, the old assertion
+      // passes and this one fails.
+      titleBlockHoldsPublish: (() => {
+        const chain = (el: HTMLElement) => {
+          const out: HTMLElement[] = [];
+          for (let n: HTMLElement | null = el; n; n = n.parentElement) out.push(n);
+          return out;
+        };
+        const ct = chain(title as HTMLElement);
+        const ch = chain(history as HTMLElement);
+        const common = ct.find((n) => ch.includes(n));
+        if (!common) return null;
+        const titleBlock = ct.find((n) => n.parentElement === common);
+        return titleBlock ? titleBlock.contains(publish) : null;
+      })(),
     },
     rows: rows.map((row) => {
       const cells = [...row.querySelectorAll<HTMLElement>("td")];
@@ -279,11 +309,19 @@ function measureResponse() {
       buttonCentre: centre(download),
       // A `border-t` that actually paints, read as a property rather than as
       // a class — a `border-*` utility with no `border-t-width` is inert.
+      //
+      // The block is reached by a WALK from the heading up to the direct child
+      // of the section root, never by `parentElement.parentElement` — one
+      // wrapper `div` inside the block re-points that at the heading LINE,
+      // which has no border of its own, and the assertion would then fail for
+      // a reason that has nothing to do with the rule. (The same hop in the
+      // other direction is what made this file's Versions guard vacuous.)
       blockBorderTop: (() => {
-        const block = openapiHeading.parentElement?.parentElement ?? null;
-        if (!block) return null;
-        const s = getComputedStyle(block);
-        return { width: s.borderTopWidth, style: s.borderTopStyle };
+        let block: HTMLElement | null = openapiHeading as HTMLElement;
+        while (block && block.parentElement !== root) block = block.parentElement;
+        if (!block || block === root) return null;
+        const cs = getComputedStyle(block);
+        return { width: cs.borderTopWidth, style: cs.borderTopStyle };
       })(),
     },
     // The section's TOP-LEVEL table frames, by right edge. §5.1's one measure:
@@ -421,7 +459,7 @@ test.describe("Data API — one grid down the tab, and a history row that spends
     // title's line holds no control.
     expect(m.heading.publishCentre, "Publish shares the History line").toBe(m.heading.historyCentre);
     expect(m.heading.publishAboveTable, "…and that line is above the table").toBe(true);
-    expect(m.heading.titleLineHasButton, "the section title's line holds no control").toBe(false);
+    expect(m.heading.titleBlockHoldsPublish, "the section title's block holds no control").toBe(false);
   });
 
   test("Response renders one settings grid, with the transform's editors in a row that spans it", async ({

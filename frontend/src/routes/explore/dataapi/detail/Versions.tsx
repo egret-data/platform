@@ -109,10 +109,19 @@ export default function VersionsSection() {
     //
     // 272px, reproduced. But the distance that a reader crosses is from the
     // row's last TEXT to its action, and that is **83px** here, in both
-    // states — `When` sits immediately left of the action column and is never
-    // empty. (`Access`, whose equivalent regression §5.1 records as fixed,
-    // measures 643px on the same metric after its fix. This table was never
-    // the one with the hole.)
+    // states — and it is STRUCTURALLY FORCED, not merely measured. `When` is a
+    // fixed `w-32` column immediately left of a `text-right` action in a
+    // `table-fixed` table, so the gap is `158 − (the width of "a month ago")`
+    // at ANY viewport: 128 of `When` plus the action cell's padding and the
+    // button's inset, none of which depends on the section's width. The cap
+    // could not have improved it and removing the cap could not have worsened
+    // it. (`Access`, whose equivalent regression §5.1 records as fixed,
+    // measured ~643px on the same metric — from a one-account stub, so take
+    // the shape and not the number. This table was never the one with the
+    // hole.)
+    //
+    // So this half of §5.1's mitigation is WITHDRAWN, not fixed: `Roll back`
+    // is at x=1470 before and after. The complaint was mis-specified.
     //
     // What the 272px actually did is put them all into `Note`, which on a row
     // with no note is 680px of blank in the MIDDLE of the row, while `Who` was
@@ -278,11 +287,30 @@ export default function VersionsSection() {
                   <TableCell className="truncate py-2 text-muted-foreground" title={v.note || undefined}>
                     {v.note || "—"}
                   </TableCell>
-                  <TableCell className="truncate py-2 text-muted-foreground">
-                    {(v.created_by && userEmailById.get(v.created_by)) ??
-                      v.created_by?.slice(0, 8) ??
-                      "—"}
-                  </TableCell>
+                  {/* `title`, like the `Note` cell above — and it is not
+                      symmetry. This cell is `truncate`, and the `xl` gate on
+                      its column means that BELOW `xl` it is exactly the 224px
+                      column that was cutting realistic addresses. Without a
+                      `title` there is no route at all to the clipped value in
+                      the regime the widening deliberately does not reach: the
+                      defect the fix is named after, left whole wherever the
+                      fix does not land. `Access` makes the same call for the
+                      one address its own widened column still cuts.
+
+                      Computed once so the attribute and the text cannot
+                      drift — the fallback chain is three-deep and a second
+                      copy of it in a `title=` is a copy that will be edited
+                      alone. `undefined` for the em-dash placeholder: a
+                      tooltip reading "—" is noise. */}
+                  {(() => {
+                    const who =
+                      (v.created_by && userEmailById.get(v.created_by)) ?? v.created_by?.slice(0, 8) ?? null;
+                    return (
+                      <TableCell className="truncate py-2 text-muted-foreground" title={who ?? undefined}>
+                        {who ?? "—"}
+                      </TableCell>
+                    );
+                  })()}
                   <TableCell className="py-2 text-muted-foreground">
                     <RelativeTime iso={v.created_at} />
                   </TableCell>
