@@ -3,6 +3,7 @@ import { useParams } from "react-router-dom";
 
 import { useDataApiActivitySummary } from "@/api/generated/data-api/data-api";
 import type { ActivityRange, ActivityRow } from "@/api/generated/model";
+import { ListPageShell } from "@/components/explore/ListPageShell";
 import { ListStates } from "@/components/explore/ListStates";
 import { Button } from "@/components/ui/button";
 import {
@@ -65,17 +66,33 @@ export default function Activity() {
   const rangeIsEmpty = summary != null && !hasCalls;
 
   return (
-    // Canonical Explore list-page scaffold (same as Charts.tsx/Datasets.tsx):
-    // `p-4` + a single `h1`. Activity is its own top-level sidebar item now,
-    // not a section nested under a `DataApiLayout` shell — that shell (which
-    // used to own the page's `h1` and add `p-6`) was removed once Data API
-    // got its own sidebar group, so this page owns its own heading and
-    // padding again.
-    <div className="p-4">
-      <div className="mb-4">
-        <h1 className="text-lg font-semibold">Activity</h1>
-      </div>
-
+    // The canonical Explore list-page scaffold — `p-4` + a single `h1` — comes
+    // from `ListPageShell`. Activity is its own top-level sidebar item, not a
+    // section nested under a `DataApiLayout` shell (that shell, which used to
+    // own the page's `h1` and add `p-6`, was removed once Data API got its own
+    // sidebar group), so the heading and the padding still belong to this route
+    // — they just come from the shared shell now.
+    //
+    // That ownership claim is the whole of what the previous comment here
+    // decided, and it SURVIVES this conversion rather than being overturned by
+    // it: the question it answered was whether this route has a heading at all,
+    // not how the heading is spelled. It was written in #511 (2026-08-17), one
+    // day before `ListPageShell` existed (#518, 2026-08-18), so it cannot have
+    // been a decision to decline the shell. `dataapi/Clients.tsx` carries the
+    // same paragraph and already resolves it this way; this page is the copy
+    // that was not migrated with it. The old comment also called itself "same
+    // as Charts.tsx/Datasets.tsx", and both of those moved to the shell too, so
+    // its own claim of parity had become false.
+    <ListPageShell title="Activity">
+      {/* The 1h/24h/7d/30d strip stays in the body rather than moving to the
+          shell's `toolbar` slot. §1.2 classes it a view SWITCH, and the
+          consequence of that is it is never GATED on `hasData` — which is a
+          rule about when it renders, not about where. It is also not a toolbar
+          control in shape: `RangePicker` is a two-row block, a button strip
+          over a `<details>` retention caveat, and dropping that into the
+          header's `flex flex-wrap items-center` group is a layout change no
+          jsdom test can check (§10). Left where it renders today, so this
+          commit changes the frame and nothing else. */}
       <div className="mb-4">
         <RangePicker range={range} onChange={setRange} retentionDays={retentionDays} />
       </div>
@@ -127,7 +144,7 @@ export default function Activity() {
             queueing behind it. */}
         <ActivityCallList ws={ws} range={range} rangeIsEmpty={rangeIsEmpty} />
       </div>
-    </div>
+    </ListPageShell>
   );
 }
 

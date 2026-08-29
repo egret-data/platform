@@ -1,7 +1,7 @@
 import { useCallback, useState } from "react";
-import type { EntityKind, Folder } from "@/api/folders";
+import type { EntityKind, Folder, FolderKind } from "@/api/folders";
 
-export type { EntityKind, Folder };
+export type { EntityKind, Folder, FolderKind };
 
 export interface FolderGroup<T> { folder: Folder | null; rows: T[] }
 
@@ -12,6 +12,53 @@ export interface FolderGroup<T> { folder: Folder | null; rows: T[] }
  *  while still treating its rows as selectable — silently, and only for the
  *  folderless bucket. */
 export const UNCATEGORIZED_KEY = "__uncat__";
+
+/**
+ * Where `useCollapsed` persists which sections a list's visitor left shut.
+ *
+ * A function here rather than a template literal at each call site, because a
+ * page that spells the key one way in its component and another in its test
+ * seeds localStorage where nothing reads it — and the test that depends on the
+ * seed then PASSES, because a seed that misses is indistinguishable from a
+ * page that correctly ignored it. `Endpoints.tsx` had already exported its own
+ * one-argument version of exactly this, for exactly that reason; this is that
+ * function with the kind lifted into a parameter, and its export is now a thin
+ * wrapper, so the seven grouped lists cannot drift apart on the format.
+ *
+ * `FolderKind`, not `EntityKind`: `data_api_endpoints` has folders without a
+ * `PATCH …/{id}/folder` route, so it exists only in the wider type.
+ */
+export const folderCollapseKey = (ws: string, kind: FolderKind) => `folders:${ws}:${kind}`;
+
+/**
+ * Whether a list is drawn with folder SECTION HEADERS at all — which is not
+ * the same question as whether it is grouped. [`groupByFolder`] always returns
+ * at least the folderless bucket, so a workspace that has never made a folder
+ * still gets one group; heading it turns a plain list into "Uncategorized (1)",
+ * a collapsible section introducing a taxonomy the workspace does not use.
+ * "Uncategorized" only carries information beside a NAMED folder; on its own it
+ * labels the whole list after the one thing it is not, and its collapse
+ * control's only effect is to hide everything.
+ *
+ * Read off `folders`, **not** off `groups.length`: with a filter engaged
+ * `groupByFolder` drops empty named folders, so a search matching only
+ * folderless rows would collapse `groups` to one and make the header blink out
+ * mid-keystroke, then back on deletion of the last character.
+ *
+ * The trash is never sectioned. Folders organise work in progress; a trashed
+ * row's folder is what it will go BACK to, not where it is now, and grouping
+ * the trash would hide rows behind collapsible headers in the one view whose
+ * whole job is to let the author find something they deleted.
+ *
+ * **Feed the SAME flag to the render loop and to whatever `useBulkSelect` is
+ * given.** Those are two derivations of one question, and gating only the
+ * render leaves a stale collapse state — `useCollapsed` restores it from
+ * localStorage, and it outlives the folder that produced it — hiding rows from
+ * "Select all" that are in front of the user, with no header left to expand.
+ */
+export function showFolderSections(folders: Folder[], showTrash = false): boolean {
+  return !showTrash && folders.length > 0;
+}
 
 /** Bucket rows by folder_id; folders A→Z, Uncategorized (null) last.
  *  hideEmpty drops empty named folders (used while a search/filter is active). */

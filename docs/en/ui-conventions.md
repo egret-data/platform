@@ -86,7 +86,17 @@ is `"keeps the way OUT of an empty trash"` in
 `src/routes/explore/dataapi/Activity.tsx` and `ActivityCallList.tsx` are the second
 application, and they read the rule twice over. **The 1h/24h/7d/30d strip is a view switch**:
 it selects the window the whole page is about, and it is how a reader leaves a range that
-turned out to be empty. **So is "Include trial runs"**, which is less obvious and matters
+turned out to be empty.
+
+**What that classification decides is GATING, not placement — despite this section's title.**
+"View controls first, primary action last" orders the header for controls that are *in* the
+header; calling something a view switch settles that it renders whatever `hasData` says, and
+says nothing about which slot it renders into. The range strip is the case that separates the
+two: it is a view switch, and it lives in Activity's **body** rather than in `ListPageShell`'s
+`toolbar` slot, because `RangePicker` is a two-row block — a button strip over a `<details>`
+retention caveat — and moving that into the header's `flex flex-wrap items-center` group is a
+layout change no jsdom test can check (§10). Neither the classification nor this section's
+title argues for moving it; recorded here because the title alone reads as though it does. **So is "Include trial runs"**, which is less obvious and matters
 more. `crates/egret-dataapi/src/activity.rs`'s summary query ends `AND al.actor_user_id IS
 NULL`, so trials are excluded from *every number the page shows* — including the one the
 filter gate is computed from. A workspace whose only traffic was Try-it runs therefore reads
@@ -187,33 +197,186 @@ because only one page of rows was ever mounted. Grouping removed the pagination,
 now explicit (`GROUP_PAGE`, a "Show N more" button), and its test asserts the number of
 distinct accounts queried on first paint — not just what is on screen.
 
-**`role="rowheader"` on the group header is this page's addition, not yet the siblings'
-practice — and this section would otherwise be a convention its own reference implementation
-violates.** `Clients.tsx` puts the role on the header's spanning cell, the same idiom §4.1
-records for `ConfigTableGroup` and for the same reason: a group row that reads as another data
-cell is the confusion the shape exists to remove. But `FolderHeaderRow.tsx` — the shared
-component Charts, Datasets, Dashboards, Notebooks, Alerts and Endpoints group with — does
-**not** set it, so **six** of the seven grouped tables in Explore currently announce their
-folder header as an ordinary cell.
+**`role="rowheader"` on the group header, on all seven.** `dataapi/Clients.tsx` puts the role on
+its header's spanning cell, the same idiom §4.1 records for `ConfigTableGroup`, and
+`FolderHeaderRow.tsx` — the shared component Charts, Datasets, Dashboards, Notebooks, Alerts and
+Endpoints group with — now does too.
+
+**It was verified before it was added.** The role is right for the shape rather than borrowed
+from the house style: `rowheader` is what HTML-AAM computes for `<th scope="rowgroup">`, which
+is the HTML-native spelling of precisely this construct — a full-span header cell heading the
+rows of one `<tbody>`, each folder group being its own `<tbody>` with the header row first.
+ARIA has no separate rowgroup-header role, so `rowheader` is what this construct gets. Its
+required context is a `row`, which the cell has.
+
+**Claim exactly this much and no more: it announces as a header instead of as a data cell.**
+The role does **not** carry a group association. In HTML, `scope="rowgroup"` says "this heads
+the remaining cells in this row group"; ARIA has no `scope` equivalent, so the cell is a
+rowheader for its own row — which contains nothing else — and is not associated with the rows
+beneath it. Nothing is re-announced on those rows, but that is because no association exists at
+all, not because one was scoped correctly. Against the `cell` role it replaces this is a strict
+improvement, and it is not the full semantics of the HTML spelling. An earlier revision of this
+section wrote the true sentence ("nothing is re-announced") with the false reason attached, and
+that is the kind of overclaim a later reader inherits as a fact.
+
+It stays a `<td>` with an explicit role rather than becoming a `<th scope="rowgroup">`, for the
+reason §4.1 records: a `<th>` brings its own implicit role to argue with. **That choice has a
+cost, named here rather than left implicit: `<th scope="rowgroup">` would carry the association
+the `<td>` does not.** `scope` is absent because it is a `<th>`-only attribute and inert on a
+`<td>`; adding it would be decoration.
+
+**Do not add an attribute because this document predicted it.** The previous revision of this
+section said the change "should" be made and called it a one-attribute change; that is a
+prediction, not a verification, and it would have read identically had the role been wrong for a
+spanning cell. The check that settled it was the HTML-AAM mapping.
+
+**And check that the guard you cite can fail.** The code check is
+`getByRole("rowheader", { name: /Revenue/ })` — the real role and accessible-name computation,
+not `getAttribute("role")` — on `FolderHeaderRow`'s own test, plus **"the folder headers are the
+only rowheaders, and the data rows stay cells"** in
+`src/routes/explore/__tests__/Charts.test.tsx`. The uniqueness half lives on a page and not on
+the component **because the component cannot fail it**: it emits one cell, and its fixture has
+no data rows for a stray role to land on, so the assertion could only have broken if
+`FolderHeaderRow` emitted two rowheaders — which it structurally cannot. It sat on the component
+for one revision and this section cited it as the reason the ruling was safe. The failure it now
+actually catches is a data cell in a page's `renderRow` gaining the role, which makes the folder
+header no longer distinguishable from the rows it heads — the exact confusion the role was added
+to remove, and invisible to every other test in the file.
 
 **It was recorded as four, and the counting is worth more than the number.** `Notebooks` was
-named in this section's own file list above and then dropped from the count in this paragraph;
-`Alerts` was in neither, because it was missing from the list the count was read off. The count
-was taken from a prose list in this document instead of from the tree. **Count by resolved
-module:**
+named in this section's own file list above and then dropped from the count in the paragraph
+this replaces; `Alerts` was in neither, because it was missing from the list the count was read
+off. The count was taken from a prose list in this document instead of from the tree. **Count by
+resolved module:**
 
 ```bash
-grep -rln 'from "@/components/explore/FolderHeaderRow"' frontend/src   # 6, plus its own test
+grep -rln 'from "@/components/explore/FolderHeaderRow"' frontend/src   # 7: the 6 pages, plus its own test
 ```
 
 Same failure as §7.2's `Caveat` inventory, and the same fix: an inventory in this document is a
 claim about the tree, so it is taken FROM the tree.
 
-That is a gap in those six, not a licence for the next one. A new grouped table sets the
-role, and `FolderHeaderRow` should adopt it: it is a one-attribute change, held back only
-because the task that wrote this section was scoped to a single page. It is stated here rather
-than left implicit so that nobody reads the reference implementation's silence as the
-convention.
+### 1.5a A workspace with no folders gets no section header
+
+`src/components/explore/folders.ts` — `showFolderSections(folders, showTrash)`
+
+`groupByFolder` always returns at least the folderless bucket, so "is this list grouped" is
+**not** the question "does this list get section headers". A workspace that has never made a
+folder still gets one group, and heading it turns a plain list into a collapsible
+"Uncategorized (1)" — a section introducing a taxonomy the workspace is not using, whose
+collapse control's only effect is to hide everything. "Uncategorized" carries information only
+beside a NAMED folder; alone, it labels the whole list after the one thing it is not.
+
+```tsx
+const showFolderHeaders = showFolderSections(folders, showTrash);
+```
+
+**Read off `folders`, never off `groups.length`.** With a filter engaged `groupByFolder` drops
+empty named folders, so a search matching only folderless rows collapses `groups` to one and
+would make the header blink out mid-keystroke and back on deleting the character.
+
+**The trash is never sectioned.** A trashed row's folder is where it will go BACK to, not where
+it is, and the trash is the one view whose whole job is to let the author find something they
+deleted.
+
+**Feed the one flag to the render loop AND to `visibleRows`.** Those are two derivations of the
+same question. Gating only the render leaves a collapse state that `useCollapsed` restored from
+localStorage — it outlives the folder that produced it — hiding rows from "Select all" that are
+in plain sight, with no header left anywhere to expand.
+
+**The defect.** `sqllab/SavedTab.tsx` wrote this gate first and `dataapi/Endpoints.tsx` second;
+`Charts.tsx`, `Datasets.tsx`, `Dashboards.tsx`, `Notebooks.tsx` and `Alerts.tsx` headed the
+folderless bucket unconditionally. Two copies of a rule and five pages without it is how the
+rule was going to be deleted for "consistency", so the gate is a shared helper now and the
+call sites cannot drift.
+
+**`folderCollapseKey(ws, kind)` for the same reason.** Every one of these pages spelled
+`` `folders:${ws}:${kind}` `` inline, and its test spelled it again. A test that seeds
+localStorage under a key the page does not read **passes anyway**, because a seed that misses is
+indistinguishable from a page that correctly ignored it. Its parameter is `FolderKind`, not
+`EntityKind`: `data_api_endpoints` has folders but no `PATCH …/{id}/folder` route, so it exists
+only in the wider type. `Endpoints.tsx` keeps its one-argument export as a thin wrapper so
+`FOLDER_KIND` stays bound in one place.
+
+**Counted from the tree, not from this paragraph:**
+
+```bash
+grep -rl 'showFolderSections' frontend/src   # 9: folders.ts, its test, and the 7 grouped lists
+```
+
+**Both fixtures, on every page.** A page tested only without folders cannot tell a working gate
+from one wired permanently off; a page tested only with folders cannot see the gate at all.
+
+### 1.6 `SummaryStrip` owns the singular, and the pages own the words
+
+`src/components/explore/SummaryStrip.tsx`
+
+The strip prints `{value}` then a word. **The rule that picks the word lives in the
+component**: the number `1` — and only the number `1` — renders `singular`; every other
+count, zero included, renders `label`.
+
+```tsx
+<SummaryStrip items={[{ label: "charts", singular: "chart", value: rows.length }]} />
+```
+
+**The defect.** Seven Explore list pages render counts through this component and five of
+them read "1 charts", "1 folders", "1 dashboards". The other two — `dataapi/Endpoints.tsx`
+and `dataapi/Clients.tsx` — had been fixed with a ternary *at the call site*, which is how a
+rule ends up applied on two pages and forgotten on five. Both ternaries are gone; all seven
+now pass the pair.
+
+**Why a `singular`/`plural` pair and not a derived plural.** Most labels on this strip are
+not nouns. "live", "draft", "disabled", "active", "paused", "failing", "ok", "granted",
+"queued" are adjectives, "phase" and "auth" are not counts at all, and "endpoints total" and
+"queries run" do not carry the noun at the end. A component that inflected `label` would have
+to tell those apart from "charts" with no information to do it, and English gives it no rule
+to borrow ("bus", "was"). Naming both words at the call site costs one field, needs no
+dictionary and no i18n dependency, handles an irregular ("queries"/"query") for free, and
+makes an adjective gaining an `s` **unrepresentable** rather than merely remembered.
+
+**It also keeps the key stable, and that is not a coincidence.** `SummaryStrip` keys its items
+by `it.label`. Because `singular` is a *separate field*, `label` is count-independent, so the
+rendered word changes at 1↔2 while the key does not. The alternative API — a count-aware
+`label` formatter — would have made the key count-dependent and remounted a focused toggle
+chip the moment its own count crossed one. Guarded by `"keeps the same DOM node across a
+1 -> 2 transition"` in `src/components/explore/__tests__/SummaryStrip.test.tsx`.
+
+`value === 1` is strict identity on a **number**. `value` also carries formatted strings
+(`EngineDetail.tsx` passes `"3/4"` and a phase name), and a string that happens to read `"1"`
+is not a count of one.
+
+**Adoption, counted from the tree and not from this paragraph:**
+
+```bash
+grep -rl 'from "@/components/explore/SummaryStrip"' frontend/src   # 26, one of them the test
+grep -rl 'singular:' frontend/src                                  # 8, one of them the test
+```
+
+25 modules render a strip; **7 pass `singular`** — the seven Explore list pages. The
+remaining 18 are control-plane pages, Explore settings, `MembersPanel.tsx` and
+`DatabasesPage.tsx`, and they still read "1 users", "1 engines", "1 secrets". That is a
+stated gap, not a second convention: the field is opt-in, so those pages are unchanged rather
+than differently-behaved, and the next one to be touched sets the pair.
+
+**Accessible name — TRACKED FOLLOW-UP, open.** The toggle-chip variant's accessible name is
+`"1folder"`, with no space: the number is in its own `<span>` and the separation on screen
+comes from the flex `gap-1`, which the name computation does not see. It is pre-existing and
+true of every chip on the strip (Endpoints' live/draft/disabled, Alerts' failing), not
+something the singular rule introduced.
+
+*Open*, not accepted. It is unfixed here because inserting a text node into an `inline-flex`
+row adds a flex **item**, and the resulting spacing is a change no jsdom test can check (§10) —
+so the fix needs a browser, which the task that found it did not have. It is not papered over
+with a hand-written `aria-label`, which would hide the defect behind a second source of truth
+for the same string.
+
+**A defect encoded as an expectation becomes the convention**, which is why it is written down
+in both places rather than only pinned. In
+`src/components/explore/__tests__/SummaryStrip.test.tsx` the expected value is bound to a
+constant named `DEFECT_NAME_MISSING_SPACE` rather than passed as the bare literal `"1folder"`:
+a literal in an assertion is indistinguishable from a desired value, and the next person to add
+a chip copies it. **What closes this:** render the separator, check the chip's spacing in a
+browser at the sizes §5.3 uses, and rename that constant out of existence.
 
 ---
 
@@ -1176,13 +1339,37 @@ without which `<details open>` — a disclosure that collapses nothing — passe
 Honest scope, measured on the current tree, so nobody reads this as describing code that does
 not exist yet:
 
-- `ListPageShell` — **9** route files: 5 Data API (`Endpoints`, `Clients`, `EndpointCreate`,
-  `ServiceAccountCreate`, `ClientCreate`) and 4 Explore list pages (`Datasets`, `Charts`,
-  `Dashboards`, `Alerts`), converted by package U on 2026-08-22. Measured with
+- `ListPageShell` — **10** route files: 6 Data API (`Endpoints`, `Clients`, `Activity`,
+  `EndpointCreate`, `ServiceAccountCreate`, `ClientCreate`) and 4 Explore list pages
+  (`Datasets`, `Charts`, `Dashboards`, `Alerts`). Nine were converted by package U on
+  2026-08-22; `Activity.tsx` followed on 2026-08-29. Measured with
   `grep -rl 'from "@/components/explore/ListPageShell"' src --include='*.tsx' | grep -v __tests__ | wc -l`
   from `frontend/`. **`Notebooks.tsx` still hand-writes its header** (735 lines, `aria-pressed`
   = 0). It was named in neither §1.3's list of four nor package U's scope, and is recorded
   here so this section is not read as "every Explore list page is converted".
+
+  **`Activity.tsx` was the last hand-written copy, and the reason it survived is worth more
+  than the conversion.** It carried a comment saying the page "owns its own heading and padding
+  again", which reads as a decision to decline the shell and was defended as one. It is not:
+  the comment was written in #511 on 2026-08-17, one day *before* `ListPageShell` existed
+  (#518, 2026-08-18), so it cannot have weighed a component that did not exist. What it
+  actually decided was that this route has a heading **at all**, rather than inheriting one
+  from the `DataApiLayout` shell that had just been deleted — a question about ownership, not
+  about spelling, and the shell is how that ownership is discharged. `dataapi/Clients.tsx`
+  carries the same paragraph and already ends it "they just come from the shared shell now".
+  The comment also called itself "same as `Charts.tsx`/`Datasets.tsx`" while both of those had
+  moved to the shell, so its own claim of parity had gone stale without anything editing it.
+
+  **A comment that records a decision still has to be re-read against the date it was written.**
+  Neither "a review called it drift" nor "a comment calls it deliberate" settles anything; the
+  commit dates and the sibling that resolved the identical paragraph did.
+
+  The 1h/24h/7d/30d strip stayed in the page body rather than moving to the shell's `toolbar`
+  slot. §1.2 classes it a view **switch**, and the consequence of that classification is that
+  it is never gated on `hasData` — a rule about *when* it renders, not *where*. It is also not
+  a toolbar control in shape: `RangePicker` is a button strip over a `<details>` retention
+  caveat, two rows, and moving that into the header's `flex flex-wrap items-center` group is a
+  layout change no jsdom test can check (§10).
 - `ListStates` — **6** route files (`Endpoints`, `Clients`, `Datasets`, `Charts`, `Dashboards`,
   `Alerts`). Measured with
   `grep -rl 'from "@/components/explore/ListStates"' src --include='*.tsx' | grep -v __tests__ | wc -l`

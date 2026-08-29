@@ -5,6 +5,7 @@ import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { ScheduleRun, ScheduleSummary } from "@/api/alerts";
+import { folderCollapseKey, UNCATEGORIZED_KEY } from "@/components/explore/folders";
 
 const schedulesMock = vi.fn();
 const scheduleMock = vi.fn(
@@ -493,5 +494,107 @@ describe("Alerts — dataapi_alert rides the Alerts tab (Task 6 fix round 1)", (
     });
     renderPage();
     expect(screen.queryByRole("link", { name: /\+ data api alert/i })).not.toBeInTheDocument();
+  });
+});
+
+/*
+ * Item 1: the strip owns the singular. This page sets `singular` beside
+ * `label`; the RULE (only the number one takes it) is tested once, on the
+ * component, in `src/components/explore/__tests__/SummaryStrip.test.tsx`.
+ * What is checked here is the WIRING — that the page passes the pair at all,
+ * which is the half a component test cannot see and the half five pages had
+ * missing.
+ */
+describe("Alerts — the summary strip says `1 alert`, not `1 alerts`", () => {
+  it("uses the singular for one row and one folder", () => {
+    schedulesMock.mockReturnValue({ data: [row()], isLoading: false, isError: false });
+    folders = [{ id: "f1", name: "Revenue" }];
+    renderPage();
+    expect(screen.getByText("alert")).toBeInTheDocument();
+    expect(screen.getByText("folder")).toBeInTheDocument();
+    expect(screen.queryByText("alerts")).not.toBeInTheDocument();
+    expect(screen.queryByText("folders")).not.toBeInTheDocument();
+  });
+
+  it("goes back to the plural at two", () => {
+    schedulesMock.mockReturnValue({
+      data: [row(), row({ id: "s2", name: "Signups flat" })],
+      isLoading: false,
+      isError: false,
+    });
+    folders = [{ id: "f1", name: "Revenue" }, { id: "f2", name: "Ops" }];
+    renderPage();
+    expect(screen.getByText("alerts")).toBeInTheDocument();
+    expect(screen.getByText("folders")).toBeInTheDocument();
+  });
+
+  it("inflects the tab's own noun, not a hard-coded one", async () => {
+    // `label` is `${typeLabel}s` and `singular` is `typeLabel`, so the Reports
+    // tab must read "1 report" — a page that hard-coded "alert" would pass the
+    // two tests above and fail this one.
+    const user = userEvent.setup();
+    schedulesMock.mockReturnValue({ data: [row({ type: "report" })], isLoading: false, isError: false });
+    renderPage();
+    await user.click(screen.getByRole("tab", { name: /reports/i }));
+    expect(screen.getByText("report")).toBeInTheDocument();
+    expect(screen.queryByText("reports")).not.toBeInTheDocument();
+  });
+});
+
+/*
+ * Item 2: the folderless-header gate, lifted from `dataapi/Endpoints.tsx` and
+ * `sqllab/SavedTab.tsx` (the original precedent) into the five siblings that
+ * headed the folderless bucket unconditionally.
+ *
+ * Both fixtures matter and neither is optional. Without folders is the case
+ * being fixed; WITH a folder is what tells a working gate apart from one
+ * wired permanently off, which the first test alone cannot see.
+ */
+describe("Alerts — no folders, no folderless header", () => {
+  it("draws a flat table when the workspace has no folders", () => {
+    schedulesMock.mockReturnValue({ data: [row(), row({ id: "s2", name: "Signups flat" })], isLoading: false, isError: false });
+    folders = [];
+    renderPage();
+    expect(screen.getByText("Orders dropped")).toBeInTheDocument();
+    expect(screen.getByText("Signups flat")).toBeInTheDocument();
+    // "Uncategorized" beside nothing labels the whole list after the one thing
+    // it is not, and its collapse control's only effect is to hide everything.
+    expect(screen.queryByRole("button", { name: "Toggle Uncategorized" })).not.toBeInTheDocument();
+  });
+
+  it("still heads the folderless bucket beside a real folder", () => {
+    schedulesMock.mockReturnValue({ data: [row({ folder_id: "f1" }), row({ id: "s2", name: "Signups flat" })], isLoading: false, isError: false });
+    folders = [{ id: "f1", name: "Revenue" }];
+    renderPage();
+    expect(screen.getByRole("button", { name: "Toggle Revenue" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Toggle Uncategorized" })).toBeInTheDocument();
+  });
+
+  it("does not strand rows behind a collapse state whose header is no longer rendered", async () => {
+    // What a previous session left behind: Uncategorized collapsed, from back
+    // when this workspace still had folders. `useCollapsed` reads that out of
+    // localStorage at mount and it survives the folders being deleted.
+    //
+    // Both halves are DERIVED, never spelled out: `folderCollapseKey` is the
+    // same function the page hands `useCollapsed`, `UNCATEGORIZED_KEY` the same
+    // constant it collapses under. A hardcoded key would land the seed where
+    // nothing reads it and this test would still pass, because a seed that
+    // misses is indistinguishable from a page that correctly ignored it.
+    //
+    // Rendering the rows is only half of it. `visibleRows` — what bulk select
+    // acts on — is a SEPARATE derivation over the same collapse state, so
+    // gating the render loop alone leaves "Select all" sweeping zero rows while
+    // two sit in front of the user with no header left anywhere to expand.
+    localStorage.setItem(folderCollapseKey("eng", "alerts"), JSON.stringify([UNCATEGORIZED_KEY]));
+    schedulesMock.mockReturnValue({ data: [row(), row({ id: "s2", name: "Signups flat" })], isLoading: false, isError: false });
+    folders = [];
+    const user = userEvent.setup();
+    renderPage();
+    expect(screen.getByText("Orders dropped")).toBeInTheDocument();
+    expect(screen.getByText("Signups flat")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Bulk select" }));
+    await user.click(screen.getByLabelText("Select all"));
+    expect(screen.getByRole("button", { name: "Move 2 to Trash" })).toBeInTheDocument();
   });
 });

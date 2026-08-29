@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { groupByFolder } from "@/components/explore/folders";
+import { folderCollapseKey, groupByFolder, showFolderSections } from "@/components/explore/folders";
 
 const folders = [{ id: "f2", name: "Beta" }, { id: "f1", name: "Alpha" }];
 const rows = [
@@ -86,4 +86,31 @@ test("emits each row exactly once across all groups", () => {
   // a group index, so it still holds however the buckets are built.
   const all = groupByFolder(rows, folders, false).flatMap((g) => g.rows.map((r) => r.id));
   expect([...all].sort()).toEqual(["a", "b", "c"]);
+});
+
+// ── showFolderSections / folderCollapseKey ───────────────────────────────────
+
+test("showFolderSections is false with no folders, true with one", () => {
+  // `groupByFolder` always returns at least the folderless bucket, so "is it
+  // grouped" is not the same question and cannot be used as the gate.
+  expect(showFolderSections([])).toBe(false);
+  expect(showFolderSections(folders.slice(0, 1))).toBe(true);
+});
+
+test("showFolderSections is false in the trash however many folders exist", () => {
+  // The trash is never sectioned: a trashed row's folder is where it will go
+  // BACK to, not where it is, and this is the one view whose whole job is to
+  // let the author find something they deleted.
+  expect(showFolderSections(folders, true)).toBe(false);
+  expect(showFolderSections(folders, false)).toBe(true);
+});
+
+test("folderCollapseKey separates workspace from kind", () => {
+  // Two lists in one workspace, and one list across two workspaces, must not
+  // share a collapse set — a shared key would collapse Charts by opening
+  // Datasets. Both halves are varied, so a key built from only one of them
+  // fails here rather than in a browser.
+  expect(folderCollapseKey("eng", "charts")).toBe("folders:eng:charts");
+  expect(folderCollapseKey("eng", "datasets")).not.toBe(folderCollapseKey("eng", "charts"));
+  expect(folderCollapseKey("ops", "charts")).not.toBe(folderCollapseKey("eng", "charts"));
 });

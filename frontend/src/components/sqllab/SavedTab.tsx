@@ -14,7 +14,7 @@ import {
   type SavedQuery, type DatabaseListItem,
 } from "@/api/sqllab";
 import { useFolders, useFolderMutations, useSetFolder } from "@/api/folders";
-import { groupByFolder, useCollapsed, UNCATEGORIZED_KEY } from "@/components/explore/folders";
+import { folderCollapseKey, groupByFolder, showFolderSections, useCollapsed, UNCATEGORIZED_KEY } from "@/components/explore/folders";
 import { FolderNameDialog } from "@/components/explore/FolderNameDialog";
 import { MoveToFolderItems } from "@/components/explore/MoveToFolderSub";
 import { RowActionsMenu } from "@/components/explore/RowActionsMenu";
@@ -79,7 +79,7 @@ export function SavedTab({ ws, databases, onOpen }: {
   const { data: folders = [] } = useFolders(ws, "saved_queries");
   const setFolder = useSetFolder(ws, "saved_queries");
   const { create: createFolder, rename: renameFolder, remove: removeFolder } = useFolderMutations(ws, "saved_queries");
-  const collapse = useCollapsed(`folders:${ws}:saved_queries`);
+  const collapse = useCollapsed(folderCollapseKey(ws, "saved_queries"));
 
   const [editing, setEditing] = useState<SavedQuery | null>(null);
   const [deleting, setDeleting] = useState<SavedQuery | null>(null);
@@ -131,7 +131,11 @@ export function SavedTab({ ws, databases, onOpen }: {
 
   return (
     <>
-      {folders.length === 0 ? (
+      {/* The original folderless-header gate, now the shared
+          `showFolderSections` all seven grouped lists call. This file is where
+          it was first written; `dataapi/Endpoints.tsx` was the second, and the
+          other five caught up when the helper was extracted. */}
+      {!showFolderSections(folders) ? (
         <div className="divide-y">{items.map(renderRow)}</div>
       ) : (
         groups.map((group) => {

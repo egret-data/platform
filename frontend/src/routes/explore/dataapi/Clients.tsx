@@ -218,7 +218,7 @@ export default function Clients() {
 
         <div className="mb-3">
           <SummaryStrip
-            items={[{ label: rows.length === 1 ? "service account" : "service accounts", value: rows.length }]}
+            items={[{ label: "service accounts", singular: "service account", value: rows.length }]}
           />
         </div>
 
