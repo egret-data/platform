@@ -14,7 +14,12 @@ vi.mock("@/api/access");
 
 import * as api from "@/api/generated/data-api/data-api";
 import * as accessApi from "@/api/access";
-import type { ActivityCallDto, ActivitySummaryDto, DataApiEndpointDto } from "@/api/generated/model";
+import type {
+  ActivityCallDto,
+  ActivityRow,
+  ActivitySummaryDto,
+  DataApiEndpointDto,
+} from "@/api/generated/model";
 import Activity from "@/routes/explore/dataapi/Activity";
 
 function makeEndpoint(overrides: Partial<DataApiEndpointDto> = {}): DataApiEndpointDto {
@@ -931,5 +936,376 @@ describe("Activity — the filter row when there IS something to filter", () => 
     const list = screen.getByTestId("activity-call-list");
     expect(within(list).getByText(/no calls match the current filters/i)).toBeInTheDocument();
     expect(within(list).queryByText(/no calls in this range/i)).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The monitoring loop: read a failing endpoint's name, then see its calls.
+// ---------------------------------------------------------------------------
+
+/** A summary whose breakdown is exactly `rows`, with a grand total summed from
+ * them. Not `DEFAULT_SUMMARY` with `endpoints` swapped: that keeps
+ * `total.calls: 120` beside a breakdown that no longer adds up to it, a state
+ * one `GROUPING SETS` query cannot produce — and a degenerate fixture cannot
+ * tell a page that reads the rows from one that reads the total. */
+function mockSummaryRows(rows: ActivityRow[]) {
+  const sum = (pick: (r: ActivityRow) => number) => rows.reduce((n, r) => n + pick(r), 0);
+  mockSummary({
+    data: {
+      status: 200,
+      data: {
+        total: {
+          endpoint_id: null,
+          endpoint_name: null,
+          calls: sum((r) => r.calls),
+          errors: sum((r) => r.errors),
+          p50_ms: 40,
+          p95_ms: 180,
+          cache_hits: sum((r) => r.cache_hits),
+          cacheable_calls: sum((r) => r.cacheable_calls),
+        },
+        endpoints: rows,
+        retention_days: null,
+      } satisfies ActivitySummaryDto,
+    },
+  });
+}
+
+function makeRow(over: Partial<ActivityRow> = {}): ActivityRow {
+  return {
+    endpoint_id: "ep-1",
+    endpoint_name: "Daily report",
+    calls: 100,
+    errors: 4,
+    p50_ms: 40,
+    p95_ms: 180,
+    cache_hits: 28,
+    cacheable_calls: 90,
+    ...over,
+  };
+}
+
+/** The two-endpoint world the loop tests navigate: the call fetcher HONOURS
+ * `endpoint_id`, so "the filter reached the server" is observable as a row that
+ * is no longer there — by identity, not by a count over a population that never
+ * empties. */
+function mockCallsPerEndpoint() {
+  const all = [
+    makeCall({ id: "c-daily", endpoint_id: "ep-1", endpoint_name: "Daily report", request_id: "req-daily" }),
+    makeCall({ id: "c-weekly", endpoint_id: "ep-9", endpoint_name: "Weekly export", request_id: "req-weekly" }),
+  ];
+  vi.mocked(api.dataApiActivityCalls).mockImplementation(async (_ws, params) => {
+    const id = (params as { endpoint_id?: string }).endpoint_id;
+    return {
+      status: 200,
+      data: id ? all.filter((c) => c.endpoint_id === id) : all,
+      headers: new Headers(),
+    } as unknown as Awaited<ReturnType<typeof api.dataApiActivityCalls>>;
+  });
+}
+
+describe("Activity — a per-endpoint row reaches its own calls", () => {
+  beforeEach(() => {
+    mockSummaryRows([
+      makeRow({ endpoint_id: "ep-1", endpoint_name: "Daily report", errors: 20 }),
+      makeRow({ endpoint_id: "ep-9", endpoint_name: "Weekly export", errors: 0 }),
+    ]);
+    mockEndpoints([makeEndpoint(), makeEndpoint({ id: "ep-9", name: "Weekly export" })]);
+    mockCallsPerEndpoint();
+  });
+
+  it("filtering from the table leaves only that endpoint's calls on screen", async () => {
+    const user = userEvent.setup();
+    renderActivity();
+    // Both endpoints' calls are listed before anything is clicked — otherwise
+    // the assertion below would pass over a list that was never going to show
+    // the other row.
+    await screen.findByText("req-weekly");
+    expect(screen.getByText("req-daily")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Show calls for Daily report" }));
+
+    await waitFor(() => expect(screen.queryByText("req-weekly")).not.toBeInTheDocument());
+    expect(screen.getByText("req-daily")).toBeInTheDocument();
+  });
+
+  it("reaches those calls from the keyboard as well as the mouse", async () => {
+    // The row is a real `<button>` (EngineMonitor's idiom for the same job), so
+    // Enter and Space are the browser's, not a hand-rolled `onKeyDown` that can
+    // handle one and forget the other. What this pins is the choice made HERE:
+    // the endpoint name is a control, not the inert `<td>` text it used to be —
+    // measured as `cursor: auto`, no role, nothing focusable in the row.
+    const user = userEvent.setup();
+    renderActivity();
+    await screen.findByText("req-weekly");
+
+    const control = screen.getByRole("button", { name: "Show calls for Daily report" });
+    control.focus();
+    expect(control).toHaveFocus();
+    await user.keyboard("{Enter}");
+
+    await waitFor(() => expect(screen.queryByText("req-weekly")).not.toBeInTheDocument());
+  });
+
+  it("Space works too, not only Enter", async () => {
+    const user = userEvent.setup();
+    renderActivity();
+    await screen.findByText("req-weekly");
+
+    screen.getByRole("button", { name: "Show calls for Weekly export" }).focus();
+    await user.keyboard("[Space]");
+
+    await waitFor(() => expect(screen.queryByText("req-daily")).not.toBeInTheDocument());
+    expect(screen.getByText("req-weekly")).toBeInTheDocument();
+  });
+
+  it("moves focus to the Endpoint filter, which is where the change happened", async () => {
+    // The table is above the fold and the call list is below it. Without this,
+    // a keyboard user presses Enter and nothing near them changes — and a
+    // pointer user gets no scroll either, since focus is what browsers scroll
+    // to. The filter is also the control that UNDOES the choice.
+    const user = userEvent.setup();
+    renderActivity();
+    await screen.findByText("req-weekly");
+
+    await user.click(screen.getByRole("button", { name: "Show calls for Daily report" }));
+
+    const filter = screen.getByRole("combobox", { name: /endpoint/i });
+    expect(filter).toHaveFocus();
+    // And it SAYS which endpoint, rather than silently narrowing the list.
+    expect(filter).toHaveTextContent("Daily report");
+  });
+
+  it("does not offer the unmatched bucket as a filter — the dropdown cannot express it", async () => {
+    // `endpoint_id: null` is every request that resolved no endpoint. There is
+    // no id to filter by, so the row stays inert rather than becoming a control
+    // that cannot do what it looks like it does.
+    mockSummaryRows([
+      makeRow(),
+      makeRow({ endpoint_id: null, endpoint_name: null, errors: 2 }),
+    ]);
+    renderActivity();
+
+    const row = (await screen.findByText("No matching endpoint")).closest("tr")!;
+    expect(within(row).queryByRole("button")).not.toBeInTheDocument();
+    // The matched row above it IS a control, so this is a difference between
+    // rows and not a page with no controls at all.
+    expect(screen.getByRole("button", { name: "Show calls for Daily report" })).toBeInTheDocument();
+  });
+
+  it("names the endpoint it will filter to, so eight of them are eight controls", async () => {
+    renderActivity();
+    await screen.findByText("req-weekly");
+    // Real accessible-name computation, not a `title`/text sniff.
+    expect(screen.getByRole("button", { name: "Show calls for Weekly export" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Show calls for Daily report" })).toBeInTheDocument();
+  });
+
+  it("still shows the chosen endpoint when it is no longer in the endpoints list", async () => {
+    // A deleted endpoint keeps its `access_log` rows, and the summary's LEFT
+    // JOIN then yields `endpoint_name: null` — an id the live endpoints list
+    // does not contain. Without a fallback option the filter would read blank
+    // while the list below it was narrowed: a filter in effect that the screen
+    // does not admit to.
+    const user = userEvent.setup();
+    mockSummaryRows([makeRow({ endpoint_id: "ep-gone", endpoint_name: null })]);
+    mockEndpoints([]);
+    renderActivity();
+    await screen.findByTestId("tile-calls");
+
+    await user.click(screen.getByRole("button", { name: "Show calls for ep-gone" }));
+
+    expect(screen.getByRole("combobox", { name: /endpoint/i })).toHaveTextContent("ep-gone");
+    await waitFor(() =>
+      expect(api.dataApiActivityCalls).toHaveBeenLastCalledWith(
+        "eng",
+        expect.objectContaining({ endpoint_id: "ep-gone" }),
+      ),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Severity: an error rate that says how bad it is.
+// ---------------------------------------------------------------------------
+
+/** The cell an error-rate reading lives in, found through its row rather than
+ * by position: `getByText("20.0%")` alone would also match the same figure in
+ * another column of another row. */
+function errorRateOf(endpointName: string): HTMLElement {
+  const row = screen.getByText(endpointName).closest("tr")!;
+  return within(row).getAllByRole("cell")[2];
+}
+
+describe("Activity — an error rate carries its severity", () => {
+  it("marks a failing endpoint in form as well as colour, and a healthy one not at all", async () => {
+    mockSummaryRows([
+      makeRow({ endpoint_id: "ep-bad", endpoint_name: "Spend pacing", calls: 100, errors: 20 }),
+      makeRow({ endpoint_id: "ep-ok", endpoint_name: "Quiet export", calls: 100, errors: 0 }),
+    ]);
+    renderActivity();
+    await screen.findByTestId("activity-per-endpoint");
+
+    const bad = errorRateOf("Spend pacing");
+    const ok = errorRateOf("Quiet export");
+
+    // FORM: an icon the failing reading has and the healthy one does not. This
+    // is the half that survives a monochrome display, and it is structural —
+    // an inert class could not produce it.
+    expect(bad.querySelector("svg")).not.toBeNull();
+    expect(ok.querySelector("svg")).toBeNull();
+    // WORD: what a screen reader gets, where colour reaches nobody.
+    expect(within(bad).getByText(/failing/i)).toBeInTheDocument();
+    expect(within(ok).getByText(/no errors/i)).toBeInTheDocument();
+    // COLOUR: the class only. What it PAINTS is asserted in
+    // tests/e2e/activity-error-rate-severity.spec.ts — jsdom resolves no
+    // `oklch()` and would give the same answer with the tokens swapped (§10).
+    expect(bad.querySelector(".text-destructive")).not.toBeNull();
+    expect(ok.querySelector(".text-success")).not.toBeNull();
+  });
+
+  it("renders 0.0% as good, not as the dash that means unmeasured", async () => {
+    // The Cache-hit column on this very table already uses `—` for "not
+    // configured", so an empty-looking cell means something else here. A
+    // zero error rate is a MEASUREMENT, and the best one.
+    mockSummaryRows([makeRow({ endpoint_name: "Quiet export", calls: 100, errors: 0, cacheable_calls: 0, cache_hits: 0 })]);
+    renderActivity();
+    await screen.findByTestId("activity-per-endpoint");
+
+    const cell = errorRateOf("Quiet export");
+    expect(within(cell).getByText("0.0%")).toBeInTheDocument();
+    expect(cell).not.toHaveTextContent("—");
+    // And the cell that IS unmeasured, on the same row, still says so.
+    const cacheCell = within(screen.getByText("Quiet export").closest("tr")!).getAllByRole("cell")[4];
+    expect(cacheCell).toHaveTextContent("—");
+  });
+
+  it("draws the alert line at 5% of calls: 5.0% is failing, 4.9% is not", async () => {
+    // 5% is the error-budget convention (a 99% target spends a month's budget
+    // in about seven hours at this rate), and it sits far above the routine
+    // 4xx traffic that `errors` also counts. The seeded distribution — 0.0%
+    // against 18.8% and 20.0% — fixes only that the line lies between them.
+    mockSummaryRows([
+      makeRow({ endpoint_id: "ep-at", endpoint_name: "At the line", calls: 20, errors: 1 }),
+      makeRow({ endpoint_id: "ep-under", endpoint_name: "Under the line", calls: 1000, errors: 49 }),
+    ]);
+    renderActivity();
+    await screen.findByTestId("activity-per-endpoint");
+
+    const at = errorRateOf("At the line");
+    const under = errorRateOf("Under the line");
+    expect(within(at).getByText("5.0%")).toBeInTheDocument();
+    expect(within(under).getByText("4.9%")).toBeInTheDocument();
+    expect(within(at).getByText(/failing/i)).toBeInTheDocument();
+    expect(within(under).queryByText(/failing/i)).not.toBeInTheDocument();
+  });
+
+  it("still marks a rate below the line, because a 4xx is counted as an error", async () => {
+    // `errors` is `status_code >= 400`, so a nonzero rate can be consumers
+    // sending bad requests rather than the endpoint breaking. That is worth
+    // seeing and not worth alarming: a third state, forced by what the number
+    // conflates rather than added for symmetry.
+    mockSummaryRows([
+      makeRow({ endpoint_id: "ep-mid", endpoint_name: "Some 4xx", calls: 1000, errors: 20 }),
+      makeRow({ endpoint_id: "ep-ok", endpoint_name: "Quiet export", calls: 100, errors: 0 }),
+      makeRow({ endpoint_id: "ep-bad", endpoint_name: "Spend pacing", calls: 100, errors: 20 }),
+    ]);
+    renderActivity();
+    await screen.findByTestId("activity-per-endpoint");
+
+    const mid = errorRateOf("Some 4xx");
+    expect(within(mid).getByText(/elevated/i)).toBeInTheDocument();
+    expect(mid.querySelector("svg")).not.toBeNull();
+    // Three readings, three different words — not one marked state and two
+    // spellings of the same one.
+    expect(mid.querySelector(".text-highlight")).not.toBeNull();
+    expect(errorRateOf("Spend pacing").querySelector(".text-highlight")).toBeNull();
+    expect(errorRateOf("Quiet export").querySelector(".text-highlight")).toBeNull();
+  });
+
+  it("gives the Error rate tile the same severity as the table", async () => {
+    mockSummaryRows([makeRow({ endpoint_name: "Spend pacing", calls: 100, errors: 20 })]);
+    renderActivity();
+
+    const tile = await screen.findByTestId("tile-error-rate");
+    expect(tile).toHaveTextContent("20.0%");
+    expect(within(tile).getByText(/failing/i)).toBeInTheDocument();
+    expect(tile.querySelector("svg")).not.toBeNull();
+  });
+
+  it("leaves the tile unmarked when the range produced no errors at all", async () => {
+    mockSummaryRows([makeRow({ calls: 100, errors: 0 })]);
+    renderActivity();
+
+    const tile = await screen.findByTestId("tile-error-rate");
+    expect(tile).toHaveTextContent("0.0%");
+    expect(within(tile).getByText(/no errors/i)).toBeInTheDocument();
+    expect(tile.querySelector("svg")).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The ids a call row shows are the ids the workflow asks you to paste back.
+// ---------------------------------------------------------------------------
+
+describe("Activity — a call row's ids can be copied", () => {
+  it("copies the request id — the value the Request ID filter asks for", async () => {
+    // `userEvent.setup()` REPLACES `navigator.clipboard`, so a spy installed
+    // beforehand is an object this component never touches. Read back through
+    // userEvent's own stub instead: assert what LANDED, not that a call was made.
+    const user = userEvent.setup();
+    mockCalls([makeCall({ request_id: "req-fixture-1" })]);
+    renderActivity();
+    await screen.findByText("req-fixture-1");
+
+    await user.click(screen.getByRole("button", { name: "Copy request id req-fixture-1" }));
+
+    expect(await navigator.clipboard.readText()).toBe("req-fixture-1");
+  });
+
+  it("copies the client id too — the same identifier Clients already offers", async () => {
+    const user = userEvent.setup();
+    mockCalls([makeCall({ client_id: "client_abc123" })]);
+    renderActivity();
+    await screen.findByText("client_abc123");
+
+    await user.click(screen.getByRole("button", { name: "Copy client id client_abc123" }));
+
+    expect(await navigator.clipboard.readText()).toBe("client_abc123");
+  });
+
+  it("copies THAT row's id, not the first row's", async () => {
+    // Fifty rows of "Copy" is fifty controls with one name. Naming each button
+    // after the value it carries is what makes them distinguishable to a screen
+    // reader — and it is what this asserts, by copying from the second row.
+    const user = userEvent.setup();
+    mockCalls([
+      makeCall({ id: "c1", request_id: "req-first" }),
+      makeCall({ id: "c2", request_id: "req-second" }),
+    ]);
+    renderActivity();
+    await screen.findByText("req-second");
+
+    await user.click(screen.getByRole("button", { name: "Copy request id req-second" }));
+
+    expect(await navigator.clipboard.readText()).toBe("req-second");
+  });
+
+  it("offers no client-id copy on a trial row, which carries no client identity", async () => {
+    // A trial's `client_id` is the reserved marker `trial:<service_account_id>`
+    // and the row shows the actor instead. A copy button there would hand over
+    // a string that is not a client id.
+    const user = userEvent.setup();
+    vi.mocked(accessApi.listUsers).mockResolvedValue([
+      { id: "user-77", email: "alice@egret.local", name: "Alice" },
+    ] as unknown as accessApi.AccessUser[]);
+    mockCalls([makeCall({ id: "c-trial", actor_user_id: "user-77", client_id: "trial:sa-99", request_id: "req-trial" })]);
+    renderActivity();
+    await screen.findByText("alice@egret.local");
+
+    expect(screen.queryByRole("button", { name: /copy client id/i })).not.toBeInTheDocument();
+    // The request id is still copyable — that is the one support quotes.
+    await user.click(screen.getByRole("button", { name: "Copy request id req-trial" }));
+    expect(await navigator.clipboard.readText()).toBe("req-trial");
   });
 });

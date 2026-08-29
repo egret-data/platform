@@ -1,5 +1,5 @@
-import { useMemo, useState } from "react";
-import { Inbox } from "lucide-react";
+import { type Ref, useImperativeHandle, useMemo, useRef, useState } from "react";
+import { Check, Copy, Inbox } from "lucide-react";
 import { Link } from "react-router-dom";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 
@@ -54,13 +54,27 @@ const PAGE_SIZE = 50;
  * free: every filter is part of the query key below, so changing one is a
  * brand-new query to react-query, which starts back at page one on its own.
  */
+/**
+ * What `Activity` may ask this list to do from the outside. One command, not a
+ * filter it owns: the four filter `useState`s below stay here, which is what
+ * makes them survive a range switch, and this is an EVENT ("show me that
+ * endpoint's calls") rather than a second copy of one of them held upstairs.
+ */
+export interface ActivityCallListHandle {
+  /** Narrow to one endpoint and put focus on the control that did it. */
+  showCallsFor: (endpointId: string) => void;
+}
+
 export default function ActivityCallList({
   ws,
   range,
   rangeIsEmpty,
+  ref,
 }: {
   ws: string;
   range: ActivityRange;
+  /** React 19 passes `ref` as an ordinary prop — no `forwardRef` wrapper. */
+  ref?: Ref<ActivityCallListHandle>;
   /** The summary has SETTLED and says this range produced no calls — the
    * unfiltered truth the filter row is gated on (§2.3). False while that query
    * is in flight, which is not the same claim: gated on `!hasCalls` instead,
@@ -76,6 +90,20 @@ export default function ActivityCallList({
   // because this component no longer unmounts on one.
   const [includeTrials, setIncludeTrials] = useState(false);
 
+  // Focus moves to the filter, and that is the point of the command rather
+  // than a flourish on it: the per-endpoint table is above the fold and this
+  // list is below it, so setting the filter alone changes nothing a keyboard
+  // user can perceive and scrolls nothing for a pointer user (browsers scroll
+  // to focus). The Endpoint filter is also the control that UNDOES the choice,
+  // so it is the right place to be standing afterwards.
+  const endpointTrigger = useRef<HTMLButtonElement>(null);
+  useImperativeHandle(ref, () => ({
+    showCallsFor: (id: string) => {
+      setEndpointId(id);
+      endpointTrigger.current?.focus();
+    },
+  }));
+
   const endpointParam = endpointId === "all" ? undefined : endpointId;
   const trimmedStatus = statusCode.trim();
   const parsedStatus = trimmedStatus ? Number(trimmedStatus) : undefined;
@@ -84,7 +112,20 @@ export default function ActivityCallList({
   const requestIdParam = requestId.trim() || undefined;
 
   const endpointsQuery = useDataApiListEndpoints(ws);
+  const endpointsKnown = endpointsQuery.data?.status === 200;
   const endpoints = endpointsQuery.data?.status === 200 ? endpointsQuery.data.data : [];
+
+  // A selected endpoint the live list does not contain. It can only get here
+  // through `showCallsFor` — the summary's `LEFT JOIN dataapi.endpoints` still
+  // reports a deleted endpoint's `access_log` rows, under its id with a null
+  // name — and without an option to match it, `SelectValue` renders blank while
+  // the list below it is narrowed: a filter in effect that the screen does not
+  // admit to. Gated on `endpointsKnown` so a still-loading list cannot produce
+  // a duplicate `<SelectItem value>` the moment the real one arrives.
+  const unlistedEndpoint =
+    endpointsKnown && endpointParam !== undefined && !endpoints.some((e) => e.id === endpointParam)
+      ? endpointParam
+      : undefined;
 
   // Trial rows are identified by `actor_user_id`, and resolving it to an
   // email is the same problem AuditLog.tsx solves for its actor column.
@@ -204,7 +245,12 @@ export default function ActivityCallList({
           <div className="space-y-1.5">
             <Label htmlFor="activity-endpoint">Endpoint</Label>
             <Select value={endpointId} onValueChange={setEndpointId}>
-              <SelectTrigger id="activity-endpoint" className="w-48" aria-label="Endpoint">
+              <SelectTrigger
+                id="activity-endpoint"
+                ref={endpointTrigger}
+                className="w-48"
+                aria-label="Endpoint"
+              >
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -214,6 +260,9 @@ export default function ActivityCallList({
                     {e.name}
                   </SelectItem>
                 ))}
+                {/* Labelled with the id, which is exactly what the per-endpoint
+                    table shows for the same row when the name is gone. */}
+                {unlistedEndpoint && <SelectItem value={unlistedEndpoint}>{unlistedEndpoint}</SelectItem>}
               </SelectContent>
             </Select>
           </div>
@@ -388,10 +437,60 @@ function CallRow({
             </span>
           </span>
         ) : (
-          <span className="font-mono text-xs text-muted-foreground">{call.client_id ?? "—"}</span>
+          <span className="inline-flex items-center gap-1">
+            <span className="font-mono text-xs text-muted-foreground">{call.client_id ?? "—"}</span>
+            {/* No button when there is no id: a "Copy" over `—` copies nothing.
+                A trial row does not reach here at all — its `client_id` is the
+                reserved `trial:<service_account_id>` marker, not a client
+                identity, and handing that to someone as if it were one is how
+                a support thread goes wrong. */}
+            {call.client_id && (
+              <CopyIdButton value={call.client_id} label={`Copy client id ${call.client_id}`} />
+            )}
+          </span>
         )}
       </TableCell>
-      <TableCell className="font-mono text-xs">{call.request_id}</TableCell>
+      <TableCell className="font-mono text-xs">
+        <span className="inline-flex items-center gap-1">
+          <span>{call.request_id}</span>
+          <CopyIdButton value={call.request_id} label={`Copy request id ${call.request_id}`} />
+        </span>
+      </TableCell>
     </TableRow>
+  );
+}
+
+/**
+ * The `Clients.tsx` copy affordance, at the same size and with the same
+ * "Copy"/"Copied" idiom (`TryIt.tsx`, `ClientCreate.tsx` and
+ * `WarehouseDetail.tsx` each carry their own copy of it).
+ *
+ * It belongs on this table more than on most: the Request ID filter three rows
+ * up is captioned "Look up a request out of an error body", so pasting a
+ * request id INTO this page is the documented workflow — and until now the
+ * page showed the ids and offered no way to lift one off the screen. A call
+ * row had no button and no link in it at all.
+ *
+ * The label carries the VALUE rather than the word "Copy": fifty rows would
+ * otherwise be fifty controls with one accessible name, which is unusable by
+ * voice and by screen reader alike.
+ */
+function CopyIdButton({ value, label }: { value: string; label: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="sm"
+      className="h-6 w-6 shrink-0 p-0 text-muted-foreground"
+      aria-label={label}
+      onClick={() => {
+        void navigator.clipboard?.writeText(value);
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1500);
+      }}
+    >
+      {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+    </Button>
   );
 }
