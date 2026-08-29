@@ -906,48 +906,48 @@ export default function ResponseSection() {
           <TableRow className="hover:bg-transparent">
             <TableCell colSpan={3} className="whitespace-normal pt-0 pb-4">
               <div className="space-y-4">
-              <div className="space-y-1.5">
-                <p className="text-sm font-medium">Script</p>
-                {/* Fixed height, not `CellEditor`'s grow-with-content: this
-                    section is an ordinary scrolling document (`fieldset` in
-                    `EndpointDetail`), not a bounded split pane like `Query`'s,
-                    so a script that grows the editor also grows the page under
-                    it rather than fighting a sibling pane for height. */}
-                <div className="h-64 overflow-hidden rounded-md border border-border">
-                  <MonacoEditor
-                    height="100%"
-                    defaultLanguage="python"
-                    value={transform.script}
-                    onChange={(v) => updateTransform({ script: v ?? "" })}
-                    options={{
-                      minimap: { enabled: false },
-                      fontSize: 13,
-                      scrollBeyondLastLine: false,
-                      padding: { top: 10, bottom: 10 },
-                      renderLineHighlight: "line",
-                      ariaLabel: "Response transform script",
-                    }}
+                <div className="space-y-1.5">
+                  <p className="text-sm font-medium">Script</p>
+                  {/* Fixed height, not `CellEditor`'s grow-with-content: this
+                      section is an ordinary scrolling document (`fieldset` in
+                      `EndpointDetail`), not a bounded split pane like `Query`'s,
+                      so a script that grows the editor also grows the page under
+                      it rather than fighting a sibling pane for height. */}
+                  <div className="h-64 overflow-hidden rounded-md border border-border">
+                    <MonacoEditor
+                      height="100%"
+                      defaultLanguage="python"
+                      value={transform.script}
+                      onChange={(v) => updateTransform({ script: v ?? "" })}
+                      options={{
+                        minimap: { enabled: false },
+                        fontSize: 13,
+                        scrollBeyondLastLine: false,
+                        padding: { top: 10, bottom: 10 },
+                        renderLineHighlight: "line",
+                        ariaLabel: "Response transform script",
+                      }}
+                    />
+                  </div>
+                  <p className={`text-xs ${scriptOverCap ? "text-destructive" : "text-muted-foreground"}`}>
+                    {scriptBytes.toLocaleString()} / {MAX_TRANSFORM_SCRIPT_BYTES.toLocaleString()} bytes
+                    {scriptOverCap &&
+                      " — over the cap. A response transform reshapes what a statement already returned; it is not where an endpoint's business logic belongs, and publish will refuse this script."}
+                  </p>
+                </div>
+
+                <div className="space-y-1.5">
+                  <p className="text-sm font-medium">Declared returns</p>
+                  <p className="max-w-prose text-sm text-muted-foreground">
+                    What <span className="font-mono text-xs">data</span> looks like once the script
+                    runs — checked against the script&rsquo;s own output at publish, and enforced on
+                    every request after.
+                  </p>
+                  <ReturnsEditor
+                    returns={transform.returns}
+                    onChange={(returns) => updateTransform({ returns })}
                   />
                 </div>
-                <p className={`text-xs ${scriptOverCap ? "text-destructive" : "text-muted-foreground"}`}>
-                  {scriptBytes.toLocaleString()} / {MAX_TRANSFORM_SCRIPT_BYTES.toLocaleString()} bytes
-                  {scriptOverCap &&
-                    " — over the cap. A response transform reshapes what a statement already returned; it is not where an endpoint's business logic belongs, and publish will refuse this script."}
-                </p>
-              </div>
-
-              <div className="space-y-1.5">
-                <p className="text-sm font-medium">Declared returns</p>
-                <p className="max-w-prose text-sm text-muted-foreground">
-                  What <span className="font-mono text-xs">data</span> looks like once the script
-                  runs — checked against the script&rsquo;s own output at publish, and enforced on
-                  every request after.
-                </p>
-                <ReturnsEditor
-                  returns={transform.returns}
-                  onChange={(returns) => updateTransform({ returns })}
-                />
-              </div>
               </div>
             </TableCell>
           </TableRow>
