@@ -86,7 +86,17 @@ is `"keeps the way OUT of an empty trash"` in
 `src/routes/explore/dataapi/Activity.tsx` and `ActivityCallList.tsx` are the second
 application, and they read the rule twice over. **The 1h/24h/7d/30d strip is a view switch**:
 it selects the window the whole page is about, and it is how a reader leaves a range that
-turned out to be empty. **So is "Include trial runs"**, which is less obvious and matters
+turned out to be empty.
+
+**What that classification decides is GATING, not placement — despite this section's title.**
+"View controls first, primary action last" orders the header for controls that are *in* the
+header; calling something a view switch settles that it renders whatever `hasData` says, and
+says nothing about which slot it renders into. The range strip is the case that separates the
+two: it is a view switch, and it lives in Activity's **body** rather than in `ListPageShell`'s
+`toolbar` slot, because `RangePicker` is a two-row block — a button strip over a `<details>`
+retention caveat — and moving that into the header's `flex flex-wrap items-center` group is a
+layout change no jsdom test can check (§10). Neither the classification nor this section's
+title argues for moving it; recorded here because the title alone reads as though it does. **So is "Include trial runs"**, which is less obvious and matters
 more. `crates/egret-dataapi/src/activity.rs`'s summary query ends `AND al.actor_user_id IS
 NULL`, so trials are excluded from *every number the page shows* — including the one the
 filter gate is computed from. A workspace whose only traffic was Try-it runs therefore reads
@@ -192,26 +202,46 @@ its header's spanning cell, the same idiom §4.1 records for `ConfigTableGroup`,
 `FolderHeaderRow.tsx` — the shared component Charts, Datasets, Dashboards, Notebooks, Alerts and
 Endpoints group with — now does too.
 
-**It was verified before it was added, and the reason is stronger than the one this section
-first gave.** The role is not merely the house idiom, and not a stretch of a role whose name says
-"row" applied to a cell heading a row *group*: `rowheader` is what HTML-AAM computes for
-`<th scope="rowgroup">`, which is the HTML-native spelling of precisely this construct — a
-full-span header cell heading the rows of one `<tbody>`. ARIA has no separate rowgroup-header
-role, so this **is** the role for this shape. Its required context is a `row`, which the cell
-has; the association is within a row, so nothing is re-announced on the data rows beneath. The
-whole effect is that the folder reads as a heading rather than as one more data cell.
+**It was verified before it was added.** The role is right for the shape rather than borrowed
+from the house style: `rowheader` is what HTML-AAM computes for `<th scope="rowgroup">`, which
+is the HTML-native spelling of precisely this construct — a full-span header cell heading the
+rows of one `<tbody>`, each folder group being its own `<tbody>` with the header row first.
+ARIA has no separate rowgroup-header role, so `rowheader` is what this construct gets. Its
+required context is a `row`, which the cell has.
+
+**Claim exactly this much and no more: it announces as a header instead of as a data cell.**
+The role does **not** carry a group association. In HTML, `scope="rowgroup"` says "this heads
+the remaining cells in this row group"; ARIA has no `scope` equivalent, so the cell is a
+rowheader for its own row — which contains nothing else — and is not associated with the rows
+beneath it. Nothing is re-announced on those rows, but that is because no association exists at
+all, not because one was scoped correctly. Against the `cell` role it replaces this is a strict
+improvement, and it is not the full semantics of the HTML spelling. An earlier revision of this
+section wrote the true sentence ("nothing is re-announced") with the false reason attached, and
+that is the kind of overclaim a later reader inherits as a fact.
 
 It stays a `<td>` with an explicit role rather than becoming a `<th scope="rowgroup">`, for the
-reason §4.1 records: a `<th>` brings its own implicit role to argue with. `scope` is absent —
-a `<th>`-only attribute, inert on a `<td>`.
+reason §4.1 records: a `<th>` brings its own implicit role to argue with. **That choice has a
+cost, named here rather than left implicit: `<th scope="rowgroup">` would carry the association
+the `<td>` does not.** `scope` is absent because it is a `<th>`-only attribute and inert on a
+`<td>`; adding it would be decoration.
 
 **Do not add an attribute because this document predicted it.** The previous revision of this
 section said the change "should" be made and called it a one-attribute change; that is a
 prediction, not a verification, and it would have read identically had the role been wrong for a
-spanning cell. The check that settled it was the HTML-AAM mapping, and the check that the code
-holds it is `getByRole("rowheader", { name: /Revenue/ })` — the real role and accessible-name
-computation — plus an assertion that it is the **only** rowheader in the table, which a
-presence-only test would pass even if every cell carried the role.
+spanning cell. The check that settled it was the HTML-AAM mapping.
+
+**And check that the guard you cite can fail.** The code check is
+`getByRole("rowheader", { name: /Revenue/ })` — the real role and accessible-name computation,
+not `getAttribute("role")` — on `FolderHeaderRow`'s own test, plus **"the folder headers are the
+only rowheaders, and the data rows stay cells"** in
+`src/routes/explore/__tests__/Charts.test.tsx`. The uniqueness half lives on a page and not on
+the component **because the component cannot fail it**: it emits one cell, and its fixture has
+no data rows for a stray role to land on, so the assertion could only have broken if
+`FolderHeaderRow` emitted two rowheaders — which it structurally cannot. It sat on the component
+for one revision and this section cited it as the reason the ruling was safe. The failure it now
+actually catches is a data cell in a page's `renderRow` gaining the role, which makes the folder
+header no longer distinguishable from the rows it heads — the exact confusion the role was added
+to remove, and invisible to every other test in the file.
 
 **It was recorded as four, and the counting is worth more than the number.** `Notebooks` was
 named in this section's own file list above and then dropped from the count in the paragraph
@@ -328,12 +358,25 @@ remaining 18 are control-plane pages, Explore settings, `MembersPanel.tsx` and
 stated gap, not a second convention: the field is opt-in, so those pages are unchanged rather
 than differently-behaved, and the next one to be touched sets the pair.
 
-**Accessible name, unfixed and recorded.** The toggle-chip variant's accessible name is
+**Accessible name — TRACKED FOLLOW-UP, open.** The toggle-chip variant's accessible name is
 `"1folder"`, with no space: the number is in its own `<span>` and the separation on screen
 comes from the flex `gap-1`, which the name computation does not see. It is pre-existing and
-true of every chip on the strip. It is pinned as-is in the component test rather than papered
-over with a hand-written `aria-label`, and not fixed there because inserting a text node into
-an `inline-flex` row adds a flex **item** — a spacing change no jsdom test can check (§10).
+true of every chip on the strip (Endpoints' live/draft/disabled, Alerts' failing), not
+something the singular rule introduced.
+
+*Open*, not accepted. It is unfixed here because inserting a text node into an `inline-flex`
+row adds a flex **item**, and the resulting spacing is a change no jsdom test can check (§10) —
+so the fix needs a browser, which the task that found it did not have. It is not papered over
+with a hand-written `aria-label`, which would hide the defect behind a second source of truth
+for the same string.
+
+**A defect encoded as an expectation becomes the convention**, which is why it is written down
+in both places rather than only pinned. In
+`src/components/explore/__tests__/SummaryStrip.test.tsx` the expected value is bound to a
+constant named `DEFECT_NAME_MISSING_SPACE` rather than passed as the bare literal `"1folder"`:
+a literal in an assertion is indistinguishable from a desired value, and the next person to add
+a chip copies it. **What closes this:** render the separator, check the chip's spacing in a
+browser at the sizes §5.3 uses, and rename that constant out of existence.
 
 ---
 

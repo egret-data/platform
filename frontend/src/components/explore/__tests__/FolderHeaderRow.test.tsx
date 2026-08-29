@@ -32,17 +32,25 @@ test("actions menu shows Share…, Rename, Delete and fires onShare", async () =
   expect(onShare).toHaveBeenCalledTimes(1);
 });
 
-test("the spanning header cell is a rowheader, not another data cell", () => {
-  // `getByRole` runs the real role + accessible-name computation, so this
-  // fails if the attribute is dropped OR if it is put somewhere the ARIA table
-  // model rejects — reading `getAttribute("role")` would only prove the string
-  // is present, which is not the same claim.
+test("the spanning header cell is a rowheader, not an ordinary cell", () => {
+  // `getByRole` runs the real role + accessible-name computation, so this fails
+  // if the attribute is dropped OR if it is put somewhere the ARIA table model
+  // rejects — reading `getAttribute("role")` would only prove the string is
+  // present, which is not the same claim.
+  //
+  // This is the whole of what the COMPONENT can be held to: it emits one cell,
+  // so "the folder header is the only rowheader in the table" is not a claim it
+  // can fail. That assertion used to live here over a fixture containing
+  // nothing but the header row, where it could only have failed if this
+  // component emitted two rowheaders — which it structurally cannot. It is now
+  // in `routes/explore/__tests__/Charts.test.tsx`, over a table that has real
+  // data rows for a stray role to appear on.
+  //
+  // The `colSpan` prop is deliberately NOT asserted here. `toHaveAttribute
+  // ("colspan", "4")` pins React's prop-to-attribute lowercasing — a library's
+  // behaviour, not this file's.
   render(<table><tbody>
     <FolderHeaderRow name="Revenue" count={3} colSpan={4} collapsed={false} onToggle={vi.fn()} />
   </tbody></table>);
-  const header = screen.getByRole("rowheader", { name: /Revenue/ });
-  expect(header).toHaveAttribute("colspan", "4");
-  // And the rows it heads are NOT rowheaders — a test that only asserted
-  // presence would pass just as well if every cell in the table had the role.
-  expect(screen.getAllByRole("rowheader")).toHaveLength(1);
+  expect(screen.getByRole("rowheader", { name: /Revenue/ })).toBeInTheDocument();
 });

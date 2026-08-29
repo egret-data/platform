@@ -120,17 +120,27 @@ describe("Datasets on the Explore primitives", () => {
  * missing.
  */
 describe("Datasets — the summary strip says `1 dataset`, not `1 datasets`", () => {
-  it("uses the singular for one row", () => {
+  it("uses the singular for one row and one folder", () => {
+    // The folder chip is asserted here too, matching the other four pages.
+    // Datasets passes its `folder`/`folders` pair inside a `folders.length ?`
+    // spread, so a fixture with no folders never renders the chip and leaves
+    // half this page's wiring — the half that is conditional, and so the more
+    // fragile half — unpinned.
     datasets = [DEFAULT_DATASETS[0]];
+    folders = [{ id: "f1", name: "Revenue" }];
     renderAt();
     expect(screen.getByText("dataset")).toBeInTheDocument();
+    expect(screen.getByText("folder")).toBeInTheDocument();
     expect(screen.queryByText("datasets")).not.toBeInTheDocument();
+    expect(screen.queryByText("folders")).not.toBeInTheDocument();
   });
 
   it("goes back to the plural at two", () => {
     datasets = [DEFAULT_DATASETS[0], { ...DEFAULT_DATASETS[0], id: "d2", name: "Customers" }];
+    folders = [{ id: "f1", name: "Revenue" }, { id: "f2", name: "Ops" }];
     renderAt();
     expect(screen.getByText("datasets")).toBeInTheDocument();
+    expect(screen.getByText("folders")).toBeInTheDocument();
   });
 });
 

@@ -93,7 +93,15 @@ describe("SummaryStrip", () => {
     // and it is not fixed here because inserting a text node into an
     // `inline-flex` row adds a flex ITEM, whose spacing no jsdom test can
     // check.
-    const btn = screen.getByRole("button", { name: "1folder" });
+    //
+    // NAMED so the call site cannot be misread: this is a pinned DEFECT, not
+    // the convention. An expectation spelled as a bare literal is
+    // indistinguishable from a desired value, and the next person to add a chip
+    // copies it. Tracked as a follow-up in §1.6 of `docs/en/ui-conventions.md`;
+    // when it is fixed, this constant is what changes and its name is what
+    // makes the change obviously correct rather than obviously breaking a test.
+    const DEFECT_NAME_MISSING_SPACE = "1folder";
+    const btn = screen.getByRole("button", { name: DEFECT_NAME_MISSING_SPACE });
     expect(btn).toHaveAttribute("aria-pressed", "true");
     await userEvent.click(btn);
     expect(onClick).toHaveBeenCalledTimes(1);

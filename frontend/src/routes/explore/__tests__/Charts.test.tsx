@@ -261,6 +261,44 @@ describe("Charts — no folders, no folderless header", () => {
     expect(screen.getByRole("button", { name: "Toggle Uncategorized" })).toBeInTheDocument();
   });
 
+  /*
+   * Item 3's real guard, and it has to live on a PAGE rather than on
+   * `FolderHeaderRow` itself.
+   *
+   * The component emits exactly one cell, so "the folder header is the only
+   * rowheader in the table" is not a claim its own test can fail — the fixture
+   * there contains no data rows for a stray role to appear on, and the
+   * assertion would only break if `FolderHeaderRow` emitted two rowheaders,
+   * which it structurally cannot. Here the table has both: two folder headers
+   * and four data rows, each with its own cells.
+   *
+   * The scenario this exists to catch is a data cell in `renderRow` picking up
+   * `role="rowheader"`. That makes the folder header no longer distinguishable
+   * from the rows it heads, which is precisely the confusion the role was added
+   * to remove — and every other test in this file stays green through it.
+   */
+  it("makes the folder headers the ONLY rowheaders — the data rows stay cells", () => {
+    charts = [{ ...DEFAULT_CHARTS[0], folder_id: "f1" }, DEFAULT_CHARTS[1]];
+    folders = [{ id: "f1", name: "Revenue" }];
+    renderAt();
+
+    // Two groups are rendered: the named folder and the folderless bucket.
+    const rowheaders = screen.getAllByRole("rowheader");
+    expect(rowheaders).toHaveLength(2);
+    expect(rowheaders.map((h) => h.textContent)).toEqual([
+      expect.stringContaining("Revenue"),
+      expect.stringContaining("Uncategorized"),
+    ]);
+
+    // And the chart rows are reachable as ordinary cells. Named through the
+    // real role computation, so a data cell that gained `role="rowheader"`
+    // would leave `getByRole("cell")` unable to find it AND push the count
+    // above two — the assertion fails from both directions.
+    const cells = screen.getAllByRole("cell");
+    expect(cells.some((c) => c.textContent?.includes("Revenue bar"))).toBe(true);
+    expect(cells.some((c) => c.textContent?.includes("Orders line"))).toBe(true);
+  });
+
   it("does not strand rows behind a collapse state whose header is no longer rendered", async () => {
     // What a previous session left behind: Uncategorized collapsed, from back
     // when this workspace still had folders. `useCollapsed` reads that out of
