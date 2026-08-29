@@ -82,11 +82,20 @@ import { loginLocalAdmin, firstWorkspace, csrf, postJson } from "./helpers";
  * harness that drove headless Chromium against the same Vite dev server with
  * the API stubbed at the network layer (`page.route`). Real Chromium, real
  * shipped stylesheet, real components; only the JSON was synthetic. Viewport
- * 1600×1000, `available` 1560px there because that harness has no seeded
- * sidebar state:
+ * 1600×1000. The numbers below are RIGHT EDGES, not widths:
  *
  *   after  — Query 1560, Config 1560, Response 1560, Access 1560, Try it 1560, Versions 1560
  *   before — Query 1560, Config 1560, Response 1560, Access 1288, Try it 1288, Versions 1288
+ *
+ * An earlier revision of this comment glossed the 1560 as "wider than the
+ * deployed 1296 because the harness has no seeded sidebar". **That was wrong,
+ * and re-measuring is what showed it.** The content box measures L=264,
+ * R=1560, WIDTH=**1296** on all six tabs — the deployed figure exactly. 1560
+ * and 1288 are right edges in viewport coordinates and they tie to §5.4b's own
+ * table: a root capped at `max-w-5xl` starts at 264 and ends at 264+1024=1288.
+ * The harness REPRODUCES the deployed geometry rather than approximating it,
+ * which is a stronger claim than the gloss made — and the same arithmetic is
+ * what caught §5.4b's 1576 as the one wrong number in that table.
  *
  * The "before" row is a **negative control**, not a recollection: the three
  * `max-w-5xl`s were put back, the page re-measured, and the 272px split
@@ -244,11 +253,23 @@ test.describe("Data API — the six detail tabs are on one width", () => {
           ).toBeLessThanOrEqual(m.available);
         }
 
-        // §5.1, per tab: the section takes the width it is given. Exact, not
-        // approximate — same box model, so they are equal or the claim is
-        // false.
+        // §5.1, per tab: the section takes the width it is given.
+        //
+        // 1px of slack, and the reasoning is worth stating because the sibling
+        // spec uses exact equality. These are two INDEPENDENTLY ROUNDED edges:
+        // `available` subtracts a parsed `padding-right` from one fractional
+        // rect, `root.right` rounds a different fractional rect. Sub-pixel
+        // layout — a fractional scrollbar, a zoom level, a font metric that
+        // shifts a flex line — can leave them 1 apart while the section is
+        // taking exactly the width it was given. This file has never executed
+        // against a live stack, so exact equality here would be a spurious
+        // failure waiting for its first run rather than a real finding. The
+        // defect being guarded is 272px; 1px of tolerance cannot hide it.
         const root = m.frames[0]!;
-        expect(root.right, `${heading}: the section leaves no gutter`).toBe(m.available);
+        expect(
+          Math.abs(root.right - m.available),
+          `${heading}: the section leaves no gutter (root ${root.right} vs available ${m.available})`,
+        ).toBeLessThanOrEqual(1);
 
         // The exception, asserted rather than skipped (§5.2). Not every tab
         // has capped prose, so this is conditional — but where it exists it
@@ -270,16 +291,23 @@ test.describe("Data API — the six detail tabs are on one width", () => {
       expect(measured.length, "measured all six tabs").toBe(TABS.length);
 
       // The claim itself, and the one no jsdom test can make: the six agree.
-      // Written as a whole-array comparison so the failure message names every
-      // tab and its number, rather than dying on the first pair.
+      //
+      // Reported as a SPREAD rather than a pairwise walk, so one failure
+      // message carries every tab and its number instead of dying on the first
+      // mismatched pair — and so the number in the message is the thing §5.1 is
+      // about (how far apart the tabs are) rather than an index.
+      //
+      // Same 1px tolerance and same reasoning as the per-tab check above: six
+      // independently rounded edges, a defect measured in hundreds of pixels.
+      // The spread was 272 before this rule; 1px cannot hide that.
       const edges = measured.map((m) => m.widest);
-      const expected = measured.map(() => edges[0]!);
+      const spread = Math.max(...edges) - Math.min(...edges);
       expect(
-        edges,
+        spread,
         `all six tabs end at the same right edge — measured: ${measured
           .map((m) => `${m.tab}=${m.widest}/${m.available}`)
           .join(", ")}`,
-      ).toEqual(expected);
+      ).toBeLessThanOrEqual(1);
     } finally {
       // Best-effort: a failed assertion must not leave the shared workspace
       // holding a throwaway endpoint or connection.

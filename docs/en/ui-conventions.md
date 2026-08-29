@@ -844,13 +844,27 @@ cannot. When those two conflict, the route wins.
 
 **Two things follow, and they are what keeps this from being a taste argument:**
 
-- **The per-section complaints do not disappear; they move to the instrument that fits them.**
-  "The picker is a screen away from the label" is a COLUMN width, and `ConfigTable`'s
-  `valueClassName` answers it without starving the section — that is exactly the resolution
-  §5.4b reached for Response, where the same complaint had earned the same cap. "The sentence
-  sets as one very long line" is a PROSE measure, and `max-w-prose` answers it (§5.2, "cap the
-  prose, not the column"). A section-root cap was answering both of those with the one tool
-  that also breaks the tab set.
+- **The per-section complaints do not disappear; they move to the instrument that fits them —
+  and one of the two moves is done, the other is owed.** A section-root cap was answering both
+  complaints with the one tool that also breaks the tab set; each has a narrower instrument.
+  **State of the tree, measured, not asserted:**
+
+  - **Prose: DONE.** "The sentence sets as one very long line" is a PROSE measure and
+    `max-w-prose` answers it (§5.2, "cap the prose, not the column"). Every section intro
+    carries it. Measured in Chromium: each intro went from filling the content box to 532px
+    (Query 419px, which is its text ending before the cap). **This was a regression introduced
+    BY the reversal and fixed in the same breath** — three of those six intros were bounded at
+    1024 by the caps this section removed, so uncapping the roots un-capped them too, and at
+    1920 with the rail collapsed they ran past 1700px.
+  - **Column width: NOT DONE on `Try it`, and this is a debt, not a resolution.** "The picker is
+    a screen away from the label" is a COLUMN width and `ConfigTable`'s `valueClassName` answers
+    it — that is the resolution §5.4b reached for `Response`, which carries `w-52 lg:w-96`.
+    `Try it` still carries the `w-52 lg:w-80` it had before the reversal, so it got §5.2's trap
+    in full: measured with and without its cap, `Details` — the only unsized column — went
+    **408 → 680px, taking all 272 freed pixels**, while `Value` stayed at 320px. The picker is
+    no further from its label than it was, but it is no closer either, and the width went to
+    muted help text. Owed by a later task in this programme; recorded here rather than papered
+    over, because a mitigation named as the reason a reversal is not taste has to actually exist.
 - **A section may still cap its own CHILDREN** (§5.5), and one does: `ResponseSection`'s
   editable `returns` grid keeps `max-w-xl`, because a row of four form controls stretched wide
   puts the delete button an arm's length from the row it acts on. That is the narrow, still-live
@@ -950,11 +964,20 @@ with the sidebar expanded, against the shipped stylesheet:
 
 | | width | right edge |
 |---|---|---|
-| content box | 1296 | 1576 |
+| content box | 1296 | **1560** (was recorded as 1576 — see below) |
 | section root (`max-w-5xl`) | 1024 | 1288 |
 | frozen `Name \| Type` table (`max-w-xl`) | 576 | 840 |
 | `Setting \| Details \| Value` table | 1024 | 1288 |
 | the two block paragraphs (`max-w-prose`) | 532 | 796 |
+
+**One number in that table was wrong, and the arithmetic is what settles it.** The content box's
+right edge was recorded as 1576, which puts its left edge at 1576 − 1296 = **280**. Every other
+row implies **264**: 1288 − 1024, 840 − 576, 796 − 532. A child box cannot start 16px to the
+LEFT of the parent that contains it, so 1576 is the outlier and the true right edge is **1560**.
+The gutter is therefore **272px**, not the 288 this section derived from the bad figure — and
+272 is also what the deployed-build audit in §5.1 reports (1296 − 1024) and what a re-measurement
+in Chromium reproduces. **Nothing downstream moves:** every conclusion in this section was
+computed from the WIDTHS, which were right; only the one derived gutter figure was wrong.
 
 **The cap was not wrong when it was applied; the section stopped being the kind of section it was
 applied to.** §5.4a capped it as a prose-and-short-lists tab. It has since gained a
@@ -1106,12 +1129,20 @@ was reversed this spec had **not** been executed against a live seeded stack —
 not running in the authoring environment — so it is committed as the regression artifact and
 "it passes" is not among the claims made for it. The geometry itself was verified in headless
 Chromium against the Vite dev server with the API stubbed at the network layer: real browser,
-real stylesheet, synthetic JSON. All six tabs measured 1560/1560 (that harness has no seeded
-sidebar, hence 1560 rather than 1296), and — the part that makes it evidence — **a negative
-control put the three `max-w-5xl`s back and the 272px split reappeared**: Access, Try it and
-Versions dropped to 1288 while the other three stayed at 1560. Six numbers agreeing prove
-nothing on their own; six numbers that agree *and* stop agreeing when the defect is reinstated
-are a measurement. §8.
+real stylesheet, synthetic JSON. All six tabs measured a right edge of 1560 against an available
+right edge of 1560, and — the part that makes it evidence — **a negative control put the three
+`max-w-5xl`s back and the 272px split reappeared**: Access, Try it and Versions dropped to 1288
+while the other three stayed at 1560. Six numbers agreeing prove nothing on their own; six
+numbers that agree *and* stop agreeing when the defect is reinstated are a measurement. §8.
+
+**Those are RIGHT EDGES, not widths, and an earlier revision of this paragraph got that wrong** —
+it glossed the 1560 as "the harness has no seeded sidebar, hence 1560 rather than 1296".
+Re-measured: the content box is L=264, R=1560, **WIDTH 1296** on all six tabs, which is the
+deployed figure exactly, and 1288 is where a `max-w-5xl` root ends (264 + 1024). The harness
+reproduces the deployed geometry rather than approximating it. The gloss was the weaker claim
+AND the false one, which is the usual shape: a number that looks off invites an explanation, and
+inventing one is cheaper than re-measuring. The same arithmetic — every box shares the left edge
+264 — is what identified §5.4b's 1576 as wrong.
 
 ---
 
@@ -1565,8 +1596,11 @@ not exist yet:
   — the last unguarded section — and deleted `expectSectionCapsItsOwnWidth`, which the reversal
   left with zero callers. **Sections whose ROOT carries a `max-w-*`: 0.** Sections capping a
   CHILD: 1, `ResponseSection`'s `returns` grid (§5.5), and
-  `grep -rn 'max-w-' src/routes/explore/dataapi/detail` returning nothing else but `max-w-prose`
-  is what makes that a count and not a recollection (§9).
+  and `grep -rn 'className="[^"]*max-w-' src/routes/explore/dataapi/detail` is what makes that a
+  count and not a recollection (§9). **Narrowed to `className=` on purpose:** the bare
+  `grep -rn 'max-w-'` this bullet used to quote also returns the `max-w-xl` line itself plus nine
+  COMMENT lines that discuss caps without applying any, so re-running it reads as drift that is
+  not there — a check nobody trusts gets skipped.
 - `ConfigSection` — 13 files, down from **15** at the merge base. This is the fifth count of
   this number in the programme and the first measured at both ends:
   `grep -rl 'from "@/components/form/ConfigSection"' src` gives 15 at `63a4fb90` and 13 at

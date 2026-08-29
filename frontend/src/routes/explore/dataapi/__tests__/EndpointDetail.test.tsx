@@ -1785,6 +1785,73 @@ describe("EndpointDetail — document heading", () => {
  * muted Details prose that `table-fixed` would otherwise hand all of it to.
  */
 describe("EndpointDetail — width", () => {
+  /**
+   * Local, and it is a BUG FIX rather than tidying.
+   *
+   * Four of the tests below render `ResponseSection` or `Versions`, both of
+   * which call `useDataApiListServiceAccounts` and
+   * `useDataApiListEndpointVersions`. Neither mock was set here — they were
+   * LEAKING from `describe("ResponseSection")`'s own `beforeEach` further up
+   * this file. There is no `clearMocks`/`mockReset` in `vitest.config.ts`, so a
+   * `mockReturnValue` set by an earlier describe survives into this one, and
+   * these four tests were passing on state they never asked for.
+   *
+   * Measured on the clean, all-green tree: unfiltered, the four Data API detail
+   * files give 185 passed / 0 failed; the same four with `-t "width"` give
+   * **4 failed**, every one a `TypeError` inside `ResponseSection` for a hook
+   * that returned `undefined`.
+   *
+   * Two things follow, and the second is the one that bites:
+   *
+   *  - **No `-t`-filtered count in this suite is a result.** Filtering skips
+   *    the tests whose side effects the survivors depend on, so a filtered run
+   *    reports failures that do not exist and can equally hide ones that do.
+   *  - **It was an ORDER DEPENDENCY, not a filtering curiosity.** Anything that
+   *    changes which tests run before these — `.only`, `--shard`, a bisect, or
+   *    splitting this 1900-line file, which is a standing temptation — turned
+   *    three real width guards red for a reason having nothing to do with
+   *    width. That is a guard failing for the wrong reason, which is only one
+   *    step better than passing for the wrong reason.
+   *
+   * Setting them here makes this block self-contained. The last test overrides
+   * `useDataApiListEndpointVersions` for its own fixture, which still works:
+   * `beforeEach` runs first and the test body's `mockReturnValue` wins.
+   */
+  beforeEach(() => {
+    vi.mocked(api.useDataApiListEndpointVersions).mockReturnValue(
+      { data: { status: 200, data: [] }, isLoading: false, isError: false } as unknown as
+        ReturnType<typeof api.useDataApiListEndpointVersions>,
+    );
+    vi.mocked(api.useDataApiListServiceAccounts).mockReturnValue(
+      {
+        data: {
+          status: 200,
+          data: [{ id: "sa-1", name: "svc", description: "", email: "svc@x", created_at: "2026-01-01T00:00:00Z" }],
+        },
+        isLoading: false,
+        isError: false,
+      } as unknown as ReturnType<typeof api.useDataApiListServiceAccounts>,
+    );
+    vi.mocked(api.useDataApiGetOpenapi).mockReturnValue(
+      { data: undefined, isError: false } as unknown as ReturnType<typeof api.useDataApiGetOpenapi>,
+    );
+    // `Versions` renders `PublishDialog`, which reads `isPending` off both
+    // mutations on first paint — these were leaking from
+    // `describe("VersionsSection")` in exactly the same way.
+    vi.mocked(api.useDataApiPublishEndpoint).mockReturnValue(
+      { mutateAsync: vi.fn(), isPending: false } as unknown as
+        ReturnType<typeof api.useDataApiPublishEndpoint>,
+    );
+    vi.mocked(api.useDataApiRollbackEndpoint).mockReturnValue(
+      { mutateAsync: vi.fn(), isPending: false } as unknown as
+        ReturnType<typeof api.useDataApiRollbackEndpoint>,
+    );
+    vi.mocked(api.getDataApiListEndpointVersionsQueryKey).mockImplementation(
+      (ws, id) => ["dataApiListEndpointVersions", ws, id] as unknown as
+        ReturnType<typeof api.getDataApiListEndpointVersionsQueryKey>,
+    );
+  });
+
   it("wraps the Outlet in nothing that caps the width", async () => {
     // The subject is the ROUTE, so the section is a sentinel rather than a real
     // one. Two earlier shapes of this guard were wrong in opposite directions
@@ -1793,7 +1860,15 @@ describe("EndpointDetail — width", () => {
     //
     //  - `container.querySelector(".max-w-3xl")` scanned the whole subtree, so
     //    it forbade one class name to an entire page. A section may legitimately
-    //    cap its own children (Try it's parameter grid does).
+    //    cap its own children — `ResponseSection`'s editable `returns` grid
+    //    (`max-w-xl`) does, and as of §5.1's reversal it is the only one.
+    //
+    //    This line used to cite `Try it`'s parameter grid instead. That was
+    //    never true: `TryIt.tsx:389` is a bare `<Table className="table-fixed">`
+    //    with no cap of its own — it was sitting inside `Try it`'s SECTION cap,
+    //    which the reversal removed. The same false precedent was written in
+    //    `ResponseSection.tsx`'s own comment on the `returns` grid, so it
+    //    existed in two places and was corrected in both.
     //  - Walking up from a real section's content and stopping at "the child of
     //    the route container" reads the wrapper we are hunting AS the section
     //    root whenever it exists — measured: a restored `max-w-3xl` around the

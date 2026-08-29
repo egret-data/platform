@@ -102,7 +102,7 @@ export default function VersionsSection() {
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h2 className="text-lg font-semibold">Versions</h2>
-          <p className="text-sm text-muted-foreground">
+          <p className="max-w-prose text-sm text-muted-foreground">
             Every frozen snapshot of this endpoint&apos;s contract. A consumer only ever receives the one
             marked Live — never the draft sitting in Query.
           </p>

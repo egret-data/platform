@@ -252,7 +252,7 @@ export default function TryIt() {
           ACCOUNT rather than as you — see the module doc. */}
       <div className="flex shrink-0 flex-wrap items-baseline gap-x-3 gap-y-1 pb-2">
         <h2 className="text-lg font-semibold">Try it</h2>
-        <p className="text-sm text-muted-foreground">
+        <p className="max-w-prose text-sm text-muted-foreground">
           Runs a real call through the actual serving router, as a chosen service account — this answers
           what a real consumer would receive, not a simulation.
         </p>

@@ -74,7 +74,7 @@ export default function Config() {
     <div className="space-y-6">
       <div>
         <h2 className="text-lg font-semibold">Config</h2>
-        <p className="text-sm text-muted-foreground">
+        <p className="max-w-prose text-sm text-muted-foreground">
           The endpoint as an HTTP object: the URL contract callers use, and the cache, limits, and
           rate-limit policy applied to their calls.
         </p>

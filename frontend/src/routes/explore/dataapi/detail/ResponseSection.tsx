@@ -692,7 +692,7 @@ export default function ResponseSection() {
     <div className="space-y-6">
       <div>
         <h2 className="text-lg font-semibold">Response</h2>
-        <p className="text-sm text-muted-foreground">
+        <p className="max-w-prose text-sm text-muted-foreground">
           What a consumer actually receives when they call this endpoint.
         </p>
       </div>

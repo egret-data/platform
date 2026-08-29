@@ -402,7 +402,7 @@ export default function Query() {
           reader who arrived by URL rather than by clicking the nav. */}
       <div className="flex shrink-0 flex-wrap items-baseline gap-x-3 gap-y-1 pb-2">
         <h2 className="text-lg font-semibold">Query</h2>
-        <p className="text-sm text-muted-foreground">
+        <p className="max-w-prose text-sm text-muted-foreground">
           The query this endpoint runs, and the parameters callers may pass it.
         </p>
       </div>
