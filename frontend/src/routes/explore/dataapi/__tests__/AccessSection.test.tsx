@@ -1182,6 +1182,18 @@ describe("AccessSection — a row that fits, and an identity you can read", () =
         order.indexOf(tryIt),
         `${account.name}: Try it comes before the mutation (§1.2)`,
       ).toBeLessThan(order.indexOf(button));
+
+      // Both mutations carry the SAME width floor, which is what keeps the link
+      // to their left at one offset down the page: measured, `Revoke` is 78px
+      // and `Grant invoke` 104px, so without it `Try it` moves 26px between
+      // rows. It also stops the button resizing under the cursor when its own
+      // label becomes "Revoking…". A class canary — the offsets themselves are
+      // measured in `data-api-access-row.spec.ts`; what makes it worth pinning
+      // here is that it has to be the same on BOTH arms, which is why this loop
+      // runs over both.
+      expect(button.className, `${account.name}: shares the mutation width floor`).toMatch(
+        /\bmin-w-28\b/,
+      );
     }
 
     // The canary for the geometry, and ONLY a canary: "beside each other" is a
@@ -1271,15 +1283,23 @@ describe("AccessSection — a row that fits, and an identity you can read", () =
    * the width has to BE — a synthesised address fitting inside the column, in
    * the shipped mono face — is measured in `data-api-access-row.spec.ts`.
    *
-   * The gate is `xl`, not `lg`, and that is measured too. `table-fixed` does
-   * not shrink a sized column, it scrolls the table (§5.3), so the two widened
-   * columns have to leave the Invoke column enough at the breakpoint they turn
-   * on at. Measured available width: 1280px viewport → 976px, so Invoke keeps
-   * 368px; 1024px viewport → 720px, which would leave it 112px against content
-   * that lays out at 183px. `lg` would have traded a truncated address for a
-   * wrapped badge.
+   * The identity gate is `xl`, not `lg`, and that is measured too.
+   * `table-fixed` does not shrink a sized column, it scrolls the table
+   * (§5.3), so the widened column has to leave Invoke enough at the
+   * breakpoint it turns on at. Measured available width: 1280px viewport →
+   * 976px, so Invoke keeps 384px; 1024px viewport → 720px, which would leave
+   * it 128px against content that lays out at 183px. `lg` would have traded a
+   * truncated address for a wrapped badge.
+   *
+   * The actions column is UNCONDITIONAL, and the asymmetry is a measurement
+   * rather than an oversight — asserting it is what stops somebody tidying it
+   * into a matching `xl:` gate. Gated, the action group wraps back onto two
+   * lines everywhere below `xl`, and two 32px controls stacked are TALLER than
+   * the 32px-plus-16px stack this change removed: seven rows measured 651px
+   * gated at a 1024px viewport, against 451px ungated and 543px before the
+   * change.
    */
-  it("widens the identity and action columns above xl, and only above xl", async () => {
+  it("widens the identity column above xl, and the actions column at every width", async () => {
     setup({ accounts: [SA_GRANTED], grants: [] });
     renderAccess();
 
@@ -1287,12 +1307,14 @@ describe("AccessSection — a row that fits, and an identity you can read", () =
     expect(identity.className).toMatch(/\bw-48\b/);
     expect(identity.className).toMatch(/\bxl:w-96\b/);
 
-    // The actions column has to grow with it: two controls side by side do not
-    // fit `w-36`, and a column that cannot hold them would wrap the row back
-    // into two lines — the defect, restored by the half-fix.
+    // Measured, the widest pair (`Try it` + `Grant invoke`, gap included) needs
+    // 167px. `w-52` gives 192px of content; `w-36` gave 128, which is why the
+    // two were stacked. The negative assertions are the ones with teeth: a
+    // column that narrows again, or gains a breakpoint, wraps the group.
     const actions = screen.getByRole("columnheader", { name: "Actions" });
-    expect(actions.className).toMatch(/\bw-36\b/);
-    expect(actions.className).toMatch(/\bxl:w-56\b/);
+    expect(actions.className).toMatch(/\bw-52\b/);
+    expect(actions.className).not.toMatch(/\bw-36\b/);
+    expect(actions.className).not.toMatch(/:w-/);
   });
 
   /**
