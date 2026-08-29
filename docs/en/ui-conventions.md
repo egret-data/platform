@@ -187,33 +187,44 @@ because only one page of rows was ever mounted. Grouping removed the pagination,
 now explicit (`GROUP_PAGE`, a "Show N more" button), and its test asserts the number of
 distinct accounts queried on first paint — not just what is on screen.
 
-**`role="rowheader"` on the group header is this page's addition, not yet the siblings'
-practice — and this section would otherwise be a convention its own reference implementation
-violates.** `Clients.tsx` puts the role on the header's spanning cell, the same idiom §4.1
-records for `ConfigTableGroup` and for the same reason: a group row that reads as another data
-cell is the confusion the shape exists to remove. But `FolderHeaderRow.tsx` — the shared
-component Charts, Datasets, Dashboards, Notebooks, Alerts and Endpoints group with — does
-**not** set it, so **six** of the seven grouped tables in Explore currently announce their
-folder header as an ordinary cell.
+**`role="rowheader"` on the group header, on all seven.** `dataapi/Clients.tsx` puts the role on
+its header's spanning cell, the same idiom §4.1 records for `ConfigTableGroup`, and
+`FolderHeaderRow.tsx` — the shared component Charts, Datasets, Dashboards, Notebooks, Alerts and
+Endpoints group with — now does too.
+
+**It was verified before it was added, and the reason is stronger than the one this section
+first gave.** The role is not merely the house idiom, and not a stretch of a role whose name says
+"row" applied to a cell heading a row *group*: `rowheader` is what HTML-AAM computes for
+`<th scope="rowgroup">`, which is the HTML-native spelling of precisely this construct — a
+full-span header cell heading the rows of one `<tbody>`. ARIA has no separate rowgroup-header
+role, so this **is** the role for this shape. Its required context is a `row`, which the cell
+has; the association is within a row, so nothing is re-announced on the data rows beneath. The
+whole effect is that the folder reads as a heading rather than as one more data cell.
+
+It stays a `<td>` with an explicit role rather than becoming a `<th scope="rowgroup">`, for the
+reason §4.1 records: a `<th>` brings its own implicit role to argue with. `scope` is absent —
+a `<th>`-only attribute, inert on a `<td>`.
+
+**Do not add an attribute because this document predicted it.** The previous revision of this
+section said the change "should" be made and called it a one-attribute change; that is a
+prediction, not a verification, and it would have read identically had the role been wrong for a
+spanning cell. The check that settled it was the HTML-AAM mapping, and the check that the code
+holds it is `getByRole("rowheader", { name: /Revenue/ })` — the real role and accessible-name
+computation — plus an assertion that it is the **only** rowheader in the table, which a
+presence-only test would pass even if every cell carried the role.
 
 **It was recorded as four, and the counting is worth more than the number.** `Notebooks` was
-named in this section's own file list above and then dropped from the count in this paragraph;
-`Alerts` was in neither, because it was missing from the list the count was read off. The count
-was taken from a prose list in this document instead of from the tree. **Count by resolved
-module:**
+named in this section's own file list above and then dropped from the count in the paragraph
+this replaces; `Alerts` was in neither, because it was missing from the list the count was read
+off. The count was taken from a prose list in this document instead of from the tree. **Count by
+resolved module:**
 
 ```bash
-grep -rln 'from "@/components/explore/FolderHeaderRow"' frontend/src   # 6, plus its own test
+grep -rln 'from "@/components/explore/FolderHeaderRow"' frontend/src   # 7: the 6 pages, plus its own test
 ```
 
 Same failure as §7.2's `Caveat` inventory, and the same fix: an inventory in this document is a
 claim about the tree, so it is taken FROM the tree.
-
-That is a gap in those six, not a licence for the next one. A new grouped table sets the
-role, and `FolderHeaderRow` should adopt it: it is a one-attribute change, held back only
-because the task that wrote this section was scoped to a single page. It is stated here rather
-than left implicit so that nobody reads the reference implementation's silence as the
-convention.
 
 ### 1.5a A workspace with no folders gets no section header
 

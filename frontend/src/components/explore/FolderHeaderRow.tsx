@@ -14,7 +14,24 @@ export function FolderHeaderRow({ name, count, colSpan, collapsed, onToggle, onS
       onDragOver={onDropItem ? (e) => e.preventDefault() : undefined}
       onDrop={onDropItem ? (e) => { const id = e.dataTransfer.getData("text/plain"); if (id) onDropItem(id); } : undefined}
     >
-      <td colSpan={colSpan} className="py-1">
+      {/* `role="rowheader"` is not a stretch of the ARIA table model and not
+          merely the idiom `ConfigTableGroup` and `dataapi/Clients.tsx` already
+          use: it is what HTML-AAM computes for `<th scope="rowgroup">`, and a
+          full-span header cell heading the rows of one `<tbody>` is exactly
+          what that spelling is for. ARIA has no separate rowgroup-header role,
+          so this IS the role for this construct.
+
+          Its required context is a `row`, which this cell has. The association
+          is within a row, so nothing here is announced again on the data rows
+          beneath — the whole effect is that the folder reads as a heading
+          rather than as one more data cell, which is the confusion a spanning
+          group row exists to remove.
+
+          A `<td>` with an explicit role rather than a `<th scope="rowgroup">`,
+          for the reason `ConfigTable.tsx` records: a `<th>` brings its own
+          implicit role to argue with. `scope` is deliberately absent — it is a
+          `<th>`-only attribute and inert on a `<td>`. */}
+      <td colSpan={colSpan} role="rowheader" className="py-1">
         <div className="flex items-center gap-1">
           <button className="inline-flex items-center gap-1 font-medium hover:underline" onClick={onToggle} aria-label={`Toggle ${name}`}>
             <Chevron className="h-4 w-4 text-muted-foreground" />
