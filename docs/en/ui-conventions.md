@@ -897,9 +897,15 @@ cannot. When those two conflict, the route wins.
     Both of these are true and they are not the same sentence: measured against the row before it,
     the fix moved **192 to identity, 64 to actions and −256 from Invoke**; measured against the
     pre-reversal layout, the net is **+192 identity, +64 actions, +16 Invoke**, which is the 272
-    the reversal freed, finally spent. Quoting the second next to a table showing the first reads
-    as an arithmetic error and invites someone to "correct" a figure that is right. Whenever a
-    width delta appears in this section, it says which row it is measured from.
+    the reversal freed, finally spent.
+
+    **This is a labelling rule, not a correction — nothing above was ever miscalculated.** Every
+    row sums to its own available width and both delta sets are right against their own baseline.
+    The rule earns its place anyway: a review of this programme raised the two figures as an
+    arithmetic error, checked them, and withdrew it. That is the cost of an unlabelled baseline —
+    a correct number that reads as wrong, and reviewer time spent proving it is not, with a real
+    chance that someone eventually "fixes" it. **Whenever a width delta appears in §5, it says
+    which row it is measured from.**
 - **A section may still cap its own CHILDREN** (§5.5), and one does: `ResponseSection`'s
   editable `returns` grid keeps `max-w-xl`, because a row of four form controls stretched wide
   puts the delete button an arm's length from the row it acts on. That is the narrow, still-live
@@ -1172,48 +1178,68 @@ render container. And the walk is a walk, never `parentElement.parentElement`: o
 the `fieldset` is a SILENT pass, because the fieldset carries no `max-w-*` whatever the section
 does — so `sectionRootOf` hard-fails on it.
 
-### 5.6a Mock state leaks between `describe`s, and why the global switch is the wrong fix
+### 5.6a Mock state leaks between `describe`s, and the two things `mockReset` finds
 
-`src/routes/explore/dataapi/__tests__/EndpointDetail.test.tsx`, `describe("EndpointDetail — width")`.
+`src/routes/explore/dataapi/__tests__/EndpointDetail.test.tsx`, `describe("EndpointDetail — width")`,
+and `TryIt.test.tsx`'s file-level `beforeEach`.
 
-Four of that block's tests render `ResponseSection` or `Versions` and were passing on mocks
-**leaked from other `describe`s in the same file**. `frontend/vitest.config.ts` sets no
-`clearMocks` and no `mockReset`, so a `mockReturnValue` set in one block survives into the next.
-Measured on the clean, all-green tree: the four Data API detail files give **185 passed / 0
-failed** unfiltered, and **4 failed** under `-t "width"`, every one a `TypeError` for a hook that
-returned `undefined`. It took **six** mocks to make the block self-contained, and each one
-surfaced only after the previous was fixed.
+`frontend/vitest.config.ts` sets no `clearMocks` and no `mockReset`, so a `mockReturnValue` set in
+one block survives into the next. Two blocks were passing on exactly that. Measured on the clean,
+all-green tree: the four Data API detail files give **185 passed / 0 failed** unfiltered and
+**5 failed** under `-t "width"`, every one a `TypeError` for a hook that returned `undefined`. It
+took **six** mocks to make the width block self-contained, each surfacing only after the previous
+was fixed.
 
-**No `-t`-filtered count in this suite is a result**, and — the part that bites — this was an
-**order dependency**, not a filtering curiosity: `.only`, `--shard`, a bisect, or splitting a
-1900-line file turns three real width guards red for reasons unrelated to width.
+**No `-t`-filtered count in this suite is a result**, and — the part that bites — this is an
+**order dependency**: `.only`, `--shard`, a bisect, or splitting a 1900-line file turns real
+guards red for reasons unrelated to what they guard.
 
-**The global switch was measured rather than assumed, and rejected on the measurement.**
+#### `clearMocks` is the wrong instrument
 
-| | fixes the leak? | full suite |
-|---|---|---|
-| `clearMocks: true` | **no** | 1 file / 1 test red |
-| `mockReset: true` | yes | **5 files / 12 tests red, 9 errors** |
-| neither (today) | n/a | 436 files / 5025 green |
+It calls `mockClear()`, which resets call history and **leaves the implementation in place** — and
+a leaked `mockReturnValue` *is* an implementation. Verified directly rather than reasoned about:
+with the local `beforeEach` removed and `clearMocks: true` set, the filtered run fails
+**identically**. Flipping it would look like a fix, cost a red test (`monaco.test.ts`), and change
+nothing. `mockReset()` is the one that drops implementations.
 
-- **`clearMocks` is the wrong instrument, and this is the load-bearing fact.** It calls
-  `mockClear()`, which resets call history and leaves the IMPLEMENTATION in place — and a leaked
-  `mockReturnValue` is exactly an implementation. Verified directly: with the local `beforeEach`
-  removed and `clearMocks: true` set, the filtered run fails **identically**, 4 failed. Flipping
-  it would have looked like a fix, cost a red test, and changed nothing about this bug class.
-- **`mockReset` does address the class** — it drops implementations before each test, so no block
-  can inherit another's — at a cost of 12 tests across 5 files. Those 12 were inspected, not
-  counted: every one is the SAME defect (`reading 'status'`, `reading 'isPending'`,
-  `reading 'then'`, `reading '0'`, and spies asserted after being reset). So the flag is not
-  incompatible with the suite; it is a **detector**, and the 5 files are 5 more instances.
+#### `mockReset: true` finds TWO different things, and the difference is the whole planning problem
 
-**Decision: not flipped here, and the reason is scope, not doubt.** Turning it on lands 12
-failures in four areas (`api/dashboards` ×2, `chart/dashboard`, `lib/monaco`) that this task
-neither owns nor can review properly, and the gate for this work is green. It is recorded as a
-dedicated follow-up with its exact cost already measured, so the next person starts from a number
-rather than a guess. **The estimate that would have been wrong is "it is probably fine" — it is
-not; it is 12 tests.** And the one that would have been worse is flipping `clearMocks` because it
-is cheap, which buys nothing at all.
+Turning it on globally is what surfaced the leaks above. It also breaks tests that are not broken.
+**An earlier revision of this section called all twelve failures "the same defect" and described
+the follow-up as "12 leaks, fix them". That was wrong**, and wrong in the way §9 warns about: the
+error messages looked alike (`reading 'status'`, `reading 'isPending'`, `reading '0'`), and
+matching shapes were read as a matching cause without opening the files. Opened, they are two
+populations:
+
+| | files | tests | what it is |
+|---|---|---|---|
+| **Leaks** — fixed | 1 (`TryIt.test.tsx`) | 4 | tests calling `renderTryIt()` with no `mockTry(...)`, running on an implementation left by an earlier test |
+| **By design** — not defects | 4 | 8 | module-scope mocks the file deliberately preserves |
+
+The second group cannot be fixed by adding a mock, because nothing is missing:
+
+- `src/lib/__tests__/monaco.test.ts` asserts `configSpy.mock.calls[0][0]` — a call made at
+  **module-import time**, which happens once per process. A per-test reset erases history that
+  cannot be recreated; there is no mock to add.
+- `src/api/__tests__/dashboards.duplicate.test.tsx`, `dashboards.publishdetail.test.tsx` and
+  `components/chart/dashboard/__tests__/DashboardViewActionRows.test.tsx` each hold a module-scope
+  `vi.fn().mockResolvedValue(...)` and each `beforeEach`s with `mockClear`/`clearAllMocks` —
+  **choosing the flag that preserves implementations**. `mockReset` breaks them by design
+  conflict, not by defect.
+
+**So the flag is an AUDIT TOOL, not a setting to switch on.** Used as one it earned its keep
+immediately: it found the four real leaks, they were fixed, and re-measuring gives **8 failures
+across 4 files, all in the by-design group** — which is the useful conclusion, because it says
+**the suite has no remaining detectable implementation leaks**. Adopting it permanently is a
+different and larger job: restructuring four files that legitimately depend on module-scope mock
+state, or giving them a per-file opt-out. Whoever scopes that should budget for restructuring, not
+for adding missing mocks.
+
+**What deferring was and was not justified by.** The earlier revision deferred on the grounds of
+not owning the affected files, while naming only four areas — 8 of the 12. **The other four were
+in `TryIt.test.tsx`, a file this same work was editing.** Those are fixed here. What is deferred
+now is only the part genuinely outside this work's reach, and it is a different kind of work than
+the number alone suggested.
 
 ### 5.7 Six class assertions are not the claim; the browser spec is
 

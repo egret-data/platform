@@ -185,6 +185,27 @@ beforeEach(() => {
     { data: { status: 200, data: [SA_1] }, isLoading: false, isError: false } as unknown as
       ReturnType<typeof api.useDataApiListServiceAccounts>,
   );
+  // A DEFAULT for the trial mutation, so a test that never runs a trial still
+  // gets a hook that answers.
+  //
+  // `vi.clearAllMocks()` above is `mockClear`, which resets call history and
+  // KEEPS implementations — so before this line, four tests that call
+  // `renderTryIt()` without `mockTry(...)` were rendering against a
+  // `mockReturnValue` left behind by whichever earlier test happened to set
+  // one. `TryIt` reads `isPending` on first paint, so with no leak they crash
+  // rather than fail: measured, `mockReset: true` turns exactly those four into
+  // `TypeError: Cannot read properties of undefined (reading 'isPending')`.
+  //
+  // Same defect as `EndpointDetail.test.tsx`'s width block (§5.6a), and the
+  // same consequence: `.only`, `--shard`, or reordering this file breaks tests
+  // that have nothing to do with what broke them. Defaulted here rather than
+  // patched into the four, because the file already defaults the accounts hook
+  // one line up — a default that covers every test cannot be outrun by a new
+  // one.
+  vi.mocked(api.useDataApiTryEndpoint).mockReturnValue(
+    { mutateAsync: vi.fn().mockResolvedValue({ status: 200, data: OK }), isPending: false } as unknown as
+      ReturnType<typeof api.useDataApiTryEndpoint>,
+  );
 });
 
 describe("TryIt", () => {
