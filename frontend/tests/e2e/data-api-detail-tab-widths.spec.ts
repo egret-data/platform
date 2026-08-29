@@ -315,10 +315,14 @@ test.describe("Data API — the six detail tabs are on one width", () => {
           // rect, `root.right` rounds a different fractional rect. Sub-pixel
           // layout — a fractional scrollbar, a zoom level, a font metric that
           // shifts a flex line — can leave them 1 apart while the section is
-          // taking exactly the width it was given. This file has never executed
-          // against a live stack, so exact equality here would be a spurious
-          // failure waiting for its first run rather than a real finding. The
-          // defect being guarded is 272px; 1px of tolerance cannot hide it.
+          // taking exactly the width it was given.
+          //
+          // The slack is kept for that reason ALONE, and the reason it used to
+          // give is now false: this file HAS run against a live kind stack, and
+          // `available == root.right` held EXACTLY on all six tabs at 1600, 900
+          // and 700 — zero gutter, so exact equality would have passed. Kept
+          // because the environments this has run in are two, not because it has
+          // run in none. The defect guarded is 272px; 1px cannot hide it.
           const root = m.frames[0]!;
           expect(
             Math.abs(root.right - m.available),

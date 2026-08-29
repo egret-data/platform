@@ -173,10 +173,12 @@ test.describe("Data API — Try it shows the parameters it asks for", () => {
         database_id: dbId,
         // Every declared parameter is REFERENCED. Draft validation skips
         // `UnreferencedParameter` (`lifecycle.rs`), so a statement that ignored
-        // them should still create — but "should" is doing work there, and this
-        // spec has never run against a live backend. Referencing all six makes
-        // the fixture self-consistent, so a create failure would mean something
-        // real rather than a rule this file guessed at.
+        // them should still create — but "should" was doing work there when this
+        // was written, before the file had ever met a backend. It has since run
+        // green against a live kind stack, which tests the CREATE but still not
+        // the unreferenced path, since the fixture no longer exercises it.
+        // Referencing all six keeps the fixture self-consistent, so a create
+        // failure means something real rather than a rule this file guessed at.
         statements: [
           {
             name: "main",
