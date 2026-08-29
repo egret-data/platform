@@ -70,13 +70,12 @@ import { loginLocalAdmin, firstWorkspace, csrf, postJson } from "./helpers";
  *
  * # What has and has not been run against this file
  *
- * **This spec has not yet been executed against a live seeded stack.** When it
- * was written the backend was not running in the authoring environment (Vite
- * on :5173, `/api` proxying to a dead :8080), and standing one up is a Rust
- * build outside a frontend-only task. It compiles, `--list` enumerates it, and
- * it is committed as the regression artifact — but "it passes" is NOT among
- * the claims made for it, and the first person with the stack up should run it
- * before trusting it.
+ * **It has been executed against a live seeded stack (kind, 2026-08-29) and it
+ * passes** — 5.2s, six tabs, `available = root right = widest frame = 1560` on
+ * every one. Until then it had not: the backend was not running in the
+ * authoring environment (Vite on :5173, `/api` proxying to a dead :8080), so
+ * it was committed as the regression artifact with "it passes" explicitly NOT
+ * among its claims. It is now among them.
  *
  * The geometry claim itself WAS verified in a real browser, by a throwaway
  * harness that drove headless Chromium against the same Vite dev server with

@@ -984,9 +984,11 @@ cannot. When those two conflict, the route wins.
     alone on purpose — it is a one-row strip inside a collapsed `<details>` that already carries
     its own `max-h-[40vh]` scroll box, not a section-level settings grid — but "left alone on
     purpose" is a decision, so it is recorded rather than omitted.
-  - **Row action distance: DONE on `Access`, WITHDRAWN on `Versions` — and the withdrawal
-    corrected a claim in this document.** "Withdrawn" and not "done": the metric the old bullet
-    named did not move. `Roll back` is at **x=1470 both before and after** this task, and no
+  - **Row action distance: WITHDRAWN on BOTH tabs; what is DONE on `Access` is row height and
+    identity legibility — and both withdrawals corrected a claim in this document.** The label
+    read "DONE on `Access`" until the live check measured the same metric there and got 643px
+    (see below); the distance was never the thing either fix moved. "Withdrawn" and not "done":
+    the metric the old bullet named did not move. `Roll back` is at **x=1470 both before and after** this task, and no
     column sizing can move it. What changed is that the complaint was re-measured and found to be
     about the wrong distance, and the defect that IS there — the width piling into `Note` while
     `Who` cut addresses — was fixed with `Access`'s instrument. A reader who greps this list for
@@ -1022,10 +1024,27 @@ cannot. When those two conflict, the route wins.
     cell's 8px padding and the button's own inset, none of which depends on how wide the section
     is. The cap could never have improved it and removing the cap could never have worsened it.
 
-    On the same metric `Access` measured **643px** after its own fix — but that figure comes from
-    a ONE-ACCOUNT stub whose `Invoke` cell holds two badges, so treat it as indicative of the
-    shape and not as a number to quote. What is solid is the comparison's direction: `Access` has
-    a wide unsized column between its content and its action and `Versions` does not.
+    On the same metric `Access` measures **643px** after its own fix. That figure used to be
+    marked "indicative — a one-account stub whose `Invoke` cell holds two badges, not a number to
+    quote". **It is now a measurement**: taken on the deployed kind build at 1600×1000 against
+    the `demo` workspace's EIGHT real service accounts, whose `Invoke` cells hold ONE badge each,
+    the distance from a row's last text to the left edge of `Try it` is 643px on all eight rows.
+    The stub was right, and it was right for a reason the stub could not show.
+
+    **And it is structurally forced in exactly the way `Versions`' 83px is** — which is what
+    settles the comparison rather than merely pointing at its direction. `Invoke` is a sized
+    `xl:` column (704px of the 1296px table) immediately left of a `text-right` action, so the
+    gap is `704 − (the width of the status badge) + the action cell's inset` at any viewport at
+    or above `xl`. Sizing the row's columns moved it — `Invoke` was handed 960px before — but no
+    column sizing closes it, because the width `Invoke` keeps is width its OTHER states need: the
+    `granted` row carries a caveat disclosure, and the `unchecked` row carries a full sentence.
+
+    **So the label above says "DONE on `Access`" about row HEIGHT and identity legibility, not
+    about action distance.** On action distance the complaint is withdrawn on BOTH tabs, for the
+    same reason: a left-aligned column beside a right-aligned action produces a gap that is a
+    property of the column, not of the section's width, and neither the cap nor its removal was
+    ever going to touch it. `Access` differs from `Versions` only in the size of the number
+    (643px against 83px), because its neighbouring column is 704px wide and `When` is 128px.
 
     What the 272px actually did was pile into `Note` — 680px of blank in the MIDDLE of a row
     whose note is empty — while `Who` cut realistic addresses (a 33-character address lays out at
@@ -1327,8 +1346,10 @@ the prose, not the column" says the paragraph opts out of the section's measure,
 to.
 
 It exists because for a while **five of the six intro caps were pinned by nothing runnable** —
-the only guard was two Playwright specs that have never executed, so deleting the class from
-`Query`, `Config`, `Response`, `Try it` or `Versions` left all 5025 tests green.
+the only guard was two Playwright specs that had at that point never executed, so deleting the
+class from `Query`, `Config`, `Response`, `Try it` or `Versions` left all 5025 tests green.
+(Those specs have since been run, §5.7; the helper is still the reason a deleted cap fails in
+the suite everyone runs rather than only in the one nobody does.)
 
 **By identity, never by population — this was got wrong twice, in opposite directions.** The
 browser spec first left its prose loop unguarded ("not every tab has capped prose"), which is a
@@ -1443,8 +1464,12 @@ stopped matching asserts nothing and reports green.
 
 **What has actually been run, stated separately from what the spec claims.** At the time §5.1
 was reversed this spec had **not** been executed against a live seeded stack — the backend was
-not running in the authoring environment — so it is committed as the regression artifact and
-"it passes" is not among the claims made for it. The geometry itself was verified in headless
+not running in the authoring environment — so it was committed as the regression artifact and
+"it passes" was not among the claims made for it. **It has since been run against the deployed
+kind stack (2026-08-29) and passes**, and the same walk was repeated by hand on a seeded
+endpoint: all six tabs measured `available = root right = widest frame` at 1600, 900 and 700,
+in light and in dark, with no page-level horizontal overflow at any of them. The geometry had
+also been verified before that in headless
 Chromium against the Vite dev server with the API stubbed at the network layer: real browser,
 real stylesheet, synthetic JSON. All six tabs measured a right edge of 1560 against an available
 right edge of 1560, and — the part that makes it evidence — **a negative control put the three
@@ -1487,8 +1512,22 @@ against the real page:**
   section's right edge" has to exclude nested frames, and the spec asserts that there IS exactly
   one nested frame so the exclusion cannot go vacuous.
 
-The same caveat as §5.7 applies and is stated in the file: **it has not been executed against a
-live seeded stack.** Every number in it was measured in headless Chromium against the Vite dev
+**It has now been run against a live stack (kind, 2026-08-29), and the first run FAILED on a
+third bug of the same family — a `page.route` glob that matched nothing.** It intercepted
+`**/api/access/users`, which is the name of the frontend module the call comes from
+(`src/api/access.ts`), not the route it issues: `listUsers()` reaches
+`/api/control-plane/users`. A glob that matches nothing does not throw. The real request went
+through, `Who` fell back to `created_by.slice(0, 8)`, and the run died fifteen seconds later on
+"element not found" — indistinguishable from the column regression the file exists to catch, and
+invisible to a stubbed harness because the harness answers every request itself.
+
+The fix also asserts that the intercept FIRED — and the spec says exactly what that buys, because
+re-breaking the glob as a mutation showed the run still dies at the address-visibility wait, not
+at the counter. The counter covers the case that wait cannot see: a stack whose real user list
+happens to hold the fixture's address, where the wait passes over a dead intercept and every
+width below is measured against the backend's data rather than the fixture's.
+
+Before that run, every number in it was measured in headless Chromium against the Vite dev
 server with the API stubbed at the network layer, by running the spec's own `measureVersions`
 and `measureResponse` — compiled from the spec's source with esbuild rather than retyped — so
 what was verified is the code that ships, not a paraphrase of it.

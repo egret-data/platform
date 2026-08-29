@@ -97,12 +97,19 @@ import { loginLocalAdmin, firstWorkspace, csrf, postJson } from "./helpers";
  *
  * # What has and has not been run against this file
  *
- * **This spec has not been executed against a live seeded stack.** The backend
- * was not running in the authoring environment (Vite on :5173, `/api` proxying
- * to a dead :8080) and standing one up is a Rust build outside a frontend-only
- * task. It compiles and `--list` enumerates it. "It passes" is NOT among the
- * claims made for it — the same limitation `data-api-detail-tab-widths.spec.ts`
- * records, and the first person with the stack up should run it.
+ * **It has been executed against a live seeded stack (kind, 2026-08-29) and it
+ * passes.** Until then it had not — the backend was not running in the
+ * authoring environment (Vite on :5173, `/api` proxying to a dead :8080) — and
+ * "it passes" was explicitly not among its claims.
+ *
+ * The same live pass also drove the two counts this SIX-parameter fixture
+ * cannot reach, by hand on published endpoints seeded for it: at 8 declared
+ * parameters nothing is hidden and `Run` sits just outside the box at rest; at
+ * 16, `Run` is 356px below the fold at rest, `Cmd+Enter` runs a real trial (a
+ * 403 from the serving path) and the scroll it triggers puts `Run` back INSIDE
+ * the box (1283-1315 -> 671-703). Nothing in the section hides content behind
+ * its own scrollbar at 0, 1, 2, 8 or 16 — the `hiding` list is empty at every
+ * one, which is the property the old fixed split did not have.
  *
  * The geometry claims WERE verified in a real browser, by a throwaway harness
  * driving headless Chromium against the same Vite dev server with the API

@@ -61,11 +61,15 @@ import { loginLocalAdmin, firstWorkspace, csrf, postJson } from "./helpers";
  *
  * # What has and has not been run against this file
  *
- * **This spec has not been executed against a live seeded stack.** The backend
- * was not running in the authoring environment (Vite on :5173, `/api` proxying
- * to a dead :8080) and standing one up is a Rust build outside a frontend-only
- * task. It compiles and `--list` enumerates it, and it is committed as the
- * regression artifact — "it passes" is NOT among the claims made for it.
+ * **It has been executed against a live seeded stack (kind, 2026-08-29), and
+ * the first run FAILED — on this file, not on the page.** Its user-list
+ * intercept named a URL that does not exist, so it matched nothing and the
+ * `Who` column fell back to a truncated id; see the route site for the full
+ * account and for the guard that now makes a dead intercept fail AT the
+ * intercept. Until that run it had never executed at all: the backend was not
+ * running in the authoring environment (Vite on :5173, `/api` proxying to a
+ * dead :8080), so it was committed as the regression artifact with "it passes"
+ * NOT among its claims.
  *
  * Every number above WAS measured in a real browser, by a throwaway harness
  * driving headless Chromium against the same Vite dev server with the API
@@ -390,16 +394,39 @@ test.describe("Data API — one grid down the tab, and a history row that spends
     await page.route(`**/api/ws/${ws.slug}/data-api/endpoints/${endpointId}/versions`, (route) =>
       route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(versions) }),
     );
-    await page.route("**/api/access/users", (route) =>
-      route.fulfill({
+    // `/api/control-plane/users`, and the URL is worth a sentence because THIS
+    // GLOB WAS WRONG UNTIL THE FILE'S FIRST LIVE RUN (2026-08-29). It read
+    // `**/api/access/users` — the name of the frontend MODULE the call comes
+    // from (`src/api/access.ts`), not the route it issues; `listUsers()` calls
+    // the generated `controlPlaneAccessListUsers`, whose URL builder returns
+    // `/api/control-plane/users`. A `page.route` glob that matches nothing does
+    // not throw: the real request went through, `Who` fell back to
+    // `created_by.slice(0, 8)` (Versions.tsx:307), and the run died 15s later
+    // on "element not found" — which reads exactly like the column regression
+    // this file exists to catch. On a stubbed harness it could never have been
+    // noticed, because the harness answered every request itself.
+    //
+    // `interceptedUsers` guards the OTHER half, and it is worth being exact
+    // about which: re-breaking the glob was run as a mutation, and the run dies
+    // at the `LONG_AUTHOR` visibility wait below, NOT here — so this counter is
+    // not what catches a rename, and saying so would be the kind of guard this
+    // branch keeps finding green on the defect it names. What it does catch is
+    // the case the visibility wait CANNOT see: a stack whose real user list
+    // happens to contain that address, where the wait passes, the intercept is
+    // dead anyway, and every width below is measured against whatever the
+    // backend holds rather than against the fixture this file documents.
+    let interceptedUsers = 0;
+    await page.route("**/api/control-plane/users", (route) => {
+      interceptedUsers += 1;
+      return route.fulfill({
         status: 200,
         contentType: "application/json",
         body: JSON.stringify([
           { id: "e2e-user-1", email: "admin@egret.local", name: "Admin", status: "active" },
           { id: "e2e-user-2", email: LONG_AUTHOR, name: "P V", status: "active" },
         ]),
-      }),
-    );
+      });
+    });
 
     await page.setViewportSize({ width: 1600, height: 1000 });
     await page.goto(`/explore/${ws.slug}/data-api/endpoints/${endpointId}/versions`);
@@ -410,6 +437,11 @@ test.describe("Data API — one grid down the tab, and a history row that spends
     // The author column resolves through a second query; wait for the value
     // this spec measures rather than for a timeout.
     await expect(page.getByText(LONG_AUTHOR, { exact: true }).first()).toBeVisible();
+    // Asserted before the measurements, not after: if the user list were served
+    // by the real backend the addresses below would be whoever the stack holds,
+    // and every width claim would be about a different fixture than the one
+    // this file documents.
+    expect(interceptedUsers, "the user-list intercept actually fired").toBeGreaterThan(0);
 
     const m = await page.evaluate(measureVersions, LONG_AUTHOR);
     expect(m.error, "the history table was measured").toBeNull();

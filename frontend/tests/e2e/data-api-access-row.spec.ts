@@ -1,5 +1,8 @@
 import { test, expect } from "@playwright/test";
-import { loginLocalAdmin, firstWorkspace, csrf, postJson } from "./helpers";
+// No `postJson` here, unlike the sibling specs: it asserts a 2xx and throws, and
+// this file's fixture has to try each database in turn and keep going when one
+// REFUSES to publish. See the fixture site.
+import { loginLocalAdmin, firstWorkspace, csrf } from "./helpers";
 
 /**
  * `Access`, after Task 2: **a row that fits, and an identity you can read.**
@@ -57,10 +60,15 @@ import { loginLocalAdmin, firstWorkspace, csrf, postJson } from "./helpers";
  * selector that stopped matching asserts nothing and reports green, so the
  * seven rows are counted before anything is claimed about them.
  *
- * # Why the accounts are intercepted and the endpoint is real
+ * # Why the accounts are intercepted and the endpoint is real AND PUBLISHED
  *
  * The endpoint is created for real, because the route has to resolve and the
- * six tabs have to mount. The service-account list, the grants and the invoke
+ * six tabs have to mount — and it is **published**, because otherwise the
+ * three-way branch this file claims to measure does not exist. See the comment
+ * at the fixture site: on a draft, `probeEnabled` is false, the invoke probe
+ * never fires, every row resolves to `unchecked`, and the `inherited` row —
+ * the only one-action row there is — cannot occur. The service-account list,
+ * the grants and the invoke
  * probe are `page.route`d, for the reason `data-api-narrow-and-cells.spec.ts`
  * gives for its own interception: the shared workspace's accounts are whatever
  * somebody seeded, and this spec's whole subject is a column width against
@@ -72,12 +80,14 @@ import { loginLocalAdmin, firstWorkspace, csrf, postJson } from "./helpers";
  *
  * # What has and has not been run against this file
  *
- * **This spec has not been executed against a live seeded stack.** When it was
- * written the backend was not running in the authoring environment (Vite on
- * :5173, `/api` proxying to a dead :8080) and standing one up is a Rust build
- * outside a frontend-only task. It compiles and `--list` enumerates it, and it
- * is committed as the regression artifact — "it passes" is NOT among the
- * claims made for it.
+ * **It has now been run against a live stack (kind, 2026-08-29) — and the
+ * first run failed, on the spec and not on the page.** What it caught is
+ * recorded at the fixture site: the endpoint was never published, so the
+ * `inherited` row it was waiting for could not exist and the `toBe(6)` guard
+ * below it would have failed too. The page was correct throughout; a snapshot
+ * of the failing run shows seven rows, one-line actions and readable
+ * addresses, exactly as claimed. This is the fourth way a spec in this branch
+ * has gone green-or-red for a reason that had nothing to do with the product.
  *
  * Every geometric claim in it WAS verified in a real browser, by a throwaway
  * harness driving headless Chromium against the same Vite dev server with the
@@ -231,32 +241,74 @@ test.describe("Data API — the Access row fits, and its identity is readable", 
     const h = await csrf(page.context());
 
     const runId = `${Date.now()}`;
-    let dbId: string | undefined;
     let endpointId: string | undefined;
 
     try {
-      // A real row in `databases`, never queried — this section only READS, so
-      // the throwaway connection never has to answer. Same note as the sibling
-      // specs.
-      const db = await postJson(page.request, `/api/ws/${ws.slug}/databases`, h, {
-        name: `e2e-access-row-${runId}`,
-        engine: "starrocks",
-        host: "localhost",
-        port: 9030,
-        options: { user: "root" },
-      });
-      dbId = db.id as string;
-
       // `Wxyz`, for the reason the tab-widths spec gives: the shell renders the
       // endpoint's name beside the section's, and a descriptive fixture name is
       // one dropped `exact` away from satisfying a lookup it should not.
-      const endpoint = await postJson(page.request, `/api/ws/${ws.slug}/data-api/endpoints`, h, {
-        name: `Wxyz ${runId}`,
-        path: `e2e-access-row-${runId}`,
-        database_id: dbId,
-        statements: [{ name: "main", sql: "SELECT 1 AS total" }],
-      });
-      endpointId = endpoint.id as string;
+      //
+      // THE FIXTURE HAS TO BE PUBLISHED, AND THAT IS WHY IT CANNOT USE A
+      // THROWAWAY CONNECTION LIKE ITS SIBLINGS DO. Found on this file's first
+      // execution against a live stack (2026-08-29): the run died waiting for
+      // the `Inherited from the workspace` badge, and the page was RIGHT.
+      // `AccessSection.tsx:159` computes `isLive = state === "live" &&
+      // live_version_id`, and `:463` passes exactly that as `probeEnabled`; on
+      // a draft the whole probe is skipped and every row resolves to
+      // `unchecked`. So the `openapi?service_account_id=…` intercept below was
+      // DEAD CODE, the "inherited" state was unreachable, and — because
+      // `unchecked` still offers `Grant invoke` — all seven rows carried two
+      // actions, which would have failed the `toBe(6)` vacuity guard on the
+      // next line too. One missing publish, two failing assertions, and the
+      // spec's own header claiming a three-way branch it never reached.
+      //
+      // Publishing means the fixture needs a database that can answer a
+      // `describe`: `publish` validates the draft against the engine before it
+      // writes anything (`routes.rs::publish_endpoint` → `validated_draft`), so
+      // the sibling specs' unreachable `localhost:9030` row is refused with a
+      // 500. The workspace's FIRST database is not necessarily a live one
+      // either — measured on the kind stack, `demo-starrocks` is listed first
+      // and publishes 500 while `demo-trino` publishes 200 — so this TRIES each
+      // one and reports every engine's own refusal if none works, rather than
+      // failing on an arbitrary pick and reading like a layout regression.
+      const dbs = await page.request.get(`/api/ws/${ws.slug}/databases`);
+      expect(dbs.ok(), `GET databases → ${dbs.status()}`).toBeTruthy();
+      const dbList: Array<{ id: string; name: string }> = await dbs.json();
+      expect(dbList.length, `workspace ${ws.slug} has a database to publish against`).toBeGreaterThan(0);
+
+      const refusals: string[] = [];
+      for (const db of dbList) {
+        const created = await page.request.post(`/api/ws/${ws.slug}/data-api/endpoints`, {
+          headers: h,
+          data: {
+            name: `Wxyz ${runId}`,
+            path: `e2e-access-row-${runId}`,
+            database_id: db.id,
+            statements: [{ name: "main", sql: "SELECT 1 AS total" }],
+          },
+        });
+        if (!created.ok()) {
+          refusals.push(`${db.name}: create → ${created.status()} ${await created.text()}`);
+          continue;
+        }
+        const candidate = (await created.json()).id as string;
+        const published = await page.request.post(
+          `/api/ws/${ws.slug}/data-api/endpoints/${candidate}/publish`,
+          { headers: h, data: { note: "e2e access row" } },
+        );
+        if (published.ok()) {
+          endpointId = candidate;
+          break;
+        }
+        refusals.push(`${db.name}: publish → ${published.status()} ${await published.text()}`);
+        await page.request
+          .delete(`/api/ws/${ws.slug}/data-api/endpoints/${candidate}`, { headers: h })
+          .catch(() => {});
+      }
+      expect(
+        endpointId,
+        `no database in ${ws.slug} could publish the fixture — ${refusals.join(" | ")}`,
+      ).toBeTruthy();
 
       const accounts = NAMES.map((n, i) => ({
         id: `e2e-sa-${i}`,
@@ -417,14 +469,13 @@ test.describe("Data API — the Access row fits, and its identity is readable", 
       }
     } finally {
       // Best-effort: a failed assertion must not leave the shared workspace
-      // holding a throwaway endpoint or connection.
+      // holding a throwaway endpoint. The connection is NOT deleted here and
+      // must not be — this spec no longer creates one, it borrows one of the
+      // workspace's own so that `publish` has an engine to validate against.
       if (endpointId) {
         await page.request
           .delete(`/api/ws/${ws.slug}/data-api/endpoints/${endpointId}`, { headers: h })
           .catch(() => {});
-      }
-      if (dbId) {
-        await page.request.delete(`/api/ws/${ws.slug}/databases/${dbId}`, { headers: h }).catch(() => {});
       }
     }
   });
