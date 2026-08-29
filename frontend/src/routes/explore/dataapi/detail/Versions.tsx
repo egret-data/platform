@@ -94,42 +94,95 @@ export default function VersionsSection() {
     //
     // Where the 272px actually go, checked and not assumed (§5.2 — the table
     // below is `table-fixed`): `Note` is the only unsized column, so all of it
-    // lands there, and Note is the one column here that was being truncated.
-    // The old comment's other half stands and is accepted rather than fixed:
-    // `Actions` is `w-32` and right-aligned, so Roll back is now 272px further
-    // from the version it acts on.
+    // lands there.
+    //
+    // # The row-action half, which this task closes
+    //
+    // The old comment ended "`Actions` is `w-32` and right-aligned, so Roll
+    // back is now 272px further from the version it acts on", accepted and not
+    // fixed. Measured in real Chromium at 1600×1000 against a five-version
+    // fixture, with the cap put BACK as a negative control, that number is
+    // exactly right and it is measuring the wrong thing:
+    //
+    //   capped  (1024px)  columns 128/416/224/128/128   Roll back at x=1198
+    //   uncapped(1296px)  columns 128/688/224/128/128   Roll back at x=1470
+    //
+    // 272px, reproduced. But the distance that a reader crosses is from the
+    // row's last TEXT to its action, and that is **83px** here, in both
+    // states — `When` sits immediately left of the action column and is never
+    // empty. (`Access`, whose equivalent regression §5.1 records as fixed,
+    // measures 643px on the same metric after its fix. This table was never
+    // the one with the hole.)
+    //
+    // What the 272px actually did is put them all into `Note`, which on a row
+    // with no note is 680px of blank in the MIDDLE of the row, while `Who` was
+    // cutting realistic addresses at 224px on two of five rows. So the
+    // instrument is the one `Access` used — size the row table's own columns so
+    // the width lands where content wants it — and it is applied to `Who`
+    // below, not to `Actions`.
+    //
+    // Two things deliberately NOT done, both measured rather than assumed:
+    //
+    // - Widening `Actions` moves nothing. The cell is `text-right` and the
+    //   button is 82px, so its left edge is `columnRight − 8 − 82` at any
+    //   column width; `w-32` → `w-52` leaves it at x=1470.
+    // - Sizing all five columns does not stop `Note` hoarding. Under
+    //   `table-layout: fixed` a shortfall is shared PROPORTIONALLY, measured in
+    //   Chromium: 128/512/288/128/128 in a 1296px box lays out as
+    //   140/553/312/140/140. `Note` stays the unsized remainder instead.
+    //
+    // The residual — a right-aligned action in a full-width table sits at the
+    // page's right edge — is not a column-sizing problem and is shared with
+    // every other action column on this route. Left-aligning this one would
+    // fix the arithmetic and make `Versions` the only tab in the set that
+    // aligns its action differently, which is the defect §5.1 was reversed to
+    // remove, in miniature.
     <div className="space-y-6">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h2 className="text-lg font-semibold">Versions</h2>
-          <p className="max-w-prose text-sm text-muted-foreground">
-            Every frozen snapshot of this endpoint&apos;s contract. A consumer only ever receives the one
-            marked Live — never the draft sitting in Query.
-          </p>
-        </div>
-        {/* `trashed` beside `dirty`, and stated on screen rather than only in a
-            `title`. Publishing a trashed endpoint is a 409 naming restore
-            (`lifecycle.rs`'s guard), so an enabled button here can only spend a
-            round trip to produce a red toast — and for a trashed DISABLED
-            endpoint the pre-guard behaviour was worse than that: the publish
-            SUCCEEDED and froze a new version into the trash. The shell's
-            `fieldset` would disable this button on its own; the explicit check
-            is what puts the reason next to it. */}
-        <div className="text-right">
+      {/* The same heading block as the five sibling sections: a bare `<div>`
+          holding the `h2` and one capped paragraph. This one used to wrap that
+          in a `flex … justify-between` row with a filled primary `Publish`
+          pinned to its right — directly under the shell's own `Save`, so the
+          page's top-right corner carried two primary-looking buttons doing
+          unrelated things, on the one tab of six that did that.
+
+          Publish moved to the `History` heading line instead, which is
+          `Config.tsx`'s `Validate` shape and is where it belongs on its own
+          merits: what Publish does is add a row to that table. */}
+      <div>
+        <h2 className="text-lg font-semibold">Versions</h2>
+        <p className="max-w-prose text-sm text-muted-foreground">
+          Every frozen snapshot of this endpoint&apos;s contract. A consumer only ever receives the one
+          marked Live — never the draft sitting in Query.
+        </p>
+      </div>
+
+      <div className="space-y-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <h3 className="text-sm font-medium">History</h3>
+          {/* `trashed` beside `dirty`, and stated on screen rather than only in
+              a `title`. Publishing a trashed endpoint is a 409 naming restore
+              (`lifecycle.rs`'s guard), so an enabled button here can only spend
+              a round trip to produce a red toast — and for a trashed DISABLED
+              endpoint the pre-guard behaviour was worse than that: the publish
+              SUCCEEDED and froze a new version into the trash. The shell's
+              `fieldset` would disable this button on its own; the explicit
+              check is what puts the reason next to it.
+
+              `size="sm"` on the heading line, like `Validate`; still the
+              default (filled) variant, unlike `Validate`, because this one IS
+              this tab's primary action — the shape is what unifies, not the
+              weight. */}
           <Button
             type="button"
+            size="sm"
             onClick={() => setPublishOpen(true)}
             disabled={dirty || trashed}
             title={dirty && !trashed ? "Save your changes before publishing — Publish freezes the saved draft." : undefined}
           >
             Publish saved draft
           </Button>
-          {trashed && <p className="mt-1 text-xs text-muted-foreground">Restore it first</p>}
+          {trashed && <span className="text-xs text-muted-foreground">Restore it first</span>}
         </div>
-      </div>
-
-      <div className="space-y-2">
-        <h3 className="text-sm font-medium">History</h3>
         {/* `table-fixed`, so the Note column's `truncate` is real: under the
             default auto layout a `max-w` on a cell is advisory and a long note
             simply widens the table instead of ellipsing. The sized columns do
@@ -147,7 +200,23 @@ export default function VersionsSection() {
                   applied to a column instead of a card. */}
               <TableHead className="w-32">Version</TableHead>
               <TableHead>Note</TableHead>
-              <TableHead className="w-56">Who</TableHead>
+              {/* §5.1's last open mitigation, and the same instrument
+                  `AccessSection` used: the freed width goes to the column that
+                  is CUTTING its content, not to the one that merely has room.
+                  Measured in Chromium at 1600×1000 with five versions, this
+                  column laid out `priyanka.venkataraman@egret.local` (33
+                  characters) at 231px against 224px of column and truncated it
+                  on two of the five rows, while `Note` was being handed 688.
+                  `w-80` is 320px, which holds the realistic band; a note is
+                  unbounded prose that no finite width fixes, and it keeps the
+                  `title` fallback it already had.
+
+                  Gated at `xl` for §5.3's reason: `table-fixed` scrolls rather
+                  than shrinks, so an ungated widening costs the narrow regime
+                  64px of horizontal scroll to fix a wide-screen complaint. At
+                  `xl` the content box is 976px and the four sized columns take
+                  704, leaving `Note` 272. */}
+              <TableHead className="w-56 xl:w-80">Who</TableHead>
               <TableHead className="w-32">When</TableHead>
               {/* Named for a screen reader, invisible on screen: a visible
                   "Actions" heading over a column of one small button reads as

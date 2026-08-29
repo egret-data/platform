@@ -599,9 +599,9 @@ form at the fold. Both were tried on this editor and both were wrong.
 
 ### 4.2 A read-only listing is not a setting, and an action is not a setting
 
-`src/routes/explore/dataapi/detail/ResponseSection.tsx`. Only `Output shape` was
-config-shaped, and only it became a `ConfigTableGroup` + rows. The other two blocks are not
-rows of that table, and the reason is the durable part of this section:
+`src/routes/explore/dataapi/detail/ResponseSection.tsx`. The section's SETTINGS are one
+`ConfigTable` with group rows — `Response transform`, then `Output shape` — and two blocks
+are not rows of it. The reason those two are out is the durable part of this section:
 
 - **Frozen columns** — a read-only `Name | Type` listing of the *published* contract. There
   is no Value to edit. Forcing it into the shared table would either fabricate a Value column
@@ -611,6 +611,64 @@ rows of that table, and the reason is the durable part of this section:
 
 **The rule:** the complaint that removed the `ConfigSection`s was about cards framing
 near-empty tables (§4.1), not about cards.
+
+#### The premise for `Frozen columns`, measured rather than argued
+
+The two arguments above are about kind. When the tab was re-read against "one table with
+group rows" there was a third option nobody had weighed — `Setting | Details | Value` maps
+onto `name | why | type` without fabricating anything, because the type genuinely IS the
+listing's value — and it loses on geometry, which is checkable:
+
+`ColumnTable` is `table-fixed` with `w-72` on Name, so a type starts **288px** after the name
+it describes, at any table width. That number is the whole reason the frame was rewritten:
+under auto layout inside `max-w-xl` it was 444px, and "`bigint` sat far from the name it
+describes" was the reported complaint. In a `ConfigTable` the Value column sits after
+`Setting` (288) **and** `Details` (624 at a 1296px content box), so the type would start
+**912px** after the name — three times the distance the current frame exists to produce. A
+`Details` cell cannot collapse per row; the column is sized once for the table.
+
+So the conclusion survives, and it now rests on a number instead of only on a kind.
+
+#### The `Response transform` block, which was NOT one of the two and has moved in
+
+Until the detail-tabs pass this section shipped beside `Output shape` as a titled block of its
+own: an `h3`, a paragraph, a checkbox, and — only when enabled — a Monaco editor and an
+editable returns grid. Its recorded argument was that "the script and its returns table are
+the `ParamEditor` shape … not a single `Setting | Details | Value` row", which is true of the
+script and the grid and was never true of the **toggle**. The toggle is a checkbox with a
+sentence of help beside it, which is the shape this table exists for, and on an endpoint with
+no transform the toggle is the *only* part of the block on screen — so the tab was carrying a
+titled block, permanently, to house one checkbox.
+
+It is a `ConfigTableGroup` + one `ConfigTableRow` now, **above** `Output shape` because
+turning it on removes `Shape` and `Naming` from the rows below it, and a control whose effect
+is to delete two rows reads above them. The script and the returns grid take a **full-width
+`colSpan={3}` row of the same table** — the device that table already used for the
+`SettingsNote` standing in for those two rows — because `valueClassName` is 384px at `lg` and
+a code editor is not a 384px thing. The row is not rendered at all without a transform.
+
+**What this does NOT license.** "It is a checkbox, so it is a setting" is the argument, not
+"fold everything in". The two blocks above are still out, and the OpenAPI block stayed out on
+its own kind while changing shape (§4.2a).
+
+#### 4.2a An action at the end of a settings tab has a shape, and `Config` already had it
+
+`OpenAPI document` is an action and is not a row of the table — unchanged. What changed is the
+shape it takes outside the table. It was a heading, then a paragraph, then a button on a line
+of its own: read down the page that was a third block layout on a tab that already had a
+read-only listing and a settings table, which is the complaint the whole detail-tabs pass
+answers ("Config is fine, the other tabs are not").
+
+`Config.tsx`'s `Validate` block is the same KIND of thing — an action at the end of a settings
+tab — and it is `space-y-2 border-t border-border pt-4` with the heading and a `size="sm"`
+button on ONE line and whatever the action produced beneath. `ResponseSection`'s OpenAPI block
+takes that shape, and `Versions`'s `Publish saved draft` takes it too (§5.1). Three call sites,
+one shape, on the tab set whose complaint was that it had four.
+
+**Guarded as a shared parent, not as a class**: `EndpointDetail.test.tsx`'s "ends the tab with
+the OpenAPI action on its heading line" asserts `button.parentElement === heading.parentElement`
+and that that parent holds no `<p>` — the second half is what stops the section root from
+satisfying it, since the root does hold one.
 
 #### The part of this section that was reversed, and why
 
@@ -846,16 +904,20 @@ cannot. When those two conflict, the route wins.
 
 - **The per-section complaints do not disappear; they move to the instrument that fits them.**
   A section-root cap was answering ALL of them with the one tool that also breaks the tab set;
-  each has a narrower instrument. **There are THREE such moves, not two, and one of them is
-  still open — measured, not asserted.** An earlier revision of this bullet named only two and
+  each has a narrower instrument. **There are THREE such moves, not two, and all three are now
+  done — measured, not asserted.** An earlier revision of this bullet named only two and
   reported "one done, one owed", which was the fourth time this document described a rule its
-  own tree did not implement. The failure it set up was specific, and the half of it that could
-  still happen is the half that matters now: the `Try it` debt below is CLOSED as of this task,
-  and reading that as "the reversal is mitigated" would leave `Versions` shipping a live
-  regression. It is not. **Two of the three are done; the third is done on `Access` and open on
-  `Versions`.** The check that finds it is the one this section prescribes — grep the class the
-  rule is about and reconcile every hit — which returns exactly two right-aligned action
-  columns, one fixed and one not.
+  own tree did not implement; a later one carried three with the row-action move open on
+  `Versions`. Both are closed as of the detail-tabs pass. The check that finds any of this is
+  the one this section prescribes — **grep the class the rule is about, reconcile every hit,
+  then check your count against the list you just wrote**. Run for the row-action move over
+  `src/routes/explore/dataapi`, `text-right` returns 17 hits: **two** are action columns and
+  both are fixed (`detail/AccessSection.tsx:414` and `detail/Versions.tsx:224`, plus each one's
+  matching body cell, 721 and 289); ten are numeric columns in `Activity.tsx` and
+  `ActivityCallList.tsx` (Calls, Error rate, p50/p95, Cache-hit rate, Duration, and their
+  `tabular-nums` cells); two are `Clients.tsx`, a list page rather than a detail route; and one
+  is prose — a line of `Versions.tsx`'s own comment explaining why widening a `text-right`
+  column moves nothing. 2 headers + 2 body cells + 10 numeric + 2 list-page + 1 comment = 17.
 
   - **Prose: DONE.** "The sentence sets as one very long line" is a PROSE measure and
     `max-w-prose` answers it (§5.2, "cap the prose, not the column"). Every section intro
@@ -911,19 +973,56 @@ cannot. When those two conflict, the route wins.
     alone on purpose — it is a one-row strip inside a collapsed `<details>` that already carries
     its own `max-h-[40vh]` scroll box, not a section-level settings grid — but "left alone on
     purpose" is a decision, so it is recorded rather than omitted.
-  - **Row action distance: DONE on `Access`, NOT DONE on `Versions`.** This is the move the
-    earlier revision omitted entirely, and it is the one the reversal actively CAUSED rather than
-    merely failed to help. Both tabs put their row action in a narrow, right-aligned last column
-    of a `table-fixed` table, so every pixel the section gained went to the one unsized column and
-    the action slid 272px further from the row it acts on. The instrument is neither of the two
-    above: it is **sizing the row table's own columns** so the width lands on the columns that
-    want it. `AccessSection.tsx` does that now — `Service account` went `w-48` → `w-48 xl:w-96`
-    and `Actions` `w-36` → `w-52`, on the measurement that `Invoke`, the unsized column, laid out
-    its widest row at 183px while being handed 960. **`Versions.tsx` still has the defect**, and
-    its own comment says so in as many words: `Actions` is `w-32`, `Note` is the only unsized
-    column, and Roll back sits 272px further from the version it rolls back than before the
-    reversal. Owed, and owed more urgently than the `Try it` debt, because this one is a
-    regression rather than an unbanked improvement.
+  - **Row action distance: DONE on both, and the `Versions` half corrected a claim in this
+    document.** This is the move the earlier revision omitted entirely, and it is the one the
+    reversal actively CAUSED rather than merely failed to help. Both tabs put their row action in
+    a narrow, right-aligned last column of a `table-fixed` table, so every pixel the section
+    gained went to the one unsized column. The instrument is neither of the two above: it is
+    **sizing the row table's own columns** so the width lands on the columns that want it.
+    `AccessSection.tsx` does that — `Service account` went `w-48` → `w-48 xl:w-96` and `Actions`
+    `w-36` → `w-52`, on the measurement that `Invoke`, the unsized column, laid out its widest
+    row at 183px while being handed 960.
+
+    `Versions.tsx` now does it too — `Who` went `w-56` → `w-56 xl:w-80` — and getting there
+    found that the sentence this bullet used to carry about it was measuring the wrong thing.
+    Measured in real Chromium at 1600×1000 against a five-version fixture, **with the removed cap
+    put back as a negative control**:
+
+    | | Version | Note | Who | When | Actions | Roll back at |
+    |---|---|---|---|---|---|---|
+    | capped (1024px), the pre-reversal layout | 128 | 416 | 224 | 128 | 128 | x=1198 |
+    | uncapped (1296px), before this task | 128 | **688** | 224 | 128 | 128 | x=1470 |
+    | after this task | 128 | 592 | **320** | 128 | 128 | x=1470 |
+
+    The 272px is real and reproduces exactly. **What it is not is a gap the reader crosses**: the
+    distance from a row's last TEXT to its action is **83px** in every one of those three states,
+    because `When` sits immediately left of the action column and is never empty. On the same
+    metric `Access` measures **643px** after its own fix. The tab with the hole was never this
+    one.
+
+    What the 272px actually did was pile into `Note` — 680px of blank in the MIDDLE of a row
+    whose note is empty — while `Who` cut realistic addresses (a 33-character address lays out at
+    231px against 224px of column) on two of five rows. That is the same defect `Access` had, in
+    the same place, and the same instrument fixes it: the width goes to the column that is
+    cutting its content. A note is unbounded prose that no finite width fixes and it keeps its
+    `title`; `Note` therefore stays the unsized remainder.
+
+    **Two things measured and deliberately NOT done**, recorded so they are not re-opened:
+
+    - **Widening `Actions` moves nothing.** The cell is `text-right` and the button is 82px, so
+      its left edge is `columnRight − 8 − 82` at any column width. `w-32` → `w-52` leaves Roll
+      back at x=1470. (On `Access` that same widening DID matter, and for a different reason: it
+      has two controls and they were wrapping to two lines.)
+    - **Sizing all five columns does not bound `Note`.** Under `table-layout: fixed` a shortfall
+      is shared PROPORTIONALLY — measured in Chromium, `128/512/288/128/128` inside a 1296px box
+      lays out as `140/553/312/140/140`, so every column including `Actions` grows and `Note`
+      still takes the largest share.
+
+    **The residual is not a column-sizing problem and is not owed.** A right-aligned action in a
+    full-width table sits at the page's right edge; that is what the shape means, and every
+    action column on this route shares it. Left-aligning this one would fix the arithmetic and
+    make `Versions` the only tab in the set that aligns its action differently — the defect §5.1
+    was reversed to remove, in miniature.
 
     **State the baseline with the number, because there are two and they disagree by 272.**
     `Access`'s three columns at a 1600px viewport, `Setting | Invoke | Actions`:
@@ -1085,7 +1184,10 @@ computed from the WIDTHS, which were right; only the one derived gutter figure w
 **The cap was not wrong when it was applied; the section stopped being the kind of section it was
 applied to.** §5.4a capped it as a prose-and-short-lists tab. It has since gained a
 `Setting | Details | Value` table (§4.2) and a Monaco editor for the response transform — the two
-things §5.1 THEN gave as the reason Config and Query use the page. (That what-a-section-HOLDS
+things §5.1 THEN gave as the reason Config and Query use the page. (Those are now ONE thing: the
+transform is a group of that table and its editor is a full-width row of it — §4.2. The four
+blocks this section counted are two plus a read-only listing, and only the listing and the
+`max-w-prose` sentences are not on the page's measure.) (That what-a-section-HOLDS
 criterion is retired: §5.1 now says one width for all six, so there are no groups to move
 between. This section is kept because it is still the reason THIS cap came off first, and
 because everything below it about `valueClassName`, the frozen table and the `lg` regime is

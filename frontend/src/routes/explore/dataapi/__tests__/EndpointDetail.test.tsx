@@ -815,6 +815,44 @@ describe("ResponseSection", () => {
     }
   });
 
+  /**
+   * `OpenAPI document` is an ACTION, not a setting (§4.2), so it stays out of
+   * the settings table — and this task did not change that. What changed is
+   * the SHAPE it takes outside the table. It was a heading, a paragraph, then
+   * a button on a line of its own: a third block layout on a tab that already
+   * has a read-only listing and a settings table, which is the "four shapes"
+   * complaint this task exists to answer.
+   *
+   * `Config.tsx`'s `Validate` block is the same KIND of thing — an action at
+   * the end of a settings tab — and it puts the heading and the button on ONE
+   * line under a `border-t`. That is the shape on the tab the user called
+   * fine, so this one takes it rather than inventing a third.
+   *
+   * Asserted as a SHARED PARENT rather than as a class: the identity holds
+   * only while the two are on one line, and it cannot be satisfied by the
+   * section root, which the second assertion rules out by naming something
+   * the root does hold and that line must not.
+   */
+  it("ends the tab with the OpenAPI action on its heading line, the way Config's Validate block does", async () => {
+    vi.mocked(api.useDataApiGetOpenapi).mockReturnValue(
+      { data: { status: 200, data: OPENAPI_FIXTURE }, isError: false } as unknown as
+        ReturnType<typeof api.useDataApiGetOpenapi>,
+    );
+    renderResponse();
+
+    const heading = await screen.findByRole("heading", { name: "OpenAPI document" });
+    const button = screen.getByRole("button", { name: "Download OpenAPI" });
+    expect(button.parentElement).toBe(heading.parentElement);
+    // The heading LINE, not the whole block: the explanatory sentence is a
+    // sibling of that line, so a parent holding a `<p>` means the button was
+    // dropped back into the block (or that both are sitting in the section
+    // root, which holds the intro paragraph).
+    expect((heading.parentElement as HTMLElement).querySelector("p")).toBeNull();
+    // …and the sentence is still on the page. Without this, the assertion
+    // above passes just as well on a block that lost its explanation.
+    expect(screen.getByText(/Generated per service account/i)).toBeInTheDocument();
+  });
+
   // The frozen column list is a LIST (§4.3), so it is the shared `Table`, and
   // its states are rows INSIDE it rather than a branch that replaces it. That
   // is not a cosmetic difference: with the card gone, a branch that replaced
@@ -1748,6 +1786,74 @@ describe("VersionsSection", () => {
     // …and "Query" is not just a nicer word: the shell renders it as a nav
     // link, so the reader can act on the sentence.
     expect(screen.getByRole("link", { name: "Query" })).toBeInTheDocument();
+  });
+
+  /**
+   * The heading treatment, which is what made this tab read differently from
+   * its five siblings in the nav.
+   *
+   * Every other section opens with a bare `<div>` holding the `h2` and one
+   * capped paragraph; `Versions` alone wrapped that in a
+   * `flex … justify-between` row with a filled primary button pinned to the
+   * right of it — directly under the shell's own `Save`, so the top-right
+   * corner of the page carried two primary-looking buttons that do unrelated
+   * things. `Config.tsx` already ships the shape this section wanted: its
+   * `Validate` action sits on the heading line of the block it acts on, not
+   * on the section title.
+   *
+   * Publish belongs on `History`'s line for a reason beyond symmetry — what
+   * it does is add a row to that table, so it is the same relationship
+   * `Validate` has to the block under it.
+   *
+   * Both halves are asserted, and the second is what makes the first mean
+   * something: "the h2's line holds no button" passes just as well on a
+   * section that lost Publish entirely.
+   */
+  it("gives Versions the same heading block as its five siblings, with Publish on the History line", async () => {
+    renderVersions();
+
+    const title = await screen.findByRole("heading", { name: "Versions", level: 2 });
+    expect((title.parentElement as HTMLElement).querySelector("button")).toBeNull();
+
+    const history = screen.getByRole("heading", { name: "History", level: 3 });
+    const publish = screen.getByRole("button", { name: /publish saved draft/i });
+    expect(publish.parentElement).toBe(history.parentElement);
+    // The heading LINE, not the block: the table is a sibling of that line, so
+    // a parent holding it means the button landed in the block instead.
+    expect((history.parentElement as HTMLElement).querySelector("table")).toBeNull();
+  });
+
+  /**
+   * §5.1's last open mitigation. Removing this section's `max-w-5xl` handed
+   * all 272 freed pixels to `Note` — the only unsized column of a
+   * `table-fixed` table — and the instrument for that is the one `Access`
+   * used: size the row table's own columns so the width lands where content
+   * wants it.
+   *
+   * Measured in Chromium at 1600×1000 with five versions: `Who` laid out a
+   * realistic 33-character address at 231px against 224px of column and cut
+   * it, on two of five rows, while `Note` was handed 688px. `w-80` (320px)
+   * fits the realistic band; a note is unbounded prose that no finite width
+   * fixes, and it keeps the `title` fallback it already had.
+   *
+   * Gated at `xl` for §5.3's reason — `table-fixed` scrolls rather than
+   * shrinks, so a column that is wide at every width costs the narrow regime
+   * the widening was never meant to touch. Both halves asserted: a flat
+   * `w-80` is a different and worse thing than `w-56 xl:w-80`.
+   */
+  it("widens Who where there is room, so the freed width lands on the addresses it was cutting", async () => {
+    renderVersions();
+
+    const who = await screen.findByRole("columnheader", { name: "Who" });
+    expect(who).toHaveClass("w-56");
+    expect(who).toHaveClass("xl:w-80");
+    // `Note` stays the unsized remainder — this is a REALLOCATION, not a
+    // second sized column, and sizing all five would let fixed layout hand the
+    // surplus back proportionally (measured: 128/512/288/128/128 in a 1296px
+    // box lays out as 140/553/312/140/140).
+    expect(screen.getByRole("columnheader", { name: "Note" }).className).not.toMatch(
+      /(?:^|\s)(?:[a-z]+:)*w-\d/,
+    );
   });
 
 });

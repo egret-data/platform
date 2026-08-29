@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { StrictMode, useState } from "react";
 import { MemoryRouter, Outlet, Route, Routes } from "react-router-dom";
@@ -188,6 +188,114 @@ beforeEach(() => {
       typeof api.useDataApiGetOpenapi
     >,
   );
+});
+
+/**
+ * Task 4: the tab's SETTINGS are one table with group rows, like `Config`.
+ *
+ * The complaint this answers is that `Config` carries the same amount of
+ * material as ONE table with group rows while `Response` stacked four blocks,
+ * each with a flat `text-sm` heading and a shape of its own. Two of the four
+ * resisted folding in and got a ruling instead (`docs/en/ui-conventions.md`
+ * §4.2): the frozen-column list is a read-only listing and the OpenAPI block
+ * is an action. The `Response transform` block resisted nothing — a checkbox
+ * with a sentence of help beside it is exactly `Setting | Details | Value`,
+ * and it was a titled block only because it arrived before the group row
+ * existed.
+ */
+describe("ResponseSection — one settings table", () => {
+  /**
+   * By IDENTITY — `toggle.closest("table")` compared to the table the
+   * `Envelope` control is in, not to "a table" — because the failure this
+   * guards against is precisely a SECOND settings table, which a
+   * `getByRole("table")` lookup would find and be happy with. The `Setting`
+   * columnheader count says the same thing the other way round, and it is
+   * COUNTED: `getAllByRole` on one match reads no differently from three
+   * unless the length is asserted.
+   */
+  it("puts the transform and the output shape in one table, as its two groups", async () => {
+    renderResponse({ transform: { script: "def transform(params, statements):\n    return {}\n", returns: [] } });
+
+    const envelope = await screen.findByRole("combobox", { name: "Envelope" });
+    const table = envelope.closest("table") as HTMLElement;
+    expect(table).not.toBeNull();
+
+    const toggle = screen.getByRole("checkbox", { name: "Build the response with a script" });
+    expect(toggle.closest("table")).toBe(table);
+
+    expect(screen.getAllByRole("columnheader", { name: "Setting" })).toHaveLength(1);
+
+    const transformGroup = within(table).getByRole("rowheader", { name: "Response transform" });
+    const outputGroup = within(table).getByRole("rowheader", { name: "Output shape" });
+    // Both span the row (§4.1): a group occupying only the Setting column
+    // reads as a setting with no value.
+    expect(transformGroup).toHaveAttribute("colspan", "3");
+    expect(outputGroup).toHaveAttribute("colspan", "3");
+    // No titled block left behind — that is what it used to be.
+    expect(screen.queryByRole("heading", { name: "Response transform" })).not.toBeInTheDocument();
+
+    // Order, and it is not decoration: turning the transform on REMOVES
+    // `Shape` and `Naming` from the rows under it, and a control whose effect
+    // is to delete two rows reads above them, not below.
+    const rows = within(table).getAllByRole("row");
+    const at = (el: HTMLElement) => rows.indexOf(el.closest("tr") as HTMLElement);
+    expect(at(transformGroup)).toBeLessThan(at(toggle));
+    expect(at(toggle)).toBeLessThan(at(outputGroup));
+    expect(at(outputGroup)).toBeLessThan(at(envelope));
+  });
+
+  /**
+   * The other half of the ruling, and what let the toggle move at all: the
+   * script and the declared returns are far too wide for a 384px Value cell
+   * (`valueClassName="w-52 lg:w-96"`), so they take a full-width row of the
+   * SAME table — the `colSpan={3}` device this table already uses for the
+   * `SettingsNote` that stands in for `Shape` and `Naming`.
+   *
+   * `closest("td")` from each control rather than a walk from the row:
+   * `ReturnsEditor` renders its own `<table>` inside that cell, so a counted
+   * DOM hop would land somewhere different depending on which control it
+   * started from.
+   */
+  it("gives the script and the declared returns a full-width row of that same table", async () => {
+    renderResponse({
+      transform: {
+        script: "def transform(params, statements):\n    return {}\n",
+        returns: [{ name: "total", ty: "double", required: true }],
+      },
+    });
+
+    const envelope = await screen.findByRole("combobox", { name: "Envelope" });
+    const table = envelope.closest("table") as HTMLElement;
+
+    const script = screen.getByLabelText("Response transform script");
+    expect(script.closest("table")).toBe(table);
+    expect(script.closest("td")).toHaveAttribute("colspan", "3");
+
+    // The returns editor rides in the same cell, reached from its Add button —
+    // which sits OUTSIDE its nested `<table>`, so this says the whole editor
+    // moved rather than just the grid.
+    const add = screen.getByRole("button", { name: /Add return column/i });
+    expect(add.closest("td")).toBe(script.closest("td"));
+  });
+
+  /**
+   * The row only exists while there is a transform. Without this the guard
+   * above is satisfied by a component that renders the editors unconditionally
+   * and hides them with a class, which is a different product.
+   */
+  it("renders no editor row at all when there is no transform", async () => {
+    renderResponse({});
+
+    await screen.findByRole("combobox", { name: "Envelope" });
+    expect(screen.queryByLabelText("Response transform script")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Add return column/i })).not.toBeInTheDocument();
+    // …and the group heading and its toggle are still there, so "no editors"
+    // is not "no transform group".
+    expect(screen.getByRole("rowheader", { name: "Response transform" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("checkbox", { name: "Build the response with a script" }),
+    ).toBeInTheDocument();
+  });
 });
 
 describe("ResponseSection — response transform", () => {
