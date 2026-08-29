@@ -90,6 +90,28 @@ function clearMarker(ws: string, accountId: string) {
  * 2. **spent** — a marker says this tab issued a client here but this mount does
  *    not hold the secret (a reload). It says so, and offers the way forward.
  * 3. **form** — nothing issued yet.
+ *
+ * **Issued is not granted, and both credential states say so.** A live walk of
+ * the whole journey stopped here: the page hands over a credential, and the
+ * credential cannot call anything — invoke is granted per ENDPOINT, to the
+ * service ACCOUNT, on that endpoint's Access tab
+ * (`/data-api/endpoints/:id/access`). Nothing between "Copy" and "Done" said
+ * that, so every call the new client made was refused by a page that had just
+ * told the reader it was finished. Both the created and the spent state now
+ * carry the fact, because a reader who reloaded still holds an ungranted
+ * client.
+ *
+ * **Only the spent state carries the LINK, and that asymmetry is the design.**
+ * The created state's one invariant is that it has a single navigation
+ * ("Done"), because leaving destroys a secret that cannot be shown again — a
+ * link in the guidance would be exactly the second exit this file already
+ * refuses in the header. It buys little, too: a grant is per endpoint and this
+ * page cannot know which one, so the best any link could do is drop the reader
+ * on the endpoints LIST to choose from, one hop closer at the cost of the
+ * secret. Endpoints is a real sidebar item, so naming it in prose is a
+ * destination a reader can reach. The spent state has no such cost — the secret
+ * is already gone and the state already offers two ways out — so there the same
+ * sentence ends in a link to the endpoints list.
  */
 export default function ClientCreate() {
   const { workspace: ws, accountId } = useParams() as { workspace: string; accountId: string };
@@ -111,6 +133,9 @@ export default function ClientCreate() {
   const [error, setError] = useState<string | null>(null);
 
   const clientsHref = `/explore/${ws}/data-api/clients`;
+  // Where a grant is given. Not a destination this page can be precise about
+  // — see the "issued is not granted" note in the doc comment above.
+  const endpointsHref = `/explore/${ws}/data-api/endpoints`;
   const canSubmit = name.trim() !== "";
 
   async function submit() {
@@ -187,6 +212,19 @@ export default function ClientCreate() {
             </div>
             <Field label="Token endpoint" testId="token-endpoint" value={issued.token_endpoint} />
           </div>
+
+          {/* Issued is not granted. Prose, and deliberately NOT a link: see the
+              doc comment above for why this state still has exactly one
+              navigation. It sits BELOW the card so it is read after the three
+              values, and it leads with the ordering ("Copy the secret first")
+              because the fact it delivers is the one thing on this page that
+              can wait — the secret is not. */}
+          <p className="text-sm text-muted-foreground">
+            <span className="font-medium text-foreground">This client cannot call anything yet.</span> Copy the secret
+            first, then grant it an endpoint: invoke is granted per endpoint, to{" "}
+            {account ? account.name : "the service account"}, on that endpoint&apos;s Access tab under Endpoints. Until
+            one is granted, every call it makes is refused.
+          </p>
         </div>
       </ListPageShell>
     );
@@ -227,6 +265,20 @@ export default function ClientCreate() {
             <p className="text-xs text-muted-foreground">
               The client itself is live and listed on the Clients page. If its secret was lost, revoke it there and
               issue another — there is no way to re-read a secret, by design.
+            </p>
+            {/* The same fact the created state carries — a reader who reloaded
+                still holds an ungranted client — and here it gets the link the
+                created state cannot have: there is no secret left on screen for
+                a stray click to destroy, and this state already offers two ways
+                out of its own. */}
+            <p className="text-xs text-muted-foreground">
+              Being issued is not being allowed: invoke is granted per endpoint, to{" "}
+              {account ? account.name : "the service account"}, on that endpoint&apos;s Access tab. Until one is
+              granted, every call it makes is refused —{" "}
+              <Link className="font-medium text-foreground underline underline-offset-2" to={endpointsHref}>
+                pick the endpoint from Endpoints
+              </Link>
+              .
             </p>
           </div>
         </div>
