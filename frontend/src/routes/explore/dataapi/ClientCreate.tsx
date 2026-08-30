@@ -319,8 +319,14 @@ export default function ClientCreate() {
 
         {/* Exactly what the dialog it replaces collected: the name, and the one
             field `IssueClientInput` allows to be set at mint time and never
-            again. Grants belong to the ACCOUNT, not to one of its credentials,
-            and already have their own affordance on the Clients page. */}
+            again. A grant is not one of them, and the reason is not that it
+            lives elsewhere ON THIS PAGE'S SURFACE — an earlier version of this
+            comment said "already have their own affordance on the Clients
+            page", which is the same false claim `ServiceAccountCreate`'s
+            subtitle shipped. There is no grant on the Clients page. A grant is
+            a fact about a (service account, endpoint) pair and is given on the
+            ENDPOINT's Access tab, per endpoint; this form holds neither an
+            endpoint nor a way to pick one. */}
         <div className="space-y-4 rounded-lg border p-4">
           <div className="space-y-1.5">
             <Label htmlFor="new-client-name">Name</Label>

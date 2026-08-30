@@ -22,9 +22,21 @@ import { useCreateServiceAccount } from "@/api/dataApi";
  * It collects exactly what the dialog it replaces collected — name, and an
  * optional description — because that is what a row cannot exist without. The
  * page has room for more; more is not owed. Clients, grants and expiry are all
- * things an account acquires AFTER it exists, each with its own affordance on
- * the Clients row (the actions menu issues clients; Access grants endpoints),
- * and hoisting any of them here would rebuild those flows in a worse place.
+ * things an account acquires AFTER it exists, each with its own affordance
+ * ELSEWHERE, and hoisting any of them here would rebuild those flows in a
+ * worse place.
+ *
+ * Two affordances, and they are on two different screens — the sentence that
+ * put both "on the Clients row" is what the subtitle below was copied from,
+ * and it is why the subtitle shipped false:
+ *
+ * - **Issue a client** — the Clients page, in the account's group-header
+ *   actions menu (`ServiceAccountActionsMenu`).
+ * - **Grant invoke** — an ENDPOINT's Access tab
+ *   (`/data-api/endpoints/:id/access`, `detail/AccessSection.tsx`, the only
+ *   caller of `useDataApiGrantEndpointInvoke`). A grant is a fact about a
+ *   (client, endpoint) pair, so it cannot live on a surface that holds only
+ *   the account.
  */
 export default function ServiceAccountCreate() {
   const ws = useParams().workspace!;
@@ -81,7 +93,20 @@ export default function ServiceAccountCreate() {
   return (
     <ListPageShell
       title="New service account"
-      description="A machine identity for the Data API. Once it exists, issue it OAuth2 clients and grant it endpoints from the Clients list."
+      /* Every clause of this names a place, and each place has to exist.
+         "grant it endpoints from the Clients list" did not: the Clients list
+         has no grant affordance on either of its menus, and a reader who
+         followed it went hunting for a control that is not there. Invoke is
+         granted per ENDPOINT, on that endpoint's Access tab — the same words
+         `ClientCreate` uses one screen downstream, deliberately, so the one
+         fact has one phrasing and a future drift is greppable.
+
+         Prose, no link, and that is the same asymmetry `ClientCreate` records:
+         a link here is a third navigation off a form with unsaved input and no
+         draft persistence (§3.8), so it would silently discard what the author
+         typed. `Endpoints` is a real sidebar item, so naming it is a
+         destination a reader can reach. */
+      description="A machine identity for the Data API. Once it exists, issue it OAuth2 clients from the Clients list — then grant it invoke per endpoint, on that endpoint's Access tab under Endpoints."
       back={
         /* Top-left, above the title, the same slot `EndpointCreate` moved to
            and the same shape every detail screen uses. It was still in

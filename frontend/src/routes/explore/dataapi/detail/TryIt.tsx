@@ -171,6 +171,9 @@ export default function TryIt() {
   const [runError, setRunError] = useState<string | null>(null);
 
   const accessHref = `/explore/${ws}/data-api/endpoints/${id}/access`;
+  // Where a service account is CREATED — not Access, which only grants one
+  // that already exists. See the empty-picker note below.
+  const newAccountHref = `/explore/${ws}/data-api/clients/new`;
   const activityHref = `/explore/${ws}/data-api/activity`;
 
   const canRun = !!accountId && !trashed && !tryMutation.isPending;
@@ -400,13 +403,26 @@ export default function TryIt() {
                 ) : (
                   accounts.length === 0 &&
                   !accountsQuery.isLoading && (
+                    // Two verbs, two places. This used to bind both to one
+                    // link — "Create one, then grant it invoke, in Access" —
+                    // and only the second half is true of Access: creating an
+                    // account is `clients/new`, under Clients, and
+                    // `AccessSection` has no create affordance at all. In THIS
+                    // state (zero accounts) its table renders the same "no
+                    // service accounts yet" sentence with nothing to act on,
+                    // so the one link on screen led to the problem restated.
+                    //
+                    // One link, on the only step available now. Access is
+                    // still named because the second step is real and this is
+                    // the only place in this state that says it — but a
+                    // destination that can do nothing yet does not earn a
+                    // click.
                     <p className="text-xs text-muted-foreground">
-                      This workspace has no service accounts yet. Create one, then grant it invoke,
-                      in{" "}
-                      <Link className="underline" to={accessHref}>
-                        Access
+                      This workspace has no service accounts yet.{" "}
+                      <Link className="underline" to={newAccountHref}>
+                        Create one in Clients
                       </Link>
-                      .
+                      , then grant it invoke on this endpoint in Access.
                     </p>
                   )
                 )}
