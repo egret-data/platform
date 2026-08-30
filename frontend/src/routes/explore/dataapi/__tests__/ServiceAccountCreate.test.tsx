@@ -215,6 +215,15 @@ describe("ServiceAccountCreate", () => {
  * because a sentence can only be checked against the tree it describes.
  */
 describe("ServiceAccountCreate — the hand-off sentence is true of the shipped tree", () => {
+  // Its own, because this block sits OUTSIDE the `describe` that owns the
+  // file's only `beforeEach`. Harmless today — both tests call `mockCreate()`
+  // themselves — but "harmless because of what the tests happen to do" is a
+  // property of the tests, not of the block, and the next test added here
+  // would inherit whatever the previous file left on the mock.
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
   /**
    * The subtitle BY IDENTITY: `ListPageShell` renders it as the `<p>`
    * immediately after the `h1`, in the same heading block. A `getByText`
@@ -237,9 +246,21 @@ describe("ServiceAccountCreate — the hand-off sentence is true of the shipped 
     mockCreate();
     renderCreate();
     // Not "mentions Access somewhere": the destination has to be specific
-    // enough to walk to. `Access` alone is ambiguous with the workspace
-    // Access-control console, which is a different screen in a different
-    // sidebar group and grants nothing about an endpoint.
+    // enough to WALK to, and that is the whole of the reason. `Access` is a
+    // TAB on an endpoint's detail route — there is no sidebar item by that
+    // name for a reader on this page to click, so "Access" alone names a place
+    // reachable only through a parent it does not mention. `under Endpoints`
+    // supplies the parent, and `Endpoints` sits in the same `Data API` sidebar
+    // group as the Clients page this reader came from.
+    //
+    // An earlier revision of this comment said `Access` was ambiguous with a
+    // workspace Access-control console. It is not, and the mistake is the one
+    // this whole branch is about: that heading lives in `CONTROL_PLANE_GROUPS`
+    // and `Sidebar.tsx` picks control-plane groups OR Explore groups on
+    // `isAdmin`, never both — so on `/explore/:ws/...` there is no `Access`
+    // heading at all, for anyone. Pinned now, by the absence it depends on, at
+    // `components/layout/__tests__/Sidebar.test.tsx` ("no Access heading on an
+    // Explore route"). The shipped words did not change; only the reason did.
     expect(subtitle()).toMatch(/grant[\s\S]*Access tab under Endpoints/i);
   });
 

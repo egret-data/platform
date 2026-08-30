@@ -34,9 +34,28 @@ import { useCreateServiceAccount } from "@/api/dataApi";
  *   actions menu (`ServiceAccountActionsMenu`).
  * - **Grant invoke** — an ENDPOINT's Access tab
  *   (`/data-api/endpoints/:id/access`, `detail/AccessSection.tsx`, the only
- *   caller of `useDataApiGrantEndpointInvoke`). A grant is a fact about a
- *   (client, endpoint) pair, so it cannot live on a surface that holds only
- *   the account.
+ *   caller of `useDataApiGrantEndpointInvoke`).
+ *
+ * **A grant is a fact about a (SERVICE ACCOUNT, endpoint) pair — not about a
+ * client.** The mutation body is `{ service_account_id }` (`AccessSection.tsx`
+ * `onGrant`, pinned at `__tests__/AccessSection.test.tsx:346`), `/grants`
+ * keys on the account, and `ClientCreate` says the same thing to the reader:
+ * "invoke is granted per endpoint, to <account>". An earlier revision of this
+ * comment said "(client, endpoint)", and getting that pair wrong does not just
+ * misdescribe the model — it INVERTS the conclusion below it. If grants were
+ * about clients, the Clients page would be their natural home and the argument
+ * for keeping them off it would collapse.
+ *
+ * The reason a grant cannot live here is not that this surface holds the wrong
+ * object; it holds exactly the right one. It is that this surface holds no
+ * ENDPOINT, and the other half of the pair is not optional. A control here
+ * would have to make the reader pick an endpoint first — and then answer, per
+ * pair, whether that account can already invoke, which `/grants` cannot tell
+ * it: `list_endpoint_grants` filters `scope_type = 'object'`
+ * (`crates/egret-dataapi/src/routes.rs`), so a principal reaching invoke
+ * through the Cedar workspace→object cascade is invisible to it. That is why
+ * `AccessSection` probes `can_invoke` per pair and renders a four-valued
+ * `InvokeStatus` rather than a checkbox.
  */
 export default function ServiceAccountCreate() {
   const ws = useParams().workspace!;

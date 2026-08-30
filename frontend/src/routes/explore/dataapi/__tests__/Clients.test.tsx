@@ -318,7 +318,15 @@ describe("Clients", () => {
       "Issue client\u2026",
       "Delete",
     ]);
+
+    // WAIT for the first menu to leave the DOM, do not merely ask for it to
+    // close. The reads below are document-wide (that is the point — a grant
+    // item added anywhere is caught), so an un-flushed Radix exit animation
+    // leaves the account's two items standing and the next assertion sees
+    // three. That fails loudly rather than passing falsely, but a guard that
+    // is flaky gets deleted, and a deleted guard pins nothing.
     await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryAllByRole("menuitem")).toHaveLength(0));
 
     // And the CLIENT's own row menu, because the subtitle's claim was about
     // this whole surface and not only about the account header. Radix mounts
