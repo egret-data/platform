@@ -4,6 +4,7 @@ import { Check, Copy, KeyRound, Search } from "lucide-react";
 import { toast } from "sonner";
 import { useQueryClient } from "@tanstack/react-query";
 import { Badge } from "@/components/ui/badge";
+import { CHIP_TONE } from "./chipTone";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
@@ -429,9 +430,13 @@ function ClientRow({ client: c, onRevoke }: { client: DataApiClientDto; onRevoke
           {revoked ? (
             <Badge variant="outline" className="text-muted-foreground">Revoked</Badge>
           ) : expired ? (
-            <Badge className="border-transparent bg-destructive/15 text-destructive">Expired</Badge>
+            /* Ink is `--foreground` on both washes, not the tint's own hue —
+               `chipTone.ts` carries the measurements. The three states are told
+               apart by their WORDS, which is why flattening the ink costs
+               nothing a reader was using. */
+            <Badge className={CHIP_TONE.destructive}>Expired</Badge>
           ) : (
-            <Badge className="border-transparent bg-success/15 text-success">Active</Badge>
+            <Badge className={CHIP_TONE.success}>Active</Badge>
           )}
           {revoked ? (
             <span className="text-xs text-muted-foreground">

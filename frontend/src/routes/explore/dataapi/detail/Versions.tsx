@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { listUsers } from "@/api/access";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
+import { CHIP_TONE } from "../chipTone";
 import { Button } from "@/components/ui/button";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -288,12 +289,15 @@ export default function VersionsSection() {
                   <TableCell className="py-2">
                     <span className="inline-flex items-center gap-1.5">
                       <span className="font-mono text-xs">v{v.version}</span>
-                      {/* Same token-based className `Endpoints.tsx` uses for the
-                          live state badge — `variant="success"` on `Badge`
-                          resolves to a hardcoded `bg-green-600`, not the OKLCH
-                          `--success` token, so it would be a different green
-                          from the one this row sits one click away from. */}
-                      {v.is_live && <Badge className="bg-success/15 text-success">Live</Badge>}
+                      {/* The same shared tone the endpoint list and the editor
+                          pill wear (`chipTone.ts`), so this `Live` and the one
+                          a click away are the same chip. Not `variant="success"`:
+                          that resolves to a hardcoded `bg-green-600`, not the
+                          OKLCH `--success` token. The ink is `--foreground` for
+                          the reason recorded in `chipTone.ts` — `text-success`
+                          on this wash measures 3.72:1 in light mode, and the
+                          word "Live" is what identifies the row anyway. */}
+                      {v.is_live && <Badge className={CHIP_TONE.success}>Live</Badge>}
                     </span>
                   </TableCell>
                   <TableCell className="truncate py-2 text-muted-foreground" title={v.note || undefined}>

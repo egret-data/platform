@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
+import { CHIP_TONE } from "../chipTone";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -579,7 +580,15 @@ export default function TryIt() {
             <dl className="flex items-center gap-1.5 text-sm">
               <dt className="text-muted-foreground">Status</dt>
               <dd>
-                <Badge className={outcomeOk ? "bg-success/15 text-success" : undefined}>
+                {/* Both arms are now tinted chips with `--foreground` ink
+                    (`chipTone.ts`): `text-success` on its own wash measures
+                    3.72:1, under WCAG 1.4.3's 4.5:1 at this size. The refusal
+                    arm used to fall through to `Badge`'s DEFAULT variant —
+                    solid `bg-primary`, the page's action colour — so a 500 was
+                    painted in the same teal as the Run button while the alert
+                    directly below it called the same call a refusal. The
+                    STATUS NUMBER is what carries the outcome either way. */}
+                <Badge className={outcomeOk ? CHIP_TONE.success : CHIP_TONE.destructive}>
                   {result.status}
                 </Badge>
               </dd>

@@ -44,9 +44,11 @@ import { test, expect } from "@playwright/test";
  *    as the ink to put ON it), so the middle tier wears it on its border and
  *    keeps the number in body ink.
  *
- *    The second draft died here too, and took the idiom this repo uses
- *    everywhere with it: `bg-destructive/15 text-destructive` measures 3.68:1
- *    in light, because the wash lifts the background out from under an ink that
+ *    The second draft died here too, and took the idiom this repo then used
+ *    everywhere with it — `bg-destructive/15 text-destructive`, since retired
+ *    across Data API in favour of `--foreground` ink on the same tint
+ *    (`dataapi/chipTone.ts`, `tests/e2e/dataapi-badge-ink.spec.ts`). It measures
+ *    3.68:1 in light, because the wash lifts the background out from under an ink that
  *    clears 4.81:1 on the bare card. `bg-destructive text-destructive-foreground`
  *    — the shipped `Button variant="destructive"` pairing — inverts it and
  *    measures 2.83:1 in DARK. Only ink on the unwashed card clears 4.5:1 in

@@ -290,6 +290,23 @@ export function errorRateTier(errors: number, calls: number): ErrorRateTier {
  * `--accent` is not among them: it is reserved for hover/focus, and a reading
  * permanently painted in the hover colour reads as permanently hovered.
  *
+ * **These four are ink on the UNWASHED card, and they stay that way** — this
+ * is not the `bg-<token>/15 text-<token>` chip that `chipTone.ts` had to flatten
+ * to `--foreground`, and the same treatment here would be a regression, not a
+ * fix. Measured on the same instrument and the same run as that table:
+ * `text-success` 4.54 light / 7.57 dark, `text-destructive` 4.81 / 6.09,
+ * `text-foreground` 18.03 / 17.24, `text-muted-foreground` 6.34 / 6.89 — every
+ * tier clears WCAG 1.4.3's 4.5:1 already, because nothing is washing the
+ * background out from under them. It is the /15 wash that costs `--success` its
+ * pass (4.54 → 3.72), and there is no wash here.
+ *
+ * Flattening all four to `--foreground` would also destroy what this column is
+ * FOR: four tiers in one ink are one tier. The chip can afford to lose its hue
+ * because a word or a status code sits inside it; a rate cell is a bare number,
+ * and severity is the only thing the ink is saying. It is not saying it alone —
+ * form and two icons and an `sr-only` word carry it without colour — but
+ * removing the hue removes an ordering rather than a decoration.
+ *
  * `elevated` is NOT amber ink, and that is a measurement rather than a
  * preference. `--highlight` is a FILL token — `oklch(0.72 …)` in light,
  * `oklch(0.78 …)` in dark, and its own comment in `index.css` describes it as a
@@ -316,10 +333,12 @@ export const ERROR_RATE_INK: Record<ErrorRateTier, string> = {
  * removed.
  *
  * NEITHER marked tier is filled, and that too came back from the browser rather
- * than from taste. `bg-destructive/15 text-destructive` — the tinted-chip idiom
- * this repo uses in `Clients.tsx`, in `ActivityCallList`'s own status column and
- * in a dozen other places — measures 3.68:1 in light mode: the wash lifts the
- * background out from under an ink that clears 4.81:1 on the bare card. The
+ * than from taste. `bg-destructive/15 text-destructive` — then the tinted-chip
+ * idiom of `Clients.tsx`, of `ActivityCallList`'s own status column and of a
+ * dozen other places, since retired in Data API in favour of `--foreground` ink
+ * on the same tint (`chipTone.ts`) — measures 3.68:1 in light mode: the wash
+ * lifts the background out from under an ink that clears 4.81:1 on the bare
+ * card. The
  * solid alternative (`bg-destructive text-destructive-foreground`, what
  * `Button variant="destructive"` ships) inverts the problem and measures 2.83:1
  * in DARK. Ink on the unwashed card is the only treatment that clears WCAG
