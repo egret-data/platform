@@ -377,6 +377,38 @@ describe("TryIt — the service-account picker distinguishes a failure from an e
     expect(screen.getByText(/has no service accounts yet/i)).toBeInTheDocument();
     expect(screen.queryByText(/could not load/i)).not.toBeInTheDocument();
   });
+
+  /**
+   * The prompt bound TWO verbs to ONE destination: "Create one, then grant it
+   * invoke, in [Access]". Only the second is true of Access. A service account
+   * is created at `/data-api/clients/new`, reached from Clients; `AccessSection`
+   * has no create affordance at all — in this exact state its own table renders
+   * the same "no service accounts yet" sentence with nothing to act on. So the
+   * one link on screen pointed the reader at a page that would repeat the
+   * problem back at them.
+   *
+   * The link now points at the only step available in this state. Access is
+   * still named, in prose, because it is genuinely the next step — but it is
+   * not a destination worth a click until an account exists.
+   */
+  it("points 'create one' at the service-account create page, not at Access", () => {
+    mockAccounts({ data: { status: 200, data: [] } });
+    renderTryIt();
+
+    const prompt = screen.getByText(/has no service accounts yet/i).closest("p") as HTMLElement;
+    const links = within(prompt).getAllByRole("link");
+    // Exactly one, and it is the create step. Two links in one short sentence
+    // is how the reader ends up on the dead end again.
+    expect(links).toHaveLength(1);
+    expect(links[0]).toHaveAttribute("href", "/explore/eng/data-api/clients/new");
+    // The href is the claim, but the words are what a reader reads: a link to
+    // the create page labelled "Access" would satisfy the line above.
+    expect(links[0].textContent).toMatch(/create/i);
+    expect(links[0].textContent).not.toMatch(/access/i);
+    // Access is still named — the second step is real and this is the only
+    // place in this state that says it.
+    expect(prompt.textContent).toMatch(/grant[\s\S]*invoke[\s\S]*Access/i);
+  });
 });
 
 /**

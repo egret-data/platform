@@ -289,6 +289,45 @@ describe("Clients", () => {
     expect(screen.getByRole("menuitem", { name: /delete/i })).toBeInTheDocument();
   });
 
+  /**
+   * The other end of a reconciliation whose first end is
+   * `ServiceAccountCreate.test.tsx`. That page's subtitle used to tell a
+   * reader to "grant it endpoints from the Clients list", and this is the
+   * Clients list: there is no grant here, on the account or on any of its
+   * clients. Invoke is granted per ENDPOINT, on that endpoint's Access tab —
+   * `detail/AccessSection.tsx` is the only caller of
+   * `useDataApiGrantEndpointInvoke` in the tree.
+   *
+   * By IDENTITY, not by count and not by absence. `toHaveLength(2)` passes on
+   * any two items, and `queryByRole(name: /grant/i)` passes on a control
+   * labelled anything else; the exact set is the only form that both forbids a
+   * grant appearing here silently and forbids the two real items quietly
+   * changing. If a grant path is ever genuinely added to this surface, this
+   * test fails — and the sentence one screen upstream has to be revisited with
+   * it, which is the entire point of pinning them together.
+   */
+  it("offers no grant on the Clients surface — both menus are exactly what they are", async () => {
+    const user = userEvent.setup();
+    renderClients([makeAccount({ id: "a1", name: "bot" })]);
+    await screen.findByText("bot");
+
+    // The ACCOUNT's menu, in the group header row.
+    await user.click(screen.getByRole("button", { name: "Actions for bot" }));
+    await screen.findByRole("menuitem", { name: /issue client/i });
+    expect(screen.getAllByRole("menuitem").map((i) => i.textContent)).toEqual([
+      "Issue client\u2026",
+      "Delete",
+    ]);
+    await user.keyboard("{Escape}");
+
+    // And the CLIENT's own row menu, because the subtitle's claim was about
+    // this whole surface and not only about the account header. Radix mounts
+    // only the open menu, so each set is read on its own.
+    await user.click(screen.getByRole("button", { name: "Actions for etl" }));
+    await screen.findByRole("menuitem", { name: /revoke/i });
+    expect(screen.getAllByRole("menuitem").map((i) => i.textContent)).toEqual(["Revoke\u2026"]);
+  });
+
   it("searches from the page toolbar, where every other Explore page has it", async () => {
     renderClients([makeAccount({ id: "a1", name: "alpha" }), makeAccount({ id: "a2", name: "beta" })]);
     await screen.findByText("alpha");
