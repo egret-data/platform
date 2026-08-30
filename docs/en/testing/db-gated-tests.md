@@ -25,13 +25,22 @@ but may have asserted nothing".
 possible, but it has to be asked for:
 
 ```bash
-EGRET_ALLOW_DB_SKIP=1 cargo test --workspace
+EGRET_ALLOW_DB_SKIP=1 cargo test --workspace     # or: just test-no-db
 ```
 
 The skip is now in the command line that produced the green, instead of being inferable
 only from the wall clock. The same panic covers `DATABASE_URL` set but *unreachable* —
 that case skipped silently too, and it is the shape a CI run takes when its database
 service failed to start.
+
+Two things the opt-out does **not** do, both worth knowing before reading a green:
+
+- It does not cover `#[sqlx::test]`. Those tests never call `egret_test_db::url()`; they
+  resolve `DATABASE_URL` through dotenvy themselves and create their own scratch databases.
+  They are unaffected by this flag and may still fail without a database.
+- It does not unset `DATABASE_URL` for you. If one is exported — or supplied by `.env`
+  under `just`'s `dotenv-load` — the suites will still run against it. `just test-no-db`
+  passes `env -u DATABASE_URL` for exactly this reason.
 
 ## Running with a database (what CI does)
 

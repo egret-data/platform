@@ -35,8 +35,18 @@ check:
 # report `ok` having asserted nothing (see docs/en/testing/db-gated-tests.md). Use this
 # when you want the compile + the database-free tests and nothing more — and read the
 # result knowing what it did not cover.
+#
+# `env -u DATABASE_URL` is load-bearing, not tidiness. `set dotenv-load` at the top of this
+# file puts `.env` into every recipe's environment, and `.env` points DATABASE_URL at the
+# DEV database — so without the `-u` this recipe would not skip anything. It would run the
+# whole DB-gated suite against the database `just serve` boots from, which is the precise
+# accident the rest of this package exists to make impossible.
+#
+# Caveat: this silences the suites gated on `egret_test_db::url()`. Tests using
+# `#[sqlx::test]` never call it — they resolve DATABASE_URL through dotenvy themselves —
+# so they are not covered by the opt-out and may still fail here.
 test-no-db:
-    EGRET_ALLOW_DB_SKIP=1 cargo test --workspace
+    env -u DATABASE_URL EGRET_ALLOW_DB_SKIP=1 cargo test --workspace
 
 # The one Data API test executed by a REAL engine, rather than a fake `QueryExecPort`.
 #
