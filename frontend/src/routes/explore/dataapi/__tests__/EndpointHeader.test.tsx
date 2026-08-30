@@ -12,6 +12,7 @@ vi.mock("@/api/generated/data-api/data-api");
 import * as api from "@/api/generated/data-api/data-api";
 import type { DataApiEndpointDto, DataApiEndpointVersionDto } from "@/api/generated/model";
 import EndpointDetail, { useEndpointDetail } from "@/routes/explore/dataapi/EndpointDetail";
+import { draftIsAheadOfLive } from "@/routes/explore/dataapi/endpointState";
 
 /**
  * THE HEADER SAYS WHAT THE ENDPOINT IS, AND THE BACK LINK ASKS BEFORE IT
@@ -231,11 +232,12 @@ describe("the header says what the endpoint is", () => {
     );
   });
 
-  it("a disabled endpoint is never reported as diverged, however far its row has moved", () => {
-    // `disable` writes `updated_at = now()` and leaves `live_version_id`
-    // alone (`endpoints.rs`), so the timestamp comparison alone says "the row
-    // moved after the version was frozen" for every endpoint anyone has ever
-    // paused. Divergence is a claim about what a LIVE endpoint is serving.
+  it("a paused endpoint whose row has moved still reads as Disabled, not as diverged", () => {
+    // This pins the RENDERED pill and nothing more, and that is worth saying
+    // out loud: `endpointHeaderStateLabel` and `endpointStateTier` both ignore
+    // `diverged` unless the state is `live`, so this test passes with
+    // `draftIsAheadOfLive`'s own state guard deleted. Measured — that mutant
+    // SURVIVED here. The guard is pinned where it lives instead, below.
     const live = makeVersion({ id: "ver-2", version: 2, is_live: true, created_at: "2026-08-10T00:00:00Z" });
     renderDetail(
       makeEndpoint({ state: "disabled", live_version_id: "ver-2", updated_at: "2026-08-30T00:00:00Z" }),
@@ -395,5 +397,44 @@ describe("the in-app back link asks before it discards an edit", () => {
     expect(screen.queryByRole("alertdialog")).toBeNull();
     // The edit survived the move, which is what makes the un-guarded tab safe.
     expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
+  });
+});
+
+/**
+ * `draftIsAheadOfLive` is exported and its name makes a claim, so it is pinned
+ * as a unit rather than only through whatever the pill happens to render
+ * today. Two of these three mutants are invisible from the rendered header —
+ * the label and the tier both ignore `diverged` off the `live` state — which
+ * is exactly why the contract is asserted where it is written.
+ */
+describe("draftIsAheadOfLive", () => {
+  const frozen = { created_at: "2026-08-10T00:00:00Z" };
+
+  it("is true when a live endpoint's row moved after the version was frozen", () => {
+    expect(draftIsAheadOfLive({ state: "live", updated_at: "2026-08-10T00:00:01Z" }, frozen)).toBe(true);
+  });
+
+  it("is false at the instant of the publish itself", () => {
+    // publish inserts the version row and writes `endpoints.updated_at =
+    // now()` in ONE transaction, and Postgres `now()` is the transaction
+    // timestamp — so these two stamps are exactly equal for every endpoint the
+    // moment it goes live. A `>=` would report all of them as diverged.
+    expect(draftIsAheadOfLive({ state: "live", updated_at: "2026-08-10T00:00:00Z" }, frozen)).toBe(false);
+  });
+
+  it("is false for a DISABLED endpoint however far its row has moved", () => {
+    // `disable` writes `updated_at = now()` and never touches
+    // `live_version_id` (`endpoints.rs`), so the bare timestamp comparison is
+    // true for every endpoint anyone has ever paused. Divergence is a claim
+    // about what a live endpoint is serving right now.
+    expect(draftIsAheadOfLive({ state: "disabled", updated_at: "2026-08-30T00:00:00Z" }, frozen)).toBe(false);
+  });
+
+  it("is false for a draft, which has no live version to be ahead of", () => {
+    expect(draftIsAheadOfLive({ state: "draft", updated_at: "2026-08-30T00:00:00Z" }, undefined)).toBe(false);
+  });
+
+  it("reports not-diverged rather than raising on a stamp it cannot read", () => {
+    expect(draftIsAheadOfLive({ state: "live", updated_at: "not a date" }, frozen)).toBe(false);
   });
 });

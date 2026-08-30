@@ -558,7 +558,12 @@ function EndpointDetailInner({ ws, id }: { ws: string; id: string }) {
                was tried first: name computation trims each text node, so the
                two ran together as `Live · v2(open the…)`.) */
             aria-label={`${stateLabel} — open the Versions tab`}
-            className="rounded-md focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+            /* No bespoke focus style: `index.css`'s base layer already gives
+               every focusable element a solid `outline-ring`, which is the
+               product's one focus indicator and what the two sibling links in
+               this header use. `inline-flex` so the outline hugs the pill
+               rather than the anchor's inline box. */
+            className="inline-flex rounded-md"
           >
             <EndpointStateBadge
               endpoint={endpoint}
