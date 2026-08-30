@@ -179,11 +179,26 @@ fn parse_engine_url() -> Option<(String, i32)> {
     Some((u.host_str()?.to_string(), u.port().unwrap_or(9030) as i32))
 }
 
-async fn live() -> Option<Live> {
-    let (host, port) = parse_engine_url()?;
-    // Fail-closed on the metastore half — see `egret_test_db::url`. Only the ENGINE gate
-    // above may skip.
-    let url = egret_test_db::url().await?;
+/// `Err` names the gate that was actually closed.
+///
+/// The two gates are different axes and a reader has to be able to tell them apart: the
+/// ENGINE gate is a deliberate self-skip (CI has no StarRocks), while a missing
+/// `DATABASE_URL` reaches here only because someone passed `EGRET_ALLOW_DB_SKIP`. Both
+/// used to print "EGRET_TEST_STARROCKS_URL unset", which sent the reader to the wrong
+/// remedy in the second case.
+async fn live() -> Result<Live, String> {
+    let Some((host, port)) = parse_engine_url() else {
+        return Err("EGRET_TEST_STARROCKS_URL unset".to_string());
+    };
+    // Fail-closed on the metastore half — see `egret_test_db::url`. Reaching the `None`
+    // arm therefore means the operator asked for a database-less run; only the ENGINE gate
+    // above skips on its own.
+    let Some(url) = egret_test_db::url().await else {
+        return Err(format!(
+            "DATABASE_URL unset, with {} set",
+            egret_test_db::ALLOW_SKIP_VAR
+        ));
+    };
     let db = Db::connect(&url, 5).await.expect("connect");
 
     let admin = insert_user(&db, "sr_admin").await;
@@ -308,7 +323,7 @@ async fn live() -> Option<Live> {
         .expect("create session")
         .token;
 
-    Some(Live {
+    Ok(Live {
         db,
         serving: axum::Router::new()
             .nest("/data-api/v1", serving_router())
@@ -484,12 +499,15 @@ async fn grant_ws_admin(db: &Db, user: Uuid, ws: Uuid) {
 /// fail rather than pass differently — which is the property that makes it evidence.
 #[tokio::test]
 async fn a_published_endpoint_returns_rows_a_real_starrocks_computed() {
-    let Some(f) = live().await else {
-        eprintln!(
-            "SKIPPED, asserted nothing — EGRET_TEST_STARROCKS_URL unset. \
-             See this file's header, or run `just test-dataapi-starrocks`."
-        );
-        return;
+    let f = match live().await {
+        Ok(f) => f,
+        Err(why) => {
+            eprintln!(
+                "SKIPPED, asserted nothing — {why}. \
+                 See this file's header, or run `just test-dataapi-starrocks`."
+            );
+            return;
+        }
     };
 
     f.publish(
@@ -556,12 +574,15 @@ async fn a_published_endpoint_returns_rows_a_real_starrocks_computed() {
 /// backslash injection this repo has already had to patch at three call sites.
 #[tokio::test]
 async fn a_declared_parameter_is_bound_and_filters_on_a_real_starrocks() {
-    let Some(f) = live().await else {
-        eprintln!(
-            "SKIPPED, asserted nothing — EGRET_TEST_STARROCKS_URL unset. \
-             See this file's header, or run `just test-dataapi-starrocks`."
-        );
-        return;
+    let f = match live().await {
+        Ok(f) => f,
+        Err(why) => {
+            eprintln!(
+                "SKIPPED, asserted nothing — {why}. \
+                 See this file's header, or run `just test-dataapi-starrocks`."
+            );
+            return;
+        }
     };
 
     f.publish(
