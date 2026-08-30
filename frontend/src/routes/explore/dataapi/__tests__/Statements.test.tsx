@@ -188,6 +188,15 @@ function savedStatements(): StatementSpec[] {
 
 beforeEach(() => {
   vi.resetAllMocks();
+  // The shell reads the version history on EVERY tab now: the header names the
+  // version a consumer is actually receiving, and says when the saved draft has
+  // moved past it. Automocked, that hook hands back `undefined`, so this default
+  // is what keeps the shell mountable at all here — tests that care about
+  // versions override it afterwards.
+  vi.mocked(api.useDataApiListEndpointVersions).mockReturnValue(
+    { data: { status: 200, data: [] }, isLoading: false, isError: false, error: null } as unknown as
+      ReturnType<typeof api.useDataApiListEndpointVersions>,
+  );
   updateMutateAsync.mockResolvedValue({ status: 200, data: makeEndpoint() });
   vi.mocked(databasesApi.useDatabases).mockReturnValue({
     data: [{ id: "db-1", name: "warehouse" }],

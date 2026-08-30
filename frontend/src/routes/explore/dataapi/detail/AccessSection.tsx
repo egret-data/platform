@@ -17,7 +17,7 @@ import {
   useDataApiRevokeEndpointInvoke,
 } from "@/api/generated/data-api/data-api";
 import type { DataApiEndpointGrantDto, DataApiServiceAccountDto } from "@/api/generated/model";
-import { useEndpointDetail } from "../EndpointDetail";
+import { LeaveGuardLink, useEndpointDetail } from "../EndpointDetail";
 
 /**
  * Just enough of the generated OpenAPI document to answer one question. The
@@ -646,9 +646,9 @@ function AccessRow({
             <Caveat summary="Revoking will not remove access">
               This account also reaches invoke through the workspace, so revoking here removes the grant
               but not the access.{" "}
-              <Link className="underline" to={membershipHref}>
+              <LeaveGuardLink className="underline" to={membershipHref}>
                 Workspace membership
-              </Link>
+              </LeaveGuardLink>
             </Caveat>
           )}
           {/* The caveat that used to be missing. A granted row whose check did
@@ -682,9 +682,9 @@ function AccessRow({
             <Caveat summary="Nothing here to revoke">
               There is no grant on this endpoint to revoke — this account reaches invoke through its
               workspace role, which applies to every endpoint here. Change it in{" "}
-              <Link className="underline" to={membershipHref}>
+              <LeaveGuardLink className="underline" to={membershipHref}>
                 Workspace membership
-              </Link>
+              </LeaveGuardLink>
             </Caveat>
           )}
           {/* NOTHING is rendered for `reason === "not-live"`, and that is the

@@ -1,10 +1,30 @@
+import type { ComponentProps, MouseEvent as ReactMouseEvent } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link, NavLink, Outlet, useOutletContext, useParams } from "react-router-dom";
+import { Link, NavLink, Outlet, useNavigate, useOutletContext, useParams } from "react-router-dom";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
-import { useDataApiGetEndpoint } from "@/api/generated/data-api/data-api";
+import {
+  useDataApiGetEndpoint,
+  useDataApiListEndpointVersions,
+} from "@/api/generated/data-api/data-api";
+import {
+  EndpointStateBadge,
+  draftIsAheadOfLive,
+  endpointHeaderStateLabel,
+  liveVersionOf,
+} from "./endpointState";
 // Save's invalidation (this record + the list its Name column feeds) lives in
 // the wrapper, next to every other Data API mutation — see `src/api/dataApi.ts`.
 import { useRestoreEndpoint, useUpdateEndpoint } from "@/api/dataApi";
@@ -116,11 +136,71 @@ export interface EndpointDetailContext {
    *  changed `state`/`live_version_id` server-side (publish/rollback) and needs
    *  the read-only half of this context to catch up. Does not touch `form`. */
   refetch: () => void;
+  /**
+   * Intercept a click that would LEAVE this editor while the form is dirty.
+   *
+   * Sections do not call this directly — they render {@link LeaveGuardLink}
+   * instead, which is the same guard with the plumbing already attached. It is
+   * on the context because the dirty form and the confirmation dialog both
+   * live in the shell, and there is exactly one of each.
+   *
+   * A no-op when the form is clean, so a guarded link is a plain link on every
+   * page where there is nothing to lose.
+   */
+  guardLeave: (e: ReactMouseEvent<HTMLAnchorElement>, to: string) => void;
 }
 
 /** Nested sections read/write the shared form through this, not through `useOutletContext` directly. */
 export function useEndpointDetail(): EndpointDetailContext {
   return useOutletContext<EndpointDetailContext>();
+}
+
+/**
+ * A `<Link>` that LEAVES the editor, and therefore asks first when the form is
+ * dirty.
+ *
+ * # Which links this is for, and which it is not
+ *
+ * Only the ones that navigate OUT of `/endpoints/:id`. The six tabs and the
+ * two cross-tab links (`Access` → `Try it`, `Try it` → `Access`) stay ordinary
+ * `<Link>`s on purpose: the shell owns the form and keys the `Outlet` by id,
+ * not by pathname, so moving between tabs loses nothing at all. A confirmation
+ * on those would be a false alarm on the one navigation that is always safe —
+ * and a guard that cries wolf is a guard people learn to click through.
+ *
+ * # Why this exists at all, rather than a router-level block
+ *
+ * `beforeunload` (see `useUnsavedChangesWarning`) covers reload, tab-close and
+ * external navigation, and it was doing so correctly — measured back to back
+ * against a control, a browser reload warned and clicking `← Endpoints`
+ * discarded the edit in silence. The app knew: the badge rendered and the
+ * handler was installed. The unguarded door was the one an author actually
+ * clicks.
+ *
+ * react-router's `useBlocker` would cover every in-app exit at once, but it
+ * exists only under a data router and `App.tsx` mounts `<BrowserRouter>`;
+ * migrating the whole app's router to close this is a change with a blast
+ * radius far past one editor. So this guards the CONTROLS, one by one, and the
+ * ones it does not reach are named in the report rather than implied to be
+ * covered: the sidebar, the workspace switcher and the browser Back button
+ * still discard silently.
+ */
+export function LeaveGuardLink({
+  to,
+  onClick,
+  ...rest
+}: Omit<ComponentProps<typeof Link>, "to"> & { to: string }) {
+  const { guardLeave } = useEndpointDetail();
+  return (
+    <Link
+      to={to}
+      onClick={(e) => {
+        onClick?.(e);
+        guardLeave(e, to);
+      }}
+      {...rest}
+    />
+  );
 }
 
 const SECTIONS: { to: string; label: string; end?: boolean }[] = [
@@ -183,6 +263,22 @@ function EndpointDetailInner({ ws, id }: { ws: string; id: string }) {
   const restoreMutation = useRestoreEndpoint();
 
   /**
+   * The version history, in the SHELL — because the header has to say what is
+   * serving on all six tabs, not only on the one tab that lists versions.
+   *
+   * Same query key as `Versions` and `Response`, so react-query serves all
+   * three from one fetch rather than three; this adds a request to a page that
+   * did not make one only when the author never opens either of those tabs.
+   * `is_live` is read as the server computed it against `live_version_id` and
+   * is never re-derived here.
+   */
+  const versionsQuery = useDataApiListEndpointVersions(ws, id, {
+    query: { enabled: !!ws && !!id },
+  });
+  const versionsEnvelope = versionsQuery.data;
+  const liveVersion = liveVersionOf(versionsEnvelope?.status === 200 ? versionsEnvelope.data : []);
+
+  /**
    * The one fact this page had no idea about until now.
    *
    * The Trash links straight here by name, so this route is reachable for an
@@ -226,6 +322,35 @@ function EndpointDetailInner({ ws, id }: { ws: string; id: string }) {
   const baselineJson = useMemo(() => (baselineForm ? JSON.stringify(baselineForm) : null), [baselineForm]);
   const dirty = baselineJson !== null && currentJson !== null && currentJson !== baselineJson;
   useUnsavedChangesWarning(dirty);
+
+  /**
+   * Where an intercepted click was heading, or `null` when nothing is pending.
+   *
+   * The destination is held rather than a bare `open` boolean so the dialog's
+   * "leave" can go where the author was actually going — one guard, any number
+   * of guarded links, and no second copy of any href for the two to disagree
+   * about.
+   */
+  const [pendingExit, setPendingExit] = useState<string | null>(null);
+  const navigate = useNavigate();
+
+  /**
+   * A plain function, not a `useCallback`. It is handed out on `ctx`, which is
+   * a fresh object literal every render anyway, so there is no identity for a
+   * memo to preserve — and wrapping it made React Compiler skip optimising this
+   * whole component ("existing memoization could not be preserved").
+   */
+  const guardLeave = (e: ReactMouseEvent<HTMLAnchorElement>, to: string) => {
+    // Everything a modified click means (open in a new tab, a middle click)
+    // leaves this page standing, so there is nothing to guard and swallowing it
+    // would break the link. `defaultPrevented` because a caller's own `onClick`
+    // runs first and may already have handled it.
+    if (!dirty || e.defaultPrevented || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) {
+      return;
+    }
+    e.preventDefault();
+    setPendingExit(to);
+  };
 
   const save = useCallback(async () => {
     // `trashed` here as well as on the button: Save is also reachable from a
@@ -341,7 +466,23 @@ function EndpointDetailInner({ ws, id }: { ws: string; id: string }) {
     refetch: () => {
       void refetch();
     },
+    guardLeave,
   };
+
+  const endpointsHref = `/explore/${ws}/data-api/endpoints`;
+  /**
+   * Live, and the draft has been saved past what is serving.
+   *
+   * The one state this header exists for. Before it, a Save and a Publish left
+   * the same trace on every surface egret has — proven end to end: mid-
+   * divergence the router answered `{"one":1}` at `version:1` while the draft
+   * on screen read `SELECT 42`.
+   */
+  const diverged = draftIsAheadOfLive(endpoint, liveVersion);
+  const stateLabel = endpointHeaderStateLabel(endpoint, {
+    liveVersion: liveVersion?.version,
+    diverged,
+  });
 
   return (
     // `p-4`, matching every other top-level Explore detail route (e.g.
@@ -371,9 +512,17 @@ function EndpointDetailInner({ ws, id }: { ws: string; id: string }) {
       <h1 className="sr-only">{headingName}</h1>
       <div className="mb-4 flex shrink-0 flex-wrap items-center justify-between gap-3">
         <div className="min-w-0">
+          {/* Guarded, and it is the whole of Finding 3: measured back to back
+              against a control on the same dirty form, a browser reload raised
+              `beforeunload` and this link discarded the edit without a word. */}
+          {/* The shell is OUTSIDE its own `Outlet`, so it cannot use
+              `LeaveGuardLink` (which reads the context the Outlet provides) —
+              it holds `guardLeave` directly, and this is the same call the
+              component makes for the sections. */}
           <Link
             className="text-sm text-muted-foreground hover:underline"
-            to={`/explore/${ws}/data-api/endpoints`}
+            to={endpointsHref}
+            onClick={(e) => guardLeave(e, endpointsHref)}
           >
             ← Endpoints
           </Link>
@@ -384,15 +533,87 @@ function EndpointDetailInner({ ws, id }: { ws: string; id: string }) {
             now"; the only thing this page can do to a trashed endpoint is
             restore it, and that control lives in the banner below with the
             sentence that explains it. */}
-        {!trashed && (
-          <div className="flex items-center gap-2">
-            {dirty && <span className="text-xs text-muted-foreground">Unsaved changes</span>}
-            <Button onClick={save} disabled={!dirty || updateMutation.isPending}>
-              {updateMutation.isPending ? "Saving…" : "Save"}
-            </Button>
-          </div>
-        )}
+        <div className="flex items-center gap-2">
+          {/* WHAT THIS ENDPOINT IS, BESIDE SAVE, ON ALL SIX TABS.
+              Rendered for a trashed endpoint too — Save is not, but the state
+              is still a fact, and the banner below says what the trash means
+              rather than what the endpoint is.
+
+              A LINK, and to `versions` deliberately: this pill is about the
+              publish lifecycle, and `Versions` is the page for it. That also
+              answers "Publish lives on one tab of six" without a second
+              publish control anywhere — the header ROUTES to the one publish
+              path rather than growing its own. A second Publish button here
+              would also rebuild, permanently and on every tab, the exact
+              geometry `Versions` deliberately dismantled: two primary-looking
+              buttons in the page's top-right corner doing unrelated things. */}
+          <Link
+            to="versions"
+            /* The visible word is the state; the accessible name is that word
+               plus where the link goes, for a reader who cannot see that it
+               sits beside a tab strip. WCAG 2.5.3 Label in Name is satisfied
+               by construction — the name STARTS with the visible string,
+               because both come from one call to `endpointHeaderStateLabel`
+               and there is no second spelling to drift. (An `sr-only` suffix
+               was tried first: name computation trims each text node, so the
+               two ran together as `Live · v2(open the…)`.) */
+            aria-label={`${stateLabel} — open the Versions tab`}
+            className="rounded-md focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+          >
+            <EndpointStateBadge
+              endpoint={endpoint}
+              liveVersion={liveVersion?.version}
+              diverged={diverged}
+            />
+          </Link>
+          {/* No Save at all for a trashed endpoint — not a disabled one either.
+              A greyed-out Save still says "this page edits things, just not right
+              now"; the only thing this page can do to a trashed endpoint is
+              restore it, and that control lives in the banner below with the
+              sentence that explains it. */}
+          {!trashed && (
+            <>
+              {dirty && <span className="text-xs text-muted-foreground">Unsaved changes</span>}
+              <Button onClick={save} disabled={!dirty || updateMutation.isPending}>
+                {updateMutation.isPending ? "Saving…" : "Save"}
+              </Button>
+            </>
+          )}
+        </div>
       </div>
+
+      {/* Finding 3's other half: the question the silent link never asked.
+          `AlertDialog`, not `Dialog` — this interrupts an action and wants a
+          decision, which is the role difference (`alertdialog`) rather than a
+          styling one. */}
+      <AlertDialog
+        open={pendingExit !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingExit(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Leave without saving?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This endpoint has changes you have not saved. Leaving discards them — the saved draft
+              and the live version both stay exactly as they are.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Stay on this page</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                const to = pendingExit;
+                setPendingExit(null);
+                if (to) navigate(to);
+              }}
+            >
+              Discard changes and leave
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* The page saying plainly what it is. Before this, the Trash linked by
           name straight into a six-section editor with an enabled Save, no
