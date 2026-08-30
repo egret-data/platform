@@ -23,10 +23,18 @@
 //! let url = egret_test_db::url().await?;
 //! ```
 //!
-//! `url()` still returns `None` when `DATABASE_URL` is unset, so the existing self-skip
-//! stays exactly as it was. **A DB-gated test that skips reports `ok` while asserting
-//! nothing** — if a suite goes green, check the assertion count or the duration before
-//! believing it ran.
+//! # A skip is not a pass
+//!
+//! `url()` used to return `None` when `DATABASE_URL` was unset, and every caller turned
+//! that into an early `return` — so **a DB-gated test that skipped reported `ok` while
+//! asserting nothing**, and the only way to tell it apart from a real pass was the
+//! duration. Measured on `cargo test -p egret-dataapi`, same commit, same machine: with a
+//! database, `373 passed` in **282.69 s**; without one, the identical `373 passed` in
+//! **11.31 s**, of which 315 tests executed no assertion at all.
+//!
+//! So `url()` now **panics** instead, and skipping requires [`ALLOW_SKIP_VAR`]
+//! (`EGRET_ALLOW_DB_SKIP=1`) — which puts the skip in the invocation rather than leaving
+//! it to be inferred from the wall clock. See `docs/en/testing/db-gated-tests.md`.
 //!
 //! # Why it is a crate and not a `#[path]` module
 //!
@@ -441,21 +449,169 @@ pub fn assert_database_url_is_exported() {
     );
 }
 
-/// The URL this process should use. `None` when `DATABASE_URL` is unset, which is how the
-/// DB-gated tests decide to skip.
+/// The variable that turns "I have no database" from a silent pass into a deliberate act.
+///
+/// Set it to anything (`EGRET_ALLOW_DB_SKIP=1`) and [`url`] goes back to returning `None`,
+/// so every DB-gated suite self-skips exactly as it used to. Leave it unset and a run with
+/// no usable database **panics** — which is the whole point: a suite that asserted nothing
+/// must not be readable as evidence that it passed.
+pub const ALLOW_SKIP_VAR: &str = "EGRET_ALLOW_DB_SKIP";
+
+fn allow_skip() -> bool {
+    std::env::var_os(ALLOW_SKIP_VAR).is_some()
+}
+
+/// What a run with no usable database should do.
+///
+/// A pure function over the two facts that decide it, so the matrix is unit-testable
+/// without touching the process environment — `std::env::set_var` is `unsafe` and racy
+/// beside the `sqlx`/`dotenvy` reads happening on other threads (see [`process_db_name`]'s
+/// note), so a test that flipped the real variable would be a worse test than no test.
+///
+/// `Ok(())` means "skip quietly, the operator asked for it". `Err` carries the message the
+/// caller panics with.
+fn skip_verdict(has_database_url: bool, allow_skip: bool) -> Result<(), String> {
+    if allow_skip {
+        return Ok(());
+    }
+    let cause = if has_database_url {
+        "DATABASE_URL is set, but this process could not obtain a test database from it \
+         (Postgres unreachable, or the template could not be migrated)"
+    } else {
+        "DATABASE_URL is not set, so there is no database to run against"
+    };
+    Err(format!(
+        "{cause}.\n\
+         \n\
+         This used to make the suite SKIP — and a skipped DB-gated test reports `ok` while \
+         asserting nothing, so the only way to tell a real pass from an empty one was to \
+         squint at the duration. It now fails instead. Pick one:\n\
+         \n\
+         \x20 1. Run against a database (what CI does):\n\
+         \x20      just up\n\
+         \x20      export DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test\n\
+         \n\
+         \x20 2. Deliberately skip every DB-gated suite, visibly, in the invocation:\n\
+         \x20      {ALLOW_SKIP_VAR}=1 cargo test --workspace\n\
+         \n\
+         Never point DATABASE_URL at the dev database `egret`: `#[sqlx::test]` resolves it \
+         through dotenvy and will create its scratch schemas inside it."
+    ))
+}
+
+/// The URL this process should use.
+///
+/// # This is where a green suite stops being able to lie
+///
+/// It used to return `None` whenever `DATABASE_URL` was unset, and every DB-gated suite in
+/// the workspace turned that `None` into an early `return` — a test that asserted nothing
+/// and reported `ok`. Twenty-three integration binaries in `egret-dataapi` alone behave
+/// that way, and an audit of that feature had to caveat nearly every finding with "the
+/// suite reports `ok` but may have asserted nothing".
+///
+/// So the default is now to **panic**, and skipping requires [`ALLOW_SKIP_VAR`] — which
+/// puts the skip in the command line that produced the green, rather than leaving it
+/// inferable only from the wall clock. CI already provides Postgres
+/// (`.github/workflows/ci.yml` runs a `postgres:16` service and sets `DATABASE_URL` at job
+/// level), so this does not change what CI does; it changes what a laptop with no database
+/// does.
+///
+/// The same panic covers `DATABASE_URL` set but unusable. That case skipped silently too,
+/// and it is strictly worse: it is the shape a CI run takes when the database service
+/// failed to come up, and it went green.
 ///
 /// Cheap to call repeatedly: the clone is created once per process and every later call
 /// returns the same string.
+///
+/// # Panics
+///
+/// When no test database can be obtained and [`ALLOW_SKIP_VAR`] is unset.
 pub async fn url() -> Option<String> {
-    TEST_DB
+    // Checked before the `OnceCell` so the unset case costs nothing and cannot be memoised
+    // into a `None` that a later, better-configured call would inherit.
+    if std::env::var_os("DATABASE_URL").is_none() {
+        if let Err(msg) = skip_verdict(false, allow_skip()) {
+            panic!("{msg}");
+        }
+        return None;
+    }
+    match TEST_DB
         .get_or_init(|| async { process_db_url().await })
         .await
         .clone()
+    {
+        Some(u) => Some(u),
+        None => {
+            if let Err(msg) = skip_verdict(true, allow_skip()) {
+                panic!("{msg}");
+            }
+            None
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{process_db_name, CLONE_PATTERN};
+    use super::{process_db_name, skip_verdict, ALLOW_SKIP_VAR, CLONE_PATTERN};
+
+    /// The matrix that decides whether a database-less run is a pass or a failure.
+    ///
+    /// Both `false` rows are the ones that matter and neither existed before: a run with
+    /// no `DATABASE_URL`, and a run where `DATABASE_URL` is set but yields nothing, both
+    /// used to return `None` and let every DB-gated suite report `ok` having asserted
+    /// nothing. The mutation that fails this test is making `skip_verdict` return `Ok(())`
+    /// unconditionally — i.e. restoring the old behaviour.
+    #[test]
+    fn only_an_explicit_opt_out_turns_a_missing_database_into_a_skip() {
+        assert!(
+            skip_verdict(false, true).is_ok(),
+            "with the opt-out set, no database must still SKIP — otherwise there is no way \
+             to run the workspace suite without Postgres"
+        );
+        assert!(
+            skip_verdict(true, true).is_ok(),
+            "the opt-out is one lever and covers the unusable-database case too"
+        );
+        assert!(
+            skip_verdict(false, false).is_err(),
+            "no DATABASE_URL and no opt-out must FAIL, not skip"
+        );
+        assert!(
+            skip_verdict(true, false).is_err(),
+            "DATABASE_URL set but unusable is the shape a CI run takes when the database \
+             service failed to start — it must never be green"
+        );
+    }
+
+    /// The message is the whole remedy, so it has to carry both ways out.
+    ///
+    /// Without this the change is a wall: a developer with no Postgres sees a failure and
+    /// no path forward, which is exactly the outcome this package was told not to produce.
+    #[test]
+    fn the_failure_message_names_both_ways_forward() {
+        let msg = skip_verdict(false, false).expect_err("must fail without the opt-out");
+        assert!(
+            msg.contains(ALLOW_SKIP_VAR),
+            "must name the opt-out variable: {msg}"
+        );
+        assert!(
+            msg.contains("postgres://egret:egret@localhost:5432/egret_test"),
+            "must name the test database, not leave the reader to guess: {msg}"
+        );
+        // The database that must never be named as the target — pointing tests at it has
+        // previously left the dev server unable to boot.
+        assert!(
+            !msg.contains("localhost:5432/egret\n") && !msg.contains("localhost:5432/egret "),
+            "must not suggest the DEV database: {msg}"
+        );
+
+        let unusable = skip_verdict(true, false).expect_err("must fail without the opt-out");
+        assert_ne!(
+            msg, unusable,
+            "the two causes must read differently — 'unset' and 'set but unreachable' send \
+             the reader to different places"
+        );
+    }
 
     /// The invariant that keeps [`super::drop_abandoned_clones`] unable to reach the
     /// shared database: a clone name is the prefix plus **exactly** 32 lowercase hex
@@ -493,13 +649,28 @@ mod tests {
     #[tokio::test]
     async fn postgres_matches_a_clone_and_never_the_shared_database() {
         use sqlx::Connection;
-        let Ok(url) = std::env::var("DATABASE_URL") else {
-            eprintln!("skip: DATABASE_URL unset");
-            return;
+        // Held to the same rule this crate now imposes on everyone else: a run with no
+        // database FAILS unless the operator asked for a skip. This test guards the sweep
+        // that can drop a database, so "it went green" must never mean "it did not run".
+        let url = match std::env::var("DATABASE_URL") {
+            Ok(u) => u,
+            Err(_) => {
+                if let Err(msg) = super::skip_verdict(false, super::allow_skip()) {
+                    panic!("{msg}");
+                }
+                eprintln!("skip: DATABASE_URL unset ({ALLOW_SKIP_VAR} is set)");
+                return;
+            }
         };
-        let Ok(mut conn) = sqlx::PgConnection::connect(&url).await else {
-            eprintln!("skip: no database");
-            return;
+        let mut conn = match sqlx::PgConnection::connect(&url).await {
+            Ok(c) => c,
+            Err(e) => {
+                if let Err(msg) = super::skip_verdict(true, super::allow_skip()) {
+                    panic!("{msg}\n\nunderlying connect error: {e}");
+                }
+                eprintln!("skip: no database ({ALLOW_SKIP_VAR} is set)");
+                return;
+            }
         };
         let mine = process_db_name();
         let cases: [(&str, bool); 7] = [

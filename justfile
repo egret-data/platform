@@ -2,6 +2,15 @@
 
 set dotenv-load := true
 
+# The database every test recipe below runs against, stated here rather than inherited.
+#
+# `set dotenv-load` above puts `.env` into every recipe's environment, and `.env` (like
+# `.env.example`) points `DATABASE_URL` at the DEV database `egret`. A recipe that simply
+# ran `cargo test` therefore pointed the whole workspace suite — including `#[sqlx::test]`,
+# which resolves the variable through dotenvy unconditionally — at the database the dev
+# server boots from. Naming it explicitly on the recipe line overrides the dotenv value.
+test_database_url := "postgres://egret:egret@localhost:5432/egret_test"
+
 # Start the local dev stack (Postgres, MinIO, Trino, StarRocks)
 up:
     docker compose -f deploy/docker-compose.dev.yml up -d
@@ -17,7 +26,17 @@ check:
     ./deploy/prune-target.sh
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
-    cargo test --workspace
+    DATABASE_URL={{ test_database_url }} cargo test --workspace
+
+# The workspace suite with NO database, skipping every DB-gated test on purpose.
+#
+# `EGRET_ALLOW_DB_SKIP` is the only thing that makes a database-less run green: without it
+# `egret_test_db::url()` panics rather than letting ~315 tests in `egret-dataapi` alone
+# report `ok` having asserted nothing (see docs/en/testing/db-gated-tests.md). Use this
+# when you want the compile + the database-free tests and nothing more — and read the
+# result knowing what it did not cover.
+test-no-db:
+    EGRET_ALLOW_DB_SKIP=1 cargo test --workspace
 
 # Apply migrations against the running Postgres
 migrate:
