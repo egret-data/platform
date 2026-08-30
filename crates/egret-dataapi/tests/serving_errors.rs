@@ -19,7 +19,7 @@
 //! time, which is the real sequence — a table is dropped, a grant is revoked, a
 //! coordinator goes down, all after the snapshot was frozen.
 //!
-//! DB-gated. Self-skips (passes) when `DATABASE_URL` is unset, so check the
+//! DB-gated. Self-skips ONLY when `EGRET_ALLOW_DB_SKIP` is set; without it a run with no `DATABASE_URL` FAILS, so check the
 //! DURATION, not just the `ok`.
 
 use axum::body::Body;
@@ -346,7 +346,9 @@ macro_rules! skip_without_db {
         match fixture().await {
             Some(f) => f,
             None => {
-                eprintln!("DATABASE_URL unset — skipping");
+                eprintln!(
+                    "SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set"
+                );
                 return;
             }
         }
@@ -1084,7 +1086,7 @@ async fn a_second_principal_is_refused_the_same_way() {
 #[tokio::test]
 async fn an_engine_permission_error_names_the_missing_step() {
     let Some(f) = serving_common::fixture().await else {
-        eprintln!("DATABASE_URL unset — skipping");
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
         return;
     };
     // The fake port answers as a Ranger-enforcing engine does when the
@@ -1133,7 +1135,7 @@ async fn an_engine_permission_error_names_the_missing_step() {
 #[tokio::test]
 async fn an_internal_fault_is_never_classified_as_a_data_access_denial() {
     let Some(f) = serving_common::fixture().await else {
-        eprintln!("DATABASE_URL unset — skipping");
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
         return;
     };
     // Verbatim the shape `open_secret`'s failure takes on a vault or a
@@ -1197,7 +1199,7 @@ async fn an_internal_fault_is_never_classified_as_a_data_access_denial() {
 #[tokio::test]
 async fn a_conditional_endpoint_serves_its_own_default_call() {
     let Some(f) = serving_common::fixture().await else {
-        eprintln!("DATABASE_URL unset — skipping");
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
         return;
     };
     // First arm wins, so the fallback is last. Installed BEFORE publish, since
@@ -1284,7 +1286,7 @@ async fn a_conditional_endpoint_serves_its_own_default_call() {
 #[tokio::test]
 async fn an_enum_default_beyond_the_probe_budget_still_serves_its_default_call() {
     let Some(f) = serving_common::fixture().await else {
-        eprintln!("DATABASE_URL unset — skipping");
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
         return;
     };
     f.port
@@ -1361,7 +1363,7 @@ fn keys(row: &serde_json::Value) -> Vec<&str> {
 #[tokio::test]
 async fn an_enum_default_past_the_candidate_cap_still_serves_its_default_call() {
     let Some(f) = serving_common::fixture().await else {
-        eprintln!("DATABASE_URL unset — skipping");
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
         return;
     };
     f.port.set_columns_per_sql(&[
@@ -1477,7 +1479,7 @@ async fn an_enum_default_past_the_candidate_cap_still_serves_its_default_call() 
 #[tokio::test]
 async fn each_statement_is_served_under_its_own_name_and_its_own_contract() {
     let Some(f) = serving_common::fixture().await else {
-        eprintln!("DATABASE_URL unset — skipping");
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
         return;
     };
     // First arm wins, so the fallback goes last. Installed BEFORE publish: this
@@ -1564,7 +1566,7 @@ async fn each_statement_is_served_under_its_own_name_and_its_own_contract() {
 #[tokio::test]
 async fn a_drift_in_the_second_statement_refuses_the_whole_call() {
     let Some(f) = serving_common::fixture().await else {
-        eprintln!("DATABASE_URL unset — skipping");
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
         return;
     };
     f.port
@@ -1622,7 +1624,7 @@ async fn a_drift_in_the_second_statement_refuses_the_whole_call() {
 #[tokio::test]
 async fn the_row_cap_is_charged_per_statement() {
     let Some(f) = serving_common::fixture().await else {
-        eprintln!("DATABASE_URL unset — skipping");
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
         return;
     };
     // 7 and 11 rather than round numbers: both survive `execution_limits`'
@@ -1671,7 +1673,7 @@ async fn the_row_cap_is_charged_per_statement() {
 #[tokio::test]
 async fn several_statements_report_their_contract_under_their_own_names() {
     let Some(f) = serving_common::fixture().await else {
-        eprintln!("DATABASE_URL unset — skipping");
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
         return;
     };
     // First arm wins, so the fallback goes last. Installed BEFORE publish: this
@@ -1746,7 +1748,7 @@ async fn several_statements_report_their_contract_under_their_own_names() {
 #[tokio::test]
 async fn bare_with_several_statements_writes_the_keyed_object_alone() {
     let Some(f) = serving_common::fixture().await else {
-        eprintln!("DATABASE_URL unset — skipping");
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
         return;
     };
     f.port
@@ -1784,7 +1786,7 @@ async fn bare_with_several_statements_writes_the_keyed_object_alone() {
 #[tokio::test]
 async fn a_cache_hit_reports_the_same_per_statement_meta_as_the_miss() {
     let Some(f) = serving_common::fixture().await else {
-        eprintln!("DATABASE_URL unset — skipping");
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
         return;
     };
     f.port

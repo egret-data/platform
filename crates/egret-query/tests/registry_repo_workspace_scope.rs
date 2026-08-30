@@ -1,5 +1,5 @@
 //! Workspace-scoped DatabaseRepo tests (Epic A: DB connections per-workspace).
-//! DB-gated; self-skips without `DATABASE_URL`.
+//! DB-gated; self-skips without `DATABASE_URL` ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS.
 //!
 //! These prove the per-workspace repo methods enforce ownership (ADR-19):
 //!   - `create_in_workspace(ws_a)` rows are visible to `list_for_workspace(ws_a)`

@@ -1,5 +1,5 @@
 //! Per-object authorization for saved-query (`sqllab/queries/{id}`) handlers
-//! (saved-query object-scope). DB-gated; self-skips without DATABASE_URL. Builds
+//! (saved-query object-scope). DB-gated; self-skips without DATABASE_URL ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS. Builds
 //! a REAL `CedarPdp` AFTER `migrate()` so it snapshots the `ws_viewer`/`ws_editor`
 //! `saved_query:*` perms granted in migration 0077.
 //!

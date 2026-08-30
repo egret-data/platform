@@ -1,4 +1,4 @@
-//! DB-gated revision ROUTE tests. Self-skip without DATABASE_URL.
+//! DB-gated revision ROUTE tests. Self-skip without DATABASE_URL ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAIL.
 //!
 //! Three behaviours, each of which is a way the feature can be wrong rather than absent:
 //!

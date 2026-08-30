@@ -1,4 +1,4 @@
-//! DB-gated ROUTE tests for Alerts & Reports. Self-skip without DATABASE_URL.
+//! DB-gated ROUTE tests for Alerts & Reports. Self-skip without DATABASE_URL ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAIL.
 //!
 //! These assert the three things the repo tests cannot see, because they only
 //! exist at the HTTP layer:

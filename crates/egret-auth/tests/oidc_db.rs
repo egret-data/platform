@@ -1,4 +1,4 @@
-//! Tier-0 OIDC DB tests (no IdP). Self-skip without DATABASE_URL.
+//! Tier-0 OIDC DB tests (no IdP). Self-skip without DATABASE_URL ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAIL.
 
 use egret_auth::groups::GroupRepo;
 use egret_auth::oidc::{provision_and_sync, OidcClaims};

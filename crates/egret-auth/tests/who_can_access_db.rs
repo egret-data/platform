@@ -133,7 +133,7 @@ async fn grant(
 #[tokio::test]
 async fn who_can_access_chart_reverse_resolution() {
     let Some(db) = connect().await else {
-        eprintln!("DATABASE_URL unset — skipping");
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
         return;
     };
 

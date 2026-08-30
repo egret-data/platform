@@ -1,5 +1,5 @@
 //! Object-scoped `POST /ws/{ws}/charts/{id}/data` (Effort B / B2-1b Task 2).
-//! DB-gated; self-skips without DATABASE_URL. Builds a REAL `CedarPdp` AFTER
+//! DB-gated; self-skips without DATABASE_URL ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS. Builds a REAL `CedarPdp` AFTER
 //! `migrate()` so it snapshots the `ws_viewer` BI perms.
 //!
 //! Proves the executed-chart-data endpoint is object-scoped and runs ONLY the

@@ -2066,7 +2066,7 @@ mod catalog_authz_tests {
 /// same signing key.
 ///
 /// DB-gated (the guard needs `PgSigningKeyStore`, whose key lives in Postgres);
-/// self-skips without `DATABASE_URL`, like the other DB-backed suites.
+/// self-skips without `DATABASE_URL` ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS, like the other DB-backed suites.
 #[cfg(test)]
 mod catalog_guard_audience_tests {
     use super::{EgretCatalogGuard, CATALOG_AUDIENCE};
@@ -2106,7 +2106,7 @@ mod catalog_guard_audience_tests {
     #[tokio::test]
     async fn config_rejects_a_data_api_token_but_accepts_a_catalog_one() {
         let Some(g) = guard().await else {
-            eprintln!("DATABASE_URL unset — skipping");
+            eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
             return;
         };
 

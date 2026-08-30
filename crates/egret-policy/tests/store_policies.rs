@@ -1,4 +1,4 @@
-//! DB-gated PolicyStore policy tests. Self-skip without DATABASE_URL.
+//! DB-gated PolicyStore policy tests. Self-skip without DATABASE_URL ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAIL.
 use egret_metastore::Db;
 use egret_policy::PolicyStore;
 use serde_json::json;

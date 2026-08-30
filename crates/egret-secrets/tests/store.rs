@@ -1,4 +1,4 @@
-//! DB-gated SecretStore tests. Self-skip without DATABASE_URL.
+//! DB-gated SecretStore tests. Self-skip without DATABASE_URL ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAIL.
 use egret_metastore::Db;
 use egret_secrets::{Crypto, SecretStore};
 

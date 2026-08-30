@@ -1,6 +1,6 @@
 //! `POST …/endpoints/{id}/preview` — spec §5 of the P6 authoring-loop design.
 //!
-//! DB-gated. Self-skips (passes) when DATABASE_URL is unset, like every other
+//! DB-gated. Self-skips ONLY when `EGRET_ALLOW_DB_SKIP` is set; without it a run with no DATABASE_URL FAILS, like every other
 //! suite here — so check the DURATION, not just the `ok`.
 
 mod serving_common;

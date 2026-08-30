@@ -1,4 +1,4 @@
-//! DB-gated tests for `replace_layout`'s id reconciliation. Self-skip without DATABASE_URL.
+//! DB-gated tests for `replace_layout`'s id reconciliation. Self-skip without DATABASE_URL ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAIL.
 //!
 //! Saving used to delete every card and tab and reinsert the payload, so **every id changed on
 //! every save**. These pin the replacement behaviour and, just as importantly, the two ways it

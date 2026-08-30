@@ -1,5 +1,5 @@
 //! Workspace-scoped database registry HTTP route tests (Epic A: DB per workspace).
-//! DB-gated; self-skips without `DATABASE_URL`.
+//! DB-gated; self-skips without `DATABASE_URL` ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS.
 //!
 //! These prove the `/ws/{workspace}/databases` router
 //! (`egret_query::workspace_database_router`):

@@ -5,7 +5,7 @@
 //! materializes a read-only, per-user-delegated connection in the workspace;
 //! unassigning removes it. Non-JWT engines are rejected.
 //!
-//! DB-gated: self-skips without `DATABASE_URL`, same as `tests/store.rs`. Seeds a
+//! DB-gated: self-skips without `DATABASE_URL` ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS, same as `tests/store.rs`. Seeds a
 //! warehouse (+ its workspace) via `egret_catalog_engine::CatalogStore` — the
 //! catalog seam owns them — recovers the workspace id from the `warehouses` row,
 //! and seeds a `users` row for `assigned_by`.
@@ -98,7 +98,7 @@ async fn seed_typed_engine_and_ws(
 #[tokio::test]
 async fn assign_materializes_a_delegated_connection() {
     let Some((catalog, engine_mgmt, svc)) = harness().await else {
-        eprintln!("DATABASE_URL unset — skipping");
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
         return;
     };
     // JWT-capable engine: `spec.trinoConfig.auth.jwt` is an object.
@@ -147,7 +147,7 @@ async fn assign_materializes_a_delegated_connection() {
 #[tokio::test]
 async fn assign_rejects_non_delegation_engine() {
     let Some((catalog, engine_mgmt, svc)) = harness().await else {
-        eprintln!("DATABASE_URL unset — skipping");
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
         return;
     };
     // Trino's delegation mode defaults to `impersonate`, so an engine is only
@@ -179,7 +179,7 @@ async fn assign_rejects_non_delegation_engine() {
 #[tokio::test]
 async fn rematerialize_updates_conn_opts() {
     let Some((catalog, engine_mgmt, svc)) = harness().await else {
-        eprintln!("DATABASE_URL unset — skipping");
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
         return;
     };
     // StarRocks engine, impersonate delegation → materialized opts carry

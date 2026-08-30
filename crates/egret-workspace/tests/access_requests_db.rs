@@ -2,7 +2,7 @@
 //! Covers create + dup-pending conflict, list-for-requester / list-for-workspace,
 //! approve (creates the workspace member with the chosen role + expiry), deny,
 //! cancel guards, joinable (active workspaces the user is NOT in), and
-//! `MemberRepo::add_with_expiry`. DB-gated; self-skips without DATABASE_URL —
+//! `MemberRepo::add_with_expiry`. DB-gated; self-skips without DATABASE_URL ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS —
 //! mirroring the sibling `access_views_db.rs` / `members_ax1.rs` harnesses.
 
 use egret_auth::password::hash_password;

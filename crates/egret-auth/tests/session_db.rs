@@ -1,4 +1,4 @@
-//! DB-gated integration tests. Skip (pass) when DATABASE_URL is unset so the
+//! DB-gated integration tests. Skip ONLY when `EGRET_ALLOW_DB_SKIP` is set; without it a run with no DATABASE_URL FAILS so the
 //! suite stays green offline; CI / `just up` provides Postgres.
 
 use egret_auth::password::hash_password;
@@ -19,7 +19,7 @@ fn unique_email(tag: &str) -> String {
 #[tokio::test]
 async fn insert_and_find_user() {
     let Some(db) = connect().await else {
-        eprintln!("DATABASE_URL unset — skipping");
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
         return;
     };
     let repo = UserRepo::new(db);

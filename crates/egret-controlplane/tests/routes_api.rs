@@ -1,5 +1,5 @@
 //! Control-plane Storage + Secrets HTTP route tests (platform-admin gate).
-//! DB-gated; self-skips without `DATABASE_URL`.
+//! DB-gated; self-skips without `DATABASE_URL` ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS.
 //!
 //! Proves `egret_controlplane::control_plane_router`:
 //!   - a non-platform-admin session is Forbidden (403) on the global routes,

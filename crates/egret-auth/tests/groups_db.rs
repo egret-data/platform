@@ -20,7 +20,7 @@ fn uniq(tag: &str) -> String {
 #[tokio::test]
 async fn group_local_crud_and_membership() {
     let Some(db) = connect().await else {
-        eprintln!("DATABASE_URL unset — skipping");
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
         return;
     };
     let groups = GroupRepo::new(db.clone());
@@ -102,7 +102,7 @@ async fn group_local_crud_and_membership() {
 #[tokio::test]
 async fn rename_and_delete_are_noop_on_oidc_group() {
     let Some(db) = connect().await else {
-        eprintln!("DATABASE_URL unset — skipping");
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
         return;
     };
     let groups = GroupRepo::new(db.clone());
@@ -118,7 +118,7 @@ async fn rename_and_delete_are_noop_on_oidc_group() {
 #[tokio::test]
 async fn groups_of_user_returns_membership() {
     let Some(db) = connect().await else {
-        eprintln!("DATABASE_URL unset — skipping");
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
         return;
     };
     let groups = GroupRepo::new(db.clone());

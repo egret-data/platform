@@ -1,4 +1,4 @@
-//! DB-gated certification ROUTE tests. Self-skip without DATABASE_URL.
+//! DB-gated certification ROUTE tests. Self-skip without DATABASE_URL ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAIL.
 //!
 //! WHY THESE EXIST. Certification's whole value rests on one property: a workspace editor must
 //! not be able to certify their own dashboard. Everything else about the feature is cosmetic if

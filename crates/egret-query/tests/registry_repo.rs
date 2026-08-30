@@ -1,4 +1,4 @@
-//! DB-gated DatabaseRepo tests. Self-skip without DATABASE_URL.
+//! DB-gated DatabaseRepo tests. Self-skip without DATABASE_URL ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAIL.
 //!
 //! Epic B (named per-workspace secrets): the repo no longer seals/rotates its own
 //! secret — it BINDS an already-resolved `workspace_secrets` id supplied by the

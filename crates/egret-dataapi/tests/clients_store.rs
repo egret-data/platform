@@ -1,8 +1,9 @@
 //! Every failure mode of `verify` must be indistinguishable from outside.
 //!
-//! DB-gated integration tests. Skip (pass) when DATABASE_URL is unset so the
-//! suite stays green offline; CI / `just up` provides Postgres. Fixture shape
-//! copied from `crates/egret-query/tests/registry_repo.rs`.
+//! DB-gated integration tests. Skip ONLY when `EGRET_ALLOW_DB_SKIP` is set;
+//! without it a run with no DATABASE_URL FAILS rather than going green having
+//! asserted nothing. CI / `just up` provides Postgres. Fixture shape copied
+//! from `crates/egret-query/tests/registry_repo.rs`.
 use egret_core::UserId;
 use egret_dataapi::ClientStore;
 use egret_machine_idp::ClientVerifier;
@@ -82,7 +83,9 @@ macro_rules! skip_without_db {
         match fixture().await {
             Some(f) => f,
             None => {
-                eprintln!("DATABASE_URL unset — skipping");
+                eprintln!(
+                    "SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set"
+                );
                 return;
             }
         }

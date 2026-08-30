@@ -1,4 +1,4 @@
-//! DB-gated DatasetRepo trash + bookmark tests. Self-skip without DATABASE_URL.
+//! DB-gated DatasetRepo trash + bookmark tests. Self-skip without DATABASE_URL ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAIL.
 use egret_bi::{DatasetRepo, NewColumn, SourceSpec};
 use egret_metastore::Db;
 use uuid::Uuid;

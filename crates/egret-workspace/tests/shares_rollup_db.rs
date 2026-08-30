@@ -2,7 +2,7 @@
 //! `AccessViewsRepo::list_object_grants` returns every OBJECT grant whose object
 //! lives in THIS workspace — enriched with object name, role name, principal name
 //! and effect — and, critically, EXCLUDES grants on objects that live in another
-//! workspace (the IDOR guard). DB-gated; self-skips without DATABASE_URL —
+//! workspace (the IDOR guard). DB-gated; self-skips without DATABASE_URL ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS —
 //! matching the sibling `members_ax1.rs` / `access_views_db.rs` harness (same
 //! `connect`/`uniq` setup).
 

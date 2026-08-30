@@ -11,7 +11,7 @@
 //! entitlement split). Keeping them apart keeps each file's fixture focused on
 //! what it actually proves.
 //!
-//! DB-gated: self-skips without `DATABASE_URL`, exactly like its neighbours.
+//! DB-gated: self-skips without `DATABASE_URL` ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS, exactly like its neighbours.
 //!
 //! **What is and is not provable here:** the test environment does not run a
 //! live Trino/StarRocks engine, so a request that reaches `run_query` cannot

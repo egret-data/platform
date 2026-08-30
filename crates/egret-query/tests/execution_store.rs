@@ -1,4 +1,4 @@
-//! DB-gated QueryStore tests. Self-skip without DATABASE_URL.
+//! DB-gated QueryStore tests. Self-skip without DATABASE_URL ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAIL.
 use egret_core::{ColumnMeta, TabularResult};
 use egret_metastore::Db;
 use egret_query::execution::model::QueryStatus;

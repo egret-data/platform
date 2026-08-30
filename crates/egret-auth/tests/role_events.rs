@@ -22,7 +22,7 @@ fn uniq(tag: &str) -> String {
 #[tokio::test]
 async fn role_mutations_publish_roles_changed() {
     let Some(db) = connect().await else {
-        eprintln!("DATABASE_URL unset — skipping");
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
         return;
     };
     let bus = EventBus::new();

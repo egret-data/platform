@@ -1,5 +1,5 @@
 //! Object-scoped `POST /ws/{ws}/dashboards/{id}/cards/{card_id}/data`
-//! (Effort B / B2-1b Task 3). DB-gated; self-skips without DATABASE_URL. Builds
+//! (Effort B / B2-1b Task 3). DB-gated; self-skips without DATABASE_URL ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS. Builds
 //! a REAL `CedarPdp` AFTER `migrate()` so it snapshots the `ws_viewer` BI perms.
 //!
 //! Proves the card-data endpoint authorizes on the DASHBOARD, not the chart —

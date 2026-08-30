@@ -34,7 +34,7 @@
 //!   `resource == ?resource` and therefore never matches an object) would be
 //!   silently inert, and a test built on it would pass while proving nothing.
 //!
-//! DB-gated. Self-skips (passes) when `DATABASE_URL` is unset, so check the
+//! DB-gated. Self-skips ONLY when `EGRET_ALLOW_DB_SKIP` is set; without it a run with no `DATABASE_URL` FAILS, so check the
 //! DURATION, not just the `ok`.
 
 use axum::body::Body;
@@ -382,7 +382,9 @@ macro_rules! skip_without_db {
         match fixture().await {
             Some(f) => f,
             None => {
-                eprintln!("DATABASE_URL unset — skipping");
+                eprintln!(
+                    "SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set"
+                );
                 return;
             }
         }

@@ -127,7 +127,7 @@ async fn grant(
 #[tokio::test]
 async fn resolves_direct_and_group_roles_with_source() {
     let Some(db) = connect().await else {
-        eprintln!("DATABASE_URL unset — skipping");
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
         return;
     };
     let r1 = uniq("r1");

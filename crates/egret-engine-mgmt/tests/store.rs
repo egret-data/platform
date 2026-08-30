@@ -3,7 +3,7 @@
 //! (E1b) alongside the store methods themselves; only the seeding of the
 //! `warehouse_id` FK now crosses the seam through `egret_catalog_engine::CatalogStore`
 //! (a dev-only dependency here), exactly like `create_engine`'s auto-wiring in
-//! control-plane. DB-gated; self-skips without `DATABASE_URL`.
+//! control-plane. DB-gated; self-skips without `DATABASE_URL` ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS.
 use egret_catalog_engine::CatalogStore;
 use egret_engine_mgmt::store::Engine;
 use egret_engine_mgmt::EngineMgmtStore;
@@ -59,7 +59,7 @@ async fn seed_warehouse(catalog: &CatalogStore, prefix: &str) -> (Uuid, String) 
 #[tokio::test]
 async fn create_list_get_delete_engine() {
     let Some((catalog, engine_mgmt)) = stores().await else {
-        eprintln!("DATABASE_URL unset — skipping");
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
         return;
     };
     let (wh_id, _wh_name) = seed_warehouse(&catalog, "eng").await;
@@ -92,7 +92,7 @@ async fn create_list_get_delete_engine() {
 #[tokio::test]
 async fn create_list_delete_engine_catalogs_cascade() {
     let Some((catalog, engine_mgmt)) = stores().await else {
-        eprintln!("DATABASE_URL unset — skipping");
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
         return;
     };
     let (wh_id, wh_name) = seed_warehouse(&catalog, "cat").await;
@@ -168,7 +168,7 @@ async fn create_list_delete_engine_catalogs_cascade() {
 #[tokio::test]
 async fn update_engine_catalog_reflects_in_get() {
     let Some((catalog, engine_mgmt)) = stores().await else {
-        eprintln!("DATABASE_URL unset — skipping");
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
         return;
     };
     let (wh_id, _wh_name) = seed_warehouse(&catalog, "upd").await;
@@ -257,7 +257,7 @@ async fn seed_engine_and_ws(
 #[tokio::test]
 async fn assign_list_unassign_engine_workspace() {
     let Some((catalog, engine_mgmt)) = stores().await else {
-        eprintln!("DATABASE_URL unset — skipping");
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
         return;
     };
     let (engine_id, ws_id, admin) = seed_engine_and_ws(&catalog, &engine_mgmt, "assign").await;

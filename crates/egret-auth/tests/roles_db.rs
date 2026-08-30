@@ -20,7 +20,7 @@ fn uniq(tag: &str) -> String {
 #[tokio::test]
 async fn full_role_lifecycle() {
     let Some(db) = connect().await else {
-        eprintln!("DATABASE_URL unset — skipping");
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
         return;
     };
     let roles = RoleRepo::new(db.clone(), egret_events::EventBus::new());
@@ -151,7 +151,7 @@ async fn full_role_lifecycle() {
 #[tokio::test]
 async fn assign_writes_platform_access_grant() {
     let Some(db) = connect().await else {
-        eprintln!("DATABASE_URL unset — skipping");
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
         return;
     };
     let repo = RoleRepo::new(db.clone(), egret_events::EventBus::new());
@@ -190,7 +190,7 @@ async fn assign_writes_platform_access_grant() {
 #[tokio::test]
 async fn platform_admin_user_ids_lists_direct_user_grants() {
     let Some(db) = connect().await else {
-        eprintln!("DATABASE_URL unset — skipping");
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
         return;
     };
     let roles = RoleRepo::new(db.clone(), egret_events::EventBus::new());
@@ -234,7 +234,7 @@ async fn platform_admin_user_ids_lists_direct_user_grants() {
 #[tokio::test]
 async fn platform_admin_user_ids_expands_group_granted_admins() {
     let Some(db) = connect().await else {
-        eprintln!("DATABASE_URL unset — skipping");
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
         return;
     };
     let roles = RoleRepo::new(db.clone(), egret_events::EventBus::new());

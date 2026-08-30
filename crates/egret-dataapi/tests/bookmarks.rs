@@ -22,7 +22,7 @@
 //!    BEFORE the bookmarks table is touched: `analytics.bookmarks` has no
 //!    workspace column of its own, so nothing else would refuse a foreign id.
 //!
-//! DB-gated. Self-skips (passes) when DATABASE_URL is unset, like
+//! DB-gated. Self-skips ONLY when `EGRET_ALLOW_DB_SKIP` is set; without it a run with no DATABASE_URL FAILS, like
 //! `endpoints_routes.rs` — so check the duration, not just the `ok`.
 
 use axum::body::Body;
@@ -166,7 +166,9 @@ macro_rules! skip_without_db {
         match fixture().await {
             Some(f) => f,
             None => {
-                eprintln!("DATABASE_URL unset — skipping");
+                eprintln!(
+                    "SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set"
+                );
                 return;
             }
         }

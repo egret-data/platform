@@ -1,7 +1,7 @@
 //! Tasks 8/9: the control-plane feature-entitlements API
 //! (`GET`/`PUT /api/admin/workspaces/{id}/features`) plus the `features` field
 //! `GET /api/me/workspaces` returns to tell the frontend which modules a
-//! workspace has. DB-gated; self-skips without `DATABASE_URL`, mirroring the
+//! workspace has. DB-gated; self-skips without `DATABASE_URL` ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS, mirroring the
 //! sibling `workspace_db.rs`/`access_requests_routes.rs` harnesses (own
 //! `connect`/`uniq`/`seed_user`/`ws_state`/`login_cookie` copies — each
 //! integration-test binary in this crate is self-contained).

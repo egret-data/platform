@@ -1,5 +1,5 @@
 //! Object-scoped `POST /ws/{ws}/datasets/{id}/data` (Effort B / B2-2 Task 4).
-//! DB-gated; self-skips without DATABASE_URL. Builds a REAL `CedarPdp` AFTER
+//! DB-gated; self-skips without DATABASE_URL ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS. Builds a REAL `CedarPdp` AFTER
 //! `migrate()` so it snapshots the `ws_viewer` BI perms.
 //!
 //! Proves the dataset data-preview endpoint is object-scoped and runs ONLY a
