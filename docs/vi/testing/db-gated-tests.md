@@ -63,6 +63,25 @@ cargo test --workspace
 > này qua dotenvy **vô điều kiện**, nên một biến *không export* không làm test skip — nó
 > làm test đọc `.env`, vốn trỏ vào database dev, và tạo schema `_sqlx_test` ngay bên trong.
 
+### Mọi binary có `#[sqlx::test]` đều mang guard đó
+
+Không phải quy ước hình thức — đây là lỗ hổng đã đo được. Với `DATABASE_URL` không đặt,
+`egret-automation/tests/report_tick.rs` (7 test) và `tick_end_to_end.rs` (11 test) đã **đạt**,
+sau khi ghi scratch database vào chính `egret` dev: `_sqlx_test.databases` bên trong nó cho
+`n_tup_ins = 338`. Guard đã tồn tại — ở 5 trên 24 file cần nó.
+
+Bây giờ đủ 24, mỗi **binary** một cái (guard phải ở cùng tiến trình với test nó bảo vệ):
+mỗi `tests/<name>.rs` có guard riêng, và bốn crate có `#[sqlx::test]` trong `src/` mang một
+module `dotenv_fallback_guard` trong `src/lib.rs` cho binary `--lib`.
+`crates/egret-test-db/tests/every_sqlx_test_binary_guards_the_dotenv_fallback.rs` quét cây
+mã nguồn và đỏ, nêu tên file, khi một binary dùng `#[sqlx::test]` mà không có guard.
+
+Đây là **phát hiện**, không phải **ngăn chặn**: libtest không bảo đảm thứ tự, nên lần chạy
+làm guard đỏ vẫn đã kịp tạo scratch database. Ngăn chặn thật sự cần một hook chạy trước mọi
+test trong tiến trình; sqlx không có, `[env]` trong `.cargo/config.toml` sẽ đổi luôn
+`cargo run -p egret-bin` (server dev), còn constructor pre-main chỉ chạy nếu linker giữ lại
+crate mà không gì tham chiếu. Đỏ-và-ồn tốt hơn xanh-và-im.
+
 ## CI
 
 `.github/workflows/ci.yml` đã chạy service `postgres:16` và đặt `DATABASE_URL` ở mức

@@ -688,3 +688,12 @@ async fn a_png_report_with_a_same_workspace_schedule_targets_row_still_renders(p
         "a same-workspace target still renders"
     );
 }
+
+/// `#[sqlx::test]` resolves `DATABASE_URL` through dotenvy, so an unexported
+/// variable does not skip these tests — it silently points them at the database
+/// `.env` names, which is the DEV one. See
+/// `egret_test_db::assert_database_url_is_exported`.
+#[test]
+fn database_url_is_exported_rather_than_read_from_dotenv() {
+    egret_test_db::assert_database_url_is_exported();
+}

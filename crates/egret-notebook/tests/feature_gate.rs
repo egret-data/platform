@@ -403,3 +403,12 @@ async fn a_deeper_mount_prefix_does_not_open_the_gate(pool: sqlx::PgPool) {
     );
     assert_eq!(f.json(resp).await["code"], "feature_disabled");
 }
+
+/// `#[sqlx::test]` resolves `DATABASE_URL` through dotenvy, so an unexported
+/// variable does not skip these tests — it silently points them at the database
+/// `.env` names, which is the DEV one. See
+/// `egret_test_db::assert_database_url_is_exported`.
+#[test]
+fn database_url_is_exported_rather_than_read_from_dotenv() {
+    egret_test_db::assert_database_url_is_exported();
+}

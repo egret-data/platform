@@ -85,6 +85,28 @@ above is only a server address plus a name it derives the admin connection from.
 > create `_sqlx_test` bookkeeping schemas inside it.
 > `egret_test_db::assert_database_url_is_exported()` exists to catch exactly that.
 
+### Every `#[sqlx::test]` binary carries that guard
+
+Not a style rule — a measured hole. With `DATABASE_URL` unset,
+`egret-automation/tests/report_tick.rs` (7 tests) and `tick_end_to_end.rs` (11) **passed**,
+having written their scratch databases into the dev `egret`: `_sqlx_test.databases` inside
+it showed `n_tup_ins = 338`. The guard existed, in 5 of the 24 files that needed it.
+
+It is now in all 24 — one per **binary**, since the guard has to share a process with the
+tests it protects: each `tests/<name>.rs` carries its own, and the four crates with
+`#[sqlx::test]` cases in `src/` carry a `dotenv_fallback_guard` module in `src/lib.rs` for
+their `--lib` binary.
+`crates/egret-test-db/tests/every_sqlx_test_binary_guards_the_dotenv_fallback.rs` scans the
+tree and fails, naming the file, when a binary using `#[sqlx::test]` has no guard — so the
+25th file cannot be added without one.
+
+This is detection, not prevention: libtest gives no ordering, so a run that trips the guard
+still creates its scratch databases before going red. Prevention would need a hook running
+before any test in the process; sqlx has none, a `.cargo/config.toml` `[env]` default for
+`DATABASE_URL` would redirect `cargo run -p egret-bin` (the dev server) too, and a pre-main
+constructor only runs if the linker keeps a crate nothing references. Red-and-noisy beats
+green-and-silent.
+
 ## CI
 
 `.github/workflows/ci.yml` runs a `postgres:16` service and sets `DATABASE_URL` at
