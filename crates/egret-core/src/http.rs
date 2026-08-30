@@ -373,6 +373,13 @@ mod internal_error_is_logged_tests {
             std::backtrace::BacktraceStatus::Captured
         );
         let (_, log) = convert(Error::Internal(source));
+        // The control. Without it this test passes on a build that logs NOTHING
+        // whenever `RUST_BACKTRACE` is unset — "no backtrace field" and "no line
+        // at all" are the same observation, and only one of them is correct.
+        assert!(
+            log.contains("ERROR"),
+            "there has to be a line before there can be a field on it: {log}"
+        );
         assert_eq!(
             log.contains("backtrace="),
             captured,
