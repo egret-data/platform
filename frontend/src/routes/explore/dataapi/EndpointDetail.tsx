@@ -21,9 +21,9 @@ import {
 } from "@/api/generated/data-api/data-api";
 import {
   EndpointStateBadge,
-  draftIsAheadOfLive,
+  draftVsServed,
   endpointHeaderStateLabel,
-  liveVersionOf,
+  liveVersionLookup,
 } from "./endpointState";
 // Save's invalidation (this record + the list its Name column feeds) lives in
 // the wrapper, next to every other Data API mutation — see `src/api/dataApi.ts`.
@@ -271,12 +271,28 @@ function EndpointDetailInner({ ws, id }: { ws: string; id: string }) {
    * did not make one only when the author never opens either of those tabs.
    * `is_live` is read as the server computed it against `live_version_id` and
    * is never re-derived here.
+   *
+   * The response carries every version's full frozen snapshot, and that is now
+   * the point rather than the waste it used to be: the live version's snapshot
+   * IS the served definition, so the header can compare the draft against it
+   * directly instead of inferring from `updated_at`. See `draftVsServed`.
    */
   const versionsQuery = useDataApiListEndpointVersions(ws, id, {
     query: { enabled: !!ws && !!id },
   });
-  const versionsEnvelope = versionsQuery.data;
-  const liveVersion = liveVersionOf(versionsEnvelope?.status === 200 ? versionsEnvelope.data : []);
+  /**
+   * A VALUE THAT SAYS WHETHER IT KNOWS, not a list that might be empty for two
+   * different reasons.
+   *
+   * This read used to be `envelope?.status === 200 ? envelope.data : []`, which
+   * turned a failed request — and the first paint before one lands — into an
+   * empty list, then into an absent live version, then into a confident "not
+   * diverged". A diverged endpoint read as in step whenever this request was
+   * the one that failed. `liveVersionLookup` keeps the two apart, and the pill
+   * says so out loud.
+   */
+  const lookup = liveVersionLookup(versionsQuery.data);
+  const liveVersion = lookup.known ? lookup.version : undefined;
 
   /**
    * The one fact this page had no idea about until now.
@@ -471,17 +487,21 @@ function EndpointDetailInner({ ws, id }: { ws: string; id: string }) {
 
   const endpointsHref = `/explore/${ws}/data-api/endpoints`;
   /**
-   * Live, and the draft has been saved past what is serving.
+   * Is the draft on screen the definition a consumer is receiving?
    *
    * The one state this header exists for. Before it, a Save and a Publish left
    * the same trace on every surface egret has — proven end to end: mid-
    * divergence the router answered `{"one":1}` at `version:1` while the draft
    * on screen read `SELECT 42`.
+   *
+   * Answered by comparing the draft against the live version's frozen snapshot
+   * — see `draftVsServed`. Its four values include `unknown`, and the pill
+   * renders that word rather than falling back to the confident one.
    */
-  const diverged = draftIsAheadOfLive(endpoint, liveVersion);
+  const served = draftVsServed(endpoint, lookup);
   const stateLabel = endpointHeaderStateLabel(endpoint, {
     liveVersion: liveVersion?.version,
-    diverged,
+    served,
   });
 
   return (
@@ -568,7 +588,7 @@ function EndpointDetailInner({ ws, id }: { ws: string; id: string }) {
             <EndpointStateBadge
               endpoint={endpoint}
               liveVersion={liveVersion?.version}
-              diverged={diverged}
+              served={served}
             />
           </Link>
           {/* No Save at all for a trashed endpoint — not a disabled one either.

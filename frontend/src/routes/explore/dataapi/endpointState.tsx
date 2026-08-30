@@ -1,7 +1,11 @@
-import { CircleAlert, CircleCheck, CircleDashed, CircleSlash2 } from "lucide-react";
+import { CircleAlert, CircleCheck, CircleDashed, CircleHelp, CircleSlash2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
-import type { DataApiEndpointDto, DataApiEndpointVersionDto } from "@/api/generated/model";
+import type {
+  DataApiEndpointDto,
+  DataApiEndpointVersionDto,
+  EndpointSnapshot,
+} from "@/api/generated/model";
 
 /**
  * WHAT AN ENDPOINT IS, IN WORDS, IN ONE PLACE.
@@ -46,6 +50,241 @@ export function endpointStateLabel(e: EndpointStateFacts): string {
 }
 
 /**
+ * WHAT THE HEADER KNOWS ABOUT WHAT IS ACTUALLY SERVING.
+ *
+ * Four values, and every one of them is a claim the caller can support:
+ *
+ * - `not-serving` — the endpoint is a draft or is disabled, so no consumer is
+ *   receiving anything and "is the draft ahead of what is served" has no
+ *   subject. This is the STATE GUARD, and it is a distinct return value rather
+ *   than a `false` folded in with the others on purpose: deleting the guard
+ *   then changes what this function answers, where a test can see it. When it
+ *   was folded into `false` the mutant that deleted it SURVIVED — the label and
+ *   the tier both ignore divergence off the `live` state, so nothing rendered
+ *   differently and nothing could fail.
+ * - `unknown` — we have not been able to find out. First paint, a failed
+ *   versions request, a `live` endpoint whose live version is not in the list.
+ * - `in-step` — the draft is, field for field, the definition being served.
+ * - `ahead` — it is not.
+ *
+ * `unknown` is what the whole tri-state exists for. This used to be a `boolean`
+ * fed from `envelope?.status === 200 ? envelope.data : []`, so a versions
+ * request that FAILED produced an empty list, an absent live version, and a
+ * confident `false` — a diverged endpoint reading as in step, with no test on
+ * the branch. A pill that cannot tell "no" from "I do not know" is a pill that
+ * says "no" when the network is down, which is the one moment it matters.
+ */
+export type DraftVsServed = "not-serving" | "unknown" | "in-step" | "ahead";
+
+/**
+ * What a caller managed to learn about the live version, as a value that
+ * cannot be mistaken for "there isn't one".
+ *
+ * `known: true, version: undefined` and `known: false` are different facts —
+ * "this endpoint has nothing published" versus "we could not ask" — and
+ * collapsing them into one `undefined` is exactly the defect above.
+ */
+export type LiveVersionLookup =
+  | { known: false }
+  | { known: true; version: DataApiEndpointVersionDto | undefined };
+
+/**
+ * Read a versions-list response envelope into that value.
+ *
+ * Anything that is not a `200` carrying an array is `known: false`. There is no
+ * pagination to miss: `EndpointStore::versions` (`lifecycle.rs`) selects every
+ * row for the endpoint, `ORDER BY v.version DESC`, with no `LIMIT`, so the live
+ * version is in this list or it is not published.
+ *
+ * `is_live` is read as the server computed it (`COALESCE(e.live_version_id =
+ * v.id, false)` in that same query) and never re-derived here.
+ */
+export function liveVersionLookup(
+  envelope: { status: number; data: unknown } | undefined,
+): LiveVersionLookup {
+  if (!envelope || envelope.status !== 200 || !Array.isArray(envelope.data)) {
+    return { known: false };
+  }
+  const versions = envelope.data as DataApiEndpointVersionDto[];
+  return { known: true, version: versions.find((v) => v.is_live) };
+}
+
+/**
+ * The served definition, projected out of a published snapshot — and the same
+ * projection out of the draft row, so the two are comparable.
+ *
+ * These two functions must stay each other's mirror; that is the whole
+ * contract, and it is why they sit next to each other rather than in the two
+ * places that use them.
+ *
+ * **What is compared, and why exactly this set.** `publish`
+ * (`lifecycle.rs:5120-5147`) builds `EndpointSnapshot` from the LOCKED endpoint
+ * row by `clone()`, field for field, with nothing computed in between — its own
+ * comment says "what is frozen is exactly the bytes the locked row carries".
+ * So for these nine fields the snapshot and the draft are byte-identical the
+ * instant a version is published, and they diverge only when the author edits
+ * one. Both sides also serialise through the SAME Rust types
+ * (`ParamSpec`, `OutputSpec`, `CacheSpec`, `LimitsSpec`, `RateLimitSpec`,
+ * `StatementSource`), so a value equal in the database is equal on the wire.
+ *
+ * **What is deliberately left out, and why none of it is an omission:**
+ *
+ * - `columns` on each statement — computed by the publish-time describe, not
+ *   authored; the draft has no such field to compare against.
+ * - `iterated` — the shape decision publish makes ACROSS every template
+ *   (`EndpointSnapshot::iterated`); derived, not authored.
+ * - `param_gate` — a stamp of which revision of the publish gate ran.
+ * - `delegated` / `impersonate` — witnesses of the CONNECTION at publish time,
+ *   not of the definition. They can change without anyone editing the endpoint,
+ *   and the serving path already has its own `cache_scope_stale` answer for it.
+ * - `name`, `description`, `folder_id`, `source_kind`, `source_ref` — on the
+ *   draft row but not in the snapshot, because renaming an endpoint changes
+ *   nothing a consumer receives. This is the direction the old timestamp rule
+ *   got wrong: it lit the pill on a rename.
+ *
+ * **Old snapshots compare correctly too**, which was checked rather than
+ * assumed. A pre-M2 snapshot carries `sql` + `columns` instead of `statements`;
+ * `EndpointSnapshotRepr` (`egret-dataapi-api/src/lib.rs:404`) folds that into a
+ * single statement named `main`, and migration `0129` named every pre-M2 draft
+ * row's single statement `main` as well. The two agree by construction.
+ */
+type ServedDefinition = {
+  method: string;
+  path: string;
+  database_id: string;
+  statements: unknown[];
+  params: unknown;
+  output: unknown;
+  cache: unknown;
+  limits: unknown;
+  rate_limit: unknown;
+};
+
+/** One statement, minus the frozen columns the author never wrote. */
+function authoredStatement(s: Record<string, unknown>): Record<string, unknown> {
+  return "script" in s
+    ? { name: s.name, script: s.script }
+    : { name: s.name, sql: s.sql };
+}
+
+function servedDefinitionOfSnapshot(s: EndpointSnapshot): ServedDefinition {
+  return {
+    method: s.method,
+    path: s.path,
+    database_id: s.database_id,
+    statements: s.statements.map((st) => authoredStatement(st as unknown as Record<string, unknown>)),
+    params: s.params,
+    output: s.output,
+    cache: s.cache,
+    limits: s.limits,
+    rate_limit: s.rate_limit,
+  };
+}
+
+function servedDefinitionOfDraft(e: EndpointDefinitionFacts): ServedDefinition {
+  return {
+    method: e.method,
+    path: e.path,
+    database_id: e.database_id,
+    statements: e.statements.map((st) => authoredStatement(st as unknown as Record<string, unknown>)),
+    params: e.params,
+    output: e.output,
+    cache: e.cache,
+    limits: e.limits,
+    rate_limit: e.rate_limit,
+  };
+}
+
+/** The draft columns a published version freezes. */
+export type EndpointDefinitionFacts = Pick<
+  DataApiEndpointDto,
+  | "state"
+  | "method"
+  | "path"
+  | "database_id"
+  | "statements"
+  | "params"
+  | "output"
+  | "cache"
+  | "limits"
+  | "rate_limit"
+>;
+
+/**
+ * Structural equality over JSON values, with `undefined` properties treated as
+ * absent — which is what a JSON round trip does to them, and what the optional
+ * fields of an orval-generated model can differ by without differing at all.
+ *
+ * Key ORDER is not compared. Both sides come out of the same serde types today
+ * so it already matches, but a rule that only holds while one serialiser feeds
+ * both is not a rule.
+ */
+function sameJson(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (typeof a !== "object" || typeof b !== "object" || a === null || b === null) return false;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    return a.every((x, i) => sameJson(x, b[i]));
+  }
+  const ra = a as Record<string, unknown>;
+  const rb = b as Record<string, unknown>;
+  const ka = Object.keys(ra).filter((k) => ra[k] !== undefined);
+  const kb = Object.keys(rb).filter((k) => rb[k] !== undefined);
+  if (ka.length !== kb.length) return false;
+  return ka.every((k) => rb[k] !== undefined && sameJson(ra[k], rb[k]));
+}
+
+/**
+ * Does the draft on screen differ from the definition a consumer is receiving?
+ *
+ * **A direct comparison against the published snapshot, not a clock.** The rule
+ * here used to be `endpoints.updated_at > liveVersion.created_at`, and every
+ * defect it had was the same defect: a timestamp is a PROXY for the question,
+ * and the proxy drifts every time anything but an edit touches the row. There
+ * are six writers of `dataapi.endpoints.updated_at`, all of them read before
+ * this was written:
+ *
+ * | writer | what it does to the pill under a timestamp rule |
+ * |---|---|
+ * | `endpoints.rs:1092` `update` | the one real edit — correct |
+ * | `lifecycle.rs:5186` `publish` | equal stamps, so a strict `>` was needed |
+ * | `endpoints.rs:819` `set_state`, via `disable` | needed the `live` guard |
+ * | `endpoints.rs:819` `set_state`, via `enable` | **restores `live`** — publish, disable, enable and the pill reads "unpublished changes" forever on an endpoint nobody edited |
+ * | `lifecycle.rs:5240` `rollback` | leaves `state` alone, so rolling back TO the version already live diverges it from itself |
+ * | `endpoints.rs:984` `trash` / `endpoints.rs:1027` `restore` | restore returns a row as `disabled`, so this one is masked by the state guard today and stops being masked the moment anything enables it |
+ *
+ * A comparison against the snapshot answers the question directly and is
+ * immune to all six, and to the seventh someone adds next year. It also costs
+ * nothing new: the shell already fetches the version rows, snapshots and all,
+ * and until now threw everything but one integer away.
+ *
+ * **The failure direction is a false `ahead`, never a false `in-step`.** If a
+ * snapshot cannot be read, or the live version is not in the list, the answer
+ * is `unknown` rather than a guess. If a future publish ever normalises one of
+ * the nine compared fields instead of cloning it, the pill would say
+ * "unpublished changes" on an endpoint that has none — which nags an author
+ * into republishing. The opposite error hides a live contract drifting from
+ * the draft on screen, which is the defect this pill was built for.
+ */
+export function draftVsServed(
+  endpoint: EndpointDefinitionFacts,
+  lookup: LiveVersionLookup,
+): DraftVsServed {
+  if (endpoint.state !== "live") return "not-serving";
+  if (!lookup.known) return "unknown";
+  const snapshot = lookup.version?.snapshot;
+  // A `live` endpoint always has a `live_version_id` — `enable` refuses a null
+  // one and `publish` is the only writer — so no live version in a list we DID
+  // read means the two disagree, and the honest answer is that we cannot say.
+  if (!snapshot || !Array.isArray(snapshot.statements) || snapshot.statements.length === 0) {
+    return "unknown";
+  }
+  return sameJson(servedDefinitionOfSnapshot(snapshot), servedDefinitionOfDraft(endpoint))
+    ? "in-step"
+    : "ahead";
+}
+
+/**
  * The EDITOR header's word, which says two more things than a list row can.
  *
  * - **Which version is serving.** The author is looking at a draft; the number
@@ -59,13 +298,34 @@ export function endpointStateLabel(e: EndpointStateFacts): string {
  * `Draft · never published` rather than the list's bare `Draft`: on the
  * surface where the author is writing SQL, "nothing is serving this yet" is
  * the fact that decides what they do next.
+ *
+ * **`Live · publish state unknown`, and why it is not a bare `Live`.** When the
+ * versions request has not landed or has failed, this pill knows the endpoint
+ * is live and knows nothing else. A bare `Live` beside a `CircleCheck` is a
+ * claim — "and your draft is what it is serving" — that the caller cannot
+ * support, and it is the reading a diverged endpoint would get during an
+ * outage. The word says the shape of the gap rather than hiding it, and the
+ * pill is already a link to the Versions tab, where the failed request has a
+ * real error message and a retry. Loading and failed are one word deliberately:
+ * they are the same fact to the reader ("this does not yet say"), and a
+ * separate tier for a sub-second state would be a flicker, not information.
+ *
+ * `served` defaults to `unknown` rather than `in-step` for the same reason: a
+ * caller that forgets to pass it gets a pill that says it does not know, not
+ * one that says everything is fine.
  */
 export function endpointHeaderStateLabel(
   e: EndpointStateFacts,
-  { liveVersion, diverged = false }: { liveVersion?: number | null; diverged?: boolean } = {},
+  { liveVersion, served = "unknown" }: { liveVersion?: number | null; served?: DraftVsServed } = {},
 ): string {
   if (e.state === "live") {
-    return `Live${liveVersion ? ` · v${liveVersion}` : ""}${diverged ? " · unpublished changes" : ""}`;
+    // `== null`, not truthiness: versions are numbered from 1 today
+    // (`COALESCE(MAX(version), 0) + 1`), but a `0` reaching a truthiness gate
+    // prints a bare `Live` — the confident label — for a version we DO know.
+    const version = liveVersion == null ? "" : ` · v${liveVersion}`;
+    if (served === "ahead") return `Live${version} · unpublished changes`;
+    if (served === "in-step") return `Live${version}`;
+    return `Live${version} · publish state unknown`;
   }
   if (e.state === "draft") return "Draft · never published";
   return endpointStateLabel(e);
@@ -75,12 +335,20 @@ export function endpointHeaderStateLabel(
  * Which tier the pill paints — the label's own shape, as data, so the tint and
  * the glyph cannot disagree with the words.
  */
-export type EndpointStateTier = "live" | "diverged" | "draft" | "disabled";
+export type EndpointStateTier = "live" | "diverged" | "unknown" | "draft" | "disabled";
 
-export function endpointStateTier(e: EndpointStateFacts, diverged = false): EndpointStateTier {
-  if (e.state === "live") return diverged ? "diverged" : "live";
+export function endpointStateTier(
+  e: EndpointStateFacts,
+  served: DraftVsServed = "unknown",
+): EndpointStateTier {
   if (e.state === "disabled") return "disabled";
-  return "draft";
+  if (e.state !== "live") return "draft";
+  if (served === "ahead") return "diverged";
+  if (served === "in-step") return "live";
+  // `unknown`, and also `not-serving` — which a `live` endpoint cannot be, so
+  // reaching here means two readings of `state` disagreed and "I do not know"
+  // is again the only supportable answer.
+  return "unknown";
 }
 
 /**
@@ -92,12 +360,13 @@ export function endpointStateTier(e: EndpointStateFacts, diverged = false): Endp
 const TIER_ICON: Record<EndpointStateTier, typeof CircleCheck> = {
   live: CircleCheck,
   diverged: CircleAlert,
+  unknown: CircleHelp,
   draft: CircleDashed,
   disabled: CircleSlash2,
 };
 
 /**
- * The tint, and why the INK is `--foreground` on all four.
+ * The tint, and why the INK is `--foreground` on all of them.
  *
  * Measured in Chromium by painting the composited colour into a 1×1 canvas and
  * reading the pixel back — never by parsing `oklch()`, which yields confident
@@ -121,10 +390,17 @@ const TIER_ICON: Record<EndpointStateTier, typeof CircleCheck> = {
  * `--highlight` for the diverged tier and not `--destructive`: an endpoint
  * serving an older contract than its draft is not broken, it is behind.
  * `--accent` is reserved for hover/focus and is not a state colour at all.
+ *
+ * `unknown` shares `bg-muted` with `draft` — deliberately the ABSENCE of a
+ * state colour, because the pill has no state to report. The two are still
+ * told apart by their word and their glyph, which is what carries state here;
+ * a fifth tint would imply this is a fifth thing an endpoint can BE, and it is
+ * not, it is the reader's view of it failing.
  */
 const TIER_TONE: Record<EndpointStateTier, string> = {
   live: "border-transparent bg-success/15 text-foreground",
   diverged: "border-transparent bg-highlight/15 text-foreground",
+  unknown: "border-transparent bg-muted text-foreground",
   draft: "border-transparent bg-muted text-foreground",
   disabled: "border-transparent bg-destructive/15 text-foreground",
 };
@@ -139,68 +415,21 @@ const TIER_TONE: Record<EndpointStateTier, string> = {
 export function EndpointStateBadge({
   endpoint,
   liveVersion,
-  diverged = false,
+  served = "unknown",
   className,
 }: {
   endpoint: EndpointStateFacts;
   /** The version number currently served, when the caller knows it. */
   liveVersion?: number | null;
-  diverged?: boolean;
+  served?: DraftVsServed;
   className?: string;
 }) {
-  const tier = endpointStateTier(endpoint, diverged);
+  const tier = endpointStateTier(endpoint, served);
   const Icon = TIER_ICON[tier];
   return (
     <Badge className={cn(TIER_TONE[tier], className)}>
       <Icon aria-hidden="true" data-testid="endpoint-state-icon" />
-      {endpointHeaderStateLabel(endpoint, { liveVersion, diverged })}
+      {endpointHeaderStateLabel(endpoint, { liveVersion, served })}
     </Badge>
   );
-}
-
-/** The version `endpoints.live_version_id` points at, as the server marked it. */
-export function liveVersionOf(
-  versions: DataApiEndpointVersionDto[],
-): DataApiEndpointVersionDto | undefined {
-  return versions.find((v) => v.is_live);
-}
-
-/**
- * Has the saved draft moved since the live version was frozen?
- *
- * **A strict `>`, and that is the whole correctness argument.** `publish`
- * (`lifecycle.rs`) inserts the version row and writes
- * `endpoints.updated_at = now()` inside ONE transaction, and Postgres `now()`
- * is the transaction timestamp — so immediately after a publish the two stamps
- * are exactly equal. A `>=` would report every freshly published endpoint as
- * diverged, which is the failure mode of a signal nobody would then trust.
- *
- * **Only for a `live` endpoint.** `disable` writes `updated_at = now()` and
- * leaves `live_version_id` alone (`endpoints.rs`), so the bare timestamp
- * comparison says "the row moved after the version was frozen" for every
- * endpoint anyone has ever paused. Divergence is a claim about what a live
- * endpoint is serving right now; a disabled one is serving nothing, and its
- * badge already says which of the two disabled states it is in.
- *
- * **Why the timestamp and not a field-by-field diff against the snapshot.**
- * The snapshot is not the draft: publish normalises, adds the frozen column
- * union per statement, and stamps `param_gate`, so a structural comparison
- * would have to know which differences are real — and would report a false
- * divergence the day publish learns to normalise one more thing. The stamp
- * answers a narrower question exactly: *this endpoint has been edited since
- * the version a consumer is receiving was frozen.* That sentence is true even
- * when the edit was to a field the snapshot does not carry (a rename), which
- * is why the copy says "unpublished changes" and not "the SQL differs".
- */
-export function draftIsAheadOfLive(
-  endpoint: Pick<DataApiEndpointDto, "state" | "updated_at">,
-  liveVersion: Pick<DataApiEndpointVersionDto, "created_at"> | undefined,
-): boolean {
-  if (endpoint.state !== "live" || !liveVersion) return false;
-  const draft = Date.parse(endpoint.updated_at);
-  const frozen = Date.parse(liveVersion.created_at);
-  // `Date.parse` answers NaN on anything it cannot read, and every comparison
-  // with NaN is false — so an unparseable stamp reports "not diverged" rather
-  // than raising a warning nobody can act on.
-  return draft > frozen;
 }
