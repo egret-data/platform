@@ -559,6 +559,62 @@ state and a reload empties them. For `ClientCreate` this is deliberate — the w
 not remembering is a worse first-run form; the worst outcome of remembering is a leaked
 secret.
 
+### 3.9 Copy that names a control is a claim about the tree, and is checked like one
+
+A create page's subtitle usually says what happens next, and next is usually somewhere else.
+That sentence is not decoration: a reader follows it. **`ServiceAccountCreate` shipped
+"issue it OAuth2 clients and grant it endpoints from the Clients list", and the Clients list
+has no grant affordance at all** — the account's group-header menu is `Issue client…` +
+`Delete`, a client row offers `Revoke…`, and `useDataApiGrantEndpointInvoke` has exactly one
+caller in the tree, `detail/AccessSection.tsx`. The reader went hunting for a control that
+does not exist, which is strictly worse than saying nothing: silence sends nobody anywhere.
+
+The rule, and the reason it is here rather than in one file's comment:
+
+- **Name a destination specific enough to walk to, and no more specific than is true.**
+  "Access" alone is ambiguous: the sidebar has an **`Access` group heading** of its own
+  (`Sidebar.tsx:85`, holding `Access Explorer` and `Permissions`), which grants nothing
+  about an endpoint. The shipped wording is "on that endpoint's Access tab under Endpoints" —
+  and `Endpoints` is a real sidebar link (pinned by `layout/__tests__/Sidebar.test.tsx:140`),
+  so the reader has somewhere to start walking.
+- **One fact, one phrasing.** `ClientCreate` already carried this sentence; the subtitle now
+  uses its words verbatim. Two spellings of one fact are two things to keep true, and the grep
+  below is what makes drift visible.
+- **A link is not automatically the better answer** (§3.6's neighbour). `ClientCreate`'s
+  created state refuses one because leaving destroys a secret shown once;
+  `ServiceAccountCreate` refuses one because it is a form with unsaved input and no draft
+  persistence (§3.8), so a link in its subtitle would discard what was typed. Prose naming a
+  reachable place is the floor; a link is an upgrade only where leaving costs nothing.
+- **Where the copy binds two verbs, check both.** `TryIt`'s empty-account prompt read "Create
+  one, then grant it invoke, in [Access]" and only the second half was true of Access —
+  `AccessSection` has no create affordance, and in that exact state its own table renders the
+  same "no service accounts yet" sentence, so the one link on screen led to the problem
+  restated. Half a true sentence is a false one.
+
+**The check is §5.1's, applied to copy: grep the class the claim is about, and reconcile every
+hit.** Run from `frontend/` for this class:
+
+```bash
+grep -rn --include='*.tsx' -iE "Access tab|Access section|Clients list|Clients page|Endpoints list|Endpoints page|actions menu|row menu|in Access|in Clients|under Endpoints" src/routes/explore/dataapi
+```
+
+**60** hits on the current tree, of which **7** are shipped user-visible copy —
+`ClientCreate.tsx:225` (created state), `:266`, `:276` (spent state),
+`ServiceAccountCreate.tsx:109` (the subtitle), `detail/TryIt.tsx:423` and `:425` (the
+empty-account prompt) and `:659` ("Grant it in Access", a real `Link` to `accessHref`) — and
+each of the seven names a place that exists. The other 53 are **20** code comments and **33**
+test lines, neither of which a reader follows. 7 + 20 + 33 = 60. A second sweep,
+`grep -rn --include='*.tsx' -i grant src/routes/explore/dataapi` with the identifiers filtered
+out, is what surfaced the `TryIt` instance; this section's terms alone would not have caught
+it, which is the argument for running more than one.
+
+**The two instances were one screen apart and neither review caught the other**, because the
+false claim was copied before anyone checked it: `ServiceAccountCreate`'s own doc comment
+placed both affordances "on the Clients row", and the subtitle was written from the comment.
+Where a comment and the tree disagree, the tree is the fact — the same order §5.1 states for
+this document.
+
+
 ---
 
 ## 4. `Setting | Details | Value` tables, and when a card is still right
