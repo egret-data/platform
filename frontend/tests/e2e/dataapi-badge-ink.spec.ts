@@ -62,6 +62,33 @@ import { test, expect } from "@playwright/test";
  * - The RETIRED pair itself, `text-success` on `bg-success/15`, asserted to
  *   still fail in light. That is the defect; if it starts passing, either the
  *   tokens moved or the probe stopped compositing the wash.
+ * - An ALPHA-COMPOSITING probe: 50%-opaque black over the surface, whose
+ *   expected value is arithmetic rather than a measured constant. See
+ *   `control-composite-half` below for why the self-ink control could not
+ *   carry that job.
+ *
+ * # Why a headroom floor and not the nine numbers
+ *
+ * The per-tone assertion is `>= 4.5`, and on its own that pins nothing about
+ * where a tone actually sits: `--foreground` on `bg-success/15` could slide
+ * from 14.76 to 4.6 on a token tweak and every case here would stay green,
+ * having lost 68% of its margin without a word.
+ *
+ * The obvious fix — pin the nine readings with a tolerance — was weighed and
+ * rejected. There is not one number per tone but one per tone PER THEME PER
+ * SURFACE, so it is a table of thirty-six that has to be re-measured and
+ * re-committed for any token change at all, including changes that improve the
+ * contrast. A table like that gets updated by pasting in whatever the run
+ * printed, which is not a check; and the day it fails for a real reason it will
+ * be read as the routine chore it has been every other time.
+ *
+ * `TONE_HEADROOM` is the middle: ONE number, no theme or surface in it,
+ * asserting that every shipped tone still clears the bar by more than a factor
+ * of two. The whole claim of `chipTone.ts` is that `--foreground` clears 4.5:1
+ * by a factor of three (the lowest post-change reading in the set is 13.21),
+ * so a tone that has fallen under 10 has lost that claim and wants a human,
+ * while ordinary token drift of a point or two says nothing and is not
+ * reported.
  *
  * # Prerequisites
  *
@@ -76,11 +103,26 @@ const ENABLED = process.env.EGRET_E2E_BADGE_INK === "1";
 /** WCAG 2.2 1.4.3 Contrast (Minimum), normal text. These chips are 12px. */
 const TEXT_CONTRAST = 4.5;
 
+/**
+ * The margin every shipped tone is expected to keep over `TEXT_CONTRAST`.
+ *
+ * A drift alarm, NOT the standard — `TEXT_CONTRAST` is the standard, and it is
+ * asserted separately so it survives if this floor is ever deliberately
+ * lowered. Post-change readings run 13.21–16.96, so 10 is roughly three points
+ * of slack for anti-aliasing, browser revisions and small token moves. If a
+ * tone lands between 4.5 and 10 the chip is still legible and the failure is a
+ * REPORT, not a defect: re-measure, decide, and move this number with the
+ * reason written down. See the header for why this is one number and not the
+ * thirty-six readings it replaces.
+ */
+const TONE_HEADROOM = 10;
+
 /** The surfaces a Data API chip is ever laid on. */
 const SURFACES = ["bg-card", "bg-background"] as const;
 
 type Reading = { name: string; ratio: number; ink: string; fill: string };
-type Measurement = { tones: Reading[]; controls: Record<string, Reading> };
+type Composite = { surface: number[]; got: number[]; want: number[] };
+type Measurement = { tones: Reading[]; controls: Record<string, Reading>; composite: Composite };
 
 async function measure(
   page: import("@playwright/test").Page,
@@ -153,7 +195,28 @@ async function measure(
       const canvas = document.createElement("canvas");
       canvas.width = canvas.height = 1;
       const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
+      // Assigning an unparseable value to `fillStyle` is a SILENT no-op — the
+      // context keeps the colour it already had. These probes assign a computed
+      // `oklch(… / .15)` and then a computed ink, so one refusal would make
+      // every ink read back as the previous fill and every tone measure ~18:1
+      // and pass. Detected without knowing what a colour serialises to: set it
+      // from two different sentinels and require the two results to agree,
+      // which is impossible if the assignment did nothing and certain if it
+      // took.
+      const accepted = (color: string): boolean => {
+        ctx.fillStyle = "#000000";
+        ctx.fillStyle = color;
+        const fromBlack = ctx.fillStyle;
+        ctx.fillStyle = "#ffffff";
+        ctx.fillStyle = color;
+        return ctx.fillStyle === fromBlack;
+      };
       const paint = (color: string, backdrop: number[]) => {
+        if (!accepted(color)) {
+          throw new Error(
+            `canvas refused the colour \`${color}\` — every reading after it would silently be the PREVIOUS colour`,
+          );
+        }
         ctx.clearRect(0, 0, 1, 1);
         ctx.fillStyle = `rgb(${backdrop[0]},${backdrop[1]},${backdrop[2]})`;
         ctx.fillRect(0, 0, 1, 1);
@@ -175,6 +238,20 @@ async function measure(
       const hex = (c: number[]) => "#" + c.map((v) => v.toString(16).padStart(2, "0")).join("");
 
       const surfaceRgb = paint(getComputedStyle(pane).backgroundColor, [255, 255, 255]);
+
+      // PROOF THAT ALPHA IS REALLY BEING COMPOSITED, on a value that can be
+      // predicted instead of measured. `control-fail-self-ink` cannot do this
+      // job: it has no fill of its own, so its backdrop is the surface
+      // unchanged and its 1.00:1 is arithmetic, not compositing. Every tone
+      // here is a 15% wash, so if `paint` ever stopped blending — a refused
+      // colour, a canvas that ignored the alpha — the fills would read as the
+      // bare surface and the tones would come back ~18:1 and pass.
+      //
+      // 50%-opaque black over the surface must land on half the surface's own
+      // value: source-over is `src·a + dst·(1−a)`, and `src` is 0. Not the
+      // surface, not black, and not a number anyone had to look up.
+      const compositeGot = paint("rgba(0,0,0,0.5)", surfaceRgb);
+      const compositeWant = surfaceRgb.map((v) => Math.round(v / 2));
       const read = (id: string, name: string) => {
         const cs = getComputedStyle(document.getElementById(`probe-${id}`)!);
         // The wash is semi-transparent, so it is composited onto the surface
@@ -192,6 +269,7 @@ async function measure(
           failRetired: read("control-fail-retired-pair", "control-fail-retired-pair"),
           failSelfInk: read("control-fail-self-ink", "control-fail-self-ink"),
         },
+        composite: { surface: surfaceRgb, got: compositeGot, want: compositeWant },
       };
       host.remove();
       document.documentElement.classList.remove("dark");
@@ -225,12 +303,30 @@ test.describe("Data API status chips are legible, in both themes, on both surfac
           m.tones.length,
           "control: no tones were probed at all, so nothing below was measured",
         ).toBeGreaterThanOrEqual(9);
+        // Every tone is a 15% wash, so a probe that had stopped blending would
+        // report all of them against the bare surface — and pass.
+        for (let i = 0; i < 3; i++) {
+          expect(
+            m.composite.got[i],
+            `control: 50% black over ${JSON.stringify(m.composite.surface)} read ${JSON.stringify(
+              m.composite.got,
+            )}, expected ~${JSON.stringify(m.composite.want)} — the probe is not compositing alpha`,
+          ).toBeGreaterThanOrEqual(m.composite.want[i] - 2);
+          expect(m.composite.got[i]).toBeLessThanOrEqual(m.composite.want[i] + 2);
+        }
 
         for (const t of m.tones) {
           expect(
             t.ratio,
             `${t.name}: ink ${t.ink} on ${t.fill} measures ${t.ratio}:1`,
           ).toBeGreaterThanOrEqual(TEXT_CONTRAST);
+          // The margin, separately from the bar — see `TONE_HEADROOM`. A tone
+          // that clears 4.5 but has lost two thirds of its headroom is a token
+          // change nobody measured, and `>= 4.5` alone would never say so.
+          expect(
+            t.ratio,
+            `${t.name}: ${t.ratio}:1 clears 4.5 but is under the ${TONE_HEADROOM}:1 this chip is supposed to keep — re-measure and decide, do not just move the floor`,
+          ).toBeGreaterThanOrEqual(TONE_HEADROOM);
         }
       });
     }

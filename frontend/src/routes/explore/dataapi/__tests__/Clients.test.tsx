@@ -11,6 +11,7 @@ vi.mock("@/api/generated/data-api/data-api");
 import * as api from "@/api/generated/data-api/data-api";
 import type { DataApiClientDto, DataApiServiceAccountDto } from "@/api/generated/model";
 import Clients from "@/routes/explore/dataapi/Clients";
+import { expectChipTone, expectNoChipTone } from "./expectChipTone";
 
 // The one rule this task exists to hold: `DataApiClientDto` (the list shape)
 // has no secret field — not a skipped one, an absent one. This string stands
@@ -832,5 +833,51 @@ describe("Clients — the per-account request fan-out stays capped", () => {
     await screen.findByText("bot-00");
     expect(screen.queryByText("bot-29")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /show 5 more service accounts/i })).toBeInTheDocument();
+  });
+});
+
+/**
+ * THE STATUS BADGE IS BOUND TO `CHIP_TONE`, PER ARM.
+ *
+ * The accessibility pass moved `Active` and `Expired` off `bg-<token>/15
+ * text-<token>` — 3.72:1 and 3.68:1 in light mode, under WCAG 2.2 1.4.3's
+ * 4.5:1 for this 12px text — and onto the shared map in `chipTone.ts`. Nothing
+ * then held them there: the browser spec measures `CHIP_TONE`'s VALUES, which
+ * a call site can stop using without moving a single number, and the arm
+ * assertions above ask only for the WORD.
+ *
+ * Read from `CHIP_TONE`, never typed out, so a future contrast change moves
+ * the map and these tests together. jsdom resolves no `oklch()` and composites
+ * nothing, so what is pinned here is the WIRING; the ratios are measured in
+ * `tests/e2e/dataapi-badge-ink.spec.ts`.
+ */
+describe("Clients — every Status arm is wired to the shared chip tone", () => {
+  it("paints Active with CHIP_TONE.success", async () => {
+    mockClients({ data: { status: 200, data: [makeClient({ name: "live-etl" })] } });
+    renderClients();
+    const row = await screen.findByRole("row", { name: /live-etl/ });
+    expectChipTone(within(row).getByText("Active"), "success", "Clients: Active");
+  });
+
+  it("paints Expired with CHIP_TONE.destructive", async () => {
+    mockClients({
+      data: { status: 200, data: [makeClient({ name: "stale-etl", expires_at: "2020-01-01T00:00:00Z" })] },
+    });
+    renderClients();
+    const row = await screen.findByRole("row", { name: /stale-etl/ });
+    expectChipTone(within(row).getByText("Expired"), "destructive", "Clients: Expired");
+  });
+
+  it("leaves Revoked untinted — it is not a state to scan a list for", async () => {
+    // The third arm, and the one a tone map tempts you to fill in. A revoked
+    // client is already carried by the WORD and by the whole row going muted
+    // (asserted above); giving it a wash would put it in the same visual
+    // register as the two live states it is the end of.
+    mockClients({
+      data: { status: 200, data: [makeClient({ name: "old-etl", revoked_at: "2026-08-01T00:00:00Z" })] },
+    });
+    renderClients();
+    const row = await screen.findByRole("row", { name: /old-etl/ });
+    expectNoChipTone(within(row).getByText("Revoked"), "Clients: Revoked");
   });
 });

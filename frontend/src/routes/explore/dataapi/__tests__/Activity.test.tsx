@@ -21,6 +21,7 @@ import type {
   DataApiEndpointDto,
 } from "@/api/generated/model";
 import Activity from "@/routes/explore/dataapi/Activity";
+import { expectChipTone } from "./expectChipTone";
 
 function makeEndpoint(overrides: Partial<DataApiEndpointDto> = {}): DataApiEndpointDto {
   return {
@@ -1487,5 +1488,43 @@ describe("Activity — a call row's ids can be copied", () => {
     // The request id is still copyable — that is the one support quotes.
     await user.click(screen.getByRole("button", { name: "Copy request id req-trial" }));
     expect(await navigator.clipboard.readText()).toBe("req-trial");
+  });
+});
+
+/**
+ * THE STATUS-CODE CHIP IS BOUND TO `CHIP_TONE`, PER BRANCH.
+ *
+ * `ActivityCallList` painted `text-success` on `bg-success/15` for 2xx and
+ * `text-destructive` on `bg-destructive/15` for 4xx/5xx — 3.72:1 and 3.68:1 in
+ * light mode, under WCAG 2.2 1.4.3's 4.5:1 for this 12px text — and moved onto
+ * the shared map in `chipTone.ts`. `statusTone` is a three-way conditional and
+ * the assertions above only ever look at the NUMBER, so until now no test
+ * distinguished the branches from each other or from no tone at all.
+ *
+ * The `neutral` branch (1xx/3xx) is deliberately the ABSENCE of a state
+ * colour, and it needs the same guard as the other two: it is the branch a
+ * careless edit collapses into `destructive`, which would call a `304` an
+ * error.
+ *
+ * Expected classes are read out of `CHIP_TONE`, never typed, so a contrast
+ * change moves the map and these guards together. The ratios are measured in
+ * `tests/e2e/dataapi-badge-ink.spec.ts`; jsdom composites nothing.
+ */
+describe("Activity — the call list's status chip is wired to the shared tone", () => {
+  const ARMS = [
+    [200, "success"],
+    [500, "destructive"],
+    [304, "neutral"],
+  ] as const;
+
+  it.each(ARMS)("paints a %i with CHIP_TONE.%s", async (status, tone) => {
+    mockEmptySummary();
+    mockCalls([makeCall({ id: `call-${status}`, status_code: status, request_id: `req-${status}` })]);
+    renderActivity();
+    // The request id, not the status code: waiting on the code would make the
+    // query below find whatever it waited for.
+    await screen.findByText(`req-${status}`);
+    const row = screen.getByText(`req-${status}`).closest("tr")!;
+    expectChipTone(within(row).getByText(String(status)), tone, `ActivityCallList: ${status}`);
   });
 });

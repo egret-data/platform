@@ -31,6 +31,7 @@ import EndpointDetail from "@/routes/explore/dataapi/EndpointDetail";
 import Config from "@/routes/explore/dataapi/detail/Config";
 import ResponseSection from "@/routes/explore/dataapi/detail/ResponseSection";
 import VersionsSection from "@/routes/explore/dataapi/detail/Versions";
+import { expectChipTone } from "./expectChipTone";
 import {
   expectSectionIntroCapsItsProse,
   expectSectionLeavesWidthToThePage,
@@ -1407,6 +1408,40 @@ describe("VersionsSection", () => {
     expect(screen.getByText("user-2")).toBeInTheDocument();
     // Exactly one Live badge — on v-2, not on both rows.
     expect(screen.getAllByText("Live")).toHaveLength(1);
+  });
+
+  /**
+   * THE `Live` BADGE IS BOUND TO `CHIP_TONE`, NOT JUST TO THE WORD.
+   *
+   * This chip shipped as `bg-success/15 text-success` — 3.72:1 in light mode,
+   * under WCAG 2.2 1.4.3's 4.5:1 for its 12px text — and moved onto the shared
+   * map in `chipTone.ts` so that this `Live` and the header pill one click away
+   * are the same chip. The test above finds the badge by its WORD, which is
+   * true of a `variant="success"` badge (a hardcoded `bg-green-600`, not the
+   * OKLCH token) and of an untoned one, so it does not hold the tone.
+   *
+   * Expected classes are read out of `CHIP_TONE.success` rather than typed, so
+   * a future contrast change moves the map and this guard together. jsdom
+   * resolves no `oklch()`; the ratios are measured in
+   * `tests/e2e/dataapi-badge-ink.spec.ts`.
+   */
+  it("paints the live version's badge with CHIP_TONE.success", async () => {
+    vi.mocked(api.useDataApiListEndpointVersions).mockReturnValue(
+      {
+        data: {
+          status: 200,
+          data: [makeVersion({ id: "v-2", version: 2, is_live: true, note: "fixed a typo" })],
+        },
+        isLoading: false,
+        isError: false,
+      } as unknown as ReturnType<typeof api.useDataApiListEndpointVersions>,
+    );
+    renderVersions();
+    // Scoped to the row: the shell's own header pill also says Live, and an
+    // unscoped query could measure that one instead — the chip this branch
+    // never touched — and pass with this call site reverted.
+    const row = await screen.findByTestId("version-row-v-2");
+    expectChipTone(within(row).getByText("Live"), "success", "Versions: Live");
   });
 
   // The defect this whole section exists to fix: on the live cluster the Who
