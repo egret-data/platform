@@ -1,7 +1,9 @@
 -- Package 1 of the Data API production-readiness programme: mark a connection
 -- whose data is governed at the ENGINE (Ranger row filters, column masks), so
--- that publishing a Data API endpoint onto it requires a connection that runs
--- every query as the CALLER rather than as the shared service account.
+-- that reading it through the Data API — publishing an endpoint onto it,
+-- previewing a statement against it, or serving a live version from it —
+-- requires a connection that runs every query as the CALLER rather than as the
+-- shared service account.
 --
 -- ── Which direction this defaults, and why ────────────────────────────────────
 --
@@ -34,7 +36,9 @@ ALTER TABLE query.databases
 
 COMMENT ON COLUMN query.databases.governed IS
     'Engine-side row filters / column masks apply to this connection''s data. '
-    'A Data API endpoint may only be published onto it when the connection runs '
-    'queries as the caller (delegated, or options.impersonate) — otherwise the '
-    'query runs on a shared service credential and those filters are evaluated '
-    'for the machine identity, not the consumer.';
+    'A Data API endpoint may only be published onto it — and its SQL may only be '
+    'previewed against it, and a live version may only be served from it — when '
+    'the connection runs queries as the caller (delegated, or '
+    'options.impersonate); otherwise the query runs on a shared service '
+    'credential and those filters are evaluated for the machine identity, not '
+    'the consumer.';

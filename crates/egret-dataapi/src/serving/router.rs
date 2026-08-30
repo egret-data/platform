@@ -2083,7 +2083,31 @@ async fn invoke_allowed(
 /// otherwise have the safety of a live version decided by a connection that
 /// version never used. The `::uuid` cast can only fail on a snapshot `publish`
 /// did not write, which is the same corruption the `from_value` below answers
-/// with a 500.
+/// with a 500 — the `map_err` on the query says so, because Postgres' own
+/// `22P02` names neither the endpoint nor the field.
+///
+/// # `d.workspace_id = $1`, on a key that came out of a snapshot
+///
+/// It is the same predicate [`crate::lifecycle::EndpointStore::connection_safety_opt`]
+/// carries, and it is here for the same reason: `database_id` is the worst
+/// column in this crate to resolve unscoped, because what it opens is a
+/// CREDENTIAL — a foreign row would hand this request another workspace's
+/// engine connection to decide safety from. Nothing published can reach that
+/// state today (publish and rollback both read the connection through
+/// `connection_safety_opt`, which is scoped, so a foreign id never enters
+/// `endpoint_versions`), so this is insurance rather than a fix — and this repo
+/// has already shipped one cross-workspace `database_id` leak of exactly this
+/// shape.
+///
+/// It does not fail open. A foreign — or legacy `workspace_id IS NULL` — row
+/// simply does not match, so `governed` comes back `NULL` and both readers take
+/// the row-is-gone branch: [`governance_allows_serving`] allows, and
+/// [`crate::serving::cache_ttl`] answers `None` so nothing is served from or
+/// written to the cache. What is left is execution, and that is where the
+/// refusal lands: `execute_as_with_params` resolves through `connect_as`, which
+/// calls `get_in_workspace` and reports a foreign id as `NotFound` before any
+/// connection is opened. Strictly tighter than without the predicate, which
+/// could serve such a request from a warm cache entry.
 async fn live_snapshot(
     db: &Db,
     ws: Uuid,
@@ -2102,7 +2126,8 @@ async fn live_snapshot(
         "SELECT e.id, v.version, v.snapshot, d.governed, d.delegated, d.options \
          FROM dataapi.endpoints e \
          JOIN dataapi.endpoint_versions v ON v.id = e.live_version_id \
-         LEFT JOIN query.databases d ON d.id = (v.snapshot->>'database_id')::uuid \
+         LEFT JOIN query.databases d \
+           ON d.id = (v.snapshot->>'database_id')::uuid AND d.workspace_id = $1 \
          WHERE e.workspace_id = $1 AND e.method = $2 AND e.path = $3 \
            AND e.state = 'live'",
     )
@@ -2111,7 +2136,23 @@ async fn live_snapshot(
     .bind(path)
     .fetch_optional(&db.pool)
     .await
-    .map_err(ServingError::internal)?;
+    .map_err(|e| {
+        // The one expression here that can fail on DATA rather than on the
+        // database being unreachable is the `::uuid` cast, and Postgres reports
+        // it as `22P02 invalid input syntax for type uuid: "…"` — which names
+        // the cast and nothing else. The `from_value` below, which this cast
+        // used to be reached before, answered the same corruption with the field
+        // name. Say the same thing here rather than leaving the operator with a
+        // driver message about a type.
+        if e.as_database_error().and_then(|d| d.code()).as_deref() == Some("22P02") {
+            return ServingError::internal(format!(
+                "the live version of {method} {path} has a snapshot whose `database_id` is not a \
+                 uuid; publish is the only writer of that field, so this row was not written by \
+                 this server: {e}"
+            ));
+        }
+        ServingError::internal(e)
+    })?;
 
     let Some((id, version, raw, governed, delegated, options)) = row else {
         return Ok(None);

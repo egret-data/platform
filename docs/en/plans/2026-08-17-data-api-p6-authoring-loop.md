@@ -592,6 +592,14 @@ fn draft(f: &serving_common::Fixture, sql: &str) -> serde_json::Value {
 
 /// Spec §5: **preview runs as the author, not the service account.**
 ///
+/// CORRECTION (2026-08-30): this heading, this test's NAME and the UI copy
+/// sketched later in this plan were all false, and are corrected on the
+/// branch that shipped the governance flag. What the route decides is the
+/// PRINCIPAL it passes; which identity the engine applies policy for is
+/// `delegation_for`'s answer, and on an ordinary connection that is the
+/// service account. The shipped test is `preview_passes_the_author_as_the_
+/// principal`. See the design doc's §2.1.
+///
 /// `FakePort` folds the principal into the value it returns (`marker`), the way
 /// Ranger filters per principal. A preview that ran as a service account would
 /// be `Try it` wearing the wrong label — and the author would be told their SQL

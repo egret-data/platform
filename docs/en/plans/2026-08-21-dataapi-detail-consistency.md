@@ -61,6 +61,8 @@ The service-account picker and anything else that configures the call become `Co
 
 Try it runs as the **service account**; the preview in `Query` runs as **the author**. `PreviewBlock`'s note says so explicitly, and the two were proven to differ live on kind (`who=admin` vs `who=svc-kind-smoke-bot`). Whatever copy carries that distinction today must survive the reshape — it is the entire reason both features exist.
 
+> **Correction (2026-08-30), left in place because a later reader will find this paragraph and act on it.** The second half is false and the copy it protected has been rewritten. `preview::run` reaches the engine through `delegation_for`, which sends the connection's SERVICE user on any connection that is neither `delegated` nor impersonating — so on an ordinary connection a preview and a served call are the *same* identity. The kind measurement was taken on a delegated connection and was generalised. The distinction Try it exists to make, and the one the copy now carries, is **authentication, authorization, rate limiting and the published contract** — none of which a preview touches, on any connection. See `docs/en/specs/2026-08-17-data-api-authoring-loop-design.md` §2.1.
+
 - [ ] **Step 4: Test, mutation-check, commit**
 
 Assert the **payload** the trial request carries, not merely that it fired. Use a fixture with **two** parameters so editing the wrong row is distinguishable from editing the right one.

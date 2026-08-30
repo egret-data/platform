@@ -1198,7 +1198,9 @@ async fn a_written_statement_generates_nothing_to_show() {
 /// generated per request, because a script may branch on a value no probe
 /// supplies. Preview generates from the author's test values, which is the same
 /// situation and the same risk in both directions: the statement below is not a
-/// read at all, and preview runs as the AUTHOR against a real engine.
+/// read at all, and preview reaches a real engine — on an ordinary connection
+/// under the SERVICE account's credentials, which is a stronger reason to refuse
+/// a generated `DELETE` than "the author is running it", not a weaker one.
 ///
 /// Both halves are asserted. The refusal, and that **nothing reached the
 /// engine** — "a 400" and "a 400 after running DML" are the same status code and

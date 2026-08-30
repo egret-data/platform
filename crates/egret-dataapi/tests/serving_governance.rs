@@ -435,3 +435,226 @@ async fn rollback_refuses_a_shared_cache_version_on_a_now_per_principal_connecti
     let (status, body) = roll_back_to_v1().await;
     assert_eq!(status, StatusCode::OK, "{body}");
 }
+
+/// **`param_gate` is the third 503 of this shape and rollback deliberately does
+/// NOT re-check it — this test is what makes that a decision rather than an
+/// omission.**
+///
+/// The two rules above are re-asked at rollback because their inputs are live
+/// columns and their serve-time message cannot tell the operator how to clear
+/// them: `governance_stale`'s only fix is on the database, and the publish it
+/// would send them to is refused by the same rule. `param_gate_stale` is the
+/// near-miss — a version frozen before the current parameter gate also 503s
+/// forever once made live — but its message says RE-PUBLISH and re-publishing
+/// works, so refusing at rollback would take away an action during an incident
+/// that the operator could otherwise undo with the very next thing they are
+/// told to do. `check_version_still_publishable`'s doc carries the reasoning;
+/// nothing pinned it, so a later edit that added `param_gate` to that function
+/// would have removed incident-time rollback with a green suite.
+///
+/// All three legs are asserted, because the decision is the whole sequence and
+/// any one of them alone is compatible with the opposite choice:
+///
+/// 1. the rollback SUCCEEDS onto a `param_gate`-stale version;
+/// 2. serving that version then answers `503 param_gate_stale` — so the leg
+///    above is a real trade, not a case where nothing was wrong;
+/// 3. a re-publish clears it — which is what makes the trade the right way
+///    round, and is exactly what `governance_stale` cannot offer.
+///
+/// Bracketed: the same rollback on the same endpoint is REFUSED once the
+/// database is governed, so leg 1 is about `param_gate` being excluded and not
+/// about `check_version_still_publishable` never running here.
+#[tokio::test]
+async fn rollback_allows_a_param_gate_stale_version_because_a_re_publish_clears_it() {
+    let f = skip_without_db!();
+    let ep = f
+        .publish_with_params(
+            "/rollback-gate",
+            f.database_id,
+            no_cache(),
+            no_limits(),
+            "SELECT 1 AS n WHERE 1=1 {% if region %} AND region = {{ region }} {% endif %}",
+            serde_json::json!([
+                { "name": "region", "type": "string", "location": "query", "required": true }
+            ]),
+        )
+        .await;
+    // v2, so there is something to roll back FROM.
+    let (status, body) = f
+        .mgmt_post(
+            &format!("/api/ws/{}/data-api/endpoints/{ep}/publish", f.ws_slug),
+            Some(serde_json::json!({})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "second publish: {body}");
+
+    let roll_back_to_v1 = || async {
+        f.mgmt_post(
+            &format!("/api/ws/{}/data-api/endpoints/{ep}/rollback", f.ws_slug),
+            Some(serde_json::json!({ "version": 1 })),
+        )
+        .await
+    };
+
+    // Age v1's stamp below `PARAM_GATE`. Written straight into the immutable
+    // row because that is the only way the state exists: `publish` always stamps
+    // the current gate, and the versions this rule is about were frozen by an
+    // older BUILD. `rows_affected` is asserted so a forge that matched nothing
+    // cannot make every assertion below pass for the wrong reason.
+    let aged = sqlx::query(
+        "UPDATE dataapi.endpoint_versions \
+         SET snapshot = jsonb_set(snapshot, '{param_gate}', '0'::jsonb) \
+         WHERE endpoint_id = $1 AND version = 1",
+    )
+    .bind(ep)
+    .execute(&f.db.pool)
+    .await
+    .expect("age the param gate");
+    assert_eq!(aged.rows_affected(), 1, "no version row was aged");
+
+    // Leg 1: it goes through.
+    let (status, body) = roll_back_to_v1().await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a `param_gate`-stale version must stay reachable by rollback: the fix \
+         its 503 names (re-publish) works, so refusing here would remove the \
+         action an operator reaches for mid-incident: {body}"
+    );
+    assert_eq!(body["version"].as_i64(), Some(1), "{body}");
+
+    // Leg 2: and the version really is the one that 503s, so leg 1 is a trade
+    // rather than a version with nothing wrong with it.
+    let served = f.call_as(f.principal_a, "rollback-gate?region=x").await;
+    assert_eq!(
+        served.status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "the rolled-back version must be the stale one: {}",
+        served.body
+    );
+    assert_eq!(
+        served.body["error"]["code"], "param_gate_stale",
+        "and stale for the parameter gate, not for governance or cache scope: {}",
+        served.body
+    );
+
+    // Leg 3: the way out its message names actually works — the difference from
+    // `governance_stale`, whose publish is refused by the rule that produced it.
+    let (status, body) = f
+        .mgmt_post(
+            &format!("/api/ws/{}/data-api/endpoints/{ep}/publish", f.ws_slug),
+            Some(serde_json::json!({})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "re-publish: {body}");
+    let served = f.call_as(f.principal_a, "rollback-gate?region=x").await;
+    assert_eq!(
+        served.status,
+        StatusCode::OK,
+        "re-publishing is the fix `param_gate_stale` names, and it must clear \
+         it — that is the whole reason rollback may leave this rule alone: {}",
+        served.body
+    );
+
+    // The bracket: `check_version_still_publishable` DOES run on this endpoint.
+    // Without this, leg 1 would also pass if rollback re-validated nothing.
+    f.set_database_governed(f.database_id, true).await;
+    let (status, body) = roll_back_to_v1().await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "the two live-input rules are still asked here — leg 1 is `param_gate` \
+         being excluded, not the check being absent: {body}"
+    );
+}
+
+/// **The `LEFT JOIN` that carries the live connection is scoped to the calling
+/// workspace, so another workspace's row cannot decide this request.**
+///
+/// `database_id` is the worst column in this crate to resolve unscoped: what it
+/// opens is a CREDENTIAL, and this repo has already shipped one cross-workspace
+/// `database_id` leak of exactly that shape. Nothing published can reach the
+/// state below — publish and rollback both read the connection through the
+/// workspace-scoped `connection_safety_opt`, so a foreign id never enters
+/// `endpoint_versions` — which is why the snapshot here is PLANTED. That is the
+/// point: the predicate is insurance against a writer that does not exist yet,
+/// and insurance nothing exercises is indistinguishable from insurance that was
+/// never bought.
+///
+/// It does not fail open. A row that does not match is the row-is-gone branch,
+/// which allows serving and disables the cache — and the refusal then lands at
+/// execution, where `connect_as` calls `get_in_workspace` and reports a foreign
+/// `database_id` as `NotFound` before any connection is opened. The fake port
+/// here has no workspace scoping, so that last step is not what this test
+/// measures; what it measures is that the foreign row's `governed` flag is not
+/// the thing that answered.
+#[tokio::test]
+async fn a_foreign_workspaces_database_does_not_decide_this_workspaces_request() {
+    let f = skip_without_db!();
+    f.publish("/foreign-db", f.database_id, no_cache(), no_limits())
+        .await;
+
+    // Anti-triviality, both halves, BEFORE the planted row: the endpoint serves,
+    // and the gate genuinely fires on this workspace's OWN database. Without the
+    // second, "not `governance_stale`" below would also hold with the whole gate
+    // deleted.
+    let before = f.call_as(f.principal_a, "foreign-db").await;
+    assert_eq!(before.status, StatusCode::OK, "{}", before.body);
+    f.set_database_governed(f.database_id, true).await;
+    let own = f.call_as(f.principal_a, "foreign-db").await;
+    assert_eq!(
+        own.status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "the gate must fire on this workspace's own row: {}",
+        own.body
+    );
+    assert_eq!(
+        own.body["error"]["code"], "governance_stale",
+        "{}",
+        own.body
+    );
+    f.set_database_governed(f.database_id, false).await;
+
+    // The row under test: another workspace's connection, `governed` and running
+    // as a service account — the exact row whose flags must not be read here.
+    let other_ws = f.make_workspace("gov-foreign").await;
+    let foreign_db: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO query.databases \
+           (workspace_id, name, engine, host, port, delegated, options, governed, created_by) \
+         VALUES ($1, $2, 'trino', 'localhost', 8080, false, '{}'::jsonb, true, \
+                 (SELECT created_by FROM workspaces WHERE id = $1)) RETURNING id",
+    )
+    .bind(other_ws)
+    .bind(format!("foreign-{}", uuid::Uuid::new_v4().simple()))
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("insert foreign database");
+
+    let planted = sqlx::query(
+        "UPDATE dataapi.endpoint_versions v \
+         SET snapshot = jsonb_set(v.snapshot, '{database_id}', to_jsonb($1::text)) \
+         FROM dataapi.endpoints e \
+         WHERE e.live_version_id = v.id AND e.path = '/foreign-db' AND e.workspace_id = $2",
+    )
+    .bind(foreign_db.to_string())
+    .bind(f.ws_id)
+    .execute(&f.db.pool)
+    .await
+    .expect("plant the foreign database_id");
+    assert_eq!(planted.rows_affected(), 1, "no snapshot was repointed");
+
+    let after = f.call_as(f.principal_a, "foreign-db").await;
+    assert_ne!(
+        after.body["error"]["code"], "governance_stale",
+        "another workspace's `governed` flag decided this workspace's request — \
+         which means the join read a row this caller has no relationship to, on \
+         the one column whose value is a credential: {}",
+        after.body
+    );
+    assert_ne!(
+        after.status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "and nothing else about the foreign row answered either: {}",
+        after.body
+    );
+}
