@@ -782,10 +782,16 @@ async fn serve(
     )
     .await;
 
+    // ONE reading, feeding both the row and the histogram. They are documented
+    // as the same measurement (`serving::metrics::REQUEST_DURATION_SECONDS`) and
+    // were two separate `started.elapsed()` calls, which made that documentation
+    // false by however long the rendering between them took.
+    //
     // Measured before the log write, and saturating rather than wrapping: a
     // request that somehow ran for 25 days should record `i32::MAX`, not a
     // negative duration that poisons every average computed over the column.
-    entry.duration_ms = started.elapsed().as_millis().min(i32::MAX as u128) as i32;
+    let elapsed = started.elapsed();
+    entry.duration_ms = elapsed.as_millis().min(i32::MAX as u128) as i32;
 
     // The tuple carries what the metrics need OUT of the match rather than
     // re-deriving it below: `wire` is consumed by `into_response`, and reading
@@ -846,26 +852,8 @@ async fn serve(
     // see it without holding a workspace. `metric_status`/`metric_code` came out
     // of the match above rather than being re-derived, so one call is one
     // increment and the counter cannot disagree with the row about what happened.
-    serving_metrics::record_request(metric_status, metric_code, started.elapsed());
-
-    // The counter that exists because the write below is, for these calls, about
-    // to do NOTHING.
-    //
-    // `record` drops a row it has no `workspace_id` for — the column is `NOT
-    // NULL`, and before the bearer token verifies the only workspace identifier
-    // in hand is the caller's own unverified slug. So a refusal at step 1 leaves
-    // no row; the per-workspace error rate computed from that table stays `None`
-    // rather than 1.0, and no alert can fire however completely the surface is
-    // failing. This is the ONE thing in this package that is not ordinary good
-    // practice — see `serving::metrics`.
-    //
-    // The condition is spelled the same way `record` spells it, immediately
-    // beside it, because the counter is defined as the complement of the table:
-    // if the two ever disagree about which calls produce a row, the gap this
-    // counts is no longer the gap that exists.
-    if entry.workspace_id.is_none() {
-        serving_metrics::record_pre_auth_rejection();
-    }
+    // `elapsed` is the reading the row's `duration_ms` was computed from.
+    serving_metrics::record_request(metric_status, metric_code, elapsed);
 
     // Unconditional, INCLUDING the 429 and the 404 — accepted deliberately, not
     // overlooked. The reasoning, because "the rate limiter protects the
@@ -892,7 +880,20 @@ async fn serve(
     // writer, trading durability at shutdown for amortised writes. It is not
     // adopted now for the same reason partitioning is not — nothing has been
     // measured, and the simple version cannot lose a row.
-    AccessLogStore::new(st.db.clone()).record(&entry).await;
+    //
+    // The write ANSWERS whether a row exists, and the answer is what the metrics
+    // are told. That is the whole of the "the counter is the access log's
+    // complement" property: there is no second copy of the predicate here to
+    // drift from the one inside `record`. It used to be an
+    // `if entry.workspace_id.is_none()` written out beside this line, held to
+    // `record`'s own `let Some(ws) = … else` by adjacency and a comment — so a
+    // third early return added there (skipping trial rows, say, the way
+    // `activity` filters them elsewhere) would have left the counter quietly
+    // measuring something other than the gap. See `serving::metrics` for what
+    // this does and does not guarantee, and for why a failed INSERT gets its own
+    // counter rather than moving the pre-auth one.
+    let recorded = AccessLogStore::new(st.db.clone()).record(&entry).await;
+    serving_metrics::record_access_log_outcome(recorded);
     response
 }
 

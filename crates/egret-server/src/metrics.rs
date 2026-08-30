@@ -46,18 +46,47 @@ use std::sync::{Mutex, OnceLock};
 
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
-use metrics_exporter_prometheus::{BuildError, PrometheusBuilder, PrometheusHandle};
+use metrics_exporter_prometheus::{BuildError, Matcher, PrometheusBuilder, PrometheusHandle};
 
 /// The Prometheus text exposition format's content type. Written out rather
 /// than left to default to `text/plain`, because a scrape that negotiates
 /// nothing still records the version it parsed.
 const EXPOSITION_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
 
+/// The metric-name suffix these buckets are scoped to.
+///
+/// `metrics-exporter-prometheus` applies buckets by metric-name pattern, and
+/// the pattern is checked against the name as REGISTERED — not against the
+/// `_bucket`/`_sum`/`_count` series the renderer derives from it, and not
+/// against a name with a unit appended, because `set_enable_unit_suffix` is
+/// left at its `false` default. So the two histograms this process can record
+/// resolve like this:
+///
+/// | registered name | ends with `_seconds` | rendered as |
+/// |---|---|---|
+/// | `egret_dataapi_request_duration_seconds` | yes | histogram, the buckets below |
+/// | `lakekeeper_role_membership_edge_fanout_users` | no | summary, quantiles over the raw values |
+///
+/// Both names are asserted, as literals, by
+/// `only_second_shaped_histograms_get_the_second_shaped_buckets` in
+/// `tests/metrics_endpoint.rs` — a suffix that stopped matching the one and
+/// started matching the other is the failure this scoping exists to prevent,
+/// and it is silent.
+const LATENCY_METRIC_SUFFIX: &str = "_seconds";
+
 /// Histogram bucket boundaries, in seconds.
 ///
-/// One global set, because `metrics-exporter-prometheus` matches buckets by
-/// metric-name pattern and every histogram this process records today is a
-/// request latency.
+/// SCOPED to [`LATENCY_METRIC_SUFFIX`] rather than set globally, because not
+/// every histogram this process records is a request latency. Egret's recorder
+/// is the `metrics` facade's PROCESS-GLOBAL one, so it also receives whatever
+/// the embedded lakekeeper records through the same facade — including
+/// `lakekeeper_role_membership_edge_fanout_users`, a histogram of a COUNT of
+/// users (`crates/lakekeeper/src/service/cache_metrics.rs:22` at the pinned
+/// rev). A global `set_buckets` would put a 0–1000 count into second-shaped
+/// buckets topping out at 60, where every reading above that lands in `+Inf`
+/// and the distribution is unreadable. Unmatched histograms fall back to the
+/// exporter's summary rendering, whose quantiles are computed from the values
+/// themselves and so mean something whatever the unit is.
 ///
 /// The range runs to a minute on purpose. The Data API's own latency is
 /// dominated by an engine round trip whose ceiling is the endpoint's published
@@ -96,7 +125,10 @@ pub fn install_recorder() -> Result<(), BuildError> {
         return Ok(());
     }
     let handle = PrometheusBuilder::new()
-        .set_buckets(LATENCY_BUCKETS_SECONDS)?
+        .set_buckets_for_metric(
+            Matcher::Suffix(LATENCY_METRIC_SUFFIX.to_owned()),
+            LATENCY_BUCKETS_SECONDS,
+        )?
         .install_recorder()?;
     // Names, units and help text. Registered here rather than in each crate's
     // startup because "describe once, at the point the recorder exists" is the

@@ -108,31 +108,77 @@ async fn the_installer_registers_the_data_api_metric_descriptions() {
 /// A latency metric renders as a HISTOGRAM, not as a summary.
 ///
 /// `metrics-exporter-prometheus` emits a summary with pre-computed quantiles
-/// unless the builder was given buckets — and that difference is invisible until
-/// someone tries to use the number. A summary's quantiles cannot be aggregated
-/// across replicas: "the p95 across three egret pods" is not computable from
-/// three summaries and has no correct answer, whereas cumulative buckets add.
-/// The install path is the only place that choice is made, and this is the only
-/// thing that checks it was made.
+/// unless the builder gave that metric buckets — and that difference is
+/// invisible until someone tries to use the number. A summary's quantiles cannot
+/// be aggregated across replicas: "the p95 across three egret pods" is not
+/// computable from three summaries and has no correct answer, whereas cumulative
+/// buckets add. The install path is the only place that choice is made, and this
+/// is the only thing that checks it was made.
+///
+/// The probe's name ends in `_seconds` on purpose: that suffix is the whole
+/// selector now, so a probe named anything else would be asserting the fallback
+/// rather than the configuration.
 #[tokio::test]
 async fn the_latency_histogram_renders_as_buckets_and_not_as_quantiles() {
     egret_server::install_metrics_recorder().expect("install the recorder");
-    metrics::histogram!("egret_server_metrics_endpoint_latency_probe").record(0.42);
+    metrics::histogram!("egret_server_metrics_endpoint_latency_probe_seconds").record(0.42);
     let (_, _, text) = scrape().await;
     assert!(
-        text.contains("egret_server_metrics_endpoint_latency_probe_bucket{le="),
+        text.contains("egret_server_metrics_endpoint_latency_probe_seconds_bucket{le="),
         "no buckets — the exporter fell back to a summary, whose quantiles \
          cannot be aggregated across replicas:\n{text}"
     );
     assert!(
-        !text.contains("egret_server_metrics_endpoint_latency_probe{quantile="),
+        !text.contains("egret_server_metrics_endpoint_latency_probe_seconds{quantile="),
         "a summary was emitted beside the buckets:\n{text}"
     );
     // The topmost bucket must be above the endpoint timeout ceiling, or every
     // slow query lands in `+Inf` and a degraded endpoint has an unreadable p95.
     assert!(
-        text.contains("egret_server_metrics_endpoint_latency_probe_bucket{le=\"60\"}"),
+        text.contains("egret_server_metrics_endpoint_latency_probe_seconds_bucket{le=\"60\"}"),
         "the bucket set no longer reaches a minute:\n{text}"
+    );
+}
+
+/// The second-shaped buckets reach the latency histogram and NOTHING ELSE.
+///
+/// Both names below are the real registered ones, written out as literals rather
+/// than derived, because the property is about the exact strings the recorder
+/// sees:
+///
+/// * `egret_dataapi_request_duration_seconds` —
+///   `egret_dataapi::serving::metrics::REQUEST_DURATION_SECONDS`, a latency.
+/// * `lakekeeper_role_membership_edge_fanout_users` — the embedded lakekeeper's
+///   histogram of how many users a single role-membership edge change
+///   invalidates (`crates/lakekeeper/src/service/cache_metrics.rs:22` at the
+///   pinned rev). It goes through the same `metrics` facade into the same
+///   process-global recorder this crate installs, and it counts USERS.
+///
+/// A global `set_buckets` — which is what the installer used to do — would
+/// bucket that count into boundaries topping out at 60, so a fan-out of 500
+/// would land in `+Inf` beside a fan-out of 5000 and the histogram would be a
+/// constant. The last assertion is that the 500 is still READABLE, which a
+/// "no buckets were applied" check on its own would not establish.
+#[tokio::test]
+async fn only_second_shaped_histograms_get_the_second_shaped_buckets() {
+    egret_server::install_metrics_recorder().expect("install the recorder");
+    metrics::histogram!(egret_dataapi::serving::metrics::REQUEST_DURATION_SECONDS).record(0.42);
+    metrics::histogram!("lakekeeper_role_membership_edge_fanout_users").record(500.0);
+    let (_, _, text) = scrape().await;
+
+    assert!(
+        text.contains("egret_dataapi_request_duration_seconds_bucket{le="),
+        "the suffix matcher no longer covers the Data API's latency histogram, \
+         so it silently became a summary:\n{text}"
+    );
+    assert!(
+        !text.contains("lakekeeper_role_membership_edge_fanout_users_bucket"),
+        "a COUNT histogram was given second-shaped buckets; every fan-out above \
+         60 now lands in +Inf and the distribution is a constant:\n{text}"
+    );
+    assert!(
+        text.contains("lakekeeper_role_membership_edge_fanout_users{quantile=\"0.99\"} 500"),
+        "the recorded fan-out of 500 is not readable from the scrape:\n{text}"
     );
 }
 

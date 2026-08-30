@@ -3,7 +3,7 @@
 //!
 //! # The one thing here that is not ordinary good practice
 //!
-//! [`record_pre_auth_rejection`] counts the calls `dataapi.access_log`
+//! [`PREAUTH_REJECTIONS_TOTAL`] counts the calls `dataapi.access_log`
 //! **structurally cannot record**. `access_log.workspace_id` is `NOT NULL` and
 //! is only known once the bearer token verifies, so
 //! [`super::access_log::AccessLogStore::record`] drops a row it has no workspace
@@ -30,6 +30,40 @@
 //! question only the counter answers is "is anything getting through at all",
 //! and the one question only the log answers is "whose, and which endpoint".
 //!
+//! ## What "the counter is the table's complement" is, exactly
+//!
+//! It is a property of ONE expression, not of two that happen to agree.
+//! [`super::access_log::AccessLogStore::record`] returns
+//! [`super::access_log::Recorded`], and the serving path counts whichever
+//! no-row variant it was handed. There is no second copy of the "does this call
+//! produce a row" predicate to drift out of step with the first — which is what
+//! there was, and what the comment beside it overstated.
+//!
+//! What that does and does not guarantee, stated plainly because this is the
+//! kind of claim that ages badly:
+//!
+//! * **Guaranteed by the types.** A new early return added to `record` cannot
+//!   compile without naming a [`super::access_log::Recorded`] variant, so it
+//!   cannot silently leave a call uncounted. A caller cannot ignore the answer
+//!   either — the type is `#[must_use]`.
+//! * **NOT guaranteed by the types.** Someone could return
+//!   `Recorded::Row` from a path that wrote nothing. Nothing in Rust catches
+//!   that, so `record_reports_a_row_exactly_when_one_exists` in
+//!   `tests/serving_metrics.rs` asserts the biconditional against the real
+//!   table, over a table of entry shapes rather than for one case.
+//!
+//! ## The second no-row path, and why it gets its own counter
+//!
+//! A pre-authentication refusal is not the only way a call leaves no row: the
+//! INSERT itself can fail, which `record` logs at `warn` and swallows. That hole
+//! has the same shape — no row, so `error_rate` stays `None` — but a different
+//! cause and a different fix, so it is
+//! [`ACCESS_LOG_WRITE_FAILURES_TOTAL`] and not a second reason for the pre-auth
+//! counter to move. Folding the two would make an alert on
+//! `egret_dataapi_preauth_rejections_total` fire for a metastore problem while
+//! saying "authentication is refusing everything", which is worse than not
+//! alerting: it is alerting with the wrong noun.
+//!
 //! # Cardinality is a correctness property, not a style note
 //!
 //! A Prometheus series exists for every distinct combination of label values,
@@ -48,6 +82,7 @@
 //! | `egret_dataapi_request_duration_seconds` | `status` | as above. |
 //! | `egret_dataapi_cache_lookups_total` | `result` | `"hit"` or `"miss"`; nothing else is constructible. |
 //! | `egret_dataapi_preauth_rejections_total` | *(none)* | it is reached before anything about the caller has been verified, so there is no value here that is not the caller's own word. |
+//! | `egret_dataapi_access_log_write_failures_total` | *(none)* | the failing thing is the metastore, not the call; the sqlx error's text is a runtime string and would be unbounded. |
 //!
 //! `code` and `status` are both present and that costs nothing: `code`
 //! determines `status` (each arm of `to_wire` pairs one with one), so the two
@@ -89,16 +124,28 @@ use std::time::Duration;
 
 use axum::http::StatusCode;
 
+use super::access_log::Recorded;
+
 /// One increment per served call, whatever the answer.
 pub const REQUESTS_TOTAL: &str = "egret_dataapi_requests_total";
-/// End-to-end latency as the CALLER experienced it — the same measurement
-/// `access_log.duration_ms` records, in seconds because that is Prometheus'
-/// base unit.
+/// End-to-end latency as the CALLER experienced it, in seconds because that is
+/// Prometheus' base unit.
+///
+/// Literally the same measurement `access_log.duration_ms` records: `serve`
+/// takes ONE `started.elapsed()` and feeds both, so the row and the histogram
+/// cannot disagree by the cost of whatever ran between them. It used to be two
+/// separate readings with this comment claiming otherwise.
 pub const REQUEST_DURATION_SECONDS: &str = "egret_dataapi_request_duration_seconds";
 /// Hit/miss, counted only where a lookup actually happened.
 pub const CACHE_LOOKUPS_TOTAL: &str = "egret_dataapi_cache_lookups_total";
-/// The calls no `access_log` row exists for — see the module comment.
+/// The calls refused before a workspace was known, which is the larger of the
+/// two ways a call leaves no `access_log` row — see the module comment.
 pub const PREAUTH_REJECTIONS_TOTAL: &str = "egret_dataapi_preauth_rejections_total";
+/// The other way a call leaves no `access_log` row: the INSERT failed.
+///
+/// Its own counter rather than a second reason for [`PREAUTH_REJECTIONS_TOTAL`]
+/// to move, because the two name different faults — see the module comment.
+pub const ACCESS_LOG_WRITE_FAILURES_TOTAL: &str = "egret_dataapi_access_log_write_failures_total";
 
 /// The `code` label's value on a success, where there is no [`super::error::Wire`]
 /// to read one off.
@@ -136,6 +183,11 @@ pub fn describe() {
         PREAUTH_REJECTIONS_TOTAL,
         "Data API serving calls refused before a workspace was resolved, which dataapi.access_log \
          cannot record because workspace_id is NOT NULL"
+    );
+    ::metrics::describe_counter!(
+        ACCESS_LOG_WRITE_FAILURES_TOTAL,
+        "Data API serving calls whose dataapi.access_log INSERT failed, so no row exists for them \
+         either"
     );
 }
 
@@ -188,17 +240,74 @@ pub(crate) fn record_cache_lookup(hit: bool) {
         .increment(1);
 }
 
-/// A call refused before a workspace was resolved — see the module comment.
+/// One call that left no `access_log` row, counted under the reason there is
+/// none.
 ///
-/// No labels, and it must stay that way: everything known at this point is the
-/// caller's unverified word.
-pub(crate) fn record_pre_auth_rejection() {
-    ::metrics::counter!(PREAUTH_REJECTIONS_TOTAL).increment(1);
+/// Takes the [`Recorded`] the write itself returned rather than re-deciding
+/// from the entry, so the counters are the table's complement by construction
+/// rather than by two call sites agreeing — see the module comment for what that
+/// does and does not guarantee.
+///
+/// Neither counter has labels and neither may gain one: at a pre-auth refusal
+/// everything known is the caller's unverified word, and the write failure's
+/// only distinguishing value is a sqlx error string.
+pub(crate) fn record_access_log_outcome(recorded: Recorded) {
+    match recorded {
+        Recorded::Row => {}
+        Recorded::NoWorkspace => ::metrics::counter!(PREAUTH_REJECTIONS_TOTAL).increment(1),
+        Recorded::InsertFailed => ::metrics::counter!(ACCESS_LOG_WRITE_FAILURES_TOTAL).increment(1),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each way a call can leave no `access_log` row moves its OWN counter, and
+    /// a row moves neither.
+    ///
+    /// Driven over every [`Recorded`] variant rather than over the one that
+    /// matters, so a variant added later has to be given a home here — a `_ =>`
+    /// arm silently mapping a new no-row reason onto the pre-auth counter is the
+    /// drift this whole change is about, one level up.
+    ///
+    /// A real recorder, local to this thread, rendering real exposition text: a
+    /// double would assert that a function was called, which is not the claim.
+    #[test]
+    fn each_no_row_outcome_moves_its_own_counter_and_a_row_moves_neither() {
+        use metrics_exporter_prometheus::PrometheusBuilder;
+
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        ::metrics::with_local_recorder(&recorder, || {
+            record_access_log_outcome(Recorded::Row);
+            let after_row = handle.render();
+            assert!(
+                !after_row.contains(PREAUTH_REJECTIONS_TOTAL)
+                    && !after_row.contains(ACCESS_LOG_WRITE_FAILURES_TOTAL),
+                "a written row is not a gap and must move nothing:\n{after_row}"
+            );
+
+            record_access_log_outcome(Recorded::NoWorkspace);
+            record_access_log_outcome(Recorded::InsertFailed);
+            record_access_log_outcome(Recorded::InsertFailed);
+            let text = handle.render();
+
+            // Different totals on purpose: equal ones would pass just as well if
+            // both names resolved to one counter.
+            assert!(
+                text.contains(&format!("{PREAUTH_REJECTIONS_TOTAL} 1")),
+                "the pre-auth refusal did not move its own counter exactly \
+                 once:\n{text}"
+            );
+            assert!(
+                text.contains(&format!("{ACCESS_LOG_WRITE_FAILURES_TOTAL} 2")),
+                "the two failed INSERTs are not counted apart from the pre-auth \
+                 refusal; an alert on the pre-auth counter would now fire for a \
+                 metastore problem while naming authentication:\n{text}"
+            );
+        });
+    }
 
     /// The status label is a closed set, and the fallback is what closes it.
     ///
