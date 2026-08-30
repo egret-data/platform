@@ -11,7 +11,7 @@ import { ConfigTable, ConfigTableRow } from "@/components/config/ConfigTable";
 import { Caveat } from "./Caveat";
 import { useDataApiListServiceAccounts, useDataApiTryEndpoint } from "@/api/generated/data-api/data-api";
 import type { DataApiServiceAccountDto, TryRequestParams, TryResponse } from "@/api/generated/model";
-import { useEndpointDetail } from "../EndpointDetail";
+import { LeaveGuardLink, useEndpointDetail } from "../EndpointDetail";
 
 /**
  * Best-effort extraction of the refusal's machine-readable code/message from
@@ -419,9 +419,9 @@ export default function TryIt() {
                     // click.
                     <p className="text-xs text-muted-foreground">
                       This workspace has no service accounts yet.{" "}
-                      <Link className="underline" to={newAccountHref}>
+                      <LeaveGuardLink className="underline" to={newAccountHref}>
                         Create one in Clients
-                      </Link>
+                      </LeaveGuardLink>
                       , then grant it invoke on this endpoint in Access.
                     </p>
                   )
@@ -640,9 +640,9 @@ export default function TryIt() {
               <AlertDescription>
                 This result is too large to display here. The call still ran for real — its
                 rate-limit, access-log and cache effects all happened — check{" "}
-                <Link className="underline" to={activityHref}>
+                <LeaveGuardLink className="underline" to={activityHref}>
                   Activity
-                </Link>{" "}
+                </LeaveGuardLink>{" "}
                 to see it.
               </AlertDescription>
             </Alert>

@@ -34,6 +34,7 @@ import { useBookmarkEndpoint, useDeleteEndpoint, useTrashEndpoint, useUnbookmark
 import type { DataApiEndpointDto, DataApiEndpointListItemDto } from "@/api/generated/model";
 import { DownloadOpenApiDialog } from "./DownloadOpenApiDialog";
 import { EndpointActionsMenu } from "./EndpointActionsMenu";
+import { endpointStateLabel } from "./endpointState";
 
 // Folders share the generic router (egret-bi's `kind_perms`); this is the
 // `{kind}` URL segment data-api registers there, matching
@@ -89,29 +90,18 @@ const STATE_TONE: Record<string, string> = {
 const ENGINE_LABEL: Record<string, string> = { trino: "Trino", starrocks: "StarRocks" };
 
 /**
- * The list DTO has no version count — only `live_version_id`, a nullable id.
- * Showing it as its own "Version" column was tried and dropped (see
- * `docs/en/specs/2026-08-16-data-api-p5-design.md` §2.3): for `live` and
- * `draft` the id fully tracks the state — a fresh draft is created with it
- * null (migration 0121), and `EndpointStore::publish` (`lifecycle.rs`) is the
- * only place that ever sets it, atomically with `state = 'live'` — so
- * labelling those two states alone would only repeat the badge's own colour
- * in words.
+ * The row badge's word.
  *
- * `disabled` is the one state where the id carries real information:
- * `EndpointStore::disable` (`lifecycle.rs`) has no state guard and never
- * touches `live_version_id`, so a draft can be disabled directly — a
- * `disabled` row can mean "was serving, paused" or "never served at all",
- * and those need different next actions (Enable vs. Publish). Folding both
- * into a bare "Disabled" badge would read as "currently serving" in the
- * worse of the two cases.
+ * Shared with the editor header (`endpointState.tsx`), which is the point: the
+ * list said "Live" on every row while the six tabs an author edits on said
+ * nothing, and two surfaces describing one endpoint must not be free to
+ * describe it differently. The reasoning for the `disabled` split — and for
+ * why `live`/`draft` need none on a LIST row — moved there with it.
+ *
+ * The header's word is longer, because the shell has already loaded the
+ * version history and can name the served version and say whether the draft
+ * has moved past it. A list row knows neither, and says neither.
  */
-function stateBadgeLabel(e: DataApiEndpointDto): string {
-  if (e.state === "disabled") {
-    return e.live_version_id ? "Disabled · was live" : "Disabled · never published";
-  }
-  return e.state.length ? e.state.charAt(0).toUpperCase() + e.state.slice(1) : e.state;
-}
 
 export default function Endpoints() {
   const ws = useParams().workspace!;
@@ -490,7 +480,7 @@ export default function Endpoints() {
       </td>
       <td>
         <Badge className={STATE_TONE[e.state] ?? "bg-muted text-muted-foreground"}>
-          {stateBadgeLabel(e)}
+          {endpointStateLabel(e)}
         </Badge>
       </td>
       <td className="text-muted-foreground">{engineLabel(e.database_id)}</td>
