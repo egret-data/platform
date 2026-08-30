@@ -19,6 +19,20 @@ up:
 down:
     docker compose -f deploy/docker-compose.dev.yml down
 
+# Scrub the DB-skip opt-out from any recipe that is supposed to actually run the tests.
+#
+# `EGRET_ALLOW_DB_SKIP` makes every DB-gated suite report `ok` having asserted nothing. An
+# opt-out that came from `.env` is refused in `egret_test_db` itself (it reads the file, so
+# `set dotenv-load` cannot smuggle one in) — but one exported in a shell profile is
+# indistinguishable in-process from one the operator typed, and would make `just check`
+# report a full green over ~315 empty tests, silently: the skip's `eprintln!` is swallowed
+# by libtest because the test PASSES.
+#
+# So the recipes that mean "everything ran" unset it. `tests/every_test_recipe_refuses_the
+# _skip.rs` in egret-test-db fails if a recipe here runs `cargo test` without either this
+# prefix or a deliberate `EGRET_ALLOW_DB_SKIP=` of its own.
+no_db_skip := "env -u EGRET_ALLOW_DB_SKIP"
+
 # Format, lint, and test everything
 check:
     # Cheap (0.2s) and visible: cargo never prunes deps/, and past ~100k files every test
@@ -26,7 +40,7 @@ check:
     ./deploy/prune-target.sh
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
-    DATABASE_URL={{ test_database_url }} cargo test --workspace
+    {{ no_db_skip }} DATABASE_URL={{ test_database_url }} cargo test --workspace
 
 # The workspace suite with NO database, skipping every DB-gated test on purpose.
 #
@@ -60,7 +74,7 @@ test-no-db:
 # Prereq: `just up` (StarRocks takes ~30-60s to become healthy).
 test-dataapi-starrocks:
     ./deploy/seed-starrocks-dataapi.sh
-    DATABASE_URL={{ test_database_url }} EGRET_TEST_STARROCKS_URL=mysql://localhost:9030 \
+    {{ no_db_skip }} DATABASE_URL={{ test_database_url }} EGRET_TEST_STARROCKS_URL=mysql://localhost:9030 \
       cargo test -p egret-dataapi --test serving_starrocks_live -- --nocapture
 
 # Apply migrations against the running Postgres

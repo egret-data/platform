@@ -33,11 +33,37 @@ only from the wall clock. The same panic covers `DATABASE_URL` set but *unreacha
 that case skipped silently too, and it is the shape a CI run takes when its database
 service failed to start.
 
-Two things the opt-out does **not** do, both worth knowing before reading a green:
+### The opt-out may not come from `.env`
+
+That whole claim — *the skip appears in the invocation* — is worth exactly as much as the
+guarantee that the variable could not have arrived from somewhere nobody looks. A `.env`
+breaks it in one untracked line: `justfile` has `set dotenv-load := true`, so `.env` enters
+the environment of **every** recipe, and `#[sqlx::test]`'s `dotenvy::dotenv()` loads the
+whole file into the process environment besides. Either route would make `just check`
+report a full green having asserted nothing, and nothing would be visible on the terminal —
+the skip's message is swallowed by libtest precisely *because* the test passes.
+
+So `egret_test_db` reads the **file**, not the environment, and **refuses** an opt-out a
+`.env` at or above the working directory could have supplied:
+
+```
+EGRET_ALLOW_DB_SKIP is set by /path/to/.env, so this run cannot show that anyone ASKED
+to skip the DB-gated suites. […] Delete the EGRET_ALLOW_DB_SKIP line from that file.
+```
+
+This is structural rather than per-recipe: it holds for a bare `cargo test`, and it cannot
+be forgotten when someone adds the next recipe. What it *cannot* see is a variable exported
+in a shell profile — inside the process that is indistinguishable from one the operator
+typed. So the recipes that mean "everything ran" also carry `{{ no_db_skip }}`
+(`env -u EGRET_ALLOW_DB_SKIP`), and
+`crates/egret-test-db/tests/every_test_recipe_refuses_the_skip.rs` fails if a `justfile`
+recipe runs `cargo test` without either scrubbing the variable or setting it deliberately.
+
+### Two things the opt-out does not do
 
 - It does not cover `#[sqlx::test]`. Those tests never call `egret_test_db::url()`; they
   resolve `DATABASE_URL` through dotenvy themselves and create their own scratch databases.
-  They are unaffected by this flag and may still fail without a database.
+  They are unaffected by this flag and may still fail without a database — see below.
 - It does not unset `DATABASE_URL` for you. If one is exported — or supplied by `.env`
   under `just`'s `dotenv-load` — the suites will still run against it. `just test-no-db`
   passes `env -u DATABASE_URL` for exactly this reason.
@@ -61,10 +87,10 @@ above is only a server address plus a name it derives the admin connection from.
 
 ## CI
 
-`.github/workflows/ci.yml` runs a `postgres:16` service and sets `DATABASE_URL` at job
-level, so **this change does not alter what CI does**. It changes what a laptop with no
-database does: previously green-and-empty, now a failure with both ways forward in the
-message.
+`.github/workflows/ci.yml` runs a `postgres:16` service and sets `DATABASE_URL` at
+**workflow** level — the top-level `env:` block, which every job inherits — so **this
+change does not alter what CI does**. It changes what a laptop with no database does:
+previously green-and-empty, now a failure with both ways forward in the message.
 
 ## Engine-gated tests are a separate axis
 

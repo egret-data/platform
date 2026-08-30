@@ -33,6 +33,24 @@ Việc bỏ qua bây giờ nằm trong chính dòng lệnh tạo ra màu xanh, t
 nối được** — trường hợp này trước đây cũng im lặng bỏ qua, và nó chính là hình dạng của
 một lần chạy CI khi service database không khởi động được.
 
+### Opt-out KHÔNG được đến từ `.env`
+
+Toàn bộ lời khẳng định "việc bỏ qua nằm trong dòng lệnh" chỉ đáng giá bằng đúng bảo đảm
+rằng biến đó không thể đến từ chỗ không ai nhìn. Một `.env` phá vỡ nó bằng một dòng không
+được commit: `justfile` có `set dotenv-load := true`, nên `.env` vào môi trường của **mọi**
+recipe; và `dotenvy::dotenv()` mà `#[sqlx::test]` gọi cũng nạp cả file vào môi trường tiến
+trình. Cả hai đường đều khiến `just check` báo xanh toàn phần trong khi không assert gì, và
+không có gì hiện trên terminal — thông báo skip bị libtest nuốt **chính vì** test đạt.
+
+Vì vậy `egret_test_db` đọc **file**, không đọc môi trường, và **từ chối** một opt-out mà
+một `.env` ở thư mục hiện tại hoặc cấp trên có thể đã cung cấp. Đây là biện pháp mang tính
+cấu trúc chứ không phải theo từng recipe: nó đúng cả với `cargo test` trần, và không thể bị
+quên khi ai đó thêm recipe mới. Thứ nó **không** thấy được là biến export trong shell
+profile — trong tiến trình, nó không phân biệt được với biến người vận hành tự gõ. Nên các
+recipe mang nghĩa "đã chạy hết" còn kèm `{{ no_db_skip }}` (`env -u EGRET_ALLOW_DB_SKIP`),
+và `crates/egret-test-db/tests/every_test_recipe_refuses_the_skip.rs` sẽ đỏ nếu một recipe
+trong `justfile` chạy `cargo test` mà không xử lý biến này.
+
 ## Chạy kèm database (giống CI)
 
 ```bash
@@ -47,7 +65,8 @@ cargo test --workspace
 
 ## CI
 
-`.github/workflows/ci.yml` đã chạy service `postgres:16` và đặt `DATABASE_URL` ở mức job,
+`.github/workflows/ci.yml` đã chạy service `postgres:16` và đặt `DATABASE_URL` ở mức
+**workflow** (khối `env:` ở đầu file, nên mọi job đều thừa hưởng),
 nên **thay đổi này không làm CI khác đi**. Nó chỉ đổi hành vi trên máy không có database.
 
 ## Test cần ENGINE là trục riêng
