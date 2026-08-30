@@ -243,6 +243,39 @@ describe("Sidebar – Infrastructure group", () => {
   });
 });
 
+/**
+ * The `Access` heading belongs to `CONTROL_PLANE_GROUPS`, and `groups` is a
+ * hard either/or on `isAdmin` — control-plane groups OR Explore groups, never
+ * both. So on an Explore route there is no `Access` heading at all, for anyone,
+ * admin included.
+ *
+ * This is asserted because its ABSENCE was load-bearing and nobody had written
+ * it down. Every existing `Access` assertion in this file renders
+ * `/control-plane/...`; nothing said what an Explore route shows. A Data API
+ * doc comment and a `ui-conventions` §3.9 bullet were both written on the
+ * belief that a reader on `/explore/:ws/data-api/clients/new` could see an
+ * `Access` sidebar group and confuse it with an endpoint's Access TAB. They
+ * cannot — the tab needs disambiguating from nothing, it needs a PATH, which
+ * is a different argument for the same wording. Both were corrected against
+ * this test.
+ */
+describe("Sidebar – no Access heading on an Explore route", () => {
+  test("an Explore route renders the Explore groups and no control-plane Access group", () => {
+    renderSidebar("/explore/eng/data-api/clients");
+
+    // The positive half first: this really is the Explore sidebar, so an empty
+    // render cannot satisfy the negative below.
+    expect(screen.getByText("Data API")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Clients" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Endpoints" })).toBeInTheDocument();
+
+    // By identity over the whole rendered sidebar, not `queryByText("Access")`
+    // — an exact-text query would miss a heading spelled "Access control" and
+    // report the absence this comment depends on.
+    expect(screen.queryByText(/access/i)).not.toBeInTheDocument();
+  });
+});
+
 describe("Sidebar – Identity + Access groups", () => {
   test("renders Users, Groups, Roles, Permissions at their /control-plane routes", () => {
     renderSidebar("/control-plane/workspaces");

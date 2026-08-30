@@ -194,3 +194,90 @@ describe("ServiceAccountCreate", () => {
     expect(actionGroup).not.toContainElement(back);
   });
 });
+
+/**
+ * The subtitle is an INSTRUCTION, and it named a control that has never
+ * existed: "issue it OAuth2 clients and grant it endpoints from the Clients
+ * list". The Clients list grants nothing. Its account menu offers
+ * `Issue client…` and `Delete` (`ServiceAccountActionsMenu`), and its client
+ * rows offer `Revoke…`; invoke is granted per ENDPOINT, on that endpoint's
+ * Access tab (`detail/AccessSection.tsx` is the only caller of
+ * `useDataApiGrantEndpointInvoke`). A reader who followed the sentence went
+ * hunting the Clients list for a control that is not there — which is worse
+ * than the silence it was written to fix, because silence does not send anyone
+ * anywhere.
+ *
+ * The page's own doc comment had it right the whole time. These tests are the
+ * halves of the claim, split so that neither can carry the other: one pins
+ * where the sentence sends a grant, one pins that it no longer sends it to the
+ * surface that cannot serve one. `Clients.test.tsx` holds the other end of the
+ * reconciliation — that the Clients account menu really has no grant item —
+ * because a sentence can only be checked against the tree it describes.
+ */
+describe("ServiceAccountCreate — the hand-off sentence is true of the shipped tree", () => {
+  // Its own, because this block sits OUTSIDE the `describe` that owns the
+  // file's only `beforeEach`. Harmless today — both tests call `mockCreate()`
+  // themselves — but "harmless because of what the tests happen to do" is a
+  // property of the tests, not of the block, and the next test added here
+  // would inherit whatever the previous file left on the mock.
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  /**
+   * The subtitle BY IDENTITY: `ListPageShell` renders it as the `<p>`
+   * immediately after the `h1`, in the same heading block. A `getByText`
+   * regex would match the sentence wherever it drifted to — including a
+   * second copy of it below the form — and would still pass if the header
+   * lost its description entirely and some other prose happened to match.
+   */
+  function subtitle(): string {
+    const h1 = screen.getByRole("heading", { level: 1, name: "New service account" });
+    const p = h1.nextElementSibling;
+    expect(p?.tagName).toBe("P");
+    const text = (p as HTMLElement).textContent ?? "";
+    // Guards the assertions below against the empty string, on which a
+    // `not.toMatch` is vacuously true.
+    expect(text.length).toBeGreaterThan(40);
+    return text;
+  }
+
+  it("sends a grant to an endpoint's Access tab, under Endpoints", () => {
+    mockCreate();
+    renderCreate();
+    // Not "mentions Access somewhere": the destination has to be specific
+    // enough to WALK to, and that is the whole of the reason. `Access` is a
+    // TAB on an endpoint's detail route — there is no sidebar item by that
+    // name for a reader on this page to click, so "Access" alone names a place
+    // reachable only through a parent it does not mention. `under Endpoints`
+    // supplies the parent, and `Endpoints` sits in the same `Data API` sidebar
+    // group as the Clients page this reader came from.
+    //
+    // An earlier revision of this comment said `Access` was ambiguous with a
+    // workspace Access-control console. It is not, and the mistake is the one
+    // this whole branch is about: that heading lives in `CONTROL_PLANE_GROUPS`
+    // and `Sidebar.tsx` picks control-plane groups OR Explore groups on
+    // `isAdmin`, never both — so on `/explore/:ws/...` there is no `Access`
+    // heading at all, for anyone. Pinned now, by the absence it depends on, at
+    // `components/layout/__tests__/Sidebar.test.tsx` ("no Access heading on an
+    // Explore route"). The shipped words did not change; only the reason did.
+    expect(subtitle()).toMatch(/grant[\s\S]*Access tab under Endpoints/i);
+  });
+
+  it("does not send a grant to the Clients list, which has no grant control", () => {
+    mockCreate();
+    renderCreate();
+    const text = subtitle();
+    // The clause, not the sentence. Naming Clients is CORRECT here — that is
+    // where a client is issued — so a flat `not.toMatch(/Clients/)` would
+    // forbid the one true half. The defect was the binding: the verb `grant`
+    // and the noun `Clients` in one clause. Clauses are split on the
+    // separators the sentence actually uses.
+    const clauses = text.split(/[.;\u2014]/).map((c) => c.trim()).filter(Boolean);
+    const grantClauses = clauses.filter((c) => /\bgrant/i.test(c));
+    // Fails loudly rather than passing on a subtitle that stopped talking
+    // about grants at all — silence is the outcome this fix is NOT.
+    expect(grantClauses).toHaveLength(1);
+    expect(grantClauses[0]).not.toMatch(/Clients/i);
+  });
+});

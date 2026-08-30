@@ -559,6 +559,94 @@ state and a reload empties them. For `ClientCreate` this is deliberate — the w
 not remembering is a worse first-run form; the worst outcome of remembering is a leaked
 secret.
 
+### 3.9 Copy that names a control is a claim about the tree, and is checked like one
+
+A create page's subtitle usually says what happens next, and next is usually somewhere else.
+That sentence is not decoration: a reader follows it. **`ServiceAccountCreate` shipped
+"issue it OAuth2 clients and grant it endpoints from the Clients list", and the Clients list
+has no grant affordance at all** — the account's group-header menu is `Issue client…` +
+`Delete`, a client row offers `Revoke…`, and `useDataApiGrantEndpointInvoke` has exactly one
+caller in the tree, `detail/AccessSection.tsx`. The reader went hunting for a control that
+does not exist, which is strictly worse than saying nothing: silence sends nobody anywhere.
+
+The rule, and the reason it is here rather than in one file's comment:
+
+- **Name a destination specific enough to walk to, and no more specific than is true.**
+  "Access" alone is a **tab on a detail route** — there is no sidebar item by that name, so
+  it names a place reachable only through a parent it does not mention. The shipped wording
+  is "on that endpoint's Access tab under Endpoints": `Endpoints` is a real sidebar link
+  (pinned by `layout/__tests__/Sidebar.test.tsx`) in the same `Data API` group as the Clients
+  page the reader is standing on, so the sentence hands them a first step.
+
+  **An earlier revision of this bullet gave a different reason, and it was false — in the
+  section written about exactly that failure.** It said `Access` was ambiguous with an
+  `Access` sidebar group. That heading is in `CONTROL_PLANE_GROUPS`, and `Sidebar.tsx` picks
+  control-plane groups **or** Explore groups on `isAdmin`, never both, so on
+  `/explore/:ws/data-api/clients/new` there is no `Access` heading at all — for anyone, admin
+  included. The check that would have caught it is this section's own: the claim was about a
+  control, and the control was never rendered to look at. Its absence is now pinned
+  (`layout/__tests__/Sidebar.test.tsx`, "no Access heading on an Explore route"), which is the
+  general repair — **a reason nobody can render is a reason nobody can check.**
+- **One fact, one greppable stem** — which is weaker than "one phrasing", and the weaker
+  claim is the true one. The stem is **`Access tab`**, and all three shipped occurrences carry
+  it (`ServiceAccountCreate.tsx`, `ClientCreate.tsx` created and spent). The **tails differ on
+  purpose**: the created state and the subtitle append "under Endpoints" because neither
+  carries a link, while the spent state stops at "Access tab." because its own sentence ends
+  in a `Link` to the endpoints list — repeating the parent in prose beside a link to it is
+  noise. So do not read this bullet as "these sentences are byte-identical". Read it as: the
+  stem is fixed so `grep "Access tab"` finds every one of them, and each tail is answerable
+  for itself.
+- **A link is not automatically the better answer** (§3.6's neighbour). `ClientCreate`'s
+  created state refuses one because leaving destroys a secret shown once;
+  `ServiceAccountCreate` refuses one because it is a form with unsaved input and no draft
+  persistence (§3.8), so a link in its subtitle would discard what was typed. Prose naming a
+  reachable place is the floor; a link is an upgrade only where leaving costs nothing.
+- **Where the copy binds two verbs, check both.** `TryIt`'s empty-account prompt read "Create
+  one, then grant it invoke, in [Access]" and only the second half was true of Access —
+  `AccessSection` has no create affordance, and in that exact state its own table renders the
+  same "no service accounts yet" sentence, so the one link on screen led to the problem
+  restated. Half a true sentence is a false one.
+
+**The check is §5.1's, applied to copy: grep the class the claim is about, and reconcile every
+hit.** Run from `frontend/` for this class:
+
+```bash
+grep -rn --include='*.tsx' -iE "Access tab|Access section|Clients list|Clients page|Endpoints list|Endpoints page|actions menu|row menu|in Access|in Clients|under Endpoints" src/routes/explore/dataapi
+```
+
+**63** hits on the current tree, of which **7** are shipped user-visible copy —
+`ClientCreate.tsx:225` (created state), `:266`, `:276` (spent state),
+`ServiceAccountCreate.tsx:128` (the subtitle), `detail/TryIt.tsx:423` and `:425` (the
+empty-account prompt) and `:659` ("Grant it in Access", a real `Link` to `accessHref`) — and
+each of the seven names a place that exists. The other 56 are **21** code comments and **35**
+test lines, neither of which a reader follows. 7 + 21 + 35 = 63.
+
+**That total was 60 when this section was written, three commits ago, and the seven did not
+change** — the drift is entirely comments and test lines, added by the very review that
+corrected this section. Recorded rather than quietly overwritten, because it is the shape of
+the staleness §5.1 warns about and because it shows what the count is FOR: the number that
+must be re-derived and defended is **7**, the shipped sentences a reader can follow. The other
+two numbers only have to add up. A second sweep,
+`grep -rn --include='*.tsx' -i grant src/routes/explore/dataapi` with the identifiers filtered
+out, is what surfaced the `TryIt` instance; this section's terms alone would not have caught
+it, which is the argument for running more than one.
+
+**And this grep is not a complete census of shipped copy that names a place — do not use it as
+one.** Two true sentences fall outside its terms: `ClientCreate.tsx:279` ("pick the endpoint
+from Endpoints", the spent state's link) and `detail/TryIt.tsx:624` ("appears in Activity's
+call list under \"Include trial runs\"", whose control is the checkbox beside `<h2>Calls</h2>`
+in `ActivityCallList.tsx`, deliberately not gated on `hasCalls` so it is present in exactly
+the state that sentence renders in). Both were checked by hand and both hold. The terms above
+are a **starting sweep tuned to the two defects this task found**, and a claim that copy is
+clean rests on the hand pass, not on the grep returning what you expected.
+
+**The two instances were one screen apart and neither review caught the other**, because the
+false claim was copied before anyone checked it: `ServiceAccountCreate`'s own doc comment
+placed both affordances "on the Clients row", and the subtitle was written from the comment.
+Where a comment and the tree disagree, the tree is the fact — the same order §5.1 states for
+this document.
+
+
 ---
 
 ## 4. `Setting | Details | Value` tables, and when a card is still right

@@ -22,9 +22,40 @@ import { useCreateServiceAccount } from "@/api/dataApi";
  * It collects exactly what the dialog it replaces collected — name, and an
  * optional description — because that is what a row cannot exist without. The
  * page has room for more; more is not owed. Clients, grants and expiry are all
- * things an account acquires AFTER it exists, each with its own affordance on
- * the Clients row (the actions menu issues clients; Access grants endpoints),
- * and hoisting any of them here would rebuild those flows in a worse place.
+ * things an account acquires AFTER it exists, each with its own affordance
+ * ELSEWHERE, and hoisting any of them here would rebuild those flows in a
+ * worse place.
+ *
+ * Two affordances, and they are on two different screens — the sentence that
+ * put both "on the Clients row" is what the subtitle below was copied from,
+ * and it is why the subtitle shipped false:
+ *
+ * - **Issue a client** — the Clients page, in the account's group-header
+ *   actions menu (`ServiceAccountActionsMenu`).
+ * - **Grant invoke** — an ENDPOINT's Access tab
+ *   (`/data-api/endpoints/:id/access`, `detail/AccessSection.tsx`, the only
+ *   caller of `useDataApiGrantEndpointInvoke`).
+ *
+ * **A grant is a fact about a (SERVICE ACCOUNT, endpoint) pair — not about a
+ * client.** The mutation body is `{ service_account_id }` (`AccessSection.tsx`
+ * `onGrant`, pinned at `__tests__/AccessSection.test.tsx:346`), `/grants`
+ * keys on the account, and `ClientCreate` says the same thing to the reader:
+ * "invoke is granted per endpoint, to <account>". An earlier revision of this
+ * comment said "(client, endpoint)", and getting that pair wrong does not just
+ * misdescribe the model — it INVERTS the conclusion below it. If grants were
+ * about clients, the Clients page would be their natural home and the argument
+ * for keeping them off it would collapse.
+ *
+ * The reason a grant cannot live here is not that this surface holds the wrong
+ * object; it holds exactly the right one. It is that this surface holds no
+ * ENDPOINT, and the other half of the pair is not optional. A control here
+ * would have to make the reader pick an endpoint first — and then answer, per
+ * pair, whether that account can already invoke, which `/grants` cannot tell
+ * it: `list_endpoint_grants` filters `scope_type = 'object'`
+ * (`crates/egret-dataapi/src/routes.rs`), so a principal reaching invoke
+ * through the Cedar workspace→object cascade is invisible to it. That is why
+ * `AccessSection` probes `can_invoke` per pair and renders a four-valued
+ * `InvokeStatus` rather than a checkbox.
  */
 export default function ServiceAccountCreate() {
   const ws = useParams().workspace!;
@@ -81,7 +112,20 @@ export default function ServiceAccountCreate() {
   return (
     <ListPageShell
       title="New service account"
-      description="A machine identity for the Data API. Once it exists, issue it OAuth2 clients and grant it endpoints from the Clients list."
+      /* Every clause of this names a place, and each place has to exist.
+         "grant it endpoints from the Clients list" did not: the Clients list
+         has no grant affordance on either of its menus, and a reader who
+         followed it went hunting for a control that is not there. Invoke is
+         granted per ENDPOINT, on that endpoint's Access tab — the same words
+         `ClientCreate` uses one screen downstream, deliberately, so the one
+         fact has one phrasing and a future drift is greppable.
+
+         Prose, no link, and that is the same asymmetry `ClientCreate` records:
+         a link here is a third navigation off a form with unsaved input and no
+         draft persistence (§3.8), so it would silently discard what the author
+         typed. `Endpoints` is a real sidebar item, so naming it is a
+         destination a reader can reach. */
+      description="A machine identity for the Data API. Once it exists, issue it OAuth2 clients from the Clients list — then grant it invoke per endpoint, on that endpoint's Access tab under Endpoints."
       back={
         /* Top-left, above the title, the same slot `EndpointCreate` moved to
            and the same shape every detail screen uses. It was still in
