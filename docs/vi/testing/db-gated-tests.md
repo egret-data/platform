@@ -1,0 +1,58 @@
+# Test cần DB: bỏ qua không còn là "đạt"
+
+Bản tham chiếu. Bản chuẩn (canonical): `docs/en/testing/db-gated-tests.md`.
+
+Hầu hết integration suite trong workspace này cần Postgres. Đến 2026-08-30, tất cả đều
+xử lý việc thiếu Postgres theo cùng một cách: `egret_test_db::url()` trả `None`, macro
+`skip_without_db!` biến nó thành `return` sớm, và libtest in ra `ok`.
+
+Một suite **không assert gì** trông **y hệt** một suite đã chạy thật — chỉ khác thời
+lượng. Đo trên `cargo test -p egret-dataapi`, cùng máy, cùng commit:
+
+| lần chạy | binary | báo cáo | thời gian |
+| --- | --- | --- | --- |
+| có `DATABASE_URL` | 23 | `373 passed; 0 failed` | 282.69 s |
+| không `DATABASE_URL` | 23 | `373 passed; 0 failed` | 11.31 s |
+
+Đầu ra giống hệt nhau. 315 trong 373 test đó không chạy một assertion nào ở lần thứ hai
+(chỉ 9 test của `serving_auth.rs` và 49 của `template_render.rs` là không cần DB theo
+thiết kế). Một cuộc audit Data API đã phải ghi chú gần như mọi phát hiện bằng câu "suite
+báo `ok` nhưng có thể chưa assert gì".
+
+## Quy tắc hiện tại
+
+`egret_test_db::url()` **panic** khi không lấy được test database. Vẫn bỏ qua được, nhưng
+phải yêu cầu rõ ràng:
+
+```bash
+EGRET_ALLOW_DB_SKIP=1 cargo test --workspace
+```
+
+Việc bỏ qua bây giờ nằm trong chính dòng lệnh tạo ra màu xanh, thay vì chỉ suy ra được từ
+đồng hồ. Cùng một panic đó cũng bao trùm trường hợp `DATABASE_URL` có nhưng **không kết
+nối được** — trường hợp này trước đây cũng im lặng bỏ qua, và nó chính là hình dạng của
+một lần chạy CI khi service database không khởi động được.
+
+## Chạy kèm database (giống CI)
+
+```bash
+just up                                                          # Postgres ở :5432
+export DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test
+cargo test --workspace
+```
+
+> **Không bao giờ trỏ `DATABASE_URL` vào database dev `egret`.** `#[sqlx::test]` đọc biến
+> này qua dotenvy **vô điều kiện**, nên một biến *không export* không làm test skip — nó
+> làm test đọc `.env`, vốn trỏ vào database dev, và tạo schema `_sqlx_test` ngay bên trong.
+
+## CI
+
+`.github/workflows/ci.yml` đã chạy service `postgres:16` và đặt `DATABASE_URL` ở mức job,
+nên **thay đổi này không làm CI khác đi**. Nó chỉ đổi hành vi trên máy không có database.
+
+## Test cần ENGINE là trục riêng
+
+Test cần một query engine sống vẫn tự bỏ qua, vì CI không có engine:
+`EGRET_TEST_STARROCKS_URL`, `EGRET_TEST_TRINO_URL`, `EGRET_TEST_S3_ENDPOINT`,
+`EGRET_TEST_RANGER_E2E`. Xem `just test-dataapi-starrocks` cho đường Data API duy nhất
+chạy trên engine thật thay vì `QueryExecPort` giả.
