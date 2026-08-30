@@ -328,19 +328,24 @@ async fn live() -> Option<Live> {
 impl Live {
     /// Publish `sql` at `path` through the REAL publish route, so the snapshot under test
     /// is the one publish froze — including the output columns StarRocks reported.
-    async fn publish(&self, path: &str, sql: &str) -> Uuid {
+    ///
+    /// `params` moves with `sql` because publish refuses a declared parameter no
+    /// placeholder references: a fixture that split them would fail at publish rather than
+    /// at the assertion under test.
+    async fn publish(&self, path: &str, sql: &str, params: serde_json::Value) -> Uuid {
         let ep: Uuid = sqlx::query_scalar(
             "INSERT INTO dataapi.endpoints \
                (workspace_id, name, path, method, database_id, statements, params, cache, rate_limit, created_by) \
              VALUES ($1, $2, $3, 'GET', $4, \
                      jsonb_build_array(jsonb_build_object('name', 'main', 'sql', $5::text)), \
-                     '[]'::jsonb, $6, '{}'::jsonb, $7) RETURNING id",
+                     $6, $7, '{}'::jsonb, $8) RETURNING id",
         )
         .bind(self.ws_id)
         .bind(format!("ep-{}", Uuid::new_v4().simple()))
         .bind(path)
         .bind(self.database_id)
         .bind(sql)
+        .bind(&params)
         .bind(serde_json::json!({ "enabled": false }))
         .bind(self.admin)
         .fetch_one(&self.db.pool)
@@ -493,6 +498,7 @@ async fn a_published_endpoint_returns_rows_a_real_starrocks_computed() {
             "SELECT region, sum(units) AS units FROM {SEED_DB}.{SEED_TABLE} \
              GROUP BY region ORDER BY region"
         ),
+        serde_json::json!([]),
     )
     .await;
 
@@ -528,4 +534,74 @@ async fn a_published_endpoint_returns_rows_a_real_starrocks_computed() {
              it: {body}"
         );
     }
+}
+
+/// A DECLARED PARAMETER, bound by a real StarRocks.
+///
+/// The higher-risk half of the same path, and the one no fake can speak to. A bound value
+/// travels: caller query string -> `coerce` -> `Param` -> the connector's placeholder
+/// substitution -> StarRocks' own parser. `FakePort` sees the `Param` and stops there — it
+/// folds the binds into a hash and returns that, which proves the serving path PASSED
+/// something but says nothing about whether the engine accepted it, substituted it in the
+/// right position, or compared it against the right column.
+///
+/// Asserted on the FILTER's effect rather than on a status code: `?region=EU` must come
+/// back with EU's `42` and, critically, WITHOUT the `US` row that
+/// `a_published_endpoint_returns_rows_a_real_starrocks_computed` proves is sitting in the
+/// same table. A bind that was dropped, ignored, or substituted as a literal `{{region}}`
+/// produces either both rows or an engine error — never this.
+///
+/// This is also the only automated coverage in the repo of parameter binding on StarRocks
+/// specifically, where `\` is an escape character (unlike Trino) — the asymmetry behind the
+/// backslash injection this repo has already had to patch at three call sites.
+#[tokio::test]
+async fn a_declared_parameter_is_bound_and_filters_on_a_real_starrocks() {
+    let Some(f) = live().await else {
+        eprintln!(
+            "SKIPPED, asserted nothing — EGRET_TEST_STARROCKS_URL unset. \
+             See this file's header, or run `just test-dataapi-starrocks`."
+        );
+        return;
+    };
+
+    f.publish(
+        "/by-region",
+        &format!(
+            "SELECT region, sum(units) AS units FROM {SEED_DB}.{SEED_TABLE} \
+             WHERE region = {{{{region}}}} GROUP BY region ORDER BY region"
+        ),
+        serde_json::json!([
+            { "name": "region", "type": "string", "location": "query", "required": true }
+        ]),
+    )
+    .await;
+
+    let (status, body) = f.call("by-region?region=EU").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "parameterised serve on live StarRocks: {body}"
+    );
+
+    let rows = body["data"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no data array in {body}"));
+    assert_eq!(
+        rows.len(),
+        1,
+        "the bind must FILTER — `US` is in the same table, so two rows means the value \
+         never reached the WHERE clause: {body}"
+    );
+    assert_eq!(rows[0]["region"], serde_json::json!("EU"), "{body}");
+    assert_eq!(
+        rows[0]["units"].as_i64(),
+        Some(42),
+        "EU's two rows summed by StarRocks: {body}"
+    );
+
+    // The frozen contract carries StarRocks' OWN types, not a fake's `integer` for
+    // everything — the other half of what publishing against a live engine buys.
+    let columns = &body["meta"]["columns"];
+    assert_eq!(columns[0]["ty"], serde_json::json!("varchar"), "{body}");
+    assert_eq!(columns[1]["ty"], serde_json::json!("bigint"), "{body}");
 }
