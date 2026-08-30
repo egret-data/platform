@@ -1,4 +1,5 @@
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useRef, useState } from "react";
+import { AlertTriangle, OctagonAlert } from "lucide-react";
 import { useParams } from "react-router-dom";
 
 import { useDataApiActivitySummary } from "@/api/generated/data-api/data-api";
@@ -14,7 +15,8 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import ActivityCallList from "./ActivityCallList";
+import { cn } from "@/lib/utils";
+import ActivityCallList, { type ActivityCallListHandle } from "./ActivityCallList";
 import { Caveat } from "./detail/Caveat";
 
 const RANGES: ActivityRange[] = ["1h", "24h", "7d", "30d"];
@@ -47,6 +49,15 @@ const RANGE_DAYS: Record<ActivityRange, number> = {
 export default function Activity() {
   const ws = useParams().workspace!;
   const [range, setRange] = useState<ActivityRange>("24h");
+
+  // A one-way COMMAND to the call list, not a filter lifted up here. The four
+  // filters stay `useState` inside `ActivityCallList` on purpose — that is what
+  // makes them survive a range switch — and "show me this endpoint's calls" is
+  // an event, not a second copy of one of them. Lifting `endpointId` would put
+  // one of the four somewhere else than its three siblings and invite the next
+  // reader to "finish the job" by lifting the rest, which is the shipped bug
+  // this list was hoisted out of `ListStates` to fix.
+  const callList = useRef<ActivityCallListHandle>(null);
 
   const summaryQuery = useDataApiActivitySummary(ws, { range }, { query: { retry: false } });
   const summary = summaryQuery.data?.status === 200 ? summaryQuery.data.data : undefined;
@@ -130,7 +141,12 @@ export default function Activity() {
                   has no empty state to own. `hasCalls` is also true when the
                   grand total is positive and this array is somehow not, and a
                   header row over nothing is not a better answer than no table. */}
-              {summary.endpoints.length > 0 && <EndpointTable rows={summary.endpoints} />}
+              {summary.endpoints.length > 0 && (
+                <EndpointTable
+                  rows={summary.endpoints}
+                  onShowCalls={(id) => callList.current?.showCallsFor(id)}
+                />
+              )}
             </>
           )}
         </ListStates>
@@ -142,7 +158,7 @@ export default function Activity() {
             a request id the operator pasted, gone on the way to a wider window.
             Out here it also fetches in parallel with the summary instead of
             queueing behind it. */}
-        <ActivityCallList ws={ws} range={range} rangeIsEmpty={rangeIsEmpty} />
+        <ActivityCallList ref={callList} ws={ws} range={range} rangeIsEmpty={rangeIsEmpty} />
       </div>
     </ListPageShell>
   );
@@ -207,6 +223,211 @@ function formatRate(numerator: number, denominator: number): string {
   return `${((numerator / denominator) * 100).toFixed(1)}%`;
 }
 
+/**
+ * The share of calls that returned `>= 400` at which an endpoint is called
+ * failing rather than merely noisy.
+ *
+ * Where the number comes from, since the data alone cannot supply it. The
+ * seeded workspace's endpoints sit at 0.0% and at 18.8%/20.0% with nothing
+ * between, so the distribution fixes only that the line lies somewhere in that
+ * gap — any cut inside it separates the same two groups, which means picking
+ * the cut from THIS data would be fitting a threshold to one week of one
+ * workspace. It is taken from the error-budget convention instead: a 99%
+ * availability target spends a whole month's budget in about seven hours at
+ * 5%, which is why 5% is the usual "this is an incident" line. It also sits far
+ * enough above routine 4xx traffic (see `errorRateTier`) that a healthy API
+ * does not trip it.
+ *
+ * No minimum-sample rule guards it: 1 error out of 20 calls is 5% and is
+ * marked. That is deliberate — the `Calls` column sits immediately to the left
+ * of the rate, so the denominator is on screen to be checked, which is the
+ * same reason the backend sends raw counts instead of rates at all.
+ */
+export const ERROR_RATE_ALERT = 0.05;
+
+export type ErrorRateTier = "unmeasured" | "none" | "elevated" | "failing";
+
+/**
+ * Three states, and the middle one earns its place by being FEW rather than
+ * MANY. Nothing more than that.
+ *
+ * An earlier draft of this comment claimed the third tier was forced by
+ * `errors` counting 4xx as well as 5xx
+ * (`count(*) FILTER (WHERE al.status_code >= 400)`,
+ * `crates/egret-dataapi/src/activity.rs:207`). The premise is true and the
+ * conclusion does not follow, so it is recorded here as a wrong turn rather
+ * than deleted: **a threshold on a rate cannot separate 4xx from 5xx.** One 500
+ * in 1000 calls is 0.1% and lands in `elevated`; six hundred 404s from one
+ * misconfigured consumer is 60% and lands in `failing`. Whatever this ladder
+ * separates, it is not client mistakes from server faults.
+ *
+ * What it does separate is a trickle from a flood, which is worth three states
+ * because the operator's next action differs across all three: `none` is the
+ * endpoint to skip, `elevated` is the one to keep an eye on, `failing` is the
+ * one to open now. Two states would force the trickle to be either invisible
+ * or alarming, and both are wrong.
+ *
+ * Separating 4xx from 5xx is a real and different want, and it needs data this
+ * page does not have: `ActivityRow` carries one `errors` count and no 5xx
+ * breakdown. Doing it properly means a second `count(*) FILTER (WHERE
+ * al.status_code >= 500)` in that query, a field on the DTO, and a decision
+ * about which of the two the rate column reports — not a different threshold
+ * here.
+ */
+export function errorRateTier(errors: number, calls: number): ErrorRateTier {
+  if (calls === 0) return "unmeasured";
+  if (errors === 0) return "none";
+  return errors / calls >= ERROR_RATE_ALERT ? "failing" : "elevated";
+}
+
+/**
+ * The ink each tier is painted in. Exported because
+ * `tests/e2e/activity-error-rate-severity.spec.ts` measures what these actually
+ * PAINT, in a real browser, over the surface they sit on — jsdom resolves no
+ * `oklch()` and would return the same answer with the tokens swapped
+ * (`docs/en/ui-conventions.md` §10).
+ *
+ * `--accent` is not among them: it is reserved for hover/focus, and a reading
+ * permanently painted in the hover colour reads as permanently hovered.
+ *
+ * `elevated` is NOT amber ink, and that is a measurement rather than a
+ * preference. `--highlight` is a FILL token — `oklch(0.72 …)` in light,
+ * `oklch(0.78 …)` in dark, and its own comment in `index.css` describes it as a
+ * badge/marker colour with `--highlight-foreground` as the ink to put ON it.
+ * Used as ink on the card it measures 2.56:1 in Chrome, against WCAG 1.4.3's
+ * 4.5:1 — the browser spec above rejected that first draft, which every jsdom
+ * class assertion had passed. There is no amber INK in this token set (the
+ * `-foreground` half is near-black and fails in dark), so the middle tier keeps
+ * the amber as a wash and a border and puts the NUMBER in body ink. Its
+ * severity is carried by form, which is the channel that does not depend on a
+ * hue being legible.
+ */
+export const ERROR_RATE_INK: Record<ErrorRateTier, string> = {
+  unmeasured: "text-muted-foreground",
+  none: "text-success",
+  elevated: "text-foreground",
+  failing: "text-destructive",
+};
+
+/**
+ * The FORM half, which is the half that survives greyscale, a projector and
+ * every kind of colour blindness: nothing, a soft outline, a full-strength
+ * outline. Read down the column it is an ordering even with every colour
+ * removed.
+ *
+ * NEITHER marked tier is filled, and that too came back from the browser rather
+ * than from taste. `bg-destructive/15 text-destructive` — the tinted-chip idiom
+ * this repo uses in `Clients.tsx`, in `ActivityCallList`'s own status column and
+ * in a dozen other places — measures 3.68:1 in light mode: the wash lifts the
+ * background out from under an ink that clears 4.81:1 on the bare card. The
+ * solid alternative (`bg-destructive text-destructive-foreground`, what
+ * `Button variant="destructive"` ships) inverts the problem and measures 2.83:1
+ * in DARK. Ink on the unwashed card is the only treatment that clears WCAG
+ * 1.4.3 in both themes, so the fill is spent on the border instead, where no
+ * text sits on it. The severity ordering is carried by border strength, by ink,
+ * and by two different icons — see `ERROR_RATE_ICON`.
+ */
+export const ERROR_RATE_PILL: Record<ErrorRateTier, string> = {
+  unmeasured: "",
+  none: "",
+  elevated: "border border-highlight/50",
+  failing: "border border-destructive font-semibold",
+};
+
+/**
+ * Two different icons, not one icon in two colours. This is the only channel
+ * that separates `elevated` from `failing` for a reader who has neither colour
+ * nor the `sr-only` word — a greyscale print, a failing display, a colour-blind
+ * reader glancing at the column. A triangle warns; an octagon is the shape
+ * every road on earth uses for STOP.
+ */
+const ERROR_RATE_ICON: Record<"elevated" | "failing", typeof AlertTriangle> = {
+  elevated: AlertTriangle,
+  failing: OctagonAlert,
+};
+
+/** And the WORD, which is the only half that reaches a screen reader at all.
+ * Rendered `sr-only`: the number is already on screen and repeating "failing"
+ * in ink beside it would cost a column's width on every row. */
+/**
+ * The short form, shown VISIBLY beside the figure in a tile.
+ *
+ * A tile has no pill — a `text-xs` outline inside a `text-2xl` figure is a
+ * badge pretending to be a headline — and `ERROR_RATE_INK.elevated` is
+ * `text-foreground`, the tile's own ink. So an elevated tile rendered like a
+ * cell would have carried exactly ONE channel: a small triangle. Review caught
+ * that; the two tile tests only covered `failing` and `none`, where the ink
+ * does differ, so nothing here would have.
+ *
+ * The word is the second channel, and at tile scale it fits where it would not
+ * in a table column. It replaces the `sr-only` span rather than doubling it: a
+ * screen reader must not read "Elevated" twice.
+ */
+const ERROR_RATE_LABEL: Record<"elevated" | "failing", string> = {
+  elevated: "Elevated",
+  failing: "Failing",
+};
+
+const ERROR_RATE_WORD: Record<ErrorRateTier, string> = {
+  unmeasured: "not measurable",
+  none: "no errors",
+  elevated: "elevated error rate",
+  failing: "failing",
+};
+
+/**
+ * An error rate, with its severity in three channels at once — colour, form,
+ * and a word.
+ *
+ * `0.0%` is deliberately NOT a dash. `—` on this table already means "not
+ * configured / nothing to divide" (the `Cache-hit rate` column), so an
+ * empty-looking cell is a claim about the absence of a measurement. A zero
+ * error rate is a measurement, and the best one there is; it gets the success
+ * ink so that it reads as good rather than as blank.
+ */
+function ErrorRate({
+  errors,
+  calls,
+  size,
+}: {
+  errors: number;
+  calls: number;
+  /** `tile` is a 2xl figure — a `text-xs` pill inside it would be a badge
+   * pretending to be a headline, so the tile skips the pill and spends the
+   * second channel on a visible word instead (see `ERROR_RATE_LABEL`). */
+  size: "cell" | "tile";
+}) {
+  const tier = errorRateTier(errors, calls);
+  if (tier === "unmeasured") {
+    return <span className={ERROR_RATE_INK.unmeasured}>{formatRate(errors, calls)}</span>;
+  }
+  const marked = tier === "elevated" || tier === "failing";
+  const Icon = marked ? ERROR_RATE_ICON[tier] : null;
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1 tabular-nums",
+        ERROR_RATE_INK[tier],
+        size === "cell" && marked && "rounded px-1.5 py-0.5 text-xs font-medium",
+        size === "cell" && ERROR_RATE_PILL[tier],
+      )}
+    >
+      {Icon && (
+        <Icon className={size === "tile" ? "h-5 w-5 shrink-0" : "h-3 w-3 shrink-0"} aria-hidden />
+      )}
+      <span>{formatRate(errors, calls)}</span>
+      {size === "tile" && marked ? (
+        <span className="text-xs font-medium">{ERROR_RATE_LABEL[tier]}</span>
+      ) : (
+        /* A comma, not an em dash: `—` is this table's word for "no
+           measurement" and the sr-only text must not put one inside a cell
+           whose whole point is that it HAS one. */
+        <span className="sr-only">, {ERROR_RATE_WORD[tier]}</span>
+      )}
+    </span>
+  );
+}
+
 /** `p50_ms`/`p95_ms` are `null` when there was no successful-call population
  * to compute a percentile over — the absence of a measurement, not a zero
  * one. */
@@ -225,7 +446,11 @@ function Tiles({ total }: { total: ActivityRow }) {
   return (
     <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
       <Tile testId="tile-calls" label="Calls" value={total.calls.toLocaleString()} />
-      <Tile testId="tile-error-rate" label="Error rate" value={formatRate(total.errors, total.calls)} />
+      <Tile
+        testId="tile-error-rate"
+        label="Error rate"
+        value={<ErrorRate errors={total.errors} calls={total.calls} size="tile" />}
+      />
       <Tile
         testId="tile-latency"
         label="Latency"
@@ -266,7 +491,17 @@ function Tile({
  * aggregate row can only be labelled, not itself identified by a single
  * request — it may summarize many different paths.
  */
-function EndpointTable({ rows }: { rows: ActivityRow[] }) {
+function EndpointTable({
+  rows,
+  onShowCalls,
+}: {
+  rows: ActivityRow[];
+  /** Narrow the call list below to one endpoint's calls. The reason this table
+   * takes a callback at all: naming the failing endpoint and then leaving the
+   * reader to find that same name by hand in a dropdown further down the page
+   * is the monitoring loop broken in the middle. */
+  onShowCalls: (endpointId: string) => void;
+}) {
   const matched = rows.filter((r) => r.endpoint_id != null);
   const unmatched = rows.find((r) => r.endpoint_id == null);
 
@@ -286,8 +521,17 @@ function EndpointTable({ rows }: { rows: ActivityRow[] }) {
           </TableHeader>
           <TableBody>
             {matched.map((r) => (
-              <EndpointRow key={r.endpoint_id} row={r} name={r.endpoint_name ?? r.endpoint_id!} />
+              <EndpointRow
+                key={r.endpoint_id}
+                row={r}
+                name={r.endpoint_name ?? r.endpoint_id!}
+                onShowCalls={() => onShowCalls(r.endpoint_id!)}
+              />
             ))}
+            {/* No `onShowCalls`: this bucket is `endpoint_id: null`, and there
+                is no id for the filter below to take. A control that looks like
+                the ones above it but cannot do what they do is worse than the
+                plain text it replaced. */}
             {unmatched && <EndpointRow key="unmatched" row={unmatched} name="No matching endpoint" muted />}
           </TableBody>
         </Table>
@@ -301,12 +545,53 @@ function EndpointTable({ rows }: { rows: ActivityRow[] }) {
   );
 }
 
-function EndpointRow({ row, name, muted }: { row: ActivityRow; name: string; muted?: boolean }) {
+function EndpointRow({
+  row,
+  name,
+  muted,
+  onShowCalls,
+}: {
+  row: ActivityRow;
+  name: string;
+  muted?: boolean;
+  onShowCalls?: () => void;
+}) {
   return (
     <TableRow>
-      <TableCell className={muted ? "text-muted-foreground" : "font-medium"}>{name}</TableCell>
+      <TableCell className={muted ? "text-muted-foreground" : "font-medium"}>
+        {onShowCalls ? (
+          // A real `<button>`, which is `EngineMonitor.tsx`'s idiom for exactly
+          // this job (its query-id cell), and not a `<td>` with `role="button"`
+          // + `tabIndex` + a hand-rolled Enter/Space handler. The pattern this
+          // repo has twice had to repair — `ChartTable`'s and `PivotTable`'s
+          // sort headers — was a `<th onClick>` that a keyboard could not
+          // reach; the fix both times was a real button, which gets focus,
+          // Enter AND Space from the browser rather than from a handler that
+          // can implement one key and forget the other.
+          //
+          // The whole row is deliberately NOT the target: four of its five
+          // cells are numbers a reader may want to select and copy, and a
+          // row-wide click target eats that.
+          <button
+            type="button"
+            className="text-left hover:underline focus-visible:underline focus-visible:outline-none"
+            // Names the endpoint, not just "Show calls": a table of eight rows
+            // otherwise offers eight controls with one accessible name. The
+            // visible text is contained in it, so the label still matches what
+            // a speech-input user would say (WCAG 2.5.3).
+            aria-label={`Show calls for ${name}`}
+            onClick={onShowCalls}
+          >
+            {name}
+          </button>
+        ) : (
+          name
+        )}
+      </TableCell>
       <TableCell className="text-right tabular-nums">{row.calls}</TableCell>
-      <TableCell className="text-right tabular-nums">{formatRate(row.errors, row.calls)}</TableCell>
+      <TableCell className="text-right tabular-nums">
+        <ErrorRate errors={row.errors} calls={row.calls} size="cell" />
+      </TableCell>
       <TableCell className="text-right tabular-nums">{formatLatency(row.p50_ms, row.p95_ms)}</TableCell>
       <TableCell className="text-right tabular-nums">{formatRate(row.cache_hits, row.cacheable_calls)}</TableCell>
     </TableRow>

@@ -353,6 +353,110 @@ describe("ClientCreate", () => {
     expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
   });
 
+  /**
+   * The gap a live walk of the whole journey found: the page hands over a
+   * credential that cannot call anything, and never says so. A client is issued
+   * to a service account; invoke is granted PER ENDPOINT, on that endpoint's
+   * Access tab. Between "Copy" and "Done" there was nothing on screen saying
+   * the credential was unfinished.
+   *
+   * The second half of this test is the constraint the file's own doc comment
+   * records: the created state has exactly ONE navigation, and it is `Done`. A
+   * link added here would be a second exit competing with copying a secret that
+   * cannot be shown again — so the guidance is prose, and the assertion is by
+   * IDENTITY (this one link is the Done link) rather than a count over a
+   * population that never empties.
+   */
+  it("says on the created state that the client is not usable until an endpoint grants it, and adds no second exit", async () => {
+    serverIssues({
+      client_id: "client_delta_4",
+      client_secret: "cs_live_delta_9e3a",
+      token_endpoint: "https://delta.egret.local/oauth/token",
+    });
+    renderCreate("ws1", "sa-2");
+    await fillAndCreate("etl-delta");
+    await screen.findByTestId("client-secret");
+
+    const note = screen.getByText(/cannot call anything yet/i).closest("p")!;
+    // Where the grant lives, in the reader's words: per endpoint, on the Access
+    // tab. Naming only one of the two would send a reader to the right screen
+    // with no idea which control, or to the right tab of the wrong object.
+    expect(note).toHaveTextContent(/per endpoint/i);
+    expect(note).toHaveTextContent(/access tab/i);
+    // A grant is given to the ACCOUNT, so the note names the account from the
+    // route — not the first row, and never the raw id.
+    expect(note).toHaveTextContent("nightly-exporter");
+    expect(note).not.toHaveTextContent("reporting-bot");
+    expect(note).not.toHaveTextContent("sa-2");
+
+    // The constraint. One link, and it is Done — asserted through the real
+    // accessible-name computation, and by href, not by counting.
+    const links = screen.getAllByRole("link");
+    expect(links).toHaveLength(1);
+    expect(links[0]).toHaveAccessibleName(/done/i);
+    expect(links[0]).toHaveAttribute("href", "/explore/ws1/data-api/clients");
+
+    // And still exactly one copy affordance, still the secret's: the note adds
+    // prose, not a fourth value with a control beside it.
+    expect(screen.getAllByRole("button", { name: /^copy$/i })).toHaveLength(1);
+  });
+
+  /**
+   * The guidance is about a credential that EXISTS. Rendered unconditionally it
+   * would tell an author filling in the form that a client they have not
+   * created yet cannot call anything — and every assertion above would still
+   * pass. This is the test that makes "on the created state" falsifiable.
+   */
+  it("does not claim anything about grants before a client has been issued", () => {
+    renderCreate("ws1", "sa-2");
+    expect(screen.getByLabelText("Name")).toBeInTheDocument();
+    expect(screen.queryByText(/cannot call anything yet/i)).not.toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/access tab/i);
+  });
+
+  /**
+   * A reader who reloaded still holds an ungranted client, so the spent state
+   * owes the same fact — and here the link is right, where the created state's
+   * would have been wrong: there is no secret left to destroy by leaving, and
+   * this state already carries two navigations of its own.
+   *
+   * It goes to the endpoints LIST, not to an endpoint: a grant is per endpoint
+   * and this page cannot know which one, so the honest destination is the place
+   * the reader picks from. Mounted on a workspace no other test here uses, so a
+   * hardcoded `/explore/ws1/...` cannot satisfy it.
+   */
+  it("repeats the grant guidance on the spent state, with a link to the endpoints list", async () => {
+    serverIssues({
+      client_id: "client_epsilon_5",
+      client_secret: "cs_live_epsilon_1c8b",
+      token_endpoint: "https://epsilon.egret.local/oauth/token",
+    });
+    const first = renderCreate("other-ws", "sa-3");
+    await fillAndCreate("etl-epsilon");
+    await screen.findByTestId("client-secret");
+    first.unmount();
+
+    renderCreate("other-ws", "sa-3");
+    await screen.findByRole("heading", { level: 1, name: /no longer available/i });
+
+    const note = screen.getByText(/every call it makes is refused/i).closest("p")!;
+    expect(note).toHaveTextContent(/per endpoint/i);
+    expect(note).toHaveTextContent(/access tab/i);
+    expect(note).toHaveTextContent("audit-sync");
+    expect(note).not.toHaveTextContent("nightly-exporter");
+
+    const toEndpoints = screen.getByRole("link", { name: /endpoints/i });
+    expect(toEndpoints).toHaveAttribute("href", "/explore/other-ws/data-api/endpoints");
+    // The way out this state already had is untouched, and the recovery still
+    // mints nothing on its own.
+    expect(screen.getByRole("link", { name: /clients/i })).toHaveAttribute(
+      "href",
+      "/explore/other-ws/data-api/clients",
+    );
+    expect(screen.getByRole("button", { name: /issue another client/i })).toBeInTheDocument();
+    expect(issueMutateAsync).toHaveBeenCalledTimes(1);
+  });
+
   it("puts the way back above the title, not against the primary action", () => {
     // The same assertion `EndpointCreate.test.tsx` carries. Seen in a browser
     // at 1440px, `← Clients` sat directly beside the "Create client" primary
