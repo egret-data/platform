@@ -38,6 +38,21 @@ check:
 test-no-db:
     EGRET_ALLOW_DB_SKIP=1 cargo test --workspace
 
+# The one Data API test executed by a REAL engine, rather than a fake `QueryExecPort`.
+#
+# Every other suite in `egret-dataapi` drives `serving_common::FakePort`, so nothing
+# engine-side had ever been RUN by a test there and every claim about StarRocks behaviour
+# rested on reading the connector. This publishes an endpoint and serves it end to end
+# through `egret_query::EngineState`, asserting rows StarRocks computed.
+#
+# Opt-in behind `EGRET_TEST_STARROCKS_URL`, the same convention `egret-query`'s connector
+# suites use — CI has no engine, so this cannot be part of `just check`.
+# Prereq: `just up` (StarRocks takes ~30-60s to become healthy).
+test-dataapi-starrocks:
+    ./deploy/seed-starrocks-dataapi.sh
+    DATABASE_URL={{ test_database_url }} EGRET_TEST_STARROCKS_URL=mysql://localhost:9030 \
+      cargo test -p egret-dataapi --test serving_starrocks_live -- --nocapture
+
 # Apply migrations against the running Postgres
 migrate:
     cargo run -p egret-bin -- migrate

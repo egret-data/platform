@@ -90,3 +90,24 @@ tracing-subscriber.workspace = true
 # `CedarPdp::build` needs an `EventBus` — the route tests run against the REAL
 # PDP, not a mocked decision, so a mis-scoped permission cannot pass.
 egret-events.workspace = true
+# `serving_starrocks_live.rs` ONLY. Every other suite in this crate drives a fake
+# `QueryExecPort`, so nothing engine-side had ever been executed by a test and every
+# claim about StarRocks or Trino behaviour rested on reading rather than running.
+# That file swaps the fake for `egret_query::EngineState`, the real implementation
+# the binary ships.
+#
+# A DEV-dependency, deliberately. The note beside `egret-query-api` above still holds
+# for the library: `egret-dataapi` must never depend on `egret-query`, because the
+# whole point of the port is that the seam can move to another binary. A dev-only
+# edge does not link into the library and cannot be reached from `src/`, so the
+# architectural rule is intact — and there is no cycle, `egret-query` does not depend
+# on this crate.
+egret-query.workspace = true
+# The concrete `EngineState` the port implementation lives on needs these to be
+# constructed at all: an object store (inert here — the Data API path never
+# materialises a result set to S3), a secret store for the connection, and the
+# engine-token minter trait the delegation path resolves through.
+# (`egret-auth` and `egret-workspace` are already normal dependencies above.)
+egret-storage.workspace = true
+egret-secrets.workspace = true
+egret-analytics-api.workspace = true
