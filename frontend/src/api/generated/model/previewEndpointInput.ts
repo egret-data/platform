@@ -61,7 +61,7 @@ export type PreviewEndpointInput = StatementSource & {
   output: OutputSpec;
   /**
      * The database picker's current value. Workspace-scoped by
-     * `connection_per_principal_pair`, which answers `NotFound` for a database
+     * `connection_safety`, which answers `NotFound` for a database
      * belonging to another workspace — this id comes from a request body, so it
      * is exactly the shape that could name someone else's connection.
      */

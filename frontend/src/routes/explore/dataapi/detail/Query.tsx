@@ -16,6 +16,8 @@ import { SqlEditor } from "@/components/sqllab/SqlEditor";
 import MonacoEditor from "@/components/monaco/MonacoEditor";
 import { useIsDark } from "@/hooks/useIsDark";
 import { useDatabases } from "@/api/databases";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { GOVERNED_BLOCKED_MESSAGE, governedWithoutPerPrincipal } from "../governance";
 import { useEndpointDetail } from "../EndpointDetail";
 import { ParamEditor } from "./ParamEditor";
 import { PreviewBlock, type PreviewHandle } from "./PreviewBlock";
@@ -445,15 +447,40 @@ export default function Query() {
                   <SelectValue placeholder="Choose a database" />
                 </SelectTrigger>
                 <SelectContent>
+                  {/* Governed connections are still offered — see
+                      `EndpointCreate` for why hiding them is the wrong shape —
+                      and the ones that cannot carry a publish are named by the
+                      warning below rather than by an absence. */}
                   {(databases ?? []).map((d) => (
                     <SelectItem key={d.id} value={d.id}>
                       {d.name}
+                      {d.governed ? (
+                        <span className="ml-1.5 text-xs text-muted-foreground">Governed</span>
+                      ) : null}
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
             </ConfigTableRow>
           </ConfigTable>
+
+          {/* The refusal an author would otherwise meet only at Publish, said at
+              the moment the database is chosen.
+
+              Note what it does NOT say: nothing about the PREVIEW, which keeps
+              working. A preview runs as the author under the author's own engine
+              policy and returns rows only to them; it is publishing that hands
+              that reach to a consumer, which is where the server's rule sits
+              (`preview.rs`, `lifecycle::check_governed_connection`). Warning
+              that preview is affected would be false, and the author would learn
+              it was false the first time they pressed Run. */}
+          {governedWithoutPerPrincipal(
+            (databases ?? []).find((d) => d.id === form.database_id),
+          ) ? (
+            <Alert>
+              <AlertDescription>{GOVERNED_BLOCKED_MESSAGE}</AlertDescription>
+            </Alert>
+          ) : null}
 
           <ParamEditor params={form.params} onChange={(params) => setForm((f) => ({ ...f, params }))} />
         </div>

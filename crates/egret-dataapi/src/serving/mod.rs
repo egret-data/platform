@@ -21,6 +21,7 @@ pub mod error;
 /// root calls [`metrics::describe`] once at startup; everything else in it is
 /// crate-private.
 pub mod metrics;
+pub mod governance;
 pub(crate) mod params;
 pub mod ratelimit;
 pub mod router;
@@ -29,6 +30,7 @@ pub use access_log::{scheduled_retention, AccessLogEntry, AccessLogStore, Record
 pub use auth::{verify_serving_token, ServingPrincipal, DATA_API_AUDIENCE};
 pub use cache::{cache_key, shared_cache_allowed, CachedResponse, ResponseCache};
 pub use error::{ServingErrorBody, ServingErrorDetail};
+pub use governance::{governance_allows_serving, LiveConnection};
 pub use ratelimit::{Rate, RateLimitStore, TokenBucket};
 pub use router::{
     serving_openapi, serving_router, MetaContract, ServingMeta, ServingResponse, ServingStatus,
@@ -266,6 +268,35 @@ pub enum ServingError {
     /// the error is wrong.
     #[error("cache scope is stale")]
     CacheScopeStale,
+    /// The endpoint's database is marked `governed` right now, and the
+    /// connection does not run queries as the caller right now.
+    ///
+    /// `execute_as` would run the SQL as the SERVICE ACCOUNT, so the engine's
+    /// row filters and column masks would be evaluated for the machine identity
+    /// and every consumer of this endpoint would read whatever that identity may
+    /// read. [`crate::lifecycle::check_governed_connection`] makes that
+    /// unpublishable; this is what happens when it becomes true AFTER a publish,
+    /// which it can, because both columns are mutable.
+    ///
+    /// **Refused, not warned.** The three options were refuse, serve with a
+    /// recorded warning, or downgrade somehow, and only the first is
+    /// defensible: a warning means governed rows keep flowing under a machine
+    /// identity while a log line accumulates somewhere nobody reads, which is
+    /// precisely the defect this package exists to close, now with a paper trail
+    /// saying it was known. There is nothing to downgrade to — the query has one
+    /// identity and it is not the caller's. 503 rather than 500 for the same
+    /// reason as its three neighbours: nothing failed, the configuration drifted,
+    /// and a human clears it by turning delegation on, moving the endpoint to a
+    /// delegated connection, or clearing `governed`.
+    ///
+    /// Distinct from [`Self::CacheScopeStale`] because the fixes are disjoint.
+    /// `cache_scope_stale` is cleared by RE-PUBLISHING; re-publishing does not
+    /// clear this one — [`crate::lifecycle::check_governed_connection`] would
+    /// refuse the re-publish, telling the operator the same thing again. Sending
+    /// them to do something that cannot work is the one failure a drift message
+    /// must not have.
+    #[error("this endpoint's database is governed and its connection is not per-principal")]
+    GovernanceStale,
     /// A version that declares parameters but was frozen before the
     /// publish-time parameter gate existed, or before its current revision —
     /// `EndpointSnapshot::param_gate < PARAM_GATE`.

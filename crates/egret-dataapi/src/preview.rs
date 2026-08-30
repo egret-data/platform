@@ -367,7 +367,7 @@ pub struct PreviewEndpointInput {
     // rather than a call anything else would notice.
     pub output: OutputSpec,
     /// The database picker's current value. Workspace-scoped by
-    /// `connection_per_principal_pair`, which answers `NotFound` for a database
+    /// `connection_safety`, which answers `NotFound` for a database
     /// belonging to another workspace — this id comes from a request body, so it
     /// is exactly the shape that could name someone else's connection.
     pub database_id: Uuid,
@@ -857,12 +857,13 @@ pub(crate) async fn run(
     body: &PreviewEndpointInput,
 ) -> Result<DataApiPreviewDto, DataApiError> {
     // Workspace containment for a body-supplied id, before anything is rendered
-    // or executed. The pair itself is unused — preview consults no cache — but
-    // this call is the scope check, so it is not replaceable with a cheaper one.
-    let _ = st
-        .endpoints
-        .connection_per_principal_pair(ws, body.database_id)
-        .await?;
+    // or executed. The flags themselves are unused — preview consults no cache,
+    // and `governed` is deliberately NOT enforced here: a preview runs as the
+    // author, under the author's own engine policy, and returns rows only to
+    // them. It is publishing that hands the author's reach to a consumer, which
+    // is where `check_governed_connection` sits. But this call is the scope
+    // check, so it is not replaceable with a cheaper one.
+    let _ = st.endpoints.connection_safety(ws, body.database_id).await?;
 
     // Returns the shape decision — which parameters arrive as lists — made
     // across `sql` AND `siblings`, i.e. the endpoint, exactly as publish makes

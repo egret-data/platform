@@ -25640,7 +25640,7 @@
             }
           },
           "503": {
-            "description": "`schema_drift` / `output_naming_collision` / `cache_scope_stale` / `param_gate_stale` — the published configuration no longer describes the data, or was frozen before the current parameter-safety rules existed. `Retry-After` is a floor, not a forecast: only a re-publish clears these",
+            "description": "`schema_drift` / `output_naming_collision` / `cache_scope_stale` / `governance_stale` / `param_gate_stale` — the published configuration no longer describes the data, was frozen before the current parameter-safety rules existed, or points at a `governed` database through a connection that does not run queries as the caller. `Retry-After` is a floor, not a forecast: a re-publish clears the first four, and `governance_stale` is cleared only by restoring the connection or the database's `governed` flag",
             "content": {
               "application/json": {
                 "schema": {
@@ -25753,7 +25753,7 @@
             }
           },
           "503": {
-            "description": "`schema_drift` / `output_naming_collision` / `cache_scope_stale` / `param_gate_stale` — the published configuration no longer describes the data, or was frozen before the current parameter-safety rules existed. `Retry-After` is a floor, not a forecast: only a re-publish clears these",
+            "description": "`schema_drift` / `output_naming_collision` / `cache_scope_stale` / `governance_stale` / `param_gate_stale` — the published configuration no longer describes the data, was frozen before the current parameter-safety rules existed, or points at a `governed` database through a connection that does not run queries as the caller. `Retry-After` is a floor, not a forecast: a re-publish clears the first four, and `governance_stale` is cleared only by restoring the connection or the database's `governed` flag",
             "content": {
               "application/json": {
                 "schema": {
@@ -29025,6 +29025,10 @@
             "type": "boolean",
             "description": "B3a: run BI queries as the caller's per-user engine JWT (delegation)."
           },
+          "governed": {
+            "type": "boolean",
+            "description": "The data behind this connection is governed at the ENGINE — Ranger row\nfilters and column masks apply to it.\n\nConsumed by `egret-dataapi`, which refuses to publish an endpoint onto a\ngoverned connection unless [`Database::delegated`] or\n`options.impersonate` makes the engine run each query as the CALLER. On a\nshared service credential those filters are evaluated for the machine\nidentity, so every consumer of the endpoint reads what the service\naccount may read.\n\n`#[serde(default)]` for rows and payloads written before the column\nexisted: `false` is what migration 0130 gave every existing row, and it\nis the value that changes nothing. It is NOT the fail-safe direction and\nis not claimed to be — the gate is opt-in per database by design (see the\nmigration's own comment for why the alternative was a migration-time\noutage)."
+          },
           "engine_id": {
             "type": [
               "string",
@@ -29046,7 +29050,8 @@
           "options",
           "has_secret",
           "status",
-          "delegated"
+          "delegated",
+          "governed"
         ],
         "properties": {
           "id": {
@@ -29076,6 +29081,10 @@
           },
           "delegated": {
             "type": "boolean"
+          },
+          "governed": {
+            "type": "boolean",
+            "description": "See [`Database::governed`]. Surfaced on the detail DTO so the Data API\nauthor's database picker can warn BEFORE publish that the connection it\nis pointed at cannot carry a governed endpoint."
           },
           "engine_id": {
             "type": [
@@ -29132,6 +29141,10 @@
           "delegated": {
             "type": "boolean",
             "description": "B3a: run BI queries as the caller's per-user engine JWT (delegation)."
+          },
+          "governed": {
+            "type": "boolean",
+            "description": "The data behind this connection is governed at the engine (Ranger row\nfilters / column masks). Publishing a Data API endpoint onto it requires\n`delegated` or `options.impersonate`; see [`Database::governed`].\n\n`#[serde(default)]` so a client that predates the field keeps working and\nan omitted value means \"not governed\" — the same direction migration 0130\ndefaulted the column to. The cost of that default is stated there: it is\nthe value that changes nothing, not the value that is safest."
           }
         }
       },
@@ -29142,7 +29155,8 @@
           "id",
           "name",
           "engine",
-          "delegated"
+          "delegated",
+          "governed"
         ],
         "properties": {
           "id": {
@@ -29156,6 +29170,10 @@
           },
           "delegated": {
             "type": "boolean"
+          },
+          "governed": {
+            "type": "boolean",
+            "description": "See [`Database::governed`]."
           }
         }
       },
@@ -31555,7 +31573,7 @@
               "database_id": {
                 "type": "string",
                 "format": "uuid",
-                "description": "The database picker's current value. Workspace-scoped by\n`connection_per_principal_pair`, which answers `NotFound` for a database\nbelonging to another workspace — this id comes from a request body, so it\nis exactly the shape that could name someone else's connection."
+                "description": "The database picker's current value. Workspace-scoped by\n`connection_safety`, which answers `NotFound` for a database\nbelonging to another workspace — this id comes from a request body, so it\nis exactly the shape that could name someone else's connection."
               }
             }
           }

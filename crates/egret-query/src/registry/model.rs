@@ -33,6 +33,16 @@ pub struct DatabaseInput {
     /// B3a: run BI queries as the caller's per-user engine JWT (delegation).
     #[serde(default)]
     pub delegated: bool,
+    /// The data behind this connection is governed at the engine (Ranger row
+    /// filters / column masks). Publishing a Data API endpoint onto it requires
+    /// `delegated` or `options.impersonate`; see [`Database::governed`].
+    ///
+    /// `#[serde(default)]` so a client that predates the field keeps working and
+    /// an omitted value means "not governed" — the same direction migration 0130
+    /// defaulted the column to. The cost of that default is stated there: it is
+    /// the value that changes nothing, not the value that is safest.
+    #[serde(default)]
+    pub governed: bool,
 }
 
 /// Body for testing an unsaved connection (no `name`).
@@ -60,6 +70,10 @@ pub struct DatabaseDetailDto {
     pub has_secret: bool,
     pub status: String,
     pub delegated: bool,
+    /// See [`Database::governed`]. Surfaced on the detail DTO so the Data API
+    /// author's database picker can warn BEFORE publish that the connection it
+    /// is pointed at cannot carry a governed endpoint.
+    pub governed: bool,
     /// Set (as a UUID string) when this connection was materialized by an
     /// engine→workspace assignment (read-only, provisioned by egret); `None`
     /// for a self-service connection. The frontend uses it to split the
@@ -79,6 +93,7 @@ impl From<Database> for DatabaseDetailDto {
             has_secret: d.has_secret,
             status: d.status,
             delegated: d.delegated,
+            governed: d.governed,
             engine_id: d.engine_id.map(|u| u.to_string()),
         }
     }
@@ -91,6 +106,8 @@ pub struct DatabaseListDto {
     pub name: String,
     pub engine: Engine,
     pub delegated: bool,
+    /// See [`Database::governed`].
+    pub governed: bool,
 }
 
 // ── B2: ws-member read-only view of assigned engines ──────────────────────────

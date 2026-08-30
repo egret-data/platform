@@ -15,4 +15,6 @@ export interface DatabaseListDto {
   name: string;
   engine: Engine;
   delegated: boolean;
+  /** See [`Database::governed`]. */
+  governed: boolean;
 }

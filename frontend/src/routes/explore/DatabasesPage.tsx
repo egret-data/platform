@@ -157,6 +157,14 @@ export default function DatabasesPage() {
               Per-user
             </Badge>
           ) : null}
+          {conn.governed ? (
+            <Badge
+              variant="outline"
+              title="Row filters and column masks are applied per user at the engine"
+            >
+              Governed
+            </Badge>
+          ) : null}
         </span>
       ),
     },
@@ -397,6 +405,14 @@ function ProvisionedEngineCard({ ws, conn }: { ws: string; conn: DatabaseConn })
                 Per-user
               </Badge>
             ) : null}
+            {conn.governed ? (
+              <Badge
+                variant="outline"
+                title="Row filters and column masks are applied per user at the engine"
+              >
+                Governed
+              </Badge>
+            ) : null}
           </div>
           <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
             <Badge variant={statusVariant(conn.status)}>{humanizeStatus(conn.status)}</Badge>
@@ -497,6 +513,12 @@ function DatabaseConnDialog({
   const [httpScheme, setHttpScheme] = useState(editConn?.options.http_scheme ?? "");
   const [impersonate, setImpersonate] = useState(editConn?.options.impersonate ?? false);
   const [delegated, setDelegated] = useState(editConn?.delegated ?? false);
+  // Held in form state even though nothing on this page reads it back, because
+  // `PUT …/databases/{id}` replaces the whole row: a form that did not carry
+  // `governed` would send the serde default (`false`) and CLEAR the flag every
+  // time someone edited a port. That is the quiet direction — the connection
+  // keeps working, and the endpoints on it silently stop being gated.
+  const [governed, setGoverned] = useState(editConn?.governed ?? false);
   const [secretSel, setSecretSel] = useState<SecretSelection>({});
   const [error, setError] = useState<string | null>(null);
 
@@ -511,6 +533,7 @@ function DatabaseConnDialog({
     setHttpScheme(conn?.options.http_scheme ?? "");
     setImpersonate(conn?.options.impersonate ?? false);
     setDelegated(conn?.delegated ?? false);
+    setGoverned(conn?.governed ?? false);
     setSecretSel({});
     setError(null);
     createMutation.reset();
@@ -530,6 +553,7 @@ function DatabaseConnDialog({
     httpScheme !== (editConn?.options.http_scheme ?? "") ||
     impersonate !== (editConn?.options.impersonate ?? false) ||
     delegated !== (editConn?.delegated ?? false) ||
+    governed !== (editConn?.governed ?? false) ||
     Object.keys(secretSel).length > 0;
 
   // beforeunload guard (refresh / tab-close) while there are unsaved edits.
@@ -584,6 +608,10 @@ function DatabaseConnDialog({
       options,
       // B3a: run BI queries as the caller's per-user engine JWT (delegation).
       delegated,
+      // Package 1: the data behind this connection is filtered per user at the
+      // engine, so a Data API endpoint may only be published onto it when the
+      // query runs as the caller.
+      governed,
       // Reference an existing named secret or create a new one. On edit with no
       // change, secretSel is `{}` so the backend keeps the current secret.
       ...secretSel,
@@ -746,6 +774,27 @@ function DatabaseConnDialog({
               </div>
               <p className="text-xs text-muted-foreground">
                 Run queries as the signed-in user (requires SSO)
+              </p>
+            </div>
+
+            {/* Directly under the two switches it depends on, because the
+                sentence below is only true in relation to them. */}
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between">
+                <Label htmlFor="db-governed" className="font-normal">
+                  Governed data
+                </Label>
+                <Switch
+                  id="db-governed"
+                  checked={governed}
+                  onCheckedChange={setGoverned}
+                  aria-label="Governed data"
+                />
+              </div>
+              <p className="text-xs text-muted-foreground">
+                {governed && !delegated && !impersonate
+                  ? "Row filters and column masks are applied per user at the engine. Data API endpoints cannot be published onto this connection until per-user delegation or impersonation is on, and any already published stop serving."
+                  : "Row filters and column masks are applied per user at the engine. Data API endpoints on this connection must run queries as the caller."}
               </p>
             </div>
 

@@ -13,6 +13,7 @@ import { useDatabases } from "@/api/databases";
 // the wrapper is what invalidates the endpoint list, so the row this page
 // creates is already in the list behind it when the user navigates back.
 import { useCreateEndpoint } from "@/api/dataApi";
+import { GOVERNED_BLOCKED_MESSAGE, governedWithoutPerPrincipal } from "./governance";
 
 /**
  * Create an endpoint on a page with a URL (`/explore/:ws/data-api/endpoints/new`)
@@ -165,13 +166,36 @@ export default function EndpointCreate() {
                   <SelectValue placeholder="Choose a database" />
                 </SelectTrigger>
                 <SelectContent>
+                  {/* The option is still OFFERED when it is governed and the
+                      connection is not per-user. Omitting it would be the
+                      obvious move and it is the wrong one: the same database is
+                      publishable the moment an admin turns delegation on, so a
+                      picker that hides it teaches the author the connection does
+                      not exist rather than that it needs one setting. The
+                      warning below says which. */}
                   {(databases ?? []).map((d) => (
-                    <SelectItem key={d.id} value={d.id}>{d.name}</SelectItem>
+                    <SelectItem key={d.id} value={d.id}>
+                      {d.name}
+                      {d.governed ? (
+                        <span className="ml-1.5 text-xs text-muted-foreground">Governed</span>
+                      ) : null}
+                    </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
             </div>
           </div>
+          {/* Shown here, at the picker, rather than only at Publish. A refusal
+              an author meets after writing the SQL is a refusal that cost them
+              the work; this one is visible the moment the choice is made, and
+              it names the setting and the person who can change it. */}
+          {governedWithoutPerPrincipal(
+            (databases ?? []).find((d) => d.id === databaseId),
+          ) ? (
+            <Alert>
+              <AlertDescription>{GOVERNED_BLOCKED_MESSAGE}</AlertDescription>
+            </Alert>
+          ) : null}
           <div className="space-y-1.5">
             {/* A `<p>`, not a `<Label>`: Monaco is not a form control, so
                 `htmlFor` would point at nothing. The editor names itself

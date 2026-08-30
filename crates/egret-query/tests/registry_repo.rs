@@ -27,6 +27,7 @@ fn input(name: &str) -> egret_query::registry::model::DatabaseInput {
         secret_id: None,
         new_secret: None,
         delegated: false,
+        governed: false,
     }
 }
 

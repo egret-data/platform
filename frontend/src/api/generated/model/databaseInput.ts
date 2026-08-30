@@ -26,4 +26,15 @@ export interface DatabaseInput {
   new_secret?: null | NewSecret;
   /** B3a: run BI queries as the caller's per-user engine JWT (delegation). */
   delegated?: boolean;
+  /**
+     * The data behind this connection is governed at the engine (Ranger row
+     * filters / column masks). Publishing a Data API endpoint onto it requires
+     * `delegated` or `options.impersonate`; see [`Database::governed`].
+     *
+     * `#[serde(default)]` so a client that predates the field keeps working and
+     * an omitted value means "not governed" — the same direction migration 0130
+     * defaulted the column to. The cost of that default is stated there: it is
+     * the value that changes nothing, not the value that is safest.
+     */
+  governed?: boolean;
 }

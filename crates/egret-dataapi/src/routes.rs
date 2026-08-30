@@ -1363,7 +1363,8 @@ pub struct RollbackEndpointInput {
     pub version_id: Option<Uuid>,
 }
 
-/// Resolve the draft, its connection's delegation mode, and its output columns.
+/// Resolve the draft, its connection's [`ConnectionSafety`], and its output
+/// columns.
 ///
 /// Shared by `validate` and `publish` so a definition that validates is exactly a
 /// definition that publishes — two separate call sites would be two chances to
@@ -1381,14 +1382,14 @@ async fn validated_draft(
     DataApiError,
 > {
     let draft = st.endpoints.get(ws, id).await?;
-    let (delegated, impersonate) = st
+    let conn = st
         .endpoints
-        .connection_per_principal_pair(ws, draft.database_id)
+        .connection_safety(ws, draft.database_id)
         .await?;
     // `ctx.principal`, not the service account: `describe_as` resolves under the
     // caller's own identity so a delegated connection applies THEIR policy, and
     // an author cannot publish a contract over a table they cannot themselves see.
-    let described = validate(&*st.query, ws, principal, &draft, delegated, impersonate).await?;
+    let described = validate(&*st.query, ws, principal, &draft, conn).await?;
     Ok((draft, described))
 }
 

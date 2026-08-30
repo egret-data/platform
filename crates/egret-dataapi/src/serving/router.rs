@@ -224,6 +224,7 @@ use super::error::{is_permission_denied, to_wire, ServingErrorBody};
 // Aliased: `metrics` unqualified would read as the FACADE crate at every
 // call site in this file, and the two are one keystroke apart.
 use super::metrics as serving_metrics;
+use super::governance::{governance_allows_serving, LiveConnection};
 use super::params;
 use super::ratelimit::{check_request, retry_after_secs};
 use super::{verify_serving_token, ServingError};
@@ -658,7 +659,7 @@ impl utoipa::Modify for BearerAddon {
         (status = 404, description = "`not_found` — no such live endpoint in this workspace", body = ServingErrorBody),
         (status = 429, description = "`rate_limited` — a published rate limit was exceeded; `Retry-After` states when the bucket refills", body = ServingErrorBody),
         (status = 500, description = "`internal` — an egret-side fault; quote `request_id` to support", body = ServingErrorBody),
-        (status = 503, description = "`schema_drift` / `output_naming_collision` / `cache_scope_stale` / `param_gate_stale` — the published configuration no longer describes the data, or was frozen before the current parameter-safety rules existed. `Retry-After` is a floor, not a forecast: only a re-publish clears these", body = ServingErrorBody),
+        (status = 503, description = "`schema_drift` / `output_naming_collision` / `cache_scope_stale` / `governance_stale` / `param_gate_stale` — the published configuration no longer describes the data, was frozen before the current parameter-safety rules existed, or points at a `governed` database through a connection that does not run queries as the caller. `Retry-After` is a floor, not a forecast: a re-publish clears the first four, and `governance_stale` is cleared only by restoring the connection or the database's `governed` flag", body = ServingErrorBody),
     ),
     security(("data_api_bearer" = [])),
 )]
@@ -689,7 +690,7 @@ async fn serve_get(
         (status = 404, description = "`not_found` — no such live endpoint in this workspace", body = ServingErrorBody),
         (status = 429, description = "`rate_limited` — a published rate limit was exceeded; `Retry-After` states when the bucket refills", body = ServingErrorBody),
         (status = 500, description = "`internal` — an egret-side fault; quote `request_id` to support", body = ServingErrorBody),
-        (status = 503, description = "`schema_drift` / `output_naming_collision` / `cache_scope_stale` / `param_gate_stale` — the published configuration no longer describes the data, or was frozen before the current parameter-safety rules existed. `Retry-After` is a floor, not a forecast: only a re-publish clears these", body = ServingErrorBody),
+        (status = 503, description = "`schema_drift` / `output_naming_collision` / `cache_scope_stale` / `governance_stale` / `param_gate_stale` — the published configuration no longer describes the data, was frozen before the current parameter-safety rules existed, or points at a `governed` database through a connection that does not run queries as the caller. `Retry-After` is a floor, not a forecast: a re-publish clears the first four, and `governance_stale` is cleared only by restoring the connection or the database's `governed` flag", body = ServingErrorBody),
     ),
     security(("data_api_bearer" = [])),
 )]
@@ -1024,7 +1025,19 @@ async fn run(
     if !snap.params.is_empty() && snap.param_gate < egret_dataapi_api::PARAM_GATE {
         return Err(ServingError::ParamGateStale);
     }
-    let shared = shared_cache_allowed(&st.db, &snap).await?;
+    // ONE read of the live `query.databases` row, feeding BOTH live-connection
+    // rules below. Two reads would let the two checks see the connection at two
+    // different moments; the cost of this one — it is now paid by every request,
+    // not only by `shared`-cache ones — is stated in `serving::governance`.
+    let live_conn = LiveConnection::load(&st.db, snap.database_id).await?;
+    // Package 1. BEFORE the cache lookup, for the reason every check on this
+    // path is before it: a warm entry would otherwise keep answering with
+    // governed rows read under the service account for the whole of its TTL.
+    // Evaluated against the LIVE row rather than compared with a frozen witness
+    // — see `serving::governance` for why the shared-cache shape would stay
+    // silent in the exact case that matters.
+    governance_allows_serving(live_conn)?;
+    let shared = shared_cache_allowed(live_conn, &snap)?;
     // The list is never empty — `EndpointSnapshotRepr` refuses a snapshot that
     // carries neither `statements` nor the pre-M2 `sql`+`columns` pair, and
     // `params::resolve` below refuses an empty list a second time. Checked here

@@ -69,10 +69,10 @@ use std::time::{Duration, Instant};
 
 use egret_core::UserId;
 use egret_dataapi_api::{CacheScope, EndpointSnapshot};
-use egret_metastore::Db;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use super::governance::LiveConnection;
 use super::ServingError;
 
 /// Upper bound applied to a snapshot's `cache.ttl_seconds` before it is acted
@@ -173,10 +173,20 @@ pub fn cache_key(
 
 /// Decide whether this request may use a shared (principal-free) cache entry.
 ///
-/// Returns `Ok(false)` for every `per_principal` snapshot without touching the
-/// database — the common case costs nothing. For a `shared` one it reads the
-/// LIVE `(delegated, options.impersonate)` pair and compares it against the
-/// frozen witness pair.
+/// Returns `Ok(false)` for every `per_principal` snapshot. For a `shared` one it
+/// compares the LIVE `(delegated, options.impersonate)` pair against the frozen
+/// witness pair.
+///
+/// **`live` is handed in rather than read here, and it used to be read here.**
+/// Package 1 added a second live-connection rule
+/// ([`crate::serving::governance::governance_allows_serving`]) that applies to
+/// EVERY request rather than only to `shared` ones, so the read moved up to the
+/// one call site and both checks are now computed from it. That is one round
+/// trip per request instead of two, and — the reason that matters more — the two
+/// checks can no longer see the connection at two different moments.
+///
+/// `None` means the row is gone; see below for why that is a refusal here and is
+/// not one in the governance check.
 ///
 /// **Deliberately not gated on `cache.enabled`.** `check_cache_scope` refuses a
 /// `shared` scope at publish time whether or not the cache is currently on,
@@ -193,18 +203,18 @@ pub fn cache_key(
 ///
 /// # Cost, per request
 ///
-/// This is a metastore round-trip on EVERY call to a `shared` endpoint,
-/// including calls that would have been cache hits. The placement is deliberate:
-/// checking after the hit would mean serving the stale entry first and asking
-/// afterwards, which is the leak. It is also the reason the check returns early
-/// for `per_principal` — the common case must not pay for it.
+/// The read this consumes happens on EVERY call, including calls that would have
+/// been cache hits, and including `per_principal` endpoints which used to skip
+/// it entirely — see [`crate::serving::governance`], which is what made it
+/// unconditional and states the trade. The placement is deliberate: checking
+/// after the hit would mean serving the stale entry first and asking afterwards,
+/// which is the leak.
 ///
-/// If that round-trip ever matters, memoise
-/// `(database_id → (delegated, impersonate))` with a short TTL rather than
-/// moving the check: the window a memo opens is bounded and stated, while a
-/// re-ordered check is unbounded. Nothing memoises today, because a single
-/// indexed primary-key read next to a query execution is not yet worth the
-/// staleness.
+/// If that round-trip ever matters, memoise `database_id → LiveConnection` with
+/// a short TTL rather than moving the check: the window a memo opens is bounded
+/// and stated, while a re-ordered check is unbounded. Nothing memoises today,
+/// because a single indexed primary-key read next to a query execution is not
+/// yet worth the staleness.
 ///
 /// # Why this compares a PAIR rather than refusing on live `impersonate`
 ///
@@ -222,36 +232,39 @@ pub fn cache_key(
 /// `false` — so `cache_scope_stale` keeps meaning only what it says: something
 /// changed after publish, and re-publishing against what is there now will
 /// succeed.
-pub async fn shared_cache_allowed(db: &Db, snap: &EndpointSnapshot) -> Result<bool, ServingError> {
+pub fn shared_cache_allowed(
+    live: Option<LiveConnection>,
+    snap: &EndpointSnapshot,
+) -> Result<bool, ServingError> {
     if snap.cache.scope != CacheScope::Shared {
         return Ok(false);
     }
 
-    // `fetch_optional`, not `fetch_one`: a deleted database is not a "no rows"
-    // panic-shaped error, and it is certainly not a reason to serve a shared
-    // entry. It is the same refusal — the configuration the version was
-    // published against no longer exists.
+    // A deleted database is not a "no rows" panic-shaped error, and it is
+    // certainly not a reason to serve a shared entry. It is the same refusal —
+    // the configuration the version was published against no longer exists.
     //
-    // BOTH columns, in ONE statement. Two reads would let the pair come from two
-    // different moments, and reading only `delegated` — which is what this did —
-    // was the leak: `options.impersonate` makes the engine run as the caller
-    // independently of `delegated`, so a connection could be per-principal at
-    // the engine and look shared-safe here forever.
-    let live: Option<(bool, serde_json::Value)> =
-        sqlx::query_as("SELECT delegated, options FROM query.databases WHERE id = $1")
-            .bind(snap.database_id)
-            .fetch_optional(&db.pool)
-            .await
-            .map_err(ServingError::internal)?;
-
-    let Some((live_delegated, live_options)) = live else {
+    // The governance check answers `None` the OTHER way, and the asymmetry is
+    // intended: there, a missing row means the request is already doomed at
+    // execution and a governance code would name a flag on a row nobody can look
+    // at; here, a missing row would mean serving a principal-LESS cache entry
+    // against a connection nothing can vouch for.
+    //
+    // BOTH columns came from ONE statement in `LiveConnection::load`. Two reads
+    // would let the pair come from two different moments, and reading only
+    // `delegated` — which is what this did — was the leak: `options.impersonate`
+    // makes the engine run as the caller independently of `delegated`, so a
+    // connection could be per-principal at the engine and look shared-safe here
+    // forever.
+    let Some(live) = live else {
         tracing::warn!(
             database_id = %snap.database_id,
             "a shared-cache endpoint's database row is gone; refusing rather than serving it"
         );
         return Err(ServingError::CacheScopeStale);
     };
-    let live_impersonate = crate::lifecycle::impersonate_flag(&live_options);
+    let live_delegated = live.delegated;
+    let live_impersonate = live.impersonate;
 
     // Disagreement in EITHER half is a refusal, not a downgrade to
     // per-principal: the operator published a configuration that is no longer

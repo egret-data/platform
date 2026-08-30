@@ -76,8 +76,9 @@ pub use endpoints::{
     EndpointStore, UpdateEndpointInput, ALLOWED_METHODS, BOOKMARK_ENTITY, OBJECT_KIND,
 };
 pub use lifecycle::{
-    check_cache_scope, check_enum_params, check_params, check_single_select, validate,
-    DataApiEndpointVersionDto, DataApiPublishedDto, ValidationError, VersionRef,
+    check_cache_scope, check_enum_params, check_governed_connection, check_params,
+    check_single_select, validate, ConnectionSafety, DataApiEndpointVersionDto,
+    DataApiPublishedDto, ValidationError, VersionRef,
 };
 pub use render::{check_dynamic, check_publish, check_static, render, ParamValues, RenderError};
 pub use routes::{

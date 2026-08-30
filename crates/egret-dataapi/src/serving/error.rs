@@ -331,6 +331,21 @@ pub(crate) fn to_wire(e: &ServingError) -> Wire {
              `delegated` and `options.impersonate` settings"
                 .into(),
         ),
+        // Names all three fixes, and deliberately does NOT say "re-publish".
+        // Every other 503 on this list is cleared by a re-publish and this one
+        // is not: `check_governed_connection` refuses the publish under exactly
+        // the condition that produced this error, so an operator sent to
+        // re-publish would be refused with the same sentence. The three actions
+        // that do clear it are the three named here.
+        ServingError::GovernanceStale => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "governance_stale",
+            "this endpoint's database is marked `governed`, so its queries must run as the \
+             caller; turn on the connection's `delegated` or `options.impersonate` setting, \
+             move the endpoint to a connection that has one, or clear `governed` on the \
+             database"
+                .into(),
+        ),
         // Names the fix and nothing else. The operator cannot act on WHICH rule
         // the old snapshot never met — the rules are the author's, and the list
         // changes — so the message states the one action that clears it.
@@ -357,6 +372,7 @@ pub(crate) fn to_wire(e: &ServingError) -> Wire {
         ServingError::SchemaDrift
         | ServingError::OutputNamingCollision
         | ServingError::CacheScopeStale
+        | ServingError::GovernanceStale
         | ServingError::ParamGateStale => Some(CONFIG_DRIFT_RETRY_AFTER_SECS),
         ServingError::Unauthorized
         | ServingError::NotFound
@@ -456,6 +472,7 @@ mod tests {
                 "output_naming_collision",
             ),
             (ServingError::CacheScopeStale, 503, "cache_scope_stale"),
+            (ServingError::GovernanceStale, 503, "governance_stale"),
             (
                 ServingError::Internal(anyhow::anyhow!("boom")),
                 500,
@@ -599,6 +616,7 @@ mod tests {
             ServingError::SchemaDrift,
             ServingError::OutputNamingCollision,
             ServingError::CacheScopeStale,
+            ServingError::GovernanceStale,
             ServingError::ParamGateStale,
         ] {
             assert_eq!(
@@ -657,7 +675,12 @@ mod tests {
             to_wire(&ServingError::SchemaDrift).code,
             to_wire(&ServingError::OutputNamingCollision).code,
             to_wire(&ServingError::CacheScopeStale).code,
-            // Four 503s now, and this is the one most easily confused with
+            // `governance_stale` is the one that is NOT cleared by a re-publish,
+            // which is why it may not collapse into `cache_scope_stale`: the two
+            // send an operator to two different actions, and one of the two
+            // actions is refused for this condition.
+            to_wire(&ServingError::GovernanceStale).code,
+            // Five 503s now, and this is the one most easily confused with
             // `cache_scope_stale`: both mean "this version predates something",
             // and only one of them is cleared by restoring a connection setting.
             to_wire(&ServingError::ParamGateStale).code,

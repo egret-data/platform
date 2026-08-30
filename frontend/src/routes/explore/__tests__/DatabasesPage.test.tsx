@@ -507,6 +507,63 @@ describe("DatabasesPage", () => {
     });
   });
 
+  // ── Package 1: `governed` ──────────────────────────────────────────────────
+
+  it("toggling Governed data includes governed: true in the create payload", async () => {
+    renderAt();
+    fireEvent.click(screen.getByRole("button", { name: /add connection/i }));
+
+    await waitFor(() => screen.getByText("Add engine connection"));
+
+    fireEvent.change(screen.getByLabelText(/^name$/i), { target: { value: "trino-gov" } });
+    fireEvent.change(screen.getByLabelText(/^host$/i), { target: { value: "trino.example.com" } });
+    fireEvent.change(screen.getByLabelText(/^port$/i), { target: { value: "8080" } });
+
+    fireEvent.click(screen.getByRole("switch", { name: /governed data/i }));
+    fireEvent.click(screen.getByRole("button", { name: /add connection/i, hidden: false }));
+
+    await waitFor(() => {
+      expect(createMutateAsync).toHaveBeenCalledWith(
+        expect.objectContaining({ name: "trino-gov", governed: true }),
+      );
+    });
+  });
+
+  /**
+   * **The quiet direction, and the reason `governed` is in the form at all.**
+   *
+   * `PUT …/databases/{id}` replaces the whole row and the field carries
+   * `#[serde(default)]`, so a form that did not send `governed` would clear it
+   * on any edit — someone changing a port would silently un-gate every Data API
+   * endpoint on that connection, with nothing failing and nothing logged.
+   *
+   * The fixture is a connection that IS governed and the edit touches only the
+   * host, which is the shape that catches it. Against a form that dropped the
+   * field this asserts `false`, and against one that hard-codes `true` the test
+   * above fails instead — neither passes both.
+   */
+  it("preserves governed through an edit that does not touch it", async () => {
+    databasesMock.mockReturnValue({
+      data: [{ ...mockDb1, delegated: true, governed: true }],
+      isLoading: false,
+      isError: false,
+      error: null,
+    });
+    renderAt();
+
+    fireEvent.click(screen.getAllByRole("button", { name: /^edit/i })[0]);
+    await waitFor(() => screen.getByText("Edit engine connection"));
+
+    fireEvent.change(screen.getByLabelText(/^host$/i), { target: { value: "moved.corp.local" } });
+    fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
+
+    await waitFor(() => {
+      const call = updateMutateAsync.mock.calls[0][0];
+      expect(call.input.host).toBe("moved.corp.local");
+      expect(call.input.governed).toBe(true);
+    });
+  });
+
   // ── F3: provisioned (read-only) vs self-service groups ─────────────────────
 
   const provisionedDb = {

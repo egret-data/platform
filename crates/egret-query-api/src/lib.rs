@@ -144,6 +144,24 @@ pub struct Database {
     /// B3a: run BI queries as the caller's per-user engine JWT (delegation).
     #[serde(default)]
     pub delegated: bool,
+    /// The data behind this connection is governed at the ENGINE — Ranger row
+    /// filters and column masks apply to it.
+    ///
+    /// Consumed by `egret-dataapi`, which refuses to publish an endpoint onto a
+    /// governed connection unless [`Database::delegated`] or
+    /// `options.impersonate` makes the engine run each query as the CALLER. On a
+    /// shared service credential those filters are evaluated for the machine
+    /// identity, so every consumer of the endpoint reads what the service
+    /// account may read.
+    ///
+    /// `#[serde(default)]` for rows and payloads written before the column
+    /// existed: `false` is what migration 0130 gave every existing row, and it
+    /// is the value that changes nothing. It is NOT the fail-safe direction and
+    /// is not claimed to be — the gate is opt-in per database by design (see the
+    /// migration's own comment for why the alternative was a migration-time
+    /// outage).
+    #[serde(default)]
+    pub governed: bool,
     /// Set when this row was materialized by an engine→workspace assignment.
     /// A non-null `engine_id` marks the connection provisioned (read-only,
     /// per-user-delegated) and links it back to the source engine.
@@ -245,6 +263,7 @@ mod wire_names {
             has_secret: false,
             status: String::new(),
             delegated: true,
+            governed: true,
             engine_id: None,
         };
         let v = serde_json::to_value(&db).expect("serialise Database");
@@ -255,6 +274,20 @@ mod wire_names {
              witness freezes; it is read by name in SQL (`SELECT delegated, \
              options ...`), so a rename is a schema change and not only a serde \
              one: {v}"
+        );
+        // The third column of the same story, added by Package 1. It is read by
+        // name in SQL from THREE places in `egret-dataapi` — the publish
+        // transaction, `EndpointStore::connection_safety`, and
+        // `serving::governance::LiveConnection::load` — and none of them would
+        // fail to compile on a rename here.
+        assert_eq!(
+            v.get("governed"),
+            Some(&serde_json::Value::Bool(true)),
+            "`governed` decides whether the Data API will publish onto this \
+             connection at all, and is read by name in SQL (`SELECT delegated, \
+             governed, options ...`): a rename is a schema change, and the \
+             direction it fails in is that every governed database silently \
+             reads as ungoverned: {v}"
         );
     }
 }
