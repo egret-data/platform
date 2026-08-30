@@ -21,6 +21,7 @@ import {
   endpointHeaderStateLabel,
   liveVersionLookup,
 } from "@/routes/explore/dataapi/endpointState";
+import type { EndpointStateTier } from "@/routes/explore/dataapi/endpointState";
 
 /**
  * THE HEADER SAYS WHAT THE ENDPOINT IS, AND THE BACK LINK ASKS BEFORE IT
@@ -383,6 +384,19 @@ describe("the header says what the endpoint is", () => {
    * A per-tier table is what makes "all four" (now five) a fact about the
    * table rather than about which case someone remembered to add.
    */
+  /**
+   * Every tier the pill can paint, listed once. The `satisfies` is what makes
+   * it exhaustive: a sixth member of `EndpointStateTier` fails to COMPILE
+   * until it is named here, so the table below cannot fall behind the type.
+   */
+  const ALL_TIERS = Object.keys({
+    live: true,
+    diverged: true,
+    unknown: true,
+    draft: true,
+    disabled: true,
+  } satisfies Record<EndpointStateTier, true>);
+
   function tierCases(): [string, DataApiEndpointDto, DataApiEndpointVersionDto[], "ok" | "error"][] {
     const liveEndpoint = makeEndpoint({ state: "live", live_version_id: "ver-2" });
     const edited = {
@@ -426,7 +440,11 @@ describe("the header says what the endpoint is", () => {
       cleanup();
     }
 
-    expect(new Set(seen).size).toBe(cases.length);
+    // Against the tier NAMES, not against `cases.length`: that read the test's
+    // own table on both sides of the equality, so deleting a row shrank the
+    // coverage and the assertion stayed true. It has to be an outside number.
+    expect(cases.map(([tier]) => tier)).toEqual(ALL_TIERS);
+    expect(new Set(seen).size).toBe(ALL_TIERS.length);
   });
 
   it("the pill's ink is --foreground on EVERY tier, never a tinted ink that fails contrast", () => {
@@ -693,6 +711,74 @@ describe("draftVsServed", () => {
       output: { pretty: true, format: "json" },
     } as unknown as EndpointSnapshot;
     expect(draftVsServed(reordered, known(version))).toBe("in-step");
+  });
+
+  /**
+   * THE FOUR COMPARED FIELDS NO FIXTURE EVER MOVED.
+   *
+   * `output`, `cache`, `limits` and `rate_limit` are four of the nine fields
+   * `draftVsServed` compares, and until now every fixture in this file left all
+   * four as `{}` on BOTH sides. Measured: deleting their four lines from both
+   * mirror projections killed ZERO of 42 tests. Four ninths of the rule was
+   * guarded by nothing.
+   *
+   * They are not decoration — each one is part of the contract a consumer is
+   * being served under, and none of them shows up in the SQL an author is
+   * looking at while the pill claims to speak for the whole definition:
+   *
+   * - `limits.max_rows` / `timeout_seconds` — the caps a response is truncated
+   *   and timed out by (`LimitsSpec`, `egret-dataapi-api/src/lib.rs:172`).
+   * - `rate_limit.per_key_qps` / `burst` / `per_endpoint_qps` — how often a key
+   *   may call at all (`RateLimitSpec`, same file, `:187`).
+   * - `cache.ttl_seconds` / `scope` — how stale an answer may be, and whether
+   *   it is shared across principals (`CacheSpec`, `:153`).
+   * - `output.envelope` — whether the body is `{status, message, data, meta}`
+   *   or `data` on its own (`OutputSpec`, `:1273`); `shape` and `naming` change
+   *   the row shape and the key casing.
+   *
+   * Raise a cap, save, and a pill that had stopped comparing these would read
+   * `Live · v2` with a check beside it while consumers keep the old ones.
+   *
+   * Both sides carry a full, realistic spec throughout and only ONE VALUE ONE
+   * LEVEL DOWN moves, which is the interesting case: a projection that compared
+   * these fields merely by presence, or a `sameJson` that stopped recursing,
+   * would still pass a presence/absence test.
+   */
+  const servedSpecs: Pick<DataApiEndpointDto, "output" | "cache" | "limits" | "rate_limit"> = {
+    output: { shape: "objects", naming: "as_is", envelope: "wrapped" },
+    cache: { enabled: true, ttl_seconds: 60, scope: "per_principal" },
+    limits: { max_rows: 10_000, timeout_seconds: 30 },
+    rate_limit: { per_key_qps: 10, burst: 20, per_endpoint_qps: 100 },
+  };
+
+  /** One nested edit per field — the smallest change an author can save. */
+  const nestedEdits: [keyof typeof servedSpecs, Record<string, unknown>][] = [
+    ["output", { envelope: "bare" }],
+    ["cache", { ttl_seconds: 3600 }],
+    ["limits", { max_rows: 50_000 }],
+    ["rate_limit", { per_key_qps: 50 }],
+  ];
+
+  it.each(nestedEdits)("is ahead when `%s` moves, under untouched SQL", (field, edit) => {
+    const published = live(servedSpecs);
+    const edited = {
+      ...published,
+      [field]: { ...servedSpecs[field], ...edit },
+    } as unknown as DataApiEndpointDto;
+    expect(draftVsServed(edited, known(publishedAs(published)))).toBe("ahead");
+  });
+
+  it.each(nestedEdits)("is in-step when `%s` is an equal value, freshly built", (field) => {
+    // The control for the row above, and the half that would fail if the field
+    // were compared by object IDENTITY: the draft rebuilds the same spec every
+    // time the form round-trips, so an equal-but-not-same value must not light
+    // the pill on an endpoint nobody edited.
+    const published = live(servedSpecs);
+    const redrawn = {
+      ...published,
+      [field]: { ...servedSpecs[field] },
+    } as unknown as DataApiEndpointDto;
+    expect(draftVsServed(redrawn, known(publishedAs(published)))).toBe("in-step");
   });
 });
 
