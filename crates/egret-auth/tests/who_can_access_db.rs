@@ -1,7 +1,8 @@
 //! DB-gated integration test for the reverse resolver (`who_can_access`):
-//! RESOURCE→principals — "who can access this object, and why". Mirrors the
-//! sibling `effective_db.rs` harness (same `connect` + `DATABASE_URL` self-skip so
-//! the suite stays green offline; CI / `just up` provides Postgres).
+//! RESOURCE→principals — "who can access this object, and why". Mirrors the sibling
+//! `effective_db.rs` harness (same `connect` + `DATABASE_URL` gate, which FAILS without a
+//! database and self-skips only under `EGRET_ALLOW_DB_SKIP`; CI / `just up` provides
+//! Postgres).
 //!
 //! Unlike `effective_db.rs` (which uses bare-uuid object targets), this needs a
 //! REAL `analytics.charts` row so the object can be resolved to a name + workspace

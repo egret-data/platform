@@ -5271,10 +5271,11 @@ mod tests {
         assert!(auth.is_none());
     }
 
-    /// Fix #3c: enabling the engine `jwt` block with no JWKS anywhere (platform
-    /// OIDC unconfigured AND no per-engine `jwksUri`) must be REJECTED at the
-    /// API boundary, not silently provision a coordinator that crashes at boot.
-    /// Self-skips without `DATABASE_URL` (mirrors the other `test_state` tests).
+    /// Fix #3c: enabling the engine `jwt` block with no JWKS anywhere (platform OIDC
+    /// unconfigured AND no per-engine `jwksUri`) must be REJECTED at the API boundary, not
+    /// silently provision a coordinator that crashes at boot. Self-skips without
+    /// `DATABASE_URL` ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS (mirrors the
+    /// other `test_state` tests).
     #[tokio::test]
     async fn resolve_auth_rejects_jwt_when_no_jwks() {
         let Some(mut st) = test_state().await else {

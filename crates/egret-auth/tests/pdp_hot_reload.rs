@@ -1,8 +1,8 @@
-//! DB-gated hot-reload integration test (Effort B / B1b-0 Task 4).
-//! Self-skips without DATABASE_URL. Proves an in-flight `CedarPdp` reflects a
-//! permission grant/revoke made through `RoleRepo` sharing the same `EventBus`,
-//! with NO rebuild of the PDP — the background reload task swaps the template
-//! set on each `RolesChanged`.
+//! DB-gated hot-reload integration test (Effort B / B1b-0 Task 4). Self-skips without
+//! `DATABASE_URL` ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS. Proves an
+//! in-flight `CedarPdp` reflects a permission grant/revoke made through `RoleRepo` sharing
+//! the same `EventBus`, with NO rebuild of the PDP — the background reload task swaps the
+//! template set on each `RolesChanged`.
 //!
 //! Model: `crates/egret-auth/tests/cedar_pdp.rs` + `role_events.rs`.
 

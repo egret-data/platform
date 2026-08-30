@@ -1,5 +1,6 @@
-//! DB-gated test for the `tag_version` bump on catalog-tag assign/unassign
-//! (Access P3.2, Task 36 Part B). Self-skips without DATABASE_URL.
+//! DB-gated test for the `tag_version` bump on catalog-tag assign/unassign (Access P3.2,
+//! Task 36 Part B). Self-skips without `DATABASE_URL` ONLY under `EGRET_ALLOW_DB_SKIP`, and
+//! otherwise FAILS.
 //!
 //! When a catalog tag is (un)assigned, the bound policy service's
 //! `tag_version` must bump so the Ranger tag-download plugin re-polls

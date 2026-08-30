@@ -37,8 +37,9 @@ use axum::http::StatusCode;
 use egret_query_api::Param;
 use serving_common::{bind_signature, fixture, marker, Fixture};
 
-/// Self-skip when there is no database. The DURATION is what says whether these
-/// ran; an `ok` alone does not.
+/// Self-skip when there is no database, which `egret_test_db::url()` now permits only under
+/// `EGRET_ALLOW_DB_SKIP`. The DURATION is what says whether these ran; an `ok` alone does
+/// not.
 macro_rules! skip_without_db {
     () => {
         match fixture().await {

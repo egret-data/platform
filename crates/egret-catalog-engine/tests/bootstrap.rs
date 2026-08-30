@@ -6,7 +6,8 @@
 //! catalog DB (it seeds the default project + registers the system user); there
 //! is no warehouse creation and thus no live S3 `validate_access`.
 //!
-//! Self-skips when `DATABASE_URL` is unset. Run with:
+//! Self-skips when `DATABASE_URL` is unset ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise
+//! FAILS. Run with:
 //!   export DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test
 //!   cargo test -p egret-catalog-engine --test bootstrap
 

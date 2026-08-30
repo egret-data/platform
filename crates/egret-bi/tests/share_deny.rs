@@ -1,5 +1,6 @@
-//! Explicit-deny object share (B2-3 Task 6). DB-gated; self-skips without
-//! DATABASE_URL. Builds a REAL `CedarPdp` AFTER `migrate()`.
+//! Explicit-deny object share (B2-3 Task 6). DB-gated; self-skips without `DATABASE_URL`
+//! ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS. Builds a REAL `CedarPdp` AFTER
+//! `migrate()`.
 //!
 //! Proves: an Editor (`dashboard:manage`) can PUT a `deny` grant on an object;
 //! `grant_list` returns it with `effect="deny"`; and a non-member holding ONLY a

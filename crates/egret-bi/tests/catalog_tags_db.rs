@@ -1,7 +1,7 @@
-//! Catalog-resource tag-target DB harness (Access P3.2). DB-gated; self-skips
-//! without DATABASE_URL. Covers `CatalogTagRepo` assign/unassign + the
-//! resource/warehouse listing round-trips against migration 0081's
-//! `catalog_tag_assignments` table.
+//! Catalog-resource tag-target DB harness (Access P3.2). DB-gated; self-skips without
+//! `DATABASE_URL` ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS. Covers
+//! `CatalogTagRepo` assign/unassign + the resource/warehouse listing round-trips against
+//! migration 0081's `catalog_tag_assignments` table.
 //!
 //! METADATA ONLY: no authorization decision reads these tables in this phase.
 

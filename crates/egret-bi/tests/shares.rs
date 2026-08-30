@@ -1,6 +1,7 @@
-//! Object-grant share API (Effort B / B2-1a Task 4). DB-gated; self-skips
-//! without DATABASE_URL. Builds a REAL `CedarPdp` AFTER `migrate()` so it
-//! snapshots the `ws_viewer` BI read perms added by migration 0070.
+//! Object-grant share API (Effort B / B2-1a Task 4). DB-gated; self-skips without
+//! `DATABASE_URL` ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS. Builds a REAL
+//! `CedarPdp` AFTER `migrate()` so it snapshots the `ws_viewer` BI read perms added by
+//! migration 0070.
 //!
 //! Proves: a `<kind>:manage` holder can share an object with an OUTSIDE user at
 //! `ws_viewer`; that user can then read the object (require_object read passes

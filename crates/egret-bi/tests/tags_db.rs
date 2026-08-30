@@ -1,6 +1,7 @@
-//! Classification tag model DB harness (Access P3.1). DB-gated; self-skips
-//! without DATABASE_URL. Covers the `TagRepo` CRUD + assignment round-trips
-//! against migration 0080's `tags` / `tag_assignments` tables.
+//! Classification tag model DB harness (Access P3.1). DB-gated; self-skips without
+//! `DATABASE_URL` ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS. Covers the
+//! `TagRepo` CRUD + assignment round-trips against migration 0080's `tags` /
+//! `tag_assignments` tables.
 //!
 //! METADATA ONLY: no authorization decision reads these tables in this phase.
 

@@ -1,7 +1,7 @@
-//! DB-gated test that `RoleRepo` publishes `RolesChanged` on exactly the
-//! catalog-mutating methods (create / delete / set_permissions) and on none of
-//! the others. Self-skip (pass) without `DATABASE_URL` so the suite stays green
-//! offline; CI / `just up` provides Postgres.
+//! DB-gated test that `RoleRepo` publishes `RolesChanged` on exactly the catalog-mutating
+//! methods (create / delete / set_permissions) and on none of the others. Self-skips
+//! without `DATABASE_URL` ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS;
+//! CI / `just up` provides Postgres.
 
 use egret_auth::events::RolesChanged;
 use egret_auth::roles::RoleRepo;

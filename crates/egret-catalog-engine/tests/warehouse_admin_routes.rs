@@ -1,7 +1,7 @@
-//! Catalog seam admin router HTTP tests — moved with the warehouse admin router
-//! out of egret-controlplane in E3d-3. DB-gated; self-skips without
-//! `DATABASE_URL`. Auth is a session cookie (the CSRF layer is applied above this
-//! router in egret-server, not here).
+//! Catalog seam admin router HTTP tests — moved with the warehouse admin router out of
+//! egret-controlplane in E3d-3. DB-gated; self-skips without `DATABASE_URL` ONLY under
+//! `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS. Auth is a session cookie (the CSRF layer is
+//! applied above this router in egret-server, not here).
 //!
 //! Proves `egret_catalog_engine::catalog_admin_router`:
 //!   - warehouse browse (namespaces/tables/schema) over a `FakeBrowser`,

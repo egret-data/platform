@@ -16,8 +16,9 @@ use egret_query::DatabaseRepo;
 use egret_secrets::{SecretStore, WorkspaceSecretStore};
 use uuid::Uuid;
 
-/// Connect and build the full stack shared by both tests. `None` (self-skip)
-/// when `DATABASE_URL` is unset. The `DatabaseRepo` binds no crypto key (the
+/// Connect and build the full stack shared by both tests. `None` (self-skip) when
+/// `DATABASE_URL` is unset AND `EGRET_ALLOW_DB_SKIP` is set; without the opt-out
+/// `egret_test_db::url()` panics instead. The `DatabaseRepo` binds no crypto key (the
 /// materialized connection seals no secret — `secret_id` is NULL).
 async fn harness() -> Option<(CatalogStore, EngineMgmtStore, EngineAssignmentService)> {
     let url = egret_test_db::url().await?;

@@ -1,5 +1,5 @@
-//! DB-gated integration test for `AccessGrantStore` (Effort B / B1a Task 5).
-//! Self-skips without DATABASE_URL.
+//! DB-gated integration test for `AccessGrantStore` (Effort B / B1a Task 5). Self-skips
+//! without `DATABASE_URL` ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS.
 //!
 //! Model: `crates/egret-workspace/tests/workspace_db.rs`.
 

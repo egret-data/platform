@@ -641,7 +641,8 @@ mod tests {
     }
 
     /// The same claim, asked of Postgres — because it is Postgres' regex engine that
-    /// decides, not Rust's reading of the string. Self-skips without `DATABASE_URL`.
+    /// decides, not Rust's reading of the string. Self-skips without `DATABASE_URL` ONLY
+    /// under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS.
     ///
     /// Deliberately does NOT go through [`super::url`]: it needs no clone, only an
     /// evaluation of the pattern, and cloning here would make the test that guards the

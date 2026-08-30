@@ -1,9 +1,10 @@
 //! Task 9: ws_admin scoped impersonation + `WsContext` containment.
 //!
-//! DB-gated HTTP integration tests; self-skip without DATABASE_URL. Exercises the
-//! `POST /api/ws/{workspace}/impersonate` endpoint (local step-up) and the
-//! workspace-containment that confines a ws-scoped overlay to the single workspace
-//! it was started in — the ws_admin isolation boundary.
+//! DB-gated HTTP integration tests; self-skips without `DATABASE_URL` ONLY under
+//! `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS. Exercises the `POST
+//! /api/ws/{workspace}/impersonate` endpoint (local step-up) and the workspace-containment
+//! that confines a ws-scoped overlay to the single workspace it was started in — the
+//! ws_admin isolation boundary.
 
 use axum::body::Body;
 use axum::http::{Request as HttpRequest, StatusCode};

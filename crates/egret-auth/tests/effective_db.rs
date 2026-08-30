@@ -1,5 +1,5 @@
-//! DB-gated integration tests for the AX-3 effective-access resolver. Skip (pass)
-//! when DATABASE_URL is unset so the suite stays green offline; CI / `just up`
+//! DB-gated integration tests for the AX-3 effective-access resolver. Skips without
+//! `DATABASE_URL` ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS; CI / `just up`
 //! provides Postgres.
 //!
 //! Object-grant target choice: these tests use BARE uuids for `scope_id` on object

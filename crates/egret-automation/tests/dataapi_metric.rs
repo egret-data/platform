@@ -1,8 +1,8 @@
 //! `dataapi_metric::measure` against a real `dataapi.access_log`.
 //!
-//! DB-gated, self-skipping without `DATABASE_URL`, following
-//! `crates/egret-automation/tests/dataapi_alert_schema.rs`'s `setup()` ->
-//! `Option` idiom.
+//! DB-gated, self-skipping without `DATABASE_URL` ONLY under `EGRET_ALLOW_DB_SKIP` and
+//! otherwise FAILING, following `crates/egret-automation/tests/dataapi_alert_schema.rs`'s
+//! `setup()` -> `Option` idiom.
 //!
 //! Every test binds its own `seed_time` from a single `Utc::now()` read and
 //! derives `now`/`since` from it arithmetically — never a second clock read —

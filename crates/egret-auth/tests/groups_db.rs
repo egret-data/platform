@@ -1,6 +1,5 @@
-//! DB-gated `GroupRepo`/`UserRepo` tests. Self-skip (pass) without
-//! `DATABASE_URL` so the suite stays green offline; CI / `just up` provides
-//! Postgres.
+//! DB-gated `GroupRepo`/`UserRepo` tests. Self-skips without `DATABASE_URL` ONLY under
+//! `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS; CI / `just up` provides Postgres.
 
 use egret_auth::groups::GroupRepo;
 use egret_auth::users::UserRepo;

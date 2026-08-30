@@ -1,7 +1,7 @@
-//! DB-gated e2e integration test for `CedarPdp` (Effort B / B1a Task 8).
-//! Self-skips without DATABASE_URL. Exercises the assembled decision point end
-//! to end: build templates from `role_permissions`, resolve a user's mirrored
-//! `access_grants`, link them, and authorize via Cedar.
+//! DB-gated e2e integration test for `CedarPdp` (Effort B / B1a Task 8). Self-skips without
+//! `DATABASE_URL` ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS. Exercises the
+//! assembled decision point end to end: build templates from `role_permissions`, resolve a
+//! user's mirrored `access_grants`, link them, and authorize via Cedar.
 //!
 //! Model: `crates/egret-auth/tests/grant_store.rs`.
 

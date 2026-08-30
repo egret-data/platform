@@ -1,4 +1,5 @@
-//! DB-gated integration tests; self-skip without DATABASE_URL.
+//! DB-gated integration tests; self-skips without `DATABASE_URL` ONLY under
+//! `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS.
 
 use axum::body::Body;
 use axum::http::{Request as HttpRequest, StatusCode};

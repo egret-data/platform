@@ -1,6 +1,7 @@
-//! Task 9 (P5a): the access-console arm and the member-picker over-grant.
-//! DB-gated; self-skip without DATABASE_URL — same `connect`/`uniq`/`seed_user`/
-//! `login_cookie`/`ws_state` setup as the sibling harnesses in this crate.
+//! Task 9 (P5a): the access-console arm and the member-picker over-grant. DB-gated;
+//! self-skips without `DATABASE_URL` ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS
+//! — same `connect`/`uniq`/`seed_user`/`login_cookie`/`ws_state` setup as the sibling
+//! harnesses in this crate.
 //!
 //! Two regressions this pins:
 //!

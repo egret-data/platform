@@ -1,7 +1,7 @@
 //! A service account is a user row that can never log in.
 //!
-//! DB-gated integration tests. Skip ONLY when `EGRET_ALLOW_DB_SKIP` is set; without it a run with no DATABASE_URL FAILS so the
-//! suite stays green offline; CI / `just up` provides Postgres.
+//! DB-gated integration tests. Skips ONLY when `EGRET_ALLOW_DB_SKIP` is set; without it a
+//! run with no `DATABASE_URL` FAILS. CI / `just up` provides Postgres.
 
 use egret_auth::users::UserRepo;
 use egret_metastore::Db;

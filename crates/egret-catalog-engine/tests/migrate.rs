@@ -4,7 +4,8 @@
 //! migration tracker (`_sqlx_migrations`) stays in `public` (egret's own tables now
 //! live in per-seam schemas: `engine_mgmt`/`policy`/`storage`/`catalog`).
 //!
-//! Self-skips when `DATABASE_URL` is unset. Run with:
+//! Self-skips when `DATABASE_URL` is unset ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise
+//! FAILS. Run with:
 //!   export DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test
 //!   cargo test -p egret-catalog-engine --test migrate
 

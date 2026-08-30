@@ -4,7 +4,8 @@
 //! force-granted the action (the adversarial escalation case), because a Cedar
 //! `forbid` overrides every `permit`.
 //!
-//! Self-skips without DATABASE_URL. Model: `crates/egret-auth/tests/cedar_pdp.rs`.
+//! Self-skips without `DATABASE_URL` ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS.
+//! Model: `crates/egret-auth/tests/cedar_pdp.rs`.
 
 use egret_auth::pdp::CedarPdp;
 use egret_core::authz::{Pdp, Resource, Subject};
