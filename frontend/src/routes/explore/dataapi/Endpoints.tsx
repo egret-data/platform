@@ -4,7 +4,6 @@ import { Search, Trash2, Webhook } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { SummaryStrip } from "@/components/explore/SummaryStrip";
@@ -34,7 +33,7 @@ import { useBookmarkEndpoint, useDeleteEndpoint, useTrashEndpoint, useUnbookmark
 import type { DataApiEndpointDto, DataApiEndpointListItemDto } from "@/api/generated/model";
 import { DownloadOpenApiDialog } from "./DownloadOpenApiDialog";
 import { EndpointActionsMenu } from "./EndpointActionsMenu";
-import { endpointStateLabel } from "./endpointState";
+import { EndpointRowStateBadge } from "./endpointState";
 
 // Folders share the generic router (egret-bi's `kind_perms`); this is the
 // `{kind}` URL segment data-api registers there, matching
@@ -78,19 +77,10 @@ const DEFAULT_SORT: Record<"list" | "trash", SortState<SortKey>> = {
   trash: { key: "deleted_at", dir: "desc" },
 };
 
-// live is the only state that earns emphasis (--highlight is reserved for a
-// page's single primary accent, not a state chip) — draft and disabled both
-// read as muted/negative, never as something to celebrate.
-const STATE_TONE: Record<string, string> = {
-  live: "bg-success/15 text-success",
-  draft: "bg-muted text-muted-foreground",
-  disabled: "bg-destructive/15 text-destructive",
-};
-
 const ENGINE_LABEL: Record<string, string> = { trino: "Trino", starrocks: "StarRocks" };
 
 /**
- * The row badge's word.
+ * The row badge, whole — word, tint and glyph.
  *
  * Shared with the editor header (`endpointState.tsx`), which is the point: the
  * list said "Live" on every row while the six tabs an author edits on said
@@ -98,9 +88,16 @@ const ENGINE_LABEL: Record<string, string> = { trino: "Trino", starrocks: "StarR
  * describe it differently. The reasoning for the `disabled` split — and for
  * why `live`/`draft` need none on a LIST row — moved there with it.
  *
- * The header's word is longer, because the shell has already loaded the
+ * The WORD was shared first and the visuals were not, so the fork simply moved:
+ * this file kept a local `STATE_TONE` painting `live` as `bg-success/15
+ * text-success`, which measures 3.72:1 against WCAG 1.4.3's 4.5:1, while the
+ * header pill one click away had already been fixed to `--foreground` ink plus
+ * a per-tier glyph. Both halves now come from the same module.
+ *
+ * The header's word is still longer, because the shell has already loaded the
  * version history and can name the served version and say whether the draft
- * has moved past it. A list row knows neither, and says neither.
+ * has moved past it. A list row knows neither, says neither, and — see
+ * `endpointStateOnlyTier` — cannot be made to guess.
  */
 
 export default function Endpoints() {
@@ -479,9 +476,7 @@ export default function Endpoints() {
         <span className="font-mono text-xs">/{e.path.replace(/^\//, "")}</span>
       </td>
       <td>
-        <Badge className={STATE_TONE[e.state] ?? "bg-muted text-muted-foreground"}>
-          {endpointStateLabel(e)}
-        </Badge>
+        <EndpointRowStateBadge endpoint={e} />
       </td>
       <td className="text-muted-foreground">{engineLabel(e.database_id)}</td>
       {/* The trash ages by when it was TRASHED, not when it was last edited —
