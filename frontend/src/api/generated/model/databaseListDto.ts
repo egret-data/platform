@@ -9,12 +9,17 @@ import type { Engine } from './engine';
 
 /**
  * Minimal listing for the Explorer DB picker (no connection internals).
+ *
+ * **Nothing constructs this today.** `GET /ws/{ws}/databases` answers
+ * `Vec<DatabaseDetailDto>`; this type survives only as a published schema
+ * component. Adding a field here therefore ships a documented field that no
+ * response ever carries — Package 1 added `governed` to it and the field was
+ * dead on arrival. If a caller needs a narrower listing, give `list` this
+ * return type first; until then, leave it alone.
  */
 export interface DatabaseListDto {
   id: string;
   name: string;
   engine: Engine;
   delegated: boolean;
-  /** See [`Database::governed`]. */
-  governed: boolean;
 }

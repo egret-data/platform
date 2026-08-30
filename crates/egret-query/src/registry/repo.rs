@@ -122,7 +122,10 @@ impl DatabaseRepo {
         .bind(created_by.map(|u| u.0))
         .bind(workspace_id)
         .bind(input.delegated)
-        .bind(input.governed)
+        // CREATE has nothing to keep, so an absent `governed` is `false` — see
+        // [`DatabaseInput::governed`] for why absence means something different
+        // on UPDATE.
+        .bind(input.governed.unwrap_or(false))
         .fetch_one(&self.db.pool)
         .await
         .map_err(|e| match &e {
@@ -345,9 +348,18 @@ impl DatabaseRepo {
         self.get_in_workspace(workspace_id, id).await?; // 404 if not owned, before any mutation
         let opts = serde_json::to_value(&input.options).unwrap_or(serde_json::json!({}));
 
+        // `governed = COALESCE($10, governed)` and NOT `governed = $10`. This is
+        // a whole-row update, so every other column here is overwritten by
+        // whatever the body carried — including its `serde` default when the
+        // body omitted it. For a security flag that is a control a client which
+        // predates the field CLEARS by accident, editing a port; see
+        // [`crate::registry::model::DatabaseInput::governed`]. NULL means "leave
+        // it", so only an explicit `false` turns it off, and the keep-current
+        // value is read and written in ONE statement rather than across a
+        // read-modify-write with a window in it.
         sqlx::query(
             "UPDATE query.databases SET name=$2, engine=$3, host=$4, port=$5, options=$6, \
-                 secret_id=$7, delegated=$9, governed=$10, updated_at=now() \
+                 secret_id=$7, delegated=$9, governed=COALESCE($10, governed), updated_at=now() \
                WHERE id=$1 AND workspace_id=$8",
         )
         .bind(id)

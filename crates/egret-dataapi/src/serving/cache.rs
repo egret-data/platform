@@ -203,18 +203,18 @@ pub fn cache_key(
 ///
 /// # Cost, per request
 ///
-/// The read this consumes happens on EVERY call, including calls that would have
-/// been cache hits, and including `per_principal` endpoints which used to skip
-/// it entirely — see [`crate::serving::governance`], which is what made it
-/// unconditional and states the trade. The placement is deliberate: checking
-/// after the hit would mean serving the stale entry first and asking afterwards,
-/// which is the leak.
+/// None of its own. The connection this consumes is not read here and not read
+/// by a statement of its own: it arrives on `router::live_snapshot`'s routing
+/// query through a `LEFT JOIN`, so the value both live-connection rules use
+/// costs zero extra round trips and is read at ONE moment. An intermediate
+/// version did read it separately, adding a metastore round trip to every
+/// served request — see [`crate::serving::governance`]'s Cost section, which
+/// records why that was worth folding away.
 ///
-/// If that round-trip ever matters, memoise `database_id → LiveConnection` with
-/// a short TTL rather than moving the check: the window a memo opens is bounded
-/// and stated, while a re-ordered check is unbounded. Nothing memoises today,
-/// because a single indexed primary-key read next to a query execution is not
-/// yet worth the staleness.
+/// The CHECK's placement is unchanged and is deliberate: checking after the hit
+/// would mean serving the stale entry first and asking afterwards, which is the
+/// leak. If a memo is ever wanted anyway, it belongs on the join, not on a
+/// re-ordering of this.
 ///
 /// # Why this compares a PAIR rather than refusing on live `impersonate`
 ///
@@ -248,10 +248,15 @@ pub fn shared_cache_allowed(
     // intended: there, a missing row means the request is already doomed at
     // execution and a governance code would name a flag on a row nobody can look
     // at; here, a missing row would mean serving a principal-LESS cache entry
-    // against a connection nothing can vouch for.
+    // against a connection nothing can vouch for. What makes "doomed at
+    // execution" true rather than nearly true is that [`cache_ttl`] declines to
+    // cache at all without a live row — otherwise this early return on a
+    // `per_principal` snapshot would leave a warm entry answering for a deleted
+    // connection.
     //
-    // BOTH columns came from ONE statement in `LiveConnection::load`. Two reads
-    // would let the pair come from two different moments, and reading only
+    // BOTH columns came from ONE statement — the routing query's `LEFT JOIN`,
+    // which is also where the snapshot came from. Two reads would let the pair
+    // come from two different moments, and reading only
     // `delegated` — which is what this did — was the leak: `options.impersonate`
     // makes the engine run as the caller independently of `delegated`, so a
     // connection could be per-principal at the engine and look shared-safe here
@@ -312,7 +317,32 @@ pub fn shared_cache_allowed(
 ///
 /// A too-LARGE TTL is still clamped rather than refused, because there the
 /// author's intent ("cache for a long time") is honoured, just bounded.
-pub fn cache_ttl(snap: &EndpointSnapshot) -> Option<Duration> {
+///
+/// # A DELETED database row does not cache, and that is what makes the
+/// governance asymmetry honest
+///
+/// [`super::governance_allows_serving`] answers `None` — the row is gone — with
+/// `Ok`, and justifies it with "the request is already doomed at execution
+/// anyway". **That sentence was not true when it was written.** A snapshot with
+/// `cache.scope: per_principal` never reaches [`shared_cache_allowed`]'s refusal
+/// (it returns at the `scope != Shared` line), so a warm entry answered `200`
+/// without the request ever reaching an engine: the one path on which "doomed at
+/// execution" is not a bound, because execution does not happen.
+///
+/// Rather than leave a justification with a hole in it, the fix is to make the
+/// sentence true: with no live connection row there is no TTL, so the cache is
+/// neither read nor written and every such request goes to the engine and fails
+/// there, naming the deleted connection. It is the cheapest of the three
+/// candidates — the others were to refuse `governance_stale` on a missing row
+/// (which names a flag on a row nobody can go and look at, the thing that check
+/// deliberately declines to do) and to leave the comment and weaken it to "in
+/// most cases" (a justification that says "mostly" is not one).
+///
+/// It also stands on its own: an entry cached against a connection that no
+/// longer exists is answering for a configuration nothing can vouch for, which
+/// is the same reason [`shared_cache_allowed`] refuses a missing row outright.
+pub fn cache_ttl(live: Option<LiveConnection>, snap: &EndpointSnapshot) -> Option<Duration> {
+    live?;
     if !snap.cache.enabled || snap.cache.ttl_seconds == 0 {
         return None;
     }
@@ -801,23 +831,52 @@ mod tests {
         );
     }
 
+    /// A connection that exists and is entirely ordinary, so the TTL assertions
+    /// below are about the TTL. `governed: false` because a governed connection
+    /// that runs as the service account never reaches the cache at all —
+    /// `governance_allows_serving` refuses first.
+    fn present() -> Option<LiveConnection> {
+        Some(LiveConnection {
+            governed: false,
+            delegated: false,
+            impersonate: false,
+        })
+    }
+
     #[test]
     fn a_zero_ttl_means_do_not_cache_even_when_enabled() {
         // The one place a published 0 could silently become non-zero behaviour:
         // an earlier version clamped into `1..=CEILING`, so an author spelling
         // "don't cache" as a zero TTL got a one-second cache.
-        assert_eq!(cache_ttl(&snapshot_with_cache(true, 0)), None);
-        assert_eq!(cache_ttl(&snapshot_with_cache(false, 60)), None);
+        assert_eq!(cache_ttl(present(), &snapshot_with_cache(true, 0)), None);
+        assert_eq!(cache_ttl(present(), &snapshot_with_cache(false, 60)), None);
         assert_eq!(
-            cache_ttl(&snapshot_with_cache(true, 60)),
+            cache_ttl(present(), &snapshot_with_cache(true, 60)),
             Some(Duration::from_secs(60))
         );
         // A too-large TTL is still clamped rather than refused — there the
         // author's intent is honoured, just bounded.
         assert_eq!(
-            cache_ttl(&snapshot_with_cache(true, u32::MAX)),
+            cache_ttl(present(), &snapshot_with_cache(true, u32::MAX)),
             Some(Duration::from_secs(TTL_CEILING_SECS))
         );
+    }
+
+    /// A DELETED database row does not cache — which is what makes
+    /// `governance_allows_serving`'s "already doomed at execution" reasoning
+    /// true rather than nearly true. Without this, a `per_principal` snapshot
+    /// (which returns from `shared_cache_allowed` before its missing-row
+    /// refusal) kept answering `200` from a warm entry for a connection that no
+    /// longer exists, with no execution to be doomed by.
+    ///
+    /// The bracketing case is the line above it: the SAME snapshot, one thing
+    /// different — the row is there — and it caches for the full 60s. Without
+    /// that pair this test would pass against a `cache_ttl` that never caches.
+    #[test]
+    fn a_deleted_database_row_does_not_cache() {
+        let snap = snapshot_with_cache(true, 60);
+        assert_eq!(cache_ttl(present(), &snap), Some(Duration::from_secs(60)));
+        assert_eq!(cache_ttl(None, &snap), None);
     }
 
     fn snapshot_with_cache(enabled: bool, ttl_seconds: u32) -> EndpointSnapshot {

@@ -15723,7 +15723,7 @@
             }
           },
           "400": {
-            "description": "Not a single SELECT, a parameter mismatch, a test value that does not satisfy its declared type, or SQL the engine rejects — with the engine's own message",
+            "description": "Not a single SELECT, a parameter mismatch, a test value that does not satisfy its declared type, SQL the engine rejects — with the engine's own message — or a `governed` database reached through a connection that does not run queries as the caller, which is refused here for the same reason publishing onto it is",
             "content": {
               "application/json": {
                 "schema": {
@@ -16092,7 +16092,7 @@
             }
           },
           "409": {
-            "description": "The endpoint is in the trash — restore it before changing which version it serves",
+            "description": "The endpoint is in the trash — restore it before changing which version it serves; or the named version can no longer be published onto its database (it became `governed` without a per-principal connection, or a `shared` cache became unsafe), which is refused here rather than left to 503 on every request",
             "content": {
               "application/json": {
                 "schema": {
@@ -29143,20 +29143,22 @@
             "description": "B3a: run BI queries as the caller's per-user engine JWT (delegation)."
           },
           "governed": {
-            "type": "boolean",
-            "description": "The data behind this connection is governed at the engine (Ranger row\nfilters / column masks). Publishing a Data API endpoint onto it requires\n`delegated` or `options.impersonate`; see [`Database::governed`].\n\n`#[serde(default)]` so a client that predates the field keeps working and\nan omitted value means \"not governed\" — the same direction migration 0130\ndefaulted the column to. The cost of that default is stated there: it is\nthe value that changes nothing, not the value that is safest."
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "The data behind this connection is governed at the engine (Ranger row\nfilters / column masks). Publishing a Data API endpoint onto it — or\npreviewing one against it — requires `delegated` or\n`options.impersonate`; see [`Database::governed`].\n\n# Why this one field is `Option` on a body where nothing else is\n\n`PUT /ws/{ws}/databases/{id}` is a WHOLE-ROW update: every field of this\nbody is written, so an omitted field is written as its `serde` default.\nFor `name` or `port` that is merely an API a client must send in full.\nFor a security flag it is a control that a client which predates the\nfield — a script, an IaC provider, a `curl` recipe copied before this\nshipped — **silently turns off by editing a port**, with a 200, nothing\nlogged, and the endpoints on that connection quietly un-gated. That is\nthe same failure class the flag exists to prevent: a protection that\ndepends on every writer remembering it.\n\nSo `None` means \"leave it as it is\" and only an explicit `false` clears\nit. Absence cannot clear the control; clearing is a thing a client says.\nThe keep-current semantics live in the SQL (`COALESCE($n, governed)` in\n[`crate::registry::repo::DatabaseRepo::update_in_workspace`]) rather than\nin a read-modify-write here, so there is no window between reading the\nold value and writing it back.\n\nOn CREATE there is nothing to keep, and `None` is `false` — the same\ndirection migration 0130 defaulted the column to, for the reason stated\nthere: it is the value that changes nothing, not the value that is\nsafest."
           }
         }
       },
       "DatabaseListDto": {
         "type": "object",
-        "description": "Minimal listing for the Explorer DB picker (no connection internals).",
+        "description": "Minimal listing for the Explorer DB picker (no connection internals).\n\n**Nothing constructs this today.** `GET /ws/{ws}/databases` answers\n`Vec<DatabaseDetailDto>`; this type survives only as a published schema\ncomponent. Adding a field here therefore ships a documented field that no\nresponse ever carries — Package 1 added `governed` to it and the field was\ndead on arrival. If a caller needs a narrower listing, give `list` this\nreturn type first; until then, leave it alone.",
         "required": [
           "id",
           "name",
           "engine",
-          "delegated",
-          "governed"
+          "delegated"
         ],
         "properties": {
           "id": {
@@ -29170,10 +29172,6 @@
           },
           "delegated": {
             "type": "boolean"
-          },
-          "governed": {
-            "type": "boolean",
-            "description": "See [`Database::governed`]."
           }
         }
       },

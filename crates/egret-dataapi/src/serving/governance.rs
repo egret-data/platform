@@ -70,23 +70,29 @@
 //! (see [`ServingError::GovernanceStale`], which explains why "re-publish" is
 //! NOT among them).
 //!
-//! # Cost
+//! # Cost — ZERO extra round trips, which took a second attempt
 //!
-//! One indexed primary-key read on `query.databases` per served request. That is
-//! a real change: it used to be one read for a `shared`-cache endpoint and ZERO
-//! for a `per_principal` one, which is the common case. It is one read, not two,
-//! because [`LiveConnection::load`] fetches all three columns in one statement
-//! and both this check and the shared-cache check are computed from it — two
-//! reads would also let the two checks see two different moments.
+//! The first version read `query.databases` in its own `SELECT`, adding one
+//! metastore round trip to **every** served request — where a `per_principal`
+//! endpoint, the common case, previously paid none. The metastore pool is the
+//! first ceiling the scale audit predicted (~13 round trips per request against
+//! a default pool of 10, shared with all of egret), so a 14th on the hot path is
+//! not a rounding error; the memo that would have relieved it (`database_id →
+//! LiveConnection`, short TTL) was written down and, mercifully, not needed.
 //!
-//! The read is before the cache lookup, and that placement is not negotiable for
-//! the same reason it is not negotiable in `cache`: checking after a hit means
-//! serving the governed rows first and asking afterwards. If the round trip ever
-//! matters, memoise `database_id → LiveConnection` with a short TTL — a bounded,
-//! stateable staleness window — rather than moving or skipping the check.
-
-use egret_metastore::Db;
-use uuid::Uuid;
+//! The three columns now arrive on `router::live_snapshot`'s existing routing
+//! query, through a `LEFT JOIN query.databases ON id = snapshot->>'database_id'`.
+//! One statement, no extra trip, and the snapshot and the connection are read at
+//! ONE moment instead of two — which also removes the (harmless but real)
+//! possibility of the two live-connection rules seeing different rows.
+//!
+//! **What moved is the READ, not the CHECK.** The read now happens at step 2,
+//! ahead of the invoke grant and the rate limiter, because that is where the
+//! routing query is; it costs those refused requests nothing they were not
+//! already paying, since it is the same statement. Both checks still run exactly
+//! where they ran: after the limiter and **before the cache lookup**, which is
+//! not negotiable for the same reason it is not negotiable in `cache` — checking
+//! after a hit means serving the governed rows first and asking afterwards.
 
 use super::ServingError;
 
@@ -107,26 +113,34 @@ pub struct LiveConnection {
 }
 
 impl LiveConnection {
-    /// Read the connection behind `database_id`, or `None` if the row is gone.
+    /// Build one from the three `query.databases` columns as `router`'s routing
+    /// query returned them: `None` for any of them means the `LEFT JOIN` matched
+    /// nothing, i.e. the row is gone.
     ///
-    /// ONE statement for all three columns, so they cannot come from three
-    /// different moments — the same reason `EndpointStore::publish` reads them
-    /// together. `fetch_optional`, not `fetch_one`: a deleted database is a
-    /// state, not a panic-shaped error, and the two callers below answer it
-    /// differently on purpose.
-    pub async fn load(db: &Db, database_id: Uuid) -> Result<Option<Self>, ServingError> {
-        let row: Option<(bool, bool, serde_json::Value)> = sqlx::query_as(
-            "SELECT governed, delegated, options FROM query.databases WHERE id = $1",
-        )
-        .bind(database_id)
-        .fetch_optional(&db.pool)
-        .await
-        .map_err(ServingError::internal)?;
-        Ok(row.map(|(governed, delegated, options)| Self {
-            governed,
-            delegated,
-            impersonate: crate::lifecycle::impersonate_flag(&options),
-        }))
+    /// **There is no `load` any more, and there must not be a second one.** The
+    /// first version of this module read the row in its own `SELECT`, which cost
+    /// every served request an extra metastore round trip at the exact place the
+    /// scale audit named as the first ceiling. The columns now ride in on
+    /// `live_snapshot`'s `LEFT JOIN` — zero extra round trips, and the snapshot
+    /// and the connection are read at ONE moment rather than two. Adding a
+    /// separate reader back would restore both costs and reintroduce the thing
+    /// this type's own comment warns about: two answers to one question.
+    ///
+    /// `governed` and `delegated` are `NOT NULL` in the schema, so a `None` in
+    /// either can only mean an unmatched outer join; `governed` is the one
+    /// discriminated on and the others follow it.
+    pub fn from_row(
+        governed: Option<bool>,
+        delegated: Option<bool>,
+        options: Option<serde_json::Value>,
+    ) -> Option<Self> {
+        Some(Self {
+            governed: governed?,
+            delegated: delegated.unwrap_or(false),
+            impersonate: options
+                .as_ref()
+                .is_some_and(crate::lifecycle::impersonate_flag),
+        })
     }
 
     /// Whether the engine runs this connection's queries as the caller.
@@ -158,6 +172,17 @@ impl LiveConnection {
 /// would name a flag on a row the operator cannot go and look at, and would hide
 /// the one fact that explains everything they are seeing: the connection was
 /// deleted. Refusal is reserved for the state it can actually describe.
+///
+/// **"Doomed at execution" is load-bearing, and it had to be MADE true.** As
+/// first written it was false on one path: a `per_principal` snapshot returns
+/// from [`crate::serving::shared_cache_allowed`] before that function's
+/// missing-row refusal, so a warm cache entry answered `200` for a deleted
+/// database without any execution to be doomed by. [`crate::serving::cache_ttl`]
+/// now takes the live connection and answers `None` when there is no row, so
+/// nothing is served from — or written to — the cache for a connection that no
+/// longer exists, and the sentence above describes every request rather than
+/// most of them. That function's doc carries the reasoning and the two
+/// alternatives it was chosen over.
 pub fn governance_allows_serving(live: Option<LiveConnection>) -> Result<(), ServingError> {
     let Some(live) = live else {
         return Ok(());

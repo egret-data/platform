@@ -376,14 +376,20 @@ pub enum ValidationError {
     // Names both fields it will accept, for the same reason the arm above names
     // both: an author told only "turn on delegation" has been told one of two
     // answers, and the one they can actually reach may be the other.
+    //
+    // "published onto it OR PREVIEWED against it", because both refuse through
+    // this one variant and an author who meets it at Run must not read a
+    // sentence that is only about Publish — see [`crate::preview::run`] for why
+    // preview is gated and what the note it replaced got wrong.
     #[error(
         "this database is marked `governed` — engine-side row filters and column masks apply to \
-         its data — so an endpoint may only be published onto it through a connection that runs \
-         queries as the CALLER. This connection has `delegated: false` and no \
-         `options.impersonate`, so every request would run on the shared service credential and \
-         those filters would be evaluated for the service account rather than for the consumer. \
-         Turn on delegation (or `options.impersonate`) for the connection, publish onto a \
-         connection that already has it, or — if this data is not in fact governed — clear \
+         its data — so a statement may only be published onto it, or previewed against it, \
+         through a connection that runs queries as the CALLER. This connection has \
+         `delegated: false` and no `options.impersonate`, so every request would run on the \
+         shared service credential and those filters would be evaluated for the service account \
+         rather than for the consumer — a preview included, which is why Run is refused too. \
+         Turn on delegation (or `options.impersonate`) for the connection, point the endpoint at \
+         a connection that already has it, or — if this data is not in fact governed — clear \
          `governed` on the database"
     )]
     GovernedDatabaseNeedsPerPrincipalConnection,
@@ -1638,6 +1644,17 @@ impl ConnectionSafety {
 /// The two checks sit side by side in [`validate_endpoint`] so both entry points
 /// — `POST …/validate` and `EndpointStore::publish`'s in-transaction re-run —
 /// get them by construction.
+///
+/// # And at PREVIEW, which is the third caller and not a publish
+///
+/// [`crate::preview::run`] calls this directly, off the `validate_endpoint`
+/// path, because a preview is not a definition being frozen — it is a read of
+/// the same governed data, executed as the SERVICE ACCOUNT exactly like a
+/// served request. That doc comment carries the decision and the measurement
+/// behind it; what matters here is that this predicate now guards every route
+/// by which this crate reads a governed database: preview, try-it, publish,
+/// serve. `runs_per_principal` remains the one expression of "runs as the
+/// caller" and this remains the one expression of the rule built on it.
 ///
 /// **This is not the whole guard, and cannot be.** Both `governed` and
 /// `delegated` are mutable columns, so a legitimately published endpoint becomes
@@ -4951,6 +4968,30 @@ impl EndpointStore {
         workspace: Uuid,
         database: Uuid,
     ) -> Result<ConnectionSafety> {
+        self.connection_safety_opt(workspace, database)
+            .await?
+            .ok_or_else(|| Error::NotFound("database".into()))
+    }
+
+    /// [`Self::connection_safety`] without the `NotFound`, for the one caller
+    /// that has something to say about a database row that is GONE.
+    ///
+    /// Every other caller is deciding what may be written onto a connection, and
+    /// for them "no such connection here" is the answer. [`Self::rollback`] is
+    /// re-checking a version that was published long ago and whose database may
+    /// since have been deleted; a 404 naming a database the caller never
+    /// mentioned would send them looking for the wrong thing, and there is
+    /// nothing to check anyway — a row that does not exist cannot be `governed`.
+    /// Same asymmetry, same reason, as
+    /// [`crate::serving::governance_allows_serving`].
+    ///
+    /// ONE statement for all three columns so they cannot come from three
+    /// different moments; the public wrapper adds only the error.
+    async fn connection_safety_opt(
+        &self,
+        workspace: Uuid,
+        database: Uuid,
+    ) -> Result<Option<ConnectionSafety>> {
         let row: Option<(bool, bool, serde_json::Value)> = sqlx::query_as(
             "SELECT delegated, governed, options \
                FROM query.databases WHERE id = $1 AND workspace_id = $2",
@@ -4960,13 +5001,11 @@ impl EndpointStore {
         .fetch_optional(&self.db.pool)
         .await
         .map_err(db_err)?;
-        let (delegated, governed, options) =
-            row.ok_or_else(|| Error::NotFound("database".into()))?;
-        Ok(ConnectionSafety {
+        Ok(row.map(|(delegated, governed, options)| ConnectionSafety {
             governed,
             delegated,
             impersonate: impersonate_flag(&options),
-        })
+        }))
     }
 
     /// Freeze `draft` into a new immutable version and make it the live one.
@@ -5342,6 +5381,84 @@ impl EndpointStore {
         })
     }
 
+    /// The two rules a FROZEN version can fall out of without being touched,
+    /// asked again against the connection as it is right now.
+    ///
+    /// Both read `query.databases` columns that no version owns:
+    /// [`check_governed_connection`] (the database became `governed`, or the
+    /// connection stopped running per principal) and [`check_cache_scope`] (the
+    /// connection STARTED running per principal under a `shared` cache). Publish
+    /// asks both; nothing re-asked them for a version made live by any other
+    /// route, which is the gap [`Self::rollback`] closes by calling this.
+    ///
+    /// Only these two. It deliberately does NOT re-run [`validate_endpoint`]:
+    /// every other rule there is a property of the frozen definition, which
+    /// cannot have changed, and re-running the lot would make a rollback fail
+    /// for a rule that did not exist when the version was published — turning
+    /// "put yesterday's version back" into an upgrade gate during an incident,
+    /// which is the one moment rollback has to work. What is checked here is the
+    /// pair whose INPUTS are live.
+    ///
+    /// # `param_gate` is the near-miss, and it is left out on purpose
+    ///
+    /// A version frozen before the publish-time parameter gate also 503s
+    /// forever once made live ([`crate::serving::ServingError::ParamGateStale`]),
+    /// so it looks like the same shape. It is not, and the difference is the one
+    /// that matters to whoever is holding the incident: `param_gate_stale`'s
+    /// message tells the operator to RE-PUBLISH, and re-publishing works — the
+    /// gate stamps the new version and the endpoint comes back. `governance_stale`
+    /// cannot say that, because the publish it would send them to is refused by
+    /// the very rule that produced it. Refusing at the point of action buys the
+    /// most where the serve-time message can offer no way out; adding
+    /// `param_gate` here would take a version offline at rollback that the
+    /// operator could otherwise revive with the next thing they were told to do.
+    ///
+    /// # A snapshot this cannot READ is neither a refusal nor a 500
+    ///
+    /// The first version answered `Internal` on a snapshot that would not
+    /// deserialise, reasoning that the only writer is `publish` so anything else
+    /// is corruption worth naming. That is a worse trade than it looks, and a
+    /// test caught it: such a version cannot serve at all —
+    /// `serving::router::live_snapshot` already answers 500 for it — so making
+    /// it live changes nothing this route is responsible for, while refusing the
+    /// rollback takes away the action an operator reaches for during an
+    /// incident, on a route that used to work. This check is for a version that
+    /// is valid and has DRIFTED; a version whose snapshot cannot be read is a
+    /// different failure, not one rollback caused and not one rollback can fix.
+    ///
+    /// Nor is it a hole worth guarding: writing an unreadable snapshot needs
+    /// direct database access, which is already past every gate in this file.
+    async fn check_version_still_publishable(
+        &self,
+        workspace: Uuid,
+        raw: serde_json::Value,
+    ) -> Result<()> {
+        let Ok(snap) = serde_json::from_value::<EndpointSnapshot>(raw) else {
+            return Ok(());
+        };
+        let Some(conn) = self
+            .connection_safety_opt(workspace, snap.database_id)
+            .await?
+        else {
+            return Ok(());
+        };
+        let conflict = |e: ValidationError| {
+            Error::Conflict(format!(
+                "this version cannot be made live as things stand: {e}"
+            ))
+        };
+        // Governance first, for the same reason `validate_endpoint` puts the
+        // cache rule first there and this one second: the ordering names which
+        // fix the operator hears about, and here the two are the reverse of
+        // publish's case. At publish the author is editing the DRAFT, so the
+        // rule about a field they are holding comes first; at rollback the
+        // version is immutable and BOTH fixes are on the database, so the one
+        // that decides whether the data may be read at all leads.
+        check_governed_connection(conn).map_err(conflict)?;
+        check_cache_scope(&snap.cache, conn.delegated, conn.impersonate).map_err(conflict)?;
+        Ok(())
+    }
+
     /// Point `live_version_id` at an existing version of THIS endpoint.
     ///
     /// `v.endpoint_id = e.id` in the statement below is the containment predicate:
@@ -5362,6 +5479,37 @@ impl EndpointStore {
     /// TRASHED endpoint succeeded: it silently repointed which frozen SQL the
     /// endpoint would serve the moment anything enabled it. A guarantee that lives
     /// in a constraint on `state` cannot cover a writer that does not touch `state`.
+    ///
+    /// # The two LIVE-CONNECTION rules are re-checked, because rollback is a
+    /// publish decision wearing different clothes
+    ///
+    /// [`check_governed_connection`] and [`check_cache_scope`] both read columns
+    /// on `query.databases` that move independently of any version. A version
+    /// frozen when the database was ungoverned, or when the connection did not
+    /// run per principal, is a version `publish` would REFUSE today — and
+    /// rollback used to make exactly that version live, whereupon the serving
+    /// path answered `503 governance_stale` (or `cache_scope_stale`) to every
+    /// consumer, forever, with the explanation arriving nowhere near the act
+    /// that caused it. The operator's next move is a *different* endpoint's
+    /// settings page, and nothing told them so.
+    ///
+    /// So both are asked here, against the TARGET version's frozen snapshot and
+    /// the connection as it is right now, and a refusal is a `409` carrying the
+    /// publish-time sentence. `Conflict`, not `InvalidInput`: the body named a
+    /// version that exists and belongs to this endpoint, so nothing about the
+    /// request is malformed — the endpoint is in a state this act cannot be
+    /// asked of, which is the same thing the trash case answers here.
+    ///
+    /// **No transaction, and that is not an oversight.** `endpoint_versions` is
+    /// immutable, so the snapshot read below cannot be stale by the time the
+    /// UPDATE runs; and the connection columns are LIVE, so no lock held here
+    /// could stop them moving a millisecond after commit — which is precisely
+    /// why [`crate::serving::governance_allows_serving`] exists and stays the
+    /// authority. This check is about telling the operator at the point of
+    /// action, not about making the window smaller.
+    ///
+    /// A database row that has been DELETED is not refused, for the reason
+    /// [`Self::connection_safety_opt`] gives.
     pub async fn rollback(
         &self,
         workspace: Uuid,
@@ -5372,6 +5520,29 @@ impl EndpointStore {
             VersionRef::Number(n) => (Some(n), None),
             VersionRef::Id(v) => (None, Some(v)),
         };
+        // Resolve the target's SNAPSHOT first, under exactly the predicates the
+        // UPDATE below uses, so a version this cannot see is not one the UPDATE
+        // would have written either. `None` here is left to the UPDATE to
+        // report: it owns the 404/409 split, and duplicating that decision is
+        // how the two answers drift apart.
+        let target_snapshot: Option<serde_json::Value> = sqlx::query_scalar(
+            "SELECT v.snapshot \
+               FROM dataapi.endpoint_versions v \
+               JOIN dataapi.endpoints e ON e.id = v.endpoint_id \
+              WHERE e.id = $1 AND e.workspace_id = $2 \
+                AND e.deleted_at IS NULL \
+                AND (v.version = $3 OR v.id = $4)",
+        )
+        .bind(id)
+        .bind(workspace)
+        .bind(number)
+        .bind(version_id)
+        .fetch_optional(&self.db.pool)
+        .await
+        .map_err(db_err)?;
+        if let Some(raw) = target_snapshot {
+            self.check_version_still_publishable(workspace, raw).await?;
+        }
         let row: Option<(Uuid, i32, String)> = sqlx::query_as(
             "UPDATE dataapi.endpoints e SET live_version_id = v.id, updated_at = now() \
                FROM dataapi.endpoint_versions v \

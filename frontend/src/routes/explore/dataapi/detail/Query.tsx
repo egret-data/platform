@@ -467,13 +467,15 @@ export default function Query() {
           {/* The refusal an author would otherwise meet only at Publish, said at
               the moment the database is chosen.
 
-              Note what it does NOT say: nothing about the PREVIEW, which keeps
-              working. A preview runs as the author under the author's own engine
-              policy and returns rows only to them; it is publishing that hands
-              that reach to a consumer, which is where the server's rule sits
-              (`preview.rs`, `lifecycle::check_governed_connection`). Warning
-              that preview is affected would be false, and the author would learn
-              it was false the first time they pressed Run. */}
+              It names Run too, because Run is refused too. An earlier version of
+              this comment claimed the opposite — "a preview runs as the author,
+              under the author's own engine policy" — and that was simply untrue:
+              `preview::run` goes through the same `execute_as` path as a served
+              request, so on a connection that is neither delegated nor
+              impersonating the engine sees the SERVICE ACCOUNT and the preview
+              returns unmasked rows. The server gates it now
+              (`preview::run` → `lifecycle::check_governed_connection`), and this
+              sentence has to match or the author finds out at the first press. */}
           {governedWithoutPerPrincipal(
             (databases ?? []).find((d) => d.id === form.database_id),
           ) ? (

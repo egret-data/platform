@@ -948,9 +948,13 @@ async fn run(
         .filter(|w| w.id.0 == principal.workspace_id && w.status == "active")
         .ok_or(ServingError::NotFound)?;
 
-    let (endpoint_id, version, snap) = live_snapshot(&st.db, ws.id.0, method.as_str(), &path)
-        .await?
-        .ok_or(ServingError::NotFound)?;
+    // `live_conn` rides in on this same statement — see `live_snapshot`. It is
+    // READ here, at step 2, and ACTED ON below, after the invoke grant and the
+    // limiter: nothing between the two consults it.
+    let (endpoint_id, version, snap, live_conn) =
+        live_snapshot(&st.db, ws.id.0, method.as_str(), &path)
+            .await?
+            .ok_or(ServingError::NotFound)?;
     // From here every failure is attributable to a specific published version,
     // which is what makes "this endpoint started 503ing at 14:02" answerable
     // from the log alone.
@@ -1025,11 +1029,6 @@ async fn run(
     if !snap.params.is_empty() && snap.param_gate < egret_dataapi_api::PARAM_GATE {
         return Err(ServingError::ParamGateStale);
     }
-    // ONE read of the live `query.databases` row, feeding BOTH live-connection
-    // rules below. Two reads would let the two checks see the connection at two
-    // different moments; the cost of this one — it is now paid by every request,
-    // not only by `shared`-cache ones — is stated in `serving::governance`.
-    let live_conn = LiveConnection::load(&st.db, snap.database_id).await?;
     // Package 1. BEFORE the cache lookup, for the reason every check on this
     // path is before it: a warm entry would otherwise keep answering with
     // governed rows read under the service account for the whole of its TTL.
@@ -1068,8 +1067,10 @@ async fn run(
     );
 
     // `cache_ttl` is the single decision about whether this endpoint caches at
-    // all: `enabled: false` and a `ttl_seconds` of 0 both answer `None`.
-    let ttl = cache_ttl(&snap);
+    // all: `enabled: false`, a `ttl_seconds` of 0, and a database row that is
+    // GONE all answer `None`. The third is what keeps `governance`'s
+    // missing-row reasoning honest — see that function's doc.
+    let ttl = cache_ttl(live_conn, &snap);
     // Counted INSIDE this `if`, so an endpoint with caching off contributes
     // neither a hit nor a miss. Counting its every success as a miss would put a
     // 0% hit rate on a dashboard for an endpoint that has no cache to miss.
@@ -2061,16 +2062,47 @@ async fn invoke_allowed(
 /// The `state = 'live'` predicate is what makes a DISABLED endpoint a 404: the
 /// row and its `live_version_id` both survive a disable (that is the point — an
 /// enable must restore the same version), so the join alone would still find it.
+/// # The `LEFT JOIN` carries the live connection, and costs nothing
+///
+/// `d.governed, d.delegated, d.options` are the three columns
+/// [`governance_allows_serving`] and [`shared_cache_allowed`] decide from, and
+/// they ride in here rather than in a `SELECT` of their own: same statement,
+/// same round trip, and the snapshot and the connection are then read at ONE
+/// moment. See [`super::governance`]'s Cost section for why the round trip
+/// mattered enough to fold.
+///
+/// `LEFT`, so a DELETED database still routes: `governed` comes back `NULL`, the
+/// column is `NOT NULL` in the schema, and [`LiveConnection::from_row`] reads
+/// that as "the row is gone" — a state both readers answer deliberately, and
+/// differently. An INNER join would instead turn a deleted connection into a
+/// 404, hiding the one fact that explains everything the operator is seeing.
+///
+/// The join key is the SNAPSHOT's `database_id`, not `e.database_id`. They are
+/// usually the same and are allowed to differ: `e.database_id` follows the
+/// DRAFT, so an author who re-points the picker without publishing would
+/// otherwise have the safety of a live version decided by a connection that
+/// version never used. The `::uuid` cast can only fail on a snapshot `publish`
+/// did not write, which is the same corruption the `from_value` below answers
+/// with a 500.
 async fn live_snapshot(
     db: &Db,
     ws: Uuid,
     method: &str,
     path: &str,
-) -> Result<Option<(Uuid, i32, EndpointSnapshot)>, ServingError> {
-    let row: Option<(Uuid, i32, serde_json::Value)> = sqlx::query_as(
-        "SELECT e.id, v.version, v.snapshot \
+) -> Result<Option<(Uuid, i32, EndpointSnapshot, Option<LiveConnection>)>, ServingError> {
+    type Row = (
+        Uuid,
+        i32,
+        serde_json::Value,
+        Option<bool>,
+        Option<bool>,
+        Option<serde_json::Value>,
+    );
+    let row: Option<Row> = sqlx::query_as(
+        "SELECT e.id, v.version, v.snapshot, d.governed, d.delegated, d.options \
          FROM dataapi.endpoints e \
          JOIN dataapi.endpoint_versions v ON v.id = e.live_version_id \
+         LEFT JOIN query.databases d ON d.id = (v.snapshot->>'database_id')::uuid \
          WHERE e.workspace_id = $1 AND e.method = $2 AND e.path = $3 \
            AND e.state = 'live'",
     )
@@ -2081,14 +2113,19 @@ async fn live_snapshot(
     .await
     .map_err(ServingError::internal)?;
 
-    let Some((id, version, raw)) = row else {
+    let Some((id, version, raw, governed, delegated, options)) = row else {
         return Ok(None);
     };
     // A snapshot that will not deserialise is OUR fault, not the caller's: the
     // only writer is publish. 500, not 404 — a 404 would quietly hide a
     // corrupted or forward-incompatible version behind "no such endpoint".
     let snapshot: EndpointSnapshot = serde_json::from_value(raw).map_err(ServingError::internal)?;
-    Ok(Some((id, version, snapshot)))
+    Ok(Some((
+        id,
+        version,
+        snapshot,
+        LiveConnection::from_row(governed, delegated, options),
+    )))
 }
 
 /// The `Authorization: Bearer …` value, or [`ServingError::Unauthorized`].

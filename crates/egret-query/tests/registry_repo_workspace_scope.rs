@@ -77,7 +77,7 @@ fn input(name: &str) -> DatabaseInput {
         secret_id: None,
         new_secret: None,
         delegated: false,
-        governed: false,
+        governed: None,
     }
 }
 

@@ -2,9 +2,17 @@
 //!
 //! # What this is, in one line
 //!
-//! The author's on-screen draft, run as the AUTHOR, through the same validation
-//! and render path publish and serving use, capped at 100 rows, with none of the
-//! four consumer-facing side effects.
+//! The author's on-screen draft, run with the AUTHOR as the principal, through
+//! the same validation and render path publish and serving use, capped at 100
+//! rows, with none of the four consumer-facing side effects.
+//!
+//! "With the author as the principal" is the careful phrasing and it is not
+//! pedantry. Whether the ENGINE evaluates its policy for that user is decided by
+//! `execution::delegation_for`, not by this route: on a connection that is
+//! neither `delegated` nor `options.impersonate` the query runs on the service
+//! account, so a preview reads whatever that account may read. This module said
+//! the stronger thing for a while and Package 1 leaned on it; on a `governed`
+//! database [`run`] now refuses instead — its doc comment carries the decision.
 //!
 //! # ONE statement runs; the endpoint's OTHER statements are still an input
 //!
@@ -775,8 +783,11 @@ async fn validate_off_the_worker(
 /// carries the argument in full.
 ///
 /// Preview needs it in both directions. A generated `DELETE FROM t` would run
-/// **as the author**, against a real engine, from a route whose whole error
-/// contract is "pass the engine's message through". And a generated template
+/// against a real engine from a route whose whole error contract is "pass the
+/// engine's message through" — and NOT, as this sentence used to say, "as the
+/// author": on a connection that is neither delegated nor impersonating it
+/// would run on the SERVICE ACCOUNT's credential, which is a stronger reason to
+/// refuse it here rather than a weaker one. And a generated template
 /// carrying a comparison `check_static` misses would preview GREEN with
 /// over-broad rows and serve exactly the same way — a silent wrong answer shown
 /// to the one person who could have caught it.
@@ -850,6 +861,57 @@ async fn generate_off_the_worker(
 /// not learn the shape of the tables, and an author who owns the SQL cannot fix a
 /// syntax error from a sanitised message. That inversion is why this expression
 /// must never be reachable below `data_api_endpoint:manage`.
+///
+/// # Preview is GATED on a governed database — and the note it replaces was false
+///
+/// Package 1's first draft did not gate preview, and justified it in a comment
+/// here and in the UI with: *"a preview runs as the author, under the author's
+/// own engine policy."* **`preview` does no such thing.** It calls
+/// `execute_as_with_params`, which reaches `connect_as` →
+/// `execution::delegation_for` (`egret-query/src/execution/mod.rs:43-88`); on a
+/// connection with `delegated: false` and no `options.impersonate` that arm
+/// mints no bearer, Trino's connector sends the SERVICE user as `X-Trino-User`
+/// (`execution/connector/trino.rs`: `bearer_token.is_some() || impersonate`) and
+/// StarRocks issues no `EXECUTE AS` (`connector/starrocks.rs`:
+/// `bearer_token.is_none() && impersonate`). Preview on such a connection runs
+/// as the service account — the exact identity this package exists to refuse —
+/// and returns the UNMASKED rows to whoever holds `data_api_endpoint:manage`.
+///
+/// So there were two defensible ends: make the sentence true by gating, or
+/// delete the sentence and say what preview really runs as. **Gating was
+/// chosen**, for four reasons, in order of weight:
+///
+/// 1. The rule the package added is "on a governed database, a Data API read
+///    runs as the caller". Publish, serve and try-it all enforce it; a preview
+///    that does not is not a smaller version of the rule, it is a hole in it,
+///    reachable from the same page as the refusal.
+/// 2. It is a real narrowing, not a no-op. The exposure is pre-existing —
+///    preview already grants arbitrary `SELECT` to a `:manage` holder — but
+///    "pre-existing" is a description of how the hole got there, not an argument
+///    for leaving it under the one flag an admin sets to close exactly it.
+/// 3. It costs nothing to enforce and nothing to authorise. The scope check
+///    above ALREADY reads the three columns; the gate is the value it was
+///    throwing away. And the predicate is `governed && !runs_per_principal`, so
+///    on every ungoverned database — which is every database until an admin acts,
+///    migration 0130 defaulting the column to `false` — authoring is untouched.
+/// 4. On a governed database whose connection IS per-principal, preview keeps
+///    working and now genuinely runs as the author: `delegation_for` mints their
+///    engine JWT, or sends them as the session user. That is the state the
+///    original sentence described, and gating is what makes it the only state in
+///    which a preview of governed data happens.
+///
+/// What it costs, stated rather than hidden: an author may no longer preview SQL
+/// against a governed connection that runs as the service account. They could
+/// never have published it either — [`crate::lifecycle::check_governed_connection`]
+/// refuses that in the same breath — so what is lost is trying out a statement
+/// that cannot ship. The refusal carries that rule's own message, which names the
+/// three edits that clear it, so the author meets the same sentence at Run that
+/// they would have met at Publish rather than a different one.
+///
+/// The gate is NOT a substitute for an engine-side control and must not be read
+/// as one: SQL Lab and notebooks reach the same connections by other routes and
+/// are unchanged by this package (design §6 — data classification is excluded).
+/// This closes the Data API's own door, which is the door this package owns.
 pub(crate) async fn run(
     st: &DataApiState,
     ws: Uuid,
@@ -857,13 +919,13 @@ pub(crate) async fn run(
     body: &PreviewEndpointInput,
 ) -> Result<DataApiPreviewDto, DataApiError> {
     // Workspace containment for a body-supplied id, before anything is rendered
-    // or executed. The flags themselves are unused — preview consults no cache,
-    // and `governed` is deliberately NOT enforced here: a preview runs as the
-    // author, under the author's own engine policy, and returns rows only to
-    // them. It is publishing that hands the author's reach to a consumer, which
-    // is where `check_governed_connection` sits. But this call is the scope
-    // check, so it is not replaceable with a cheaper one.
-    let _ = st.endpoints.connection_safety(ws, body.database_id).await?;
+    // or executed. This id comes from a request body, so it is exactly the shape
+    // that could name another workspace's connection.
+    let conn = st.endpoints.connection_safety(ws, body.database_id).await?;
+    // …and the SAME flags decide whether this preview may run at all. See
+    // [`run`]'s doc comment for why preview is gated and what the sentence that
+    // used to sit here got wrong.
+    crate::lifecycle::check_governed_connection(conn)?;
 
     // Returns the shape decision — which parameters arrive as lists — made
     // across `sql` AND `siblings`, i.e. the endpoint, exactly as publish makes

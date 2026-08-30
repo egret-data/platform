@@ -297,3 +297,141 @@ async fn republishing_does_not_clear_a_governance_refusal() {
         "and it must be refused for the SAME reason, not incidentally: {body}"
     );
 }
+
+/// **Rollback re-asks the two rules whose inputs are LIVE, so a version that
+/// `publish` would refuse cannot be made live by the back door.**
+///
+/// `rollback` writes `live_version_id` and nothing else, and it used to
+/// re-validate nothing at all. So the sequence below — publish twice while the
+/// database is ordinary, mark it governed, roll back — put a version live that
+/// `publish` refuses, whereupon every consumer got `503 governance_stale`
+/// forever and the explanation appeared nowhere near the act that caused it.
+/// The operator's next move is a DIFFERENT page (the database's), and nothing
+/// told them so.
+///
+/// Bracketed on both sides: the same rollback succeeds before the flip and
+/// again after it is cleared, so the 409 is about the flag and not about the
+/// rollback route being broken.
+#[tokio::test]
+async fn rollback_refuses_a_version_publish_would_refuse() {
+    let f = skip_without_db!();
+    let ep = f
+        .publish("/rollback-gov", f.database_id, no_cache(), no_limits())
+        .await;
+    // A second version of the SAME endpoint, so there is something to roll back
+    // FROM. `publish` on an existing endpoint id freezes v2.
+    let (status, body) = f
+        .mgmt_post(
+            &format!("/api/ws/{}/data-api/endpoints/{ep}/publish", f.ws_slug),
+            Some(serde_json::json!({})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "second publish: {body}");
+    assert_eq!(body["version"].as_i64(), Some(2), "{body}");
+
+    let roll_back_to_v1 = || async {
+        f.mgmt_post(
+            &format!("/api/ws/{}/data-api/endpoints/{ep}/rollback", f.ws_slug),
+            Some(serde_json::json!({ "version": 1 })),
+        )
+        .await
+    };
+
+    // Anti-triviality FIRST: the rollback itself works.
+    let (status, body) = roll_back_to_v1().await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the rollback must work while nothing is governed, or the refusal below \
+         proves nothing: {body}"
+    );
+    assert_eq!(body["version"].as_i64(), Some(1), "{body}");
+
+    // ONE column, on the database.
+    f.set_database_governed(f.database_id, true).await;
+
+    let (status, body) = roll_back_to_v1().await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "a version that `publish` refuses must not be reachable by rollback — \
+         it would 503 on every request with the explanation arriving nowhere \
+         near the act: {body}"
+    );
+    let text = body.to_string();
+    assert!(
+        text.contains("governed"),
+        "the refusal must name the flag that caused it, at the point of action: {body}"
+    );
+    assert!(
+        text.contains("delegated") && text.contains("impersonate"),
+        "and both ways out, exactly as publish names them: {body}"
+    );
+
+    // It reads the live column rather than latching: clear the flag and the same
+    // rollback goes through.
+    f.set_database_governed(f.database_id, false).await;
+    let (status, body) = roll_back_to_v1().await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+/// The same gap for the OTHER live-input rule, which the reviewer asked be
+/// closed together or explained: a `shared`-cache version published on a
+/// connection that has since become per-principal.
+///
+/// `check_cache_scope` refuses that at publish; serving refuses it with
+/// `cache_scope_stale`. Rollback used to make it live regardless, which is the
+/// same "explanation nowhere near the action" shape as the test above — and
+/// leaving one of the pair open would have taught the next reader that rollback
+/// re-validates, which would then be half true.
+#[tokio::test]
+async fn rollback_refuses_a_shared_cache_version_on_a_now_per_principal_connection() {
+    let f = skip_without_db!();
+    let shared_cache = serde_json::json!({ "enabled": true, "ttl_seconds": 60, "scope": "shared" });
+    let ep = f
+        .publish("/rollback-cache", f.database_id, shared_cache, no_limits())
+        .await;
+    let (status, body) = f
+        .mgmt_post(
+            &format!("/api/ws/{}/data-api/endpoints/{ep}/publish", f.ws_slug),
+            Some(serde_json::json!({})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "second publish: {body}");
+
+    let roll_back_to_v1 = || async {
+        f.mgmt_post(
+            &format!("/api/ws/{}/data-api/endpoints/{ep}/rollback", f.ws_slug),
+            Some(serde_json::json!({ "version": 1 })),
+        )
+        .await
+    };
+
+    let (status, body) = roll_back_to_v1().await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the rollback works to begin with: {body}"
+    );
+
+    // The connection starts running queries as the caller. The frozen `shared`
+    // scope is now a cross-principal cache.
+    f.set_database_delegated(f.database_id, true).await;
+
+    let (status, body) = roll_back_to_v1().await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "a `shared` cache on a connection the engine now filters per principal \
+         is one principal's rows served to another; publish refuses it and \
+         rollback must not be the way around: {body}"
+    );
+    assert!(
+        body.to_string().contains("shared"),
+        "the refusal must name the scope that caused it: {body}"
+    );
+
+    f.set_database_delegated(f.database_id, false).await;
+    let (status, body) = roll_back_to_v1().await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}

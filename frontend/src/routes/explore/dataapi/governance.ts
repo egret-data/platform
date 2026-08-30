@@ -40,9 +40,19 @@ export function governedWithoutPerPrincipal(
  * The one sentence every surface shows for it, so an author reads the same
  * explanation on the create page, in the Query tab's picker, and — with the
  * server's own wording — in the refusal itself.
+ *
+ * It names **Run as well as Publish**, and that is a correction rather than an
+ * addition. The first version of this string said only that publishing would be
+ * refused, on the belief that a preview "runs as the author, under the author's
+ * own engine policy". It does not: `preview::run` executes through the same
+ * `execute_as` path as a served request, so on a connection that is neither
+ * delegated nor impersonating the ENGINE sees the service account and the author
+ * reads unmasked rows. The server now refuses the preview too — see
+ * `preview::run`'s doc comment — and an author who was told Run still worked
+ * would find out otherwise on the first press.
  */
 export const GOVERNED_BLOCKED_MESSAGE =
   "This database is governed: its row filters and column masks are applied per user at the engine. " +
   "A query here would run on the shared service credential, so every consumer would read what that " +
-  "account can read. Publishing will be refused until the connection has per-user delegation (or " +
-  "impersonation) turned on.";
+  "account can read. Running and publishing are both refused until the connection has per-user " +
+  "delegation (or impersonation) turned on.";

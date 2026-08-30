@@ -609,8 +609,14 @@ function DatabaseConnDialog({
       // B3a: run BI queries as the caller's per-user engine JWT (delegation).
       delegated,
       // Package 1: the data behind this connection is filtered per user at the
-      // engine, so a Data API endpoint may only be published onto it when the
-      // query runs as the caller.
+      // engine, so a Data API endpoint may only be run or published onto it when
+      // the query runs as the caller.
+      //
+      // Sent EXPLICITLY, always. The field is optional on the wire and an
+      // omitted one now means "leave it as it is" rather than `false`, so this
+      // page could no longer clear the flag by forgetting it — but a form whose
+      // switch is off must be able to turn it off, and "the value the user is
+      // looking at" is the only thing this dialog may send.
       governed,
       // Reference an existing named secret or create a new one. On edit with no
       // change, secretSel is `{}` so the backend keeps the current secret.
@@ -793,7 +799,7 @@ function DatabaseConnDialog({
               </div>
               <p className="text-xs text-muted-foreground">
                 {governed && !delegated && !impersonate
-                  ? "Row filters and column masks are applied per user at the engine. Data API endpoints cannot be published onto this connection until per-user delegation or impersonation is on, and any already published stop serving."
+                  ? "Row filters and column masks are applied per user at the engine. Data API endpoints on this connection cannot be run or published until per-user delegation or impersonation is on, and any already published stop serving."
                   : "Row filters and column masks are applied per user at the engine. Data API endpoints on this connection must run queries as the caller."}
               </p>
             </div>
