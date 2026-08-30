@@ -45,6 +45,19 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::load().context("loading configuration")?;
     config.validate().map_err(|e| anyhow::anyhow!(e))?;
     init_tracing(&config);
+    // Beside tracing, and for the same reason: both are process-wide sinks that
+    // have to exist before anything that writes to them runs. Every
+    // `metrics::counter!` in the tree records into a no-op recorder until this
+    // line, so instrumentation that fires during boot would otherwise be
+    // silently dropped — and `GET /metrics` would answer 503 while the server
+    // served traffic.
+    //
+    // Propagated rather than warned about. The two ways this can fail are an
+    // invalid bucket list (a constant in `egret-server`) and a recorder already
+    // installed (impossible: nothing else installs one) — so a failure here is a
+    // bug in this process, not an environment egret should carry on into.
+    egret_server::install_metrics_recorder()
+        .map_err(|e| anyhow::anyhow!("installing the metrics recorder: {e}"))?;
 
     match cli.command {
         Command::Serve => serve(config).await,

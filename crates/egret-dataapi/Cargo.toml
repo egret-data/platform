@@ -38,6 +38,11 @@ chrono.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
+# The metrics FACADE only (`counter!`/`histogram!`). No recorder, no exporter:
+# a library crate must not decide how a process exposes its metrics, and until
+# `egret-bin` installs one every macro here compiles to a no-op. See
+# `serving/metrics.rs` for the label set and why it is bounded.
+metrics.workspace = true
 tokio.workspace = true
 async-trait.workspace = true
 # Client-secret hashing (create) + verification (the `ClientVerifier` impl).
@@ -87,6 +92,10 @@ egret-test-db.workspace = true
 # replayed catalog one; without a subscriber to capture the events, that promise
 # was prose and stayed false through a whole review.
 tracing-subscriber.workspace = true
+# `serving_metrics.rs` installs a REAL Prometheus recorder and scrapes it, so
+# the assertions are about a value that MOVED on the shipped path rather than
+# about a counter's existence. Dev-only: the exporter is `egret-server`'s.
+metrics-exporter-prometheus.workspace = true
 # `CedarPdp::build` needs an `EventBus` — the route tests run against the REAL
 # PDP, not a mocked decision, so a mis-scoped permission cannot pass.
 egret-events.workspace = true

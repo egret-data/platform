@@ -17,6 +17,10 @@ pub mod access_log;
 pub mod auth;
 pub mod cache;
 pub mod error;
+/// Prometheus instrumentation for this surface. `pub` because the composition
+/// root calls [`metrics::describe`] once at startup; everything else in it is
+/// crate-private.
+pub mod metrics;
 pub(crate) mod params;
 pub mod ratelimit;
 pub mod router;

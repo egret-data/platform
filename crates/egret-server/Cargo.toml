@@ -28,6 +28,11 @@ tracing.workspace = true
 # OpenAPI aggregator (E0·P4): base doc + `.merge(egret_query::openapi())`,
 # served at GET /api-docs/openapi.json. P4b adds one `.merge(...)` per crate.
 utoipa.workspace = true
+# The recorder + text renderer behind `GET /metrics`. This crate owns the
+# route, so it is the only one that names the exporter; every instrumented
+# crate depends on the `metrics` facade instead. Already in the tree at this
+# version via lakekeeper's `axum-prometheus`, so it adds no build.
+metrics-exporter-prometheus.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true
@@ -42,3 +47,6 @@ chrono.workspace = true
 # router: `QueryExecPort` for the fake engine, `uuid` for the token claims.
 egret-query-api.workspace = true
 uuid.workspace = true
+# `metrics_endpoint.rs` drives the composed router and asserts a counter's
+# VALUE moved, which needs the facade to increment through.
+metrics.workspace = true
