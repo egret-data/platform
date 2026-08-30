@@ -57,6 +57,7 @@ import { ApiError } from "@/api/client";
 import { ParamLocation, ParamType, type DataApiEndpointDto, type DataApiServiceAccountDto } from "@/api/generated/model";
 import type { EndpointDetailContext } from "@/routes/explore/dataapi/EndpointDetail";
 import TryIt from "@/routes/explore/dataapi/detail/TryIt";
+import { expectChipTone } from "./expectChipTone";
 import { expectSectionIntroCapsItsProse, expectSectionLeavesWidthToThePage, sectionRootOf } from "./sectionWidth";
 
 function makeEndpoint(overrides: Partial<DataApiEndpointDto> = {}): DataApiEndpointDto {
@@ -347,6 +348,41 @@ describe("TryIt", () => {
     expect(screen.getByText(/"row_count": 1/)).toBeInTheDocument();
     expect(screen.getByText(/GET https:\/\/egret\.test/)).toBeInTheDocument();
     expect(screen.getByText(OK.request.curl)).toBeInTheDocument();
+  });
+
+  /**
+   * BOTH OUTCOME ARMS ARE BOUND TO `CHIP_TONE`.
+   *
+   * The refusal arm is where this whole accessibility pass found its worst
+   * reading. It used to be `undefined`, so it fell through to `Badge`'s DEFAULT
+   * variant — solid `bg-primary` at 3.50:1, the page's action colour — and a
+   * `500` was painted in the same teal as the Run button, one line above an
+   * alert calling the same call a refusal.
+   *
+   * Nothing held the fix in place. The assertions above look at the status
+   * NUMBER, which is text either way; the browser spec measures `CHIP_TONE`'s
+   * values, which stay healthy no matter what this file does with them. Put
+   * `: undefined` back and every one of them stays green.
+   *
+   * Expected classes are read out of `CHIP_TONE`, never typed, so a contrast
+   * change moves the map and these guards together. The ratios themselves are
+   * measured in `tests/e2e/dataapi-badge-ink.spec.ts`.
+   */
+  it("paints a 2xx outcome with CHIP_TONE.success", async () => {
+    mockTry(OK);
+    renderTryIt();
+    await userEvent.click(screen.getByRole("button", { name: /run/i }));
+    expectChipTone(await screen.findByText("200"), "success", "TryIt: 200");
+  });
+
+  it("paints a refused outcome with CHIP_TONE.destructive, never Badge's default fill", async () => {
+    mockTry(REFUSED);
+    renderTryIt();
+    await userEvent.click(screen.getByRole("button", { name: /run/i }));
+    // `expectChipTone` also forbids the other three tones; `bg-primary` is
+    // excluded by requiring `bg-destructive/15`, which the default variant
+    // cannot supply.
+    expectChipTone(await screen.findByText("403"), "destructive", "TryIt: 403");
   });
 });
 

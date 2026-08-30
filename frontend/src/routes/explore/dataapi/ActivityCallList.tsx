@@ -9,6 +9,7 @@ import type { ActivityCallDto, ActivityRange } from "@/api/generated/model";
 import { EmptyState } from "@/components/explore/EmptyState";
 import { ListStates } from "@/components/explore/ListStates";
 import { RelativeTime } from "@/components/explore/RelativeTime";
+import { CHIP_TONE } from "./chipTone";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -414,12 +415,18 @@ function CallRow({
     ? (call.endpoint_name ?? call.endpoint_id)
     : [call.request_method, call.request_path].filter(Boolean).join(" ") || "—";
 
+  // The chip is a scan aid; the STATUS CODE is the information, and it is
+  // already three digits of text — `200` and `500` differ without a hue, which
+  // is why the ink can be flattened to `--foreground` without costing the
+  // column a channel. It has to be: `text-success` on this wash measures
+  // 3.72:1 and `text-destructive` 3.68:1 against WCAG 1.4.3's 4.5:1 for 12px
+  // text (`chipTone.ts`).
   const statusTone =
     call.status_code >= 200 && call.status_code < 300
-      ? "bg-success/15 text-success"
+      ? CHIP_TONE.success
       : call.status_code >= 400
-        ? "bg-destructive/15 text-destructive"
-        : "bg-muted text-muted-foreground";
+        ? CHIP_TONE.destructive
+        : CHIP_TONE.neutral;
 
   return (
     <TableRow>

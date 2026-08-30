@@ -35,6 +35,9 @@ import { fullTimestamp } from "@/lib/relativeTime";
 // passing against a page that had stopped using this key at all.
 import { UNCATEGORIZED_KEY } from "@/components/explore/folders";
 import Endpoints, { folderCollapseKey } from "@/routes/explore/dataapi/Endpoints";
+// The shipped glyph map, so a forbidden glyph is named by its TIER and not by a
+// class string that lucide is free to rename out from under the assertion.
+import { TIER_ICON } from "@/routes/explore/dataapi/endpointState";
 
 function mockList(over: Partial<{ data: unknown; isError: boolean; isLoading: boolean; error: unknown }> = {}) {
   vi.mocked(api.useDataApiListEndpoints).mockReturnValue(
@@ -276,6 +279,139 @@ describe("Endpoints", () => {
     // There is no separate Version column — see the mutation-checked test below
     // for why that information lives in the State badge instead.
     expect(screen.queryByText("Version")).not.toBeInTheDocument();
+  });
+
+  /**
+   * THE ROW BADGE IS THE EDITOR'S PILL, AND IT IS NOT ALLOWED TO GUESS.
+   *
+   * The list kept its own tone map — `live: "bg-success/15 text-success"`,
+   * measured at 3.72:1 in Chromium against WCAG 2.2 1.4.3's 4.5:1 for this 12px
+   * text — while the header pill one click away had already been moved to
+   * `--foreground` ink plus a per-tier glyph. Same endpoint, two paintings.
+   *
+   * Moving the list onto the shared component has one trap, and these tests
+   * exist for it. `endpointStateTier` defaults `served` to `"unknown"`, and for
+   * a LIVE endpoint `"unknown"` is a tier of its own: grey `bg-muted` with a
+   * `CircleHelp`. The list does not fetch versions, so a naive rewiring paints
+   * every live row as a shrug — and passing `"in-step"` to get the green back
+   * is a claim the list has no evidence for. `endpointStateOnlyTier` is the
+   * third answer, and its return type is what makes the wrong two unreachable.
+   */
+  const ROW_TIERS = [
+    ["live", "bg-success/15"],
+    ["draft", "bg-muted"],
+    ["disabled", "bg-destructive/15"],
+  ] as const;
+
+  /**
+   * The lucide name classes an icon paints, sorted and joined into one identity.
+   *
+   * Taken from the ICON ITSELF rather than typed as a literal, because the
+   * literal is not checkable: `CircleHelp` is an alias of `CircleQuestionMark`
+   * and paints `lucide-circle-question-mark`, `CircleSlash2` paints TWO name
+   * classes, and a `not.toBe("lucide-circle-help")` written from the import name
+   * is true under every possible render. That assertion was written here first
+   * and it survived the mutant it existed to kill.
+   */
+  function glyphOf(Icon: (typeof TIER_ICON)[keyof typeof TIER_ICON]): string {
+    const { container, unmount } = render(<Icon />);
+    const names = lucideNames(container.querySelector("svg")!);
+    unmount();
+    return names;
+  }
+
+  function lucideNames(svg: Element): string {
+    const named = svg
+      .getAttribute("class")!
+      .split(/\s+/)
+      .filter((c) => c.startsWith("lucide-") && c !== "lucide")
+      .sort()
+      .join(" ");
+    // An empty identity would make every comparison below pass by being
+    // uniformly nothing, so it is rejected before anything is compared.
+    expect(named).not.toBe("");
+    return named;
+  }
+
+  /** The state badge of the one row on screen, and the glyph inside it. */
+  function stateBadge() {
+    const icon = screen.getByTestId("endpoint-state-icon");
+    return { className: icon.closest('[data-slot="badge"]')!.className, glyph: lucideNames(icon) };
+  }
+
+  it("a live row is painted LIVE, not `unknown` — the list is not asking about divergence", async () => {
+    // The mutation this pins: `endpointStateTier(endpoint)` in place of
+    // `endpointStateOnlyTier(endpoint)` inside `EndpointRowStateBadge`. It
+    // compiles (`served` is optional) and it type-checks, and it turns every
+    // live row grey with a question mark. Confirmed by making that exact edit:
+    // `tsc` stayed at 0 errors and this test failed on both assertions.
+    mockList({ data: { status: 200, data: [makeEndpoint({ state: "live", live_version_id: "v-1" })] } });
+    renderEndpoints();
+    await screen.findByText("Live");
+    const badge = stateBadge();
+    expect(badge.glyph).toBe(glyphOf(TIER_ICON.live));
+    expect(badge.className).toContain("bg-success/15");
+  });
+
+  it("no row can reach the `diverged` or `unknown` tier, in either channel", async () => {
+    // A row that has not asked whether the draft is ahead must not answer in
+    // either direction, so neither the amber `bg-highlight/15` wash nor the two
+    // glyphs that mean "behind" and "cannot tell" may appear on any state the
+    // list can render. The two glyphs are read off `TIER_ICON`, so a lucide
+    // rename cannot quietly make this vacuous.
+    const forbidden = [glyphOf(TIER_ICON.unknown), glyphOf(TIER_ICON.diverged)];
+    for (const [state] of ROW_TIERS) {
+      mockList({ data: { status: 200, data: [makeEndpoint({ state, live_version_id: "v-1" })] } });
+      const { unmount } = renderEndpoints();
+      await screen.findByTestId("endpoint-state-icon");
+      const badge = stateBadge();
+      expect(forbidden, `${state}: ${badge.glyph}`).not.toContain(badge.glyph);
+      expect(badge.className, state).not.toContain("bg-highlight");
+      unmount();
+    }
+  });
+
+  it("every row state has its own tone AND its own glyph, so state is not carried by colour alone", async () => {
+    const seen: string[] = [];
+    for (const [state, fill] of ROW_TIERS) {
+      mockList({ data: { status: 200, data: [makeEndpoint({ state, live_version_id: "v-1" })] } });
+      const { unmount } = renderEndpoints();
+      await screen.findByTestId("endpoint-state-icon");
+      const badge = stateBadge();
+      // The tier is named by the TEST and the glyph is derived from the shipped
+      // map, so this is not a tautology: the component still has to route the
+      // state to the tier the test names.
+      expect(badge.glyph, state).toBe(glyphOf(TIER_ICON[state]));
+      expect(badge.className, state).toContain(fill);
+      seen.push(badge.glyph);
+      unmount();
+    }
+    // Against the state NAMES rather than `seen.length`, which would read the
+    // table on both sides of the equality and shrink silently with it.
+    expect(ROW_TIERS.map(([state]) => state)).toEqual(["live", "draft", "disabled"]);
+    expect(new Set(seen).size).toBe(3);
+  });
+
+  it("the row badge's ink is --foreground on every state, never a tinted ink", async () => {
+    // Measured in Chromium by painting the composited colour into a 1x1 canvas
+    // and reading the pixel back (`tests/e2e/dataapi-badge-ink.spec.ts`):
+    // `text-success` on `bg-success/15` is 3.72:1 light, `text-destructive` on
+    // `bg-destructive/15` is 3.68:1, and `--foreground` on the same two fills
+    // is 14.76:1 and 13.81:1. Nothing paints in jsdom and nothing here resolves
+    // `oklch()`, so this is the WIRING guard on that decision — that each row
+    // is handed `text-foreground` and no hued ink — and the browser spec is the
+    // measurement.
+    for (const [state] of ROW_TIERS) {
+      mockList({ data: { status: 200, data: [makeEndpoint({ state, live_version_id: "v-1" })] } });
+      const { unmount } = renderEndpoints();
+      await screen.findByTestId("endpoint-state-icon");
+      const { className } = stateBadge();
+      expect(className, state).toContain("text-foreground");
+      for (const ink of ["text-success", "text-destructive", "text-highlight", "text-muted-foreground"]) {
+        expect(className, `${state}: ${ink}`).not.toContain(ink);
+      }
+      unmount();
+    }
   });
 
   it("shows the real error message from the failed query, not just a generic string", async () => {

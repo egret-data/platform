@@ -1,6 +1,8 @@
+import type { ReactNode } from "react";
 import { CircleAlert, CircleCheck, CircleDashed, CircleHelp, CircleSlash2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
+import { CHIP_TONE } from "./chipTone";
 import type {
   DataApiEndpointDto,
   DataApiEndpointVersionDto,
@@ -341,8 +343,8 @@ export function endpointStateTier(
   e: EndpointStateFacts,
   served: DraftVsServed = "unknown",
 ): EndpointStateTier {
-  if (e.state === "disabled") return "disabled";
-  if (e.state !== "live") return "draft";
+  const base = endpointStateOnlyTier(e);
+  if (base !== "live") return base;
   if (served === "ahead") return "diverged";
   if (served === "in-step") return "live";
   // `unknown`, and also `not-serving` — which a `live` endpoint cannot be, so
@@ -352,12 +354,54 @@ export function endpointStateTier(
 }
 
 /**
+ * The tier a surface that is NOT ASKING about divergence can support.
+ *
+ * **This exists because the list page cannot honestly call `endpointStateTier`
+ * at all.** That function defaults `served` to `"unknown"` and, for a `live`
+ * endpoint, `"unknown"` is a TIER: grey `bg-muted` and a `CircleHelp`. The list
+ * does not fetch versions, so it has no `served` to pass, and the default would
+ * paint every live row as a shrug. Passing `"in-step"` to get the green back
+ * would be worse — it is a claim the list has no evidence for, and inventing a
+ * confident answer where none was measured is the exact defect `DraftVsServed`
+ * was introduced to kill.
+ *
+ * **The honest distinction is that "not asking" and "asked and could not tell"
+ * are different facts.** `unknown` means a versions request was made and did
+ * not settle the question; the reader should go look. The list never raised the
+ * question, so it has nothing to report and no reason to nag. Collapsing the
+ * two would be the same mistake in a new place — the mistake that turned a
+ * failed request into a confident `false` and a diverged endpoint into an
+ * in-step one, written up over `DraftVsServed`.
+ *
+ * **Its return type, not a convention, is what keeps the list honest.**
+ * `EndpointStateOnlyTier` does not contain `diverged` or `unknown`, so a list
+ * surface built on this function CANNOT render either — there is no argument to
+ * pass and no branch to reach. A `served` parameter defaulted to something
+ * benign would have made the same promise in prose and left it to be forgotten;
+ * this one is checked by `tsc`.
+ */
+export type EndpointStateOnlyTier = Extract<EndpointStateTier, "live" | "draft" | "disabled">;
+
+export function endpointStateOnlyTier(e: EndpointStateFacts): EndpointStateOnlyTier {
+  if (e.state === "disabled") return "disabled";
+  if (e.state === "live") return "live";
+  return "draft";
+}
+
+/**
  * A distinct glyph per tier, because **state must not be carried by colour
  * alone**. The word already separates the tiers for anyone reading; the glyph
  * separates them at a glance without asking the reader to tell a green chip
  * from an amber one.
+ *
+ * Exported so tests can name a FORBIDDEN glyph by its tier instead of by its
+ * class string: `CircleHelp` is an alias of lucide's `CircleQuestionMark` and
+ * paints `lucide-circle-question-mark`, so a test asserting
+ * `not.toBe("lucide-circle-help")` is true no matter what the component
+ * renders. That assertion was written, and it passed under the mutant it was
+ * written to catch.
  */
-const TIER_ICON: Record<EndpointStateTier, typeof CircleCheck> = {
+export const TIER_ICON: Record<EndpointStateTier, typeof CircleCheck> = {
   live: CircleCheck,
   diverged: CircleAlert,
   unknown: CircleHelp,
@@ -368,24 +412,15 @@ const TIER_ICON: Record<EndpointStateTier, typeof CircleCheck> = {
 /**
  * The tint, and why the INK is `--foreground` on all of them.
  *
- * Measured in Chromium by painting the composited colour into a 1×1 canvas and
- * reading the pixel back — never by parsing `oklch()`, which yields confident
- * garbage in exactly the 2.5–2.6 band the real failures live in:
+ * The pairs themselves, the measurements behind them and the reason the fix is
+ * the ink rather than the token now live in `chipTone.ts`, because four other
+ * Data API surfaces were painting the same chip by hand and one of them (this
+ * pill) had already been fixed while the other four still shipped
+ * `bg-success/15 text-success` at 3.72:1. A rule that lives in one file's
+ * comment is a rule four files can be written without reading.
  *
- *   text-success     on bg-success/15       3.72 light / 7.00 dark
- *   text-destructive on bg-destructive/15   3.68 light / 5.84 dark
- *   text-highlight   on --background        2.56 light / 9.68 dark
- *   text-foreground  on bg-success/15      14.76 light / 15.95 dark
- *   text-foreground  on bg-highlight/15    15.80 light / 15.68 dark
- *   text-foreground  on bg-destructive/15  13.81 light / 16.53 dark
- *   text-foreground  on bg-muted           16.96 light / 14.68 dark
- *
- * This text is 12px (`text-xs`), so the bar is WCAG 2.2 1.4.3's 4.5:1 — not
- * the 3:1 of 1.4.11, which governs non-text. The three tinted inks fail it in
- * light mode; `--foreground` clears it by a factor of three on every tint. So
- * the tint stays (it is the recognition cue the list row already trained) and
- * the ink does not. The tint is decoration: the word and the glyph are what
- * identify the state, so 1.4.11 does not bind on the fill either.
+ * What stays here is the mapping from TIER to tone, which is a judgement about
+ * endpoints and not about colour:
  *
  * `--highlight` for the diverged tier and not `--destructive`: an endpoint
  * serving an older contract than its draft is not broken, it is behind.
@@ -396,13 +431,18 @@ const TIER_ICON: Record<EndpointStateTier, typeof CircleCheck> = {
  * told apart by their word and their glyph, which is what carries state here;
  * a fifth tint would imply this is a fifth thing an endpoint can BE, and it is
  * not, it is the reader's view of it failing.
+ *
+ * Exported so `tests/e2e/dataapi-badge-ink.spec.ts` measures what this actually
+ * PAINTS rather than a string retyped in the spec — jsdom resolves no `oklch()`
+ * and a class assertion returns the same answer with the tokens swapped
+ * (`docs/en/ui-conventions.md` §10).
  */
-const TIER_TONE: Record<EndpointStateTier, string> = {
-  live: "border-transparent bg-success/15 text-foreground",
-  diverged: "border-transparent bg-highlight/15 text-foreground",
-  unknown: "border-transparent bg-muted text-foreground",
-  draft: "border-transparent bg-muted text-foreground",
-  disabled: "border-transparent bg-destructive/15 text-foreground",
+export const TIER_TONE: Record<EndpointStateTier, string> = {
+  live: CHIP_TONE.success,
+  diverged: CHIP_TONE.highlight,
+  unknown: CHIP_TONE.neutral,
+  draft: CHIP_TONE.neutral,
+  disabled: CHIP_TONE.destructive,
 };
 
 /**
@@ -411,7 +451,31 @@ const TIER_TONE: Record<EndpointStateTier, string> = {
  * `aria-hidden` on the glyph, and no `aria-label` on the pill: the accessible
  * name is the visible word, computed the ordinary way, so what a screen reader
  * announces and what the page shows are the same string by construction.
+ *
+ * Shared by both surfaces so the tint and the glyph cannot fork again. They did
+ * fork: the list kept its own `STATE_TONE` map and a bare `<Badge>`, so one
+ * endpoint read as green-ink-on-green in a table and as themed-with-a-glyph one
+ * click away, and the list's copy was the one measuring 3.72:1.
  */
+function StateBadge({
+  tier,
+  className,
+  children,
+}: {
+  tier: EndpointStateTier;
+  className?: string;
+  children: ReactNode;
+}) {
+  const Icon = TIER_ICON[tier];
+  return (
+    <Badge className={cn(TIER_TONE[tier], className)}>
+      <Icon aria-hidden="true" data-testid="endpoint-state-icon" />
+      {children}
+    </Badge>
+  );
+}
+
+/** The EDITOR header's pill, which knows what is served and says so. */
 export function EndpointStateBadge({
   endpoint,
   liveVersion,
@@ -424,12 +488,40 @@ export function EndpointStateBadge({
   served?: DraftVsServed;
   className?: string;
 }) {
-  const tier = endpointStateTier(endpoint, served);
-  const Icon = TIER_ICON[tier];
   return (
-    <Badge className={cn(TIER_TONE[tier], className)}>
-      <Icon aria-hidden="true" data-testid="endpoint-state-icon" />
+    <StateBadge tier={endpointStateTier(endpoint, served)} className={className}>
       {endpointHeaderStateLabel(endpoint, { liveVersion, served })}
-    </Badge>
+    </StateBadge>
+  );
+}
+
+/**
+ * The LIST row's pill — the same tint and the same glyph, over the shorter word
+ * a row can support and over a tier that cannot express divergence.
+ *
+ * It takes no `served` and has nowhere to put one: see `endpointStateOnlyTier`
+ * for why a list that has not fetched versions must not answer that question in
+ * either direction.
+ *
+ * **`live` still gets `CircleCheck` here, and that does not contradict
+ * `endpointHeaderStateLabel`.** That function's comment refuses a bare `Live`
+ * beside a check *in the header*, where the author is looking at a draft they
+ * are editing and the pair would read as "and this draft is what your consumers
+ * receive" — a claim about a comparison. A row carries no draft: nothing is on
+ * screen for `Live ✓` to be a claim ABOUT, and it says only that the row's
+ * state is the serving one, which the word already said. The check marks the
+ * healthy member of {live, draft, disabled}; it does not mark agreement.
+ */
+export function EndpointRowStateBadge({
+  endpoint,
+  className,
+}: {
+  endpoint: EndpointStateFacts;
+  className?: string;
+}) {
+  return (
+    <StateBadge tier={endpointStateOnlyTier(endpoint)} className={className}>
+      {endpointStateLabel(endpoint)}
+    </StateBadge>
   );
 }

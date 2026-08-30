@@ -359,9 +359,14 @@ export default function Alerts() {
                 so this is the one thing on the row that tells them apart.
                 `variant="outline"`, not `variant="success"`: that variant is a
                 hardcoded `bg-green-600` reserved elsewhere in this app for an
-                actual state (Endpoints/Versions/Clients' "Live"/"Active"
-                badges use the `bg-success/15 text-success` OKLCH token for
-                exactly that reason), and a type is not a status. */}
+                actual state, and a type is not a status. Those state badges
+                (Endpoints/Versions/Clients' "Live"/"Active") no longer read
+                `bg-success/15 text-success`, as this comment used to say —
+                that pair measures 3.72:1 against WCAG 1.4.3's 4.5:1, and they
+                now share `dataapi/chipTone.ts`, which keeps the OKLCH tint and
+                puts the ink in `--foreground`. The point this comment is making
+                survives the change: they wear a STATE tone from the token set,
+                and `variant="success"`'s hardcoded green is not one. */}
             {s.type === "dataapi_alert" && (
               <Badge variant="outline" className="ml-1.5 align-middle">
                 Data API
