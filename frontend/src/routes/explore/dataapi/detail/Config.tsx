@@ -38,6 +38,70 @@ function describeColumns(columns: { name: string; ty: string }[], bare = false):
 }
 
 /**
+ * What a served request is given before egret answers it `504`, in seconds.
+ *
+ * `egret_dataapi::serving::SERVING_REQUEST_DEADLINE`. Duplicated here because
+ * this is the one number the warning below is about and there is no endpoint
+ * that reports it — and duplicated SAFELY: the Rust test
+ * `serving::guard::tests::the_config_surface_warns_against_this_modules_deadline`
+ * reads this file and fails if the two stop agreeing, the same device the
+ * ingress annotation is held to.
+ */
+const SERVING_REQUEST_DEADLINE_SECONDS = 50;
+
+/** `LimitsSpec`'s default for `timeout_seconds` (`egret_dataapi_api`). */
+const DEFAULT_TIMEOUT_SECONDS = 30;
+
+/** `TIMEOUT_CEILING_SECS` — serving clamps a larger value down to this. */
+const TIMEOUT_CEILING_SECONDS = 300;
+
+/**
+ * The worst wall clock this configuration can spend, in seconds.
+ *
+ * `statements x clamp(timeout_seconds, 1, 300)`, because the statements run
+ * SEQUENTIALLY (`serving::router`'s execution loop) and each gets the whole
+ * `timeout_seconds` — the value is per statement, not per call, which is the
+ * thing an author reading one number in one box has no way to know.
+ *
+ * The clamp is applied here for the same reason the Details cell names the
+ * ceiling: serving reads `timeout_seconds.clamp(1, TIMEOUT_CEILING_SECS)`, so a
+ * warning computed from the literal typed value would over-report for anyone who
+ * typed 10,000 and under-report for anyone who typed 0.
+ */
+export function worstCaseSeconds(statementCount: number, timeoutSeconds?: number): number {
+  const per = Math.min(Math.max(timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS, 1), TIMEOUT_CEILING_SECONDS);
+  return statementCount * per;
+}
+
+/**
+ * The sentence shown under the Timeout box when this endpoint's worst case
+ * exceeds what a served call is given, or `null` when it does not.
+ *
+ * # Why here and not at the moment a call dies
+ *
+ * A two-statement endpoint at the defaults is 2 x 30 = 60s, past the 50s
+ * serving deadline — and that is LEGAL. Publishing it is not refused and must
+ * not be: a long endpoint is a real thing to want, the author simply has to know
+ * that consumers can be cut off before it finishes. Told at serve time it is a
+ * mystery `504` in someone else's logs; told at Try-it time it is a mystery
+ * `504` in the author's. Told here it is a fact about the two boxes the author
+ * is looking at, at the moment they set them.
+ *
+ * Deliberately NOT a publish refusal, and deliberately not phrased as an error.
+ */
+export function worstCaseWarning(statementCount: number, timeoutSeconds?: number): string | null {
+  const worst = worstCaseSeconds(statementCount, timeoutSeconds);
+  if (worst <= SERVING_REQUEST_DEADLINE_SECONDS) return null;
+  const plural = statementCount === 1 ? "statement" : "statements";
+  return (
+    `This endpoint's worst case is ${worst}s — ${statementCount} ${plural} that may each take ` +
+    `the full timeout, run one after another. A served call is cut off at ` +
+    `${SERVING_REQUEST_DEADLINE_SECONDS}s, so a consumer may get a 504 before it finishes, and so ` +
+    `may Try it. This is allowed — lower the timeout, or split the endpoint, if callers need it to complete.`
+  );
+}
+
+/**
  * Everything about the endpoint as an HTTP object: the URL contract callers use,
  * and the cache / limits / rate-limit policy applied to their calls. Nothing here
  * decides what the query returns — that is `Query`.
@@ -311,6 +375,16 @@ export default function Config() {
               }))
             }
           />
+          {/* Under the box that causes it, not in a banner at the top of the
+              page: the number the author would change is six inches away. It
+              appears and disappears as they type, because it is a property of
+              what is in the two inputs and not of anything the server was
+              asked. */}
+          {worstCaseWarning(form.statements.length, form.limits.timeout_seconds) && (
+            <p className="mt-2 text-sm text-muted-foreground" data-testid="worst-case-warning">
+              {worstCaseWarning(form.statements.length, form.limits.timeout_seconds)}
+            </p>
+          )}
         </ConfigTableRow>
 
         {/* # What a rate limit of `0` means, and why the three rows do not agree

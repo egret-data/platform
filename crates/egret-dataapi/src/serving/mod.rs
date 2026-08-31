@@ -18,6 +18,7 @@ pub mod auth;
 pub mod cache;
 pub mod error;
 pub mod governance;
+pub mod guard;
 /// Prometheus instrumentation for this surface. `pub` because the composition
 /// root calls [`metrics::describe`] once at startup; everything else in it is
 /// crate-private.
@@ -31,6 +32,10 @@ pub use auth::{verify_serving_token, ServingPrincipal, DATA_API_AUDIENCE};
 pub use cache::{cache_key, shared_cache_allowed, CachedResponse, ResponseCache};
 pub use error::{ServingErrorBody, ServingErrorDetail};
 pub use governance::{governance_allows_serving, LiveConnection};
+pub use guard::{
+    INGRESS_READ_TIMEOUT_SECS, SERVING_MAX_BODY_BYTES, SERVING_MAX_CONCURRENCY,
+    SERVING_REQUEST_DEADLINE,
+};
 pub use ratelimit::{Rate, RateLimitStore, TokenBucket};
 pub use router::{
     serving_openapi, serving_router, MetaContract, ServingMeta, ServingResponse, ServingStatus,

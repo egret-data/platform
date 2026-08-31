@@ -55,6 +55,8 @@ use egret_core::{Error, WorkspacePath};
 use egret_workspace::context::WsContext;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::sync::{Arc, OnceLock};
+use tokio::sync::Semaphore;
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -113,6 +115,116 @@ const TRIAL_CLIENT_PREFIX: &str = "trial:";
 /// memory into a management response. See [`TrialResultTooLarge`] for the status
 /// that failure carries and why it is not a 409.
 const MAX_TRIAL_BODY: usize = 4 * 1024 * 1024;
+
+/// A trial is bounded by [`crate::serving::SERVING_REQUEST_DEADLINE`], the
+/// consumer's number, and it does **not** get one of its own.
+///
+/// # Because Try it answers "can a consumer call this endpoint?"
+///
+/// That is the question the feature exists for and the one its copy promises.
+/// A trial that survived where a consumer is cut off would answer a different
+/// question and answer it reassuringly — the exact class of lie this surface
+/// keeps removing, and worse than no Try it at all, because it is the one tool
+/// an author would have used to find the problem.
+///
+/// So there is deliberately no `TRIAL_REQUEST_DEADLINE` constant. A second
+/// number that must equal the first is a drift waiting to happen; passing the
+/// consumer's constant makes the parity a property of the code rather than of
+/// two comments agreeing.
+///
+/// # The argument for a longer trial deadline, and why it fails
+///
+/// It is real as far as it goes: the deadline's derivation is the edge a
+/// consumer crosses (ingress-nginx gives `/data-api` 60 s), and the trial call
+/// itself crosses no edge — [`try_endpoint`] drives the router with
+/// `tower::ServiceExt::oneshot`, in process, with no socket between the halves.
+/// A trial deadline of 120 s was tried on that reasoning.
+///
+/// Two things kill it. First, the trial **request** — `POST …/try` from the
+/// console — is an ordinary browser call, and when `ingress.enabled` it crosses
+/// the same Ingress-wide `proxy-read-timeout: "60"`
+/// (`deploy/helm/egret/templates/ingress.yaml`). So behind an ingress a 120 s
+/// trial deadline is unreachable: nginx answers the author with a generic
+/// gateway error at 60 s instead of egret answering with its own envelope and a
+/// code. Second, and independently of any deployment: a trial that completes at
+/// 90 s tells the author their endpoint works, and a consumer calling it gets
+/// cut off. The bound being *shared* is what makes the answer true.
+///
+/// # What that means for a legal-but-slow endpoint, and where it is said
+///
+/// `limits.timeout_seconds` defaults to 30 and `MAX_STATEMENTS` allows 16, so
+/// the canonical several-statement endpoint — a `rows` query and the `total`
+/// that paginates it (spec §4.4) — has a 60 s worst case at the defaults, which
+/// is past this deadline and past the ingress. That is legal, and publishing it
+/// is not refused. It is a fact about the **configuration**, so it is surfaced
+/// where the author sets the configuration — the Config surface warns as soon as
+/// `statements × timeout_seconds` exceeds the serving deadline — rather than
+/// arriving as an unexplained `504` at the moment a trial dies.
+/// How many trials may be in flight at once, **process-wide**.
+///
+/// # Why this is a constant and a `static`, not a `permits` argument
+///
+/// [`try_endpoint`] builds its serving router per trial. A bulkhead built with
+/// that router would hold `TRIAL_MAX_CONCURRENCY` permits *per request*, so the
+/// cap could never be reached by any number of concurrent trials — a limit that
+/// reads like a wall in review and is not one. The semaphore therefore lives in
+/// [`trial_bulkhead`], is created once, and is passed to
+/// [`crate::serving::router::serving_router_sharing_bulkhead`].
+///
+/// # Why a quarter of the serving surface's 64
+///
+/// The two bulkheads are separate — a burst of trials must not spend the machine
+/// surface's admission slots — but they are **not** independent underneath: both
+/// draw on the one metastore pool, whose default is 10 connections
+/// (`egret_config`'s `database.max_connections`), and a trial is strictly the
+/// more expensive of the two: it resolves the workspace, mints an RSA-signed
+/// token and emits an audit event around the same handler.
+///
+/// So this is derived the same way `SERVING_MAX_CONCURRENCY` is, and then given
+/// the smaller share. 16 is above the pool, which keeps the pool — not this
+/// layer — the thing that paces ordinary trials, exactly as the serving
+/// bulkhead intends; and it is a quarter of 64, so with both bulkheads full the
+/// machine surface still holds the clear majority of the process. A trial is
+/// human-initiated from an authenticated console session holding [`EP_MANAGE`];
+/// there is no consumer traffic pattern behind it, and the console must not be
+/// able to starve the surface it exists to test.
+pub const TRIAL_MAX_CONCURRENCY: usize = crate::serving::SERVING_MAX_CONCURRENCY / 4;
+
+/// The trial bulkhead, built once for the process.
+///
+/// `OnceLock` rather than a field on `DataApiState` because the bound is on the
+/// *process* — the tokio runtime and the metastore pool that trials consume are
+/// process-wide, and a per-state semaphore would multiply the cap by however
+/// many states a binary happens to construct.
+fn trial_bulkhead() -> Arc<Semaphore> {
+    static BULKHEAD: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    BULKHEAD
+        .get_or_init(|| crate::serving::guard::serving_bulkhead(TRIAL_MAX_CONCURRENCY))
+        .clone()
+}
+
+/// The serving router a trial runs against: the real one, with the consumer's
+/// deadline and body cap, and the trial path's own bulkhead.
+///
+/// Exposed so the bounds can be tested through the same function the handler
+/// calls. A test that hand-assembled an equivalent router would be asserting
+/// against its own copy of the wiring, which is the shape
+/// [`try_endpoint`]'s module comment refuses for the handler and refuses here
+/// for the same reason.
+pub fn trial_serving_router() -> axum::Router<DataApiState> {
+    crate::serving::router::serving_router_sharing_bulkhead(
+        // The consumer's deadline, not a trial-shaped one. See the block above
+        // the bulkhead constant for why there is no second number here.
+        crate::serving::SERVING_REQUEST_DEADLINE,
+        trial_bulkhead(),
+        // The body cap is inherited unchanged and is **unreachable** on this
+        // path: the request below is built with `Body::empty()` and no
+        // `Content-Length`, so nothing a trial sends can cross it. Kept rather
+        // than removed so the trial router stays the serving router with two
+        // numbers changed, not a third shape.
+        crate::serving::SERVING_MAX_BODY_BYTES,
+    )
+}
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -327,9 +439,14 @@ pub async fn try_endpoint(
         format!("/data-api/v1/{slug}/{path}?{query}")
     };
 
-    // THE REAL ROUTER. Same nest, same layers, same handler a consumer reaches.
+    // THE REAL ROUTER. Same nest, same layers, same handler a consumer reaches —
+    // with the two bounds that are the trial path's rather than the consumer
+    // path's: the deadline and the body cap are the CONSUMER's, deliberately,
+    // so a trial cannot succeed where a consumer would be cut off; the bulkhead
+    // is the trial's own, because a router built per trial cannot own one. See
+    // the two blocks above [`TRIAL_MAX_CONCURRENCY`].
     let router = axum::Router::new()
-        .nest("/data-api/v1", crate::serving_router())
+        .nest("/data-api/v1", trial_serving_router())
         .with_state(st.clone());
     let req = Request::builder()
         .method(endpoint.method.as_str())

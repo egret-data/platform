@@ -22,6 +22,10 @@ egret-automation.workspace = true
 egret-notebook.workspace = true
 egret-kernel.workspace = true
 axum.workspace = true
+# `serve_with_drain` + `shutdown_signal`: the SIGTERM handler, the `watch`
+# channel that starts the drain clock, and the deadline that bounds it. A
+# runtime dependency and not a dev one — the graceful shutdown is shipped code.
+tokio.workspace = true
 tower-http.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
@@ -35,8 +39,12 @@ utoipa.workspace = true
 metrics-exporter-prometheus.workspace = true
 
 [dev-dependencies]
-tokio.workspace = true
 tower.workspace = true
+# A lazy pool with a SHORT `acquire_timeout`. `Db::connect_lazy` uses sqlx's
+# 30 s default, so every test whose request reaches a database call — the
+# `/readyz` 503 and the serving path's own access-log insert — paid 30 s to fail.
+# `Db { pool }` is public, so the options can be chosen here instead.
+sqlx.workspace = true
 http-body-util = "0.1"
 # Router-mount reachability test: builds a `WorkspaceState` by hand (lazy DB
 # pool, stub Pdp) without a live Postgres.
@@ -50,3 +58,7 @@ uuid.workspace = true
 # `metrics_endpoint.rs` drives the composed router and asserts a counter's
 # VALUE moved, which needs the facade to increment through.
 metrics.workspace = true
+# `dataapi_serving_bounds.rs` builds the legal worst case of a two-statement
+# endpoint out of `DEFAULT_TIMEOUT_SECONDS` rather than typing `60`, so the
+# trial deadline's justification moves if that default ever does.
+egret-dataapi-api.workspace = true

@@ -216,14 +216,16 @@ use egret_dataapi_api::{
 };
 use egret_metastore::Db;
 use serde::Serialize;
+use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 use super::access_log::{AccessLogEntry, AccessLogStore};
 use super::cache::{cache_key, cache_ttl, shared_cache_allowed};
 use super::error::{is_permission_denied, to_wire, ServingErrorBody};
+use super::governance::{governance_allows_serving, LiveConnection};
+use super::guard;
 // Aliased: `metrics` unqualified would read as the FACADE crate at every
 // call site in this file, and the two are one keystroke apart.
-use super::governance::{governance_allows_serving, LiveConnection};
 use super::metrics as serving_metrics;
 use super::params;
 use super::ratelimit::{check_request, retry_after_secs};
@@ -574,7 +576,75 @@ impl Served {
 /// correct and leaks nothing (it is the same answer for every path, existing or
 /// not, under this router).
 pub fn serving_router() -> Router<DataApiState> {
-    Router::new().route("/{ws}/{*path}", get(serve_get).post(serve_post))
+    serving_router_with_bounds(
+        guard::SERVING_REQUEST_DEADLINE,
+        guard::SERVING_MAX_CONCURRENCY,
+        guard::SERVING_MAX_BODY_BYTES,
+    )
+}
+
+/// [`serving_router`] with its three bounds supplied, so a test can drive a
+/// limit it genuinely exceeds instead of asserting that a layer was installed.
+///
+/// # The nesting order is the design, not an accident of `.layer` calls
+///
+/// axum applies the LAST `.layer` outermost, so reading the calls bottom-up
+/// gives the order a request meets them:
+///
+/// 1. **body cap** — the only refusal that costs nothing, so it is first;
+/// 2. **deadline** — started before admission, so time spent being admitted is
+///    charged against the caller's budget rather than added to it (see
+///    [`guard::SERVING_REQUEST_DEADLINE`]);
+/// 3. **bulkhead** — the last gate before the handler, holding its permit for
+///    exactly the span of `serve` and released by the guard's drop even when the
+///    deadline above cancels the future.
+///
+/// The semaphore is built HERE, once per router, rather than per request — the
+/// same reason `DataApiState`'s cache and token buckets are constructed once in
+/// `egret-bin`.
+///
+/// **That "once" is a property of the CALLER, not of this function.** A caller
+/// that builds a router per request gets a fresh semaphore per request, which is
+/// a limit nobody can ever reach — the mistake [`guard::serving_bulkhead`]'s own
+/// doc warns about. `egret-server` builds its mount once at boot and is fine.
+/// `try_it` builds a router per trial and is **not**, so it does not call this
+/// function: it calls [`serving_router_sharing_bulkhead`] with a semaphore that
+/// outlives the trial. An earlier version of this comment claimed the throwaway
+/// router's private bulkhead was "the intended isolation"; it was not isolation,
+/// it was an unreachable limit.
+pub fn serving_router_with_bounds(
+    deadline: Duration,
+    permits: usize,
+    max_body_bytes: u64,
+) -> Router<DataApiState> {
+    serving_router_sharing_bulkhead(deadline, guard::serving_bulkhead(permits), max_body_bytes)
+}
+
+/// [`serving_router_with_bounds`] with the bulkhead **supplied** rather than
+/// built, for a caller whose router is constructed more than once.
+///
+/// The bulkhead is the one of the three bounds whose meaning depends on the
+/// router outliving the request. A deadline and a body cap are per-request
+/// numbers and stay correct however often the router is rebuilt; a semaphore
+/// rebuilt per request has as many permits as there are requests. This entry
+/// point exists so `try_it` can keep its permits somewhere that survives the
+/// trial that borrowed them.
+pub fn serving_router_sharing_bulkhead(
+    deadline: Duration,
+    bulkhead: Arc<Semaphore>,
+    max_body_bytes: u64,
+) -> Router<DataApiState> {
+    Router::new()
+        .route("/{ws}/{*path}", get(serve_get).post(serve_post))
+        .layer(axum::middleware::from_fn(move |req, next| {
+            guard::serving_admit(bulkhead.clone(), req, next)
+        }))
+        .layer(axum::middleware::from_fn(move |req, next| {
+            guard::serving_deadline(deadline, req, next)
+        }))
+        .layer(axum::middleware::from_fn(move |req, next| {
+            guard::serving_body_limit(max_body_bytes, req, next)
+        }))
 }
 
 /// The serving surface's OpenAPI document, merged by `egret_server::openapi_doc`

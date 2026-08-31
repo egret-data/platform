@@ -16,6 +16,8 @@ use egret_workspace::routes::{
     access_request_router, admin_user_router, admin_workspace_router, me_router, ws_member_router,
     WorkspaceState,
 };
+use std::future::IntoFuture;
+use std::time::Duration;
 
 /// Application state shared by all handlers.
 #[derive(Clone)]
@@ -403,6 +405,54 @@ async fn healthz() -> impl IntoResponse {
     Json(serde_json::json!({ "status": "ok" }))
 }
 
+/// How long `/readyz` waits for the database before answering `503` itself.
+///
+/// # The probe had no bound of its own, and the pool's is 30 s
+///
+/// `Db::connect` builds the pool with sqlx's default `acquire_timeout` of **30
+/// seconds**. Without a bound here, a `/readyz` that cannot get a connection
+/// waits all 30 of them — long past the kubelet's `timeoutSeconds`, which means
+/// the kubelet abandons the probe and the abandoned `acquire` stays queued
+/// behind the traffic that was already there. Under the load that causes it,
+/// that is one more waiter every `periodSeconds`.
+///
+/// # Bulkhead width, pool size and probe timings are ONE set of numbers
+///
+/// They were chosen in three different places and only make sense read together,
+/// so they are written down here:
+///
+/// | number | value | where |
+/// |---|---|---|
+/// | serving bulkhead | 64 in flight | `SERVING_MAX_CONCURRENCY` |
+/// | trial bulkhead | 8 in flight | `egret_dataapi::TRIAL_MAX_CONCURRENCY` |
+/// | metastore pool | 10 connections | `egret_config`'s `database.max_connections` |
+/// | pool acquire timeout | 30 s | sqlx's default, via `Db::connect` |
+/// | request deadline | 50 s | `SERVING_REQUEST_DEADLINE` |
+/// | readiness probe | 3 s × 5 s × N | `backend-deployment.yaml` |
+///
+/// The bulkhead is deliberately **8× the pool** — see its own doc: it is a wall
+/// against the Data API consuming the process, not a throughput limit, and the
+/// pool is meant to be the thing that paces ordinary work. The consequence is
+/// that **a pool with no free connection is the normal busy state of a healthy
+/// pod**, not a fault. Two things follow, and both are the reconciliation:
+///
+/// 1. **`/readyz` must answer before the kubelet gives up**, so this bound sits
+///    below the probe's `timeoutSeconds: 3`. An answer egret writes is one the
+///    operator can read; a probe the kubelet abandons is a timeout with no
+///    explanation and a queued waiter left behind.
+/// 2. **Withdrawal must take longer than one request.** One admitted request may
+///    legitimately hold its connection for `SERVING_REQUEST_DEADLINE`, so a
+///    readiness budget shorter than that is guaranteed to withdraw pods that are
+///    merely busy — and every withdrawal moves that load onto the peers, which
+///    then fail the same check. `periodSeconds × failureThreshold` is therefore
+///    set above 50 s in the chart, and `deployment_probes.rs` asserts both
+///    relations against these constants rather than against a comment.
+///
+/// The residual, stated: a genuinely dead database keeps receiving traffic for
+/// the whole withdrawal budget. Those requests fail fast and loudly with a 500
+/// each; a healthy pod withdrawn under load fails an entire deployment quietly.
+pub const READYZ_DB_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Readiness: dependencies are reachable. 200 when the DB (if any) responds.
 async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
     match &state.db {
@@ -410,16 +460,148 @@ async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
             StatusCode::OK,
             Json(serde_json::json!({ "status": "ok", "db": "none" })),
         ),
-        Some(db) => match db.ping().await {
-            Ok(()) => (
+        // `timeout` CANCELS the ping, which is the half that matters: the
+        // dropped future takes its place in the pool's acquire queue with it.
+        Some(db) => match tokio::time::timeout(READYZ_DB_TIMEOUT, db.ping()).await {
+            Ok(Ok(())) => (
                 StatusCode::OK,
                 Json(serde_json::json!({ "status": "ok", "db": "up" })),
             ),
-            Err(_) => (
+            Ok(Err(_)) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(serde_json::json!({ "status": "degraded", "db": "down" })),
             ),
+            // Distinguished in the body, not in the status: for the kubelet this
+            // is the same "not ready", but for the operator reading a probe
+            // response by hand "slow" and "refused" are different incidents.
+            Err(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "status": "degraded", "db": "slow" })),
+            ),
         },
+    }
+}
+
+/// How long the process keeps serving after SIGTERM before it stops waiting.
+///
+/// # Why there is a deadline at all
+///
+/// `axum::serve(..).with_graceful_shutdown(..)` waits for every in-flight
+/// request with no bound of its own. A single request stuck on an unresponsive
+/// engine would hold the whole shutdown open until the kubelet's SIGKILL — which
+/// is the same outcome as no drain at all, arrived at slowly. So the drain is
+/// bounded, and the bound is stated where the numbers it sits between can be
+/// read together.
+///
+/// # The three numbers, and the order they must be in
+///
+/// ```text
+/// egret_dataapi::serving::SERVING_REQUEST_DEADLINE   50 s
+/// DRAIN_DEADLINE                                     55 s
+/// terminationGracePeriodSeconds (Helm)               65 s
+/// ```
+///
+/// * **> the request deadline**, so a request admitted one moment before SIGTERM
+///   gets its full budget and is answered rather than cut in half. At 50 s the
+///   drain would race the very deadline that is supposed to end that request,
+///   and the caller would sometimes see a connection reset instead of a `504`.
+/// * **< the pod's termination grace period**, so the process is the thing that
+///   decides to stop, not SIGKILL. Kubernetes' default grace period is **30 s**,
+///   which is *below* the request deadline: leaving it at the default would have
+///   made this whole drain unreachable, so `backend-deployment.yaml` sets 65 and
+///   `drain_deadline_fits_inside_the_pods_termination_grace_period` pins the two
+///   together.
+///
+/// # Why the drain matters more here than the numbers suggest
+///
+/// `egret_dataapi::serving::router::serve` writes its `dataapi.access_log` row
+/// **after** the response. A request killed mid-flight is therefore not merely
+/// failed, it is unrecorded: the operator sees a consumer complaining about an
+/// error that appears in no activity view. Every deploy did this to every
+/// in-flight query before this change.
+pub const DRAIN_DEADLINE: Duration = Duration::from_secs(55);
+
+/// Resolve when the process is asked to stop: SIGTERM (what Kubernetes sends) or
+/// SIGINT (what a developer's Ctrl-C sends).
+///
+/// SIGTERM is the one that matters and the one that was missing — nothing in the
+/// process observed it, so a rollout terminated every in-flight query.
+pub async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut term = match signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(e) => {
+                // Losing the handler must not lose the drain: fall back to
+                // Ctrl-C alone rather than returning immediately, which would
+                // shut the server down the instant it started.
+                tracing::error!(
+                    error = %e,
+                    "cannot listen for SIGTERM; drain will only honour Ctrl-C"
+                );
+                let _ = tokio::signal::ctrl_c().await;
+                return;
+            }
+        };
+        tokio::select! {
+            _ = term.recv() => tracing::info!("SIGTERM received; draining"),
+            _ = tokio::signal::ctrl_c() => tracing::info!("SIGINT received; draining"),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+        tracing::info!("Ctrl-C received; draining");
+    }
+}
+
+/// Serve `app` until `shutdown` resolves, then finish in-flight requests for at
+/// most `drain_deadline`.
+///
+/// `shutdown` and `drain_deadline` are parameters rather than reads of
+/// [`shutdown_signal`] and [`DRAIN_DEADLINE`] for one reason: a test must be
+/// able to trigger the drain and observe that an **in-flight request completed**
+/// — not that a handler was installed. A test that asserted installation would
+/// pass with the drain removed, which is the failure this repo has shipped
+/// repeatedly.
+pub async fn serve_with_drain<F>(
+    listener: tokio::net::TcpListener,
+    app: Router,
+    shutdown: F,
+    drain_deadline: Duration,
+) -> std::io::Result<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    // The signal is observed once and then broadcast twice: `axum::serve` needs
+    // it to stop accepting, and the deadline below needs it to start counting.
+    // Starting the timer any earlier would make it a bound on UPTIME.
+    let (draining_tx, mut draining_rx) = tokio::sync::watch::channel(false);
+    let server = axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            shutdown.await;
+            let _ = draining_tx.send(true);
+        })
+        // `WithGracefulShutdown` is `IntoFuture`, not `Future`, so it cannot be
+        // polled by `select!` until it is converted.
+        .into_future();
+    tokio::pin!(server);
+
+    tokio::select! {
+        res = &mut server => res,
+        () = async {
+            // `changed()` resolves on the send above, never on the initial
+            // `false` — so the sleep is entered at SIGTERM and not at boot.
+            let _ = draining_rx.changed().await;
+            tokio::time::sleep(drain_deadline).await;
+        } => {
+            tracing::warn!(
+                deadline_secs = drain_deadline.as_secs(),
+                "requests still in flight at the drain deadline; exiting anyway"
+            );
+            Ok(())
+        }
     }
 }
 
@@ -482,6 +664,99 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// The half of `/readyz` that matters now that a probe actually calls it.
+    ///
+    /// `readyz_ok_without_db` above pins the `db: None` path, which is the one
+    /// that cannot fail — it would pass with the `ping()` deleted. This drives a
+    /// pool pointed at a port nothing listens on and requires the `503`, so the
+    /// handler is shown to have a *reachable* failing answer. Without that, the
+    /// chart change in this package would wire a probe to an endpoint that is
+    /// green whatever the database is doing, which is where it started.
+    #[tokio::test]
+    async fn readyz_reports_503_when_the_database_is_unreachable() {
+        // Port 1: nothing listens, so the ping cannot succeed. The short
+        // `acquire_timeout` is the whole reason this builds the pool by hand —
+        // `Db::connect_lazy` inherits sqlx's 30 s default, and a 30-second unit
+        // test is one nobody runs.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(Duration::from_millis(250))
+            .connect_lazy("postgres://egret:egret@127.0.0.1:1/egret")
+            .expect("lazy pool");
+        let mut state = AppState::without_db();
+        state.db = Some(Db { pool });
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/readyz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["db"], "down");
+    }
+
+    /// The readiness probe must not inherit the pool's 30-second patience.
+    ///
+    /// A refused connection answers instantly and is the easy case; the one that
+    /// matters is a database that **accepts and then says nothing** — a failing
+    /// over primary, a blackholed route, a saturated pool. This binds a socket
+    /// and never accepts on it, so the client completes the TCP handshake in the
+    /// kernel's backlog and then blocks forever waiting for the Postgres
+    /// greeting. The pool is built with sqlx's real default `acquire_timeout`,
+    /// so with the bound deleted this test does not fail fast — it waits the
+    /// full 30 s and then reports `db: "down"`, which is both slower than the
+    /// kubelet's `timeoutSeconds` and the wrong diagnosis.
+    #[tokio::test]
+    async fn readyz_gives_up_on_a_hung_database_long_before_the_pool_does() {
+        // Never accepted. Held for the duration of the test so the port stays
+        // bound and the connection stays parked rather than being refused.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind blackhole");
+        let port = listener.local_addr().expect("addr").port();
+
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy(&format!("postgres://egret:egret@127.0.0.1:{port}/egret"))
+            .expect("lazy pool");
+        let mut state = AppState::without_db();
+        state.db = Some(Db { pool });
+        let app = build_router(state);
+
+        let started = std::time::Instant::now();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/readyz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let elapsed = started.elapsed();
+
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            elapsed < READYZ_DB_TIMEOUT * 3,
+            "/readyz took {elapsed:?} against a hung database. Its own bound is \
+             {READYZ_DB_TIMEOUT:?}; anything near sqlx's 30 s acquire_timeout \
+             means the probe has no bound of its own and the kubelet is deciding \
+             it instead"
+        );
+
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            json["db"], "slow",
+            "a database that hangs is a different incident from one that refuses, \
+             and the body is the only place an operator can tell them apart: {json}"
+        );
+        drop(listener);
     }
 
     /// A `Pdp` that must never actually be consulted in this test: every

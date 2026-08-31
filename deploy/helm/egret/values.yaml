@@ -1,6 +1,18 @@
 backend:
   image: { repository: egret-backend, tag: dev, pullPolicy: IfNotPresent }
   replicas: 1
+  # Requests/limits — see backend-deployment.yaml for why each number is what it
+  # is. Without them the container is BestEffort QoS.
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "1Gi"
+    limits:
+      cpu: "2000m"
+      memory: "4Gi"
+  # Must stay ABOVE egret_server::DRAIN_DEADLINE (55 s), or SIGKILL arrives
+  # before the drain finishes and the graceful shutdown is decoration.
+  terminationGracePeriodSeconds: 65
 frontend:
   image: { repository: egret-frontend, tag: dev, pullPolicy: IfNotPresent }
   nodePort: 30080
