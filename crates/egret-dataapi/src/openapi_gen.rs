@@ -632,17 +632,59 @@ fn success_schema(snap: &EndpointSnapshot, endpoint: &str) -> Result<Value, Open
 }
 
 /// The error responses, identical for every path, referenced not inlined.
+///
+/// # The status list is DERIVED, and that is the whole point of this function
+///
+/// It used to be the literal `"400", "401", "403", "404", "429", "500", "503"`.
+/// Package 3b then made `502 engine_unavailable` and `504 timeout` live on this
+/// surface, the root `utoipa` document was corrected, and **this one was not** —
+/// so a consumer who downloads its own contract and generates a client from it
+/// gets a client with no case for the status it receives when the coordinator
+/// goes down. That is precisely the "the caller cannot act on it" defect this
+/// package exists to remove, in the more consumer-facing of the two documents,
+/// and nothing could catch it: the `openapi.json` byte gate compares the ROOT
+/// document to the committed copy of itself and has never read this builder.
+///
+/// So the list is not written here. [`crate::serving::error::wire_answers`]
+/// applies `to_wire` to the taxonomy census — which is checked against
+/// `ServingError`'s own source — and a status this surface can answer with
+/// therefore appears here by construction. A new variant cannot land without an
+/// arm in `to_wire` (a compile error) and a census sample (a named test
+/// failure), and once it has both, this document already describes it.
+///
+/// Each status also NAMES its codes, for the same reason the root document's
+/// descriptions do: `error.code` is the stable thing a client branches on, and a
+/// bare `"Error"` tells a generated client nothing about which of the two 504s
+/// it just received. The names come from the same derivation, so they cannot
+/// disagree with the statuses above them.
 fn error_responses() -> Value {
-    let err = json!({
-        "description": "Error",
-        "content": { "application/json": {
-            "schema": { "$ref": "#/components/schemas/ServingErrorBody" }
-        }}
-    });
-    json!({
-        "400": err, "401": err, "403": err,
-        "404": err, "429": err, "500": err, "503": err,
-    })
+    let mut out = Map::new();
+    for (status, codes) in crate::serving::error::wire_answers() {
+        let named = codes
+            .iter()
+            .map(|c| format!("`{c}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        // Two of these statuses carry two codes each (500 and 504), which is the
+        // whole reason a consumer branches on `code` and not on the status line.
+        let named = if codes.len() > 1 {
+            format!("one of {named}")
+        } else {
+            named
+        };
+        out.insert(
+            status.to_string(),
+            json!({
+                "description": format!(
+                    "Error. `error.code` is {named} — branch on it, not on the message.",
+                ),
+                "content": { "application/json": {
+                    "schema": { "$ref": "#/components/schemas/ServingErrorBody" }
+                }}
+            }),
+        );
+    }
+    Value::Object(out)
 }
 
 /// Build the document for one service account.

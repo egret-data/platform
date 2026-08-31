@@ -17,11 +17,11 @@ pub mod access_log;
 pub mod auth;
 pub mod cache;
 pub mod error;
+pub mod governance;
 /// Prometheus instrumentation for this surface. `pub` because the composition
 /// root calls [`metrics::describe`] once at startup; everything else in it is
 /// crate-private.
 pub mod metrics;
-pub mod governance;
 pub(crate) mod params;
 pub mod ratelimit;
 pub mod router;
@@ -58,26 +58,20 @@ pub use router::{
 /// a silent 500, and would inherit whatever the wildcard did with any engine
 /// message the new variant carried.
 ///
-/// # The variants spec §7 names that do NOT exist here
+/// # The two variants spec §7 named and P4 could not produce — now it can
 ///
-/// Recorded so their absence reads as a decision rather than as an oversight.
-/// None of them is constructible on today's serving path, and a dead variant
-/// would make the table look finished while nothing could ever produce the code:
-///
-/// * `engine_unavailable` (502) and `timeout` (504) — **not decidable at this
-///   seam.** `QueryExecPort` returns `egret_core::Error`, and `port_impl` folds
-///   BOTH the engine's infrastructure failures (`Connect`/`Storage`/`Db`) AND
-///   its own egret-side faults — resolving the principal's email, opening the
-///   database secret (`egret-query/src/execution/port_impl.rs:120-137`) — into
-///   the same `Error::Internal`. Mapping that to 502 would page an operator
-///   about the engine when the metastore is what failed. `Timeout` is worse:
-///   `engine_error` maps `EngineError::Timeout` to
-///   `Error::InvalidInput("query timed out")`, deliberately, because for
-///   `describe_as` a timeout means the query is too expensive to plan — so the
-///   only way to recognise it here would be to match another crate's message
-///   string, which breaks silently the day someone rewords it. Making these two
-///   real means widening the port's error type, which is a cross-crate contract
-///   change and not this task's.
+/// `engine_unavailable` (502) and `timeout` (504) were recorded here for four
+/// phases as "not decidable at this seam", and the reason was true: `port_impl`
+/// folded the engine's infrastructure failures **and** egret's own faults into
+/// one `Error::Internal`, so a 502 would have paged an operator about Trino when
+/// the metastore was what failed; and `EngineError::Timeout` arrived as
+/// `Error::InvalidInput("query timed out")`, so recognising it would have meant
+/// matching another crate's message string. Package 3b widened the port —
+/// additively, via `egret_query_api::ExecFailure` inside the existing
+/// `Error::Internal` — so both causes now arrive as values. They are
+/// [`Self::EngineUnavailable`] and [`Self::EngineTimeout`], and
+/// [`Self::EndpointQueryFailed`] is the third code that widening required (spec
+/// §7's requirement (b): an author-fault code that is not a 4xx).
 ///
 /// Everything a caller CAN receive today is in the table, and everything in the
 /// table is reachable.
@@ -321,10 +315,147 @@ pub enum ServingError {
     /// would tell an operator to look for a deleted endpoint.
     #[error("published before the parameter validation gate")]
     ParamGateStale,
+    /// The engine ran the endpoint's published statement and refused it: the SQL
+    /// no longer parses, a relation it names has been dropped, a column changed
+    /// type, a resource group rejected it.
+    ///
+    /// # The finding this closes
+    ///
+    /// This used to be [`Self::Internal`], and it is the largest share of the
+    /// six unrelated causes that shared the `internal` code. The cost is not
+    /// abstract: an operator reading `dataapi.access_log.error_code` to answer
+    /// *"which endpoints are failing?"* could not separate **an author's broken
+    /// endpoint** from **egret itself being broken**, and those are two
+    /// different people's problems. The design doc has argued this since P4
+    /// (`docs/vi/specs/2026-08-14-data-api-design.md` §7, requirement (b)); PR
+    /// #552 put the cause in the *log*, which helps someone already reading the
+    /// log for one request and does nothing for the column an alert aggregates.
+    ///
+    /// # 500, and specifically NOT a 4xx
+    ///
+    /// Requirement (c) of that same paragraph, and it is the whole reason this
+    /// variant is not simply `param_invalid`'s neighbour: **the caller did
+    /// nothing wrong.** It sent a well-formed request to an endpoint someone
+    /// published; the endpoint is what broke. A 4xx would tell a machine client
+    /// to fix its own request, which it cannot do, and would make the failure
+    /// invisible in every "5xx rate" an operator alerts on.
+    ///
+    /// Not a 503 either, unlike the four config-drift codes: those are cleared
+    /// by an action the message can name (re-publish, restore the connection),
+    /// and they carry a `Retry-After` saying so. This one may be permanent (the
+    /// table is gone) or transient (the cluster was out of resources), and egret
+    /// cannot tell which — so it neither invites a retry nor forbids one.
+    ///
+    /// # `raw`
+    ///
+    /// Kept for the same reason [`Self::DataAccessDenied`] keeps its own, and
+    /// with the same guarantee: [`super::error::to_wire`] never renders it, so
+    /// the engine's words — which name tables and columns — reach the server log
+    /// and nothing else.
+    #[error("the endpoint's published statement failed at the engine")]
+    EndpointQueryFailed {
+        #[source]
+        raw: Option<anyhow::Error>,
+    },
+    /// The statement outran the endpoint's own published `limits.timeout`.
+    ///
+    /// Spec §7 named this `timeout` (504) and recorded why P4 could not produce
+    /// it: `QueryExecPort` mapped `EngineError::Timeout` to
+    /// `InvalidInput("query timed out")` — a fixed string egret itself wrote —
+    /// so recognising it here would have meant matching another crate's message
+    /// text, "a check that keeps compiling and silently stops working the day
+    /// someone rewords it". `egret_query_api::ExecFailure` closed that: the
+    /// cause now arrives as a value.
+    ///
+    /// **504 and not 500**, because the distinction is real and actionable: the
+    /// endpoint works, its budget was too small (or its data grew). The fix is
+    /// the author's `limits.timeout`, not a bug report.
+    ///
+    /// No `raw`: the port's timeout carries no engine text, only egret's own
+    /// note of which budget expired.
+    #[error("the endpoint's statement exceeded its published time budget")]
+    EngineTimeout,
+    /// The engine could not be reached at all — connection refused, TLS failure,
+    /// a dropped socket.
+    ///
+    /// Spec §7 named this `engine_unavailable` (502) and recorded why P4 could
+    /// not produce it: `port_impl` folded the engine's `Connect` failures and
+    /// **egret's own** faults (resolving the principal's email, opening the
+    /// database secret, reaching egret's object store) into one
+    /// `Error::Internal`, so answering 502
+    /// "would page an operator about Trino when the metastore is what failed".
+    /// That is now decidable — only the engine's own transport failures carry
+    /// `ExecFailureKind::EngineUnavailable`, and egret's faults deliberately
+    /// carry nothing and still land on [`Self::Internal`].
+    ///
+    /// Kept apart from [`Self::EndpointQueryFailed`] because the two send
+    /// different people to different systems: this one is an operator's problem
+    /// with the engine or the network, that one is the endpoint author's problem
+    /// with their statement.
+    #[error("the engine could not be reached")]
+    EngineUnavailable {
+        #[source]
+        raw: Option<anyhow::Error>,
+    },
+    /// The request outran **egret's** serving deadline — not the endpoint's
+    /// published budget, which is [`Self::EngineTimeout`].
+    ///
+    /// # Why this is a variant here and not a string in the middleware
+    ///
+    /// The request-bounds layer (`serving/guard.rs`, Package 3a) answers a
+    /// deadline, a shed and an over-size body from *outside* the handler, and it
+    /// built its envelopes directly — bypassing [`super::error::to_wire`]'s
+    /// exhaustive match, which is the one place this crate forces a status/code
+    /// decision to be made deliberately. Three codes that no `ServingError`
+    /// produces are three codes the taxonomy's own tests cannot see, and the
+    /// `code` label's bound in `serving/metrics.rs` stops being "that match" and
+    /// becomes "that match plus whatever else someone wrote".
+    ///
+    /// # And its code is NOT `timeout`
+    ///
+    /// This is the part that would have been expensive later. Both this and
+    /// [`Self::EngineTimeout`] are 504s, and the bounds layer called this one
+    /// `timeout` too — the same code, the same status, for **two different
+    /// actors**: there, egret's own serving clock; here, the budget the endpoint's
+    /// author published.
+    ///
+    /// The collision is on the `code` label of
+    /// `egret_dataapi_requests_total` and on the `error.code` a client
+    /// branches on — NOT on `dataapi.access_log.error_code`, which an earlier
+    /// version of this note claimed. A bound fires outside the handler, so a
+    /// request it cuts off writes no access-log row at all; the metric is the
+    /// only instrument that sees it. One string there and an operator asking
+    /// "are we cutting callers off, or are their queries too slow?" would have
+    /// had no way to tell — which is the exact question this package split
+    /// `internal` to make answerable. So this one is `deadline_exceeded` and
+    /// `timeout` stays spec §7's name for the author's budget.
+    #[error("the request exceeded egret's serving deadline")]
+    ServingDeadline,
+    /// egret shed the request: every concurrency permit on the serving surface
+    /// was in use.
+    ///
+    /// A refusal by egret about egret, and the only 503 here that is not
+    /// configuration drift — it clears by itself, so its `Retry-After` is a
+    /// second rather than the config-drift floor.
+    #[error("the serving surface is at its concurrency limit")]
+    Overloaded,
+    /// The request declared a body larger than the serving surface accepts.
+    ///
+    /// The one 413 in the taxonomy, and the one refusal here that really is the
+    /// caller's own doing.
+    #[error("the request body is larger than the serving surface accepts")]
+    PayloadTooLarge,
     /// Something on egret's side failed — the IdP key store was unreachable, say.
     /// Deliberately NOT folded into [`Self::Unauthorized`]: a 401 tells an
     /// operator their credential is bad and sends them to rotate it, while the
     /// actual fault is ours. Task 5 maps this to a 500 with a fixed message.
+    ///
+    /// **Narrower than it was.** Until Package 3b this was also every engine
+    /// failure the seam could not type — see [`Self::EndpointQueryFailed`],
+    /// [`Self::EngineTimeout`] and [`Self::EngineUnavailable`], which took three
+    /// of those causes away. What remains really is egret: the metastore, the
+    /// secret store, a corrupt snapshot, the cache. That narrowing is the point
+    /// — `internal` is now a statement about egret rather than a shrug.
     #[error("internal error")]
     Internal(#[source] anyhow::Error),
 }
@@ -341,5 +472,193 @@ impl ServingError {
     /// fault" a decision at the call site.
     pub(crate) fn internal(e: impl std::fmt::Display) -> Self {
         Self::Internal(anyhow::anyhow!("{e}"))
+    }
+}
+
+/// One constructed value per [`ServingError`] variant, and the check that the
+/// list is COMPLETE.
+///
+/// # Why this exists
+///
+/// Three tests describe the taxonomy as a whole — the spec §7 code table in
+/// [`super::error`], the `code` label set and the status label set in
+/// [`super::metrics`] — and all three were hand-written lists of variants. Two
+/// of them had already gone stale on `main` (`governance_stale` was missing from
+/// the metrics list while its assertion still read `codes.len() == 14`, and
+/// passed; the status-label list had neither `502` nor `504`, both live since
+/// Package 3b). And the comment above the code table claimed a new variant
+/// "shows up as a missing line here", which was false: only `to_wire`'s
+/// exhaustive match fails to compile, and a `to_wire` arm can be added without
+/// touching any list.
+///
+/// So the lists are one list, and the list is checked against the enum itself.
+/// A new variant now fails [`every_declared_variant_has_a_sample`] by name; once
+/// sampled, it fails the two tables that have no row for it. That is three
+/// failures a new variant cannot land without, in place of three tests that
+/// silently kept passing.
+///
+/// Sampled by NAME, and the name is what the census compares — a sample that
+/// constructs the wrong variant under a right name would pass the census and
+/// then fail the code table, which reads its expectations by the same name.
+///
+/// # Why it is NOT `#[cfg(test)]` any more
+///
+/// [`super::error::wire_answers`] — which is what the per-service-account
+/// OpenAPI document's status list is built from — needs to walk the taxonomy at
+/// run time, not only under `cargo test`. That is the whole point of the second
+/// finding this module closes: the consumer-facing document declared a
+/// hand-written list of statuses, it went stale the moment 502 and 504 became
+/// live, and the byte gate over the ROOT document could not see it. A list
+/// derived from the enum cannot go stale; a list derived from a `#[cfg(test)]`
+/// enumeration cannot be derived at all.
+///
+/// The cost is twenty-odd constructed values compiled into the binary and built
+/// once per generated document. The samples carrying an `anyhow` message are
+/// still only messages egret itself wrote, so nothing here can reach a wire
+/// body — [`super::error::to_wire`] reads no `raw` field.
+pub(crate) mod census {
+    use super::ServingError;
+
+    /// Every variant, each with the name it is declared under. More than one
+    /// row per variant is allowed (and used: the two `raw` shapes are two
+    /// construction sites), so the census compares the SET of names.
+    pub(crate) fn every_variant() -> Vec<(&'static str, ServingError)> {
+        vec![
+            ("Unauthorized", ServingError::Unauthorized),
+            ("NotFound", ServingError::NotFound),
+            (
+                "DataAccessDenied",
+                ServingError::DataAccessDenied { raw: None },
+            ),
+            (
+                "DataAccessDenied",
+                ServingError::DataAccessDenied {
+                    raw: Some(anyhow::anyhow!(
+                        "Access Denied: Cannot select from table sales"
+                    )),
+                },
+            ),
+            ("NotGranted", ServingError::NotGranted),
+            ("ParamMissing", ServingError::ParamMissing),
+            ("ParamInvalid", ServingError::ParamInvalid),
+            (
+                "RowLimitExceeded",
+                ServingError::RowLimitExceeded { cap: 100 },
+            ),
+            (
+                "RateLimited",
+                ServingError::RateLimited {
+                    retry_after: std::time::Duration::from_secs(2),
+                },
+            ),
+            ("SchemaDrift", ServingError::SchemaDrift),
+            ("OutputNamingCollision", ServingError::OutputNamingCollision),
+            ("CacheScopeStale", ServingError::CacheScopeStale),
+            ("GovernanceStale", ServingError::GovernanceStale),
+            ("ParamGateStale", ServingError::ParamGateStale),
+            (
+                "EndpointQueryFailed",
+                ServingError::EndpointQueryFailed { raw: None },
+            ),
+            (
+                "EndpointQueryFailed",
+                ServingError::EndpointQueryFailed {
+                    raw: Some(anyhow::anyhow!(
+                        "line 1:15: Table 'hive.a.b' does not exist"
+                    )),
+                },
+            ),
+            ("EngineTimeout", ServingError::EngineTimeout),
+            (
+                "EngineUnavailable",
+                ServingError::EngineUnavailable { raw: None },
+            ),
+            ("ServingDeadline", ServingError::ServingDeadline),
+            ("Overloaded", ServingError::Overloaded),
+            ("PayloadTooLarge", ServingError::PayloadTooLarge),
+            ("Internal", ServingError::internal("boom")),
+        ]
+    }
+
+    /// The variant names DECLARED by the enum, read out of this file.
+    ///
+    /// Reading the source is the only mechanism available that a new variant
+    /// cannot pass: `match` is exhaustive but cannot enumerate, and nothing in
+    /// this workspace derives an iterator over variants. It is not clever and it
+    /// is not fragile in the way that matters — it parses `rustfmt`'s output of
+    /// one enum in one file, and if it ever failed to find the enum it fails
+    /// LOUD rather than reporting an empty set (see the assertion below).
+    ///
+    /// `include_str!`, not `fs::read_to_string`: the text is bound at COMPILE
+    /// time, to this very file, by the compiler that also compiled the enum. The
+    /// runtime read had to reconstruct the path from `CARGO_MANIFEST_DIR` and
+    /// would happily have read a *different* checkout's `mod.rs` — or failed on
+    /// a machine where the sources are not next to the binary — turning a
+    /// statement about this build into a statement about whatever was on disk.
+    #[cfg(test)]
+    fn declared_variants() -> Vec<String> {
+        let src = include_str!("mod.rs");
+        let body = src
+            .split_once("pub enum ServingError {")
+            .expect("the enum this census is about must exist")
+            .1;
+        let body = body.split_once("\n}").expect("the enum must end").0;
+        body.lines()
+            .filter_map(|line| {
+                // A variant is a line at one level of indentation whose first
+                // token starts with a capital: `Unauthorized,`,
+                // `RowLimitExceeded { cap: u32 },`, `DataAccessDenied {`,
+                // `Internal(#[source] anyhow::Error),`. Field lines are indented
+                // deeper and attribute/doc lines start with `#` or `/`.
+                let rest = line.strip_prefix("    ")?;
+                if rest.starts_with(' ') || rest.starts_with('#') || rest.starts_with('/') {
+                    return None;
+                }
+                let name: String = rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric())
+                    .collect();
+                let first = name.chars().next()?;
+                first.is_ascii_uppercase().then_some(name)
+            })
+            .collect()
+    }
+
+    /// The census itself: no variant may exist without a sample.
+    ///
+    /// Mutation: delete any row from `every_variant` and this names it.
+    #[test]
+    fn every_declared_variant_has_a_sample() {
+        use std::collections::BTreeSet;
+
+        let declared: BTreeSet<String> = declared_variants().into_iter().collect();
+        // A floor, not a count of today's enum: its only job is to fail loudly
+        // if the parser ever stops matching the source, because a census that
+        // finds nothing agrees with every sample list there is.
+        assert!(
+            declared.len() >= 10,
+            "the parser found only {} variants, which means it stopped matching \
+             the source rather than that the enum shrank: {declared:?}",
+            declared.len()
+        );
+        let sampled: BTreeSet<String> = every_variant()
+            .into_iter()
+            .map(|(name, _)| name.to_string())
+            .collect();
+
+        let missing: Vec<_> = declared.difference(&sampled).collect();
+        assert!(
+            missing.is_empty(),
+            "ServingError variants with no sample in `census::every_variant`: \
+             {missing:?}. Every test that describes the taxonomy as a whole \
+             iterates that list, so an unsampled variant is a variant those \
+             tests cannot see."
+        );
+        let unknown: Vec<_> = sampled.difference(&declared).collect();
+        assert!(
+            unknown.is_empty(),
+            "`census::every_variant` names variants the enum does not declare \
+             (a rename?): {unknown:?}"
+        );
     }
 }

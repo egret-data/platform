@@ -47,3 +47,15 @@ egret-workspace.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 rcgen = { workspace = true }
+# Already a runtime dependency; named again here so an INTEGRATION test can open
+# a raw MySQL-protocol connection. `connector_starrocks.rs` needs one to measure
+# what `COM_RESET_CONNECTION` does to an `EXECUTE AS` identity — the fact the
+# decision not to pool StarRocks connections rests on.
+mysql_async.workspace = true
+# `#[tokio::test(start_paused = true)]` — tokio's `full` feature does NOT include
+# `test-util`, and without it the attribute silently resolves to a private field
+# rather than the pause. `port_impl`'s `a_describe_that_never_answers_is_still_bounded`
+# drives a 30-second bound in microseconds with it; the alternative was passing the
+# timeout in as an argument, which would have tested a mechanism while leaving the
+# value every caller actually uses unasserted.
+tokio = { workspace = true, features = ["test-util"] }

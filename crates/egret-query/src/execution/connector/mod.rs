@@ -12,6 +12,7 @@ use crate::execution::error::EngineError;
 use crate::execution::model::Limits;
 use egret_query_api::Param;
 
+mod http_pool;
 mod starrocks;
 mod trino;
 

@@ -49,6 +49,7 @@
 //! to widen the type first, which makes it a decision rather than a slip.
 
 use std::borrow::Cow;
+use std::collections::{BTreeMap, BTreeSet};
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -93,6 +94,16 @@ use super::ServingError;
 /// enough that a re-publish is picked up without an operator wondering why
 /// clients have not come back.
 const CONFIG_DRIFT_RETRY_AFTER_SECS: u64 = 300;
+
+/// How long a caller is asked to wait after being SHED.
+///
+/// A third meaning for the same header, and the shortest: unlike the
+/// config-drift floor above (which waits for a human) and unlike the 429's
+/// prediction (which is a bucket refilling at a known rate), a shed clears when
+/// whatever filled the surface's permits drains — usually within a request. One
+/// second is what the bounds layer sends today; the value lives here now
+/// because that layer's envelope is built from this table.
+const SHED_RETRY_AFTER_SECS: u64 = 1;
 
 /// Does this engine failure mean "the principal may not read this data"?
 ///
@@ -356,6 +367,94 @@ pub(crate) fn to_wire(e: &ServingError) -> Wire {
              re-publish it"
                 .into(),
         ),
+        // The author's endpoint is broken, not egret and not the caller's
+        // request. A 5xx because the caller did nothing wrong (spec §7's
+        // requirement (c)), and its OWN code because the whole point is that
+        // `access_log.error_code` can now separate "which endpoints are failing"
+        // from "egret is failing".
+        //
+        // The message says which of the two it is and who fixes it, and it says
+        // it WITHOUT the engine's words: `raw` is not read here, exactly as
+        // `Internal`'s source is not, because the engine's text names tables and
+        // columns and this surface is authenticated by a machine credential
+        // alone. The endpoint's OWNER is named rather than the mechanics of a
+        // fix, for the same reason `not_granted` names them: the caller is
+        // somebody else's client and can act on none of it.
+        ServingError::EndpointQueryFailed { .. } => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "endpoint_query_failed",
+            "this endpoint's published statement was rejected by the engine; \
+             the request was fine — ask the endpoint's owner to check it"
+                .into(),
+        ),
+        // Spec §7's `timeout`. The endpoint works; its published budget did not
+        // fit this query. A caller CAN act on this one — retrying a narrower
+        // request may succeed — but no `Retry-After` is offered, because egret
+        // has no idea when (or whether) the same query would fit.
+        ServingError::EngineTimeout => (
+            StatusCode::GATEWAY_TIMEOUT,
+            "timeout",
+            "this endpoint's query exceeded its published time budget".into(),
+        ),
+        // Spec §7's `engine_unavailable`. The one code here that is an
+        // OPERATOR's, and the message says so without naming the engine, its
+        // host or its port — that detail is precisely what a 502 body must not
+        // teach a caller outside the network.
+        ServingError::EngineUnavailable { .. } => (
+            StatusCode::BAD_GATEWAY,
+            "engine_unavailable",
+            "the query engine behind this endpoint could not be reached".into(),
+        ),
+        // **The three the request-bounds layer answers**, decided here rather
+        // than where they fire. `serving/guard.rs` (Package 3a) runs OUTSIDE the
+        // handler — a deadline, a bulkhead and a body cap — so it builds its
+        // envelope from a `ServingError` it never constructs a handler for. The
+        // decision still belongs in this match: it is the only place in the
+        // crate where a status and a code are chosen together, and three codes
+        // built elsewhere are three codes the taxonomy's tests, the metrics
+        // module's cardinality bound and the OpenAPI document cannot see.
+        //
+        // `deadline_exceeded`, NOT `timeout`. Both are 504s and the bounds layer
+        // originally called this one `timeout` as well — one string, one status,
+        // two different actors: egret's own serving clock here, the endpoint
+        // author's published budget in `EngineTimeout`.
+        //
+        // **And the place they would have collided is the `code` metric label,
+        // not `access_log.error_code`.** This comment used to name the access
+        // log, which cannot be right: the bounds layer fires OUTSIDE the
+        // handler, so a request it cuts off leaves no `dataapi.access_log` row
+        // at all — the two 504s can never meet in that column, because only one
+        // of them ever reaches it. Where they do meet is
+        // `egret_dataapi_requests_total{code=…}` (`serving::metrics`), which is
+        // the only instrument that sees a shed or a deadline at all, and the
+        // `error.code` in the body a client branches on. One string there and an
+        // operator could not have separated "we are cutting callers off" from
+        // "their queries are too slow" — the exact class of question this
+        // package split `internal` to make answerable.
+        ServingError::ServingDeadline => (
+            StatusCode::GATEWAY_TIMEOUT,
+            "deadline_exceeded",
+            "this request exceeded the serving deadline".into(),
+        ),
+        // egret refusing egret's own work, and the only 503 here that is not
+        // configuration drift: it clears by itself, which is why it carries a
+        // one-second `Retry-After` rather than the five-minute floor. Sheds
+        // rather than queues, so a caller told this can back off; that argument
+        // lives with the middleware.
+        ServingError::Overloaded => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "overloaded",
+            "too many requests are in flight; retry shortly".into(),
+        ),
+        // The one refusal in the table that really is the caller's own doing,
+        // and the only 413. The cap itself is not named: it is egret's number,
+        // not the endpoint author's, and a caller cannot act on it beyond
+        // sending less.
+        ServingError::PayloadTooLarge => (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "payload_too_large",
+            "request body is larger than this surface accepts".into(),
+        ),
         // The source is NOT rendered. It is the only thing in this file that
         // could carry a table name or a host, and it goes to `tracing` instead.
         ServingError::Internal(_) => (
@@ -374,6 +473,17 @@ pub(crate) fn to_wire(e: &ServingError) -> Wire {
         | ServingError::CacheScopeStale
         | ServingError::GovernanceStale
         | ServingError::ParamGateStale => Some(CONFIG_DRIFT_RETRY_AFTER_SECS),
+        // A prediction again, and a short one: the permits drain on their own.
+        ServingError::Overloaded => Some(SHED_RETRY_AFTER_SECS),
+        // The three engine codes carry no `Retry-After`, and each for its own
+        // reason. `endpoint_query_failed` may be permanent (the table is gone)
+        // or transient (the cluster was busy) and egret cannot tell which, so
+        // naming a floor would be a guess. `timeout` is the caller's own query
+        // being too big — waiting changes nothing. `engine_unavailable` is the
+        // one where a bare 5xx and a client's own backoff is exactly right: the
+        // engine comes back when an operator brings it back, and unlike the
+        // config-drift 503s there is no human who needs the fleet to go quiet in
+        // order to notice.
         ServingError::Unauthorized
         | ServingError::NotFound
         | ServingError::DataAccessDenied { .. }
@@ -381,6 +491,13 @@ pub(crate) fn to_wire(e: &ServingError) -> Wire {
         | ServingError::ParamMissing
         | ServingError::ParamInvalid
         | ServingError::RowLimitExceeded { .. }
+        | ServingError::EndpointQueryFailed { .. }
+        | ServingError::EngineTimeout
+        | ServingError::EngineUnavailable { .. }
+        // Neither of these two clears with time: the request outran a fixed
+        // deadline, and the body will be the same size next time.
+        | ServingError::ServingDeadline
+        | ServingError::PayloadTooLarge
         | ServingError::Internal(_) => None,
     };
 
@@ -390,6 +507,39 @@ pub(crate) fn to_wire(e: &ServingError) -> Wire {
         message,
         retry_after,
     }
+}
+
+/// Every answer this taxonomy can put on the wire: HTTP status -> the
+/// `error.code`s that produce it.
+///
+/// # Why this is a function and not a constant
+///
+/// It is DERIVED — [`to_wire`] applied to [`crate::serving::census`], which is
+/// itself checked against `ServingError`'s own source. Nothing here is written
+/// down twice, which is the point: the two OpenAPI documents this surface
+/// publishes both carried a hand-maintained status list, and both went stale the
+/// moment Package 3b made `502 engine_unavailable` and `504 timeout` live. One
+/// list was corrected; the other — the per-service-account document a consumer
+/// actually generates a client from (`openapi_gen::error_responses`) — was not,
+/// and no gate could see it, because the byte gate compares the ROOT document to
+/// itself.
+///
+/// A list a human maintains goes stale silently. A list the compiler and the
+/// census maintain cannot: add a variant and [`to_wire`] fails to compile until
+/// it has an arm, the census fails until it has a sample, and this map — and
+/// therefore every document built from it — grows the new status without anyone
+/// remembering to widen it.
+///
+/// `BTreeMap`/`BTreeSet` rather than hash sets, so a generated document is
+/// byte-stable across runs: an OpenAPI file that reorders its own keys makes
+/// every regeneration look like a change.
+pub fn wire_answers() -> BTreeMap<u16, BTreeSet<&'static str>> {
+    let mut out: BTreeMap<u16, BTreeSet<&'static str>> = BTreeMap::new();
+    for (_, e) in crate::serving::census::every_variant() {
+        let w = to_wire(&e);
+        out.entry(w.status.as_u16()).or_default().insert(w.code);
+    }
+    out
 }
 
 impl Wire {
@@ -424,66 +574,120 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    /// Every variant, spelled out. Written as a list rather than as a loop over
-    /// something clever so that adding a variant to `ServingError` fails to
-    /// compile in `to_wire` and then shows up as a missing line here.
+    /// Spec §7's table: every variant's status and code, spelled out.
+    ///
+    /// # What changed here, and why the old shape was worth replacing
+    ///
+    /// This used to be a hand-written list of variants whose comment claimed
+    /// that "adding a variant to `ServingError` fails to compile in `to_wire`
+    /// and then shows up as a missing line here". Only the first half was true.
+    /// A new variant forces a `to_wire` arm and NOTHING forces a row here, so
+    /// the list could silently describe a subset of the taxonomy — which is
+    /// exactly what happened to its twin in `serving/metrics.rs`.
+    ///
+    /// Now the variants come from [`crate::serving::census::every_variant`],
+    /// which is itself checked against the enum's own source, and this test owns
+    /// only the EXPECTATIONS. A new variant therefore cannot reach the wire
+    /// without someone writing down, here, what status and code it carries.
     #[test]
     fn the_code_table_is_spec_section_7() {
-        let cases: Vec<(ServingError, u16, &str)> = vec![
-            (ServingError::Unauthorized, 401, "key_invalid"),
-            (ServingError::NotFound, 404, "not_found"),
-            // Both recognitions, one code. Spelled out as two rows because the
-            // two `raw` shapes are two construction sites in
-            // `router::engine_error`, and a change that gave either its own code
-            // would have to edit this list.
-            (
-                ServingError::DataAccessDenied { raw: None },
-                403,
-                "data_access_denied",
-            ),
-            (
-                ServingError::DataAccessDenied {
-                    raw: Some(anyhow::anyhow!(
-                        "Access Denied: Cannot select from table sales"
-                    )),
-                },
-                403,
-                "data_access_denied",
-            ),
-            (ServingError::NotGranted, 403, "not_granted"),
-            (ServingError::ParamMissing, 400, "param_missing"),
-            (ServingError::ParamInvalid, 400, "param_invalid"),
-            (
-                ServingError::RowLimitExceeded { cap: 100 },
-                400,
-                "row_limit_exceeded",
-            ),
-            (
-                ServingError::RateLimited {
-                    retry_after: Duration::from_secs(2),
-                },
-                429,
-                "rate_limited",
-            ),
-            (ServingError::SchemaDrift, 503, "schema_drift"),
-            (
-                ServingError::OutputNamingCollision,
-                503,
-                "output_naming_collision",
-            ),
-            (ServingError::CacheScopeStale, 503, "cache_scope_stale"),
-            (ServingError::GovernanceStale, 503, "governance_stale"),
-            (
-                ServingError::Internal(anyhow::anyhow!("boom")),
-                500,
-                "internal",
-            ),
-        ];
-        for (e, status, code) in cases {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        // variant name -> (status, code). The census guarantees the key set is
+        // the whole enum; the assertions below guarantee this map is exactly it.
+        let expected: BTreeMap<&str, (u16, &str)> = BTreeMap::from([
+            ("Unauthorized", (401, "key_invalid")),
+            ("NotFound", (404, "not_found")),
+            // Both recognitions, one code — the two `raw` shapes are two
+            // construction sites in `router::engine_error`.
+            ("DataAccessDenied", (403, "data_access_denied")),
+            ("NotGranted", (403, "not_granted")),
+            ("ParamMissing", (400, "param_missing")),
+            ("ParamInvalid", (400, "param_invalid")),
+            ("RowLimitExceeded", (400, "row_limit_exceeded")),
+            ("RateLimited", (429, "rate_limited")),
+            ("SchemaDrift", (503, "schema_drift")),
+            ("OutputNamingCollision", (503, "output_naming_collision")),
+            ("CacheScopeStale", (503, "cache_scope_stale")),
+            ("GovernanceStale", (503, "governance_stale")),
+            ("ParamGateStale", (503, "param_gate_stale")),
+            // The three Package 3b codes.
+            ("EndpointQueryFailed", (500, "endpoint_query_failed")),
+            ("EngineTimeout", (504, "timeout")),
+            ("EngineUnavailable", (502, "engine_unavailable")),
+            // The three the request-bounds layer answers. `deadline_exceeded`
+            // and `timeout` are two 504s on purpose: two actors, two codes.
+            ("ServingDeadline", (504, "deadline_exceeded")),
+            ("Overloaded", (503, "overloaded")),
+            ("PayloadTooLarge", (413, "payload_too_large")),
+            ("Internal", (500, "internal")),
+        ]);
+
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        for (name, e) in crate::serving::census::every_variant() {
+            let Some(&(status, code)) = expected.get(name) else {
+                panic!(
+                    "`{name}` reaches the wire with no row in this table. Spec §7 \
+                     is what a client branches on: write down its status and code \
+                     here rather than letting `to_wire` decide unwatched."
+                );
+            };
             let w = to_wire(&e);
-            assert_eq!(w.status.as_u16(), status, "status for {code}");
-            assert_eq!(w.code, code, "code for {e:?}");
+            assert_eq!(w.status.as_u16(), status, "status for {name} ({code})");
+            assert_eq!(w.code, code, "code for {name} ({e:?})");
+            seen.insert(name);
         }
+
+        let unused: Vec<_> = expected.keys().filter(|k| !seen.contains(*k)).collect();
+        assert!(
+            unused.is_empty(),
+            "rows for variants the census does not produce (renamed? removed?): \
+             {unused:?}"
+        );
+    }
+
+    /// `Retry-After` is present exactly where the code table says a wait is
+    /// meaningful, and absent everywhere else.
+    ///
+    /// Driven off the census for the same reason as the table above: the header
+    /// is a promise about a specific condition clearing, and a variant that
+    /// acquired one by accident (or lost one) would otherwise be invisible.
+    #[test]
+    fn the_retry_after_header_is_carried_by_exactly_the_codes_that_mean_it() {
+        use std::collections::BTreeMap;
+
+        let expected: BTreeMap<&str, Option<u64>> = BTreeMap::from([
+            // A prediction: the bucket has refilled.
+            ("RateLimited", Some(2)),
+            // A floor, not a forecast — a human clears these.
+            ("SchemaDrift", Some(CONFIG_DRIFT_RETRY_AFTER_SECS)),
+            ("OutputNamingCollision", Some(CONFIG_DRIFT_RETRY_AFTER_SECS)),
+            ("CacheScopeStale", Some(CONFIG_DRIFT_RETRY_AFTER_SECS)),
+            ("GovernanceStale", Some(CONFIG_DRIFT_RETRY_AFTER_SECS)),
+            ("ParamGateStale", Some(CONFIG_DRIFT_RETRY_AFTER_SECS)),
+            // Drains on its own, and fast.
+            ("Overloaded", Some(SHED_RETRY_AFTER_SECS)),
+        ]);
+
+        for (name, e) in crate::serving::census::every_variant() {
+            let want = expected.get(name).copied().unwrap_or(None);
+            assert_eq!(
+                to_wire(&e).retry_after,
+                want,
+                "{name} carries the wrong `Retry-After`; every value here is a \
+                 claim about when the condition clears"
+            );
+        }
+
+        // The 429's value is COMPUTED from the bucket, and rounded up: a client
+        // that comes back at one second is still refused.
+        assert_eq!(
+            to_wire(&ServingError::RateLimited {
+                retry_after: Duration::from_millis(1_500)
+            })
+            .retry_after,
+            Some(2)
+        );
     }
 
     /// The one property this whole module exists for. Asserted on the MESSAGE
@@ -561,6 +765,100 @@ mod tests {
         );
     }
 
+    /// **The leak-proofness rule, applied to the three codes Package 3b added.**
+    ///
+    /// Splitting `internal` into named causes is exactly the kind of change that
+    /// takes a message from "internal error" to something that quotes the
+    /// engine, because the whole point of the split is to be more specific. It
+    /// is more specific about the CAUSE and not one word more specific about the
+    /// data: `EndpointQueryFailed` and `EngineUnavailable` both carry a `raw`,
+    /// and neither may render it.
+    ///
+    /// Mutating either arm to interpolate its source fails here.
+    #[test]
+    fn the_engine_codes_never_render_what_the_engine_said() {
+        let failed = ServingError::EndpointQueryFailed {
+            raw: Some(anyhow::anyhow!(
+                "line 1:15: Table 'hive.analytics.salaries' does not exist"
+            )),
+        };
+        let w = to_wire(&failed);
+        for leak in ["hive.analytics.salaries", "line 1:15", "Table"] {
+            assert!(
+                !w.message.contains(leak),
+                "leaked {leak:?} from the engine: {}",
+                w.message
+            );
+        }
+        // The other half: the words still reach the log, through the same
+        // `#[source]` chain `serve`'s `error = ?e` line prints.
+        let src = std::error::Error::source(&failed).expect("the engine's words reach the log");
+        assert!(src.to_string().contains("hive.analytics.salaries"));
+
+        let unavailable = ServingError::EngineUnavailable {
+            raw: Some(anyhow::anyhow!(
+                "engine unavailable: connect: error sending request for url \
+                 (https://trino-coordinator.internal:8443/v1/statement)"
+            )),
+        };
+        let w = to_wire(&unavailable);
+        for leak in ["trino-coordinator.internal", "8443", "v1/statement"] {
+            assert!(
+                !w.message.contains(leak),
+                "a 502 taught a caller outside the network where the engine lives: {leak:?} in {}",
+                w.message
+            );
+        }
+        assert!(std::error::Error::source(&unavailable)
+            .expect("the address reaches the log")
+            .to_string()
+            .contains("trino-coordinator.internal"));
+
+        // `EngineTimeout` carries nothing to leak, and that is a statement: the
+        // port's timeout has no engine text behind it, only egret's own note of
+        // which budget expired.
+        assert!(std::error::Error::source(&ServingError::EngineTimeout).is_none());
+    }
+
+    /// The split is only worth anything if the codes are DISTINCT — an operator
+    /// aggregating `access_log.error_code` to answer "which endpoints are
+    /// failing" needs the author's broken endpoint separable from egret's own
+    /// fault and from the engine being down.
+    ///
+    /// Collapsing any two of them back onto one string fails here.
+    #[test]
+    fn the_four_5xx_causes_have_four_different_codes() {
+        let codes = [
+            to_wire(&ServingError::EndpointQueryFailed { raw: None }).code,
+            to_wire(&ServingError::EngineTimeout).code,
+            to_wire(&ServingError::EngineUnavailable { raw: None }).code,
+            to_wire(&ServingError::Internal(anyhow::anyhow!("boom"))).code,
+        ];
+        let mut seen: Vec<&str> = codes.to_vec();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(
+            seen.len(),
+            codes.len(),
+            "two 5xx causes share one error_code: {codes:?}"
+        );
+        // And none of them is a 4xx — spec §7's requirement (c). The caller did
+        // nothing wrong in any of the four.
+        for e in [
+            ServingError::EndpointQueryFailed { raw: None },
+            ServingError::EngineTimeout,
+            ServingError::EngineUnavailable { raw: None },
+        ] {
+            let w = to_wire(&e);
+            assert!(
+                w.status.is_server_error(),
+                "{} must not be a client error, got {}",
+                w.code,
+                w.status
+            );
+        }
+    }
+
     /// The rule the module comment states, asserted on the only two answers
     /// that could break it. A parameter name is the author's, so neither body
     /// may contain one — and since the variants carry nothing, the strongest
@@ -598,95 +896,34 @@ mod tests {
         assert_eq!(w.message, "result exceeded the 5000-row cap");
     }
 
-    /// Two `Retry-After` sources with two meanings. The 429's is computed from
-    /// the bucket; the 503s' is a fixed floor.
-    #[test]
-    fn retry_after_is_present_exactly_where_it_means_something() {
-        assert_eq!(
-            to_wire(&ServingError::RateLimited {
-                retry_after: Duration::from_millis(1_500)
-            })
-            .retry_after,
-            // Rounded UP by `retry_after_secs`: a client that comes back at 1s
-            // is still refused.
-            Some(2),
-            "the 429's wait is computed, not fixed"
-        );
-        for e in [
-            ServingError::SchemaDrift,
-            ServingError::OutputNamingCollision,
-            ServingError::CacheScopeStale,
-            ServingError::GovernanceStale,
-            ServingError::ParamGateStale,
-        ] {
-            assert_eq!(
-                to_wire(&e).retry_after,
-                Some(CONFIG_DRIFT_RETRY_AFTER_SECS),
-                "a config-drift 503 states a floor so clients do not default to \
-                 a one-second backoff against a state only a human clears: {e:?}"
-            );
-        }
-        for e in [
-            ServingError::Unauthorized,
-            ServingError::NotFound,
-            ServingError::DataAccessDenied { raw: None },
-            ServingError::DataAccessDenied {
-                raw: Some(anyhow::anyhow!(
-                    "Access Denied: Cannot select from table sales"
-                )),
-            },
-            ServingError::NotGranted,
-            ServingError::ParamMissing,
-            ServingError::ParamInvalid,
-            ServingError::RowLimitExceeded { cap: 1 },
-            ServingError::Internal(anyhow::anyhow!("boom")),
-        ] {
-            assert_eq!(
-                to_wire(&e).retry_after,
-                None,
-                "waiting does not help with {e:?}, so promising a wait would be a lie"
-            );
-        }
-    }
-
     /// Codes are the client's branching key, so two variants sharing one would
-    /// make them indistinguishable on the wire. The four 503s in particular
-    /// have four different fixes.
+    /// make them indistinguishable on the wire — and indistinguishable in
+    /// `access_log.error_code`, which is the column an operator aggregates.
+    ///
+    /// Over the census rather than over a list, for the reason the code table
+    /// above gives: a hand-written list can only find a collision between
+    /// variants somebody remembered to list, and the collision this repo
+    /// actually met was between a variant on this branch (`EngineTimeout` →
+    /// `timeout`) and one on a sibling branch that no list here mentioned.
+    ///
+    /// One variant may appear more than once in the census (two `raw` shapes are
+    /// two construction sites), so the claim is per NAME: two different variants
+    /// may not answer with one code.
     #[test]
     fn no_two_variants_share_a_code() {
-        let codes = [
-            to_wire(&ServingError::Unauthorized).code,
-            to_wire(&ServingError::NotFound).code,
-            to_wire(&ServingError::DataAccessDenied { raw: None }).code,
-            // The pair this test exists for most: two variants that share a
-            // STATUS must not share a code, or the wire cannot tell "ask egret
-            // for a grant" from "ask the engine for a permission".
-            to_wire(&ServingError::NotGranted).code,
-            // Three 400s now. `param_missing` and `param_invalid` point at two
-            // different client-side fixes, and both are different from
-            // `row_limit_exceeded`, which is not the caller's fault at all.
-            to_wire(&ServingError::ParamMissing).code,
-            to_wire(&ServingError::ParamInvalid).code,
-            to_wire(&ServingError::RowLimitExceeded { cap: 1 }).code,
-            to_wire(&ServingError::RateLimited {
-                retry_after: Duration::from_secs(1),
-            })
-            .code,
-            to_wire(&ServingError::SchemaDrift).code,
-            to_wire(&ServingError::OutputNamingCollision).code,
-            to_wire(&ServingError::CacheScopeStale).code,
-            // `governance_stale` is the one that is NOT cleared by a re-publish,
-            // which is why it may not collapse into `cache_scope_stale`: the two
-            // send an operator to two different actions, and one of the two
-            // actions is refused for this condition.
-            to_wire(&ServingError::GovernanceStale).code,
-            // Five 503s now, and this is the one most easily confused with
-            // `cache_scope_stale`: both mean "this version predates something",
-            // and only one of them is cleared by restoring a connection setting.
-            to_wire(&ServingError::ParamGateStale).code,
-            to_wire(&ServingError::Internal(anyhow::anyhow!("boom"))).code,
-        ];
-        let unique: std::collections::HashSet<_> = codes.iter().collect();
-        assert_eq!(unique.len(), codes.len(), "duplicate code in {codes:?}");
+        use std::collections::BTreeMap;
+
+        let mut owner: BTreeMap<&'static str, &'static str> = BTreeMap::new();
+        for (name, e) in crate::serving::census::every_variant() {
+            let code = to_wire(&e).code;
+            match owner.insert(code, name) {
+                Some(other) if other != name => panic!(
+                    "`{name}` and `{other}` both answer `{code}`: a client \
+                     branching on the code, and an operator aggregating \
+                     `access_log.error_code`, cannot tell them apart"
+                ),
+                _ => {}
+            }
+        }
     }
 }

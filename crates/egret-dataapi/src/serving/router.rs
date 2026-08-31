@@ -223,8 +223,8 @@ use super::cache::{cache_key, cache_ttl, shared_cache_allowed};
 use super::error::{is_permission_denied, to_wire, ServingErrorBody};
 // Aliased: `metrics` unqualified would read as the FACADE crate at every
 // call site in this file, and the two are one keystroke apart.
-use super::metrics as serving_metrics;
 use super::governance::{governance_allows_serving, LiveConnection};
+use super::metrics as serving_metrics;
 use super::params;
 use super::ratelimit::{check_request, retry_after_secs};
 use super::{verify_serving_token, ServingError};
@@ -643,6 +643,23 @@ impl utoipa::Modify for BearerAddon {
     }
 }
 
+// A `//` comment and NOT a doc comment: `utoipa` lifts a doc comment on a handler
+// into the operation's `summary`/`description`, and this is a note to whoever
+// edits the annotation, not something a machine consumer should read.
+//
+// **Every status and code below is pinned by
+// `the_published_contract_names_every_answer_the_surface_can_give`**, which reads
+// them out of the generated document and compares them against `to_wire`'s table
+// rather than against a list. Before that test the responses declared
+// `500 internal` and nothing else, so `502`, `504` and `endpoint_query_failed` —
+// all of them live — were statuses a machine consumer branching on this document
+// had no case for. The `openapi.json` byte gate did not notice, because nothing
+// in the document had changed: that gate answers "is the committed file
+// current", never "is the document true".
+//
+// `serve_post` below carries the same list, verbatim. `utoipa::path` takes
+// literals, so the duplication cannot be factored out — the test asserts the two
+// operations independently for that reason.
 #[utoipa::path(
     get,
     path = "/data-api/v1/{ws}/{path}",
@@ -658,8 +675,11 @@ impl utoipa::Modify for BearerAddon {
         (status = 403, description = "`data_access_denied` — the engine refused this service account the underlying data, either because it lacks a data permission (a Ranger grant, say) or because its engine credential is bad or expired; one code, because the two recognitions available (Trino's typed 401/403 from the coordinator, and every other engine failure matched on its own message) cannot tell those causes apart. `not_granted` — egret refused the call because the service account holds no invoke grant on this endpoint", body = ServingErrorBody),
         (status = 404, description = "`not_found` — no such live endpoint in this workspace", body = ServingErrorBody),
         (status = 429, description = "`rate_limited` — a published rate limit was exceeded; `Retry-After` states when the bucket refills", body = ServingErrorBody),
-        (status = 500, description = "`internal` — an egret-side fault; quote `request_id` to support", body = ServingErrorBody),
-        (status = 503, description = "`schema_drift` / `output_naming_collision` / `cache_scope_stale` / `governance_stale` / `param_gate_stale` — the published configuration no longer describes the data, was frozen before the current parameter-safety rules existed, or points at a `governed` database through a connection that does not run queries as the caller. `Retry-After` is a floor, not a forecast: a re-publish clears the first four, and `governance_stale` is cleared only by restoring the connection or the database's `governed` flag", body = ServingErrorBody),
+        (status = 413, description = "`payload_too_large` — the request declared a body larger than this surface accepts", body = ServingErrorBody),
+        (status = 500, description = "`internal` — an egret-side fault (the metastore, the secret store, a corrupt snapshot); quote `request_id` to support. `endpoint_query_failed` — the engine ran the endpoint's published statement and refused it: the request was fine and the endpoint is what broke, so it is a 5xx rather than a 4xx, and its own code so that `which endpoints are failing` is separable from `egret is failing`", body = ServingErrorBody),
+        (status = 502, description = "`engine_unavailable` — the query engine behind this endpoint could not be reached. An operator's problem, not the endpoint author's; the engine, its host and its port are deliberately not named", body = ServingErrorBody),
+        (status = 503, description = "`schema_drift` / `output_naming_collision` / `cache_scope_stale` / `governance_stale` / `param_gate_stale` — the published configuration no longer describes the data, was frozen before the current parameter-safety rules existed, or points at a `governed` database through a connection that does not run queries as the caller. `Retry-After` is a floor, not a forecast: a re-publish clears the first four, and `governance_stale` is cleared only by restoring the connection or the database's `governed` flag. `overloaded` — egret shed the request because the serving surface was at its concurrency limit; that one clears by itself and its `Retry-After` is a prediction", body = ServingErrorBody),
+        (status = 504, description = "`timeout` — the endpoint's statement exceeded the time budget its author published (`limits.timeout`); the fix is the endpoint's, not the caller's. `deadline_exceeded` — the request outran egret's own serving deadline. Two codes for one status on purpose: they name two different actors, and `code` is what tells them apart", body = ServingErrorBody),
     ),
     security(("data_api_bearer" = [])),
 )]
@@ -689,8 +709,11 @@ async fn serve_get(
         (status = 403, description = "`data_access_denied` — the engine refused this service account the underlying data, either because it lacks a data permission (a Ranger grant, say) or because its engine credential is bad or expired; one code, because the two recognitions available (Trino's typed 401/403 from the coordinator, and every other engine failure matched on its own message) cannot tell those causes apart. `not_granted` — egret refused the call because the service account holds no invoke grant on this endpoint", body = ServingErrorBody),
         (status = 404, description = "`not_found` — no such live endpoint in this workspace", body = ServingErrorBody),
         (status = 429, description = "`rate_limited` — a published rate limit was exceeded; `Retry-After` states when the bucket refills", body = ServingErrorBody),
-        (status = 500, description = "`internal` — an egret-side fault; quote `request_id` to support", body = ServingErrorBody),
-        (status = 503, description = "`schema_drift` / `output_naming_collision` / `cache_scope_stale` / `governance_stale` / `param_gate_stale` — the published configuration no longer describes the data, was frozen before the current parameter-safety rules existed, or points at a `governed` database through a connection that does not run queries as the caller. `Retry-After` is a floor, not a forecast: a re-publish clears the first four, and `governance_stale` is cleared only by restoring the connection or the database's `governed` flag", body = ServingErrorBody),
+        (status = 413, description = "`payload_too_large` — the request declared a body larger than this surface accepts", body = ServingErrorBody),
+        (status = 500, description = "`internal` — an egret-side fault (the metastore, the secret store, a corrupt snapshot); quote `request_id` to support. `endpoint_query_failed` — the engine ran the endpoint's published statement and refused it: the request was fine and the endpoint is what broke, so it is a 5xx rather than a 4xx, and its own code so that `which endpoints are failing` is separable from `egret is failing`", body = ServingErrorBody),
+        (status = 502, description = "`engine_unavailable` — the query engine behind this endpoint could not be reached. An operator's problem, not the endpoint author's; the engine, its host and its port are deliberately not named", body = ServingErrorBody),
+        (status = 503, description = "`schema_drift` / `output_naming_collision` / `cache_scope_stale` / `governance_stale` / `param_gate_stale` — the published configuration no longer describes the data, was frozen before the current parameter-safety rules existed, or points at a `governed` database through a connection that does not run queries as the caller. `Retry-After` is a floor, not a forecast: a re-publish clears the first four, and `governance_stale` is cleared only by restoring the connection or the database's `governed` flag. `overloaded` — egret shed the request because the serving surface was at its concurrency limit; that one clears by itself and its `Retry-After` is a prediction", body = ServingErrorBody),
+        (status = 504, description = "`timeout` — the endpoint's statement exceeded the time budget its author published (`limits.timeout`); the fix is the endpoint's, not the caller's. `deadline_exceeded` — the request outran egret's own serving deadline. Two codes for one status on purpose: they name two different actors, and `code` is what tells them apart", body = ServingErrorBody),
     ),
     security(("data_api_bearer" = [])),
 )]
@@ -2222,51 +2245,52 @@ fn execution_limits(snap: &EndpointSnapshot) -> egret_query_api::Limits {
 /// `"permission denied"` is a common OS/Kubernetes/vault string. See the match
 /// arm below for what that cost.
 ///
-/// # Everything else is `Internal`, and that is now a decision rather than a gap
+/// # The widening the three notes below asked for, and what it brought
 ///
-/// A published snapshot whose SQL no longer parses, a relation that has been
-/// dropped, an unreachable coordinator and a timeout are four different operator
-/// stories, and spec §7 names two of them (`engine_unavailable`, `timeout`).
-/// **Neither is decidable here**, and the reason is upstream of this function:
+/// This function used to answer `500 internal` for everything that was not a
+/// denial, and the doc comment here listed what a future widening would owe.
+/// Package 3b did it; the list is kept, each item now naming what discharged it,
+/// because the reasoning is what stops the next edit from collapsing them again.
 ///
-/// * `port_impl::connect_as` produces `egret_core::Error::Internal` for EGRET's
-///   own faults — resolving the principal's email, opening the database secret
-///   (`egret-query/src/execution/port_impl.rs:120-137`) — using the same variant
-///   `engine_error` produces for the engine's `Connect`/`Storage`/`Db`. So
-///   `Internal` does not mean "the engine is unreachable", and answering 502
-///   would page an operator about Trino when the metastore is what failed.
-/// * `EngineError::Timeout` becomes `Error::InvalidInput("query timed out")`,
-///   deliberately and for `describe_as`'s sake
-///   (`port_impl.rs:53`). Recognising it here would mean matching another
-///   crate's message string — a check that keeps compiling and silently stops
-///   working the day someone rewords it.
-///
-/// # What the widening must bring, when someone does it
-///
-/// Recorded here because this is the function they will open, and because two
-/// of the three are easy to miss while thinking only about 502 and 504:
-///
-/// 1. **`execute_as` needs its own timeout error, not `describe_as`'s.** They
-///    share one `engine_error` table today, and that table maps
-///    `EngineError::Timeout` to `InvalidInput("query timed out")` for a reason
-///    that is true only of `describe_as` — a `LIMIT 0` plan that times out
-///    really is a query problem. For `execute_as` it means the caller's
-///    published budget was exceeded. Widening the error type without splitting
-///    that arm leaves 504 undecidable forever.
+/// 1. **`execute_as` needed its own timeout error, not `describe_as`'s.** They
+///    shared one table, and that table mapped `EngineError::Timeout` to
+///    `InvalidInput("query timed out")` for a reason true only of `describe_as`
+///    — a `LIMIT 0` plan that times out really is a query problem. For
+///    `execute_as` it means the caller's published budget was exceeded.
+///    `port_impl` now has `describe_error` and `execute_error`, and only the
+///    second types a timeout. Without that split, 504 was undecidable forever.
 /// 2. **A distinct AUTHOR-FAULT code, not only 502/504.**
-///    `EngineError::BadRequest`/`Engine`/`Limit` all become
-///    `Error::InvalidInput` and land here on `500 internal`, so a published
-///    endpoint whose SQL stopped parsing is indistinguishable in
-///    `access_log.error_code` from an egret fault. Spec §7's `internal` row does
-///    cover it — it is disclosed, not hidden — but an operator scanning the log
-///    for "which endpoints are broken" cannot separate the two, and those are
-///    different people's problems.
-/// 3. It must not become a 400. The caller did nothing wrong; the endpoint did.
+///    `EngineError::BadRequest`/`Engine`/`Limit` still become
+///    `Error::InvalidInput` — deliberately, because that message is what the
+///    authoring surfaces show the author — but they no longer land on `500
+///    internal`. They are [`ServingError::EndpointQueryFailed`], so an operator
+///    scanning `access_log.error_code` for "which endpoints are broken" can
+///    separate that from an egret fault.
+/// 3. **It must not be a 400.** It is a 500. The caller did nothing wrong; the
+///    endpoint did.
 ///
-/// Until then the answer is 500 with the detail in the log, which is safe —
-/// nothing from the engine reaches the body — and honest, which a guessed 502
-/// would not be. See `ServingError`'s comment.
+/// # The two engine causes are recovered as VALUES, never from message text
+///
+/// The old note said 502 and 504 were undecidable here, and gave the right
+/// reason: `Error::Internal` was produced both for the engine's
+/// `Connect`/`Storage` failures and for EGRET's own — resolving the principal's
+/// email, opening the database secret — so a 502 would have paged an operator
+/// about Trino when the metastore was what failed; and a timeout arrived as a
+/// message string, so recognising it would have meant matching another crate's
+/// wording, "a check that keeps compiling and silently stops working the day
+/// someone rewords it".
+///
+/// `egret_query_api::ExecFailure` closed both. `port_impl::execute_error` tags
+/// ONLY the engine's own transport failures and ONLY an execution timeout;
+/// egret's faults deliberately carry no tag and still fall through to
+/// [`ServingError::Internal`]. So the 502 stays honest by construction: it is
+/// not "an Internal we guessed was the engine", it is "the port said the engine
+/// was unreachable".
 fn engine_error(e: egret_core::Error) -> ServingError {
+    // Read BEFORE the match, because recovering it needs the error by reference
+    // and the arms below consume it. `None` for every error that carries no tag
+    // — which is every error egret produced about itself.
+    let exec_kind = egret_query_api::ExecFailure::kind_of(&e);
     match e {
         // `raw: None` is a statement, not an omission: `Error::Forbidden` is a
         // unit variant, so there is no engine text to keep. Naming the field
@@ -2302,6 +2326,26 @@ fn engine_error(e: egret_core::Error) -> ServingError {
             // doc for why that matters.
             ServingError::DataAccessDenied {
                 raw: Some(anyhow::anyhow!("{msg}")),
+            }
+        }
+        // Everything else `InvalidInput` can be at this seam is the engine
+        // rejecting the endpoint's own statement — its SQL, a dropped relation,
+        // a resource-group refusal. It is NOT the caller's input: caller values
+        // never reach the SQL (they are bound), and a parameter the caller got
+        // wrong was refused as `param_invalid` long before the engine was
+        // contacted. So the author's endpoint is what is broken.
+        egret_core::Error::InvalidInput(msg) => ServingError::EndpointQueryFailed {
+            raw: Some(anyhow::anyhow!("{msg}")),
+        },
+        // The two the port tagged. Matched on the tag read above, never on the
+        // variant alone — an untagged `Internal` is egret's own fault and must
+        // keep falling through to `internal` below.
+        _ if exec_kind == Some(egret_query_api::ExecFailureKind::Timeout) => {
+            ServingError::EngineTimeout
+        }
+        other if exec_kind == Some(egret_query_api::ExecFailureKind::EngineUnavailable) => {
+            ServingError::EngineUnavailable {
+                raw: Some(anyhow::anyhow!("{other}")),
             }
         }
         other => ServingError::internal(other),
@@ -2780,6 +2824,119 @@ pub(crate) fn apply_naming(name: &str, naming: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- Package 3b: `internal` was one code for six causes -----------------
+    //
+    // Every case below builds its input with `egret_query_api::ExecFailure`,
+    // which is the SAME constructor `egret_query::execution::port_impl`'s
+    // `execute_error` uses — the two crates cannot see each other, and the
+    // producer half is pinned by `a_timeout_means_different_things_to_describe_
+    // and_to_execute` and `an_unreachable_engine_is_typed_on_the_execute_path`
+    // over there. Asserting a code string against a hand-built `ServingError`
+    // would prove nothing about what actually reaches the wire; these drive the
+    // classifier itself, and `serving_errors.rs` drives the whole handler.
+
+    /// The endpoint's own statement failed. Before this it was `500 internal`,
+    /// indistinguishable in `access_log.error_code` from egret being broken.
+    ///
+    /// Deleting the `InvalidInput` arm from `engine_error` makes this fail with
+    /// `internal`, which is exactly the defect it names.
+    #[test]
+    fn a_rejected_statement_is_the_authors_endpoint_not_egret() {
+        let e = engine_error(egret_core::Error::InvalidInput(
+            "line 1:15: Table 'hive.analytics.salaries' does not exist".into(),
+        ));
+        assert!(
+            matches!(e, ServingError::EndpointQueryFailed { .. }),
+            "expected EndpointQueryFailed, got {e:?}"
+        );
+        let w = to_wire(&e);
+        assert_eq!(w.code, "endpoint_query_failed");
+        assert_eq!(w.status.as_u16(), 500, "spec §7 (c): it must not be a 4xx");
+    }
+
+    /// The denial heuristic still wins over the new arm. Order matters: a
+    /// permission denial arrives as `InvalidInput` too, and reporting it as a
+    /// broken endpoint would send an admin to debug SQL that is fine.
+    #[test]
+    fn a_denial_still_beats_the_new_author_fault_arm() {
+        let e = engine_error(egret_core::Error::InvalidInput(
+            "Access Denied: Cannot select from table sales".into(),
+        ));
+        assert!(
+            matches!(e, ServingError::DataAccessDenied { .. }),
+            "the denial heuristic must be tried first, got {e:?}"
+        );
+    }
+
+    /// Spec §7's `timeout`, decidable at last — and decidable **as a value**.
+    /// The port no longer says "query timed out" in words this crate would have
+    /// had to match.
+    #[test]
+    fn an_execution_timeout_is_a_504() {
+        let from_port =
+            egret_query_api::ExecFailure::new(egret_query_api::ExecFailureKind::Timeout, "timeout")
+                .into_error();
+        let e = engine_error(from_port);
+        assert!(matches!(e, ServingError::EngineTimeout), "got {e:?}");
+        let w = to_wire(&e);
+        assert_eq!(w.code, "timeout");
+        assert_eq!(w.status.as_u16(), 504);
+    }
+
+    /// Spec §7's `engine_unavailable`.
+    #[test]
+    fn an_unreachable_engine_is_a_502() {
+        let from_port = egret_query_api::ExecFailure::new(
+            egret_query_api::ExecFailureKind::EngineUnavailable,
+            "connect: error sending request for url (https://trino.internal:8443/v1/statement)",
+        )
+        .into_error();
+        let e = engine_error(from_port);
+        assert!(
+            matches!(e, ServingError::EngineUnavailable { .. }),
+            "got {e:?}"
+        );
+        let w = to_wire(&e);
+        assert_eq!(w.code, "engine_unavailable");
+        assert_eq!(w.status.as_u16(), 502);
+    }
+
+    /// **The half that keeps the 502 honest, and the reason the old comment
+    /// said it was undecidable.**
+    ///
+    /// `port_impl::connect_as` produces a plain `Error::Internal` for egret's
+    /// OWN faults — resolving the principal's email, opening the database
+    /// secret. Those must stay `internal`: answering 502 for one would page an
+    /// operator about Trino when the metastore is what failed.
+    ///
+    /// Mutating the two arms above to match on the variant instead of on the
+    /// tag — `Error::Internal(_) => EngineUnavailable` — fails here, and it is
+    /// the mutation most likely to be written, because it looks simpler.
+    #[test]
+    fn an_untagged_internal_is_still_egrets_own_fault() {
+        for detail in [
+            "open secret: connection pool timed out",
+            "resolve principal: no such user",
+            "delegation: token minting failed",
+        ] {
+            let e = engine_error(egret_core::Error::Internal(anyhow::anyhow!("{detail}")));
+            assert!(
+                matches!(e, ServingError::Internal(_)),
+                "{detail:?} is egret's fault and must stay `internal`, got {e:?}"
+            );
+            assert_eq!(to_wire(&e).code, "internal");
+        }
+    }
+
+    /// `connect_as` reports a database outside the workspace as `NotFound`
+    /// before an engine is contacted, so it is egret's answer and not the
+    /// engine's — it must not become an endpoint fault.
+    #[test]
+    fn a_not_found_from_the_port_is_not_an_engine_failure() {
+        let e = engine_error(egret_core::Error::NotFound("database".into()));
+        assert!(matches!(e, ServingError::Internal(_)), "got {e:?}");
+    }
 
     /// **A caller must not be able to choose how loudly a fault is reported.**
     ///
@@ -4745,6 +4902,66 @@ mod tests {
                 detail.contains("`main`") && detail.contains(named),
                 "the detail names the statement and what it was: {detail}"
             );
+        }
+    }
+
+    /// **The published contract answers for every answer the surface gives.**
+    ///
+    /// The finding: the two `utoipa::path` blocks declared `500 internal` and no
+    /// `502`, no `504` and no `endpoint_query_failed`, while all three were live
+    /// on this branch. A machine consumer branching on the document — which is
+    /// what a document is for — receives an undocumented status, which is the
+    /// same "the operator cannot act on it" defect this package exists to fix,
+    /// one layer out.
+    ///
+    /// It survived review because the `openapi.json` byte gate was green: it
+    /// compares the committed file to the generated one and passes *precisely
+    /// because nothing changed*. Nothing in the pipeline compared the document
+    /// to the taxonomy. This does.
+    ///
+    /// Driven off `census::every_variant` (checked against the enum itself), so
+    /// a variant added later fails here until both operations document it —
+    /// and, because the assertion is on the generated document, the committed
+    /// `openapi.json` has to be regenerated too.
+    ///
+    /// Asserted on the SERIALISED document rather than through utoipa's typed
+    /// model, because the serialised form is what a consumer reads.
+    #[test]
+    fn the_published_contract_names_every_answer_the_surface_can_give() {
+        use crate::serving::error::to_wire;
+
+        let doc = serde_json::to_value(super::serving_openapi()).expect("serialise");
+        let item = &doc["paths"]["/data-api/v1/{ws}/{path}"];
+        assert!(item.is_object(), "the serving path must be in the document");
+
+        for verb in ["get", "post"] {
+            let responses = &item[verb]["responses"];
+            assert!(
+                responses["200"].is_object(),
+                "{verb}: the success answer must be documented"
+            );
+            for (name, e) in crate::serving::census::every_variant() {
+                let w = to_wire(&e);
+                let status = w.status.as_str();
+                let described = &responses[status]["description"];
+                let described = described.as_str().unwrap_or_else(|| {
+                    panic!(
+                        "{verb}: `{name}` answers {status} `{}`, and the \
+                         published contract has no {status} response at all. A \
+                         consumer branching on this document cannot handle a \
+                         status it was never told about.",
+                        w.code
+                    )
+                });
+                assert!(
+                    described.contains(&format!("`{}`", w.code)),
+                    "{verb}: the {status} response does not name `{}` (from \
+                     `{name}`). `error.code` is what a client branches on, so a \
+                     status documented without its codes is documented in name \
+                     only.\n  description: {described}",
+                    w.code
+                );
+            }
         }
     }
 }

@@ -747,6 +747,108 @@ async fn a_several_statement_operation_discloses_that_it_shares_no_transaction()
 /// untouched by `envelope`).
 ///
 /// Both halves are read off real responses.
+/// **Every status the taxonomy can answer with is declared in the document a
+/// consumer generates a client from.**
+///
+/// # The finding
+///
+/// There are TWO OpenAPI documents. The root `utoipa` one, guarded by the
+/// `openapi.json` byte gate, and this one — `openapi_gen::build`, the
+/// per-service-account contract a consumer downloads. Package 3b made `502
+/// engine_unavailable` and `504 timeout` live on the serving surface and
+/// corrected only the first. This document still declared
+/// `400,401,403,404,429,500,503`, so a generated client had no case for the
+/// status it receives the moment the Trino coordinator goes down: the very
+/// "the caller cannot act on it" defect the package exists to remove, in the
+/// more consumer-facing of the two artefacts.
+///
+/// The byte gate cannot see this. It compares the ROOT document to the
+/// committed copy of itself and passes precisely because nothing changed.
+///
+/// # Why this test cannot go stale the way the list did
+///
+/// The expectation is not written here. `error::wire_answers()` derives it by
+/// applying `to_wire` to the taxonomy census, which is itself checked against
+/// `ServingError`'s own source — so a variant added later reaches this
+/// assertion without anyone editing it, and fails until the document declares
+/// its status. `error_responses()` is built from the same derivation, which is
+/// what makes the two agree by construction rather than by memory; this test is
+/// what fails if someone ever hand-writes the list again.
+///
+/// Asserted on a REAL built document (through the management route, on a real
+/// live endpoint), not on `error_responses()` in isolation: the responses map
+/// being right and the operation carrying it are two different facts, and the
+/// second one is the one a consumer reads.
+#[tokio::test]
+async fn the_consumer_document_declares_every_status_the_surface_can_answer() {
+    let Some(f) = fixture().await else { return };
+    let sa = f.create_service_account("status-list-sa").await;
+    f.grant_ws_admin(sa).await;
+    f.publish(
+        "/status-list",
+        f.database_id,
+        serde_json::json!({}),
+        serde_json::json!({}),
+    )
+    .await;
+
+    let (status, doc) = f
+        .mgmt_get(&format!(
+            "/api/ws/{}/data-api/openapi?service_account_id={sa}",
+            f.ws_slug
+        ))
+        .await;
+    assert_eq!(status, 200, "{doc}");
+    let op = operation(&doc, "/status-list");
+    let responses = &op["responses"];
+
+    let answers = egret_dataapi::serving::error::wire_answers();
+    // A floor, not a count of today's taxonomy: its only job is to fail loudly
+    // if the derivation ever returns nothing, because an empty expectation
+    // agrees with every document there is.
+    assert!(
+        answers.len() >= 7,
+        "the taxonomy derivation found only {} statuses, which means it stopped \
+         working rather than that the surface shrank: {answers:?}",
+        answers.len()
+    );
+
+    for (http_status, codes) in &answers {
+        let declared = &responses[&http_status.to_string()];
+        let description = declared["description"].as_str().unwrap_or_else(|| {
+            panic!(
+                "the serving surface answers {http_status} with {codes:?}, and the \
+                 document a consumer generates a client from has no {http_status} \
+                 response at all. A client generated from this file has no case \
+                 for a status it will receive. Responses declared: {:?}",
+                responses.as_object().map(|o| o.keys().collect::<Vec<_>>())
+            )
+        });
+        for code in codes {
+            assert!(
+                description.contains(code),
+                "{http_status} is declared but its description does not name \
+                 `{code}` — `error.code` is the stable thing a consumer branches \
+                 on, and two of these statuses carry two codes each. Got: \
+                 {description:?}"
+            );
+        }
+        assert!(
+            declared["content"]["application/json"]["schema"]["$ref"]
+                .as_str()
+                .is_some_and(|r| r.ends_with("ServingErrorBody")),
+            "{http_status} must carry the shared error envelope: {declared}"
+        );
+    }
+
+    // And the success answer is still there beside them — a responses map built
+    // purely from the taxonomy would pass everything above.
+    assert!(
+        responses["200"].is_object(),
+        "the success answer must survive: {op}"
+    );
+}
+
 #[tokio::test]
 async fn a_bare_endpoint_is_documented_as_the_body_it_answers_with() {
     let Some(f) = fixture().await else { return };

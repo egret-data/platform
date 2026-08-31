@@ -495,3 +495,90 @@ async fn starrocks_execute_with_params_returns_canonical_type_names() {
         "int"
     );
 }
+
+/// **Why StarRocks connections are NOT pooled, measured on a live engine.**
+///
+/// Package 3b introduced connection reuse for Trino (one `reqwest::Client` per
+/// coordinator; every credential stays per request) and deliberately did not for
+/// StarRocks. This test is the measurement that decision rests on, kept as a
+/// test rather than as prose so that whoever revisits pooling has to watch it
+/// fail before believing the constraint has lifted.
+///
+/// The constraint: `StarRocksConnector` switches identity with
+/// `EXECUTE AS <user> WITH NO REVERT` on the impersonate path. A connection pool
+/// recycles a connection by sending `COM_RESET_CONNECTION` — that is literally
+/// what `mysql_async`'s `PoolOpts::reset_connection` does, and it defaults to
+/// on, which is the property that would otherwise make a pool look safe.
+///
+/// **It does not revert the identity.** Measured here: after `EXECUTE AS` and a
+/// reset, `current_user()` is still the impersonated user. So a pooled
+/// connection handed to the next request would run that request as the previous
+/// principal — the most serious defect this programme could introduce.
+///
+/// A second, independent reason is not measurable here and is recorded instead:
+/// SQL Lab and notebooks send arbitrary user SQL through this same connector,
+/// and StarRocks executes every statement in a `COM_QUERY` payload, so a user
+/// can issue `EXECUTE AS` themselves and poison a pooled service-account
+/// connection even on the non-impersonating path.
+///
+/// Gated on `EGRET_TEST_STARROCKS_URL` like every other test in this file.
+#[tokio::test]
+async fn execute_as_survives_a_connection_reset_which_is_why_starrocks_is_not_pooled() {
+    let Some((host, port)) = parse() else {
+        eprintln!("skip: no EGRET_TEST_STARROCKS_URL");
+        return;
+    };
+    // A second identity to switch INTO. Created here so the test is
+    // self-contained; `IMPERSONATE` is what StarRocks requires for `EXECUTE AS`.
+    let opts = mysql_async::OptsBuilder::default()
+        .ip_or_hostname(host)
+        .tcp_port(u16::try_from(port).unwrap_or(9030))
+        .user(Some("root".to_string()))
+        .prefer_socket(false);
+    let mut conn = mysql_async::Conn::new(mysql_async::Opts::from(opts))
+        .await
+        .expect("connect to StarRocks");
+
+    use mysql_async::prelude::Queryable;
+    conn.query_drop("CREATE USER IF NOT EXISTS 'egret_pool_probe'@'%'")
+        .await
+        .expect("create probe user");
+    conn.query_drop("GRANT IMPERSONATE ON USER 'egret_pool_probe'@'%' TO USER 'root'@'%'")
+        .await
+        .expect("grant impersonate");
+
+    let before: Option<String> = conn
+        .query_first("SELECT current_user()")
+        .await
+        .expect("read current_user");
+    assert!(
+        before.as_deref().unwrap_or("").contains("root"),
+        "expected to start as root, got {before:?}"
+    );
+
+    conn.query_drop("EXECUTE AS 'egret_pool_probe' WITH NO REVERT")
+        .await
+        .expect("switch identity");
+
+    // The exact thing a connection pool does when it recycles a connection.
+    let supported = conn.reset().await.expect("COM_RESET_CONNECTION");
+    assert!(
+        supported,
+        "StarRocks did not accept COM_RESET_CONNECTION; the premise of the \
+         measurement has changed and the conclusion must be re-derived"
+    );
+
+    let after: Option<String> = conn
+        .query_first("SELECT current_user()")
+        .await
+        .expect("read current_user after reset");
+    assert!(
+        after.as_deref().unwrap_or("").contains("egret_pool_probe"),
+        "COM_RESET_CONNECTION reverted the identity — the constraint that keeps \
+         StarRocks connections unpooled has lifted, and the pooling decision in \
+         `connector/starrocks.rs` should be revisited deliberately rather than \
+         left as it is. Measured: {after:?}"
+    );
+
+    let _ = conn.disconnect().await;
+}
