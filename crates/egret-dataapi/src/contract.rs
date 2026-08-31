@@ -219,7 +219,10 @@ pub enum ChangeKind {
     ColumnBecameRequired,
     /// Under `shape: arrays` the rows are positional and `shape_rows` zips them
     /// by INDEX, so a surviving column that moved is a different value at the
-    /// index a consumer already reads.
+    /// index a consumer already reads. Judged by where each surviving column
+    /// LANDS, not by whether the survivors kept their order relative to each
+    /// other: an insertion or a prepend leaves that order untouched and still
+    /// moves every column after it.
     ColumnOrderChanged,
 
     // ---- parameters ----------------------------------------------------
@@ -519,6 +522,25 @@ fn keyed_envelope(s: &EndpointSnapshot) -> bool {
     !(s.statements.len() == 1 && s.output.transform.is_none())
 }
 
+/// What `data` IS for this snapshot, said the way a consumer would find it.
+///
+/// [`keyed_envelope`] is one boolean over two doors and the doors do not lead to
+/// the same place. `statements_data` keys `data` by statement name for several
+/// statements; a TRANSFORM replaces `data` outright with whatever the script
+/// returns, checked against its declared `returns` and nothing else — there is
+/// no statement key in it at all. Describing the flip with one sentence made
+/// the transform door's message plainly false, so the sentence is built from
+/// this instead, and the transform arm is tested for its own string.
+fn data_shape_of(s: &EndpointSnapshot) -> &'static str {
+    if s.output.transform.is_some() {
+        "whatever the response transform's script returns"
+    } else if s.statements.len() == 1 {
+        "an array of rows"
+    } else {
+        "an object keyed by statement name"
+    }
+}
+
 /// Compare the version a consumer is receiving against the one about to be
 /// frozen.
 ///
@@ -568,11 +590,7 @@ pub fn compare_contracts(live: &EndpointSnapshot, next: &EndpointSnapshot) -> Co
 
 fn compare_output(live: &EndpointSnapshot, next: &EndpointSnapshot, d: &mut ContractDiff) {
     if keyed_envelope(live) != keyed_envelope(next) {
-        let (from, to) = if keyed_envelope(next) {
-            ("an array of rows", "an object keyed by statement name")
-        } else {
-            ("an object keyed by statement name", "an array of rows")
-        };
+        let (from, to) = (data_shape_of(live), data_shape_of(next));
         d.breaks(
             ChangeKind::EnvelopeFlipped,
             "the top-level `data`",
@@ -761,31 +779,49 @@ fn compare_columns(
         }
     }
     if positional {
-        // Only the SURVIVING columns, and only their order relative to each
-        // other. A column removed has already been reported, and an APPENDED
-        // column moves no existing index — which is the common, safe way a
-        // column list grows, and flagging it would be exactly the over-broad
-        // rule that trains an author to click through.
-        let old_order: Vec<&str> = live.iter().map(|c| c.name.as_str()).collect();
-        let new_order: Vec<&str> = next
-            .iter()
-            .map(|c| c.name.as_str())
-            .filter(|n| old_order.contains(n))
-            .collect();
-        let surviving: Vec<&str> = old_order
-            .iter()
-            .copied()
-            .filter(|n| next.iter().any(|c| c.name == *n))
-            .collect();
-        if surviving != new_order {
+        // POSITION, not relative order — and the difference is the whole reason
+        // this is written out rather than compared as two sequences.
+        //
+        // Filtering the next list down to columns that already existed and
+        // comparing THAT against the survivors answers "did the survivors keep
+        // their order relative to each other", and an insertion keeps it: it
+        // deletes the inserted column before the comparison can see it, so
+        // `[id, n]` becoming `[id, region, n]` compares equal and publishes with
+        // nothing to acknowledge. Under `shape: arrays` that is a wire break of
+        // the plainest kind — every consumer reading `data[i][1]` as `n` now
+        // reads `region` — and it is the same hole for a prepend.
+        //
+        // So each surviving column is asked where it LANDS. `expected` is the
+        // index it reaches if only the removals happen: its position among the
+        // survivors, in the live order. `actual` is its index in the next list.
+        // An insertion or a prepend moves `actual` past `expected`; a reorder
+        // moves it either way; an APPEND moves neither, which is the common,
+        // safe way a column list grows and must stay silent. The shift a
+        // REMOVAL causes is already carried by `ColumnRemoved` — "every later
+        // column shifts one position left" — so compacting `expected` over the
+        // removals is what keeps one edit from being reported twice.
+        let mut moved: Vec<String> = Vec::new();
+        let mut expected = 0usize;
+        for old in live {
+            let Some(actual) = next.iter().position(|c| c.name == old.name) else {
+                continue;
+            };
+            if actual != expected {
+                moved.push(format!(
+                    "`{}` moves from index {expected} to {actual}",
+                    old.name
+                ));
+            }
+            expected += 1;
+        }
+        if !moved.is_empty() {
             d.breaks(
                 ChangeKind::ColumnOrderChanged,
                 subject.to_string(),
                 format!(
-                    "`shape: arrays` rows are positional, and the surviving columns move from \
-                     [{}] to [{}]",
-                    surviving.join(", "),
-                    new_order.join(", ")
+                    "`shape: arrays` rows are positional and a consumer reads each row by \
+                     index: {}",
+                    moved.join(", ")
                 ),
             );
         }
@@ -1078,42 +1114,66 @@ fn bound_direction(
     }
 }
 
+/// The `max_rows` a request is actually served under.
+///
+/// `publish` does not bound what an author types here, and
+/// `serving::router::execution_limits` clamps it to `MAX_ROWS_CEILING` before
+/// the engine ever sees it. So `5_000_000` and `2_000_000` are the SAME limit
+/// on the wire, and reporting the edit between them as a break asks an author
+/// to acknowledge something no consumer can observe — the over-broad rule this
+/// module exists to refuse. `lifecycle`'s transform projection already quotes
+/// the clamped count for the same reason.
+fn effective_max_rows(v: u32) -> u32 {
+    v.clamp(1, crate::serving::router::MAX_ROWS_CEILING)
+}
+
+/// The same, for the timeout, against the same clamp in the same function.
+fn effective_timeout_seconds(v: u32) -> u64 {
+    (v as u64).clamp(1, crate::serving::router::TIMEOUT_CEILING_SECS)
+}
+
 fn compare_limits(live: &EndpointSnapshot, next: &EndpointSnapshot, d: &mut ContractDiff) {
-    if next.limits.max_rows < live.limits.max_rows {
+    // Both limits are compared at the value SERVING will apply, not the value
+    // the author typed — see `effective_max_rows`.
+    let (live_rows, next_rows) = (
+        effective_max_rows(live.limits.max_rows),
+        effective_max_rows(next.limits.max_rows),
+    );
+    if next_rows < live_rows {
         d.breaks(
             ChangeKind::RowLimitLowered,
             "`limits.max_rows`",
             format!(
-                "{} becomes {}. A result over the cap is refused outright — \
+                "{live_rows} becomes {next_rows}. A result over the cap is refused outright — \
                  `row_limit_exceeded`, never a truncated 200 — so a call that returned rows can \
                  now fail",
-                live.limits.max_rows, next.limits.max_rows
             ),
         );
-    } else if next.limits.max_rows > live.limits.max_rows {
+    } else if next_rows > live_rows {
         d.breaks(
             ChangeKind::RowLimitRaised,
             "`limits.max_rows`",
-            format!("{} becomes {}", live.limits.max_rows, next.limits.max_rows),
+            format!("{live_rows} becomes {next_rows}"),
         );
     }
-    if next.limits.timeout_seconds < live.limits.timeout_seconds {
+    let (live_timeout, next_timeout) = (
+        effective_timeout_seconds(live.limits.timeout_seconds),
+        effective_timeout_seconds(next.limits.timeout_seconds),
+    );
+    if next_timeout < live_timeout {
         d.breaks(
             ChangeKind::TimeoutLowered,
             "`limits.timeout_seconds`",
             format!(
-                "{}s becomes {}s, so a query that finished in time may now be cut off",
-                live.limits.timeout_seconds, next.limits.timeout_seconds
+                "{live_timeout}s becomes {next_timeout}s, so a query that finished in time may \
+                 now be cut off",
             ),
         );
-    } else if next.limits.timeout_seconds > live.limits.timeout_seconds {
+    } else if next_timeout > live_timeout {
         d.breaks(
             ChangeKind::TimeoutRaised,
             "`limits.timeout_seconds`",
-            format!(
-                "{}s becomes {}s",
-                live.limits.timeout_seconds, next.limits.timeout_seconds
-            ),
+            format!("{live_timeout}s becomes {next_timeout}s"),
         );
     }
 
@@ -1126,7 +1186,11 @@ fn compare_limits(live: &EndpointSnapshot, next: &EndpointSnapshot, d: &mut Cont
     // inactive limiter is not a change to anything.
     let (lq, lb) = (live.rate_limit.per_key_qps, live.rate_limit.burst);
     let (nq, nb) = (next.rate_limit.per_key_qps, next.rate_limit.burst);
-    if (lq, lb) != (nq, nb) {
+    // `!(lq == 0 && nq == 0)` is the sentence above made true. The bucket is off
+    // on both sides, so a burst edit between two off limiters changes nothing a
+    // caller can reach — and without this it fell to the `else` and was reported
+    // as a RELAXATION, which is a change to a limit that is not there.
+    if (lq, lb) != (nq, nb) && !(lq == 0 && nq == 0) {
         let tightened = nq > 0 && (lq == 0 || nq < lq || nb < lb);
         d.breaks(
             if tightened {
@@ -1302,6 +1366,47 @@ mod tests {
             d.breaking
         );
         assert!(kinds(&d.breaking).contains(&ChangeKind::TransformPresenceChanged));
+
+        // The KIND is the same through either door; the sentence must not be.
+        // `data` under a transform is whatever the script returns, checked
+        // against its `returns` — there is no statement key in it — so the
+        // multi-statement wording was simply false here, and asserting kinds
+        // alone is what let it stay.
+        let flip = d
+            .breaking
+            .iter()
+            .find(|c| c.kind == ChangeKind::EnvelopeFlipped)
+            .expect("just asserted");
+        assert!(
+            flip.detail
+                .contains("whatever the response transform's script returns"),
+            "the transform door must describe the transform: {}",
+            flip.detail
+        );
+        assert!(
+            !flip.detail.contains("keyed by statement name"),
+            "no statement key reaches `data` under a transform: {}",
+            flip.detail
+        );
+
+        // And the OTHER door still says what it always said.
+        let mut two = snap();
+        two.statements.push(stmt(
+            "total",
+            "SELECT count(*) AS n",
+            vec![col("n", "bigint")],
+        ));
+        let d = compare_contracts(&snap(), &two);
+        let flip = d
+            .breaking
+            .iter()
+            .find(|c| c.kind == ChangeKind::EnvelopeFlipped)
+            .expect("a second statement flips the envelope");
+        assert!(
+            flip.detail.contains("an object keyed by statement name"),
+            "{}",
+            flip.detail
+        );
     }
 
     /// A three-statement endpoint gaining a fourth flips nothing, and must not
@@ -1393,6 +1498,87 @@ mod tests {
         swapped.statements[0].columns = vec![col("n", "bigint"), col("id", "uuid")];
         let d = compare_contracts(&live, &swapped);
         assert_eq!(kinds(&d.breaking), vec![ChangeKind::ColumnOrderChanged]);
+    }
+
+    /// The edit the append/swap pair above could not reach, and the one the
+    /// enum's own documentation already promised: a column inserted in the
+    /// MIDDLE under `shape: arrays`.
+    ///
+    /// `SELECT id, n` becoming `SELECT id, region, n` changes no survivor's
+    /// order relative to another — they are still `id` then `n` — so comparing
+    /// the survivors as a sequence sees nothing and the publish goes through
+    /// with an empty diff. On the wire every consumer reading `data[i][1]` as
+    /// the bigint `n` starts reading the varchar `region`. `serving::router`
+    /// requires the engine's positional order to equal the frozen list exactly
+    /// and then clones the rows verbatim, so the frozen order IS the wire order.
+    #[test]
+    fn under_arrays_a_column_inserted_in_the_middle_is_breaking() {
+        let mut live = snap();
+        live.output.shape = "arrays".into();
+        let mut inserted = live.clone();
+        inserted.statements[0].columns = vec![
+            col("id", "uuid"),
+            col("region", "varchar"),
+            col("n", "bigint"),
+        ];
+        let d = compare_contracts(&live, &inserted);
+        assert!(
+            kinds(&d.breaking).contains(&ChangeKind::ColumnOrderChanged),
+            "an insertion moves every column after it: {:?}",
+            d.breaking
+        );
+        // Named, and by the index the consumer actually reads.
+        let order = d
+            .breaking
+            .iter()
+            .find(|c| c.kind == ChangeKind::ColumnOrderChanged)
+            .expect("just asserted");
+        assert!(
+            order.detail.contains("`n` moves from index 1 to 2"),
+            "the refusal must name the column and the index: {}",
+            order.detail
+        );
+    }
+
+    /// The same hole reached from the front. A prepend leaves the survivors'
+    /// order relative to each other untouched exactly as an insertion does, and
+    /// moves EVERY index a consumer reads.
+    #[test]
+    fn under_arrays_a_prepended_column_is_breaking() {
+        let mut live = snap();
+        live.output.shape = "arrays".into();
+        let mut prepended = live.clone();
+        prepended.statements[0].columns = vec![
+            col("region", "varchar"),
+            col("id", "uuid"),
+            col("n", "bigint"),
+        ];
+        let d = compare_contracts(&live, &prepended);
+        assert!(
+            kinds(&d.breaking).contains(&ChangeKind::ColumnOrderChanged),
+            "{:?}",
+            d.breaking
+        );
+    }
+
+    /// The other half, and the reason `expected` is compacted over the
+    /// removals rather than read straight off the live list: dropping the FIRST
+    /// column shifts every later one left, which is what `ColumnRemoved`
+    /// already says. One edit, one entry — an author asked to acknowledge the
+    /// same shift twice learns to stop reading the list.
+    #[test]
+    fn under_arrays_removing_the_first_column_is_reported_once() {
+        let mut live = snap();
+        live.output.shape = "arrays".into();
+        let mut dropped = live.clone();
+        dropped.statements[0].columns = vec![col("n", "bigint")];
+        let d = compare_contracts(&live, &dropped);
+        assert_eq!(
+            kinds(&d.breaking),
+            vec![ChangeKind::ColumnRemoved],
+            "the left shift is what ColumnRemoved means: {:?}",
+            d.breaking
+        );
     }
 
     /// The same reorder under `objects` moves nothing a consumer reads, and
@@ -1503,6 +1689,35 @@ mod tests {
         assert_eq!(kinds(&d.safe), vec![ChangeKind::RateLimitRelaxed]);
     }
 
+    /// `qps: 0` is "no limit", so the bucket is OFF whatever its burst says.
+    /// The pair is judged together for exactly this reason, and an edit between
+    /// two off limiters is not a change to anything — it used to fall to the
+    /// `else` and be reported as a relaxation of a limit that is not there.
+    #[test]
+    fn a_burst_edit_on_an_inactive_limiter_is_not_a_change() {
+        let mut live = snap();
+        live.rate_limit.burst = 5;
+        let mut next = snap();
+        next.rate_limit.burst = 50;
+        assert_eq!(live.rate_limit.per_key_qps, 0);
+        assert_eq!(next.rate_limit.per_key_qps, 0);
+        let d = compare_contracts(&live, &next);
+        assert_eq!(d.breaking, vec![], "{:?}", d.breaking);
+        assert_eq!(d.safe, vec![], "{:?}", d.safe);
+
+        // A burst edit on an ACTIVE limiter is still judged, and tightening it
+        // is still breaking.
+        let mut live = snap();
+        live.rate_limit.per_key_qps = 10;
+        live.rate_limit.burst = 50;
+        let mut next = live.clone();
+        next.rate_limit.burst = 5;
+        assert_eq!(
+            kinds(&compare_contracts(&live, &next).breaking),
+            vec![ChangeKind::RateLimitTightened]
+        );
+    }
+
     /// `max_rows` is a REFUSAL, not a truncation — `ServingError::RowLimitExceeded`
     /// — so lowering it turns calls that returned rows into failures.
     #[test]
@@ -1514,6 +1729,48 @@ mod tests {
             vec![ChangeKind::RowLimitLowered]
         );
         assert_eq!(compare_contracts(&lower, &snap()).breaking, vec![]);
+    }
+
+    /// Nothing bounds `max_rows` at publish and `serving::router` clamps it to
+    /// `MAX_ROWS_CEILING` before the engine sees it, so two values above the
+    /// ceiling are the SAME limit on the wire. Reporting the edit between them
+    /// would ask an author to acknowledge a break no consumer can observe.
+    #[test]
+    fn a_limit_edit_the_serving_clamp_erases_is_not_a_change() {
+        let ceiling = crate::serving::router::MAX_ROWS_CEILING;
+        let mut live = snap();
+        live.limits.max_rows = ceiling * 5;
+        let mut next = snap();
+        next.limits.max_rows = ceiling * 2;
+        let d = compare_contracts(&live, &next);
+        assert_eq!(d.breaking, vec![], "{:?}", d.breaking);
+        assert_eq!(d.safe, vec![], "{:?}", d.safe);
+
+        // The same for the timeout, against the same clamp in the same
+        // function.
+        let mut live = snap();
+        live.limits.timeout_seconds = 3_600;
+        let mut next = snap();
+        next.limits.timeout_seconds = 600;
+        let d = compare_contracts(&live, &next);
+        assert_eq!(d.breaking, vec![], "{:?}", d.breaking);
+        assert_eq!(d.safe, vec![], "{:?}", d.safe);
+
+        // And an edit that crosses the ceiling downward is still the break it
+        // is — the clamp narrows what counts as a change, it does not hide one.
+        let mut live = snap();
+        live.limits.max_rows = ceiling * 5;
+        let mut next = snap();
+        next.limits.max_rows = 500;
+        let d = compare_contracts(&live, &next);
+        assert_eq!(kinds(&d.breaking), vec![ChangeKind::RowLimitLowered]);
+        assert!(
+            d.breaking[0]
+                .detail
+                .starts_with(&format!("{ceiling} becomes 500")),
+            "the sentence must quote the limit serving applies: {}",
+            d.breaking[0].detail
+        );
     }
 
     /// `shape` and `naming` describe how `data` is WRITTEN, and

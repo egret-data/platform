@@ -39,4 +39,17 @@ export interface DataApiEndpointVersionDto {
      * @nullable
      */
   breaking_changes?: ContractChange[] | null;
+  /**
+     * The version NUMBER [`Self::breaking_changes`] was compared against —
+     * whatever was live when this one was published.
+     *
+     * `None` exactly when `breaking_changes` is `None`. Usually the preceding
+     * version, and after a rollback NOT: `rollback` moves the live pointer
+     * backwards and adds no row, so `Some([])` beside a baseline two versions
+     * down is a comparison that happened and a set of consumers it says nothing
+     * about. The number rather than the id, because this is what a history
+     * renders and a number is what a reader can place.
+     * @nullable
+     */
+  compared_against_version?: number | null;
 }

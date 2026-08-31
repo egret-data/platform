@@ -5728,6 +5728,16 @@ pub struct DataApiEndpointVersionDto {
     /// history that showed both as "no breaking changes" would be claiming
     /// something about the first that nobody ever checked.
     pub breaking_changes: Option<Vec<crate::contract::ContractChange>>,
+    /// The version NUMBER [`Self::breaking_changes`] was compared against —
+    /// whatever was live when this one was published.
+    ///
+    /// `None` exactly when `breaking_changes` is `None`. Usually the preceding
+    /// version, and after a rollback NOT: `rollback` moves the live pointer
+    /// backwards and adds no row, so `Some([])` beside a baseline two versions
+    /// down is a comparison that happened and a set of consumers it says nothing
+    /// about. The number rather than the id, because this is what a history
+    /// renders and a number is what a reader can place.
+    pub compared_against_version: Option<i32>,
 }
 
 /// Which version a rollback names.
@@ -5772,6 +5782,32 @@ pub struct DataApiPublishedDto {
     /// comparison at all, and a `null` would invite the reader to interpret it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub breaking_changes: Option<Vec<crate::contract::ContractChange>>,
+    /// The version [`Self::breaking_changes`] is a statement ABOUT: whatever was
+    /// live at the instant of the publish.
+    ///
+    /// Echoed for the same reason it is stored — see migration `0131`. After a
+    /// rollback this is not the version before this one, and an empty list read
+    /// without it says more than it knows. `None` for a first publish, and for a
+    /// `rollback`, which compares against the version it moved OFF and reports
+    /// that under [`Self::rollback_breaks`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compared_against: Option<Uuid>,
+    /// What a `rollback` did to the consumers of the version it moved OFF,
+    /// classified by the same [`crate::contract::compare_contracts`]
+    /// `publish` uses — and refusing nothing.
+    ///
+    /// A separate field from [`Self::breaking_changes`] because it answers a
+    /// separate question. That one is read back out of
+    /// `endpoint_versions.breaking_changes` and is a record of what an author
+    /// ACCEPTED; this one is stored on no row, because a rollback creates no
+    /// version. Sharing a field would let a history renderer show a rollback's
+    /// consequences as an acknowledgement nobody gave.
+    ///
+    /// `None` for a `publish`, for a rollback onto an endpoint with nothing
+    /// live, and when either snapshot cannot be read — a rollback must not fail
+    /// because the sentence it was going to say could not be built.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollback_breaks: Option<Vec<crate::contract::ContractChange>>,
 }
 
 fn db_err(e: sqlx::Error) -> Error {
@@ -6146,6 +6182,12 @@ impl EndpointStore {
         // server's state disagree, which is what a conflict is — and it is the
         // same class, and the same remedy, as the edit-during-publish conflict
         // above.
+        // The baseline is carried out beside the diff, because `[]` is a claim
+        // ABOUT a version and not about the endpoint: `rollback` moves
+        // `live_version_id` backwards and writes no row, so the version this
+        // publish compared against is not always the one before it. Stored, not
+        // inferred — see migration `0131`.
+        let mut compared_against: Option<Uuid> = None;
         let breaking: Option<Vec<crate::contract::ContractChange>> = match live {
             Some((live_version_id, live_snapshot)) => {
                 // A stored snapshot that will not deserialize is corrupt data,
@@ -6157,6 +6199,7 @@ impl EndpointStore {
                 let diff = crate::contract::compare_contracts(&live_snapshot, &snapshot);
                 diff.check_acknowledgement(id, live_version_id, acknowledge_breaking)
                     .map_err(|e| Error::Conflict(e.to_string()))?;
+                compared_against = Some(live_version_id);
                 Some(diff.breaking)
             }
             None => {
@@ -6189,18 +6232,31 @@ impl EndpointStore {
         // SQL `NULL` and `[]` is load-bearing: null means nobody looked — a
         // version published before this column existed, or a first version,
         // where there is no live contract to compare against — and `[]` means
-        // this publish was compared against the live version and broke nothing.
+        // this publish was compared and broke nothing.
         // A `DEFAULT '[]'` on the migration would have stamped the second claim
         // onto every row that only ever qualified for the first.
         //
+        // `compared_against` is written in the same statement and is what makes
+        // `[]` a true sentence rather than a nearly-true one. The diff is taken
+        // against `live_version_id`, and `rollback` moves that pointer BACKWARDS
+        // without writing a row here — so after a rollback from v1 to v0, this
+        // publish can compare against v0, find nothing, and store `[]` while
+        // every consumer of v1 has already been moved off a contract this table
+        // never mentions. `[]` beside a baseline that is not the newest version
+        // says exactly what happened; `[]` alone would have read as "broke
+        // nobody". Recorded rather than gated: the rollback is the act that
+        // moved them, it is deliberately not refused, and it now classifies and
+        // audits what it did.
+        //
         // The row already carries `created_by`, so together they are the audit
-        // trail the package asked for: who accepted which break, on which
-        // version, at which time — cheap to write here, and not recoverable
+        // trail the package asked for: who accepted which break, against which
+        // baseline, at which time — cheap to write here, and not recoverable
         // afterwards from anything else.
         let (version_id, version): (Uuid, i32) = sqlx::query_as(
             "INSERT INTO dataapi.endpoint_versions \
-                 (endpoint_id, version, snapshot, note, created_by, breaking_changes) \
-             SELECT $1, COALESCE(MAX(version), 0) + 1, $2, $3, $4, $5 \
+                 (endpoint_id, version, snapshot, note, created_by, breaking_changes, \
+                  compared_against) \
+             SELECT $1, COALESCE(MAX(version), 0) + 1, $2, $3, $4, $5, $6 \
                FROM dataapi.endpoint_versions WHERE endpoint_id = $1 \
              RETURNING id, version",
         )
@@ -6209,6 +6265,7 @@ impl EndpointStore {
         .bind(note)
         .bind(by.0)
         .bind(&breaking_payload)
+        .bind(compared_against)
         .fetch_one(&mut *tx)
         .await
         .map_err(db_err)?;
@@ -6251,6 +6308,8 @@ impl EndpointStore {
             version,
             state,
             breaking_changes: breaking,
+            compared_against,
+            rollback_breaks: None,
         })
     }
 
@@ -6413,6 +6472,46 @@ impl EndpointStore {
         .fetch_optional(&self.db.pool)
         .await
         .map_err(db_err)?;
+        // What this rollback does to the consumers of the version it is moving
+        // OFF, classified by the same function `publish` uses.
+        //
+        // It does not gate anything and must not: rollback is usually someone
+        // ending an outage, and the reasoning above is why the one gate that
+        // must not exist is this one. But not refusing is not the same as not
+        // SAYING. A rollback from v1 to v0 breaks every consumer that coded
+        // against v1, it writes no `endpoint_versions` row, and until this it
+        // left no trace anywhere — so a later publish could compare against v0,
+        // find nothing, and record an empty diff that an auditor would read as
+        // "nobody was broken here". The caller gets the list, the audit event
+        // carries it, and nothing is refused.
+        //
+        // Computed BEFORE the UPDATE, because it needs the pointer as it is now.
+        // `None` when either snapshot is missing or unreadable — a rollback must
+        // not fail because the thing it was going to TELL someone could not be
+        // computed, which is the opposite of `publish`'s fail-closed direction
+        // and for the opposite reason: there, the diff decides whether the write
+        // happens at all.
+        let live_snapshot: Option<serde_json::Value> = sqlx::query_scalar(
+            "SELECT v.snapshot FROM dataapi.endpoint_versions v                JOIN dataapi.endpoints e ON e.live_version_id = v.id               WHERE e.id = $1 AND e.workspace_id = $2",
+        )
+        .bind(id)
+        .bind(workspace)
+        .fetch_optional(&self.db.pool)
+        .await
+        .map_err(db_err)?;
+        let moves_consumers_off: Option<Vec<crate::contract::ContractChange>> =
+            match (&target_snapshot, live_snapshot) {
+                (Some(to), Some(from)) => match (
+                    serde_json::from_value::<EndpointSnapshot>(from),
+                    serde_json::from_value::<EndpointSnapshot>(to.clone()),
+                ) {
+                    (Ok(from), Ok(to)) => {
+                        Some(crate::contract::compare_contracts(&from, &to).breaking)
+                    }
+                    _ => None,
+                },
+                _ => None,
+            };
         if let Some(raw) = target_snapshot {
             self.check_version_still_publishable(workspace, raw).await?;
         }
@@ -6451,9 +6550,15 @@ impl EndpointStore {
             version_id,
             version,
             state,
-            // A rollback re-serves a version that was published once already;
-            // it does not compare contracts and must not claim to have.
+            // A rollback re-serves a version that was published once already, so
+            // it records nothing on any version row and this field — which is
+            // read back out of `endpoint_versions.breaking_changes` everywhere
+            // else — stays `None`. What it DID to the consumers of the version
+            // it moved off is `rollback_breaks`, a different question with a
+            // different name so the two cannot be read as one.
             breaking_changes: None,
+            compared_against: None,
+            rollback_breaks: moves_consumers_off,
         })
     }
 
@@ -6548,12 +6653,18 @@ impl EndpointStore {
             chrono::DateTime<chrono::Utc>,
             serde_json::Value,
             Option<serde_json::Value>,
+            Option<i32>,
         );
+        // `LEFT JOIN`, and the baseline is resolved to its NUMBER here rather
+        // than in the caller: `compared_against` is a uuid, the history renders
+        // numbers, and asking a reader to map one to the other is how the
+        // baseline stops being read at all.
         let rows: Vec<Row> = sqlx::query_as(
             "SELECT v.id, v.version, v.note, COALESCE(e.live_version_id = v.id, false), \
-                    v.created_by, v.created_at, v.snapshot, v.breaking_changes \
+                    v.created_by, v.created_at, v.snapshot, v.breaking_changes, b.version \
                FROM dataapi.endpoint_versions v \
                JOIN dataapi.endpoints e ON e.id = v.endpoint_id \
+               LEFT JOIN dataapi.endpoint_versions b ON b.id = v.compared_against \
               WHERE v.endpoint_id = $1 AND e.workspace_id = $2 \
               ORDER BY v.version DESC",
         )
@@ -6564,7 +6675,17 @@ impl EndpointStore {
         .map_err(db_err)?;
         rows.into_iter()
             .map(
-                |(id, version, note, is_live, created_by, created_at, snapshot, breaking)| {
+                |(
+                    id,
+                    version,
+                    note,
+                    is_live,
+                    created_by,
+                    created_at,
+                    snapshot,
+                    breaking,
+                    compared_against_version,
+                )| {
                     Ok(DataApiEndpointVersionDto {
                         id,
                         version,
@@ -6572,6 +6693,7 @@ impl EndpointStore {
                         is_live,
                         created_by,
                         created_at,
+                        compared_against_version,
                         // Same rule as the snapshot one line down: a stored
                         // value that will not read is a 500, never a silent
                         // default. This one is the record of what an author

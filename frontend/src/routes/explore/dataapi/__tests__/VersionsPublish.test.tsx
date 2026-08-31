@@ -244,4 +244,54 @@ describe("the version history's record of what was accepted", () => {
     expect(screen.queryByTestId("version-breaking-v-1")).toBeNull();
     expect(screen.queryByTestId("version-breaking-v-2")).toBeNull();
   });
+
+  it("names the baseline when a rollback moved it, and stays quiet when it did not", async () => {
+    mockValidate({ statements: [], against_live: null, acknowledge_breaking: null });
+    mockPublish();
+    vi.mocked(gen.useDataApiListEndpointVersions).mockReturnValue({
+      data: {
+        status: 200,
+        data: [
+          // v3 was published while v1 was live, because someone rolled back.
+          // Its `[]` is true of v1's consumers and says nothing about v2's, and
+          // with no chip this row reads as "publishing this broke nobody".
+          {
+            ...LIVE_VERSION,
+            id: "v-3",
+            version: 3,
+            is_live: true,
+            breaking_changes: [],
+            compared_against_version: 1,
+          },
+          // The ordinary case: the baseline IS the version before, so saying so
+          // adds nothing and a chip on every row is a chip nobody reads.
+          {
+            ...LIVE_VERSION,
+            id: "v-2",
+            version: 2,
+            is_live: false,
+            breaking_changes: [],
+            compared_against_version: 1,
+          },
+          // A first publish compared against nothing and names nothing.
+          {
+            ...LIVE_VERSION,
+            id: "v-1",
+            version: 1,
+            is_live: false,
+            breaking_changes: null,
+            compared_against_version: null,
+          },
+        ],
+      },
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof gen.useDataApiListEndpointVersions>);
+    renderVersions();
+
+    expect(await screen.findByTestId("version-baseline-v-3")).toHaveTextContent(
+      "compared against v1",
+    );
+    expect(screen.queryByTestId("version-baseline-v-2")).toBeNull();
+    expect(screen.queryByTestId("version-baseline-v-1")).toBeNull();
+  });
 });

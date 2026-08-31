@@ -79,8 +79,9 @@ function makeEndpoint(overrides: Partial<DataApiEndpointDto> = {}): DataApiEndpo
  * divergence question now turns on, so it models the real writer rather than a
  * plausible-looking object.
  *
- * `lifecycle.rs:5120-5147` clones nine fields off the LOCKED endpoint row and
- * adds four of its own. The four are here and are all DIFFERENT from anything
+ * `lifecycle::prospective_snapshot` — the ONE builder `validate` and `publish`
+ * both go through — clones nine fields off the LOCKED endpoint row and adds
+ * four of its own. The four are here and are all DIFFERENT from anything
  * on the draft on purpose: `columns` is non-empty, `iterated` is set,
  * `param_gate` is stamped and `delegated`/`impersonate` are present. A
  * comparison that failed to exclude any of them would call every published

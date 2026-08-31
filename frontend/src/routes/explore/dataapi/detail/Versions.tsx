@@ -325,6 +325,30 @@ export default function VersionsSection() {
                             : `${v.breaking_changes?.length} breaking changes`}
                         </Badge>
                       )}
+                      {/* The baseline, shown ONLY when it is not the version
+                          before this one — which is the case a rollback
+                          creates and the only case where the chip above (or
+                          its absence) says less than it appears to.
+
+                          `rollback` moves the live pointer backwards and
+                          writes no version row, so a publish afterwards
+                          compares against the restored version, can truthfully
+                          find nothing, and record `[]`. With no chip at all,
+                          this row reads as "publishing this broke nobody" —
+                          true of the consumers of the baseline, and silent
+                          about the consumers of the version the rollback moved
+                          them off. `neutral`: it is not a fault, it is the
+                          missing half of a sentence. */}
+                      {v.compared_against_version != null &&
+                        v.compared_against_version !== v.version - 1 && (
+                          <Badge
+                            className={CHIP_TONE.neutral}
+                            title={`The comparison that produced this row's verdict was made against version ${v.compared_against_version}, not version ${v.version - 1} — the live pointer had been rolled back. It says nothing about consumers of the versions in between.`}
+                            data-testid={`version-baseline-${v.id}`}
+                          >
+                            {`compared against v${v.compared_against_version}`}
+                          </Badge>
+                        )}
                     </span>
                   </TableCell>
                   <TableCell className="truncate py-2 text-muted-foreground" title={v.note || undefined}>

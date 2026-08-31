@@ -1627,6 +1627,10 @@ async fn publish_endpoint(
             // row. `null` for a first publish, where nothing was compared —
             // distinct from `[]`, which means it was and broke nothing.
             "breaking_changes": published.breaking_changes,
+            // And WHICH version that is a claim about. After a rollback the
+            // live pointer is not the newest row, so `[]` alone does not say
+            // whose consumers survived — see migration `0131`.
+            "compared_against": published.compared_against,
         }),
     ));
     Ok(Json(published))
@@ -1683,6 +1687,15 @@ async fn rollback_endpoint(
         serde_json::json!({
             "version": rolled.version,
             "version_id": rolled.version_id,
+            // What this rollback did to the consumers of the version it moved
+            // OFF. A rollback is not refused for breaking them — it is usually
+            // the end of an outage — but until this it left no record anywhere
+            // that they had been moved, and a later publish comparing against
+            // the restored version could then record an empty diff an auditor
+            // would read as "nobody was broken here". Classified by the same
+            // function `publish` uses. `null` when there was no live version to
+            // move off, or when a stored snapshot could not be read.
+            "moves_consumers_off": rolled.rollback_breaks,
         }),
     ));
     Ok(Json(rolled))

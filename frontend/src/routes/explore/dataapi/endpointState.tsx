@@ -119,10 +119,13 @@ export function liveVersionLookup(
  * contract, and it is why they sit next to each other rather than in the two
  * places that use them.
  *
- * **What is compared, and why exactly this set.** `publish`
- * (`lifecycle.rs:5120-5147`) builds `EndpointSnapshot` from the LOCKED endpoint
- * row by `clone()`, field for field, with nothing computed in between — its own
- * comment says "what is frozen is exactly the bytes the locked row carries".
+ * **What is compared, and why exactly this set.** `publish` builds
+ * `EndpointSnapshot` through `lifecycle::prospective_snapshot`, which clones
+ * these fields off the LOCKED endpoint row, field for field, with nothing
+ * computed in between — its own comment says "what is frozen is exactly the
+ * bytes the row carries". Named rather than cited by line: the citation this
+ * replaces pointed at where the builder USED to be inlined in `publish`, and
+ * was already false in the commit that added it.
  * So for these nine fields the snapshot and the draft are byte-identical the
  * instant a version is published, and they diverge only when the author edits
  * one. Both sides also serialise through the SAME Rust types

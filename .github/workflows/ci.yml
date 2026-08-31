@@ -112,6 +112,18 @@ jobs:
       # the npm script, never bare `orval`: it also runs
       # `encode-path-params.mjs`, the codemod that puts back the
       # `encodeURIComponent` orval 8.24 drops from every URL builder.
+      #
+      # This step regenerates FROM the committed `openapi.json`, so on its own it
+      # only proves the client matches whatever spec is in the tree. What proves
+      # the spec itself is `committed_openapi_json_is_current` in the `rust` job,
+      # which byte-compares it against a fresh emit. The two jobs run in
+      # PARALLEL and neither `needs:` the other on purpose — both are required,
+      # so a stale spec fails `rust` and cannot merge whatever this job says, and
+      # ordering them would serialise every run to buy a clearer error message
+      # for a case that is already blocked. What is NOT covered either way is a
+      # run that does not happen: the 413/502 response types that packages 3a/3b
+      # added to the spec sat un-generated in the committed client for several
+      # merges, which is what this step would have caught had it run.
       - run: npm run gen:api
       - name: Fail if the generated API client drifted from openapi.json
         run: |

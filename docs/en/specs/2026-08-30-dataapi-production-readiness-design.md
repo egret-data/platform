@@ -90,23 +90,34 @@ rediscovering:
   live at that instant, so "your request is malformed" would be false the moment
   a rollback moved the pointer.
 
-- **The record distinguishes silence from an answer.** Migration `0131` adds
-  `dataapi.endpoint_versions.breaking_changes jsonb` **NULL**, not
-  `DEFAULT '[]'`. NULL means nobody looked — a version published before the
-  column existed, or a first publish, where no consumer has ever received
-  anything. `[]` means it was compared and broke nothing. A default would have
-  stamped the second claim, retroactively, onto every row that only qualified
-  for the first. With the row's existing `created_by`/`created_at` that is the
-  audit trail: who accepted which break, on which version, when.
+- **The record distinguishes silence from an answer, and names what it is about.**
+  Migration `0131` adds `dataapi.endpoint_versions.breaking_changes jsonb`
+  **NULL**, not `DEFAULT '[]'`. NULL means nobody looked — a version published
+  before the column existed, or a first publish, where no consumer has ever
+  received anything. `[]` means it was compared and broke nothing. A default
+  would have stamped the second claim, retroactively, onto every row that only
+  qualified for the first. Beside it, `compared_against` names the version the
+  comparison was made against — whatever `live_version_id` pointed at inside the
+  publishing transaction. That is usually the preceding version and after a
+  rollback is not, so without it `[]` is a sentence with its subject missing:
+  true of the baseline's consumers, and silent about the consumers of the
+  version a rollback moved them off. With the row's existing
+  `created_by`/`created_at` that is the audit trail: who accepted which break,
+  against which baseline, when.
 
 Two deliberate exclusions, recorded so they are read as decisions:
 
-- **`rollback` is not gated.** Putting yesterday's version back can break a
-  consumer who coded against today's, and the diff would run just as well in
-  that direction. It is not run, for the reason `rollback` already refuses to
-  re-run the full validator: rollback is usually someone stopping an outage, and
-  a gate there is the one that must not exist. Publish is an author choosing to
-  move forward and can afford to be stopped.
+- **`rollback` is not gated — it is REPORTED.** Putting yesterday's version back
+  can break a consumer who coded against today's, and the diff runs just as well
+  in that direction. It does not refuse, for the reason `rollback` already
+  refuses to re-run the full validator: rollback is usually someone stopping an
+  outage, and a gate there is the one that must not exist. Publish is an author
+  choosing to move forward and can afford to be stopped. But not refusing is not
+  the same as not saying: `rollback` classifies what it moves consumers off
+  through the same `compare_contracts`, returns it as `rollback_breaks`, and the
+  route audits it. Before that the one act that could break every consumer of an
+  endpoint left no trace anywhere, and the publish that followed it recorded an
+  empty diff an auditor would read as "nobody was broken here".
 - **The console does not classify.** The editor's state pill
   (`endpointState.tsx`, package 1) still answers its own question — "is there
   anything to publish", one boolean over nine fields — and is untouched. It is

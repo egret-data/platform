@@ -36,4 +36,34 @@ export interface DataApiPublishedDto {
      * @nullable
      */
   breaking_changes?: ContractChange[] | null;
+  /**
+     * The version [`Self::breaking_changes`] is a statement ABOUT: whatever was
+     * live at the instant of the publish.
+     *
+     * Echoed for the same reason it is stored — see migration `0131`. After a
+     * rollback this is not the version before this one, and an empty list read
+     * without it says more than it knows. `None` for a first publish, and for a
+     * `rollback`, which compares against the version it moved OFF and reports
+     * that under [`Self::rollback_breaks`].
+     * @nullable
+     */
+  compared_against?: string | null;
+  /**
+     * What a `rollback` did to the consumers of the version it moved OFF,
+     * classified by the same [`crate::contract::compare_contracts`]
+     * `publish` uses — and refusing nothing.
+     *
+     * A separate field from [`Self::breaking_changes`] because it answers a
+     * separate question. That one is read back out of
+     * `endpoint_versions.breaking_changes` and is a record of what an author
+     * ACCEPTED; this one is stored on no row, because a rollback creates no
+     * version. Sharing a field would let a history renderer show a rollback's
+     * consequences as an acknowledgement nobody gave.
+     *
+     * `None` for a `publish`, for a rollback onto an endpoint with nothing
+     * live, and when either snapshot cannot be read — a rollback must not fail
+     * because the sentence it was going to say could not be built.
+     * @nullable
+     */
+  rollback_breaks?: ContractChange[] | null;
 }

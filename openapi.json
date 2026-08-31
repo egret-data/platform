@@ -28979,6 +28979,14 @@
               "$ref": "#/components/schemas/ContractChange"
             },
             "description": "What publishing this version did to the consumers of the one it replaced\n(package 6), and therefore what its `created_by` accepted when they\nacknowledged it.\n\n`None` and `Some([])` are different facts and are kept apart. `None` is a\nversion published before this was recorded, or the FIRST version of an\nendpoint, where there was no live contract to break. `Some([])` is a\nversion that was compared against the live one and broke nothing. A\nhistory that showed both as \"no breaking changes\" would be claiming\nsomething about the first that nobody ever checked."
+          },
+          "compared_against_version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The version NUMBER [`Self::breaking_changes`] was compared against —\nwhatever was live when this one was published.\n\n`None` exactly when `breaking_changes` is `None`. Usually the preceding\nversion, and after a rollback NOT: `rollback` moves the live pointer\nbackwards and adds no row, so `Some([])` beside a baseline two versions\ndown is a comparison that happened and a set of consumers it says nothing\nabout. The number rather than the id, because this is what a history\nrenders and a number is what a reader can place."
           }
         }
       },
@@ -29086,6 +29094,24 @@
               "$ref": "#/components/schemas/ContractChange"
             },
             "description": "The breaking changes this publish made, which the caller acknowledged to\nget here (package 6).\n\nEchoed back rather than merely stored so the audit event the route emits\ncarries the same list the version row does — one write, two records, and\nno second computation of what was accepted.\n\n`None` for a first publish and for a `rollback`, neither of which\ncompares anything: a rollback re-serves a contract that was already\npublished once, and the two live rules it DOES re-ask are the ones whose\ninputs are live (see [`EndpointStore::rollback`]).\n\n`skip_serializing_if` here and deliberately NOT on\n[`DataApiEndpointVersionDto::breaking_changes`], which is the same value\nread back out of the table. There, `null` is an answer — \"nobody looked\"\n— and a reader has to be able to tell it from `[]`. Here the field is\nabsent from a `rollback`'s response because that response is not about a\ncomparison at all, and a `null` would invite the reader to interpret it."
+          },
+          "compared_against": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The version [`Self::breaking_changes`] is a statement ABOUT: whatever was\nlive at the instant of the publish.\n\nEchoed for the same reason it is stored — see migration `0131`. After a\nrollback this is not the version before this one, and an empty list read\nwithout it says more than it knows. `None` for a first publish, and for a\n`rollback`, which compares against the version it moved OFF and reports\nthat under [`Self::rollback_breaks`]."
+          },
+          "rollback_breaks": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/ContractChange"
+            },
+            "description": "What a `rollback` did to the consumers of the version it moved OFF,\nclassified by the same [`crate::contract::compare_contracts`]\n`publish` uses — and refusing nothing.\n\nA separate field from [`Self::breaking_changes`] because it answers a\nseparate question. That one is read back out of\n`endpoint_versions.breaking_changes` and is a record of what an author\nACCEPTED; this one is stored on no row, because a rollback creates no\nversion. Sharing a field would let a history renderer show a rollback's\nconsequences as an acknowledgement nobody gave.\n\n`None` for a `publish`, for a rollback onto an endpoint with nothing\nlive, and when either snapshot cannot be read — a rollback must not fail\nbecause the sentence it was going to say could not be built."
           }
         }
       },

@@ -3725,6 +3725,171 @@ async fn a_first_publish_compares_nothing_and_records_that_it_did_not() {
     assert!(versions[0]["breaking_changes"].is_null(), "{versions:?}");
 }
 
+/// **The record a `rollback` used to make false.**
+///
+/// v1 returns `id, n`. A rollback to v0 — `id` alone — is not refused, and
+/// should not be: it is usually someone ending an outage. But it moves every
+/// consumer of v1 off a contract they were coding against, and it writes no row
+/// in `endpoint_versions`. Publishing the id-only draft afterwards then compares
+/// against v0, finds nothing, and stores `[]`, which migration `0131` DEFINES as
+/// "compared and broke nothing".
+///
+/// Two things make that true again, and neither is a gate:
+///
+/// * the version row names the baseline it is a claim about, so `[]` beside a
+///   baseline that is not the newest version is visibly a rolled-back one;
+/// * the rollback itself classifies what it moved consumers off and returns it,
+///   which is the record that did not exist anywhere before.
+#[tokio::test]
+async fn a_publish_after_a_rollback_names_the_baseline_its_empty_diff_is_about() {
+    let f = skip_without_db!();
+    // v1: `id` alone.
+    f.port.set(Describe::Columns(vec![("id", "uuid")]));
+    let ep = f
+        .create_endpoint("pkg6rb", "pkg6rb", "SELECT id FROM t")
+        .await;
+    f.publish(ep).await;
+
+    // v2: `id, n`, the contract consumers then code against. Adding a column is
+    // safe, so this needs no acknowledgement.
+    f.port
+        .set(Describe::Columns(vec![("id", "uuid"), ("n", "bigint")]));
+    f.set_statements(
+        ep,
+        serde_json::json!([{ "name": "main", "sql": "SELECT id, n FROM t" }]),
+    )
+    .await;
+    f.publish(ep).await;
+
+    // The rollback to v1 removes `n` from every response, and says so.
+    let (status, rolled) = f
+        .rollback_raw(ep, serde_json::json!({ "version": 1 }))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{rolled}");
+    assert_eq!(
+        rolled["rollback_breaks"][0]["kind"], "column_removed",
+        "a rollback must say what it moves consumers off, even though it \
+         refuses nothing: {rolled}"
+    );
+    assert!(
+        rolled["rollback_breaks"][0]["subject"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("`n`"),
+        "{rolled}"
+    );
+    // It is not an acknowledgement and must never be recorded as one.
+    assert!(rolled["breaking_changes"].is_null(), "{rolled}");
+
+    // Now publish the id-only draft. Against v1 — the live version — it breaks
+    // nothing, and that is the truth. The row has to say WHICH truth.
+    f.port.set(Describe::Columns(vec![("id", "uuid")]));
+    f.set_statements(
+        ep,
+        serde_json::json!([{ "name": "main", "sql": "SELECT id FROM t" }]),
+    )
+    .await;
+    let (status, body) = f.publish_raw(ep).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["breaking_changes"], serde_json::json!([]), "{body}");
+
+    let versions = f.versions(ep).await;
+    let v3 = versions
+        .iter()
+        .find(|v| v["version"] == 3)
+        .expect("v3 exists");
+    assert_eq!(
+        v3["compared_against_version"],
+        serde_json::json!(1),
+        "the empty diff is a claim about v1, not about v2 — and a reader who \
+         cannot see that reads it as `nobody was broken here`: {v3}"
+    );
+    // The version it does NOT speak for is still in the history, one number
+    // higher than the baseline, which is what makes the rollback visible.
+    let v2 = versions
+        .iter()
+        .find(|v| v["version"] == 2)
+        .expect("v2 exists");
+    assert_eq!(v2["compared_against_version"], serde_json::json!(1), "{v2}");
+}
+
+/// The ordinary case, so the field above is not just "whatever the last publish
+/// happened to point at": with no rollback the baseline IS the version before.
+#[tokio::test]
+async fn a_publish_over_a_live_version_names_that_version_as_its_baseline() {
+    let f = skip_without_db!();
+    f.port.set(Describe::Columns(vec![("id", "uuid")]));
+    let ep = f
+        .create_endpoint("pkg6base", "pkg6base", "SELECT id FROM t")
+        .await;
+    f.publish(ep).await;
+    f.set_statements(
+        ep,
+        serde_json::json!([{ "name": "main", "sql": "SELECT id FROM t WHERE x" }]),
+    )
+    .await;
+    f.publish(ep).await;
+
+    let versions = f.versions(ep).await;
+    let v2 = versions.iter().find(|v| v["version"] == 2).expect("v2");
+    assert_eq!(v2["compared_against_version"], serde_json::json!(1), "{v2}");
+    // And a FIRST publish compared against nothing, so it names nothing —
+    // exactly where `breaking_changes` is null too. The two absences are the
+    // same absence and must not disagree.
+    let v1 = versions.iter().find(|v| v["version"] == 1).expect("v1");
+    assert!(v1["compared_against_version"].is_null(), "{v1}");
+    assert!(v1["breaking_changes"].is_null(), "{v1}");
+}
+
+/// A mid-list insertion under `shape: arrays`, end to end.
+///
+/// `SELECT id, n` becoming `SELECT id, region, n` reorders nothing — the
+/// survivors are still `id` then `n` — so a check that compares the survivors as
+/// a sequence sees an empty diff and publishes with a 200. `serving::router`
+/// requires the engine's positional order to equal the frozen list exactly and
+/// then clones the rows verbatim, so every consumer reading `data[i][1]` as the
+/// bigint `n` starts reading the varchar `region`.
+#[tokio::test]
+async fn publishing_a_mid_list_column_insertion_under_arrays_is_refused() {
+    let f = skip_without_db!();
+    f.port
+        .set(Describe::Columns(vec![("id", "uuid"), ("n", "bigint")]));
+    let ep = f
+        .create_endpoint("pkg6ins", "pkg6ins", "SELECT id, n FROM t")
+        .await;
+    f.patch_endpoint(ep, serde_json::json!({ "output": { "shape": "arrays" } }))
+        .await;
+    f.publish(ep).await;
+
+    f.port.set(Describe::Columns(vec![
+        ("id", "uuid"),
+        ("region", "varchar"),
+        ("n", "bigint"),
+    ]));
+    f.set_statements(
+        ep,
+        serde_json::json!([{ "name": "main", "sql": "SELECT id, region, n FROM t" }]),
+    )
+    .await;
+
+    let (status, body) = f.publish_raw(ep).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "an insertion moves every index after it: {body}"
+    );
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("index 1 to 2"),
+        "the refusal must name the index a consumer already reads: {msg}"
+    );
+    assert_eq!(
+        f.versions(ep).await.len(),
+        1,
+        "a refused publish leaves the history alone"
+    );
+}
+
 /// Sending an acknowledgement that corresponds to nothing is refused rather
 /// than ignored. Ignoring it is how a client learns to send one always, which
 /// is the `force: true` the token shape exists to make unrepresentable.
