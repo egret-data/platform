@@ -5,6 +5,7 @@
  * egret unified data portal HTTP API.
  * OpenAPI spec version: 0.1.0
  */
+import type { ContractChange } from './contractChange';
 import type { EndpointSnapshot } from './endpointSnapshot';
 
 /**
@@ -24,4 +25,18 @@ export interface DataApiEndpointVersionDto {
      * a request returns** — see the module comment.
      */
   snapshot: EndpointSnapshot;
+  /**
+     * What publishing this version did to the consumers of the one it replaced
+     * (package 6), and therefore what its `created_by` accepted when they
+     * acknowledged it.
+     *
+     * `None` and `Some([])` are different facts and are kept apart. `None` is a
+     * version published before this was recorded, or the FIRST version of an
+     * endpoint, where there was no live contract to break. `Some([])` is a
+     * version that was compared against the live one and broke nothing. A
+     * history that showed both as "no breaking changes" would be claiming
+     * something about the first that nobody ever checked.
+     * @nullable
+     */
+  breaking_changes?: ContractChange[] | null;
 }

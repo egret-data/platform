@@ -144,6 +144,24 @@ export function liveVersionLookup(
  *   nothing a consumer receives. This is the direction the old timestamp rule
  *   got wrong: it lit the pill on a rename.
  *
+ * **This is NOT the publish-time breaking-change diff, and the two must not be
+ * merged.** Package 6 added `egret_dataapi::contract::compare_contracts`, which
+ * compares the same two things and answers a different question:
+ *
+ * | | question | answer |
+ * |---|---|---|
+ * | here | is there anything to publish? | one boolean over nine fields |
+ * | `contract.rs` | does publishing break a consumer? | a classified list |
+ *
+ * A `sql` edit lights this pill — correctly, the author has unpublished work —
+ * and is not a breaking change — also correctly, the data is not the contract.
+ * Collapsing them would make one of the two wrong. The load-bearing rule is the
+ * other direction: **nothing in the frontend decides what is breaking.** That
+ * judgement has one home, it reaches the console as data on `POST /validate`,
+ * and the acknowledgement `Versions.tsx` sends back is the server's own digest.
+ * A second opinion computed here is the drift this file's own comments keep
+ * closing.
+ *
  * **Old snapshots compare correctly too**, which was checked rather than
  * assumed. A pre-M2 snapshot carries `sql` + `columns` instead of `statements`;
  * `EndpointSnapshotRepr` (`egret-dataapi-api/src/lib.rs:404`) folds that into a

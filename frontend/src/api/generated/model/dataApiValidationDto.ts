@@ -5,6 +5,7 @@
  * egret unified data portal HTTP API.
  * OpenAPI spec version: 0.1.0
  */
+import type { ContractDiff } from './contractDiff';
 import type { StatementSnapshot } from './statementSnapshot';
 
 /**
@@ -25,4 +26,14 @@ export interface DataApiValidationDto {
      * and "what publish writes" the same words.
      */
   statements: StatementSnapshot[];
+  against_live?: null | ContractDiff;
+  /**
+     * The value to send back as `acknowledge_breaking` on `POST …/publish`,
+     * present exactly when `against_live.breaking` is non-empty.
+     *
+     * A digest of those breaking changes, not a constant — see
+     * [`PublishEndpointInput::acknowledge_breaking`].
+     * @nullable
+     */
+  acknowledge_breaking?: string | null;
 }

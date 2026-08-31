@@ -5,6 +5,7 @@
  * egret unified data portal HTTP API.
  * OpenAPI spec version: 0.1.0
  */
+import type { ContractChange } from './contractChange';
 
 /**
  * What `publish`/`rollback` report back about the version now being served.
@@ -13,4 +14,26 @@ export interface DataApiPublishedDto {
   version_id: string;
   version: number;
   state: string;
+  /**
+     * The breaking changes this publish made, which the caller acknowledged to
+     * get here (package 6).
+     *
+     * Echoed back rather than merely stored so the audit event the route emits
+     * carries the same list the version row does — one write, two records, and
+     * no second computation of what was accepted.
+     *
+     * `None` for a first publish and for a `rollback`, neither of which
+     * compares anything: a rollback re-serves a contract that was already
+     * published once, and the two live rules it DOES re-ask are the ones whose
+     * inputs are live (see [`EndpointStore::rollback`]).
+     *
+     * `skip_serializing_if` here and deliberately NOT on
+     * [`DataApiEndpointVersionDto::breaking_changes`], which is the same value
+     * read back out of the table. There, `null` is an answer — "nobody looked"
+     * — and a reader has to be able to tell it from `[]`. Here the field is
+     * absent from a `rollback`'s response because that response is not about a
+     * comparison at all, and a `null` would invite the reader to interpret it.
+     * @nullable
+     */
+  breaking_changes?: ContractChange[] | null;
 }
