@@ -290,6 +290,11 @@ pub(crate) fn status_label(status: StatusCode) -> &'static str {
         404 => "404",
         // The request-bounds layer's body cap.
         413 => "413",
+        // Package 7's `version_unavailable`: the pinned version is not one this
+        // endpoint can serve right now. A status of its own so an operator can
+        // see "consumers are pinned to versions that have gone" without it
+        // hiding inside the 400s a malformed header also produces.
+        409 => "409",
         429 => "429",
         500 => "500",
         // The engine could not be reached.
@@ -494,6 +499,8 @@ mod tests {
             "not_granted",
             "param_missing",
             "param_invalid",
+            "version_pin_invalid",
+            "version_unavailable",
             "row_limit_exceeded",
             "rate_limited",
             "schema_drift",

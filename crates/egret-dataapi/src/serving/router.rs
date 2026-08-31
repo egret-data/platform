@@ -737,13 +737,15 @@ impl utoipa::Modify for BearerAddon {
     params(
         ("ws" = String, Path, description = "Workspace slug; must match the token's `ws` claim"),
         ("path" = String, Path, description = "The endpoint's published path, e.g. `reports/daily`"),
+        ("X-Egret-Version" = Option<i32>, Header, description = "Pin the request to a published version of this endpoint, so a publish does not move this caller until they choose to move. Omit it to call whatever is live — the behaviour every caller had before this header existed. The number is the `version` in `meta`, and the `x-egret-version` stamped on this operation in the generated per-service-account document. A pin selects which frozen CONTRACT answers and never which live policy applies: the invoke grant, the governed-database check, the endpoint's state and the workspace's are all evaluated exactly as they are for an unpinned call, and the endpoint's rate limit is the LIVE version's in both cases. A version above the live one is refused — that can only mean a rollback moved consumers off it"),
     ),
     responses(
         (status = 200, description = "Rows from the published snapshot", body = ServingResponse),
-        (status = 400, description = "`row_limit_exceeded` — the result exceeded the endpoint's row cap; `param_missing` — a required parameter was not supplied; `param_invalid` — a supplied parameter failed its declared type, its `allowed` list, or was repeated where one value is required. Neither parameter error names the parameter: the name is the author's, and naming it turns the error surface into a directory of what an endpoint declares", body = ServingErrorBody),
+        (status = 400, description = "`row_limit_exceeded` — the result exceeded the endpoint's row cap; `param_missing` — a required parameter was not supplied; `param_invalid` — a supplied parameter failed its declared type, its `allowed` list, or was repeated where one value is required. Neither parameter error names the parameter: the name is the author's, and naming it turns the error surface into a directory of what an endpoint declares. `version_pin_invalid` — the `X-Egret-Version` header was not a single positive whole number; it names the caller's own header and no fact about the endpoint", body = ServingErrorBody),
         (status = 401, description = "`key_invalid` — bearer token missing, expired, or not for this audience", body = ServingErrorBody),
         (status = 403, description = "`data_access_denied` — the engine refused this service account the underlying data, either because it lacks a data permission (a Ranger grant, say) or because its engine credential is bad or expired; one code, because the two recognitions available (Trino's typed 401/403 from the coordinator, and every other engine failure matched on its own message) cannot tell those causes apart. `not_granted` — egret refused the call because the service account holds no invoke grant on this endpoint", body = ServingErrorBody),
         (status = 404, description = "`not_found` — no such live endpoint in this workspace", body = ServingErrorBody),
+        (status = 409, description = "`version_unavailable` — the version named by `X-Egret-Version` is not one this endpoint can serve: it was never published, or a rollback has moved consumers off it. One code for both, because a consumer's action is the same either way and two would enumerate the endpoint's history. A 409 rather than a 400 because the same request is correct or incorrect depending on which version is live at that instant; no `Retry-After`, because it clears only when a human republishes or the caller changes what it sends", body = ServingErrorBody),
         (status = 429, description = "`rate_limited` — a published rate limit was exceeded; `Retry-After` states when the bucket refills", body = ServingErrorBody),
         (status = 413, description = "`payload_too_large` — the request declared a body larger than this surface accepts", body = ServingErrorBody),
         (status = 500, description = "`internal` — an egret-side fault (the metastore, the secret store, a corrupt snapshot); quote `request_id` to support. `endpoint_query_failed` — the engine ran the endpoint's published statement and refused it: the request was fine and the endpoint is what broke, so it is a 5xx rather than a 4xx, and its own code so that `which endpoints are failing` is separable from `egret is failing`", body = ServingErrorBody),
@@ -771,13 +773,15 @@ async fn serve_get(
     params(
         ("ws" = String, Path, description = "Workspace slug; must match the token's `ws` claim"),
         ("path" = String, Path, description = "The endpoint's published path, e.g. `reports/daily`"),
+        ("X-Egret-Version" = Option<i32>, Header, description = "Pin the request to a published version of this endpoint, so a publish does not move this caller until they choose to move. Omit it to call whatever is live — the behaviour every caller had before this header existed. The number is the `version` in `meta`, and the `x-egret-version` stamped on this operation in the generated per-service-account document. A pin selects which frozen CONTRACT answers and never which live policy applies: the invoke grant, the governed-database check, the endpoint's state and the workspace's are all evaluated exactly as they are for an unpinned call, and the endpoint's rate limit is the LIVE version's in both cases. A version above the live one is refused — that can only mean a rollback moved consumers off it"),
     ),
     responses(
         (status = 200, description = "Rows from the published snapshot", body = ServingResponse),
-        (status = 400, description = "`row_limit_exceeded` — the result exceeded the endpoint's row cap; `param_missing` — a required parameter was not supplied; `param_invalid` — a supplied parameter failed its declared type, its `allowed` list, or was repeated where one value is required. Neither parameter error names the parameter: the name is the author's, and naming it turns the error surface into a directory of what an endpoint declares", body = ServingErrorBody),
+        (status = 400, description = "`row_limit_exceeded` — the result exceeded the endpoint's row cap; `param_missing` — a required parameter was not supplied; `param_invalid` — a supplied parameter failed its declared type, its `allowed` list, or was repeated where one value is required. Neither parameter error names the parameter: the name is the author's, and naming it turns the error surface into a directory of what an endpoint declares. `version_pin_invalid` — the `X-Egret-Version` header was not a single positive whole number; it names the caller's own header and no fact about the endpoint", body = ServingErrorBody),
         (status = 401, description = "`key_invalid` — bearer token missing, expired, or not for this audience", body = ServingErrorBody),
         (status = 403, description = "`data_access_denied` — the engine refused this service account the underlying data, either because it lacks a data permission (a Ranger grant, say) or because its engine credential is bad or expired; one code, because the two recognitions available (Trino's typed 401/403 from the coordinator, and every other engine failure matched on its own message) cannot tell those causes apart. `not_granted` — egret refused the call because the service account holds no invoke grant on this endpoint", body = ServingErrorBody),
         (status = 404, description = "`not_found` — no such live endpoint in this workspace", body = ServingErrorBody),
+        (status = 409, description = "`version_unavailable` — the version named by `X-Egret-Version` is not one this endpoint can serve: it was never published, or a rollback has moved consumers off it. One code for both, because a consumer's action is the same either way and two would enumerate the endpoint's history. A 409 rather than a 400 because the same request is correct or incorrect depending on which version is live at that instant; no `Retry-After`, because it clears only when a human republishes or the caller changes what it sends", body = ServingErrorBody),
         (status = 429, description = "`rate_limited` — a published rate limit was exceeded; `Retry-After` states when the bucket refills", body = ServingErrorBody),
         (status = 413, description = "`payload_too_large` — the request declared a body larger than this surface accepts", body = ServingErrorBody),
         (status = 500, description = "`internal` — an egret-side fault (the metastore, the secret store, a corrupt snapshot); quote `request_id` to support. `endpoint_query_failed` — the engine ran the endpoint's published statement and refused it: the request was fine and the endpoint is what broke, so it is a 5xx rather than a 4xx, and its own code so that `which endpoints are failing` is separable from `egret is failing`", body = ServingErrorBody),
@@ -1006,6 +1010,12 @@ async fn run(
     entry: &mut AccessLogEntry,
 ) -> Result<Served, ServingError> {
     let principal = verify_serving_token(&*st.keys, bearer(headers)?).await?;
+    // Package 7's version pin, parsed AFTER authentication. A malformed header
+    // from a caller who has proved nothing is still a 401: a 400 that only this
+    // header can produce would be a free "this host speaks the Data API" oracle,
+    // which is the same reasoning behind the single `Unauthorized` above it. See
+    // `super::pin` for what the parse accepts.
+    let pin = super::pin::requested_version(headers)?;
     // Recorded the moment it is known, so every answer from here on — including
     // a 404 — is attributable to a workspace and a client.
     entry.workspace_id = Some(principal.workspace_id);
@@ -1044,15 +1054,21 @@ async fn run(
     // `live_conn` rides in on this same statement — see `live_snapshot`. It is
     // READ here, at step 2, and ACTED ON below, after the invoke grant and the
     // limiter: nothing between the two consults it.
-    let (endpoint_id, version, snap, live_conn) =
-        live_snapshot(&st.db, ws.id.0, method.as_str(), &path)
-            .await?
-            .ok_or(ServingError::NotFound)?;
+    let routed = live_snapshot(&st.db, ws.id.0, method.as_str(), &path, pin)
+        .await?
+        .ok_or(ServingError::NotFound)?;
+    let endpoint_id = routed.endpoint_id;
     // From here every failure is attributable to a specific published version,
     // which is what makes "this endpoint started 503ing at 14:02" answerable
     // from the log alone.
+    //
+    // The version recorded is the one that will ANSWER, so a pinned call records
+    // the pin and not the live number — which is what makes
+    // `access_log.version < live version` the query an operator runs to find who
+    // is still on an old contract before deciding to retire it. A pin that could
+    // not be served records no version at all: nothing answered.
     entry.endpoint_id = Some(endpoint_id);
-    entry.version = Some(version);
+    entry.version = routed.pinned.as_ref().map(|(v, _, _)| *v);
 
     // Step 4 — the authorization check. Authentication told us WHO; this is the
     // first thing on the chain that asks WHETHER. Without it a `data-api` token
@@ -1097,11 +1113,20 @@ async fn run(
     // `warn`, because it means requests are being refused that nobody's
     // allowance had anything to do with — see `serving::shared` for why the
     // refusal is nevertheless the right answer.
+    // `routed.live_rate_limit`, NOT the served snapshot's. One endpoint has one
+    // bucket (the keys carry no version), so the rate that fills it must not be
+    // one the caller selects with a header — see [`live_snapshot`]'s doc for the
+    // arithmetic. Identical to `snap.rate_limit` on every unpinned request,
+    // because there `lv` and `v` are the same row.
+    //
+    // Applied here, BEFORE the pin is resolved, so a caller hammering a stale pin
+    // is limited by the endpoint's published allowance rather than getting an
+    // unbounded refusal loop.
     check_request(
         &*st.rate_limits,
         endpoint_id,
         &principal.client_id,
-        &snap.rate_limit,
+        &routed.live_rate_limit,
         now,
     )
     .await
@@ -1124,6 +1149,34 @@ async fn run(
             ServingError::LimiterUnavailable
         }
     })?;
+
+    // Package 7 — the pin, resolved. Placed HERE rather than at step 2, and the
+    // position is two decisions:
+    //
+    // * **After the invoke grant.** Refusing earlier would tell a caller holding
+    //   a valid workspace token but no grant on this endpoint that the endpoint
+    //   exists, which steps 2 and 3 spend two 404s to avoid. By this line the
+    //   caller has been granted invoke on this very endpoint, so the endpoint's
+    //   existence is not a secret the answer could keep — the same reversal
+    //   `NotGranted` documents one step up.
+    // * **After the limiter**, so a client looping on a stale pin is bounded by
+    //   the endpoint's published allowance. The limiter needed no snapshot to
+    //   run, because its rate comes from the live version.
+    //
+    // The log line names the live version, which the wire body deliberately does
+    // not: the operator reading it is the person who decides whether to keep the
+    // old version around, and "someone is pinned to 3, live is 7" is the whole
+    // of what they need.
+    let Some((version, snap, live_conn)) = routed.pinned else {
+        tracing::debug!(
+            %endpoint_id,
+            requested = ?pin,
+            live_version = routed.live_version,
+            client_id = %principal.client_id,
+            "data-api call refused: the pinned version is not servable"
+        );
+        return Err(ServingError::VersionUnavailable);
+    };
 
     // Step 6 — the cache.
     //
@@ -2221,24 +2274,109 @@ async fn invoke_allowed(
 /// calls `get_in_workspace` and reports a foreign id as `NotFound` before any
 /// connection is opened. Strictly tighter than without the predicate, which
 /// could serve such a request from a warm cache entry.
+///
+/// # The version pin changes ONE clause, and that is the whole security argument
+///
+/// Package 7 lets a consumer name the version it built against. The pin replaces
+/// exactly one term of this statement — which `endpoint_versions` row `v` binds
+/// to — and touches nothing else:
+///
+/// * `e.workspace_id = $1`, `e.method`, `e.path` and `e.state = 'live'` all
+///   still decide whether there is a row at all. A pin therefore cannot reach
+///   another workspace's endpoint, a **disabled** one, a **trashed** one
+///   (migration 0126's CHECK makes `deleted_at IS NOT NULL` and `state = 'live'`
+///   mutually exclusive), or one in an archived workspace — the caller's `ws`
+///   filter one layer up in [`run`] having already refused that.
+/// * `v.endpoint_id = e.id` is what makes a version number from ANOTHER endpoint
+///   unreachable. Version numbers are per endpoint
+///   (`UNIQUE (endpoint_id, version)`), so this is a structural property of the
+///   join rather than a check someone has to remember.
+/// * `v.version <= lv.version` refuses a pin ABOVE the live version. The only way
+///   a version can be above live is that `rollback` moved consumers off it, and
+///   that is the one act available to an operator during an outage — serving it
+///   because a caller asked would make the rollback defeatable by a header.
+/// * The `LEFT JOIN query.databases` keys on the **pinned** snapshot's
+///   `database_id` and reads the **live** row, so [`governance_allows_serving`]
+///   and [`shared_cache_allowed`] answer about the connection as it is right now.
+///   Package 1 chose the live-predicate shape over a frozen witness precisely so
+///   that marking a database `governed` takes effect on already-published
+///   versions; a pin does not opt out of that, because there is nothing frozen
+///   for it to opt out of.
+///
+/// Everything the pin does NOT change is therefore live by construction rather
+/// than by a rule this function has to restate: the `data_api_endpoint:invoke`
+/// check runs on `endpoint_id` in [`invoke_allowed`], after this and against the
+/// PDP as it is now, and the endpoint's state and the workspace's state are the
+/// predicates above.
+///
+/// # `lv` and the live rate limit
+///
+/// The statement joins the live version as `lv` **whether or not there is a
+/// pin**, and takes `rate_limit` from it — never from `v`. The bucket
+/// (`ratelimit::client_key`, `endpoint_key`) is keyed on `endpoint_id` with no
+/// version in it, so one endpoint has one bucket; letting `v` supply the rate
+/// would put a caller-selected refill rate on shared mutable state, which is the
+/// Package 4 defect in a new dress. Concretely, `TokenBucket::take` tops the
+/// stored tokens up to `rate.burst` on every call, so a caller alternating
+/// `X-Egret-Version: 1` (an old, generous limit) with an unpinned call would
+/// refill the endpoint's bucket at version 1's rate and spend it at version 2's
+/// — the tightening an author published would not be a limit at all.
+///
+/// When there is no pin, `lv` and `v` are the same row, so this is not a second
+/// source that could disagree with the first: it is the same value, read once,
+/// on both paths. What it costs is one `->` on a jsonb already being read.
+///
+/// **`limits` is deliberately NOT treated this way and stays with `v`.**
+/// `max_rows` and `timeout_seconds` bound ONE request, are already clamped by
+/// [`MAX_ROWS_CEILING`] and [`TIMEOUT_CEILING_SECS`] before anything is sized
+/// from them, and the row cap is quoted back to the caller in
+/// `row_limit_exceeded` — it is part of what the frozen contract promises. A rate
+/// limit is none of those things: it is a bound on state shared between requests,
+/// and shared state driven by a caller-supplied parameter is the one shape this
+/// programme has now been bitten by twice.
+///
+/// # What `Ok(Some(routed))` with `routed.pinned == None` means
+///
+/// The endpoint resolved and is live; the version the caller named is not one it
+/// can serve. Kept apart from `Ok(None)` (no such endpoint) so that [`run`] can
+/// answer the two differently — and so that the version refusal happens AFTER
+/// the invoke grant and the rate limiter, which is where [`run`] puts it. A
+/// refusal before the grant check would tell a caller holding a workspace token
+/// but no grant that the endpoint exists.
+///
+/// An UNPINNED request can never produce it: with `$4` NULL the join condition
+/// is `v.id = e.live_version_id`, the same row `lv` is joined on, which the INNER
+/// join above has already proved exists.
 async fn live_snapshot(
     db: &Db,
     ws: Uuid,
     method: &str,
     path: &str,
-) -> Result<Option<(Uuid, i32, EndpointSnapshot, Option<LiveConnection>)>, ServingError> {
+    pin: Option<i32>,
+) -> Result<Option<Routed>, ServingError> {
     type Row = (
         Uuid,
         i32,
-        serde_json::Value,
+        // `->` yields SQL NULL for an absent key, so this is `Option` even
+        // though publish always writes the field. Absent is handled below as
+        // the corruption it is, rather than left to a driver decode error that
+        // would name a type and no endpoint.
+        Option<serde_json::Value>,
+        Option<i32>,
+        Option<serde_json::Value>,
         Option<bool>,
         Option<bool>,
         Option<serde_json::Value>,
     );
     let row: Option<Row> = sqlx::query_as(
-        "SELECT e.id, v.version, v.snapshot, d.governed, d.delegated, d.options \
+        "SELECT e.id, lv.version, lv.snapshot->'rate_limit', \
+                v.version, v.snapshot, d.governed, d.delegated, d.options \
          FROM dataapi.endpoints e \
-         JOIN dataapi.endpoint_versions v ON v.id = e.live_version_id \
+         JOIN dataapi.endpoint_versions lv ON lv.id = e.live_version_id \
+         LEFT JOIN dataapi.endpoint_versions v \
+           ON ($4::int IS NULL AND v.id = e.live_version_id) \
+           OR ($4::int IS NOT NULL AND v.endpoint_id = e.id \
+               AND v.version = $4 AND v.version <= lv.version) \
          LEFT JOIN query.databases d \
            ON d.id = (v.snapshot->>'database_id')::uuid AND d.workspace_id = $1 \
          WHERE e.workspace_id = $1 AND e.method = $2 AND e.path = $3 \
@@ -2247,6 +2385,7 @@ async fn live_snapshot(
     .bind(ws)
     .bind(method)
     .bind(path)
+    .bind(pin)
     .fetch_optional(&db.pool)
     .await
     .map_err(|e| {
@@ -2267,19 +2406,78 @@ async fn live_snapshot(
         ServingError::internal(e)
     })?;
 
-    let Some((id, version, raw, governed, delegated, options)) = row else {
+    let Some((id, live_version, raw_rate_limit, version, raw, governed, delegated, options)) = row
+    else {
         return Ok(None);
     };
-    // A snapshot that will not deserialise is OUR fault, not the caller's: the
-    // only writer is publish. 500, not 404 — a 404 would quietly hide a
-    // corrupted or forward-incompatible version behind "no such endpoint".
-    let snapshot: EndpointSnapshot = serde_json::from_value(raw).map_err(ServingError::internal)?;
-    Ok(Some((
-        id,
-        version,
-        snapshot,
-        LiveConnection::from_row(governed, delegated, options),
-    )))
+    // Read out of the LIVE version's snapshot with the same type and the same
+    // strictness `EndpointSnapshotRepr` applies to it — `RateLimitSpec` carries
+    // `deny_unknown_fields`, and the repr's own `rate_limit` field has no
+    // `#[serde(default)]`, so a snapshot missing the key is a snapshot the
+    // unpinned path has always answered 500 for. No second defaulting rule is
+    // invented here: absent or unreadable is the same corruption, reported the
+    // same way.
+    let live_rate_limit: egret_dataapi_api::RateLimitSpec =
+        serde_json::from_value(raw_rate_limit.unwrap_or(serde_json::Value::Null)).map_err(|e| {
+            ServingError::internal(format!(
+                "the live version of {method} {path} has a snapshot with no readable \
+             `rate_limit`; publish is the only writer of that field: {e}"
+            ))
+        })?;
+    // `v.version IS NULL` is the LEFT JOIN having matched nothing: the endpoint
+    // is live and reachable, and the pinned version is not one it can serve.
+    // Unreachable without a pin — see this function's doc.
+    let pinned = match (version, raw) {
+        (Some(version), Some(raw)) => {
+            // A snapshot that will not deserialise is OUR fault, not the
+            // caller's: the only writer is publish. 500, not 404 — a 404 would
+            // quietly hide a corrupted or forward-incompatible version behind
+            // "no such endpoint".
+            let snapshot: EndpointSnapshot =
+                serde_json::from_value(raw).map_err(ServingError::internal)?;
+            Some((
+                version,
+                snapshot,
+                LiveConnection::from_row(governed, delegated, options),
+            ))
+        }
+        // Both columns come from one LEFT-joined row, so they are NULL together.
+        // A half-matched pair would mean the join produced a version with no
+        // snapshot, which the `NOT NULL` on the column makes impossible.
+        _ => None,
+    };
+    Ok(Some(Routed {
+        endpoint_id: id,
+        live_version,
+        live_rate_limit,
+        pinned,
+    }))
+}
+
+/// What [`live_snapshot`] resolved: the endpoint, the version that will answer,
+/// and the two things read from the LIVE version regardless of any pin.
+///
+/// A struct rather than the four-tuple this used to be because the fields no
+/// longer read off in an order anyone would remember, and because two of them
+/// are deliberately about a DIFFERENT version than the one being served — which
+/// a positional tuple would hide at every call site.
+struct Routed {
+    endpoint_id: Uuid,
+    /// The version `endpoints.live_version_id` points at. Not necessarily the
+    /// one that answers.
+    ///
+    /// Currently used only for the log line on a refused pin: the SQL already
+    /// refuses a pin above it, so nothing compares it in Rust. It is here
+    /// because "the pin was refused" is not an operator-actionable sentence
+    /// without "and this is what is live".
+    live_version: i32,
+    /// The LIVE version's published rate limit, applied to every request on this
+    /// endpoint whether or not it is pinned. See [`live_snapshot`]'s doc for why
+    /// this one field does not follow the pin.
+    live_rate_limit: egret_dataapi_api::RateLimitSpec,
+    /// `(version, snapshot, live connection)` for the version that will answer,
+    /// or `None` when a pin named one this endpoint cannot serve.
+    pinned: Option<(i32, EndpointSnapshot, Option<LiveConnection>)>,
 }
 
 /// The `Authorization: Bearer …` value, or [`ServingError::Unauthorized`].

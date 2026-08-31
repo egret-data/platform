@@ -1031,6 +1031,65 @@ impl Fixture {
         }
     }
 
+    /// A consumer call whose `Authorization` header is supplied VERBATIM, so a
+    /// test can send one that will not verify.
+    ///
+    /// [`Fixture::call_as_client_with_headers`] always mints a valid token, so
+    /// nothing built on it can measure what happens BEFORE authentication
+    /// succeeds — and "this refusal is reachable without a credential" is a
+    /// statement only an unauthenticated request can settle.
+    pub async fn call_with_raw_authorization(
+        &self,
+        path: &str,
+        authorization: &str,
+        headers: &[(&str, &str)],
+    ) -> Res {
+        let uri = format!("/data-api/v1/{}/{path}", self.ws_slug);
+        let mut builder = Request::builder()
+            .method("GET")
+            .uri(&uri)
+            .header("authorization", authorization);
+        for (k, v) in headers {
+            builder = builder.header(*k, *v);
+        }
+        let res = self
+            .serving
+            .clone()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = res.status();
+        let retry_after = res
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        let bytes = axum::body::to_bytes(res.into_body(), 4 * 1024 * 1024)
+            .await
+            .unwrap();
+        Res {
+            status,
+            body: serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+            retry_after,
+        }
+    }
+
+    /// Package 7: the same consumer call, carrying `X-Egret-Version`.
+    ///
+    /// `version` is a `&str` and not an `i32` on purpose — half of what the pin
+    /// has to refuse is a value no integer type can express (`+1`, `1 `, `abc`,
+    /// the empty string), and a typed parameter would have made those tests
+    /// impossible to write without going around this helper.
+    pub async fn call_pinned(&self, principal: UserId, path: &str, version: &str) -> Res {
+        self.call_as_client_with_headers(
+            principal,
+            &format!("client-{}", principal.0.simple()),
+            path,
+            &[("x-egret-version", version)],
+        )
+        .await
+    }
+
     async fn mgmt_send(
         &self,
         method: &str,
@@ -1711,5 +1770,95 @@ impl Fixture {
         body["version"]
             .as_i64()
             .unwrap_or_else(|| panic!("no version in publish response: {body}")) as i32
+    }
+
+    /// [`Fixture::republish`] for a draft whose changes package 6 classifies as
+    /// BREAKING: fetch the acknowledgement from `POST …/validate` and send it
+    /// back on `POST …/publish`.
+    ///
+    /// [`Fixture::republish`] posts `{}` and therefore 409s on any breaking
+    /// change, which is the whole point of that gate — so a test that needs two
+    /// versions differing in something breaking (a tightened `rate_limit`, a
+    /// removed column) cannot use it. This is the same two-step an author
+    /// performs in the console, driven through the same two routes.
+    ///
+    /// It **asserts a token was issued**, so it cannot be used by accident on a
+    /// non-breaking change: publish refuses a token sent when nothing breaks, and
+    /// a helper that silently degraded to `{}` would hide the fact that the
+    /// change under test turned out not to be breaking after all — which is
+    /// exactly the vacuity a test using this is trying to avoid.
+    pub async fn republish_acknowledging(&self, ep: Uuid) -> i32 {
+        let (status, v) = self
+            .mgmt_post(
+                &format!("/api/ws/{}/data-api/endpoints/{ep}/validate", self.ws_slug),
+                Some(serde_json::json!({})),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "validate failed: {v}");
+        let token = v["acknowledge_breaking"].as_str().unwrap_or_else(|| {
+            panic!(
+                "no acknowledge_breaking in the validate response, i.e. this change is NOT \
+                 breaking — use `republish` instead, and re-read what the test is asserting: {v}"
+            )
+        });
+        let (status, body) = self
+            .mgmt_post(
+                &format!("/api/ws/{}/data-api/endpoints/{ep}/publish", self.ws_slug),
+                Some(serde_json::json!({ "acknowledge_breaking": token })),
+            )
+            .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "acknowledged republish failed: {body}"
+        );
+        body["version"]
+            .as_i64()
+            .unwrap_or_else(|| panic!("no version in publish response: {body}")) as i32
+    }
+
+    /// Take back the `data_api_endpoint:invoke` grant [`grant_invoke`] issued.
+    ///
+    /// SQL for the same reason `grant_invoke` is SQL: these principals are plain
+    /// `users` rows with no `dataapi.service_accounts` binding, which the real
+    /// `DELETE …/grants/{sa}` route (correctly) refuses. The route itself is
+    /// exercised by `serving_authz.rs` against real service accounts.
+    ///
+    /// **Asserts it removed a row.** A revoke that matched nothing looks exactly
+    /// like a revoke that worked, right up until the assertion that the call is
+    /// now refused — at which point the test reports "the pin resurrected a
+    /// revoked grant" for a grant that was never revoked.
+    pub async fn revoke_invoke(&self, user: UserId, endpoint: Uuid) {
+        let removed = sqlx::query(
+            "DELETE FROM access_grants g USING roles r \
+             WHERE g.role_id = r.id AND r.scope = 'workspace' \
+               AND r.name = 'data_api_invoker' \
+               AND g.principal_type = 'user' AND g.principal_id = $1 \
+               AND g.scope_type = 'object' AND g.object_type = 'data_api_endpoint' \
+               AND g.scope_id = $2",
+        )
+        .bind(user.0)
+        .bind(endpoint)
+        .execute(&self.db.pool)
+        .await
+        .expect("revoke invoke")
+        .rows_affected();
+        assert_eq!(
+            removed, 1,
+            "the invoke grant must actually have been removed; a revoke that \
+             matched nothing makes every refusal assertion after it meaningless"
+        );
+    }
+
+    /// Overwrite the DRAFT's `rate_limit`, so a republish freezes a different one.
+    pub async fn set_rate_limit(&self, ep: Uuid, rate_limit: serde_json::Value) {
+        let touched = sqlx::query("UPDATE dataapi.endpoints SET rate_limit = $2 WHERE id = $1")
+            .bind(ep)
+            .bind(&rate_limit)
+            .execute(&self.db.pool)
+            .await
+            .expect("store rate_limit")
+            .rows_affected();
+        assert_eq!(touched, 1, "the rate limit must actually be stored");
     }
 }
