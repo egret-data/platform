@@ -183,9 +183,10 @@ fn default_max_rows() -> u32 {
 ///
 /// Named rather than inlined because it is a **multiplicand**: an endpoint's
 /// worst case is this times its statement count, and that product is what the
-/// request-scoped deadlines on the serving and trial paths have to be reconciled
-/// against (`egret_dataapi::serving::SERVING_REQUEST_DEADLINE`,
-/// `egret_dataapi::TRIAL_REQUEST_DEADLINE`). Those reconciliations were written
+/// serving path's request deadline
+/// (`egret_dataapi::serving::SERVING_REQUEST_DEADLINE`, which also bounds a
+/// Try-it trial) has to be reconciled against. The Config surface warns the
+/// author when the product exceeds it. Those reconciliations were written
 /// against the literal `30`, which nothing would have updated.
 pub const DEFAULT_TIMEOUT_SECONDS: u32 = 30;
 

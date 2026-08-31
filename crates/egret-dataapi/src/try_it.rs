@@ -56,7 +56,6 @@ use egret_workspace::context::WsContext;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
 use tokio::sync::Semaphore;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -117,47 +116,50 @@ const TRIAL_CLIENT_PREFIX: &str = "trial:";
 /// that failure carries and why it is not a 409.
 const MAX_TRIAL_BODY: usize = 4 * 1024 * 1024;
 
-/// How long a trial may take before the serving router answers it `504`.
+/// A trial is bounded by [`crate::serving::SERVING_REQUEST_DEADLINE`], the
+/// consumer's number, and it does **not** get one of its own.
 ///
-/// # It is NOT [`crate::serving::SERVING_REQUEST_DEADLINE`], and the difference
-/// is the point
+/// # Because Try it answers "can a consumer call this endpoint?"
 ///
-/// That constant is derived from **the edge a consumer crosses**: ingress-nginx
-/// gives `/data-api` 60 s, so egret has to answer in less than that or nginx
-/// answers first with HTML egret never sees. A trial crosses no such edge on the
-/// call itself — [`try_endpoint`] drives the serving router with
-/// `tower::ServiceExt::oneshot`, entirely in process, with no socket, no proxy
-/// and no read timeout anywhere between the two halves.
+/// That is the question the feature exists for and the one its copy promises.
+/// A trial that survived where a consumer is cut off would answer a different
+/// question and answer it reassuringly — the exact class of lie this surface
+/// keeps removing, and worse than no Try it at all, because it is the one tool
+/// an author would have used to find the problem.
 ///
-/// Inheriting 50 s here was therefore a bound with no derivation behind it, and
-/// it was **tighter than a legal endpoint**: `limits.timeout_seconds` defaults to
-/// 30 and `egret_dataapi_api::MAX_STATEMENTS` allows 16, so the canonical
-/// several-statement endpoint — a `rows` query and the `total` that paginates it
-/// (spec §4.4) — has a 60 s worst case at the defaults. An author clicking
-/// **Try it** on a configuration egret itself accepts got `504 timeout`.
+/// So there is deliberately no `TRIAL_REQUEST_DEADLINE` constant. A second
+/// number that must equal the first is a drift waiting to happen; passing the
+/// consumer's constant makes the parity a property of the code rather than of
+/// two comments agreeing.
 ///
-/// # Where 120 comes from
+/// # The argument for a longer trial deadline, and why it fails
 ///
-/// Twice that canonical worst case: two default statements is 60 s, so 120 s
-/// admits four of them, or two whose author raised `timeout_seconds` to 60. It
-/// is a bound and not decoration — the published ceiling is
-/// `MAX_STATEMENTS × TIMEOUT_CEILING_SECS` = 80 minutes, and a browser tab held
-/// open for that is not a diagnosis, it is a hang. Past this the author gets
-/// egret's own envelope, with `error.code: "timeout"`, in the trial result.
+/// It is real as far as it goes: the deadline's derivation is the edge a
+/// consumer crosses (ingress-nginx gives `/data-api` 60 s), and the trial call
+/// itself crosses no edge — [`try_endpoint`] drives the router with
+/// `tower::ServiceExt::oneshot`, in process, with no socket between the halves.
+/// A trial deadline of 120 s was tried on that reasoning.
 ///
-/// # The one place the edge does come back, stated rather than discovered
+/// Two things kill it. First, the trial **request** — `POST …/try` from the
+/// console — is an ordinary browser call, and when `ingress.enabled` it crosses
+/// the same Ingress-wide `proxy-read-timeout: "60"`
+/// (`deploy/helm/egret/templates/ingress.yaml`). So behind an ingress a 120 s
+/// trial deadline is unreachable: nginx answers the author with a generic
+/// gateway error at 60 s instead of egret answering with its own envelope and a
+/// code. Second, and independently of any deployment: a trial that completes at
+/// 90 s tells the author their endpoint works, and a consumer calling it gets
+/// cut off. The bound being *shared* is what makes the answer true.
 ///
-/// The trial *request* — `POST …/try` from the console — is an ordinary browser
-/// call, and when `ingress.enabled` it crosses the same Ingress-wide
-/// `proxy-read-timeout: "60"`. So behind an ingress a trial that runs past 60 s
-/// is answered by nginx before this deadline can fire, and the author sees a
-/// network error rather than the envelope. That is a property of the annotation
-/// being Ingress-wide (`deploy/helm/egret/templates/ingress.yaml` records the
-/// same limitation) and not of this number: raising or lowering this constant
-/// cannot move it. The default deployment has no ingress and the SPA's own nginx
-/// gives `/api/` 3600 s, so there this deadline is what answers.
-pub const TRIAL_REQUEST_DEADLINE: Duration = Duration::from_secs(120);
-
+/// # What that means for a legal-but-slow endpoint, and where it is said
+///
+/// `limits.timeout_seconds` defaults to 30 and `MAX_STATEMENTS` allows 16, so
+/// the canonical several-statement endpoint — a `rows` query and the `total`
+/// that paginates it (spec §4.4) — has a 60 s worst case at the defaults, which
+/// is past this deadline and past the ingress. That is legal, and publishing it
+/// is not refused. It is a fact about the **configuration**, so it is surfaced
+/// where the author sets the configuration — the Config surface warns as soon as
+/// `statements × timeout_seconds` exceeds the serving deadline — rather than
+/// arriving as an unexplained `504` at the moment a trial dies.
 /// How many trials may be in flight at once, **process-wide**.
 ///
 /// # Why this is a constant and a `static`, not a `permits` argument
@@ -201,8 +203,8 @@ fn trial_bulkhead() -> Arc<Semaphore> {
         .clone()
 }
 
-/// The serving router a trial runs against: the real one, with the trial path's
-/// own bounds.
+/// The serving router a trial runs against: the real one, with the consumer's
+/// deadline and body cap, and the trial path's own bulkhead.
 ///
 /// Exposed so the bounds can be tested through the same function the handler
 /// calls. A test that hand-assembled an equivalent router would be asserting
@@ -211,7 +213,9 @@ fn trial_bulkhead() -> Arc<Semaphore> {
 /// for the same reason.
 pub fn trial_serving_router() -> axum::Router<DataApiState> {
     crate::serving::router::serving_router_sharing_bulkhead(
-        TRIAL_REQUEST_DEADLINE,
+        // The consumer's deadline, not a trial-shaped one. See the block above
+        // the bulkhead constant for why there is no second number here.
+        crate::serving::SERVING_REQUEST_DEADLINE,
         trial_bulkhead(),
         // The body cap is inherited unchanged and is **unreachable** on this
         // path: the request below is built with `Body::empty()` and no
@@ -437,9 +441,10 @@ pub async fn try_endpoint(
 
     // THE REAL ROUTER. Same nest, same layers, same handler a consumer reaches —
     // with the two bounds that are the trial path's rather than the consumer
-    // path's: see [`TRIAL_REQUEST_DEADLINE`] for why a deadline derived from an
-    // ingress this call never crosses was the wrong number, and
-    // [`TRIAL_MAX_CONCURRENCY`] for why the bulkhead cannot be built here.
+    // path's: the deadline and the body cap are the CONSUMER's, deliberately,
+    // so a trial cannot succeed where a consumer would be cut off; the bulkhead
+    // is the trial's own, because a router built per trial cannot own one. See
+    // the two blocks above [`TRIAL_MAX_CONCURRENCY`].
     let router = axum::Router::new()
         .nest("/data-api/v1", trial_serving_router())
         .with_state(st.clone());

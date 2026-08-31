@@ -522,94 +522,85 @@ async fn a_router_built_per_trial_still_shares_one_process_wide_bulkhead() {
     }
 }
 
-/// The deadline half of the same finding, driven against the configuration the
-/// review named: **two statements at the default `limits.timeout_seconds`**.
+/// The deadline, in the direction that matters: a trial is cut exactly where a
+/// consumer is.
 ///
-/// That is 2 x 30 = 60 s of legal worst case. The consumer path is bounded at 50
-/// s and answers `504` — correct, and derived from the ingress it crosses. The
-/// trial path crosses no such edge (it is a `tower::ServiceExt::oneshot`, in
-/// process, with no socket between the halves), and inheriting the consumer's
-/// number meant an author clicking **Try it** on a configuration egret itself
-/// accepts was told it timed out.
+/// Driven at the configuration the review named — **two statements at the
+/// default `limits.timeout_seconds`**, i.e. 2 x 30 = 60 s of legal worst case,
+/// built from the constants that produce it rather than typed as `60`.
 ///
-/// Both halves are driven here, in one test, from one duration. Set
-/// `TRIAL_REQUEST_DEADLINE` back to `SERVING_REQUEST_DEADLINE` and the trial
-/// assertion fails; delete the trial's own bound and the consumer assertion
-/// stops being a control for it.
+/// This duration is the discriminator on purpose: it is past
+/// `SERVING_REQUEST_DEADLINE` (50 s), and it is a duration a **120 s trial
+/// deadline would have let through** — which is what an earlier version of this
+/// branch did. Try it answers "can a consumer call this endpoint?", so a trial
+/// that completed here would have told the author yes about a call a consumer is
+/// cut off from; and behind an ingress it would be unreachable anyway, with
+/// nginx answering the console at 60 s with a generic gateway error instead of
+/// egret's envelope.
+///
+/// Both routers, one duration, one expectation. Give the trial path a longer
+/// deadline and the second half fails.
 #[tokio::test(start_paused = true)]
-async fn a_legal_two_statement_endpoint_is_504d_for_a_consumer_and_not_for_a_trial() {
+async fn a_trial_is_cut_at_exactly_the_deadline_a_consumer_is() {
     let _serialised = TRIAL_TESTS.lock().await;
-    // The legal worst case, built from the two constants that produce it rather
-    // than typed as `60`.
-    let worst_case = Duration::from_secs(2 * u64::from(egret_dataapi_api::DEFAULT_TIMEOUT_SECONDS));
+    let legal_worst_case =
+        Duration::from_secs(2 * u64::from(egret_dataapi_api::DEFAULT_TIMEOUT_SECONDS));
     assert!(
-        worst_case > egret_dataapi::serving::SERVING_REQUEST_DEADLINE,
-        "this test is only interesting while a legal two-statement endpoint can \
-         outrun the consumer deadline"
+        legal_worst_case > egret_dataapi::serving::SERVING_REQUEST_DEADLINE,
+        "this test only discriminates while a legal two-statement endpoint at the \
+         defaults ({legal_worst_case:?}) can outrun the serving deadline ({:?})",
+        egret_dataapi::serving::SERVING_REQUEST_DEADLINE
     );
 
-    let consumer = composed_app(Arc::new(SleepyKeys(worst_case)));
-    let res = consumer
-        .oneshot(serving_request("GET").body(Body::empty()).unwrap())
-        .await
-        .unwrap();
-    assert_eq!(
-        res.status(),
-        StatusCode::GATEWAY_TIMEOUT,
-        "the consumer path is bounded by the edge it crosses, and 60 s is past it"
+    for (app, who) in [
+        (
+            composed_app(Arc::new(SleepyKeys(legal_worst_case))),
+            "a consumer",
+        ),
+        (trial_app(Arc::new(SleepyKeys(legal_worst_case))), "a trial"),
+    ] {
+        let res = app
+            .oneshot(serving_request("GET").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::GATEWAY_TIMEOUT,
+            "{who} must be answered 504 at the serving deadline. A trial that \
+             survived this would report success for a call a consumer is cut off \
+             from, which is the question Try it exists to answer"
+        );
+        let body = body_json(res).await;
+        assert_eq!(
+            body["error"]["code"], "timeout",
+            "and in egret's own envelope, with a code — not a gateway's HTML"
+        );
+    }
+}
+
+/// The other direction, without which the test above would pass against a trial
+/// path that refused everything.
+///
+/// An ordinary trial — well inside the deadline — reaches the handler and is
+/// answered on its own merits (401 here: the token in this file is not real).
+#[tokio::test(start_paused = true)]
+async fn an_ordinary_trial_well_inside_the_deadline_still_reaches_the_handler() {
+    let _serialised = TRIAL_TESTS.lock().await;
+    let quick = Duration::from_secs(1);
+    assert!(
+        quick < egret_dataapi::serving::SERVING_REQUEST_DEADLINE,
+        "the control has to be inside the bound to be a control"
     );
 
-    let trial = trial_app(Arc::new(SleepyKeys(worst_case)));
+    let trial = trial_app(Arc::new(SleepyKeys(quick)));
     let res = trial
         .oneshot(serving_request("GET").body(Body::empty()).unwrap())
         .await
         .unwrap();
+
     assert_eq!(
         res.status(),
         StatusCode::UNAUTHORIZED,
-        "the SAME endpoint tried from the console must reach the handler and be \
-         answered on its own merits (401 — the token in this file is not real). \
-         A 504 here is the trial path inheriting a bound derived from an edge it \
-         never crosses"
+        "a short trial must be served, not refused by the deadline"
     );
-}
-
-/// And the trial deadline is still a bound, not the absence of one.
-///
-/// The published ceiling is `MAX_STATEMENTS x TIMEOUT_CEILING_SECS` — 80 minutes
-/// — and a browser tab held open for that is a hang, not a diagnosis. Past
-/// `TRIAL_REQUEST_DEADLINE` the author gets egret's own envelope with a code.
-#[tokio::test(start_paused = true)]
-async fn a_trial_that_outruns_its_own_deadline_is_answered_504_in_the_envelope() {
-    let _serialised = TRIAL_TESTS.lock().await;
-
-    // The bound has to be a NUMBER and not merely present. The drive below
-    // sleeps `TRIAL_REQUEST_DEADLINE + 1s`, so raising the constant raises the
-    // sleep with it and a `504` would arrive at any value — including an hour,
-    // which is no bound at all for the thing actually being bounded, a person
-    // watching a browser tab. Held to five minutes, well under the 80-minute
-    // published worst case that motivates having a deadline here at all.
-    assert!(
-        egret_dataapi::TRIAL_REQUEST_DEADLINE <= Duration::from_secs(300),
-        "TRIAL_REQUEST_DEADLINE is {:?}; past a few minutes the console hangs \
-         rather than diagnoses, and the deadline stops being a bound",
-        egret_dataapi::TRIAL_REQUEST_DEADLINE
-    );
-
-    let over = egret_dataapi::TRIAL_REQUEST_DEADLINE + Duration::from_secs(1);
-    let trial = trial_app(Arc::new(SleepyKeys(over)));
-
-    let res = trial
-        .oneshot(serving_request("GET").body(Body::empty()).unwrap())
-        .await
-        .unwrap();
-
-    assert_eq!(
-        res.status(),
-        StatusCode::GATEWAY_TIMEOUT,
-        "the trial path has its own deadline; without one a published 80-minute \
-         worst case would hang the console"
-    );
-    let body = body_json(res).await;
-    assert_eq!(body["error"]["code"], "timeout");
 }

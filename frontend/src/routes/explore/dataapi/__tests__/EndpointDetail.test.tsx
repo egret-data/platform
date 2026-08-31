@@ -144,6 +144,68 @@ beforeEach(() => {
 });
 
 describe("Config", () => {
+  /**
+   * A two-statement endpoint at the defaults is 2 x 30 = 60s, past the 50s a
+   * served call is given. That is LEGAL — publish does not refuse it — so the
+   * author has to be told where they set it, not by a 504 arriving in someone
+   * else's logs.
+   *
+   * Both directions, because a warning that is always on is not a warning: the
+   * default one-statement endpoint must show nothing, and it is asserted first
+   * so a component that renders the sentence unconditionally fails here rather
+   * than passing the interesting half.
+   *
+   * The 50 is duplicated in `Config.tsx` from Rust's `SERVING_REQUEST_DEADLINE`
+   * and pinned by `serving::guard`'s
+   * `the_config_surface_warns_against_this_modules_deadline`, which reads that
+   * file. Nothing in this file could catch that drift.
+   */
+  it("Config warns when the endpoint's worst case outruns a served call, and stays quiet when it does not", async () => {
+    const { unmount } = renderConfig(
+      makeEndpoint({ statements: [{ name: "main", sql: "SELECT 1" }] } as Partial<DataApiEndpointDto>),
+    );
+    expect(await screen.findByLabelText("Timeout (seconds)")).toBeInTheDocument();
+    expect(screen.queryByTestId("worst-case-warning")).not.toBeInTheDocument();
+    unmount();
+
+    // Two statements, no explicit timeout: the default 30 applies to EACH, so
+    // the worst case is 60s. Exactly the configuration the review named.
+    renderConfig(
+      makeEndpoint({
+        statements: [
+          { name: "rows", sql: "SELECT 1" },
+          { name: "total", sql: "SELECT count(*)" },
+        ],
+      } as Partial<DataApiEndpointDto>),
+    );
+    const warning = await screen.findByTestId("worst-case-warning");
+    expect(warning).toHaveTextContent("60s");
+    expect(warning).toHaveTextContent("50s");
+    // It must not read as a refusal: publishing this is allowed.
+    expect(warning.textContent ?? "").toMatch(/allowed/i);
+  });
+
+  /**
+   * The value is per STATEMENT, and serving clamps it — a warning computed from
+   * the literal typed number would over-report for an author who typed 10,000
+   * (clamped to 300) and under-report for one who typed 0 (clamped to 1).
+   */
+  it("Config computes the worst case per statement, against the clamped timeout", async () => {
+    renderConfig(
+      makeEndpoint({
+        statements: [
+          { name: "a", sql: "SELECT 1" },
+          { name: "b", sql: "SELECT 2" },
+        ],
+        limits: { timeout_seconds: 10_000 },
+      } as Partial<DataApiEndpointDto>),
+    );
+    const warning = await screen.findByTestId("worst-case-warning");
+    // 2 x clamp(10000, 1, 300) = 600, not 2 x 10000.
+    expect(warning).toHaveTextContent("600s");
+    expect(warning.textContent ?? "").not.toContain("20000");
+  });
+
   it("Config holds the endpoint's identity and its four config groups", async () => {
     const endpoint = makeEndpoint();
     vi.mocked(api.useDataApiGetEndpoint).mockReturnValue({

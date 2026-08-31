@@ -11,10 +11,12 @@
 //! forgotten at a second mount site.
 //!
 //! `try_it`'s in-process trial router gets the same three layers through
-//! [`super::router::serving_router_sharing_bulkhead`], with **two of the three
-//! numbers changed**: the deadline, because the trial crosses no ingress, and
-//! the bulkhead, because a router built per trial cannot own its own semaphore.
-//! See [`crate::TRIAL_REQUEST_DEADLINE`] and [`crate::TRIAL_MAX_CONCURRENCY`].
+//! [`super::router::serving_router_sharing_bulkhead`], with exactly **one of the
+//! three numbers changed**: the bulkhead, because a router built per trial
+//! cannot own its own semaphore. The deadline and the body cap are the
+//! consumer's, deliberately — Try it answers "can a consumer call this?", so a
+//! trial that outlived what a consumer gets would answer the wrong question.
+//! See [`crate::TRIAL_MAX_CONCURRENCY`] and `try_it`'s own block above it.
 //!
 //! # Why the answers are the serving envelope and not tower-http's
 //!
@@ -571,6 +573,44 @@ mod tests {
                  {declared:?}"
             );
         }
+    }
+
+    /// The console warns an author when their endpoint's worst case exceeds
+    /// this deadline, and it has to be THIS deadline it warns about.
+    ///
+    /// # Why the number is duplicated at all
+    ///
+    /// Nothing serves `SERVING_REQUEST_DEADLINE` to the browser: it is a
+    /// process constant, not part of any contract a client fetches, and adding
+    /// an endpoint for one integer would be a larger change than the warning it
+    /// feeds. So `Config.tsx` holds a copy — and a copy nobody checks is how the
+    /// two sides of a seam drift, which is the failure mode this repo keeps
+    /// shipping. Same device as
+    /// `ingress_read_timeout_is_the_number_this_module_derives_from` directly
+    /// below, pointed at the other side of the stack.
+    ///
+    /// If someone changes the deadline, this fails and they update the console
+    /// copy with it. If someone changes the console copy, this fails and they
+    /// find out why the number is what it is.
+    #[test]
+    fn the_config_surface_warns_against_this_modules_deadline() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../frontend/src/routes/explore/dataapi/detail/Config.tsx"
+        );
+        let source = std::fs::read_to_string(path).expect("Config.tsx missing");
+        let needle = format!(
+            "const SERVING_REQUEST_DEADLINE_SECONDS = {};",
+            SERVING_REQUEST_DEADLINE.as_secs()
+        );
+        assert!(
+            source.contains(&needle),
+            "the Data API Config surface must warn against {}s (looked for \
+             `{needle}`). An author is told there whether their endpoint's worst \
+             case outruns a served call; a stale number there is a warning that \
+             fires at the wrong threshold, which is worse than none",
+            SERVING_REQUEST_DEADLINE.as_secs()
+        );
     }
 
     /// The chart and this module must agree about the 60. Reads the template

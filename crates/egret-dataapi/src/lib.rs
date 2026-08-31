@@ -92,7 +92,7 @@ pub use serving::{
 };
 pub use try_it::{
     trial_serving_router, TrialActor, TrialResultTooLarge, TryItError, TryRequest, TryRequestEcho,
-    TryResponse, TRIAL_MAX_CONCURRENCY, TRIAL_REQUEST_DEADLINE,
+    TryResponse, TRIAL_MAX_CONCURRENCY,
 };
 
 /// Test-only access to the trial-token minter.
