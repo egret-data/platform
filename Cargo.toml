@@ -123,6 +123,13 @@ regex = "1.13"
 #
 # `regex` 1.13 depends on exactly this version, so it is already compiled and
 # already in the lock file: naming it here adds a direct edge, not a build.
+#
+# **These two must resolve to ONE copy each**, and nothing in cargo's
+# resolution says so: they are independent carets, and a `regex` bump onto a
+# new `regex-syntax` minor would give the workspace two parsers — the gate
+# reading one language while the matcher enforces another, silently, with every
+# test green. `egret-dataapi`'s `regex_and_regex_syntax_resolve_to_one_parser`
+# asserts the count in `Cargo.lock`, so bump them together.
 regex-syntax = "0.8"
 # C2: the response-transform evaluator (egret-dataapi's `transform`). Two-component
 # per this manifest's convention, which for a 0.x crate IS a minor pin — cargo's

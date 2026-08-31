@@ -133,7 +133,11 @@ can show a value *did* reach the text, never that one never will. Package 5 clos
 the caller's half **by construction** instead, in
 `check_script_parameter_constraints`: on an endpoint where any statement is a
 `script`, every `string` parameter must carry a `pattern` whose language is inside
-ASCII letters, digits and `_`. Then it does not matter which route a script takes —
+ASCII letters, digits and `_` — and, since 2026-08-31, one that is a complete regular
+expression **on its own**, because egret matches it wrapped as `^(?:…)$` and a pattern
+that re-balances against that wrapper (`a)|(a`) split those anchors across two
+alternatives — `^(?:a)` bounding only the start, `(a)$` only the end — while passing the
+language check. Then it does not matter which route a script takes —
 transform the value, refuse the sentinel, or hide the concatenation behind a branch
 no probe reaches — the value is a bare word either way. See package 5's own section
 in `2026-08-30-dataapi-production-readiness-design.md`.

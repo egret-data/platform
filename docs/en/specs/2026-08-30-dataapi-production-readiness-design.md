@@ -46,7 +46,7 @@ Ordered by value-per-effort, not by severity. Dependencies noted.
 | 3a | **Serving guard rails** — ✅ `5de17862` (#558) | No graceful shutdown, so every deploy kills in-flight queries; no resource limits; `/readyz` exists and is never called (probes are `tcpSocket`); no concurrency cap, body limit, or timeout layer on the composed router. | — |
 | 3b | **Engine coupling** — ✅ `3ff8096d` (#557) | No engine connection pool (a TCP+TLS handshake **per statement**); a retryable Trino 503 discarded as a 500; `internal` the single code for six causes. | — |
 | 4 | **Multi-replica correctness** — ✅ `0c3febe5` | Response cache and token bucket are **process-local** while replica count is a Helm value, so every published rate limit silently multiplies by replica count and the cache fragments. | §4 decision B |
-| 5 | **Script parameter constraints** — ✅ | Package S lets a script concatenate a caller's value into SQL text. The publish-time sentinel probe has **two bypasses pinned open by tests asserting `is_ok()`**. Nothing re-asks at serve time. Closed by construction rather than by a better probe — see §5.1. | — |
+| 5 | **Script parameter constraints** — ✅ | Package S lets a script concatenate a caller's value into SQL text. The publish-time sentinel probe has **two bypasses pinned open by tests asserting `is_ok()`**. Closed by construction rather than by a better probe, at publish AND — for endpoints frozen before the rule — at serve time; see §5.1. | — |
 | 6 | **Publish-time diff + acknowledgement** | `publish` validates the draft against *itself*; the only read of `endpoint_versions` is `MAX(version)`. A removed column, narrowed type, renamed parameter or new required parameter publishes silently. Worst case: adding a second statement flips top-level `data` from an array to an object. | — |
 | 7 | **Consumer version pinning** | Serving resolves `live_version_id` only; a publish moves every caller at commit. `meta.version` lets a consumer *observe* which version answered but never *ask* for one. | 6 |
 | 8 | **Contract reachability** | The OpenAPI document sits behind a human session + `:manage`, so a consumer holding only a `data-api` token cannot fetch its own contract; `error.code` has no `enum` despite being documented as the stable code to branch on. | — |
@@ -183,7 +183,9 @@ looks at the emitted text at all.
 **The rule.** On an endpoint where any statement is a `script`, every `string`
 parameter must carry a `pattern` whose accepted language is contained in **ASCII
 letters, ASCII digits and `_`**. `check_script_parameter_constraints` in `lifecycle.rs`,
-run from `validate_endpoint` and `validate_preview`. This is the move
+run from `validate_endpoint` and `validate_preview` — and, through the snapshot adapter
+beside it, from `params::resolve` for endpoints frozen before the rule existed (see
+below). This is the move
 `check_enum_params` already makes for `Enum` — the only safe form for something that
 may reach an identifier position is one the author wrote down — extended to the
 `String` case package S opened.
@@ -195,18 +197,65 @@ dual-dialect proof), qualify a name into another schema, or end a token so a key
 can follow. And — the property that actually matters, since the whole problem is that a
 script may transform the value — **the set is closed under every Starlark string
 operation that selects from its input**: case mapping (`.upper()` of `[a-z]+` is
-`[A-Z]+`, still inside), slicing, indexing, `strip`, `split`/`join`.
+`[A-Z]+`, still inside), slicing, indexing, `strip`, `removeprefix`/`removesuffix`,
+`partition`, `split`, `elems`, repetition, and concatenation of two safe values.
+
+**`join` was on that list and does not belong there** (corrected 2026-08-31, review of
+this package). The justification for the list is *"every character of the result was a
+character of the input"*, and `sep.join(pieces)` breaks it: the separator comes from
+**author** text and is inserted once per gap, while the number of gaps is
+`len(pieces)` — which the caller controls whenever the pieces came from their own
+value. `" ".join(params["q"].split("_"))` is idiomatic humanisation, every operation on
+it appears on the safe list, and a caller sending `q=1_OR_true` produces
+`WHERE flag = 1 OR true`. It belongs with `replace` and `format` below.
 
 **Where the assumption fails, stated rather than implied.** It is *not* closed under
 operations that introduce bytes the value never contained — `replace("a", "'")`,
-`format`, `chr(ord(c)+1)`, a table lookup keyed by the value. A script can still emit a
-quote that way, but the quote is a literal the **author** typed at a position the
-author chose, and no caller decides whether it appears. That is package S's accepted
-residue, unchanged; what package 5 removes is the other half, where the caller supplies
-the metacharacter and an honest script passes it along. Non-ASCII is refused as
-conservatism, not as proof: no Unicode case mapping produces a SQL metacharacter, but
-"very likely safe" is not the standard for a rule whose job is to hold under
-transformations nobody enumerated.
+`format`, `chr(ord(c)+1)`, `sep.join(…)`, a table lookup keyed by the value. A script
+can still emit a quote that way, and the earlier claim that *"no caller decides whether
+it appears"* was wrong — contradicted two clauses later by its own example, since a
+table lookup is keyed by the caller's value and a `join`'s separator is emitted once
+per piece of it. The property that survives is narrower and is the one to quote:
+**every byte of the result was typed by the author or drawn from the safe alphabet.**
+The caller may choose which of the author's bytes appear, and how many times; they
+cannot introduce one the author never wrote. That is package S's accepted residue,
+unchanged — an author who writes `join` with a `'` separator has written an injection
+by hand, with extra steps — and what package 5 removes is the other half, where the
+caller supplies the metacharacter and an honest script passes it along. Non-ASCII is
+refused as conservatism, not as proof: no Unicode case mapping produces a SQL
+metacharacter, but "very likely safe" is not the standard for a rule whose job is to
+hold under transformations nobody enumerated.
+
+**The pattern must be a complete regular expression on its own, and that is the
+anchoring** (added 2026-08-31, after review found the gate passed a breakout). egret
+matches an author's `pattern` as `^(?:{pattern})$` — built in `anchored`, enforced by
+an *unanchored* `is_match` in `coerce` — and wrapping author TEXT is not anchoring:
+`a)|(a` becomes `^(?:a)|(a)$`, which compiles — and the two anchors have landed on two
+different alternatives, `^(?:a)` bounding only the start and `(a)$` only the end (with a
+third alternative, `a)|([a-z]+)|(a`, the middle one bounds nothing at all). Every
+character of it is inside the safe alphabet, so the language analysis below answered
+`Ok`, publish returned 200, and the endpoint accepted
+`a' UNION SELECT password FROM users --` on a parameter a script concatenates: the
+whole claim of this section, defeated by two parentheses.
+
+`compile_pattern` now requires `regex_syntax::parse` to succeed on the **raw** pattern
+before it wraps anything. A pattern that parses standalone has balanced groups, so
+`(?:` … `)` encloses exactly it and the anchors bind the whole language; one that does
+not is refused, naming egret's anchoring as the thing it fails, since the author's own
+regex tester accepted it. Nothing scans the pattern for `)` — the check is the
+structural property that makes the wrapper sound, which is the only form of it that
+survives a `regex-syntax` that grows new constructs.
+
+Structural anchoring was considered and not taken: `regex` has no full-match API
+(`find` is leftmost-first, so `a|ab` "fully matches" `ab` only by accident of which
+alternative won), and building the anchored HIR and printing it back would trust the
+HIR printer to round-trip every construct and would make the matched pattern differ
+textually from the one the author wrote and the OpenAPI document publishes. The
+raw-parse requirement makes the textual wrapper provably equal to a full match, which
+is the cheaper way to the same guarantee. Because `compile_pattern` is the one function
+both publish and `coerce` go through, a snapshot frozen with a breakout pattern before
+this existed now fails to compile at serve time and answers a redacted 500 rather than
+the injection.
 
 **Sufficiency is decided on the pattern's LANGUAGE, not on its text.** The author's
 pattern is parsed (`regex-syntax`, already in the lock as `regex`'s own dependency) and
@@ -228,25 +277,59 @@ reaches the engine, and `Enum` returns the **author's** own `allowed` entry.
 The cost is real and is named rather than hidden: **an endpoint cannot combine a
 generated statement with a free-text `string` parameter.** No pattern over the safe
 alphabet accepts a search phrase, so an author who needs one must write that endpoint's
-statements as `sql`, where `{{ q }}` binds and no script can reach the value. Endpoints
-already published are unaffected — the rule runs at publish and preview, never at
-serve — but such an endpoint will be refused the next time it is republished.
+statements as `sql`, where `{{ q }}` binds and no script can reach the value.
 
-**Serving re-asks nothing, and that is the design.** The constraint lives in `pattern`
-precisely because `coerce` already applies `pattern` to every `string` value on every
-request, on the same path that produces the `Param` the script is handed. The rule the
+**Endpoints already published are refused at SERVE time too** (added 2026-08-31, after
+review). A publish-time rule only ever runs on a definition someone publishes, so every
+scripted endpoint frozen before this package would have kept its unconstrained `string`
+parameter — and stayed exploitable — for as long as nobody edited it. The snapshot
+carries `statements` and `params`, so the question is answerable on the serving path,
+and an answer that is available is not a disclosure to leave in a report:
+`params::resolve` asks `snapshot_script_parameters_are_bounded` before the cache lookup
+(so a body cached under the old rule cannot outlive it) and refuses the request as an
+internal error. The wire body is `"internal error"`; the parameter's name goes to the
+log, for the operator who has to republish. That breaks such an endpoint until it is
+republished, which is the cost, and it is the right side of the trade against serving
+an injection on a definition egret would no longer accept.
+
+Operators can find them before the first 500 does. Verified against Postgres 16 on a
+fixture carrying one affected endpoint and three decoys — a bounded scripted one, an
+unbounded *written* one, and a draft with no live version — and it returns only the
+first:
+
+```sql
+SELECT e.workspace_id, e.method, e.path, v.version, p->>'name' AS parameter
+FROM dataapi.endpoints e
+JOIN dataapi.endpoint_versions v ON v.id = e.live_version_id
+CROSS JOIN LATERAL jsonb_array_elements(v.snapshot->'statements') AS s
+CROSS JOIN LATERAL jsonb_array_elements(v.snapshot->'params') AS p
+WHERE s ? 'script'
+  AND p->>'type' = 'string'
+  AND p->'pattern' IS NULL
+GROUP BY e.workspace_id, e.method, e.path, v.version, p->>'name'
+ORDER BY e.path;
+```
+
+**Serving re-asks nothing about the VALUE, and that is the design.** (It asks one
+question about the snapshot — whether the constraint is there at all — for the frozen
+endpoints above, and that is a different question with a different answer: a refusal of
+the endpoint, not of the value.) The constraint itself lives in `pattern` precisely
+because `coerce` already applies `pattern` to every `string` value on every request, on
+the same path that produces the `Param` the script is handed. The rule the
 author is refused by and the rule the caller is bounded by are one rule, so they cannot
 drift — package C1's property, and package 5 is only sound because of it. `allowed` is
 **not** accepted as an alternative constraint on a `String` for the same reason
 inverted: `coerce` reads it only for `Enum`, so accepting it would be a publish-time
 rule resting on an enforcement that does not exist.
 
-**Carried forward, not fixed:** `ParamSpec::allowed` on a `String` is silently ignored
-by `coerce` today and `check_constraints` does not refuse it, which is the "teaches the
-author a model where constraints apply everywhere" failure that function's own comment
-warns about. Package 5 refuses to *rely* on it and says so in an error, but does not
-refuse the declaration — that is a separate change with a migration question attached.
-And `validate_preview` applies the rule only to the statement on screen, because
+**Fixed since, on review:** `ParamSpec::allowed` on a `String` was silently ignored by
+`coerce` and `check_constraints` did not refuse it — verbatim the "teaches the author a
+model where constraints apply everywhere" failure that function's own comment warns
+about, missing from the very table that describes it. `allowed` now sits in that table,
+gated to `Enum`, which is the one type `coerce` reads it for.
+
+**Carried forward, not fixed:** `validate_preview` applies the rule only to the
+statement on screen, because
 `SiblingStatements` carries the other statements' text and cannot say whether any of
 them is a script; so previewing a *written* statement whose sibling is a script is
 silent about the rule and publish refuses it. Closing that needs the preview body to

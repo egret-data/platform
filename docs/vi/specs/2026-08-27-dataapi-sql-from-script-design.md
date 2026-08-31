@@ -130,7 +130,11 @@ phủ định: nó cho thấy một giá trị **đã** tới được văn bả
 không bao giờ tới. Gói 5 đóng nửa phần thuộc về người gọi **bằng cấu trúc**, trong
 `check_script_parameter_constraints`: trên một endpoint có bất kỳ câu lệnh nào là
 `script`, mọi tham số `string` phải mang một `pattern` mà ngôn ngữ nó nhận nằm gọn trong
-chữ cái ASCII, chữ số và `_`. Khi đó script đi lối nào cũng không còn quan trọng — biến
+chữ cái ASCII, chữ số và `_` — và, từ 2026-08-31, phải là một biểu thức chính quy **tự
+nó đã hoàn chỉnh**, vì egret khớp nó ở dạng bọc `^(?:…)$` và một pattern cân lại dấu
+ngoặc với lớp bọc đó (`a)|(a`) thì đẩy hai cái neo sang hai nhánh khác nhau — `^(?:a)`
+chỉ chặn đầu, `(a)$` chỉ chặn cuối — trong khi vẫn qua được phép kiểm tra ngôn ngữ.
+Khi đó script đi lối nào cũng không còn quan trọng — biến
 đổi giá trị, từ chối sentinel, hay giấu phép nối sau một nhánh không phép thăm dò nào
 tới — giá trị vẫn chỉ là một từ trơn. Xem mục riêng của gói 5 trong
 `2026-08-30-dataapi-production-readiness-design.md`.

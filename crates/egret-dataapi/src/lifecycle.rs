@@ -1843,16 +1843,103 @@ fn bound_digit_width(text: &str) -> usize {
     int_digits + frac.len()
 }
 
+/// What [`compile_pattern`] refuses, and the two are different author errors.
+///
+/// Split out rather than collapsed into `regex::Error` because the first one is
+/// not a fact about the regex crate at all: it is a fact about how egret
+/// ANCHORS an author's pattern, and an author told only "invalid regex" about a
+/// pattern their own editor's tester accepted would have nothing to act on.
+#[derive(Debug)]
+pub enum PatternError {
+    /// The author's pattern is not a complete regular expression **on its own**.
+    ///
+    /// See [`compile_pattern`] for why that is refused rather than wrapped.
+    ///
+    /// `Box`ed because `regex_syntax::Error` is ~128 bytes and this is the
+    /// `Err` half of the `Result` every pattern compile returns, on the serving
+    /// path as well as at publish (`clippy::result_large_err`).
+    NotStandalone(Box<regex_syntax::Error>),
+    /// The anchored form does not compile, or compiles past
+    /// [`MAX_PATTERN_PROGRAM_BYTES`].
+    Compile(regex::Error),
+}
+
+impl std::fmt::Display for PatternError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotStandalone(e) => write!(
+                f,
+                "it must be a complete regular expression ON ITS OWN, because egret matches it \
+                 anchored — as `^(?:…)$` — and this one is not: {e}"
+            ),
+            Self::Compile(e) => write!(f, "{e}"),
+        }
+    }
+}
+
 /// Compile a `pattern` the way `coerce` will, so publish and serving cannot
 /// disagree about which patterns exist.
 ///
 /// **Anchored here, once.** The anchors are added in this one function, so a
 /// pattern accepted at publish is byte-identical to the one matched at serve.
 /// An author's own `^…$` is idempotent under it.
-pub fn compile_pattern(pattern: &str) -> std::result::Result<regex::Regex, regex::Error> {
+///
+/// # The author's pattern must parse ON ITS OWN, and that IS the anchoring
+///
+/// [`anchored`] wraps author TEXT, and text can be written to re-balance
+/// against a wrapper. `a)|(a` becomes `^(?:a)|(a)$`, which compiles — and the
+/// wrapper's `^` and `$` have landed on DIFFERENT alternatives: `^(?:a)` keeps
+/// only the start anchor, `(a)$` only the end, and neither constrains the whole
+/// value any more. So the `is_match` in [`crate::serving::params::coerce`]
+/// accepts `a' UNION SELECT password FROM users --` — it begins with `a`, which
+/// is all the first alternative asks — while every character of the
+/// pattern is inside [`SAFE_ALPHABET`] and
+/// [`pattern_confines_to_safe_alphabet`] therefore answers `Ok`. Publish
+/// returned 200 on that endpoint, and the caller's bytes reached the SQL text a
+/// script builds: the whole of package 5's claim, defeated by two parentheses.
+///
+/// Requiring the RAW pattern to parse closes it by construction rather than by
+/// looking for the shapes that do it. A pattern that parses standalone has
+/// balanced groups, so `(?:` … `)` encloses exactly it and the anchors bind the
+/// whole language; a pattern that does not is refused before anything wraps it.
+/// **Nothing here inspects the pattern for `)`** — the check is that the
+/// author's own string is a regex, which is the property that makes the wrapper
+/// sound, and the only one that stays sound under a `regex-syntax` that grows
+/// new constructs.
+///
+/// Two alternatives were considered and not taken. Anchoring STRUCTURALLY — a
+/// full-match API instead of `is_match` over wrapped text — is the shape that
+/// makes this class of bug unrepresentable, and `regex` has no such API:
+/// `find` is leftmost-FIRST, so `a|ab` would "fully match" `ab` only by
+/// accident of which alternative won, and a hand-rolled
+/// `m.start() == 0 && m.end() == len` is unsound for exactly that reason.
+/// Building the anchored HIR and printing it back
+/// (`Hir::concat([Look::Start, hir, Look::End])`) IS a real structural
+/// anchoring, but it rests on the HIR printer round-tripping every construct
+/// faithfully — a wider trust than "the author's string parses" — and it would
+/// make the pattern egret matches differ textually from the one the author
+/// wrote and the one [`crate::openapi_gen`] publishes in the schema. The
+/// raw-parse requirement is what makes the textual wrapper provably equal to a
+/// full match, so the wrapper stays and the trust does not grow.
+///
+/// # It runs at SERVE time too, and that is deliberate
+///
+/// This is the function `coerce` compiles through, so an endpoint frozen before
+/// this check existed carrying a breakout `pattern` now matches nothing: the
+/// compile fails and `coerce` answers
+/// [`crate::serving::params::CoerceError::Malformed`] — a redacted 500 rather
+/// than an accepted injection. Fail closed on a stored row, which is the only
+/// direction available once the row exists.
+pub fn compile_pattern(pattern: &str) -> std::result::Result<regex::Regex, PatternError> {
+    // Parsed with `regex_syntax`'s defaults, which are the defaults `regex`
+    // itself parses with — the same agreement [`anchored`] documents, and the
+    // reason `Cargo.toml` says those two crates must resolve to ONE copy
+    // (`regex_and_regex_syntax_resolve_to_one_parser` asserts it).
+    regex_syntax::parse(pattern).map_err(|e| PatternError::NotStandalone(Box::new(e)))?;
     regex::RegexBuilder::new(&anchored(pattern))
         .size_limit(MAX_PATTERN_PROGRAM_BYTES)
         .build()
+        .map_err(PatternError::Compile)
 }
 
 /// The exact source text [`compile_pattern`] compiles.
@@ -1861,6 +1948,17 @@ pub fn compile_pattern(pattern: &str) -> std::result::Result<regex::Regex, regex
 /// string** the matcher is built from. Analysing the author's raw pattern
 /// instead would be analysing a different regex from the one enforced, and the
 /// gap between the two is where a wrapper's own metacharacters would live.
+///
+/// **The wrapper is only sound because the author's pattern is required to
+/// parse ON ITS OWN** ([`compile_pattern`]). Wrapping arbitrary text in
+/// `^(?:…)$` is not anchoring: `a)|(a` re-balances against the wrapper and
+/// splits its two anchors across two alternatives, `^(?:a)` and `(a)$`, neither
+/// of which bounds the whole value; write it with one more alternative
+/// (`a)|([a-z]+)|(a`) and the middle one carries no anchor at all. With the raw
+/// parse
+/// demanded first, `(?:` … `)` encloses exactly the author's language and this
+/// string's meaning is "the whole value matches the author's pattern" — which
+/// is the sentence every doc below is written against.
 ///
 /// The other half of that agreement is the parser's CONFIGURATION, and it is
 /// inherited rather than restated: `RegexBuilder` above sets only
@@ -1899,23 +1997,47 @@ fn anchored(pattern: &str) -> String {
 /// * `upper()`, `lower()`, `title()`, `capitalize()` — case mapping maps ASCII
 ///   letters to ASCII letters and fixes digits and `_`, so `[a-z]+` becoming
 ///   `[A-Z]+` moves inside the set, which is the whole point;
-/// * slicing, indexing, `reversed`, `strip`, `split` + `join`, `elems` — every
-///   character of the result was a character of the input;
+/// * slicing, indexing, `reversed`, `strip`, `removeprefix`/`removesuffix`,
+///   `partition`, `split`, `elems` — every character of every result was a
+///   character of the input, so a list of pieces of a safe value is a list of
+///   safe values;
+/// * repetition (`value * n`) and concatenation of two safe values — the
+///   multiset grows, the alphabet does not;
 /// * concatenation with the AUTHOR's own text — the author's half is author
 ///   text, which is the same provenance `ident_filter` already blesses.
+///
+/// **`join` is NOT on that list, and it was**, until a reviewer read the
+/// justification against the operation: `sep.join(pieces)` takes `sep` from
+/// wherever the script's author put it and inserts it once per gap, and the
+/// number of gaps is `len(pieces)` — which a caller controls whenever the
+/// pieces came from their own value. `" ".join(params["q"].split("_"))` is
+/// idiomatic humanisation, every operation on it looks safe, and `q=1_OR_true`
+/// renders `WHERE flag = 1 OR true`. The separator is author text; the DECISION
+/// to emit it, and how many times, is the caller's. It belongs in the paragraph
+/// below with `replace` and `format`, not here.
 ///
 /// # Where the assumption fails, stated rather than implied
 ///
 /// It is **not** closed under operations that INTRODUCE bytes the value never
-/// contained: `replace("a", "\'")`, `format()`, `chr(ord(c) + 1)`, or a table
-/// lookup keyed by the value. A script can still emit a quote that way — but the
-/// quote is a literal the AUTHOR typed, at a position the author chose, and the
-/// caller cannot decide whether it appears. That is the residue package S
-/// already documents and accepts (`GeneratedSql::probe`): the author is
-/// authenticated, holds `data_api_endpoint:manage`, and can type the injection
-/// directly into a written statement. What this alphabet removes is the other
-/// half — the one that mattered — where the CALLER supplies the metacharacter
-/// and an honest script merely passes it along.
+/// contained: `replace("a", "\'")`, `format()`, `chr(ord(c) + 1)`,
+/// `sep.join(…)`, or a table lookup keyed by the value. A script can still emit
+/// a quote that way, and the caller may well be the one who decides that it
+/// appears — a table lookup is keyed by their value, and a `join`'s separator
+/// is emitted once per piece of their value. So the property is narrower than
+/// "no caller decides whether it appears", which is what this paragraph used to
+/// claim while contradicting itself two clauses later:
+///
+/// > **every BYTE of the result was typed by the author or drawn from the safe
+/// > alphabet.** The caller can choose which of the author's bytes appear, and
+/// > how many times; they cannot introduce one the author never wrote.
+///
+/// That is the residue package S already documents and accepts
+/// (`GeneratedSql::probe`): the author is authenticated, holds
+/// `data_api_endpoint:manage`, and can type the injection directly into a
+/// written statement — so an author who writes `join` with a `'` separator has
+/// written an injection by hand, with extra steps. What this alphabet removes
+/// is the other half — the one that mattered — where the CALLER supplies the
+/// metacharacter and an honest script merely passes it along.
 ///
 /// Non-ASCII is refused, and that is conservatism rather than a proof. No
 /// Unicode case mapping produces a SQL metacharacter, so `\p{L}` would very
@@ -1936,9 +2058,24 @@ fn char_is_safe(c: char) -> bool {
 /// Can `pattern` accept a value containing a character outside
 /// [`SAFE_ALPHABET`]?
 ///
-/// `Ok(())` means **no**: every string the pattern matches is drawn entirely
-/// from the safe alphabet. `Err(witness)` names one character it would let
-/// through, so the author is told what to remove rather than "make it safer".
+/// `Ok(())` means **no**: every string the anchored pattern matches is drawn
+/// entirely from the safe alphabet. `Err(witness)` names one character it would
+/// let through, so the author is told what to remove rather than "make it
+/// safer".
+///
+/// # This answers a question about the ALPHABET, and nothing else
+///
+/// It is asked of `anchored(pattern)` and it is sound about that string. What
+/// it cannot say is whether that string means what a reader thinks: `a)|(a` is
+/// all safe characters and its anchored form still admits
+/// `a' UNION SELECT …`, because the wrapper's own `^` and `$` ended up on a
+/// different alternative from the author's text. That is [`compile_pattern`]'s
+/// raw-parse requirement to refuse, and this function's guarantee is only worth
+/// the sentence above BECAUSE that requirement exists — publish reaches it
+/// through [`check_constraints`], serving through
+/// [`crate::serving::params::coerce`], and
+/// `a_pattern_that_escapes_the_anchors_is_refused_and_coerce_agrees` asserts
+/// both halves over one pattern.
 ///
 /// # Positive proof, refusing on doubt — the opposite of the P4.5 shape
 ///
@@ -2138,11 +2275,57 @@ fn check_script_parameter_constraints(
 ) -> std::result::Result<(), ValidationError> {
     // The first scripted statement's name, and `None` when the endpoint has no
     // script at all — which is the no-op above.
-    let Some(statement) = statements
+    let scripted = statements
         .iter()
         .find(|s| matches!(s.source, StatementSource::Script(_)))
-        .map(|s| s.name.clone())
-    else {
+        .map(|s| s.name.clone());
+    script_parameters_are_bounded(scripted, params)
+}
+
+/// [`check_script_parameter_constraints`], asked of a snapshot that is ALREADY
+/// PUBLISHED — the serving path's half of the rule.
+///
+/// # Why serving asks at all, when publish's whole design was that it need not
+///
+/// Because publish only ever runs on a definition someone publishes. Every
+/// scripted endpoint frozen before package 5 carries whatever parameters it was
+/// published with, and an unconstrained `String` on one of them is exactly the
+/// hole this package closes — indefinitely, since nothing forces a republish.
+/// The snapshot carries `statements` and `params`, so the question is
+/// answerable here, and an answer that is available is not a disclosure to
+/// leave in a report.
+///
+/// **It refuses the request** ([`crate::serving::params::resolve`], before the
+/// cache lookup, so a cached body cannot outlive the rule either). That breaks
+/// such an endpoint until its author republishes it, which is the cost, and it
+/// is the right side of the trade: the alternative is serving an injection on a
+/// definition egret would no longer accept. Operators can find them ahead of
+/// the first 500 — see the query in
+/// `docs/en/specs/2026-08-30-dataapi-production-readiness-design.md` §5.1.
+///
+/// One rule and two adapters, differing only in where the scripted statement's
+/// NAME comes from: `StatementSpec` at publish and preview, `StatementSnapshot`
+/// here. The rule itself is [`script_parameters_are_bounded`] and is not
+/// written twice, which is the same reason `coerce` owns the constraint in the
+/// first place.
+pub(crate) fn snapshot_script_parameters_are_bounded(
+    statements: &[egret_dataapi_api::StatementSnapshot],
+    params: &[ParamSpec],
+) -> std::result::Result<(), ValidationError> {
+    let scripted = statements
+        .iter()
+        .find(|s| matches!(s.source, StatementSource::Script(_)))
+        .map(|s| s.name.clone());
+    script_parameters_are_bounded(scripted, params)
+}
+
+/// The rule itself: `scripted` is the name of a statement that BUILDS its SQL,
+/// or `None` for an endpoint that has none.
+fn script_parameters_are_bounded(
+    scripted: Option<String>,
+    params: &[ParamSpec],
+) -> std::result::Result<(), ValidationError> {
+    let Some(statement) = scripted else {
         return Ok(());
     };
     for p in params {
@@ -2156,6 +2339,14 @@ fn check_script_parameter_constraints(
                 alphabet: SAFE_ALPHABET_PROSE,
             });
         };
+        // The alphabet answer is sound about `anchored(pattern)` and says
+        // nothing about whether that string means what it reads as — a pattern
+        // that re-balances against those anchors passes it while matching
+        // anything at all. The other half of the gate is `compile_pattern`'s
+        // raw-parse requirement, and it is NOT restated here: publish reaches
+        // it through `check_constraints` and serving through `coerce`, which
+        // are the two places that already compile every pattern. A third copy
+        // would be one no test could tell from the other two.
         if let Err(witness) = pattern_confines_to_safe_alphabet(pattern) {
             return Err(ValidationError::StringParameterPatternTooWide {
                 parameter: p.name.clone(),
@@ -2226,6 +2417,13 @@ pub fn check_constraints(params: &[ParamSpec]) -> std::result::Result<(), Valida
         let numeric = matches!(p.ty, ParamType::Number);
         let textual = matches!(p.ty, ParamType::String);
         let temporal = matches!(p.ty, ParamType::Date | ParamType::Timestamp);
+        // `allowed` is READ by `coerce` for exactly one type. On any other it
+        // is the failure this table's comment describes, and it was missing
+        // from the table that describes it: an author who writes `allowed` on
+        // a `String` is declaring a closed set that no request is ever
+        // measured against, and package 5's refusal already had to spend a
+        // sentence telling them so.
+        let listed = matches!(p.ty, ParamType::Enum);
 
         for (present, allowed_here, name) in [
             (p.minimum.is_some(), numeric, "minimum"),
@@ -2235,6 +2433,7 @@ pub fn check_constraints(params: &[ParamSpec]) -> std::result::Result<(), Valida
             (p.pattern.is_some(), textual, "pattern"),
             (p.not_before.is_some(), temporal, "not_before"),
             (p.not_after.is_some(), temporal, "not_after"),
+            (p.allowed.is_some(), listed, "allowed"),
         ] {
             if present && !allowed_here {
                 return Err(ValidationError::ConstraintNotForType {
@@ -2330,11 +2529,16 @@ pub fn check_constraints(params: &[ParamSpec]) -> std::result::Result<(), Valida
         if let Some(pattern) = &p.pattern {
             match compile_pattern(pattern) {
                 Ok(_) => {}
-                Err(regex::Error::CompiledTooBig(_)) => {
+                Err(PatternError::Compile(regex::Error::CompiledTooBig(_))) => {
                     return Err(ValidationError::PatternTooLarge {
                         param: p.name.clone(),
                     })
                 }
+                // Both remaining cases are "this text is not a pattern egret
+                // can match with", and `PatternError`'s `Display` is what tells
+                // them apart in the author's own terms: a pattern that does not
+                // close its groups reads differently from one that closes them
+                // against egret's own anchors.
                 Err(e) => {
                     return Err(ValidationError::PatternInvalid {
                         param: p.name.clone(),
@@ -3064,9 +3268,15 @@ impl GeneratedSql {
     /// That residue is acceptable for a reason that has nothing to do with this
     /// function's strength: the author is authenticated, holds
     /// `data_api_endpoint:manage`, and is already trusted to write the SQL by
-    /// hand. The threat this design must stop is the CALLER, and against the
-    /// caller nothing changed — values are binds and identifiers are the
-    /// author's (spec §2.3).
+    /// hand.
+    ///
+    /// **What used to be written here — "against the caller nothing changed,
+    /// values are binds" — was false, and spec §2.3 now says so in an
+    /// amendment.** A script that concatenates puts the caller's value into the
+    /// SQL TEXT; that is the point of the two escape routes above. Against the
+    /// caller what changed is package 5's declarative rule, and it is a bound
+    /// on the value rather than a promise about where it lands — see the
+    /// section below.
     ///
     /// # Package 5 closed the CALLER's half of both routes, and did not touch
     /// this function
@@ -7029,6 +7239,197 @@ mod tests {
         }
     }
 
+    /// **The breakout the alphabet analysis could not see.**
+    ///
+    /// [`anchored`] builds `^(?:{pattern})$` out of AUTHOR TEXT, and `coerce`
+    /// enforces it with an UNANCHORED `is_match`. A pattern carrying `)` … `(`
+    /// re-balances against that wrapper: `a)|(a` becomes `^(?:a)|(a)$`, where
+    /// the two anchors have ended up on two different alternatives — `^(?:a)`
+    /// bounds only the start, `(a)$` only the end, and with a third alternative
+    /// (`a)|([a-z]+)|(a`) the middle one bounds nothing at all. Every character
+    /// of it is inside [`SAFE_ALPHABET`], so
+    /// [`pattern_confines_to_safe_alphabet`] answered `Ok`, publish returned
+    /// 200, and a caller could then send arbitrary SQL
+    /// through `"… sales_" + params["region"]` — the exact hole package 5
+    /// claims to have removed, behind a green publish.
+    ///
+    /// Four assertions per pattern, in the order that makes the argument:
+    ///
+    /// 1. the ALPHABET analysis still answers `Ok` — it is sound about the
+    ///    string it is handed, and it is not the leg that refuses this;
+    /// 2. the anchored wrapper alone DOES admit the injection — the
+    ///    vulnerability executed, not described, so this test cannot decay
+    ///    into a restatement of the fix;
+    /// 3. publish refuses the definition, naming the parameter and what to
+    ///    fix ([`compile_pattern`]'s raw-parse requirement);
+    /// 4. `coerce` — the serving half, and the only half a snapshot frozen
+    ///    yesterday has — refuses the same value rather than accepting it.
+    ///
+    /// (3) and (4) together are the composition
+    /// `the_constraint_the_gate_demands_is_the_one_coerce_enforces` performs,
+    /// run over a pattern where it can FAIL: that test composes the same two
+    /// halves over `^[A-Za-z0-9_]*$`, which no wrapper bug can make unsafe, and
+    /// that is why this survived it. A fixture that can only pass is the shape
+    /// this repository has shipped a green test over sixteen times.
+    #[test]
+    fn a_pattern_that_escapes_the_anchors_is_refused_and_coerce_agrees() {
+        for (pattern, injection) in [
+            ("a)|(a", "a' UNION SELECT password FROM users --"),
+            ("a)|([a-z]+)|(a", "x'; DROP TABLE t --"),
+            ("a)|([a-z]+)|(a", "'; DELETE FROM audit; --"),
+        ] {
+            assert_eq!(
+                pattern_confines_to_safe_alphabet(pattern),
+                Ok(()),
+                "`{pattern}` is all safe characters: the alphabet analysis is not what refuses \
+                 it, and a fix that only made THAT stricter would not have closed this"
+            );
+            let wrapper = regex::Regex::new(&anchored(pattern))
+                .expect("a breakout re-balances the wrapper, so the anchored form COMPILES");
+            assert!(
+                wrapper.is_match(injection),
+                "the vulnerability, run rather than described: `{}` matches `{injection}` \
+                 exactly as `coerce` asks it to",
+                anchored(pattern)
+            );
+
+            let spec = ParamSpec {
+                pattern: Some(pattern.into()),
+                ..param("region", ParamType::String)
+            };
+            match scripted_endpoint(BINDS_REGION, std::slice::from_ref(&spec)) {
+                Err(ValidationError::PatternInvalid { param, detail }) => {
+                    assert_eq!(param, "region");
+                    assert!(
+                        detail.contains("ON ITS OWN"),
+                        "the author's pattern is a valid regex in their own tester, so the \
+                         message has to name egret's anchoring as the thing it fails: {detail}"
+                    );
+                }
+                other => panic!("`{pattern}` must not publish: {other:?}"),
+            }
+            assert_eq!(
+                crate::serving::params::coerce(&spec, injection),
+                Err(crate::serving::params::CoerceError::Malformed(
+                    crate::serving::params::MalformedReason::PatternDoesNotCompile
+                )),
+                "and a snapshot frozen with `{pattern}` before this existed serves a redacted \
+                 500 rather than the injection — `compile_pattern` is the one function both \
+                 halves go through"
+            );
+        }
+    }
+
+    /// **`join` is on the "introduces bytes" side of [`SAFE_ALPHABET`], shown in
+    /// the real evaluator rather than argued.**
+    ///
+    /// The closure list said "slicing, indexing, `reversed`, `strip`,
+    /// `split` + `join`, `elems` — every character of the result was a
+    /// character of the input", and that is false of `join`: the separator
+    /// comes from AUTHOR text and is inserted once per gap, while the number of
+    /// gaps is `len(pieces)` — the caller's, whenever the pieces came from
+    /// their value.
+    ///
+    /// Everything here is a value the rule accepts. `q` carries the safe
+    /// pattern; `1_OR_true` matches it; the probe is blind because [`SENTINEL`]
+    /// itself contains `_`, so humanising it emits something that is not the
+    /// sentinel and the containment test finds nothing. The endpoint publishes,
+    /// and a caller then gets two SQL tokens out of one bare word.
+    ///
+    /// This pins the RESIDUE, like the two probe-bypass tests above it. The
+    /// author typed the separator, so this is package S's accepted
+    /// author-provenance limit rather than a new hole — but it is a limit the
+    /// alphabet's own justification denied having, which is why it is executed
+    /// here instead of described. **If this now FAILS, something narrowed what
+    /// a script may do — say so in `SAFE_ALPHABET` and in the spec, do not just
+    /// delete this test.**
+    #[test]
+    fn the_alphabet_does_not_survive_join_and_such_an_endpoint_still_publishes() {
+        let script = "def build_sql(params):\n  \
+                      return \"SELECT count(*) AS n FROM t WHERE flag = \" \
+                      + \" \".join(params[\"q\"].split(\"_\"))";
+        assert!(
+            scripted_endpoint(script, &[string_param("q")]).is_ok(),
+            "the sentinel carries `_`, so humanising it emits something that is not the \
+             sentinel: nothing at publish sees this"
+        );
+
+        let mut params = crate::transform::GenerationParams::default();
+        params.insert("q".to_string(), Some(&Param::Str("1_OR_true".to_string())));
+        let sql = crate::transform::build_sql(script, &params)
+            .expect("the script is the one that just published");
+        assert!(
+            sql.contains("flag = 1 OR true"),
+            "one caller value, drawn entirely from the safe alphabet, became two SQL tokens \
+             — which is exactly what `join` being on the closed-under list denied: {sql}"
+        );
+    }
+
+    /// A pattern that is a complete regex on its own still publishes, including
+    /// the ones whose parentheses look like the breakout above.
+    ///
+    /// **The direction the raw-parse requirement must not fail in.** It refuses
+    /// a string that is not a regex; it must not refuse groups, alternation or
+    /// nesting, which is most of what an author writes. Without this, the fix
+    /// for the test above could have been "no `(` in a pattern" and the suite
+    /// would still be green.
+    #[test]
+    fn a_balanced_pattern_still_publishes() {
+        for pattern in [
+            "^(EU|US|APAC)$",
+            "(a)(b)",
+            "^((a|b)+_)?[a-z]{2,8}$",
+            "(?:a|b)",
+            "^$",
+        ] {
+            assert!(
+                compile_pattern(pattern).is_ok(),
+                "`{pattern}` is a regular expression on its own and must compile"
+            );
+            assert!(
+                scripted_endpoint(
+                    BINDS_REGION,
+                    &[ParamSpec {
+                        pattern: Some(pattern.into()),
+                        ..param("region", ParamType::String)
+                    }]
+                )
+                .is_ok(),
+                "`{pattern}` bounds the value to the safe alphabet and must publish"
+            );
+        }
+    }
+
+    /// The argument "the gate parses the SAME STRING the matcher compiles"
+    /// rests on `regex` and `regex-syntax` being ONE parser, and `Cargo.toml`
+    /// declares them as two independent carets.
+    ///
+    /// Nothing in the build says they must agree, so a `regex` bump that moved
+    /// to a new `regex-syntax` minor would give the workspace two copies and
+    /// two parsers: [`pattern_confines_to_safe_alphabet`] would then be reading
+    /// one language while [`compile_pattern`] matched another, silently, with
+    /// every test still green. The lock file is where that becomes visible, so
+    /// it is asserted there.
+    ///
+    /// **If this fails, do not delete it and do not loosen the count** — align
+    /// the two versions in `Cargo.toml` until the workspace resolves one copy
+    /// of each, or the safe-alphabet argument has to be re-made against
+    /// whatever the second parser accepts.
+    #[test]
+    fn regex_and_regex_syntax_resolve_to_one_parser() {
+        let lock =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.lock"))
+                .expect("the workspace lock file sits two directories above this crate");
+        for name in ["regex", "regex-syntax"] {
+            assert_eq!(
+                lock.matches(&format!("name = \"{name}\"\n")).count(),
+                1,
+                "the workspace must resolve exactly one `{name}`, or the gate parses a \
+                 different language from the one the matcher enforces"
+            );
+        }
+    }
+
     /// **THE test of package 5.** A `String` parameter with no `pattern` cannot
     /// be declared on an endpoint where a script builds SQL.
     ///
@@ -7209,7 +7610,12 @@ mod tests {
             &statements,
             &[unconstrained_string_param("q"), mode.clone()],
         )
-        .expect("no probe reaches the concatenating branch");
+        .expect(
+            "the probe must still be blind to a branch its representative values never \
+             take. If this now FAILS, the probe grew a capability its doc comment \
+             disclaims and the third blind spot is closed — say so in the spec and the \
+             comment, do not just delete this test",
+        );
         assert!(
             !blind.varying_params().any(|p| p == "q"),
             "and `q` does not even VARY the template, so a `varies_with` exemption would have \
@@ -7286,7 +7692,17 @@ mod tests {
     /// `allowed` is deliberately not accepted as an alternative constraint for a
     /// `String`, and the second half is why: `coerce` never reads it for this
     /// type, so a rule that accepted it would rest on an enforcement that does
-    /// not exist.
+    /// not exist. (`check_constraints` now refuses that declaration outright —
+    /// `allowed_on_anything_but_an_enum_is_refused` — and this rule still gets
+    /// there first, so the author reads the message with the recourse in it.)
+    ///
+    /// **This composition runs over `^[A-Za-z0-9_]*$`, where it cannot fail**,
+    /// and that is worth saying out loud: no bug in how egret ANCHORS a pattern
+    /// can make that one unsafe, so this test stayed green through a pattern
+    /// that escaped the anchors entirely. The composition over a pattern where
+    /// it can fail is
+    /// `a_pattern_that_escapes_the_anchors_is_refused_and_coerce_agrees`, and
+    /// neither test replaces the other.
     #[test]
     fn the_constraint_the_gate_demands_is_the_one_coerce_enforces() {
         let bounded = string_param("region");
@@ -8958,6 +9374,46 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("pattern"), "must name the constraint: {msg}");
         assert!(msg.contains("flag"), "must name the parameter: {msg}");
+    }
+
+    /// `allowed` is a constraint like the other seven, and the table that gates
+    /// them by type had no row for it.
+    ///
+    /// `coerce` reads `allowed` for `ParamType::Enum` and for nothing else, so
+    /// an author who writes it on a `String` declares a closed set that no
+    /// request is ever measured against — verbatim the failure
+    /// `check_constraints`' own comment describes ("teaches the author a model
+    /// where constraints apply everywhere, and the next one they write silently
+    /// does nothing"). Package 5's refusal already had to spend a sentence
+    /// telling such an author to write a `pattern` instead; now the declaration
+    /// itself is refused.
+    #[test]
+    fn allowed_on_anything_but_an_enum_is_refused() {
+        for ty in [
+            ParamType::String,
+            ParamType::Number,
+            ParamType::Boolean,
+            ParamType::Date,
+            ParamType::Timestamp,
+        ] {
+            let mut p = param("region", ty.clone());
+            p.allowed = Some(vec!["eu".into()]);
+            let err = check_constraints(std::slice::from_ref(&p))
+                .expect_err("`allowed` is read for `Enum` and for nothing else");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("allowed") && msg.contains("region"),
+                "it must name the constraint and the parameter, on a `{}`: {msg}",
+                type_name(&ty)
+            );
+        }
+        let mut e = param("status", ParamType::Enum);
+        e.allowed = Some(vec!["open".into()]);
+        assert!(
+            check_constraints(std::slice::from_ref(&e)).is_ok(),
+            "and the one type that reads it keeps it — this rule must not make an `Enum` \
+             unpublishable, which is the only direction it could break the product in"
+        );
     }
 
     #[test]
