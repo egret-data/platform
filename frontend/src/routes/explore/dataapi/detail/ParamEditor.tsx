@@ -58,13 +58,22 @@ function constraintFieldsFor(type: ParamType): ConstraintField[] {
  *  Without this, a `max_length` set while the row was `string` survives a
  *  switch to `number` and publish refuses the whole spec with
  *  `ConstraintNotForType` — an error about a field the editor no longer
- *  shows the author, since it is scoped to `newType`'s applicable set. */
+ *  shows the author, since it is scoped to `newType`'s applicable set.
+ *
+ *  `allowed` is cleared on the same rule and for the same reason. It is not in
+ *  `CONSTRAINT_FIELDS` because it is a `string[]` rather than one of the seven
+ *  scalar fields, but the editor shows it for `enum` alone — so an `enum`
+ *  switched to `string` used to carry an invisible `allowed` forever. That was
+ *  harmless while the backend ignored it; since it refuses it
+ *  (`ConstraintNotForType`, package 5 review), an uncleared list would be a
+ *  publish the author cannot fix from this screen. */
 function clearInapplicableConstraints(newType: ParamType): Partial<ParamSpec> {
   const keep = new Set<ConstraintField>(constraintFieldsFor(newType));
   const patch: Partial<ParamSpec> = {};
   for (const field of CONSTRAINT_FIELDS) {
     if (!keep.has(field)) patch[field] = undefined;
   }
+  if (newType !== ParamType.enum) patch.allowed = undefined;
   return patch;
 }
 

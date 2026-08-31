@@ -119,6 +119,29 @@ so; the same is true of one who grants too much access. The threat this design m
 stop is the **caller**, and against the caller the property is unchanged: values are
 binds, identifiers are the author's.
 
+**Amended 2026-08-31 by production-readiness package 5 — read this before quoting
+the paragraph above.** The last sentence was the weak point: "against the caller the
+property is unchanged" was true of `{{ }}`, and *not* true of a script that
+concatenates. Both escape routes above hand the **caller's own bytes** into SQL text,
+which is a caller-controlled hole with an author-side trigger, not an author-only
+one.
+
+The probe is **unchanged** — deliberately, and both tests that pin its residue still
+assert it accepts both scripts. Making it scan the emitted bytes harder is the P4.5
+mistake this gate is shaped to avoid, and a probe cannot prove a negative anyway: it
+can show a value *did* reach the text, never that one never will. Package 5 closes
+the caller's half **by construction** instead, in
+`check_script_parameter_constraints`: on an endpoint where any statement is a
+`script`, every `string` parameter must carry a `pattern` whose language is inside
+ASCII letters, digits and `_` — and, since 2026-08-31, one that is a complete regular
+expression **on its own**, because egret matches it wrapped as `^(?:…)$` and a pattern
+that re-balances against that wrapper (`a)|(a`) split those anchors across two
+alternatives — `^(?:a)` bounding only the start, `(a)$` only the end — while passing the
+language check. Then it does not matter which route a script takes —
+transform the value, refuse the sentinel, or hide the concatenation behind a branch
+no probe reaches — the value is a bare word either way. See package 5's own section
+in `2026-08-30-dataapi-production-readiness-design.md`.
+
 ### 2.4 What "unreferenced" means for a generated statement
 
 **Decided 2026-08-27, after Task 3 found the collision.** `UnreferencedParameter`

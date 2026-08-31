@@ -117,6 +117,28 @@ quyết tâm phơi endpoint của chính mình thì làm được; điều đó 
 quyền quá tay. Mối đe doạ mà thiết kế này **phải** chặn là **người gọi**, và với người
 gọi thì tính chất không đổi: giá trị là bind, định danh là của tác giả.
 
+**Sửa 2026-08-31 bởi gói 5 của chương trình production-readiness — đọc phần này trước
+khi trích đoạn ở trên.** Câu cuối là chỗ yếu: "với người gọi thì tính chất không đổi"
+đúng với `{{ }}`, và **không** đúng với một script nối chuỗi. Cả hai lối thoát ở trên
+đều đưa **chính bytes của người gọi** vào SQL dạng văn bản — đó là lỗ do người gọi điều
+khiển, chỉ có ngòi nổ nằm ở phía tác giả.
+
+Phép thăm dò **không đổi** — có chủ ý, và hai test ghim phần dư của nó vẫn khẳng định nó
+chấp nhận cả hai script. Bắt nó quét bytes phát ra kỹ hơn chính là sai lầm P4.5 mà cái
+cổng này được nắn để tránh, và dù sao một phép thăm dò cũng không chứng minh được điều
+phủ định: nó cho thấy một giá trị **đã** tới được văn bản, không bao giờ cho thấy sẽ
+không bao giờ tới. Gói 5 đóng nửa phần thuộc về người gọi **bằng cấu trúc**, trong
+`check_script_parameter_constraints`: trên một endpoint có bất kỳ câu lệnh nào là
+`script`, mọi tham số `string` phải mang một `pattern` mà ngôn ngữ nó nhận nằm gọn trong
+chữ cái ASCII, chữ số và `_` — và, từ 2026-08-31, phải là một biểu thức chính quy **tự
+nó đã hoàn chỉnh**, vì egret khớp nó ở dạng bọc `^(?:…)$` và một pattern cân lại dấu
+ngoặc với lớp bọc đó (`a)|(a`) thì đẩy hai cái neo sang hai nhánh khác nhau — `^(?:a)`
+chỉ chặn đầu, `(a)$` chỉ chặn cuối — trong khi vẫn qua được phép kiểm tra ngôn ngữ.
+Khi đó script đi lối nào cũng không còn quan trọng — biến
+đổi giá trị, từ chối sentinel, hay giấu phép nối sau một nhánh không phép thăm dò nào
+tới — giá trị vẫn chỉ là một từ trơn. Xem mục riêng của gói 5 trong
+`2026-08-30-dataapi-production-readiness-design.md`.
+
 ### 2.4 "Không được tham chiếu" nghĩa là gì với một câu lệnh sinh ra
 
 **Chốt 2026-08-27, sau khi Task 3 phát hiện xung đột.** `UnreferencedParameter` nói

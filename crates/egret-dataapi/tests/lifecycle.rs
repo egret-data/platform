@@ -663,6 +663,72 @@ async fn a_published_version_freezes_a_statements_script_and_not_its_output() {
     );
 }
 
+/// **Package 5, through the real publish route.** A `string` parameter with no
+/// `pattern` cannot be published onto an endpoint whose statement is a SCRIPT,
+/// and the same endpoint publishes once the parameter is bounded.
+///
+/// The unit tests in `lifecycle.rs` assert the rule; this asserts that an author
+/// meets it as a `400` carrying the sentence, and that nothing was written. The
+/// script here emits `{{ region }}` and nothing else — it does not concatenate
+/// anything — because the rule is deliberately conservative and a fixture that
+/// interpolated would be refused by the sentinel probe instead, which would say
+/// nothing about whether this rule exists.
+///
+/// The second half is what stops it passing for the wrong reason: exactly one
+/// field changes, the `pattern`, and the endpoint publishes.
+#[tokio::test]
+async fn a_scripted_endpoint_cannot_publish_an_unbounded_string_parameter() {
+    let f = skip_without_db!();
+    f.port.set(Describe::Columns(vec![("n", "bigint")]));
+    let ep = f.create_endpoint("bound", "bound", "SELECT 1 AS n").await;
+    let script = "def build_sql(params):\n  return \"SELECT 1 AS n FROM t WHERE r = {{ region }}\"";
+    f.set_statements(
+        ep,
+        serde_json::json!([{ "name": "main", "script": script }]),
+    )
+    .await;
+    f.patch_endpoint(
+        ep,
+        serde_json::json!({
+            "params": [{ "name": "region", "type": "string", "location": "query" }]
+        }),
+    )
+    .await;
+
+    let (status, body) = f.publish_raw(ep).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("region") && msg.contains("main"),
+        "the author needs the parameter AND the statement that brought the rule: {body}"
+    );
+    assert!(
+        msg.contains("pattern") && msg.contains("^[A-Za-z0-9_]+$"),
+        "and an example of what to write, not only that something is missing: {body}"
+    );
+    assert!(f.versions(ep).await.is_empty(), "nothing may be published");
+
+    // One field changes.
+    f.patch_endpoint(
+        ep,
+        serde_json::json!({
+            "params": [{
+                "name": "region",
+                "type": "string",
+                "location": "query",
+                "pattern": "^[A-Za-z0-9_]*$",
+            }]
+        }),
+    )
+    .await;
+    let (status, body) = f.publish_raw(ep).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the bounded parameter is publishable, or the rule would be a wall: {body}"
+    );
+}
+
 #[tokio::test]
 async fn a_published_version_is_unaffected_by_later_draft_edits() {
     let f = skip_without_db!();

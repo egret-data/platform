@@ -144,6 +144,33 @@ pub(crate) fn resolve(
     if snap.statements.is_empty() {
         return Err(ServingError::internal("snapshot carries no statements"));
     }
+    // **Package 5, for the endpoints that were ALREADY published.** The rule
+    // that bounds what a script may put into SQL text runs at publish, and
+    // publish only ever sees a definition someone publishes: a scripted
+    // endpoint frozen before the rule existed keeps its unconstrained `String`
+    // parameter, and every request to it is the hole the rule closes. The
+    // snapshot carries both halves of the question, so it is answered here and
+    // the request is refused.
+    //
+    // Before the cache lookup, deliberately (see this module's header and
+    // `router::run`'s step order): a body cached from a request served under
+    // the old rule must not outlive it.
+    //
+    // The cost is one `regex_syntax` parse per declared `String` parameter per
+    // request, on the same path where `coerce` compiles the very same pattern
+    // into a matcher a few lines later — a parse is strictly the cheaper half
+    // of work already being done.
+    //
+    // The message is for the LOG. `ServingError::internal` redacts the wire
+    // body to "internal error", so the parameter's name reaches the operator
+    // who has to republish the endpoint and reaches no caller — the same
+    // division `MalformedReason` already keeps.
+    crate::lifecycle::snapshot_script_parameters_are_bounded(&snap.statements, &snap.params)
+        .map_err(|e| {
+            ServingError::internal(format!(
+                "published before the generated-SQL parameter rule and no longer servable: {e}"
+            ))
+        })?;
     // The shape decision. Package S Task 6 moved it: publish freezes the set it
     // decided across every template of every statement, and this reads it —
     // through `resolve_supplied_with`, the same entry point preview uses, for
@@ -1517,6 +1544,62 @@ mod tests {
         ));
     }
 
+    /// **A scripted endpoint published before package 5 stops being served.**
+    ///
+    /// The publish-time rule only ever runs on a definition someone publishes,
+    /// so every scripted endpoint frozen with an unconstrained `string`
+    /// parameter would have stayed exploitable for as long as nobody edited it.
+    /// The snapshot carries `statements` and `params`, so the question is
+    /// answerable here and the request is refused instead.
+    ///
+    /// Three assertions: the refusal happens; it is an INTERNAL error, so no
+    /// caller learns the parameter's name, its bound, or which rule refused;
+    /// and the same endpoint with the constraint the rule asks for resolves
+    /// normally — without which the whole feature could have been "scripted
+    /// endpoints do not serve".
+    #[test]
+    fn a_scripted_snapshot_with_an_unconstrained_string_is_refused_at_serve_time() {
+        let scripted = |params: Vec<ParamSpec>| {
+            let mut snap = snap("SELECT 1", params);
+            snap.statements[0].source = egret_dataapi_api::StatementSource::Script(
+                "def build_sql(params):\n  return \"SELECT 1 AS n\"".into(),
+            );
+            snap
+        };
+
+        let err = match resolve(Some("region=eu"), &scripted(vec![string_param("region")])) {
+            Err(e) => e,
+            // `Resolved` is not `Debug`, and this is not the file to make it
+            // one: a resolved request carries every caller value there is.
+            Ok(_) => panic!("published before the rule, and its value can reach the SQL text"),
+        };
+        assert!(
+            matches!(err, ServingError::Internal(_)),
+            "the caller learns nothing about the parameter or the rule: {err:?}"
+        );
+        let wire = format!("{err}");
+        assert!(
+            !wire.contains("region") && !wire.contains("pattern"),
+            "no parameter name and no constraint kind on the wire: {wire}"
+        );
+
+        let mut bounded = string_param("region");
+        bounded.pattern = Some("^[a-z_]+$".into());
+        assert!(
+            resolve(Some("region=eu"), &scripted(vec![bounded])).is_ok(),
+            "and a scripted endpoint whose parameters ARE bounded serves exactly as before"
+        );
+
+        assert!(
+            resolve(
+                Some("region=eu"),
+                &snap("SELECT 1", vec![string_param("region")])
+            )
+            .is_ok(),
+            "a WRITTEN statement is untouched by the rule at serve time, as it is at publish"
+        );
+    }
+
     #[test]
     fn a_pattern_names_itself_in_the_coerce_error() {
         let mut p = string_param("s");
@@ -1538,8 +1621,9 @@ mod tests {
     #[test]
     fn a_pattern_that_does_not_compile_is_malformed_with_its_own_reason() {
         let mut p = string_param("s");
-        // Unbalanced: `compile_pattern` wraps this as `^(?:()$`, which never
-        // closes the outer non-capturing group.
+        // Unbalanced, so it is not a regex on its own — which `compile_pattern`
+        // now refuses BEFORE it wraps anything, and which the wrap would have
+        // refused anyway as `^(?:()$`. Either way it never becomes a matcher.
         p.pattern = Some("(".into());
         assert_eq!(
             coerce(&p, "anything"),

@@ -3224,6 +3224,7 @@ dependencies = [
  "rand 0.8.7",
  "redis",
  "regex",
+ "regex-syntax",
  "serde",
  "serde_json",
  "sha2 0.10.9",

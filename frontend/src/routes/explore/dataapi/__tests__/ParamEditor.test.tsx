@@ -130,6 +130,48 @@ describe("ParamEditor constraint fields", () => {
     expect(last[0].pattern).toBeUndefined();
   });
 
+  it("drops `allowed` when an enum becomes something else, and keeps it otherwise", async () => {
+    // The editor shows `allowed` for `enum` alone, so a list left behind by a
+    // type change is invisible — and since the backend refuses `allowed` on any
+    // other type (`ConstraintNotForType`), invisible means unfixable from this
+    // screen. Set FIRST, so `toBeUndefined()` cannot pass on a field that was
+    // never there.
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      <ParamEditor
+        params={[makeParam({ type: ParamType.enum, allowed: ["a", "b"] })]}
+        onChange={onChange}
+      />,
+    );
+
+    await chooseType(user, "Parameter 1", "string");
+
+    const last = onChange.mock.calls.at(-1)?.[0] as ParamSpec[];
+    expect(last[0].type).toBe(ParamType.string);
+    expect(last[0].allowed).toBeUndefined();
+  });
+
+  it("keeps `allowed` when the type is set to enum again", async () => {
+    // The other direction, without which the fix above could have been
+    // "always clear `allowed`" and every enum would lose its list on any
+    // re-selection of its own type.
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      <ParamEditor
+        params={[makeParam({ type: ParamType.string, allowed: ["a", "b"] })]}
+        onChange={onChange}
+      />,
+    );
+
+    await chooseType(user, "Parameter 1", "enum");
+
+    const last = onChange.mock.calls.at(-1)?.[0] as ParamSpec[];
+    expect(last[0].type).toBe(ParamType.enum);
+    expect(last[0].allowed).toEqual(["a", "b"]);
+  });
+
   it("preserves not_before/not_after across a date <-> timestamp switch", async () => {
     // Both types share the same two fields — only fields the NEW type does
     // not use should be cleared.

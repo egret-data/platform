@@ -72,6 +72,23 @@ fn one_string_param(name: &str) -> serde_json::Value {
     serde_json::json!([{ "name": name, "type": "string", "location": "query", "required": true }])
 }
 
+/// The same parameter, bounded — which package 5 requires of every `string` on
+/// an endpoint a SCRIPT builds SQL for.
+///
+/// A separate helper rather than a `pattern` added to the one above, so the
+/// written half of every comparison in this file keeps declaring exactly what it
+/// declared before package 5: the rule applies to generated statements only, and
+/// a fixture that constrained both halves could not show that.
+fn one_bounded_string_param(name: &str) -> serde_json::Value {
+    serde_json::json!([{
+        "name": name,
+        "type": "string",
+        "location": "query",
+        "required": true,
+        "pattern": "^[A-Za-z0-9_]*$",
+    }])
+}
+
 fn no_cache() -> serde_json::Value {
     serde_json::json!({ "enabled": false })
 }
@@ -92,7 +109,7 @@ async fn publish_scripted(f: &Fixture, path: &str, script: &str) -> uuid::Uuid {
         path,
         f.database_id,
         serde_json::json!([{ "name": "main", "script": script }]),
-        one_string_param("region"),
+        one_bounded_string_param("region"),
         no_cache(),
     )
     .await
@@ -474,7 +491,7 @@ async fn a_cache_hit_serves_without_running_the_script() {
             "/cached",
             f.database_id,
             serde_json::json!([{ "name": "main", "script": SCRIPT }]),
-            one_string_param("region"),
+            one_bounded_string_param("region"),
             serde_json::json!({ "enabled": true, "ttl_seconds": 60, "scope": "per_principal" }),
         )
         .await;

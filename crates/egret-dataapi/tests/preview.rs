@@ -1092,6 +1092,11 @@ const BRANCHING: &str = "def build_sql(params):\n    \
 
 /// A preview body whose statement is `script` rather than `sql`, with one
 /// required string parameter `region` at `value`.
+///
+/// The `pattern` is package 5's rule, and preview enforces it exactly as publish
+/// does — a `string` parameter on a statement a script BUILDS has to be bounded
+/// to an alphabet that is harmless in SQL text, whatever the script does to it.
+/// Every test value this file passes is a bare word, so nothing else changes.
 fn scripted(f: &serving_common::Fixture, script: &str, value: &str) -> serde_json::Value {
     serde_json::json!({
         "script": script,
@@ -1100,6 +1105,7 @@ fn scripted(f: &serving_common::Fixture, script: &str, value: &str) -> serde_jso
             "type": "string",
             "location": "query",
             "required": true,
+            "pattern": "^[A-Za-z0-9_]*$",
         }],
         "values": { "region": [value] },
         "output": {},
