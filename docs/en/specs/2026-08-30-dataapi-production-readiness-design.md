@@ -48,7 +48,7 @@ Ordered by value-per-effort, not by severity. Dependencies noted.
 | 4 | **Multi-replica correctness** — ✅ `0c3febe5` | Response cache and token bucket are **process-local** while replica count is a Helm value, so every published rate limit silently multiplies by replica count and the cache fragments. | §4 decision B |
 | 5 | **Script parameter constraints** — ✅ | Package S lets a script concatenate a caller's value into SQL text. The publish-time sentinel probe has **two bypasses pinned open by tests asserting `is_ok()`**. Closed by construction rather than by a better probe, at publish AND — for endpoints frozen before the rule — at serve time; see §5.1. | — |
 | 6 | **Publish-time diff + acknowledgement** — ✅ | `publish` validates the draft against *itself*; the only read of `endpoint_versions` is `MAX(version)`. A removed column, narrowed type, renamed parameter or new required parameter publishes silently. Worst case: adding a second statement flips top-level `data` from an array to an object. | — |
-| 7 | **Consumer version pinning** | Serving resolves `live_version_id` only; a publish moves every caller at commit. `meta.version` lets a consumer *observe* which version answered but never *ask* for one. | 6 |
+| 7 | **Consumer version pinning** — ✅ | Serving resolves `live_version_id` only; a publish moves every caller at commit. `meta.version` lets a consumer *observe* which version answered but never *ask* for one. | 6 |
 | 8 | **Contract reachability** | The OpenAPI document sits behind a human session + `:manage`, so a consumer holding only a `data-api` token cannot fetch its own contract; `error.code` has no `enum` despite being documented as the stable code to branch on. | — |
 
 ### Package 6 as delivered, and the four decisions inside it
@@ -125,6 +125,116 @@ Two deliberate exclusions, recorded so they are read as decisions:
   lights the pill and produces no breaking change, and both are correct. What
   the frontend does NOT do is decide what is breaking; it renders the server's
   list and echoes the server's token back.
+
+### Package 7 as delivered: the consumer's half of package 6
+
+Package 6 tells an author what a publish breaks and refuses it without an
+acknowledgement. The acknowledgement is the author saying *"yes, I am breaking
+them"* — and until package 7 the consumer on the other end had no way to keep
+working while they adapted. `meta.version` let them **observe** which version
+answered; nothing let them **ask**. Serving resolved `endpoints.live_version_id`
+and nothing else, so a publish moved every caller at the instant it committed.
+
+A consumer now sends `X-Egret-Version: <n>` and is answered from that frozen
+version. Six things are worth carrying forward rather than rediscovering.
+
+- **A header, not a query parameter, and the reason is specific to this
+  surface.** The query string is the endpoint AUTHOR's namespace and it is
+  unrestricted: nothing at publish reserves a name, so `version` is a legal
+  `ParamSpec.name` today (`check_params` even *requires* a declared parameter to
+  be referenced as `{{ version }}`), and a supplied name that is not declared is
+  **silently ignored** by `resolve_supplied_with`. So `?version=` would either
+  shadow an author's own parameter — their filter stops applying, `200`, no
+  signal, which is the exact "silently ignored" failure package 6 classifies as
+  breaking — or need a reserved-name rule applied retroactively to every already
+  published snapshot. A header has its own namespace, needs no new route (there
+  is exactly one), stays out of `resolved.key`, and OpenAPI keys a parameter on
+  the `(name, in)` PAIR, so the generated document can declare it beside an
+  author's `version` query parameter with no collision. The name matches the
+  `x-egret-version` extension the generated document already stamps on each
+  operation: the number is read out of one and sent back in the other.
+
+- **The pin replaces exactly ONE clause of the routing query, and that is the
+  whole security argument.** `router::live_snapshot` still decides *whether there
+  is a row at all* from `e.workspace_id`, `e.method`, `e.path` and
+  `e.state = 'live'`; the pin only changes which `endpoint_versions` row `v`
+  binds. So a disabled endpoint, a trashed one (migration 0126's CHECK makes
+  `deleted_at IS NOT NULL` and `state = 'live'` mutually exclusive), another
+  workspace's, and one in an archived workspace are all unreachable by pinning
+  **because nothing about them was asked differently**. Likewise the
+  `LEFT JOIN query.databases` keys on the *pinned* snapshot's `database_id` and
+  reads the *live* row, so package 1's governance predicate — deliberately built
+  as a live predicate rather than a frozen witness, precisely so that marking a
+  database `governed` takes effect on already-published versions — applies to a
+  pinned old version with nothing added. And `invoke_allowed` runs on
+  `endpoint_id` after all of it, against the PDP as it is now. **Pinning pins the
+  contract, not the permissions**, and it holds by construction rather than by a
+  rule someone has to remember. Each of those has a test that pins an old version
+  and watches the refusal still fire.
+
+- **Two predicates guard the pin, and only one of them is testable the obvious
+  way.** `v.endpoint_id = e.id` scopes the version number to this endpoint
+  (`UNIQUE (endpoint_id, version)` makes numbers per-endpoint), and
+  `v.version <= lv.version` refuses a pin ABOVE the live version — which can only
+  mean a `rollback` moved consumers off it, and a rollback that a caller can undo
+  with a header is not a rollback. **The first version of the scoping test passed
+  with `v.endpoint_id = e.id` deleted**, because published version numbers are
+  CONTIGUOUS: any number at or below an endpoint's live version is one that
+  endpoint has, so the two predicates overlap for every reachable state and the
+  `<=` clause was doing the refusing. The fixture that reaches the real state has
+  to put a **gap** in the endpoint's history — which is the state a version
+  pruner would create — and then the sibling endpoint's row is the only match and
+  an unscoped join serves another endpoint's SQL, `database_id` and frozen
+  columns under a `200`.
+
+- **The rate limit follows the LIVE version, never the pin, and this is the one
+  field that does not.** The buckets are keyed on `endpoint_id` alone
+  (`ratelimit::client_key`, `endpoint_key`) — no version — so one endpoint has
+  one bucket. If the rate came from the pinned snapshot, a caller would be
+  choosing the refill rate of shared mutable state with a header:
+  `TokenBucket::take` tops the stored tokens up to `rate.burst` on every call, so
+  alternating a pin to a generous old version with an unpinned call refills the
+  bucket at the old rate and spends it at the new one, and an author's tightening
+  is not a limit at all. That is package 4's "a shared counter driven by a
+  caller-supplied value" defect wearing different clothes, and it is a defect
+  package 7 would have INTRODUCED rather than one it found. `limits`
+  (`max_rows`, `timeout_seconds`) deliberately stays with the pinned version: it
+  bounds ONE request, is already clamped by `MAX_ROWS_CEILING` /
+  `TIMEOUT_CEILING_SECS`, and the row cap is quoted back to the caller in
+  `row_limit_exceeded`, so it is part of what the frozen contract promises.
+
+- **Two refusals, because they name two different actors.**
+  `400 version_pin_invalid` is the caller's own header — not a run of ASCII
+  digits, over nine of them, below 1, or sent twice on one request (refused, not
+  resolved by header order: a request with two answers must have none). It states
+  the accepted shape and no endpoint fact. `409 version_unavailable` is the
+  endpoint's history: never published, or above live. **One code for both of
+  those**, because two would enumerate the shape of an endpoint's history for
+  nothing — the consumer's action is identical either way. `409` rather than
+  `400` follows package 6's acknowledgement refusal: the same request is correct
+  or incorrect depending on which version is live at that instant. Neither
+  carries a `Retry-After`; neither clears with time. Both went through
+  `ServingError`, so `to_wire`'s exhaustive match forced them, and the generated
+  per-service-account document — whose status list is derived from `to_wire` —
+  describes them without anyone editing it.
+
+- **Retention is UNBOUNDED and nothing enforces a policy, which is a decision
+  rather than an omission.** Nothing prunes `dataapi.endpoint_versions`; a
+  version lives exactly as long as its endpoint, and a hard delete of the
+  endpoint cascades the versions away — but takes the endpoint with them, so a
+  pin against it answers `404 not_found` like any unknown URL, never a silent
+  fall-through to live. `version_unavailable` therefore has exactly two causes
+  today, both tested. An operator who wants to retire an old version can find who
+  is still on it from `dataapi.access_log.version`, which records the version that
+  ANSWERED — so `access_log.version < live version` is the query, and a refused
+  pin records no version because nothing answered. Two consequences to state
+  plainly rather than leave to be discovered:
+  **a pin defeats a rollback for the consumer that sends it** in one direction
+  (they keep receiving their pinned version, which is the point) and is refused
+  in the other (they may not pin the version the rollback withdrew); and **there
+  is no `retired_at` on a version**, so an author cannot force a pinned consumer
+  off one short of deleting the endpoint. If retention ever needs a bound, the
+  refusal a pruner requires already exists and is already tested.
 
 **Carried out of packages 0–3, not fixed, so they are not rediscovered as new:**
 

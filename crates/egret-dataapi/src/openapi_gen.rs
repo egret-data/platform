@@ -657,6 +657,40 @@ fn success_schema(snap: &EndpointSnapshot, endpoint: &str) -> Result<Value, Open
 /// bare `"Error"` tells a generated client nothing about which of the two 504s
 /// it just received. The names come from the same derivation, so they cannot
 /// disagree with the statuses above them.
+/// The `X-Egret-Version` request parameter, as this document declares it.
+///
+/// `version` is the operation's own `x-egret-version` — the version this
+/// description was generated FROM — and it appears as the `example` so that a
+/// consumer who copies it gets the contract they are reading rather than a
+/// number from somewhere else. It is deliberately not the `default`: a default
+/// would make every generated client pin, forever, to whatever version was live
+/// on the day it was generated, which is the opposite of the opt-in this is.
+///
+/// `minimum: 1` matches [`crate::serving::pin::requested_version`]'s own floor,
+/// so a generated client refuses `0` before the network does. The rest of that
+/// function's strictness (no sign, no whitespace, digits only) is not expressible
+/// in an `integer` schema and does not need to be — a client that sends an
+/// integer produces an accepted spelling by construction.
+fn version_pin_parameter(version: i32) -> Value {
+    json!({
+        "name": crate::serving::pin::VERSION_PIN_HEADER_DOCUMENTED,
+        "in": "header",
+        "required": false,
+        "description": "Pin this call to a published version of this endpoint. \
+                        Omit it to call whatever is live, which is what every caller \
+                        did before this header existed. The number is `meta.version` \
+                        in a served response and `x-egret-version` on this operation. \
+                        A pin selects which frozen contract answers and never which \
+                        live policy applies — grants, the governed-database check, \
+                        the endpoint's state and this endpoint's rate limit are all \
+                        evaluated exactly as they are for an unpinned call. \
+                        A version this endpoint never published, or one a rollback \
+                        has moved consumers off, is refused with `409 version_unavailable`.",
+        "schema": { "type": "integer", "format": "int32", "minimum": 1 },
+        "example": version,
+    })
+}
+
 fn error_responses() -> Value {
     let mut out = Map::new();
     for (status, codes) in crate::serving::error::wire_answers() {
@@ -770,7 +804,7 @@ pub async fn build(
         let snap: EndpointSnapshot = serde_json::from_value(snapshot)
             .map_err(|e| OpenApiGenError::Db(sqlx::Error::Decode(Box::new(e))))?;
 
-        let params: Vec<Value> = snap
+        let mut params: Vec<Value> = snap
             .params
             .iter()
             // `location: body` is refused at publish and `serve_post` has no
@@ -787,6 +821,20 @@ pub async fn build(
                 })
             })
             .collect();
+        // Package 7's pin, on every operation. Without it a consumer generating
+        // a client from this document has no argument for the one header that
+        // lets them stay on the contract this very document describes — which
+        // would leave the feature reachable only by hand-editing requests, i.e.
+        // not reachable by the audience it exists for.
+        //
+        // `in: header`, which is why it can be appended to an author's own
+        // parameter list with no possibility of collision: an author's names all
+        // live in `in: query` and OpenAPI keys a parameter on the
+        // `(name, in)` PAIR. A `?version=` pin would have had to share the
+        // author's namespace, where `version` is a legal — and already
+        // publishable — parameter name. See `serving::pin` for the whole
+        // argument.
+        params.push(version_pin_parameter(version));
 
         let bare = matches!(
             crate::serving::router::envelope_of(&snap.output),

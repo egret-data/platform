@@ -24,6 +24,8 @@ pub mod guard;
 /// crate-private.
 pub mod metrics;
 pub(crate) mod params;
+/// Package 7's version pin: the `X-Egret-Version` request header, parsed.
+pub(crate) mod pin;
 pub mod ratelimit;
 pub mod router;
 /// Package 4's shared limiter/cache store, and the startup refusal that stands
@@ -206,6 +208,50 @@ pub enum ServingError {
     /// a response body.
     #[error("a parameter value is invalid")]
     ParamInvalid,
+    /// The `X-Egret-Version` header is not a version number (Package 7).
+    ///
+    /// Not a decimal run of ASCII digits, more than
+    /// [`pin::MAX_PIN_DIGITS`] of them, below `1`, or sent twice on one
+    /// request — see [`pin::requested_version`] for each rule and why it is
+    /// there.
+    ///
+    /// **Carries nothing, and the wire message names no endpoint fact.** It is
+    /// the caller's own header that is wrong, so the message may say so; what it
+    /// may not say is which versions exist, how many there are, or what the live
+    /// one is. Those are the questions [`Self::VersionUnavailable`] is asked, and
+    /// it does not answer them either.
+    #[error("the requested version pin is not a version number")]
+    VersionPinInvalid,
+    /// The pinned version is not one this endpoint can serve (Package 7).
+    ///
+    /// Reachable two ways, and deliberately **one code for both**:
+    ///
+    /// * the endpoint never published that version — including a number that
+    ///   belongs to a *different* endpoint, since version numbers are per
+    ///   endpoint (`UNIQUE (endpoint_id, version)`) and the routing query joins
+    ///   `v.endpoint_id = e.id`;
+    /// * the version is ABOVE the live one, which can only mean a `rollback`
+    ///   moved consumers off it. Serving it would make the one act available to
+    ///   an operator during an outage defeatable by a caller's header, so it is
+    ///   refused for the same reason a `disabled` endpoint stays a 404.
+    ///
+    /// Two codes here would be an oracle for the SHAPE of an endpoint's history —
+    /// "8 was withdrawn" versus "8 never existed" — bought for nothing, since a
+    /// consumer's action is identical in both cases: drop the pin, or re-fetch
+    /// the contract and read `x-egret-version` out of it.
+    ///
+    /// **409 and not 400**, following Package 6's acknowledgement refusal: the
+    /// same request is correct or incorrect depending on which version is live at
+    /// that instant, so "your request is malformed" would be false the moment a
+    /// publish or a rollback moved the pointer. And not 404 — that code is this
+    /// surface's single "no such endpoint", and reusing it would tell a caller
+    /// their URL was wrong when the endpoint is right there.
+    ///
+    /// **No `Retry-After`.** A stale pin does not clear with time: either a human
+    /// republishes, or the caller changes what they send. Naming a floor would be
+    /// a promise egret cannot keep.
+    #[error("the pinned version is not servable for this endpoint")]
+    VersionUnavailable,
     /// The result did not fit under the snapshot's `limits.max_rows`.
     ///
     /// An error rather than a truncated 200: a client that believes it has every
@@ -584,6 +630,8 @@ pub(crate) mod census {
             ("NotGranted", ServingError::NotGranted),
             ("ParamMissing", ServingError::ParamMissing),
             ("ParamInvalid", ServingError::ParamInvalid),
+            ("VersionPinInvalid", ServingError::VersionPinInvalid),
+            ("VersionUnavailable", ServingError::VersionUnavailable),
             (
                 "RowLimitExceeded",
                 ServingError::RowLimitExceeded { cap: 100 },

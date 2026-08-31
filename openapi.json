@@ -25566,6 +25566,19 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "X-Egret-Version",
+            "in": "header",
+            "description": "Pin the request to a published version of this endpoint, so a publish does not move this caller until they choose to move. Omit it to call whatever is live — the behaviour every caller had before this header existed. The number is the `version` in `meta`, and the `x-egret-version` stamped on this operation in the generated per-service-account document. A pin selects which frozen CONTRACT answers and never which live policy applies: the invoke grant, the governed-database check, the endpoint's state and the workspace's are all evaluated exactly as they are for an unpinned call, and the endpoint's rate limit is the LIVE version's in both cases. A version above the live one is refused — that can only mean a rollback moved consumers off it",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32"
+            }
           }
         ],
         "responses": {
@@ -25580,7 +25593,7 @@
             }
           },
           "400": {
-            "description": "`row_limit_exceeded` — the result exceeded the endpoint's row cap; `param_missing` — a required parameter was not supplied; `param_invalid` — a supplied parameter failed its declared type, its `allowed` list, or was repeated where one value is required. Neither parameter error names the parameter: the name is the author's, and naming it turns the error surface into a directory of what an endpoint declares",
+            "description": "`row_limit_exceeded` — the result exceeded the endpoint's row cap; `param_missing` — a required parameter was not supplied; `param_invalid` — a supplied parameter failed its declared type, its `allowed` list, or was repeated where one value is required. Neither parameter error names the parameter: the name is the author's, and naming it turns the error surface into a directory of what an endpoint declares. `version_pin_invalid` — the `X-Egret-Version` header was not a single positive whole number; it names the caller's own header and no fact about the endpoint",
             "content": {
               "application/json": {
                 "schema": {
@@ -25611,6 +25624,16 @@
           },
           "404": {
             "description": "`not_found` — no such live endpoint in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServingErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`version_unavailable` — the version named by `X-Egret-Version` is not one this endpoint can serve: it was never published, or a rollback has moved consumers off it. One code for both, because a consumer's action is the same either way and two would enumerate the endpoint's history. A 409 rather than a 400 because the same request is correct or incorrect depending on which version is live at that instant; no `Retry-After`, because it clears only when a human republishes or the caller changes what it sends",
             "content": {
               "application/json": {
                 "schema": {
@@ -25709,6 +25732,19 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "X-Egret-Version",
+            "in": "header",
+            "description": "Pin the request to a published version of this endpoint, so a publish does not move this caller until they choose to move. Omit it to call whatever is live — the behaviour every caller had before this header existed. The number is the `version` in `meta`, and the `x-egret-version` stamped on this operation in the generated per-service-account document. A pin selects which frozen CONTRACT answers and never which live policy applies: the invoke grant, the governed-database check, the endpoint's state and the workspace's are all evaluated exactly as they are for an unpinned call, and the endpoint's rate limit is the LIVE version's in both cases. A version above the live one is refused — that can only mean a rollback moved consumers off it",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32"
+            }
           }
         ],
         "responses": {
@@ -25723,7 +25759,7 @@
             }
           },
           "400": {
-            "description": "`row_limit_exceeded` — the result exceeded the endpoint's row cap; `param_missing` — a required parameter was not supplied; `param_invalid` — a supplied parameter failed its declared type, its `allowed` list, or was repeated where one value is required. Neither parameter error names the parameter: the name is the author's, and naming it turns the error surface into a directory of what an endpoint declares",
+            "description": "`row_limit_exceeded` — the result exceeded the endpoint's row cap; `param_missing` — a required parameter was not supplied; `param_invalid` — a supplied parameter failed its declared type, its `allowed` list, or was repeated where one value is required. Neither parameter error names the parameter: the name is the author's, and naming it turns the error surface into a directory of what an endpoint declares. `version_pin_invalid` — the `X-Egret-Version` header was not a single positive whole number; it names the caller's own header and no fact about the endpoint",
             "content": {
               "application/json": {
                 "schema": {
@@ -25754,6 +25790,16 @@
           },
           "404": {
             "description": "`not_found` — no such live endpoint in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServingErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`version_unavailable` — the version named by `X-Egret-Version` is not one this endpoint can serve: it was never published, or a rollback has moved consumers off it. One code for both, because a consumer's action is the same either way and two would enumerate the endpoint's history. A 409 rather than a 400 because the same request is correct or incorrect depending on which version is live at that instant; no `Retry-After`, because it clears only when a human republishes or the caller changes what it sends",
             "content": {
               "application/json": {
                 "schema": {

@@ -286,6 +286,39 @@ pub(crate) fn to_wire(e: &ServingError) -> Wire {
             "param_invalid",
             "a parameter value is not valid for this endpoint".into(),
         ),
+        // Package 7's two refusals. They name two different actors and are
+        // therefore two codes, the same split as `timeout` versus
+        // `deadline_exceeded`: this one is the caller's own header being wrong,
+        // and `version_unavailable` below is a fact about the endpoint that the
+        // caller did not cause and cannot fix by re-spelling anything.
+        //
+        // The message states the accepted SHAPE — a positive integer — because
+        // that is the caller's own input and telling them nothing would leave a
+        // client author guessing. It states no endpoint fact: not which versions
+        // exist, not how many, not which is live.
+        ServingError::VersionPinInvalid => (
+            StatusCode::BAD_REQUEST,
+            "version_pin_invalid",
+            "the X-Egret-Version header must be a single positive whole number".into(),
+        ),
+        // 409, following the acknowledgement refusal Package 6 landed: the same
+        // request is correct or incorrect depending on which version is live at
+        // that instant. See `ServingError::VersionUnavailable` for why the two
+        // ways of reaching it share one code.
+        //
+        // The message names the ONE thing a consumer can act on and nothing
+        // else. "Which versions may I pin?" is answered by the generated
+        // contract, which the consumer is authorized to fetch; it is not
+        // answered here, where the reply would be an enumeration handed to
+        // anyone holding a token.
+        ServingError::VersionUnavailable => (
+            StatusCode::CONFLICT,
+            "version_unavailable",
+            "the pinned version is not available for this endpoint; \
+             re-fetch this endpoint's contract, or drop the X-Egret-Version header \
+             to call the version that is live"
+                .into(),
+        ),
         // An error, never a truncated 200: a client that believes it has every
         // row produces wrong numbers with no signal.
         ServingError::RowLimitExceeded { cap } => (
@@ -513,6 +546,13 @@ pub(crate) fn to_wire(e: &ServingError) -> Wire {
         | ServingError::NotGranted
         | ServingError::ParamMissing
         | ServingError::ParamInvalid
+        // Neither Package 7 refusal clears with time. A malformed pin is the
+        // same bytes next time; a stale one needs a human to republish or the
+        // caller to change what it sends. A `Retry-After` on either would be a
+        // promise egret cannot keep, and would put a fleet to sleep waiting for
+        // something that is not coming.
+        | ServingError::VersionPinInvalid
+        | ServingError::VersionUnavailable
         | ServingError::RowLimitExceeded { .. }
         | ServingError::EndpointQueryFailed { .. }
         | ServingError::EngineTimeout
@@ -627,6 +667,10 @@ mod tests {
             ("NotGranted", (403, "not_granted")),
             ("ParamMissing", (400, "param_missing")),
             ("ParamInvalid", (400, "param_invalid")),
+            // Package 7. Two codes, two statuses: the caller's header, and the
+            // endpoint's history.
+            ("VersionPinInvalid", (400, "version_pin_invalid")),
+            ("VersionUnavailable", (409, "version_unavailable")),
             ("RowLimitExceeded", (400, "row_limit_exceeded")),
             ("RateLimited", (429, "rate_limited")),
             ("SchemaDrift", (503, "schema_drift")),
