@@ -76,6 +76,11 @@ export type dataApiServingServeGetResponse404 = {
   status: 404
 }
 
+export type dataApiServingServeGetResponse413 = {
+  data: ServingErrorBody
+  status: 413
+}
+
 export type dataApiServingServeGetResponse429 = {
   data: ServingErrorBody
   status: 429
@@ -86,15 +91,25 @@ export type dataApiServingServeGetResponse500 = {
   status: 500
 }
 
+export type dataApiServingServeGetResponse502 = {
+  data: ServingErrorBody
+  status: 502
+}
+
 export type dataApiServingServeGetResponse503 = {
   data: ServingErrorBody
   status: 503
 }
 
+export type dataApiServingServeGetResponse504 = {
+  data: ServingErrorBody
+  status: 504
+}
+
 export type dataApiServingServeGetResponseSuccess = (dataApiServingServeGetResponse200) & {
   headers: Headers;
 };
-export type dataApiServingServeGetResponseError = (dataApiServingServeGetResponse400 | dataApiServingServeGetResponse401 | dataApiServingServeGetResponse403 | dataApiServingServeGetResponse404 | dataApiServingServeGetResponse429 | dataApiServingServeGetResponse500 | dataApiServingServeGetResponse503) & {
+export type dataApiServingServeGetResponseError = (dataApiServingServeGetResponse400 | dataApiServingServeGetResponse401 | dataApiServingServeGetResponse403 | dataApiServingServeGetResponse404 | dataApiServingServeGetResponse413 | dataApiServingServeGetResponse429 | dataApiServingServeGetResponse500 | dataApiServingServeGetResponse502 | dataApiServingServeGetResponse503 | dataApiServingServeGetResponse504) & {
   headers: Headers;
 };
 
@@ -227,6 +242,11 @@ export type dataApiServingServePostResponse404 = {
   status: 404
 }
 
+export type dataApiServingServePostResponse413 = {
+  data: ServingErrorBody
+  status: 413
+}
+
 export type dataApiServingServePostResponse429 = {
   data: ServingErrorBody
   status: 429
@@ -237,15 +257,25 @@ export type dataApiServingServePostResponse500 = {
   status: 500
 }
 
+export type dataApiServingServePostResponse502 = {
+  data: ServingErrorBody
+  status: 502
+}
+
 export type dataApiServingServePostResponse503 = {
   data: ServingErrorBody
   status: 503
 }
 
+export type dataApiServingServePostResponse504 = {
+  data: ServingErrorBody
+  status: 504
+}
+
 export type dataApiServingServePostResponseSuccess = (dataApiServingServePostResponse200) & {
   headers: Headers;
 };
-export type dataApiServingServePostResponseError = (dataApiServingServePostResponse400 | dataApiServingServePostResponse401 | dataApiServingServePostResponse403 | dataApiServingServePostResponse404 | dataApiServingServePostResponse429 | dataApiServingServePostResponse500 | dataApiServingServePostResponse503) & {
+export type dataApiServingServePostResponseError = (dataApiServingServePostResponse400 | dataApiServingServePostResponse401 | dataApiServingServePostResponse403 | dataApiServingServePostResponse404 | dataApiServingServePostResponse413 | dataApiServingServePostResponse429 | dataApiServingServePostResponse500 | dataApiServingServePostResponse502 | dataApiServingServePostResponse503 | dataApiServingServePostResponse504) & {
   headers: Headers;
 };
 

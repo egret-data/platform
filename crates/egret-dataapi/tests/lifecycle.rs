@@ -3356,10 +3356,14 @@ async fn publish_freezes_each_statements_own_columns() {
         .publish(
             f.ws_id,
             ep,
-            egret_core::UserId(f.admin),
-            "",
-            &draft,
-            described,
+            egret_dataapi::PublishRequest {
+                by: egret_core::UserId(f.admin),
+                note: "",
+                draft: &draft,
+                described,
+                // No live version yet, so there is nothing to acknowledge.
+                acknowledge_breaking: None,
+            },
         )
         .await
         .expect("publish");
@@ -3465,4 +3469,604 @@ async fn publish_refuses_a_statement_list_the_write_routes_would_have_refused() 
         );
         assert!(f.versions(ep).await.is_empty(), "{why} must not publish");
     }
+}
+
+// ---------- Publish-time contract diff and acknowledgement (package 6) ----------
+//
+// Every fixture below publishes a FIRST version and then publishes over it. That
+// is not incidental setup: a publish with no live version exercises the
+// first-publish path, where there is nothing to break and no acknowledgement can
+// ever be required, so a suite built on one would pass with the whole gate
+// deleted. The only test here that has no live version is the one whose subject
+// IS that path, and it says so in its name.
+
+impl Fixture {
+    /// `POST …/publish` with a body of the caller's choosing, so the
+    /// acknowledgement field can be present, absent or wrong.
+    async fn publish_with(
+        &self,
+        ep: Uuid,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        self.send(
+            &self.manager,
+            "POST",
+            &format!("{}/{ep}/publish", self.collection()),
+            Some(body),
+        )
+        .await
+    }
+
+    async fn validate_ep(&self, ep: Uuid) -> serde_json::Value {
+        let (status, body) = self
+            .send(
+                &self.manager,
+                "POST",
+                &format!("{}/{ep}/validate", self.collection()),
+                None,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "validate failed: {body}");
+        body
+    }
+
+    /// A live v1 returning `id` and `n`, and then a draft that returns only
+    /// `id` — the removed column, ready to publish.
+    async fn live_then_drops_a_column(&self, tag: &str) -> Uuid {
+        self.port
+            .set(Describe::Columns(vec![("id", "uuid"), ("n", "bigint")]));
+        let ep = self.create_endpoint(tag, tag, "SELECT id, n FROM t").await;
+        self.publish(ep).await;
+        self.port.set(Describe::Columns(vec![("id", "uuid")]));
+        self.set_statements(
+            ep,
+            serde_json::json!([{ "name": "main", "sql": "SELECT id FROM t" }]),
+        )
+        .await;
+        ep
+    }
+}
+
+/// **The property this package exists for.** Before it, this publish returned
+/// 200 and every deployed consumer of `n` found out at its next call.
+#[tokio::test]
+async fn publishing_a_removed_column_over_a_live_version_is_refused() {
+    let f = skip_without_db!();
+    let ep = f.live_then_drops_a_column("pkg6drop").await;
+
+    let (status, body) = f.publish_raw(ep).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("column `n`"),
+        "the refusal must name the change the author has to act on: {msg}"
+    );
+    // A publish-time refusal costs nothing: the transaction rolls back having
+    // written no version and moved no pointer.
+    assert_eq!(
+        f.versions(ep).await.len(),
+        1,
+        "a refused publish must leave the history alone"
+    );
+    assert_eq!(f.live_snapshot(ep).await.statements[0].columns.len(), 2);
+}
+
+/// The acknowledgement `POST /validate` issues is the one `POST /publish`
+/// accepts, and the break is RECORDED against the version and its author.
+#[tokio::test]
+async fn the_acknowledgement_from_validate_publishes_the_break_and_records_it() {
+    let f = skip_without_db!();
+    let ep = f.live_then_drops_a_column("pkg6ack").await;
+
+    let v = f.validate_ep(ep).await;
+    assert_eq!(
+        v["against_live"]["breaking"][0]["kind"], "column_removed",
+        "{v}"
+    );
+    let token = v["acknowledge_breaking"]
+        .as_str()
+        .expect("validate must issue an acknowledgement when something breaks")
+        .to_string();
+
+    let (status, body) = f
+        .publish_with(
+            ep,
+            serde_json::json!({ "note": "drop n", "acknowledge_breaking": token }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["breaking_changes"][0]["kind"], "column_removed");
+
+    let versions = f.versions(ep).await;
+    let v2 = versions
+        .iter()
+        .find(|v| v["version"] == 2)
+        .expect("v2 exists");
+    assert_eq!(v2["breaking_changes"][0]["kind"], "column_removed");
+    assert!(
+        v2["breaking_changes"][0]["subject"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("`n`"),
+        "{v2}"
+    );
+    // Who accepted it is the row's own `created_by`, which is what makes this an
+    // audit trail rather than a note.
+    assert_eq!(
+        v2["created_by"],
+        serde_json::json!(f.manager.user.to_string())
+    );
+}
+
+/// An acknowledgement is a digest of the changes it acknowledges, so one
+/// obtained for a break is not a `force: true` that covers the next one.
+#[tokio::test]
+async fn an_acknowledgement_does_not_cover_a_break_it_was_not_issued_for() {
+    let f = skip_without_db!();
+    let ep = f.live_then_drops_a_column("pkg6stale").await;
+
+    let token = f.validate_ep(ep).await["acknowledge_breaking"]
+        .as_str()
+        .expect("a token")
+        .to_string();
+
+    // The author keeps editing after taking the token: now the row limit falls
+    // too, so the set of breaking changes is not the set that was acknowledged.
+    f.patch_endpoint(ep, serde_json::json!({ "limits": { "max_rows": 10 } }))
+        .await;
+
+    let (status, body) = f
+        .publish_with(ep, serde_json::json!({ "acknowledge_breaking": token }))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("does not match"),
+        "{body}"
+    );
+    assert_eq!(f.versions(ep).await.len(), 1);
+}
+
+/// The headline case: the edit an author reads as "I added something" and a
+/// consumer receives as a different response body.
+#[tokio::test]
+async fn adding_a_second_statement_over_a_live_version_is_refused() {
+    let f = skip_without_db!();
+    f.port.set(Describe::Columns(vec![("id", "uuid")]));
+    let ep = f
+        .create_endpoint("pkg6two", "pkg6two", "SELECT id FROM t")
+        .await;
+    f.publish(ep).await;
+
+    f.port.set(Describe::PerSql(vec![
+        ("count(*)", vec![("n", "bigint")]),
+        ("", vec![("id", "uuid")]),
+    ]));
+    f.set_statements(
+        ep,
+        serde_json::json!([
+            { "name": "main", "sql": "SELECT id FROM t" },
+            { "name": "total", "sql": "SELECT count(*) AS n FROM t" }
+        ]),
+    )
+    .await;
+
+    let (status, body) = f.publish_raw(ep).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("keyed by statement name"),
+        "the refusal must say what the consumer's body becomes: {msg}"
+    );
+    assert_eq!(f.versions(ep).await.len(), 1);
+}
+
+/// The other half of the rule, and the one that keeps the warning worth
+/// reading: editing the SQL changes what an endpoint returns and breaks no
+/// contract, so it publishes with nothing to acknowledge.
+#[tokio::test]
+async fn editing_only_the_sql_publishes_over_a_live_version_with_no_acknowledgement() {
+    let f = skip_without_db!();
+    f.port
+        .set(Describe::Columns(vec![("id", "uuid"), ("n", "bigint")]));
+    let ep = f
+        .create_endpoint("pkg6sql", "pkg6sql", "SELECT id, n FROM t")
+        .await;
+    f.publish(ep).await;
+
+    f.set_statements(
+        ep,
+        serde_json::json!([{ "name": "main", "sql": "SELECT id, n FROM t WHERE n > 0" }]),
+    )
+    .await;
+
+    let v = f.validate_ep(ep).await;
+    assert_eq!(v["against_live"]["breaking"], serde_json::json!([]), "{v}");
+    assert!(v["acknowledge_breaking"].is_null(), "{v}");
+    // Reported, though — "we compared and found six harmless things" is a
+    // different message from "we found nothing".
+    assert_eq!(
+        v["against_live"]["safe"][0]["kind"],
+        "statement_definition_changed"
+    );
+
+    let (status, body) = f.publish_raw(ep).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // Compared, and broke nothing. Distinct from the `null` a first publish
+    // records, which means nothing was compared at all.
+    assert_eq!(body["breaking_changes"], serde_json::json!([]));
+}
+
+/// The first publish is the one case with nothing to compare, and the record
+/// says so rather than claiming a comparison found nothing.
+#[tokio::test]
+async fn a_first_publish_compares_nothing_and_records_that_it_did_not() {
+    let f = skip_without_db!();
+    f.port.set(Describe::Columns(vec![("id", "uuid")]));
+    let ep = f
+        .create_endpoint("pkg6first", "pkg6first", "SELECT id FROM t")
+        .await;
+
+    let v = f.validate_ep(ep).await;
+    assert!(
+        v["against_live"].is_null(),
+        "there is no live version to compare against: {v}"
+    );
+
+    let (status, body) = f.publish_raw(ep).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body["breaking_changes"].is_null(),
+        "a first publish compared nothing: {body}"
+    );
+    let versions = f.versions(ep).await;
+    assert!(versions[0]["breaking_changes"].is_null(), "{versions:?}");
+}
+
+/// **The record a `rollback` used to make false.**
+///
+/// v1 returns `id, n`. A rollback to v0 — `id` alone — is not refused, and
+/// should not be: it is usually someone ending an outage. But it moves every
+/// consumer of v1 off a contract they were coding against, and it writes no row
+/// in `endpoint_versions`. Publishing the id-only draft afterwards then compares
+/// against v0, finds nothing, and stores `[]`, which migration `0131` DEFINES as
+/// "compared and broke nothing".
+///
+/// Two things make that true again, and neither is a gate:
+///
+/// * the version row names the baseline it is a claim about, so `[]` beside a
+///   baseline that is not the newest version is visibly a rolled-back one;
+/// * the rollback itself classifies what it moved consumers off and returns it,
+///   which is the record that did not exist anywhere before.
+#[tokio::test]
+async fn a_publish_after_a_rollback_names_the_baseline_its_empty_diff_is_about() {
+    let f = skip_without_db!();
+    // v1: `id` alone.
+    f.port.set(Describe::Columns(vec![("id", "uuid")]));
+    let ep = f
+        .create_endpoint("pkg6rb", "pkg6rb", "SELECT id FROM t")
+        .await;
+    f.publish(ep).await;
+
+    // v2: `id, n`, the contract consumers then code against. Adding a column is
+    // safe, so this needs no acknowledgement.
+    f.port
+        .set(Describe::Columns(vec![("id", "uuid"), ("n", "bigint")]));
+    f.set_statements(
+        ep,
+        serde_json::json!([{ "name": "main", "sql": "SELECT id, n FROM t" }]),
+    )
+    .await;
+    f.publish(ep).await;
+
+    // The rollback to v1 removes `n` from every response, and says so.
+    let (status, rolled) = f
+        .rollback_raw(ep, serde_json::json!({ "version": 1 }))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{rolled}");
+    assert_eq!(
+        rolled["rollback_breaks"][0]["kind"], "column_removed",
+        "a rollback must say what it moves consumers off, even though it \
+         refuses nothing: {rolled}"
+    );
+    assert!(
+        rolled["rollback_breaks"][0]["subject"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("`n`"),
+        "{rolled}"
+    );
+    // It is not an acknowledgement and must never be recorded as one.
+    assert!(rolled["breaking_changes"].is_null(), "{rolled}");
+
+    // Now publish the id-only draft. Against v1 — the live version — it breaks
+    // nothing, and that is the truth. The row has to say WHICH truth.
+    f.port.set(Describe::Columns(vec![("id", "uuid")]));
+    f.set_statements(
+        ep,
+        serde_json::json!([{ "name": "main", "sql": "SELECT id FROM t" }]),
+    )
+    .await;
+    let (status, body) = f.publish_raw(ep).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["breaking_changes"], serde_json::json!([]), "{body}");
+
+    let versions = f.versions(ep).await;
+    let v3 = versions
+        .iter()
+        .find(|v| v["version"] == 3)
+        .expect("v3 exists");
+    assert_eq!(
+        v3["compared_against_version"],
+        serde_json::json!(1),
+        "the empty diff is a claim about v1, not about v2 — and a reader who \
+         cannot see that reads it as `nobody was broken here`: {v3}"
+    );
+    // The version it does NOT speak for is still in the history, one number
+    // higher than the baseline, which is what makes the rollback visible.
+    let v2 = versions
+        .iter()
+        .find(|v| v["version"] == 2)
+        .expect("v2 exists");
+    assert_eq!(v2["compared_against_version"], serde_json::json!(1), "{v2}");
+}
+
+/// The ordinary case, so the field above is not just "whatever the last publish
+/// happened to point at": with no rollback the baseline IS the version before.
+#[tokio::test]
+async fn a_publish_over_a_live_version_names_that_version_as_its_baseline() {
+    let f = skip_without_db!();
+    f.port.set(Describe::Columns(vec![("id", "uuid")]));
+    let ep = f
+        .create_endpoint("pkg6base", "pkg6base", "SELECT id FROM t")
+        .await;
+    f.publish(ep).await;
+    f.set_statements(
+        ep,
+        serde_json::json!([{ "name": "main", "sql": "SELECT id FROM t WHERE x" }]),
+    )
+    .await;
+    f.publish(ep).await;
+
+    let versions = f.versions(ep).await;
+    let v2 = versions.iter().find(|v| v["version"] == 2).expect("v2");
+    assert_eq!(v2["compared_against_version"], serde_json::json!(1), "{v2}");
+    // And a FIRST publish compared against nothing, so it names nothing —
+    // exactly where `breaking_changes` is null too. The two absences are the
+    // same absence and must not disagree.
+    let v1 = versions.iter().find(|v| v["version"] == 1).expect("v1");
+    assert!(v1["compared_against_version"].is_null(), "{v1}");
+    assert!(v1["breaking_changes"].is_null(), "{v1}");
+}
+
+/// A mid-list insertion under `shape: arrays`, end to end.
+///
+/// `SELECT id, n` becoming `SELECT id, region, n` reorders nothing — the
+/// survivors are still `id` then `n` — so a check that compares the survivors as
+/// a sequence sees an empty diff and publishes with a 200. `serving::router`
+/// requires the engine's positional order to equal the frozen list exactly and
+/// then clones the rows verbatim, so every consumer reading `data[i][1]` as the
+/// bigint `n` starts reading the varchar `region`.
+#[tokio::test]
+async fn publishing_a_mid_list_column_insertion_under_arrays_is_refused() {
+    let f = skip_without_db!();
+    f.port
+        .set(Describe::Columns(vec![("id", "uuid"), ("n", "bigint")]));
+    let ep = f
+        .create_endpoint("pkg6ins", "pkg6ins", "SELECT id, n FROM t")
+        .await;
+    f.patch_endpoint(ep, serde_json::json!({ "output": { "shape": "arrays" } }))
+        .await;
+    f.publish(ep).await;
+
+    f.port.set(Describe::Columns(vec![
+        ("id", "uuid"),
+        ("region", "varchar"),
+        ("n", "bigint"),
+    ]));
+    f.set_statements(
+        ep,
+        serde_json::json!([{ "name": "main", "sql": "SELECT id, region, n FROM t" }]),
+    )
+    .await;
+
+    let (status, body) = f.publish_raw(ep).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "an insertion moves every index after it: {body}"
+    );
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("index 1 to 2"),
+        "the refusal must name the index a consumer already reads: {msg}"
+    );
+    assert_eq!(
+        f.versions(ep).await.len(),
+        1,
+        "a refused publish leaves the history alone"
+    );
+}
+
+/// Sending an acknowledgement that corresponds to nothing is refused rather
+/// than ignored. Ignoring it is how a client learns to send one always, which
+/// is the `force: true` the token shape exists to make unrepresentable.
+#[tokio::test]
+async fn an_acknowledgement_sent_when_nothing_breaks_is_refused() {
+    let f = skip_without_db!();
+    f.port.set(Describe::Columns(vec![("id", "uuid")]));
+    let ep = f
+        .create_endpoint("pkg6noop", "pkg6noop", "SELECT id FROM t")
+        .await;
+    f.publish(ep).await;
+
+    let (status, body) = f
+        .publish_with(
+            ep,
+            serde_json::json!({ "acknowledge_breaking": "0".repeat(64) }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("breaks nothing"),
+        "{body}"
+    );
+}
+
+/// The same refusal on the FIRST publish, where the comparison does not happen
+/// at all.
+///
+/// This is the arm that was missed first: `publish` skipped the check entirely
+/// when there was no live version, so a token sent there was silently ignored —
+/// and a client whose token is silently ignored is a client that learns to send
+/// one on every call, which is exactly the `force: true` the digest exists to
+/// prevent.
+#[tokio::test]
+async fn an_acknowledgement_sent_on_a_first_publish_is_refused_too() {
+    let f = skip_without_db!();
+    f.port.set(Describe::Columns(vec![("id", "uuid")]));
+    let ep = f
+        .create_endpoint("pkg6firstack", "pkg6firstack", "SELECT id FROM t")
+        .await;
+    assert!(
+        f.versions(ep).await.is_empty(),
+        "this test is about the no-live-version path"
+    );
+
+    let (status, body) = f
+        .publish_with(
+            ep,
+            serde_json::json!({ "acknowledge_breaking": "0".repeat(64) }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("breaks nothing"),
+        "{body}"
+    );
+    assert!(
+        f.versions(ep).await.is_empty(),
+        "a refused publish must write nothing"
+    );
+}
+
+/// A live snapshot that cannot be read stops the publish; it does not skip the
+/// comparison.
+///
+/// Package 6 gave `publish` a dependency it did not have: it must now be able to
+/// DESERIALIZE the live version. The tempting handling is to shrug and publish
+/// anyway — and that would mean a corrupt row silently disables the
+/// breaking-change gate for that endpoint, forever, with a 200 each time. So the
+/// direction is closed, and it is the same answer `EndpointStore::versions` has
+/// given for an unreadable snapshot since P3.
+///
+/// Only a direct write can produce one: `publish` is the sole writer of this
+/// column. That is why the fixture below goes past the routes.
+#[tokio::test]
+async fn publish_refuses_when_the_live_snapshot_cannot_be_read() {
+    let f = skip_without_db!();
+    f.port.set(Describe::Columns(vec![("id", "uuid")]));
+    let ep = f
+        .create_endpoint("pkg6corrupt", "pkg6corrupt", "SELECT id FROM t")
+        .await;
+    f.publish(ep).await;
+
+    let touched = sqlx::query(
+        "UPDATE dataapi.endpoint_versions v SET snapshot = '{}'::jsonb \
+           FROM dataapi.endpoints e WHERE e.live_version_id = v.id AND e.id = $1",
+    )
+    .bind(ep)
+    .execute(&f.db.pool)
+    .await
+    .expect("corrupt the live snapshot")
+    .rows_affected();
+    assert_eq!(
+        touched, 1,
+        "the live snapshot must actually have been replaced"
+    );
+
+    let (status, body) = f.publish_raw(ep).await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "an unreadable live version must stop the publish, not skip the diff: {body}"
+    );
+    // Counted in SQL, not through the versions route: that route deserializes
+    // the same snapshot and answers the same 500, so it cannot be the witness
+    // for whether a row was written.
+    let rows: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM dataapi.endpoint_versions WHERE endpoint_id = $1")
+            .bind(ep)
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("count versions");
+    assert_eq!(rows, 1, "a refused publish must write nothing");
+}
+
+/// The diff is against the version consumers are RECEIVING, not against the
+/// newest row — the two differ the moment anyone rolls back, and `publish`
+/// used to read `MAX(version)` and nothing else.
+#[tokio::test]
+async fn the_diff_is_against_the_live_version_not_the_newest_one() {
+    let f = skip_without_db!();
+    // v1 returns `id` and `n`.
+    f.port
+        .set(Describe::Columns(vec![("id", "uuid"), ("n", "bigint")]));
+    let ep = f
+        .create_endpoint("pkg6roll", "pkg6roll", "SELECT id, n FROM t")
+        .await;
+    f.publish(ep).await;
+
+    // v2 drops `n`, acknowledged.
+    f.port.set(Describe::Columns(vec![("id", "uuid")]));
+    f.set_statements(
+        ep,
+        serde_json::json!([{ "name": "main", "sql": "SELECT id FROM t" }]),
+    )
+    .await;
+    let token = f.validate_ep(ep).await["acknowledge_breaking"]
+        .as_str()
+        .expect("a token")
+        .to_string();
+    let (status, body) = f
+        .publish_with(ep, serde_json::json!({ "acknowledge_breaking": token }))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // Roll back to v1, which returns both columns again. `MAX(version)` is now
+    // v2 and the LIVE contract is v1.
+    let (status, body) = f
+        .send(
+            &f.manager,
+            "POST",
+            &format!("{}/{ep}/rollback", f.collection()),
+            Some(serde_json::json!({ "version": 1 })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // The draft still drops `n`. Against v2 — the newest row — that is no
+    // change at all; against v1, which is what consumers receive, it is the
+    // removal. The refusal is what says which one was compared.
+    let (status, body) = f.publish_raw(ep).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "the diff must be against the LIVE version, not the newest: {body}"
+    );
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("column `n`"),
+        "{body}"
+    );
 }

@@ -247,7 +247,7 @@ pub(crate) const MAX_ROWS_CEILING: u32 = 1_000_000;
 /// Upper bound applied to a snapshot's `limits.timeout_seconds`. Same reasoning
 /// as [`MAX_ROWS_CEILING`]; a 0 would make every call time out instantly and an
 /// unbounded one would pin a connection for as long as the author felt like.
-const TIMEOUT_CEILING_SECS: u64 = 300;
+pub(crate) const TIMEOUT_CEILING_SECS: u64 = 300;
 
 /// How long a REQUEST waits for author-supplied starlark before it is answered
 /// 500 — a response transform (C2), or the SQL generation package S put on this

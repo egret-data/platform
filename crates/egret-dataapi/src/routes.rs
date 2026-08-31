@@ -1346,12 +1346,33 @@ async fn unbookmark_endpoint(
 // `dataapi.endpoint_versions.snapshot`; see `lifecycle.rs` for the contract P4's
 // serving path has to honour.
 
-/// The `POST /publish` body. Every field optional, so `{}` is a valid publish.
+/// The `POST /publish` body. Every field optional, so `{}` is a valid publish —
+/// of a version that breaks nobody.
 #[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
 pub struct PublishEndpointInput {
     /// Free-form "what changed", stored on the version.
     #[serde(default)]
     pub note: String,
+    /// The acknowledgement issued by `POST …/validate` for the breaking changes
+    /// this publish would make, required only when there are some.
+    ///
+    /// # Why this is a token and not `force: true`
+    ///
+    /// A boolean can be set once, in a deploy script, by someone who has never
+    /// read a diff — and every breaking publish that script ever makes is then
+    /// pre-approved, silently. There is no constant to hardcode here: the value
+    /// is a digest of the breaking changes themselves, mixed with the endpoint
+    /// and the version currently live, so it cannot be produced without having
+    /// been handed the list it acknowledges, and one issued for yesterday's
+    /// break does not match today's. Acknowledging accidentally is not a
+    /// discipline this field asks anyone to keep; it is not reachable.
+    ///
+    /// Sending one when the publish breaks nothing is refused too, rather than
+    /// ignored — an acknowledgement that does not correspond to anything is a
+    /// stale one, and staying silent about it is how a client learns to send it
+    /// always.
+    #[serde(default)]
+    pub acknowledge_breaking: Option<String>,
 }
 
 /// The `POST /rollback` body: name the version by NUMBER or by ID, not both.
@@ -1384,7 +1405,8 @@ async fn validated_draft(
 ) -> Result<
     (
         DataApiEndpointDto,
-        Vec<egret_dataapi_api::StatementSnapshot>,
+        crate::lifecycle::ConnectionSafety,
+        crate::lifecycle::ValidatedDraft,
     ),
     DataApiError,
 > {
@@ -1396,8 +1418,8 @@ async fn validated_draft(
     // `ctx.principal`, not the service account: `describe_as` resolves under the
     // caller's own identity so a delegated connection applies THEIR policy, and
     // an author cannot publish a contract over a table they cannot themselves see.
-    let described = validate(&*st.query, ws, principal, &draft, conn).await?;
-    Ok((draft, described))
+    let validated = validate(&*st.query, ws, principal, &draft, conn).await?;
+    Ok((draft, conn, validated))
 }
 
 /// What `POST /validate` answers with.
@@ -1415,6 +1437,22 @@ pub struct DataApiValidationDto {
     /// because it IS the frozen shape and reusing it keeps "what validate says"
     /// and "what publish writes" the same words.
     pub statements: Vec<egret_dataapi_api::StatementSnapshot>,
+    /// What publishing this draft would do to the consumers of the version
+    /// currently live (package 6).
+    ///
+    /// `null` for an endpoint that has never been published — the FIRST publish,
+    /// where no consumer has ever received anything and there is nothing to
+    /// break. That is a different fact from an empty diff, which means the two
+    /// contracts were compared and found compatible, and the two are kept apart
+    /// here for the same reason they are kept apart in the column that records
+    /// them.
+    pub against_live: Option<crate::contract::ContractDiff>,
+    /// The value to send back as `acknowledge_breaking` on `POST …/publish`,
+    /// present exactly when `against_live.breaking` is non-empty.
+    ///
+    /// A digest of those breaking changes, not a constant — see
+    /// [`PublishEndpointInput::acknowledge_breaking`].
+    pub acknowledge_breaking: Option<String>,
 }
 
 #[utoipa::path(
@@ -1426,7 +1464,7 @@ pub struct DataApiValidationDto {
         ("id" = Uuid, Path, description = "Endpoint id"),
     ),
     responses(
-        (status = 200, description = "The definition is publishable; the resolved output schema is returned", body = DataApiValidationDto),
+        (status = 200, description = "The definition is publishable; the resolved output schema is returned, together with what publishing it would do to consumers of the live version and the acknowledgement to send if that includes a breaking change", body = DataApiValidationDto),
         (status = 400, description = "Not a single SELECT, a parameter mismatch, an enum without an allowed list, a shared cache on a delegated connection, or SQL the engine rejects", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing data_api_endpoint:manage permission, or the engine's policy denies a table the query names", body = ErrorBody),
@@ -1442,9 +1480,41 @@ async fn validate_endpoint(
     // `:manage`, not `:read` — this runs a query against the engine under the
     // caller's identity, which is an authoring action and not a read of metadata.
     egret_core::authz::require(&*st.pdp, &ctx, EP_MANAGE).await?;
-    let (_, statements) =
-        validated_draft(&st, ctx.workspace_id.0, ctx.principal.user_id, id).await?;
-    Ok(Json(DataApiValidationDto { statements }))
+    let ws = ctx.workspace_id.0;
+    let (draft, conn, validated) = validated_draft(&st, ws, ctx.principal.user_id, id).await?;
+    // The snapshot publish WOULD freeze, built by the function publish itself
+    // builds it with — so the diff an author is shown here and the diff publish
+    // refuses on cannot be two different answers to one question.
+    let next = crate::lifecycle::prospective_snapshot(
+        &draft,
+        &validated.statements,
+        &validated.iterated,
+        conn,
+    )
+    .map_err(|_| {
+        // Unreachable through this route: both halves come from the one
+        // `validate` call above, over the same statement list. A 500 rather than
+        // publish's 409 because there is no concurrent edit to blame — if this
+        // ever fires it is a bug in this crate, and saying "try again" would
+        // send the author to do something that cannot help.
+        DataApiError::Internal(anyhow::anyhow!(
+            "validate described statements the draft does not have"
+        ))
+    })?;
+    let live = st.endpoints.live_snapshot(ws, id).await?;
+    let (against_live, acknowledge_breaking) = match live {
+        None => (None, None),
+        Some((live_version_id, live_snapshot)) => {
+            let diff = crate::contract::compare_contracts(&live_snapshot, &next);
+            let ack = diff.acknowledgement(id, live_version_id);
+            (Some(diff), ack)
+        }
+    };
+    Ok(Json(DataApiValidationDto {
+        statements: validated.statements,
+        against_live,
+        acknowledge_breaking,
+    }))
 }
 
 #[utoipa::path(
@@ -1506,7 +1576,7 @@ async fn preview_endpoint(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing data_api_endpoint:manage permission, or the engine's policy denies a table", body = ErrorBody),
         (status = 404, description = "No such endpoint in this workspace", body = ErrorBody),
-        (status = 409, description = "The draft was edited while it was being published, or the endpoint is in the trash — restore it first", body = ErrorBody),
+        (status = 409, description = "The draft was edited while it was being published; the endpoint is in the trash — restore it first; or this version would break consumers of the live one and `acknowledge_breaking` was absent, stale, or sent when nothing breaks. The message names every breaking change", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -1517,15 +1587,27 @@ async fn publish_endpoint(
     body: Option<Json<PublishEndpointInput>>,
 ) -> Result<Json<DataApiPublishedDto>, DataApiError> {
     egret_core::authz::require(&*st.pdp, &ctx, EP_MANAGE).await?;
-    let note = body.map(|Json(b)| b.note).unwrap_or_default();
+    let (note, ack) = body
+        .map(|Json(b)| (b.note, b.acknowledge_breaking))
+        .unwrap_or_default();
     let ws = ctx.workspace_id.0;
     // Validation and the describe both run BEFORE any write — see
     // `EndpointStore::publish` on why that is stronger than wrapping them in the
     // transaction, not weaker.
-    let (draft, described) = validated_draft(&st, ws, ctx.principal.user_id, id).await?;
+    let (draft, _conn, validated) = validated_draft(&st, ws, ctx.principal.user_id, id).await?;
     let published = st
         .endpoints
-        .publish(ws, id, ctx.principal.user_id, &note, &draft, described)
+        .publish(
+            ws,
+            id,
+            crate::lifecycle::PublishRequest {
+                by: ctx.principal.user_id,
+                note: &note,
+                draft: &draft,
+                described: validated.statements,
+                acknowledge_breaking: ack.as_deref(),
+            },
+        )
         .await?;
     // The version NUMBER is the load-bearing field: `dataapi.endpoint_versions`
     // is immutable, so "who put version N live, and when" is the question the
@@ -1541,6 +1623,14 @@ async fn publish_endpoint(
             "version": published.version,
             "version_id": published.version_id,
             "note": note,
+            // What the author accepted, in the trail as well as on the version
+            // row. `null` for a first publish, where nothing was compared —
+            // distinct from `[]`, which means it was and broke nothing.
+            "breaking_changes": published.breaking_changes,
+            // And WHICH version that is a claim about. After a rollback the
+            // live pointer is not the newest row, so `[]` alone does not say
+            // whose consumers survived — see migration `0131`.
+            "compared_against": published.compared_against,
         }),
     ));
     Ok(Json(published))
@@ -1597,6 +1687,15 @@ async fn rollback_endpoint(
         serde_json::json!({
             "version": rolled.version,
             "version_id": rolled.version_id,
+            // What this rollback did to the consumers of the version it moved
+            // OFF. A rollback is not refused for breaking them — it is usually
+            // the end of an outage — but until this it left no record anywhere
+            // that they had been moved, and a later publish comparing against
+            // the restored version could then record an empty diff an auditor
+            // would read as "nobody was broken here". Classified by the same
+            // function `publish` uses. `null` when there was no live version to
+            // move off, or when a stored snapshot could not be read.
+            "moves_consumers_off": rolled.rollback_breaks,
         }),
     ));
     Ok(Json(rolled))
@@ -2334,6 +2433,9 @@ pub fn management_router() -> Router<DataApiState> {
         GrantInvokeInput,
         egret_dataapi_api::EndpointSnapshot,
         egret_dataapi_api::ColumnSpec,
+        crate::contract::ContractDiff,
+        crate::contract::ContractChange,
+        crate::contract::ChangeKind,
         ActivitySummaryDto,
         ActivityRow,
         ActivityRange,

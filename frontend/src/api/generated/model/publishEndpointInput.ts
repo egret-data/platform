@@ -7,9 +7,32 @@
  */
 
 /**
- * The `POST /publish` body. Every field optional, so `{}` is a valid publish.
+ * The `POST /publish` body. Every field optional, so `{}` is a valid publish —
+ * of a version that breaks nobody.
  */
 export interface PublishEndpointInput {
   /** Free-form "what changed", stored on the version. */
   note?: string;
+  /**
+     * The acknowledgement issued by `POST …/validate` for the breaking changes
+     * this publish would make, required only when there are some.
+     *
+     * # Why this is a token and not `force: true`
+     *
+     * A boolean can be set once, in a deploy script, by someone who has never
+     * read a diff — and every breaking publish that script ever makes is then
+     * pre-approved, silently. There is no constant to hardcode here: the value
+     * is a digest of the breaking changes themselves, mixed with the endpoint
+     * and the version currently live, so it cannot be produced without having
+     * been handed the list it acknowledges, and one issued for yesterday's
+     * break does not match today's. Acknowledging accidentally is not a
+     * discipline this field asks anyone to keep; it is not reachable.
+     *
+     * Sending one when the publish breaks nothing is refused too, rather than
+     * ignored — an acknowledgement that does not correspond to anything is a
+     * stale one, and staying silent about it is how a client learns to send it
+     * always.
+     * @nullable
+     */
+  acknowledge_breaking?: string | null;
 }

@@ -15872,7 +15872,7 @@
             }
           },
           "409": {
-            "description": "The draft was edited while it was being published, or the endpoint is in the trash — restore it first",
+            "description": "The draft was edited while it was being published; the endpoint is in the trash — restore it first; or this version would break consumers of the live one and `acknowledge_breaking` was absent, stale, or sent when nothing breaks. The message names every breaking change",
             "content": {
               "application/json": {
                 "schema": {
@@ -16359,7 +16359,7 @@
         ],
         "responses": {
           "200": {
-            "description": "The definition is publishable; the resolved output schema is returned",
+            "description": "The definition is publishable; the resolved output schema is returned, together with what publishing it would do to consumers of the live version and the acknowledgement to send if that includes a breaking change",
             "content": {
               "application/json": {
                 "schema": {
@@ -27135,6 +27135,47 @@
           }
         }
       },
+      "ChangeKind": {
+        "type": "string",
+        "description": "The stable machine code for one kind of difference between two published\ncontracts.\n\nA closed enum rather than a free string, and it is what\n[`Self::is_breaking`] matches on — so the classification is a single table\nthat a reader can check against the rule at the top of this module, rather\nthan a `breaking: true` written by hand at each construction site where one\nof them would eventually be wrong.\n\nSerialised in `snake_case` and **recorded in `dataapi.endpoint_versions`**,\nso these names are persisted data: renaming one silently reinterprets every\nstored row. Add variants; do not rename them.",
+        "enum": [
+          "method_changed",
+          "path_changed",
+          "envelope_flipped",
+          "envelope_wrapper_changed",
+          "row_shape_changed",
+          "naming_changed",
+          "transform_presence_changed",
+          "transform_script_changed",
+          "statement_removed",
+          "statement_added",
+          "statement_definition_changed",
+          "column_removed",
+          "column_added",
+          "column_type_changed",
+          "column_became_optional",
+          "column_became_required",
+          "column_order_changed",
+          "parameter_removed",
+          "parameter_added",
+          "required_parameter_added",
+          "parameter_became_required",
+          "parameter_became_optional",
+          "parameter_type_changed",
+          "parameter_location_changed",
+          "parameter_constraint_tightened",
+          "parameter_constraint_relaxed",
+          "parameter_default_changed",
+          "row_limit_lowered",
+          "row_limit_raised",
+          "timeout_lowered",
+          "timeout_raised",
+          "rate_limit_tightened",
+          "rate_limit_relaxed",
+          "cache_changed",
+          "database_changed"
+        ]
+      },
       "ChartDataBody": {
         "type": "object",
         "description": "Build-only data request: produce SQL for a dataset + QuerySpec; the client submits it\nto the existing /queries endpoint and polls.\n\nStays in `egret-bi` (not the leaf contract crate): its `query_spec` field is the\n`egret-bi`-local [`QuerySpec`] query builder, which references `egret-query-api`\nand other in-crate types and so cannot move to the leaf.",
@@ -27425,6 +27466,52 @@
               "null"
             ],
             "description": "PEM of the engine's self-signed cert to pin as a trusted root (server-auth\nover TLS). Set on egret-provisioned TLS connections — Trino jwt/TLS mode\n(https) and StarRocks delegation (in-band TLS on :9030)."
+          }
+        }
+      },
+      "ContractChange": {
+        "type": "object",
+        "description": "One difference, in the words an author has to act on.\n\nThere is deliberately **no `breaking` field**. Which list a change is in IS\nits classification ([`ContractDiff`]), so a flag and a kind cannot drift into\ndisagreeing — the failure mode of every \"carry the answer beside the\nquestion\" shape this codebase has removed.",
+        "required": [
+          "kind",
+          "subject",
+          "detail"
+        ],
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/ChangeKind"
+          },
+          "subject": {
+            "type": "string",
+            "description": "What the change is ABOUT: `column `total` of statement `rows``, or\n`parameter `region``. Free text for a reader; it is also part of the\nacknowledgement digest, so two changes of one kind on two different\nsubjects cannot be acknowledged by one token."
+          },
+          "detail": {
+            "type": "string",
+            "description": "One sentence naming the old value and the new one. The author is entitled\nto know exactly what to fix — a publish-time refusal is an AUTHORING\nerror, unlike a serving error, where naming the definition would be\ncontext disclosure to a consumer."
+          }
+        }
+      },
+      "ContractDiff": {
+        "type": "object",
+        "description": "The comparison of a prospective version against the one being served.\n\nTwo lists, not one list with a flag: see [`ContractChange`].",
+        "required": [
+          "breaking",
+          "safe"
+        ],
+        "properties": {
+          "breaking": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ContractChange"
+            },
+            "description": "Changes a deployed consumer cannot survive. Non-empty means publish\nrefuses without an acknowledgement."
+          },
+          "safe": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ContractChange"
+            },
+            "description": "Changes that were looked at and judged survivable. Reported rather than\ndropped, so \"we found nothing\" is distinguishable from \"we found six\nthings and none of them matter\" — an author who sees the safe list is an\nauthor who can tell that the breaking list being empty means something."
           }
         }
       },
@@ -28882,6 +28969,24 @@
           "snapshot": {
             "$ref": "#/components/schemas/EndpointSnapshot",
             "description": "The frozen definition. **This is the only thing P4 may read to decide what\na request returns** — see the module comment."
+          },
+          "breaking_changes": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/ContractChange"
+            },
+            "description": "What publishing this version did to the consumers of the one it replaced\n(package 6), and therefore what its `created_by` accepted when they\nacknowledged it.\n\n`None` and `Some([])` are different facts and are kept apart. `None` is a\nversion published before this was recorded, or the FIRST version of an\nendpoint, where there was no live contract to break. `Some([])` is a\nversion that was compared against the live one and broke nothing. A\nhistory that showed both as \"no breaking changes\" would be claiming\nsomething about the first that nobody ever checked."
+          },
+          "compared_against_version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The version NUMBER [`Self::breaking_changes`] was compared against —\nwhatever was live when this one was published.\n\n`None` exactly when `breaking_changes` is `None`. Usually the preceding\nversion, and after a rollback NOT: `rollback` moves the live pointer\nbackwards and adds no row, so `Some([])` beside a baseline two versions\ndown is a comparison that happened and a set of consumers it says nothing\nabout. The number rather than the id, because this is what a history\nrenders and a number is what a reader can place."
           }
         }
       },
@@ -28979,6 +29084,34 @@
           },
           "state": {
             "type": "string"
+          },
+          "breaking_changes": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/ContractChange"
+            },
+            "description": "The breaking changes this publish made, which the caller acknowledged to\nget here (package 6).\n\nEchoed back rather than merely stored so the audit event the route emits\ncarries the same list the version row does — one write, two records, and\nno second computation of what was accepted.\n\n`None` for a first publish and for a `rollback`, neither of which\ncompares anything: a rollback re-serves a contract that was already\npublished once, and the two live rules it DOES re-ask are the ones whose\ninputs are live (see [`EndpointStore::rollback`]).\n\n`skip_serializing_if` here and deliberately NOT on\n[`DataApiEndpointVersionDto::breaking_changes`], which is the same value\nread back out of the table. There, `null` is an answer — \"nobody looked\"\n— and a reader has to be able to tell it from `[]`. Here the field is\nabsent from a `rollback`'s response because that response is not about a\ncomparison at all, and a `null` would invite the reader to interpret it."
+          },
+          "compared_against": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The version [`Self::breaking_changes`] is a statement ABOUT: whatever was\nlive at the instant of the publish.\n\nEchoed for the same reason it is stored — see migration `0131`. After a\nrollback this is not the version before this one, and an empty list read\nwithout it says more than it knows. `None` for a first publish, and for a\n`rollback`, which compares against the version it moved OFF and reports\nthat under [`Self::rollback_breaks`]."
+          },
+          "rollback_breaks": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/ContractChange"
+            },
+            "description": "What a `rollback` did to the consumers of the version it moved OFF,\nclassified by the same [`crate::contract::compare_contracts`]\n`publish` uses — and refusing nothing.\n\nA separate field from [`Self::breaking_changes`] because it answers a\nseparate question. That one is read back out of\n`endpoint_versions.breaking_changes` and is a record of what an author\nACCEPTED; this one is stored on no row, because a rollback creates no\nversion. Sharing a field would let a history renderer show a rollback's\nconsequences as an acknowledgement nobody gave.\n\n`None` for a `publish`, for a rollback onto an endpoint with nothing\nlive, and when either snapshot cannot be read — a rollback must not fail\nbecause the sentence it was going to say could not be built."
           }
         }
       },
@@ -29026,6 +29159,24 @@
               "$ref": "#/components/schemas/StatementSnapshot"
             },
             "description": "Exactly what `publish` would freeze: one entry per statement, in the\nauthor's order, each carrying the output schema `describe` resolved for\nit — so an author sees the contract before committing to it.\n\nA LIST rather than the single `columns` this carried before M2, because\nan endpoint has one column set per statement and folding them into one\nwould report a contract no version will ever hold: two statements each\nreturning a `total` are two result sets, not one column declared twice.\n[`egret_dataapi_api::StatementSnapshot`] rather than a new pair type,\nbecause it IS the frozen shape and reusing it keeps \"what validate says\"\nand \"what publish writes\" the same words."
+          },
+          "against_live": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ContractDiff",
+                "description": "What publishing this draft would do to the consumers of the version\ncurrently live (package 6).\n\n`null` for an endpoint that has never been published — the FIRST publish,\nwhere no consumer has ever received anything and there is nothing to\nbreak. That is a different fact from an empty diff, which means the two\ncontracts were compared and found compatible, and the two are kept apart\nhere for the same reason they are kept apart in the column that records\nthem."
+              }
+            ]
+          },
+          "acknowledge_breaking": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The value to send back as `acknowledge_breaking` on `POST …/publish`,\npresent exactly when `against_live.breaking` is non-empty.\n\nA digest of those breaking changes, not a constant — see\n[`PublishEndpointInput::acknowledge_breaking`]."
           }
         }
       },
@@ -31783,11 +31934,18 @@
       },
       "PublishEndpointInput": {
         "type": "object",
-        "description": "The `POST /publish` body. Every field optional, so `{}` is a valid publish.",
+        "description": "The `POST /publish` body. Every field optional, so `{}` is a valid publish —\nof a version that breaks nobody.",
         "properties": {
           "note": {
             "type": "string",
             "description": "Free-form \"what changed\", stored on the version."
+          },
+          "acknowledge_breaking": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The acknowledgement issued by `POST …/validate` for the breaking changes\nthis publish would make, required only when there are some.\n\n# Why this is a token and not `force: true`\n\nA boolean can be set once, in a deploy script, by someone who has never\nread a diff — and every breaking publish that script ever makes is then\npre-approved, silently. There is no constant to hardcode here: the value\nis a digest of the breaking changes themselves, mixed with the endpoint\nand the version currently live, so it cannot be produced without having\nbeen handed the list it acknowledges, and one issued for yesterday's\nbreak does not match today's. Acknowledging accidentally is not a\ndiscipline this field asks anyone to keep; it is not reachable.\n\nSending one when the publish breaks nothing is refused too, rather than\nignored — an acknowledgement that does not correspond to anything is a\nstale one, and staying silent about it is how a client learns to send it\nalways."
           }
         }
       },

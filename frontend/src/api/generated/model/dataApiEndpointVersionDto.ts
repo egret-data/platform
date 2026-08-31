@@ -5,6 +5,7 @@
  * egret unified data portal HTTP API.
  * OpenAPI spec version: 0.1.0
  */
+import type { ContractChange } from './contractChange';
 import type { EndpointSnapshot } from './endpointSnapshot';
 
 /**
@@ -24,4 +25,31 @@ export interface DataApiEndpointVersionDto {
      * a request returns** — see the module comment.
      */
   snapshot: EndpointSnapshot;
+  /**
+     * What publishing this version did to the consumers of the one it replaced
+     * (package 6), and therefore what its `created_by` accepted when they
+     * acknowledged it.
+     *
+     * `None` and `Some([])` are different facts and are kept apart. `None` is a
+     * version published before this was recorded, or the FIRST version of an
+     * endpoint, where there was no live contract to break. `Some([])` is a
+     * version that was compared against the live one and broke nothing. A
+     * history that showed both as "no breaking changes" would be claiming
+     * something about the first that nobody ever checked.
+     * @nullable
+     */
+  breaking_changes?: ContractChange[] | null;
+  /**
+     * The version NUMBER [`Self::breaking_changes`] was compared against —
+     * whatever was live when this one was published.
+     *
+     * `None` exactly when `breaking_changes` is `None`. Usually the preceding
+     * version, and after a rollback NOT: `rollback` moves the live pointer
+     * backwards and adds no row, so `Some([])` beside a baseline two versions
+     * down is a comparison that happened and a set of consumers it says nothing
+     * about. The number rather than the id, because this is what a history
+     * renders and a number is what a reader can place.
+     * @nullable
+     */
+  compared_against_version?: number | null;
 }

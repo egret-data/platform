@@ -49,6 +49,11 @@
 
 pub mod activity;
 pub mod clients;
+/// Package 6: what publishing a new version does to the consumers of the old
+/// one. `publish` used to validate the draft against itself; this is the
+/// comparison against the version a consumer is actually receiving, and the
+/// classification of each difference as breaking or not.
+pub mod contract;
 mod endpoint_port;
 pub mod endpoints;
 mod invoke;
@@ -71,6 +76,7 @@ pub use activity::{
     ActivityCallDto, ActivityRange, ActivityRow, ActivityStore, ActivitySummaryDto,
 };
 pub use clients::{ClientStore, NewClient, DATA_API_TTL_SECS};
+pub use contract::{compare_contracts, AckRefusal, ChangeKind, ContractChange, ContractDiff};
 pub use endpoints::{
     CreateEndpointInput, DataApiEndpointDto, DataApiEndpointListItemDto, DeletedEndpoint,
     EndpointStore, UpdateEndpointInput, ALLOWED_METHODS, BOOKMARK_ENTITY, OBJECT_KIND,
@@ -78,7 +84,7 @@ pub use endpoints::{
 pub use lifecycle::{
     check_cache_scope, check_enum_params, check_governed_connection, check_params,
     check_single_select, validate, ConnectionSafety, DataApiEndpointVersionDto,
-    DataApiPublishedDto, ValidationError, VersionRef,
+    DataApiPublishedDto, PublishRequest, ValidationError, VersionRef,
 };
 pub use render::{check_dynamic, check_publish, check_static, render, ParamValues, RenderError};
 pub use routes::{

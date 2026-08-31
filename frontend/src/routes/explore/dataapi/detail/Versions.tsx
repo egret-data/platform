@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { listUsers } from "@/api/access";
@@ -6,6 +6,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { CHIP_TONE } from "../chipTone";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
@@ -13,12 +14,15 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Textarea } from "@/components/ui/textarea";
 import { RelativeTime } from "@/components/explore/RelativeTime";
 import { SettingsNote } from "@/routes/explore/settings/SettingsNote";
-import { useDataApiListEndpointVersions } from "@/api/generated/data-api/data-api";
+import {
+  useDataApiListEndpointVersions,
+  useDataApiValidateEndpoint,
+} from "@/api/generated/data-api/data-api";
 // Publish/rollback move `state` and `live_version_id`, so their invalidation
 // spans three queries (this history, the endpoint record, and the list badge).
 // That lives in the wrapper — see `src/api/dataApi.ts`.
 import { usePublishEndpoint, useRollbackEndpoint } from "@/api/dataApi";
-import type { DataApiEndpointVersionDto } from "@/api/generated/model";
+import type { ContractChange, DataApiEndpointVersionDto } from "@/api/generated/model";
 import { useEndpointDetail } from "../EndpointDetail";
 
 /**
@@ -298,6 +302,53 @@ export default function VersionsSection() {
                           on this wash measures 3.72:1 in light mode, and the
                           word "Live" is what identifies the row anyway. */}
                       {v.is_live && <Badge className={CHIP_TONE.success}>Live</Badge>}
+                      {/* What this version broke when it was published, and
+                          therefore what the author in the next column accepted
+                          (package 6). Rendered only when the list is non-empty:
+                          `null` — a version published before the comparison
+                          existed, or a first version, where there was nothing
+                          to compare — and `[]` — compared, broke nothing — are
+                          different facts, and neither of them is a chip.
+                          Amber, not destructive: a version that broke its
+                          predecessor is a deliberate act with a record, not a
+                          fault. Same tone the diverged endpoint pill wears. */}
+                      {(v.breaking_changes?.length ?? 0) > 0 && (
+                        <Badge
+                          className={CHIP_TONE.highlight}
+                          title={v.breaking_changes
+                            ?.map((c) => `${c.subject}: ${c.detail}`)
+                            .join("\n")}
+                          data-testid={`version-breaking-${v.id}`}
+                        >
+                          {v.breaking_changes?.length === 1
+                            ? "1 breaking change"
+                            : `${v.breaking_changes?.length} breaking changes`}
+                        </Badge>
+                      )}
+                      {/* The baseline, shown ONLY when it is not the version
+                          before this one — which is the case a rollback
+                          creates and the only case where the chip above (or
+                          its absence) says less than it appears to.
+
+                          `rollback` moves the live pointer backwards and
+                          writes no version row, so a publish afterwards
+                          compares against the restored version, can truthfully
+                          find nothing, and record `[]`. With no chip at all,
+                          this row reads as "publishing this broke nobody" —
+                          true of the consumers of the baseline, and silent
+                          about the consumers of the version the rollback moved
+                          them off. `neutral`: it is not a fault, it is the
+                          missing half of a sentence. */}
+                      {v.compared_against_version != null &&
+                        v.compared_against_version !== v.version - 1 && (
+                          <Badge
+                            className={CHIP_TONE.neutral}
+                            title={`The comparison that produced this row's verdict was made against version ${v.compared_against_version}, not version ${v.version - 1} — the live pointer had been rolled back. It says nothing about consumers of the versions in between.`}
+                            data-testid={`version-baseline-${v.id}`}
+                          >
+                            {`compared against v${v.compared_against_version}`}
+                          </Badge>
+                        )}
                     </span>
                   </TableCell>
                   <TableCell className="truncate py-2 text-muted-foreground" title={v.note || undefined}>
@@ -359,6 +410,7 @@ export default function VersionsSection() {
       <PublishDialog
         ws={ws}
         id={id}
+        liveVersion={versions.find((v) => v.is_live)?.version}
         open={publishOpen}
         onOpenChange={setPublishOpen}
         publish={publishMutation}
@@ -411,10 +463,33 @@ export default function VersionsSection() {
  * The note stays a `<Textarea rows={2}>`. It is PROSE — "what changed" for the
  * next reader of the history table — not code, so none of `Query`'s editor
  * treatment applies to it.
+ *
+ * # The pre-flight, and what it is NOT
+ *
+ * Opening this dialog runs `POST …/validate`, which since package 6 also
+ * answers "what would publishing this do to anyone already calling it". The
+ * breaking changes it reports are shown here, and Publish will not send until
+ * the author has ticked a box saying they have read them.
+ *
+ * **That checkbox is not the gate.** The gate is the server's: `publish`
+ * recomputes the diff against the live snapshot under the endpoint's row lock
+ * and refuses without the acknowledgement, so a caller that never opens this
+ * dialog — curl, a deploy script, a future console — is refused exactly the
+ * same way. What this surface adds is the reading. If the pre-flight itself
+ * fails, Publish therefore stays ENABLED and the failure is shown: a client
+ * that can disable the publish button cannot be allowed to enable it either,
+ * and a flaky check must not be able to block a publish the server would
+ * accept.
+ *
+ * The acknowledgement is the server's own digest of those specific changes,
+ * echoed back untouched. Nothing here decides what is breaking — that judgement
+ * has one home (`egret_dataapi::contract`), and a second opinion computed in
+ * TypeScript is the drift this programme keeps closing.
  */
 function PublishDialog({
   ws,
   id,
+  liveVersion,
   open,
   onOpenChange,
   publish,
@@ -422,6 +497,8 @@ function PublishDialog({
 }: {
   ws: string;
   id: string;
+  /** The version consumers are receiving, when there is one. */
+  liveVersion?: number;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   publish: ReturnType<typeof usePublishEndpoint>;
@@ -430,6 +507,9 @@ function PublishDialog({
   const [note, setNote] = useState("");
   // The refusal, kept on screen until the author acts on it. See `submit`.
   const [refusal, setRefusal] = useState<string | null>(null);
+  const [preflight, setPreflight] = useState<Preflight>({ phase: "checking" });
+  const [acknowledged, setAcknowledged] = useState(false);
+  const validateMutation = useDataApiValidateEndpoint();
 
   // Cleared on CLOSE, not on open: the dialog instance persists across opens
   // (it is not remounted), so a note left over from a previous publish must
@@ -438,22 +518,90 @@ function PublishDialog({
   // setState-in-effect (and reaches every way the dialog can close — Cancel,
   // Escape, overlay click, and a successful submit — since they all funnel
   // through Radix's `onOpenChange`).
+  //
+  // `acknowledged` is cleared here too, and that is the load-bearing half of
+  // it: a tick left over from a previous open would be an acknowledgement of
+  // changes the author is no longer looking at. The token cannot be replayed
+  // — the server binds it to the exact break set — so the failure would be a
+  // refusal rather than a silent break, but a box that arrives already ticked
+  // is not an acknowledgement of anything.
   const handleOpenChange = (o: boolean) => {
     if (!o) {
       setNote("");
       setRefusal(null);
+      setAcknowledged(false);
+      // And the pre-flight, back to its initial value rather than left holding
+      // the previous open's answer. Resetting HERE rather than at the top of
+      // the effect below is what keeps that effect free of a synchronous
+      // setState — the same placement, for the same reason, as the note.
+      setPreflight({ phase: "checking" });
     }
     onOpenChange(o);
   };
+
+  // The pre-flight. An effect keyed on `open` because the dialog is opened by
+  // the parent's state and not through Radix's `onOpenChange`, so there is no
+  // callback to hang it on.
+  //
+  // Nothing in the body sets state synchronously — the reset lives in
+  // `handleOpenChange` above — so what is left here is one asynchronous call
+  // whose answer lands in a callback. That is what an effect is for, and it is
+  // also what keeps `react-hooks/set-state-in-effect` satisfied without a
+  // suppression comment.
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await validateMutation.mutateAsync({ workspace: ws, id });
+        if (cancelled) return;
+        if (res.status !== 200) {
+          setPreflight({ phase: "failed", message: "Could not check this draft." });
+          return;
+        }
+        const diff = res.data.against_live ?? null;
+        setPreflight({
+          phase: "ready",
+          breaking: diff?.breaking ?? [],
+          safeCount: diff?.safe?.length ?? 0,
+          token: res.data.acknowledge_breaking ?? null,
+          comparedAgainstLive: diff !== null,
+        });
+      } catch (e) {
+        if (cancelled) return;
+        setPreflight({
+          phase: "failed",
+          message: e instanceof Error ? e.message : String(e),
+        });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // `validateMutation` is a fresh object every render; depending on it would
+    // re-run the pre-flight forever.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, ws, id]);
+
+  const breaking = preflight.phase === "ready" ? preflight.breaking : [];
+  const blocked = breaking.length > 0 && !acknowledged;
 
   async function submit() {
     setRefusal(null);
     try {
       const trimmed = note.trim();
+      const token = preflight.phase === "ready" ? preflight.token : null;
       const res = await publish.mutateAsync({
         workspace: ws,
         id,
-        data: trimmed ? { note: trimmed } : {},
+        data: {
+          ...(trimmed ? { note: trimmed } : {}),
+          // Only when there is something to acknowledge. The server refuses a
+          // token sent against a publish that breaks nothing, deliberately —
+          // see `PublishEndpointInput` — so sending one unconditionally would
+          // turn every safe publish into a 409.
+          ...(breaking.length > 0 && token ? { acknowledge_breaking: token } : {}),
+        },
       });
       if (res.status !== 200) {
         setRefusal("Could not publish.");
@@ -487,6 +635,58 @@ function PublishDialog({
             connection, under whatever the engine enforces — so an admin must also grant that service
             account on the underlying tables in Ranger, or this contract has nothing to serve.
           </SettingsNote>
+
+          {preflight.phase === "checking" && (
+            <p className="text-sm text-muted-foreground" data-testid="publish-preflight-checking">
+              Checking what this changes for anyone already calling it…
+            </p>
+          )}
+          {/* A warning, not a block. See the component comment: the refusal
+              lives on the server, so a failed check here must not be able to
+              stop a publish the server would accept. */}
+          {preflight.phase === "failed" && (
+            <Alert variant="destructive">
+              <AlertDescription>
+                Could not check what this changes for existing callers: {preflight.message}. Publishing
+                is still refused by the server if it breaks them.
+              </AlertDescription>
+            </Alert>
+          )}
+          {preflight.phase === "ready" && breaking.length > 0 && (
+            <Alert variant="destructive" data-testid="publish-breaking">
+              <AlertDescription>
+                <p className="font-medium">
+                  {breaking.length === 1
+                    ? "This breaks callers of the version being served"
+                    : `This breaks callers of the version being served, in ${breaking.length} ways`}
+                  {liveVersion == null ? "" : ` (v${liveVersion})`}:
+                </p>
+                <ul className="mt-2 list-disc space-y-1 pl-5">
+                  {breaking.map((c, i) => (
+                    <li key={`${c.kind}-${c.subject}-${i}`}>
+                      <span className="font-medium">{c.subject}</span> — {c.detail}
+                    </li>
+                  ))}
+                </ul>
+              </AlertDescription>
+            </Alert>
+          )}
+          {/* Compared and found nothing is a different message from not asking,
+              and saying so is what stops the warning above reading as noise the
+              one time it appears. */}
+          {preflight.phase === "ready" && breaking.length === 0 && preflight.comparedAgainstLive && (
+            <p className="text-sm text-muted-foreground" data-testid="publish-preflight-clean">
+              {preflight.safeCount === 0
+                ? "Nothing a caller can see changes."
+                : `${preflight.safeCount} change${preflight.safeCount === 1 ? "" : "s"} compared against the served version; none of them breaks a caller.`}
+            </p>
+          )}
+          {preflight.phase === "ready" && !preflight.comparedAgainstLive && (
+            <p className="text-sm text-muted-foreground" data-testid="publish-preflight-first">
+              Nothing is serving this endpoint yet, so there is nothing to break.
+            </p>
+          )}
+
           {/* Inline and persistent, not a toast — the same rule `Config`'s
               Validate block states, for the same class of message and the same
               reader. Measured in Chrome on this branch before this changed: a
@@ -545,12 +745,28 @@ function PublishDialog({
               placeholder="What changed…"
             />
           </div>
+          {/* Rendered only when there is something to acknowledge, so it can
+              never be a box an author learns to tick on every publish — which
+              is the habit that would make it decoration. */}
+          {breaking.length > 0 && (
+            <label className="flex items-start gap-2 text-sm" htmlFor="publish-acknowledge">
+              <Checkbox
+                id="publish-acknowledge"
+                checked={acknowledged}
+                onCheckedChange={(v) => setAcknowledged(v === true)}
+              />
+              <span>
+                I have read {breaking.length === 1 ? "this change" : "these changes"} and accept that
+                deployed callers will break.
+              </span>
+            </label>
+          )}
         </div>
         <DialogFooter>
           <Button type="button" variant="outline" onClick={() => handleOpenChange(false)}>
             Cancel
           </Button>
-          <Button type="button" onClick={submit} disabled={publish.isPending}>
+          <Button type="button" onClick={submit} disabled={publish.isPending || blocked}>
             {publish.isPending ? "Publishing…" : "Publish"}
           </Button>
         </DialogFooter>
@@ -558,3 +774,32 @@ function PublishDialog({
     </Dialog>
   );
 }
+
+/**
+ * What the dialog managed to learn about what this publish would do to
+ * existing callers.
+ *
+ * Three phases and no boolean: "we have not asked yet", "we asked and could
+ * not find out" and "we asked" are three different facts, and the middle one
+ * is the reason this is not `breaking: ContractChange[]` with `[]` as its
+ * initial value. An empty list means "nothing breaks", which is exactly the
+ * claim a failed check cannot support — the same distinction `DraftVsServed`
+ * draws in `endpointState.tsx`, for the same reason.
+ */
+type Preflight =
+  | { phase: "checking" }
+  | { phase: "failed"; message: string }
+  | {
+      phase: "ready";
+      breaking: ContractChange[];
+      /** How many other changes were compared and judged survivable. */
+      safeCount: number;
+      /** The server's acknowledgement for exactly `breaking`. */
+      token: string | null;
+      /**
+       * Whether there WAS a live version to compare against. `false` is a first
+       * publish — no consumer has ever received anything — which is a different
+       * fact from an empty diff and is worded differently.
+       */
+      comparedAgainstLive: boolean;
+    };
