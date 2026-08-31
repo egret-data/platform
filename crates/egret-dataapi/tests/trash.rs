@@ -930,10 +930,46 @@ impl Fixture {
     /// the endpoint under test is about to be TRASHED and the guards this file
     /// measures would refuse the publish. The snapshot is a bare `{}` — nothing
     /// here deserialises it; `enable` and `rollback` read only the pointer.
+    /// # The snapshot is a REAL one, built from the endpoint row
+    ///
+    /// It used to be `'{}'::jsonb`, which no production path can produce —
+    /// `publish` is the only writer of this column — and which nothing read,
+    /// because publish's only look at this table was `MAX(version)` inside its
+    /// own INSERT. Package 6 makes publish read the LIVE version's snapshot to
+    /// diff against, so `{}` now fails to deserialize and the publish 500s. That
+    /// is the correct behaviour for corrupt data (`EndpointStore::versions` has
+    /// answered the same way since P3, and quietly skipping the diff instead
+    /// would mean an unreadable snapshot silently disables the breaking-change
+    /// gate) — so the fix is the fixture, not the rule. It is pinned from the
+    /// other side by `publish_refuses_when_the_live_snapshot_cannot_be_read` in
+    /// `tests/lifecycle.rs`.
+    ///
+    /// Built from `dataapi.endpoints` rather than hard-coded so it stays the
+    /// endpoint's OWN contract: a snapshot that disagreed with the draft would
+    /// make the publish below a breaking change and a 409, which is a second way
+    /// for this test to fail for a reason that has nothing to do with the trash.
+    /// The columns are what `OkPort` describes.
     async fn add_version(&self, id: Uuid, version: i32) -> Uuid {
         let vid: Uuid = sqlx::query_scalar(
-            "INSERT INTO dataapi.endpoint_versions (endpoint_id, version, snapshot, note, created_by) \
-             VALUES ($1, $2, '{}'::jsonb, '', $3) RETURNING id",
+            "INSERT INTO dataapi.endpoint_versions \
+                 (endpoint_id, version, snapshot, note, created_by) \
+             SELECT e.id, $2, jsonb_build_object( \
+                      'statements', jsonb_build_array(jsonb_build_object( \
+                          'name', 'main', 'sql', 'SELECT 1', \
+                          'columns', jsonb_build_array(jsonb_build_object( \
+                              'name', 'n', 'ty', 'integer', 'required', true)))), \
+                      'method', e.method, \
+                      'path', e.path, \
+                      'database_id', e.database_id, \
+                      'params', e.params, \
+                      'output', e.output, \
+                      'cache', e.cache, \
+                      'limits', e.limits, \
+                      'rate_limit', e.rate_limit, \
+                      'delegated', false), \
+                    '', $3 \
+               FROM dataapi.endpoints e WHERE e.id = $1 \
+             RETURNING id",
         )
         .bind(id)
         .bind(version)

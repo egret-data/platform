@@ -47,9 +47,73 @@ Ordered by value-per-effort, not by severity. Dependencies noted.
 | 3b | **Engine coupling** — ✅ `3ff8096d` (#557) | No engine connection pool (a TCP+TLS handshake **per statement**); a retryable Trino 503 discarded as a 500; `internal` the single code for six causes. | — |
 | 4 | **Multi-replica correctness** — ✅ `0c3febe5` | Response cache and token bucket are **process-local** while replica count is a Helm value, so every published rate limit silently multiplies by replica count and the cache fragments. | §4 decision B |
 | 5 | **Script parameter constraints** — ✅ | Package S lets a script concatenate a caller's value into SQL text. The publish-time sentinel probe has **two bypasses pinned open by tests asserting `is_ok()`**. Closed by construction rather than by a better probe, at publish AND — for endpoints frozen before the rule — at serve time; see §5.1. | — |
-| 6 | **Publish-time diff + acknowledgement** | `publish` validates the draft against *itself*; the only read of `endpoint_versions` is `MAX(version)`. A removed column, narrowed type, renamed parameter or new required parameter publishes silently. Worst case: adding a second statement flips top-level `data` from an array to an object. | — |
+| 6 | **Publish-time diff + acknowledgement** — ✅ | `publish` validates the draft against *itself*; the only read of `endpoint_versions` is `MAX(version)`. A removed column, narrowed type, renamed parameter or new required parameter publishes silently. Worst case: adding a second statement flips top-level `data` from an array to an object. | — |
 | 7 | **Consumer version pinning** | Serving resolves `live_version_id` only; a publish moves every caller at commit. `meta.version` lets a consumer *observe* which version answered but never *ask* for one. | 6 |
 | 8 | **Contract reachability** | The OpenAPI document sits behind a human session + `:manage`, so a consumer holding only a `data-api` token cannot fetch its own contract; `error.code` has no `enum` despite being documented as the stable code to branch on. | — |
+
+### Package 6 as delivered, and the four decisions inside it
+
+`crates/egret-dataapi/src/contract.rs` compares the snapshot a publish would
+freeze against the snapshot reached through `endpoints.live_version_id`, files
+every difference as breaking or safe, and `publish` refuses a breaking one
+without an acknowledgement. Four things are worth carrying forward rather than
+rediscovering:
+
+- **One rule, not a list of rules.** A change is breaking when a request that
+  succeeded against the live version could — with the caller changing nothing —
+  be **refused**, **silently ignored**, or answered with a **body their existing
+  code cannot read**. Every classification is derived from that sentence, and
+  the restraint is the deliverable: a rule that fires on every publish teaches
+  an author to click through, and an acknowledgement nobody reads is worse than
+  none, because it also produces a record saying they agreed. "Silently ignored"
+  is in the rule for exactly one case — a REMOVED PARAMETER. Serving walks the
+  declared specs, so `?region=EU` against an endpoint that renamed `region` is
+  not refused: it answers 200 with the filter no longer applied.
+
+- **The envelope predicate is the router's own.** `data` is keyed by statement
+  name iff `!(statements.len() == 1 && transform.is_none())` — read from
+  `meta_contract` and `statements_data`, not restated. That means the trap has
+  TWO doors, and the second was not in the brief: attaching a response transform
+  to a single-statement endpoint flips `data` and `meta` exactly as adding a
+  second statement does.
+
+- **The acknowledgement is a digest, not a flag.** `POST /validate` returns the
+  diff and a SHA-256 over (a domain tag, the endpoint id, the live version id,
+  and each breaking change's kind/subject/detail, length-prefixed). `publish`
+  recomputes it under the endpoint's row lock and compares. There is no constant
+  a deploy script can hardcode, a token issued for yesterday's break does not
+  match today's, and one issued for another endpoint or from before a rollback
+  does not match at all. A token sent when nothing breaks is refused rather than
+  ignored — accepting it is how a client learns to send it always, which is the
+  `force: true` this shape exists to make unrepresentable. The refusal is a
+  **409**: the same body is correct or incorrect depending on which version is
+  live at that instant, so "your request is malformed" would be false the moment
+  a rollback moved the pointer.
+
+- **The record distinguishes silence from an answer.** Migration `0131` adds
+  `dataapi.endpoint_versions.breaking_changes jsonb` **NULL**, not
+  `DEFAULT '[]'`. NULL means nobody looked — a version published before the
+  column existed, or a first publish, where no consumer has ever received
+  anything. `[]` means it was compared and broke nothing. A default would have
+  stamped the second claim, retroactively, onto every row that only qualified
+  for the first. With the row's existing `created_by`/`created_at` that is the
+  audit trail: who accepted which break, on which version, when.
+
+Two deliberate exclusions, recorded so they are read as decisions:
+
+- **`rollback` is not gated.** Putting yesterday's version back can break a
+  consumer who coded against today's, and the diff would run just as well in
+  that direction. It is not run, for the reason `rollback` already refuses to
+  re-run the full validator: rollback is usually someone stopping an outage, and
+  a gate there is the one that must not exist. Publish is an author choosing to
+  move forward and can afford to be stopped.
+- **The console does not classify.** The editor's state pill
+  (`endpointState.tsx`, package 1) still answers its own question — "is there
+  anything to publish", one boolean over nine fields — and is untouched. It is
+  a different question from "does publishing break a consumer": a `sql` edit
+  lights the pill and produces no breaking change, and both are correct. What
+  the frontend does NOT do is decide what is breaking; it renders the server's
+  list and echoes the server's token back.
 
 **Carried out of packages 0–3, not fixed, so they are not rediscovered as new:**
 

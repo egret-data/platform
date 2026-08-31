@@ -4974,7 +4974,7 @@ pub async fn validate(
     principal: UserId,
     draft: &DataApiEndpointDto,
     conn: ConnectionSafety,
-) -> Result<Vec<StatementSnapshot>> {
+) -> Result<ValidatedDraft> {
     // The shape decision comes back from the validator that just used it, so the
     // renders that DESCRIBE each statement below and the renders that VALIDATED
     // it are against the same `ParamValues` shape.
@@ -5102,7 +5102,171 @@ pub async fn validate(
         &iterated,
         &draft.limits,
     )?;
-    Ok(frozen)
+    Ok(ValidatedDraft {
+        statements: frozen,
+        iterated: iterated.names().to_vec(),
+    })
+}
+
+/// Everything [`validate`] resolved about a draft that is needed to say what
+/// publishing it would freeze.
+///
+/// # Why `iterated` comes back rather than being recomputed
+///
+/// It was already discarded here once. [`EndpointSnapshot::iterated`] is the
+/// endpoint's one shape decision, made across EVERY template of every
+/// statement, and the reason it is frozen at all is that a scripted statement
+/// has no text to derive it from before its parameters are resolved. Package 6
+/// needs the snapshot `validate` would produce — so that `POST /validate` can
+/// diff it against the live version and hand the author an acknowledgement for
+/// exactly the breaks that publish will find — and deriving the set a second
+/// time, from one of the texts, is the M2 bug one level down.
+#[derive(Debug)]
+pub struct ValidatedDraft {
+    /// One entry per statement, in the author's order, each carrying the output
+    /// schema `describe` resolved for it.
+    pub statements: Vec<StatementSnapshot>,
+    /// The parameter names some statement iterates.
+    pub iterated: Vec<String>,
+}
+
+/// Everything [`EndpointStore::publish`] needs beyond the workspace and the
+/// endpoint it is publishing.
+///
+/// A struct rather than five more positional parameters, and not only because
+/// clippy counts them: `described` and `acknowledge_breaking` are a `Vec` and an
+/// `Option<&str>` that no reader of a call site could tell apart from `note`
+/// without opening this file. Naming them at the call site is what stops the
+/// day a describe is passed where a note belongs.
+pub struct PublishRequest<'a> {
+    /// Who is publishing. Written to `endpoint_versions.created_by`, and
+    /// therefore the record of who accepted any breaking change.
+    pub by: UserId,
+    /// Free-form "what changed", stored on the version.
+    pub note: &'a str,
+    /// The draft as it was read BEFORE the describe. `publish` re-reads the row
+    /// under a lock and refuses unless the two still agree.
+    pub draft: &'a DataApiEndpointDto,
+    /// One entry per statement, carrying the columns `describe` resolved.
+    pub described: Vec<StatementSnapshot>,
+    /// The acknowledgement `POST /validate` issued for the breaking changes this
+    /// publish would make. `None` is the only correct value when it makes none —
+    /// see [`crate::contract::ContractDiff::check_acknowledgement`].
+    pub acknowledge_breaking: Option<&'a str>,
+}
+
+/// `described` does not describe this endpoint's statements.
+///
+/// A distinct type rather than an `Error`, because the two callers owe the
+/// reader different sentences for it. In `publish` it means the draft was edited
+/// during the describe round trips and the answer is a retryable `409`; in
+/// `POST /validate` the two halves come from one call and cannot disagree, so
+/// reaching it there is a bug in this crate and is answered as a `500`. Folding
+/// them into one `Error` at the point of failure would make one of the two
+/// messages wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DescribedMismatch;
+
+/// What publishing this definition, with these described columns, would freeze.
+///
+/// # Why this is a function and not two blocks of code
+///
+/// It was one block, inside `publish`, and package 6 needed the same value
+/// before the transaction: `POST /validate` has to diff the version an author is
+/// about to publish against the one consumers are receiving, and a diff computed
+/// against an approximation of the snapshot is a diff that can disagree with the
+/// refusal publish issues a second later. `DataApiValidationDto`'s own doc
+/// already claimed validate returns "exactly what `publish` would freeze"; this
+/// is what makes the claim structural rather than a promise two call sites keep.
+///
+/// # The pairing is by NAME, not by position
+///
+/// `described` carries the name each column list was resolved for, and a
+/// positional zip discards it: the one thing that could go wrong here —
+/// `total`'s columns frozen onto `rows`' SQL, an endpoint that then answers
+/// `503 schema_drift` on every call it does not answer wrong — is a crossing
+/// that pairing by name cannot express. In `publish` it is also guarded by the
+/// identity check against the locked row, which is a guarantee held in a
+/// different function; this is the same guarantee held by the data.
+///
+/// A count that does not match afterwards is [`DescribedMismatch`] too: every
+/// statement of the endpoint was matched, so a longer `described` can only be a
+/// describe of a statement that no longer exists.
+pub fn prospective_snapshot(
+    endpoint: &DataApiEndpointDto,
+    described: &[StatementSnapshot],
+    iterated: &[String],
+    conn: ConnectionSafety,
+) -> std::result::Result<EndpointSnapshot, DescribedMismatch> {
+    let mut statements: Vec<StatementSnapshot> = Vec::with_capacity(endpoint.statements.len());
+    for statement in &endpoint.statements {
+        let resolved = described
+            .iter()
+            .find(|d| d.name == statement.name)
+            .ok_or(DescribedMismatch)?;
+        statements.push(StatementSnapshot {
+            // The name and the DEFINITION come from the endpoint row, and only
+            // the resolved columns come from the describe. Since package S Task
+            // 6 the definition is the author's source rather than the text
+            // generated from it, which makes that sentence stronger rather than
+            // weaker: what is frozen is exactly the bytes the row carries, with
+            // nothing computed in between.
+            name: statement.name.clone(),
+            source: statement.source.clone(),
+            columns: resolved.columns.clone(),
+        });
+    }
+    if described.len() != statements.len() {
+        return Err(DescribedMismatch);
+    }
+    Ok(EndpointSnapshot {
+        statements,
+        // The endpoint's one shape decision, made across every template of every
+        // statement by the validation this was called with. Frozen because a
+        // scripted statement has no text to derive it from before its parameters
+        // are resolved, and resolving them needs it — see
+        // [`EndpointSnapshot::iterated`].
+        iterated: iterated.to_vec(),
+        method: endpoint.method.clone(),
+        // The stored path, which `normalize_path` already canonicalised. The
+        // snapshot must never carry a spelling the endpoint row does not have.
+        path: endpoint.path.clone(),
+        database_id: endpoint.database_id,
+        params: endpoint.params.clone(),
+        output: endpoint.output.clone(),
+        cache: endpoint.cache.clone(),
+        limits: endpoint.limits.clone(),
+        rate_limit: endpoint.rate_limit.clone(),
+        // The witness PAIR, both halves from ONE read of `query.databases`.
+        // Freezing only `delegated` — which is what this did — left
+        // `{delegated: false, impersonate: true}` indistinguishable from a
+        // genuinely shared-safe connection forever after.
+        //
+        // **`conn.governed` is deliberately NOT frozen beside them**, and the
+        // asymmetry is the point rather than an omission. A witness is for a
+        // question of the form "is the live row still what this version was
+        // published against?", which is the whole of the `shared`-cache rule:
+        // the unsafe half (`scope: shared`) lives in the snapshot, so the live
+        // row is the only thing that can move. Governance is not that question.
+        // BOTH halves of `governed && !runs_per_principal(…)` are live, mutable
+        // columns, so an equality against a frozen witness answers the wrong
+        // thing in the exact case that matters: an endpoint published on an
+        // ungoverned, non-delegated connection freezes
+        // `governed: false, delegated: false`, and when an admin marks the
+        // database governed the pair `(delegated)` still AGREES — the witness
+        // stays silent while the endpoint becomes the defect. So serving
+        // evaluates the live triple instead; see
+        // [`crate::serving::governance_allows_serving`].
+        delegated: conn.delegated,
+        impersonate: conn.impersonate,
+        // The stamp, written here and nowhere else, because publish calls this
+        // with the validation that has just run against the row being frozen.
+        // §7 of the parameters spec said "every endpoint with parameters must be
+        // re-published after P4.5" — an instruction to whoever reads it. This is
+        // the enforcement: a version frozen before the gate existed carries `0`,
+        // and the serving path refuses it.
+        param_gate: PARAM_GATE,
+    })
 }
 
 /// What describing every branch of one definition produced.
@@ -5553,6 +5717,17 @@ pub struct DataApiEndpointVersionDto {
     /// The frozen definition. **This is the only thing P4 may read to decide what
     /// a request returns** — see the module comment.
     pub snapshot: EndpointSnapshot,
+    /// What publishing this version did to the consumers of the one it replaced
+    /// (package 6), and therefore what its `created_by` accepted when they
+    /// acknowledged it.
+    ///
+    /// `None` and `Some([])` are different facts and are kept apart. `None` is a
+    /// version published before this was recorded, or the FIRST version of an
+    /// endpoint, where there was no live contract to break. `Some([])` is a
+    /// version that was compared against the live one and broke nothing. A
+    /// history that showed both as "no breaking changes" would be claiming
+    /// something about the first that nobody ever checked.
+    pub breaking_changes: Option<Vec<crate::contract::ContractChange>>,
 }
 
 /// Which version a rollback names.
@@ -5577,6 +5752,26 @@ pub struct DataApiPublishedDto {
     pub version_id: Uuid,
     pub version: i32,
     pub state: String,
+    /// The breaking changes this publish made, which the caller acknowledged to
+    /// get here (package 6).
+    ///
+    /// Echoed back rather than merely stored so the audit event the route emits
+    /// carries the same list the version row does — one write, two records, and
+    /// no second computation of what was accepted.
+    ///
+    /// `None` for a first publish and for a `rollback`, neither of which
+    /// compares anything: a rollback re-serves a contract that was already
+    /// published once, and the two live rules it DOES re-ask are the ones whose
+    /// inputs are live (see [`EndpointStore::rollback`]).
+    ///
+    /// `skip_serializing_if` here and deliberately NOT on
+    /// [`DataApiEndpointVersionDto::breaking_changes`], which is the same value
+    /// read back out of the table. There, `null` is an answer — "nobody looked"
+    /// — and a reader has to be able to tell it from `[]`. Here the field is
+    /// absent from a `rollback`'s response because that response is not about a
+    /// comparison at all, and a `null` would invite the reader to interpret it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub breaking_changes: Option<Vec<crate::contract::ContractChange>>,
 }
 
 fn db_err(e: sqlx::Error) -> Error {
@@ -5708,6 +5903,42 @@ impl EndpointStore {
     /// response body, and it is what makes "what is frozen is what was
     /// validated" true of the envelope as well.
     ///
+    /// # What this does to the consumers of the version already live
+    ///
+    /// Everything above validates the draft against ITSELF. Until package 6 that
+    /// was the whole of it: this function's only read of
+    /// `dataapi.endpoint_versions` was the `COALESCE(MAX(version), 0) + 1`
+    /// inside its own INSERT, so a removed column, a narrowed type, a renamed
+    /// parameter or a new required parameter published in silence and every
+    /// deployed consumer found out at its next call.
+    ///
+    /// So the live snapshot is read on this transaction and
+    /// [`crate::contract::compare_contracts`] classifies every difference; a
+    /// breaking one is refused unless `acknowledge_breaking` carries the digest
+    /// [`crate::contract::ContractDiff::acknowledgement`] computes for exactly
+    /// those changes. A long-lived endpoint may legitimately need a breaking
+    /// change — the property is that nobody makes one without being told which
+    /// one they are making.
+    ///
+    /// Three things about the placement, each of which was a choice:
+    ///
+    /// * It is read through **`live_version_id`**, not `MAX(version)`. A
+    ///   rollback makes an older version live, and diffing against the newest
+    ///   row would warn about a break nobody would feel and stay silent about
+    ///   one they would.
+    /// * It is read **inside this transaction**, after `locked` took
+    ///   `FOR UPDATE`. The acknowledgement is bound to the live version id, so
+    ///   the pointer moving between the check and the insert would let a token
+    ///   issued for one contract authorise a break against another.
+    /// * It is checked **after** the snapshot is built and **before** anything
+    ///   is written, which is what makes the refusal free: the transaction rolls
+    ///   back having inserted nothing, exactly like the trashed-endpoint
+    ///   conflict below.
+    ///
+    /// The first publish of an endpoint reads `None` and compares nothing, and
+    /// that is not the same as comparing and finding nothing — see the
+    /// `breaking_changes` column's own comment in migration `0131`.
+    ///
     /// # State
     ///
     /// `disabled` is PRESERVED. Publishing a new version of a deliberately
@@ -5720,11 +5951,15 @@ impl EndpointStore {
         &self,
         workspace: Uuid,
         id: Uuid,
-        by: UserId,
-        note: &str,
-        draft: &DataApiEndpointDto,
-        described: Vec<StatementSnapshot>,
+        req: PublishRequest<'_>,
     ) -> Result<DataApiPublishedDto> {
+        let PublishRequest {
+            by,
+            note,
+            draft,
+            described,
+            acknowledge_breaking,
+        } = req;
         // BEFORE the transaction, deliberately, and this is the placement
         // decision rather than an accident of ordering. This is the only
         // Starlark evaluation `publish` performs. `transform::MAX_WALL_CLOCK`
@@ -5859,114 +6094,113 @@ impl EndpointStore {
             },
         )?;
 
-        // The name and the SQL come from `current` — the LOCKED row — and only
-        // the resolved columns come from the caller. `described` was computed
-        // against the pre-lock draft, and the identity check above says the two
-        // agree; taking the text from the locked row anyway is what makes that
-        // an assertion rather than a promise, and it is the same reason `path`
-        // below is read from `current` rather than echoed back.
-        //
-        // Paired by NAME, not by position. `described` carries the name each
-        // column list was resolved for, and a positional zip discards it: the
-        // one thing that could go wrong here — `total`'s columns frozen onto
-        // `rows`' SQL, an endpoint that then answers `503 schema_drift` on
-        // every call it does not answer wrong — is a crossing that pairing by
-        // name cannot express. It is guarded today by the identity check above,
-        // which is a guarantee held in a different function; this is the same
-        // guarantee held by the data.
-        //
-        // A missing name is answered as the conflict it would have to be, not as
-        // a panic on an index. `current.statements` has just been through
-        // `validate_statements`, so its names are unique and the match is
-        // unambiguous.
-        let mut statements: Vec<StatementSnapshot> = Vec::with_capacity(current.statements.len());
-        for statement in &current.statements {
-            let Some(resolved) = described.iter().find(|d| d.name == statement.name) else {
-                return Err(Error::Conflict(
-                    "the endpoint was edited while it was being published; validate and publish \
-                     again"
+        // ONE expression of "what publish would freeze", shared with
+        // `POST /validate` (package 6) so that the contract an author is shown
+        // before publishing and the contract that is actually frozen cannot be
+        // two different answers. The definition comes from `current` — the
+        // LOCKED row — and only the resolved columns come from the caller; see
+        // `prospective_snapshot` for why that pairing is by NAME.
+        let snapshot = prospective_snapshot(&current, &described, validated.iterated.names(), conn)
+            .map_err(|DescribedMismatch| {
+                Error::Conflict(
+                    "the endpoint was edited while it was being published; validate and \
+                         publish again"
                         .into(),
-                ));
-            };
-            statements.push(StatementSnapshot {
-                // The name and the DEFINITION come from `current` — the LOCKED
-                // row — and only the resolved columns come from the caller.
-                // Since package S Task 6 the definition is the author's source
-                // rather than the text generated from it, which makes that
-                // sentence stronger rather than weaker: what is frozen is
-                // exactly the bytes the locked row carries, with nothing
-                // computed in between.
-                name: statement.name.clone(),
-                source: statement.source.clone(),
-                columns: resolved.columns.clone(),
-            });
-        }
-        if described.len() != statements.len() {
-            // Every statement of the locked row was matched, so this can only be
-            // `described` carrying MORE than the row does — a describe of a
-            // statement that no longer exists, which is the same edit-during-
-            // publish and gets the same answer.
-            return Err(Error::Conflict(
-                "the endpoint was edited while it was being published; validate and publish again"
-                    .into(),
-            ));
-        }
-
-        let snapshot = EndpointSnapshot {
-            statements,
-            // The endpoint's one shape decision, made across every template of
-            // every statement by the validation of the LOCKED row directly
-            // above. Frozen because a scripted statement has no text to derive
-            // it from before its parameters are resolved, and resolving them
-            // needs it — see [`EndpointSnapshot::iterated`].
-            iterated: validated.iterated.names().to_vec(),
-            method: current.method.clone(),
-            // The stored path, which `normalize_path` already canonicalised. The
-            // snapshot must never carry a spelling the endpoint row does not have.
-            path: current.path.clone(),
-            database_id: current.database_id,
-            params: current.params.clone(),
-            output: current.output.clone(),
-            cache: current.cache.clone(),
-            limits: current.limits.clone(),
-            rate_limit: current.rate_limit.clone(),
-            // The witness PAIR, both halves from the one SELECT above. Freezing
-            // only `delegated` — which is what this did — left
-            // `{delegated: false, impersonate: true}` indistinguishable from a
-            // genuinely shared-safe connection forever after.
-            //
-            // **`conn.governed` is deliberately NOT frozen beside them**, and
-            // the asymmetry is the point rather than an omission. A witness is
-            // for a question of the form "is the live row still what this
-            // version was published against?", which is the whole of the
-            // `shared`-cache rule: the unsafe half (`scope: shared`) lives in
-            // the snapshot, so the live row is the only thing that can move.
-            // Governance is not that question. BOTH halves of
-            // `governed && !runs_per_principal(…)` are live, mutable columns, so
-            // an equality against a frozen witness answers the wrong thing in
-            // the exact case that matters: an endpoint published on an
-            // ungoverned, non-delegated connection freezes
-            // `governed: false, delegated: false`, and when an admin marks the
-            // database governed the pair `(delegated)` still AGREES — the
-            // witness stays silent while the endpoint becomes the defect. So
-            // serving evaluates the live triple instead; see
-            // [`crate::serving::governance_allows_serving`].
-            delegated: conn.delegated,
-            impersonate: conn.impersonate,
-            // The stamp, written here and nowhere else, because this is the one
-            // place `validate_definition` has just run against the row being
-            // frozen. §7 of the parameters spec said "every endpoint with
-            // parameters must be re-published after P4.5" — an instruction to
-            // whoever reads it. This is the enforcement: a version frozen before
-            // the gate existed carries `0`, and the serving path refuses it.
-            param_gate: PARAM_GATE,
+                )
+            })?;
+        // ── Package 6: what this publish does to the consumers of the version
+        // currently being served ─────────────────────────────────────────────
+        //
+        // The LIVE version, reached through `endpoints.live_version_id`, and
+        // NOT `MAX(version)` — which is the only row this function used to read
+        // at all. A rollback makes an OLDER version live, so the newest row can
+        // describe a contract nobody is calling; diffing against it would warn
+        // an author about a break that does not exist and stay silent about one
+        // that does.
+        //
+        // Read on THIS transaction, after `locked` took `FOR UPDATE` on the
+        // endpoint row, so `live_version_id` cannot move between the diff and
+        // the insert — which is what makes the acknowledgement, bound to that
+        // id, mean the same thing when it is checked as when it was issued.
+        //
+        // `None` is a FIRST publish, and it is the one case where there is
+        // genuinely nothing to break: no consumer has ever received anything
+        // from this endpoint. It is a distinct absence rather than an empty
+        // diff, and the two must not be confused — a fixture with no live
+        // version exercises this branch and can never see a break at all.
+        let live: Option<(Uuid, serde_json::Value)> = sqlx::query_as(
+            "SELECT v.id, v.snapshot FROM dataapi.endpoint_versions v \
+               JOIN dataapi.endpoints e ON e.live_version_id = v.id \
+              WHERE e.id = $1 AND e.workspace_id = $2",
+        )
+        .bind(id)
+        .bind(workspace)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        //
+        // A `409`, not a `400`, on every arm below. The very same body is
+        // correct or incorrect depending on which version is live at this
+        // instant, so "your request is malformed" would be false the moment a
+        // rollback moved the pointer. What is true is that the request and the
+        // server's state disagree, which is what a conflict is — and it is the
+        // same class, and the same remedy, as the edit-during-publish conflict
+        // above.
+        let breaking: Option<Vec<crate::contract::ContractChange>> = match live {
+            Some((live_version_id, live_snapshot)) => {
+                // A stored snapshot that will not deserialize is corrupt data,
+                // not an authoring error: refusing the publish is the
+                // fail-closed direction, because the alternative is publishing
+                // over a contract nobody could read and telling nobody.
+                let live_snapshot: EndpointSnapshot = serde_json::from_value(live_snapshot)
+                    .map_err(|e| Error::Internal(anyhow::anyhow!("read live snapshot: {e}")))?;
+                let diff = crate::contract::compare_contracts(&live_snapshot, &snapshot);
+                diff.check_acknowledgement(id, live_version_id, acknowledge_breaking)
+                    .map_err(|e| Error::Conflict(e.to_string()))?;
+                Some(diff.breaking)
+            }
+            None => {
+                // A first publish compares nothing — and an EMPTY diff is the
+                // truthful thing to ask, rather than skipping the question.
+                // Skipping it is what this did first, and it left a hole in the
+                // one property the acknowledgement has: a token sent against a
+                // first publish was silently ignored, which is how a client
+                // learns to send one always. Routed through the same function
+                // as every other arm, so there is one rule and not two — the
+                // ids are not read at all when there is nothing to acknowledge.
+                crate::contract::ContractDiff::default()
+                    .check_acknowledgement(id, Uuid::nil(), acknowledge_breaking)
+                    .map_err(|e| Error::Conflict(e.to_string()))?;
+                None
+            }
         };
+        let breaking_payload = breaking
+            .as_ref()
+            .map(|b| {
+                serde_json::to_value(b)
+                    .map_err(|e| Error::Internal(anyhow::anyhow!("serialize breaking: {e}")))
+            })
+            .transpose()?;
+
         let payload = serde_json::to_value(&snapshot)
             .map_err(|e| Error::Internal(anyhow::anyhow!("serialize snapshot: {e}")))?;
 
+        // `breaking_changes` records the COMPARISON, and the distinction between
+        // SQL `NULL` and `[]` is load-bearing: null means nobody looked — a
+        // version published before this column existed, or a first version,
+        // where there is no live contract to compare against — and `[]` means
+        // this publish was compared against the live version and broke nothing.
+        // A `DEFAULT '[]'` on the migration would have stamped the second claim
+        // onto every row that only ever qualified for the first.
+        //
+        // The row already carries `created_by`, so together they are the audit
+        // trail the package asked for: who accepted which break, on which
+        // version, at which time — cheap to write here, and not recoverable
+        // afterwards from anything else.
         let (version_id, version): (Uuid, i32) = sqlx::query_as(
-            "INSERT INTO dataapi.endpoint_versions (endpoint_id, version, snapshot, note, created_by) \
-             SELECT $1, COALESCE(MAX(version), 0) + 1, $2, $3, $4 \
+            "INSERT INTO dataapi.endpoint_versions \
+                 (endpoint_id, version, snapshot, note, created_by, breaking_changes) \
+             SELECT $1, COALESCE(MAX(version), 0) + 1, $2, $3, $4, $5 \
                FROM dataapi.endpoint_versions WHERE endpoint_id = $1 \
              RETURNING id, version",
         )
@@ -5974,6 +6208,7 @@ impl EndpointStore {
         .bind(&payload)
         .bind(note)
         .bind(by.0)
+        .bind(&breaking_payload)
         .fetch_one(&mut *tx)
         .await
         .map_err(db_err)?;
@@ -6015,6 +6250,7 @@ impl EndpointStore {
             version_id,
             version,
             state,
+            breaking_changes: breaking,
         })
     }
 
@@ -6215,6 +6451,9 @@ impl EndpointStore {
             version_id,
             version,
             state,
+            // A rollback re-serves a version that was published once already;
+            // it does not compare contracts and must not claim to have.
+            breaking_changes: None,
         })
     }
 
@@ -6250,6 +6489,47 @@ impl EndpointStore {
     /// workspace and to mark which version is live. Sourcing any part of the
     /// returned snapshot from `e.*` instead would make a published version follow
     /// its draft, and is exactly the shape P4 must not grow.
+    /// The version a consumer is receiving right now, if any: its id and its
+    /// frozen snapshot.
+    ///
+    /// **Reached through `endpoints.live_version_id`, never through
+    /// `MAX(version)`.** They are the same row until the first rollback and
+    /// different rows afterwards, and it is the live one every question in
+    /// package 6 is about.
+    ///
+    /// `None` means the endpoint has never been published — or, after a `trash`
+    /// followed by nothing, still points at nothing. Either way there is no
+    /// contract to break.
+    ///
+    /// Read WITHOUT a lock, because its one caller is `POST /validate`, which
+    /// answers a question about right now and writes nothing. `publish` issues
+    /// its own copy of this SELECT inside its transaction, after `FOR UPDATE` on
+    /// the endpoint row — the answer there has to be pinned for the length of
+    /// the insert, and this one does not.
+    pub async fn live_snapshot(
+        &self,
+        workspace: Uuid,
+        id: Uuid,
+    ) -> Result<Option<(Uuid, EndpointSnapshot)>> {
+        let row: Option<(Uuid, serde_json::Value)> = sqlx::query_as(
+            "SELECT v.id, v.snapshot FROM dataapi.endpoint_versions v \
+               JOIN dataapi.endpoints e ON e.live_version_id = v.id \
+              WHERE e.id = $1 AND e.workspace_id = $2",
+        )
+        .bind(id)
+        .bind(workspace)
+        .fetch_optional(&self.db.pool)
+        .await
+        .map_err(db_err)?;
+        row.map(|(version_id, snapshot)| {
+            let snapshot: EndpointSnapshot = serde_json::from_value(snapshot).map_err(|e| {
+                Error::Internal(anyhow::anyhow!("live snapshot is not readable: {e}"))
+            })?;
+            Ok((version_id, snapshot))
+        })
+        .transpose()
+    }
+
     pub async fn versions(
         &self,
         workspace: Uuid,
@@ -6267,10 +6547,11 @@ impl EndpointStore {
             Option<Uuid>,
             chrono::DateTime<chrono::Utc>,
             serde_json::Value,
+            Option<serde_json::Value>,
         );
         let rows: Vec<Row> = sqlx::query_as(
             "SELECT v.id, v.version, v.note, COALESCE(e.live_version_id = v.id, false), \
-                    v.created_by, v.created_at, v.snapshot \
+                    v.created_by, v.created_at, v.snapshot, v.breaking_changes \
                FROM dataapi.endpoint_versions v \
                JOIN dataapi.endpoints e ON e.id = v.endpoint_id \
               WHERE v.endpoint_id = $1 AND e.workspace_id = $2 \
@@ -6283,7 +6564,7 @@ impl EndpointStore {
         .map_err(db_err)?;
         rows.into_iter()
             .map(
-                |(id, version, note, is_live, created_by, created_at, snapshot)| {
+                |(id, version, note, is_live, created_by, created_at, snapshot, breaking)| {
                     Ok(DataApiEndpointVersionDto {
                         id,
                         version,
@@ -6291,6 +6572,21 @@ impl EndpointStore {
                         is_live,
                         created_by,
                         created_at,
+                        // Same rule as the snapshot one line down: a stored
+                        // value that will not read is a 500, never a silent
+                        // default. This one is the record of what an author
+                        // accepted, and defaulting it to "nothing" would erase
+                        // exactly the fact it exists to keep.
+                        breaking_changes: breaking
+                            .map(|b| {
+                                serde_json::from_value(b).map_err(|e| {
+                                    Error::Internal(anyhow::anyhow!(
+                                        "stored breaking changes for version {version} are not \
+                                         readable: {e}"
+                                    ))
+                                })
+                            })
+                            .transpose()?,
                         // A stored snapshot that will not deserialize is a 500,
                         // never a default: it is a published contract, and quietly
                         // substituting one would misreport what clients are being
@@ -11253,9 +11549,9 @@ mod tests {
         )
         .await
         .expect("a conforming transform publishes");
-        assert_eq!(frozen.len(), 1);
+        assert_eq!(frozen.statements.len(), 1);
         assert_eq!(
-            frozen[0]
+            frozen.statements[0]
                 .columns
                 .iter()
                 .map(|c| c.name.as_str())
@@ -11368,8 +11664,8 @@ mod tests {
         )
         .await
         .expect("both branches describe");
-        assert_eq!(frozen.len(), 1);
-        let columns = &frozen[0].columns;
+        assert_eq!(frozen.statements.len(), 1);
+        let columns = &frozen.statements[0].columns;
         assert_eq!(
             columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
             vec!["a", "b"],
@@ -11417,7 +11713,7 @@ mod tests {
         )
         .await
         .expect("both branches describe");
-        let columns = &frozen[0].columns;
+        let columns = &frozen.statements[0].columns;
         assert_eq!(
             columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
             vec!["a", "b"],
@@ -11450,16 +11746,16 @@ mod tests {
         )
         .await
         .expect("one branch describes");
-        assert_eq!(frozen.len(), 1);
+        assert_eq!(frozen.statements.len(), 1);
         assert_eq!(
-            frozen[0]
+            frozen.statements[0]
                 .columns
                 .iter()
                 .map(|c| c.name.as_str())
                 .collect::<Vec<_>>(),
             vec!["a"]
         );
-        assert!(frozen[0].columns[0].required);
+        assert!(frozen.statements[0].columns[0].required);
     }
 
     /// A branch the representative values do not take is SCANNED, not merely
