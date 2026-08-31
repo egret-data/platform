@@ -4,6 +4,17 @@ kind: Ingress
 metadata:
   name: egret
   namespace: {{ .Release.Namespace }}
+  annotations:
+    # PINNED, not inherited. 60 s was ingress-nginx's DEFAULT, read out of the
+    # running controller's generated config — a number the Data API's own
+    # request deadline is derived from and that this chart did not own, so a
+    # controller upgrade or a cluster-wide ConfigMap could have moved it without
+    # anything here noticing. `egret_dataapi::serving::SERVING_REQUEST_DEADLINE`
+    # (50 s) sits deliberately below it so egret answers an overrun with its own
+    # envelope instead of nginx answering with HTML egret never sees; the test
+    # `ingress_read_timeout_is_the_number_this_module_derives_from` reads this
+    # line and fails if the two stop agreeing.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
 spec:
   ingressClassName: {{ .Values.ingress.className }}
 {{- if .Values.ingress.tls.enabled }}

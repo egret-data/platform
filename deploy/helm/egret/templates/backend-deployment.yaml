@@ -38,5 +38,71 @@ spec:
             - { name: EGRET_KERNEL__PULL_SECRET, value: "{{ .Values.kernel.pullSecret }}" }
             {{- end }}
             {{- end }}
-          readinessProbe: { tcpSocket: { port: 8080 }, initialDelaySeconds: 5, periodSeconds: 5 }
-          livenessProbe: { tcpSocket: { port: 8080 }, initialDelaySeconds: 30, periodSeconds: 20 }
+          # BOTH probes were `tcpSocket`, which is why `/readyz` — a handler that
+          # pings the database — had never once been called in this deployment: a
+          # pod whose metastore was gone still accepted the listening socket and
+          # therefore still received traffic. They are HTTP now, and the two ask
+          # DIFFERENT questions on purpose.
+          #
+          # readiness -> /readyz  ("should I get traffic?"): pings the DB.
+          # liveness  -> /healthz ("am I wedged?"): process only, NEVER the DB.
+          #
+          # Pointing liveness at /readyz is the tempting simplification and it is
+          # a trap: a database blip would then RESTART every replica at once,
+          # turning a recoverable dependency outage into a cluster-wide crash
+          # loop, and the restarts would keep the pods out of service for longer
+          # than the outage itself.
+          #
+          # Timings are chosen, not defaults:
+          #  * timeoutSeconds 3, not the default 1 — /readyz does a real round
+          #    trip, and under pool contention a 1 s budget fails a healthy pod.
+          #  * readiness 3 x 5 s = 15 s of sustained DB failure before traffic is
+          #    withdrawn: long enough to ride out a Postgres failover, short
+          #    enough that a real outage stops taking requests.
+          #  * liveness 3 x 20 s = 60 s wedged before a restart, and it cannot
+          #    fire during boot because the startupProbe below gates it.
+          #  * startupProbe: boot runs migrations, whose duration is not knowable
+          #    from here. 60 x 2 s = 120 s of boot budget, and only after it
+          #    passes does liveness begin — without it, a slow migration on a
+          #    large metastore is a restart loop that never converges.
+          startupProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            periodSeconds: 2
+            timeoutSeconds: 3
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # Without these the container is BestEffort QoS: no memory ceiling, and
+          # first in line for eviction when the node is under pressure. A single
+          # served Data API request may materialise `MAX_ROWS_CEILING`
+          # (1 000 000) rows in memory, so the exposure is real and it is not
+          # theoretical.
+          #
+          # What a limit does and does not buy, stated plainly: it does NOT make
+          # that request survive — nothing here can, and streaming the response
+          # is the actual fix. It bounds the BLAST RADIUS. With a limit the
+          # kernel kills egret and the pod restarts; without one the same
+          # allocation destabilises the node and takes its neighbours with it.
+          #
+          # 4Gi rather than 2Gi so that ONE legitimate largest-publishable
+          # response is inside the ceiling rather than certain to be killed by
+          # it; the cap on how many such responses can be in flight at once is
+          # `SERVING_MAX_CONCURRENCY`'s job, and it is honest about not being
+          # able to do it either.
+          resources:
+{{ toYaml .Values.backend.resources | indent 12 }}
+      # Longer than `egret_server::DRAIN_DEADLINE` (55 s) so the PROCESS decides
+      # when to stop, not SIGKILL. Kubernetes' default is 30 s, which is below
+      # even the per-request deadline (50 s) — leaving it at the default would
+      # have made the graceful shutdown unreachable and every deploy would still
+      # have killed in-flight queries.
+      terminationGracePeriodSeconds: {{ .Values.backend.terminationGracePeriodSeconds }}

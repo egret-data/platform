@@ -2001,7 +2001,19 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         .await
         .with_context(|| format!("binding {addr}"))?;
     tracing::info!(%addr, "egret listening");
-    axum::serve(listener, app).await.context("server error")?;
+    // SIGTERM is observed and in-flight requests are drained, bounded by
+    // `DRAIN_DEADLINE`. Before this, a rollout dropped every in-flight query on
+    // the floor — and silently, because `dataapi.access_log` is written after
+    // the response, so the killed requests appeared in no activity view.
+    egret_server::serve_with_drain(
+        listener,
+        app,
+        egret_server::shutdown_signal(),
+        egret_server::DRAIN_DEADLINE,
+    )
+    .await
+    .context("server error")?;
+    tracing::info!("egret stopped");
     Ok(())
 }
 

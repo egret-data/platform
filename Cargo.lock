@@ -3561,6 +3561,7 @@ dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
  "serde_json",
+ "sqlx",
  "tokio",
  "tower",
  "tower-http",

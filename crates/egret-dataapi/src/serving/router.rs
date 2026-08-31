@@ -221,9 +221,10 @@ use uuid::Uuid;
 use super::access_log::{AccessLogEntry, AccessLogStore};
 use super::cache::{cache_key, cache_ttl, shared_cache_allowed};
 use super::error::{is_permission_denied, to_wire, ServingErrorBody};
+use super::governance::{governance_allows_serving, LiveConnection};
+use super::guard;
 // Aliased: `metrics` unqualified would read as the FACADE crate at every
 // call site in this file, and the two are one keystroke apart.
-use super::governance::{governance_allows_serving, LiveConnection};
 use super::metrics as serving_metrics;
 use super::params;
 use super::ratelimit::{check_request, retry_after_secs};
@@ -574,7 +575,51 @@ impl Served {
 /// correct and leaks nothing (it is the same answer for every path, existing or
 /// not, under this router).
 pub fn serving_router() -> Router<DataApiState> {
-    Router::new().route("/{ws}/{*path}", get(serve_get).post(serve_post))
+    serving_router_with_bounds(
+        guard::SERVING_REQUEST_DEADLINE,
+        guard::SERVING_MAX_CONCURRENCY,
+        guard::SERVING_MAX_BODY_BYTES,
+    )
+}
+
+/// [`serving_router`] with its three bounds supplied, so a test can drive a
+/// limit it genuinely exceeds instead of asserting that a layer was installed.
+///
+/// # The nesting order is the design, not an accident of `.layer` calls
+///
+/// axum applies the LAST `.layer` outermost, so reading the calls bottom-up
+/// gives the order a request meets them:
+///
+/// 1. **body cap** — the only refusal that costs nothing, so it is first;
+/// 2. **deadline** — started before admission, so time spent being admitted is
+///    charged against the caller's budget rather than added to it (see
+///    [`guard::SERVING_REQUEST_DEADLINE`]);
+/// 3. **bulkhead** — the last gate before the handler, holding its permit for
+///    exactly the span of `serve` and released by the guard's drop even when the
+///    deadline above cancels the future.
+///
+/// The semaphore is built HERE, once per router, rather than per request — the
+/// same reason `DataApiState`'s cache and token buckets are constructed once in
+/// `egret-bin`. `try_it`'s throwaway router therefore gets its own bulkhead: a
+/// browser trial is bounded, but it does not consume the machine surface's
+/// admission slots, which is the intended isolation and not an oversight.
+pub fn serving_router_with_bounds(
+    deadline: Duration,
+    permits: usize,
+    max_body_bytes: u64,
+) -> Router<DataApiState> {
+    let bulkhead = guard::serving_bulkhead(permits);
+    Router::new()
+        .route("/{ws}/{*path}", get(serve_get).post(serve_post))
+        .layer(axum::middleware::from_fn(move |req, next| {
+            guard::serving_admit(bulkhead.clone(), req, next)
+        }))
+        .layer(axum::middleware::from_fn(move |req, next| {
+            guard::serving_deadline(deadline, req, next)
+        }))
+        .layer(axum::middleware::from_fn(move |req, next| {
+            guard::serving_body_limit(max_body_bytes, req, next)
+        }))
 }
 
 /// The serving surface's OpenAPI document, merged by `egret_server::openapi_doc`
