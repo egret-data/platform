@@ -49,6 +49,7 @@
 //! to widen the type first, which makes it a decision rather than a slip.
 
 use std::borrow::Cow;
+use std::collections::{BTreeMap, BTreeSet};
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -416,10 +417,20 @@ pub(crate) fn to_wire(e: &ServingError) -> Wire {
         // `deadline_exceeded`, NOT `timeout`. Both are 504s and the bounds layer
         // originally called this one `timeout` as well — one string, one status,
         // two different actors: egret's own serving clock here, the endpoint
-        // author's published budget in `EngineTimeout`. `access_log.error_code`
-        // stores one value, so an operator could not have separated "we are
-        // cutting callers off" from "their queries are too slow" — the exact
-        // class of question this package split `internal` to make answerable.
+        // author's published budget in `EngineTimeout`.
+        //
+        // **And the place they would have collided is the `code` metric label,
+        // not `access_log.error_code`.** This comment used to name the access
+        // log, which cannot be right: the bounds layer fires OUTSIDE the
+        // handler, so a request it cuts off leaves no `dataapi.access_log` row
+        // at all — the two 504s can never meet in that column, because only one
+        // of them ever reaches it. Where they do meet is
+        // `egret_dataapi_requests_total{code=…}` (`serving::metrics`), which is
+        // the only instrument that sees a shed or a deadline at all, and the
+        // `error.code` in the body a client branches on. One string there and an
+        // operator could not have separated "we are cutting callers off" from
+        // "their queries are too slow" — the exact class of question this
+        // package split `internal` to make answerable.
         ServingError::ServingDeadline => (
             StatusCode::GATEWAY_TIMEOUT,
             "deadline_exceeded",
@@ -496,6 +507,39 @@ pub(crate) fn to_wire(e: &ServingError) -> Wire {
         message,
         retry_after,
     }
+}
+
+/// Every answer this taxonomy can put on the wire: HTTP status -> the
+/// `error.code`s that produce it.
+///
+/// # Why this is a function and not a constant
+///
+/// It is DERIVED — [`to_wire`] applied to [`crate::serving::census`], which is
+/// itself checked against `ServingError`'s own source. Nothing here is written
+/// down twice, which is the point: the two OpenAPI documents this surface
+/// publishes both carried a hand-maintained status list, and both went stale the
+/// moment Package 3b made `502 engine_unavailable` and `504 timeout` live. One
+/// list was corrected; the other — the per-service-account document a consumer
+/// actually generates a client from (`openapi_gen::error_responses`) — was not,
+/// and no gate could see it, because the byte gate compares the ROOT document to
+/// itself.
+///
+/// A list a human maintains goes stale silently. A list the compiler and the
+/// census maintain cannot: add a variant and [`to_wire`] fails to compile until
+/// it has an arm, the census fails until it has a sample, and this map — and
+/// therefore every document built from it — grows the new status without anyone
+/// remembering to widen it.
+///
+/// `BTreeMap`/`BTreeSet` rather than hash sets, so a generated document is
+/// byte-stable across runs: an OpenAPI file that reorders its own keys makes
+/// every regeneration look like a change.
+pub fn wire_answers() -> BTreeMap<u16, BTreeSet<&'static str>> {
+    let mut out: BTreeMap<u16, BTreeSet<&'static str>> = BTreeMap::new();
+    for (_, e) in crate::serving::census::every_variant() {
+        let w = to_wire(&e);
+        out.entry(w.status.as_u16()).or_default().insert(w.code);
+    }
+    out
 }
 
 impl Wire {

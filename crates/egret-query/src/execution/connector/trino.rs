@@ -792,23 +792,75 @@ enum Retryable {
 /// accepts one statement per POST, so a multi-statement body is already a
 /// rejection; the check is here so that reading the first keyword cannot stand
 /// in for reading the whole string.
+///
+/// # The one direction this function may never move in
+///
+/// A statement may LOSE a retry it could have had. A statement may never GAIN
+/// one. Every rule below is written so that the failure mode of a wrong guess is
+/// a wasted 503, not a duplicated row — because the second mistake is
+/// unrecoverable and invisible.
+///
+/// `EXPLAIN` is where that rule was broken, and the reason is worth keeping:
+/// **`EXPLAIN ANALYZE <stmt>` executes `<stmt>`.** It is not a planner verb with
+/// an option; it is the statement itself, run, with timings attached. So
+/// `EXPLAIN ANALYZE INSERT INTO t SELECT …` read as a leading `explain`,
+/// classified as a provable read, and an ingress-synthesised 503 would have
+/// re-POSTed it up to [`TRINO_RETRY_MAX_ATTEMPTS`] times — the exact duplicated
+/// write the classifier exists to prevent, arriving through the one keyword
+/// that was allowed to stand alone.
+///
+/// The fix is not a special case for `ANALYZE`. `EXPLAIN` is now accepted only
+/// when **what it explains is itself provably a read**, checked by the same
+/// function. That refuses `EXPLAIN ANALYZE …` (its operand starts with
+/// `analyze`, which proves nothing), refuses `EXPLAIN INSERT …`, and refuses
+/// `EXPLAIN (TYPE LOGICAL) SELECT 1` too — the last of those is genuinely
+/// read-only and merely loses its retry, which is the affordable half of the
+/// trade.
+///
+/// # This is a keyword check, not a parser
+///
+/// So the allow-list is the whole of its knowledge, and anything outside it is
+/// refused rather than reasoned about. Statements deliberately kept OUT even
+/// though they can look read-shaped:
+///
+/// * `EXECUTE <name>` — runs whatever was `PREPARE`d, which may be an `INSERT`.
+///   The text at hand cannot say which.
+/// * `ANALYZE <table>` — reads a table and WRITES statistics to the metastore.
+///   Read-shaped by name only.
+/// * `CALL <procedure>` — arbitrary side effects.
+/// * `SELECT … FROM TABLE(…)` — a polymorphic table function is opaque to a
+///   keyword check. It is accepted, and this is the residual risk: no table
+///   function shipped with Trino writes, but a connector could add one, and the
+///   line to revisit is here rather than in a comment claiming there is none.
 fn is_read_statement(sql: &str) -> bool {
-    let trimmed = sql.trim().trim_end_matches(';').trim();
-    if trimmed.contains(';') {
-        return false;
+    // `EXPLAIN` may wrap a statement; nothing may wrap an `EXPLAIN`. The bound
+    // is what stops a crafted `EXPLAIN EXPLAIN EXPLAIN …` from recursing, and
+    // costs nothing real: Trino rejects the nesting anyway.
+    fn provable_read(sql: &str, depth: u32) -> bool {
+        if depth > 1 {
+            return false;
+        }
+        let trimmed = sql.trim().trim_end_matches(';').trim();
+        if trimmed.contains(';') {
+            return false;
+        }
+        // A parenthesised query — `(SELECT 1) UNION (SELECT 2)` — is still a
+        // query; no statement that writes may be wrapped in parentheses.
+        let head = trimmed.trim_start_matches(|c: char| c == '(' || c.is_whitespace());
+        let end = head
+            .find(|c: char| c.is_whitespace() || c == '(')
+            .unwrap_or(head.len());
+        let (first, rest) = head.split_at(end);
+        match first.to_ascii_lowercase().as_str() {
+            "select" | "with" | "show" | "describe" | "desc" => true,
+            // Only if its operand is one too — see the doc comment. `rest` is
+            // everything after the keyword, so `ANALYZE` and any write verb is
+            // judged on its own merits and fails.
+            "explain" => provable_read(rest, depth + 1),
+            _ => false,
+        }
     }
-    // A parenthesised query — `(SELECT 1) UNION (SELECT 2)` — is still a query;
-    // no statement that writes may be wrapped in parentheses.
-    let first = trimmed
-        .trim_start_matches(|c: char| c == '(' || c.is_whitespace())
-        .split(|c: char| c.is_whitespace() || c == '(')
-        .next()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    matches!(
-        first.as_str(),
-        "select" | "with" | "show" | "describe" | "desc" | "explain"
-    )
+    provable_read(sql, 0)
 }
 
 /// The wait before re-sending, given the attempt number (1-based) and whatever
@@ -1606,6 +1658,9 @@ mod tests {
             "SHOW CATALOGS",
             "DESCRIBE t",
             "EXPLAIN SELECT 1",
+            // The same, with the operand cased and spaced differently, so the
+            // `EXPLAIN` arm is exercised as a rule and not as one string.
+            "explain    with a as (select 1) select * from a",
             "(SELECT 1) UNION (SELECT 2)",
         ] {
             assert!(is_read_statement(sql), "{sql:?} is a read");
@@ -1619,6 +1674,31 @@ mod tests {
             "MERGE INTO t USING u ON t.a = u.a WHEN MATCHED THEN DELETE",
             "CALL system.runtime.kill_query('x')",
             "ALTER TABLE t ADD COLUMN c bigint",
+            // **The finding.** `EXPLAIN ANALYZE <stmt>` RUNS `<stmt>`; it is not
+            // a planner verb. A leading `explain` used to be proof enough, so
+            // this classified as a read and an ingress-synthesised 503 would
+            // have re-POSTed the INSERT up to four more times.
+            "EXPLAIN ANALYZE INSERT INTO t SELECT * FROM u",
+            "explain analyze insert into t select * from u",
+            "EXPLAIN ANALYZE DELETE FROM t",
+            // Executing too, and refused for the same reason even though
+            // re-running it would merely be wasteful: the rule is that the
+            // operand must PROVE itself, not that the harm is weighed per case.
+            "EXPLAIN ANALYZE SELECT 1",
+            // A plain EXPLAIN of a write plans rather than executes, so this one
+            // is safe in fact and refused anyway — an unproven statement may
+            // lose a retry, which is the affordable direction.
+            "EXPLAIN INSERT INTO t VALUES (1)",
+            "EXPLAIN (TYPE LOGICAL) SELECT 1",
+            // Nothing wraps an EXPLAIN, so the recursion bound refuses it.
+            "EXPLAIN EXPLAIN SELECT 1",
+            // `EXPLAIN` with nothing to explain proves nothing.
+            "EXPLAIN",
+            // Read-shaped keywords that execute or write, kept off the
+            // allow-list on purpose — see the doc comment.
+            "EXECUTE my_prepared_insert",
+            "ANALYZE hive.sales.orders",
+            "PREPARE p FROM SELECT 1",
             // Multi-statement: the first keyword reads like a query and the
             // second one is not.
             "SELECT 1; INSERT INTO t VALUES (1)",

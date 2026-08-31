@@ -417,12 +417,18 @@ pub enum ServingError {
     /// [`Self::EngineTimeout`] are 504s, and the bounds layer called this one
     /// `timeout` too — the same code, the same status, for **two different
     /// actors**: there, egret's own serving clock; here, the budget the endpoint's
-    /// author published. `dataapi.access_log.error_code` records one string, so
-    /// an operator asking "are we cutting callers off, or are their queries too
-    /// slow?" would have had no way to tell — which is the exact question this
-    /// package split `internal` to make answerable. So this one is
-    /// `deadline_exceeded` and `timeout` stays spec §7's name for the author's
-    /// budget.
+    /// author published.
+    ///
+    /// The collision is on the `code` label of
+    /// `egret_dataapi_requests_total` and on the `error.code` a client
+    /// branches on — NOT on `dataapi.access_log.error_code`, which an earlier
+    /// version of this note claimed. A bound fires outside the handler, so a
+    /// request it cuts off writes no access-log row at all; the metric is the
+    /// only instrument that sees it. One string there and an operator asking
+    /// "are we cutting callers off, or are their queries too slow?" would have
+    /// had no way to tell — which is the exact question this package split
+    /// `internal` to make answerable. So this one is `deadline_exceeded` and
+    /// `timeout` stays spec §7's name for the author's budget.
     #[error("the request exceeded egret's serving deadline")]
     ServingDeadline,
     /// egret shed the request: every concurrency permit on the serving surface
@@ -494,7 +500,22 @@ impl ServingError {
 /// Sampled by NAME, and the name is what the census compares — a sample that
 /// constructs the wrong variant under a right name would pass the census and
 /// then fail the code table, which reads its expectations by the same name.
-#[cfg(test)]
+///
+/// # Why it is NOT `#[cfg(test)]` any more
+///
+/// [`super::error::wire_answers`] — which is what the per-service-account
+/// OpenAPI document's status list is built from — needs to walk the taxonomy at
+/// run time, not only under `cargo test`. That is the whole point of the second
+/// finding this module closes: the consumer-facing document declared a
+/// hand-written list of statuses, it went stale the moment 502 and 504 became
+/// live, and the byte gate over the ROOT document could not see it. A list
+/// derived from the enum cannot go stale; a list derived from a `#[cfg(test)]`
+/// enumeration cannot be derived at all.
+///
+/// The cost is twenty-odd constructed values compiled into the binary and built
+/// once per generated document. The samples carrying an `anyhow` message are
+/// still only messages egret itself wrote, so nothing here can reach a wire
+/// body — [`super::error::to_wire`] reads no `raw` field.
 pub(crate) mod census {
     use super::ServingError;
 
@@ -567,10 +588,16 @@ pub(crate) mod census {
     /// is not fragile in the way that matters — it parses `rustfmt`'s output of
     /// one enum in one file, and if it ever failed to find the enum it fails
     /// LOUD rather than reporting an empty set (see the assertion below).
+    ///
+    /// `include_str!`, not `fs::read_to_string`: the text is bound at COMPILE
+    /// time, to this very file, by the compiler that also compiled the enum. The
+    /// runtime read had to reconstruct the path from `CARGO_MANIFEST_DIR` and
+    /// would happily have read a *different* checkout's `mod.rs` — or failed on
+    /// a machine where the sources are not next to the binary — turning a
+    /// statement about this build into a statement about whatever was on disk.
+    #[cfg(test)]
     fn declared_variants() -> Vec<String> {
-        let src =
-            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/serving/mod.rs"))
-                .expect("serving/mod.rs must be readable from its own crate");
+        let src = include_str!("mod.rs");
         let body = src
             .split_once("pub enum ServingError {")
             .expect("the enum this census is about must exist")

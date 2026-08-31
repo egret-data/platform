@@ -423,6 +423,12 @@ async fn an_absurd_retry_after_is_capped_and_cannot_hang_the_request() {
 /// So the write is asked exactly once, while the read beside it is asked five
 /// times. Both halves are here because either alone would pass for the wrong
 /// reason: the write alone would pass with the whole retry deleted.
+///
+/// The third clause is the second review round's finding, and it is the one
+/// direction the classifier may never move in: a statement that GAINED a retry.
+/// `EXPLAIN ANALYZE <stmt>` **executes** `<stmt>`, and a leading `explain` used
+/// to be proof of a read, so `EXPLAIN ANALYZE INSERT …` was re-POSTable — the
+/// only write on this path that the guard itself waved through.
 #[tokio::test]
 async fn a_write_statement_is_never_re_posted_after_a_503() {
     let mut s = stub();
@@ -444,6 +450,27 @@ async fn a_write_statement_is_never_re_posted_after_a_503() {
         1,
         "an INSERT that got a 503 must be reported, not sent again — a 503 \
          synthesised after the POST was forwarded would duplicate the rows"
+    );
+
+    // `EXPLAIN ANALYZE` runs the statement it is given. Same connector, same
+    // stub, same permanent 503 — and it must be asked exactly once, for exactly
+    // the reason the bare `INSERT` above is.
+    seen.lock().unwrap().clear();
+    let err = c
+        .execute(
+            "EXPLAIN ANALYZE INSERT INTO t SELECT * FROM u",
+            &limits(30),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("a permanent 503 is still an error");
+    assert!(err.to_string().contains("503"), "{err}");
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        1,
+        "`EXPLAIN ANALYZE INSERT` EXECUTES the INSERT — Trino runs the \
+         statement and reports its timings. Re-POSTing it duplicates rows just \
+         as the bare INSERT would, so a leading `explain` is not proof of a read"
     );
 
     seen.lock().unwrap().clear();
