@@ -198,6 +198,54 @@ pub fn scheduled_retention(retention_days: i64) -> Option<i64> {
     (retention_days > 0).then_some(retention_days)
 }
 
+/// What [`AccessLogStore::record`] did — the ONE expression that says whether a
+/// row exists for a call.
+///
+/// # Why this is a return value and not a rule two call sites both remember
+///
+/// The serving path counts the calls this table cannot hold
+/// (`egret_dataapi_preauth_rejections_total`, and see [`super::metrics`] for why
+/// that counter is the one thing in the package that is not ordinary practice).
+/// That counter is only meaningful if it is the exact complement of the table.
+/// Spelled as a second `if e.workspace_id.is_none()` at the call site — which is
+/// what it was — the two were independent expressions held together by nothing
+/// but adjacency and a comment: a third early return added here, skipping trial
+/// rows the way `activity` filters them elsewhere, would have left the counter
+/// silently no longer complementary and nothing would have gone red.
+///
+/// As a return value, "did a row get written" has exactly one author. A new
+/// no-row path cannot be added without naming which variant it produces, and
+/// [`Self::Row`] is a claim the DB made rather than one this function guesses.
+///
+/// It is NOT a proof against a future edit that returns [`Self::Row`] from a
+/// path that wrote nothing — no type can be — so
+/// `record_reports_a_row_exactly_when_one_exists` in
+/// `tests/serving_metrics.rs` asserts the biconditional against the real table,
+/// over a TABLE of entry shapes rather than for one case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "the caller decides which metric a missing row is counted under"]
+pub enum Recorded {
+    /// The INSERT succeeded: `dataapi.access_log` holds one row for this
+    /// `request_id`.
+    Row,
+    /// No row, and none could have been written: `workspace_id` was still
+    /// unknown, and the column is `NOT NULL`.
+    ///
+    /// This is the pre-authentication refusal — the outage class that leaves
+    /// `error_rate` `None` instead of 1.0 and fires no alert.
+    NoWorkspace,
+    /// No row: the INSERT itself failed, and the error was logged at `warn`
+    /// rather than propagated (this function never fails its caller).
+    ///
+    /// Kept apart from [`Self::NoWorkspace`] rather than folded into it because
+    /// the two are different faults with different fixes — one says
+    /// authentication is refusing everything, the other says the metastore is
+    /// rejecting writes — and folding them would make the pre-auth counter mean
+    /// "one of two unrelated things", which is precisely the ambiguity it was
+    /// added to remove.
+    InsertFailed,
+}
+
 /// Writes and prunes `dataapi.access_log`.
 #[derive(Clone)]
 pub struct AccessLogStore {
@@ -219,7 +267,11 @@ impl AccessLogStore {
     /// A row with no `workspace_id` is dropped rather than written, because the
     /// column is `NOT NULL` and there is no honest value for it. The `tracing`
     /// line still carries the `request_id`, so the call is not invisible.
-    pub async fn record(&self, e: &AccessLogEntry) {
+    ///
+    /// Returns [`Recorded`], which is the only statement anywhere about whether
+    /// a row exists for this call. Read that type's comment before adding
+    /// another path out of this function.
+    pub async fn record(&self, e: &AccessLogEntry) -> Recorded {
         let Some(ws) = e.workspace_id else {
             tracing::debug!(
                 request_id = %e.request_id,
@@ -227,7 +279,7 @@ impl AccessLogStore {
                 error_code = e.error_code.as_deref().unwrap_or(""),
                 "data-api call refused before a workspace was known; not logged to access_log"
             );
-            return;
+            return Recorded::NoWorkspace;
         };
         let res = sqlx::query(
             "INSERT INTO dataapi.access_log \
@@ -262,12 +314,16 @@ impl AccessLogStore {
         .bind(e.request_path.as_deref())
         .execute(&self.db.pool)
         .await;
-        if let Err(err) = res {
-            tracing::warn!(
-                error = %err,
-                request_id = %e.request_id,
-                "data-api access log insert failed"
-            );
+        match res {
+            Ok(_) => Recorded::Row,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    request_id = %e.request_id,
+                    "data-api access log insert failed"
+                );
+                Recorded::InsertFailed
+            }
         }
     }
 

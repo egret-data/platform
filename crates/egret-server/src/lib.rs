@@ -1,5 +1,9 @@
 //! HTTP composition root: shared application state, the router, and health endpoints.
 
+pub mod metrics;
+
+pub use metrics::install_recorder as install_metrics_recorder;
+
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -169,6 +173,13 @@ pub fn build_router(state: AppState) -> Router {
     let mut router = Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
+        // Prometheus scrape. Beside the health routes and for the same reasons:
+        // unauthenticated, outside every CSRF/auth layer, and — like them —
+        // carrying no `#[utoipa::path]`, so it is in no seam document and the
+        // committed `openapi.json` is unchanged by its existence. See
+        // `crate::metrics` for why that is the right precedent and for what the
+        // exposure rests on.
+        .route("/metrics", get(metrics::metrics_scrape))
         // OpenAPI spec: no auth/CSRF so FE codegen + tooling can fetch it.
         .route("/api-docs/openapi.json", get(openapi_json));
 

@@ -221,6 +221,9 @@ use uuid::Uuid;
 use super::access_log::{AccessLogEntry, AccessLogStore};
 use super::cache::{cache_key, cache_ttl, shared_cache_allowed};
 use super::error::{is_permission_denied, to_wire, ServingErrorBody};
+// Aliased: `metrics` unqualified would read as the FACADE crate at every
+// call site in this file, and the two are one keystroke apart.
+use super::metrics as serving_metrics;
 use super::params;
 use super::ratelimit::{check_request, retry_after_secs};
 use super::{verify_serving_token, ServingError};
@@ -779,12 +782,23 @@ async fn serve(
     )
     .await;
 
+    // ONE reading, feeding both the row and the histogram. They are documented
+    // as the same measurement (`serving::metrics::REQUEST_DURATION_SECONDS`) and
+    // were two separate `started.elapsed()` calls, which made that documentation
+    // false by however long the rendering between them took.
+    //
     // Measured before the log write, and saturating rather than wrapping: a
     // request that somehow ran for 25 days should record `i32::MAX`, not a
     // negative duration that poisons every average computed over the column.
-    entry.duration_ms = started.elapsed().as_millis().min(i32::MAX as u128) as i32;
+    let elapsed = started.elapsed();
+    entry.duration_ms = elapsed.as_millis().min(i32::MAX as u128) as i32;
 
-    let response = match outcome {
+    // The tuple carries what the metrics need OUT of the match rather than
+    // re-deriving it below: `wire` is consumed by `into_response`, and reading
+    // the code back off `entry.error_code` would mean allocating a `String` per
+    // request and then labelling with a `&str` whose value set is no longer
+    // pinned by the type — the exact thing `serving::metrics` forbids.
+    let (response, metric_status, metric_code) = match outcome {
         Ok(served) => {
             entry.status_code = StatusCode::OK.as_u16() as i32;
             // The TOTAL across statements, which is what one integer column can
@@ -807,7 +821,11 @@ async fn serve(
                 duration_ms = entry.duration_ms,
                 "data-api request served"
             );
-            served.into_response()
+            (
+                served.into_response(),
+                StatusCode::OK,
+                serving_metrics::OK_CODE,
+            )
         }
         Err(e) => {
             let wire = to_wire(&e);
@@ -825,9 +843,17 @@ async fn serve(
                 client_id = entry.client_id.as_deref().unwrap_or(""),
                 "data-api request failed"
             );
-            wire.into_response(&request_id)
+            let (status, code) = (wire.status, wire.code);
+            (wire.into_response(&request_id), status, code)
         }
     };
+
+    // The same answer the access-log row records, counted where an operator can
+    // see it without holding a workspace. `metric_status`/`metric_code` came out
+    // of the match above rather than being re-derived, so one call is one
+    // increment and the counter cannot disagree with the row about what happened.
+    // `elapsed` is the reading the row's `duration_ms` was computed from.
+    serving_metrics::record_request(metric_status, metric_code, elapsed);
 
     // Unconditional, INCLUDING the 429 and the 404 — accepted deliberately, not
     // overlooked. The reasoning, because "the rate limiter protects the
@@ -854,7 +880,20 @@ async fn serve(
     // writer, trading durability at shutdown for amortised writes. It is not
     // adopted now for the same reason partitioning is not — nothing has been
     // measured, and the simple version cannot lose a row.
-    AccessLogStore::new(st.db.clone()).record(&entry).await;
+    //
+    // The write ANSWERS whether a row exists, and the answer is what the metrics
+    // are told. That is the whole of the "the counter is the access log's
+    // complement" property: there is no second copy of the predicate here to
+    // drift from the one inside `record`. It used to be an
+    // `if entry.workspace_id.is_none()` written out beside this line, held to
+    // `record`'s own `let Some(ws) = … else` by adjacency and a comment — so a
+    // third early return added there (skipping trial rows, say, the way
+    // `activity` filters them elsewhere) would have left the counter quietly
+    // measuring something other than the gap. See `serving::metrics` for what
+    // this does and does not guarantee, and for why a failed INSERT gets its own
+    // counter rather than moving the pre-auth one.
+    let recorded = AccessLogStore::new(st.db.clone()).record(&entry).await;
+    serving_metrics::record_access_log_outcome(recorded);
     response
 }
 
@@ -1018,6 +1057,9 @@ async fn run(
     // `cache_ttl` is the single decision about whether this endpoint caches at
     // all: `enabled: false` and a `ttl_seconds` of 0 both answer `None`.
     let ttl = cache_ttl(&snap);
+    // Counted INSIDE this `if`, so an endpoint with caching off contributes
+    // neither a hit nor a miss. Counting its every success as a miss would put a
+    // 0% hit rate on a dashboard for an endpoint that has no cache to miss.
     if ttl.is_some() {
         if let Some(hit) = st.cache.get_at(&key, now) {
             // The LENGTH is checked before the counts are zipped onto the
@@ -1027,6 +1069,7 @@ async fn run(
             // then drop a statement from `meta` under a `200`, which is the one
             // answer this path may never give. A mismatch re-executes.
             if hit.row_counts.len() == snap.statements.len() {
+                serving_metrics::record_cache_lookup(true);
                 // The id comes from the caller, not from a fresh
                 // `Uuid::new_v4()`. A hit that minted its own would be
                 // uncorrelatable with the access-log row describing the very
@@ -1056,6 +1099,11 @@ async fn run(
                  the version it was keyed under; re-executing"
             );
         }
+        // Every path that leaves this block without having RETURNED a cached
+        // body re-executes, so all of them are misses — including the entry that
+        // was found but unusable. An `else` on the `if let` would have counted
+        // that one as neither.
+        serving_metrics::record_cache_lookup(false);
     }
 
     // Step 7's second half, once per statement. What is sent to the engine is

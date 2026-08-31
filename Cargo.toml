@@ -183,6 +183,21 @@ kube = { version = "2", features = ["client", "runtime", "derive", "ws"] }
 k8s-openapi = { version = "0.26", features = ["v1_32"] }
 cedar-policy = "4.12"
 arc-swap = "1"
+# Metrics (Package 2). The FACADE (`metrics`) is what instrumented crates depend
+# on: `counter!`/`histogram!` are no-ops until a recorder is installed, so a
+# library crate never has to know whether one is. `metrics-exporter-prometheus`
+# is the recorder + text renderer behind `GET /metrics`, and only `egret-server`
+# (which owns the route) and `egret-bin` (which owns process startup) name it.
+#
+# Both versions are the ones the tree ALREADY resolves: lakekeeper's
+# `axum-prometheus 0.9` pulls `metrics 0.24` and `metrics-exporter-prometheus
+# 0.17`, so these entries add no package to `Cargo.lock` and no compilation unit
+# to the build. That is why this library was chosen over `prometheus` /
+# `prometheus-client` / `opentelemetry`, each of which would have introduced a
+# second, parallel metrics stack into a dependency graph that already carries
+# pins it cannot move.
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.17", default-features = false }
 rcgen = { version = "0.14", default-features = false, features = ["pem", "crypto", "ring"] }
 
 # Vendored mysql_async: patched to support StarRocks' JWT/OIDC auth-switch
