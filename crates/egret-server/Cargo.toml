@@ -58,3 +58,7 @@ uuid.workspace = true
 # `metrics_endpoint.rs` drives the composed router and asserts a counter's
 # VALUE moved, which needs the facade to increment through.
 metrics.workspace = true
+# `dataapi_serving_bounds.rs` builds the legal worst case of a two-statement
+# endpoint out of `DEFAULT_TIMEOUT_SECONDS` rather than typing `60`, so the
+# trial deadline's justification moves if that default ever does.
+egret-dataapi-api.workspace = true

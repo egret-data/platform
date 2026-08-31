@@ -91,7 +91,8 @@ pub use serving::{
     ServingPrincipal, ServingResponse, ServingStatus, StatementMeta, DATA_API_AUDIENCE,
 };
 pub use try_it::{
-    TrialActor, TrialResultTooLarge, TryItError, TryRequest, TryRequestEcho, TryResponse,
+    trial_serving_router, TrialActor, TrialResultTooLarge, TryItError, TryRequest, TryRequestEcho,
+    TryResponse, TRIAL_MAX_CONCURRENCY, TRIAL_REQUEST_DEADLINE,
 };
 
 /// Test-only access to the trial-token minter.

@@ -847,6 +847,15 @@ async fn the_consumer_document_declares_every_status_the_surface_can_answer() {
         responses["200"].is_object(),
         "the success answer must survive: {op}"
     );
+
+    // The other control, in the opposite direction: a status the taxonomy
+    // cannot produce must be absent. Without it, a builder that declared every
+    // status there is would satisfy the loop above as easily as a derived one.
+    assert!(
+        responses.get("418").is_none(),
+        "418 is not in the taxonomy, so the document must not declare it — a \
+         document that listed everything would pass the loop above: {responses}"
+    );
 }
 
 #[tokio::test]
@@ -927,3 +936,4 @@ async fn a_bare_endpoint_is_documented_as_the_body_it_answers_with() {
         "a bare endpoint's refusals still reference it: {op}"
     );
 }
+

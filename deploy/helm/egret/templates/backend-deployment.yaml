@@ -53,18 +53,32 @@ spec:
           # loop, and the restarts would keep the pods out of service for longer
           # than the outage itself.
           #
-          # Timings are chosen, not defaults:
+          # Timings are chosen, not defaults, and the readiness ones are chosen
+          # TOGETHER WITH the bulkhead width and the pool size — the full
+          # reconciliation is on `egret_server::READYZ_DB_TIMEOUT`, and
+          # `deployment_probes.rs` asserts these numbers against those constants:
           #  * timeoutSeconds 3, not the default 1 — /readyz does a real round
-          #    trip, and under pool contention a 1 s budget fails a healthy pod.
-          #  * readiness 3 x 5 s = 15 s of sustained DB failure before traffic is
-          #    withdrawn: long enough to ride out a Postgres failover, short
-          #    enough that a real outage stops taking requests.
+          #    trip. It is also deliberately ABOVE READYZ_DB_TIMEOUT (2 s) so
+          #    egret answers the probe rather than the kubelet abandoning it and
+          #    leaving a queued pool waiter behind.
+          #  * readiness 11 x 5 s = 55 s before traffic is withdrawn. NOT 15 s.
+          #    The serving bulkhead admits 64 concurrent requests over a pool of
+          #    10 connections, so a pool with nothing free is the normal busy
+          #    state of a HEALTHY pod, and one admitted request may hold its
+          #    connection for the whole 50 s request deadline. A withdrawal
+          #    budget under 50 s therefore removes busy pods, and each removal
+          #    moves that load onto peers which fail the same check next — the
+          #    flap is caused by the probe, not detected by it. 55 s outlasts one
+          #    full-length request; the cost is that a genuinely dead database
+          #    keeps taking traffic for 55 s, and those requests fail loudly.
           #  * liveness 3 x 20 s = 60 s wedged before a restart, and it cannot
           #    fire during boot because the startupProbe below gates it.
           #  * startupProbe: boot runs migrations, whose duration is not knowable
-          #    from here. 60 x 2 s = 120 s of boot budget, and only after it
-          #    passes does liveness begin — without it, a slow migration on a
-          #    large metastore is a restart loop that never converges.
+          #    from here. 60 x 2 s = 120 s before liveness begins at all. This
+          #    does not make a slow migration safe — a migration past 120 s is
+          #    still a restart loop — it raises the ceiling from the ~60 s
+          #    liveness would otherwise allow, and it is the knob to raise if a
+          #    large metastore ever needs longer.
           startupProbe:
             httpGet: { path: /healthz, port: 8080 }
             periodSeconds: 2
@@ -75,7 +89,7 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 5
             timeoutSeconds: 3
-            failureThreshold: 3
+            failureThreshold: 11
           livenessProbe:
             httpGet: { path: /healthz, port: 8080 }
             periodSeconds: 20
@@ -93,11 +107,25 @@ spec:
           # kernel kills egret and the pod restarts; without one the same
           # allocation destabilises the node and takes its neighbours with it.
           #
-          # 4Gi rather than 2Gi so that ONE legitimate largest-publishable
-          # response is inside the ceiling rather than certain to be killed by
-          # it; the cap on how many such responses can be in flight at once is
-          # `SERVING_MAX_CONCURRENCY`'s job, and it is honest about not being
-          # able to do it either.
+          # 4Gi does NOT hold one largest-publishable response, and an earlier
+          # version of this comment claimed it did. The arithmetic:
+          # `ServingResponse.data` is a `serde_json::Value` tree built from the
+          # engine's `TabularResult`, and `Json(...)` then serialises that tree
+          # into a second contiguous buffer before the first byte is written. So
+          # at peak there are two to three live representations of the same rows,
+          # and a `Value` tree is itself several times the wire bytes (an enum
+          # discriminant, a `String` header or a `Map` node per cell). A
+          # 1 000 000-row response is OOMKilled at 4Gi, and OOMKill is SIGKILL:
+          # the drain this package added does NOT run, so the other in-flight
+          # requests on the pod die with it. That is the strongest argument for
+          # streaming the response, which is the actual fix and is not here.
+          #
+          # What 4Gi IS: room for egret's own working set plus a handful of
+          # ordinary responses (`limits.max_rows` DEFAULTS to 10 000, three
+          # orders of magnitude below the ceiling), and a blast radius bounded to
+          # one pod instead of the node. The publishable ceiling of 1 000 000
+          # rows is the number that is wrong for this limit; lowering it is a
+          # contract change and belongs with the streaming work, not here.
           resources:
 {{ toYaml .Values.backend.resources | indent 12 }}
       # Longer than `egret_server::DRAIN_DEADLINE` (55 s) so the PROCESS decides

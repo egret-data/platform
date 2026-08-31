@@ -88,8 +88,67 @@ fn the_liveness_probe_checks_the_process_and_not_the_database() {
     );
 }
 
+/// A Kubernetes memory quantity (`4Gi`, `512Mi`, `1G`) in bytes.
+fn memory_bytes(q: &str) -> u64 {
+    let q = q.trim().trim_matches('"');
+    for (suffix, mult) in [
+        ("Gi", 1024u64 * 1024 * 1024),
+        ("Mi", 1024 * 1024),
+        ("Ki", 1024),
+        ("G", 1_000_000_000),
+        ("M", 1_000_000),
+        ("K", 1_000),
+    ] {
+        if let Some(n) = q.strip_suffix(suffix) {
+            return n.parse::<u64>().unwrap_or_else(|e| panic!("{q}: {e}")) * mult;
+        }
+    }
+    q.parse().unwrap_or_else(|e| panic!("{q}: {e}"))
+}
+
+/// A Kubernetes CPU quantity (`500m`, `2000m`, `2`) in millicores.
+fn cpu_millis(q: &str) -> u64 {
+    let q = q.trim().trim_matches('"');
+    match q.strip_suffix('m') {
+        Some(n) => n.parse().unwrap_or_else(|e| panic!("{q}: {e}")),
+        None => q.parse::<u64>().unwrap_or_else(|e| panic!("{q}: {e}")) * 1000,
+    }
+}
+
+/// The value of `key:` inside the block that follows `section:`, stopping at the
+/// next line indented no further than `section` itself.
+fn scoped_scalar<'a>(yaml: &'a str, section: &str, key: &str) -> &'a str {
+    let mut lines = yaml.lines().skip_while(|l| l.trim() != section);
+    let head = lines
+        .next()
+        .unwrap_or_else(|| panic!("no `{section}` line"));
+    let indent = head.len() - head.trim_start().len();
+    for l in lines {
+        if l.trim().is_empty() {
+            continue;
+        }
+        if l.len() - l.trim_start().len() <= indent {
+            break;
+        }
+        if let Some((k, v)) = l.split_once(':') {
+            if k.trim() == key {
+                return v.trim();
+            }
+        }
+    }
+    panic!("no `{key}:` under `{section}`");
+}
+
 /// BestEffort QoS was the finding; a `resources:` block that the template never
-/// reads would be the silent way to keep it.
+/// reads would be the silent way to keep it — and so would a block that declares
+/// every key with a number nobody could run on.
+///
+/// **This test used to assert key PRESENCE only, which `memory: 64Mi` passes.**
+/// That is the shape this repo has shipped a green test over fourteen times, so
+/// the values are read and bounded. The floor is not arbitrary: 2Gi is below the
+/// 4Gi the deployment comment argues for and far above anything that could be a
+/// typo or a leftover, and the comment is explicit that even 4Gi does not hold a
+/// largest-publishable response — that is what streaming is for, not this number.
 #[test]
 fn the_backend_container_declares_requests_and_limits() {
     let d = deployment();
@@ -103,12 +162,35 @@ fn the_backend_container_declares_requests_and_limits() {
         .split("\nfrontend:")
         .next()
         .expect("values.yaml must start with the backend block");
-    for needle in ["resources:", "requests:", "limits:", "cpu:", "memory:"] {
-        assert!(
-            backend.contains(needle),
-            "backend.resources must declare `{needle}`: {backend}"
-        );
-    }
+
+    let req_mem = memory_bytes(scoped_scalar(backend, "requests:", "memory"));
+    let lim_mem = memory_bytes(scoped_scalar(backend, "limits:", "memory"));
+    let req_cpu = cpu_millis(scoped_scalar(backend, "requests:", "cpu"));
+    let lim_cpu = cpu_millis(scoped_scalar(backend, "limits:", "cpu"));
+
+    const TWO_GI: u64 = 2 * 1024 * 1024 * 1024;
+    assert!(
+        lim_mem >= TWO_GI,
+        "the backend memory LIMIT is {lim_mem} bytes. Below 2Gi the pod cannot \
+         hold egret's working set beside an ordinary response, and the kernel \
+         kills it under normal load rather than under abuse — which is a worse \
+         failure than the BestEffort QoS this block replaced"
+    );
+    assert!(
+        req_mem >= 512 * 1024 * 1024,
+        "the backend memory REQUEST is {req_mem} bytes; the scheduler places the \
+         pod on this number, so a token value overcommits the node the limit \
+         exists to protect"
+    );
+    assert!(
+        lim_mem >= req_mem && lim_cpu >= req_cpu,
+        "limits ({lim_mem} bytes / {lim_cpu}m) must not be below requests \
+         ({req_mem} bytes / {req_cpu}m) — the pod would be unschedulable"
+    );
+    assert!(
+        req_cpu > 0 && lim_cpu > 0,
+        "both CPU quantities must be non-zero: {req_cpu}m / {lim_cpu}m"
+    );
 }
 
 /// The seam that makes the graceful shutdown reachable at all.
@@ -130,6 +212,68 @@ fn the_drain_deadline_fits_inside_the_pods_termination_grace_period() {
         "terminationGracePeriodSeconds ({grace:?}) must exceed DRAIN_DEADLINE \
          ({:?}), or SIGKILL ends the drain before the drain does",
         egret_server::DRAIN_DEADLINE
+    );
+}
+
+/// The readiness block, as text, so a relation can be read out of it without
+/// tripping over `startupProbe`'s identically-named keys above it.
+fn readiness_probe() -> String {
+    let d = deployment();
+    let after = d
+        .split("readinessProbe:")
+        .nth(1)
+        .expect("no readinessProbe in the backend deployment")
+        .to_string();
+    after
+        .split("livenessProbe:")
+        .next()
+        .expect("readiness block")
+        .to_string()
+}
+
+/// egret must answer the probe before the kubelet stops listening.
+///
+/// If `READYZ_DB_TIMEOUT` were at or above the probe's `timeoutSeconds`, every
+/// slow probe would be decided by the kubelet instead of by egret: no body, no
+/// `db` field to read, and — because the kubelet's give-up does not cancel
+/// anything inside the process — one abandoned `acquire` left queued behind the
+/// traffic that caused it, once per `periodSeconds`.
+#[test]
+fn readyz_answers_before_the_kubelet_gives_up_on_it() {
+    let probe = readiness_probe();
+    let kubelet = Duration::from_secs(scalar_int(&probe, "timeoutSeconds"));
+    assert!(
+        kubelet > egret_server::READYZ_DB_TIMEOUT,
+        "the readiness probe's timeoutSeconds ({kubelet:?}) must exceed \
+         READYZ_DB_TIMEOUT ({:?}), or egret never gets to answer its own probe",
+        egret_server::READYZ_DB_TIMEOUT
+    );
+}
+
+/// The relation that stops a healthy pod being withdrawn for being busy.
+///
+/// `SERVING_MAX_CONCURRENCY` (64) is deliberately 8× the metastore pool (10), so
+/// contention for a connection is the DESIGNED steady state under load, and one
+/// admitted request may hold its connection for `SERVING_REQUEST_DEADLINE`. A
+/// withdrawal budget shorter than one request therefore removes pods that are
+/// merely working, and hands their traffic to peers that then fail the same
+/// check — the cascade the bulkhead exists to prevent, caused by the probe.
+///
+/// Asserted against the constant rather than against the comment, because the
+/// two halves live in different repositories' worth of file.
+#[test]
+fn readiness_is_not_withdrawn_before_one_full_length_request_can_finish() {
+    let probe = readiness_probe();
+    let period = scalar_int(&probe, "periodSeconds");
+    let failures = scalar_int(&probe, "failureThreshold");
+    let budget = Duration::from_secs(period * failures);
+    assert!(
+        budget > egret_dataapi::serving::SERVING_REQUEST_DEADLINE,
+        "readiness withdraws traffic after {period}s x {failures} = {budget:?}, \
+         which is inside SERVING_REQUEST_DEADLINE ({:?}). A pod holding one \
+         legal, full-length request would be taken out of Endpoints for being \
+         busy, and its load would flap its peers in turn",
+        egret_dataapi::serving::SERVING_REQUEST_DEADLINE
     );
 }
 

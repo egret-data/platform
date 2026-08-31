@@ -216,6 +216,7 @@ use egret_dataapi_api::{
 };
 use egret_metastore::Db;
 use serde::Serialize;
+use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 use super::access_log::{AccessLogEntry, AccessLogStore};
@@ -600,15 +601,39 @@ pub fn serving_router() -> Router<DataApiState> {
 ///
 /// The semaphore is built HERE, once per router, rather than per request — the
 /// same reason `DataApiState`'s cache and token buckets are constructed once in
-/// `egret-bin`. `try_it`'s throwaway router therefore gets its own bulkhead: a
-/// browser trial is bounded, but it does not consume the machine surface's
-/// admission slots, which is the intended isolation and not an oversight.
+/// `egret-bin`.
+///
+/// **That "once" is a property of the CALLER, not of this function.** A caller
+/// that builds a router per request gets a fresh semaphore per request, which is
+/// a limit nobody can ever reach — the mistake [`guard::serving_bulkhead`]'s own
+/// doc warns about. `egret-server` builds its mount once at boot and is fine.
+/// `try_it` builds a router per trial and is **not**, so it does not call this
+/// function: it calls [`serving_router_sharing_bulkhead`] with a semaphore that
+/// outlives the trial. An earlier version of this comment claimed the throwaway
+/// router's private bulkhead was "the intended isolation"; it was not isolation,
+/// it was an unreachable limit.
 pub fn serving_router_with_bounds(
     deadline: Duration,
     permits: usize,
     max_body_bytes: u64,
 ) -> Router<DataApiState> {
-    let bulkhead = guard::serving_bulkhead(permits);
+    serving_router_sharing_bulkhead(deadline, guard::serving_bulkhead(permits), max_body_bytes)
+}
+
+/// [`serving_router_with_bounds`] with the bulkhead **supplied** rather than
+/// built, for a caller whose router is constructed more than once.
+///
+/// The bulkhead is the one of the three bounds whose meaning depends on the
+/// router outliving the request. A deadline and a body cap are per-request
+/// numbers and stay correct however often the router is rebuilt; a semaphore
+/// rebuilt per request has as many permits as there are requests. This entry
+/// point exists so `try_it` can keep its permits somewhere that survives the
+/// trial that borrowed them.
+pub fn serving_router_sharing_bulkhead(
+    deadline: Duration,
+    bulkhead: Arc<Semaphore>,
+    max_body_bytes: u64,
+) -> Router<DataApiState> {
     Router::new()
         .route("/{ws}/{*path}", get(serve_get).post(serve_post))
         .layer(axum::middleware::from_fn(move |req, next| {

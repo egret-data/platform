@@ -4,11 +4,17 @@
 //! # Why these live here and not at the mount site
 //!
 //! [`crate::serving_router`] applies them, so every caller of that function gets
-//! them: `egret-server`'s composed router, `try_it`'s in-process trial router,
-//! and all twenty of the `tests/serving_*.rs` suites. A bound applied in
-//! `egret-server` instead would be a bound that the suites which actually
-//! exercise this surface never see — which is the shape of failure this repo
-//! keeps repeating. It also cannot be forgotten at a second mount site.
+//! them: `egret-server`'s composed router and all twenty of the
+//! `tests/serving_*.rs` suites. A bound applied in `egret-server` instead would
+//! be a bound that the suites which actually exercise this surface never see —
+//! which is the shape of failure this repo keeps repeating. It also cannot be
+//! forgotten at a second mount site.
+//!
+//! `try_it`'s in-process trial router gets the same three layers through
+//! [`super::router::serving_router_sharing_bulkhead`], with **two of the three
+//! numbers changed**: the deadline, because the trial crosses no ingress, and
+//! the bulkhead, because a router built per trial cannot own its own semaphore.
+//! See [`crate::TRIAL_REQUEST_DEADLINE`] and [`crate::TRIAL_MAX_CONCURRENCY`].
 //!
 //! # Why the answers are the serving envelope and not tower-http's
 //!
@@ -104,6 +110,16 @@ pub const INGRESS_READ_TIMEOUT_SECS: u64 = 60;
 ///   enforced, so the in-flight query's HTTP connection to Trino/StarRocks
 ///   closes; the *engine-side* query is not cancelled by that and keeps running
 ///   until its own `timeout_seconds` expires.
+/// * **It bounds the request only up to the response HEAD.** `tokio::time::timeout`
+///   completes as soon as `next.run(req)` resolves, and that is the moment the
+///   `Response` value exists — not the moment its body has been written. Today
+///   the whole body is already materialised by then (`Json(...)` serialises into
+///   one buffer before the first byte goes out), so head and completion are the
+///   same instant and the bound is total. **That stops being true the day the
+///   response streams**, which is the fix the memory limit's comment points at:
+///   a streaming body would leave the slow part of a slow request entirely
+///   outside this layer. Whoever implements streaming has to move the bound onto
+///   the body, not merely keep this constant.
 /// * **No `dataapi.access_log` row is written for a timed-out call.** That insert
 ///   is the last thing `serving::router::serve` does, and it dies with the
 ///   cancelled future. A timed-out request is therefore visible in `tracing` and
@@ -237,6 +253,26 @@ fn bound_response(
     }
 }
 
+/// What a bound may put in a log line, and it is the path — never the URI.
+///
+/// # A parameter value must not escape here
+///
+/// `Uri`'s `Display` writes the query string, and on this surface the query
+/// string **is the caller's parameter values**: `?customer_email=…&region=…`.
+/// Every other instrument on the serving path is already path-only —
+/// `dataapi.access_log.request_path` stores `path.1`, and no other serving log
+/// line records a URI at all — and the error taxonomy in [`super::error`] is
+/// deliberately built so that no parameter name, bound or constraint kind
+/// reaches a caller. A WARN line that prints the whole query undoes that
+/// property from the side an operator, a log shipper and a support ticket all
+/// read.
+///
+/// The path alone identifies the endpoint, which is the only thing any of these
+/// three lines is diagnosing.
+fn logged_path(req: &Request) -> String {
+    req.uri().path().to_string()
+}
+
 /// Answer `504` when a request outruns `deadline`.
 ///
 /// `deadline` is a parameter rather than a read of [`SERVING_REQUEST_DEADLINE`]
@@ -244,15 +280,23 @@ fn bound_response(
 /// production 50 s would be a 50-second test; one that asserted the layer was
 /// *installed* would pass with the layer doing nothing, which is the failure
 /// mode this repo has shipped repeatedly.
+///
+/// # This one stays at WARN
+///
+/// The other two bounds refuse before doing any work and were dropped to DEBUG
+/// (see [`serving_admit`]). A deadline that fires has already spent the whole
+/// budget, so one line per event costs nothing next to what produced it, and it
+/// is the only instrument that sees the event at all — the `access_log` insert
+/// dies with the cancelled future.
 pub async fn serving_deadline(deadline: Duration, req: Request, next: Next) -> Response {
     let method = req.method().clone();
-    let uri = req.uri().clone();
+    let path = logged_path(&req);
     let started = std::time::Instant::now();
     match tokio::time::timeout(deadline, next.run(req)).await {
         Ok(resp) => resp,
         Err(_) => {
             tracing::warn!(
-                %method, %uri, deadline_secs = deadline.as_secs(),
+                %method, %path, deadline_secs = deadline.as_secs(),
                 "data-api serving request exceeded its deadline; answering 504 \
                  (no access_log row is written for a cancelled request)"
             );
@@ -282,10 +326,23 @@ pub fn serving_bulkhead(permits: usize) -> Arc<Semaphore> {
 /// refusal into an unbounded queue whose members all time out at
 /// [`SERVING_REQUEST_DEADLINE`] having consumed a connection each. A caller told
 /// `503, Retry-After: 1` can back off; a caller left in a queue cannot.
+///
+/// # The shed logs at DEBUG, and that is a decision
+///
+/// It was a WARN. A shed costs one failed `try_acquire` — it is the cheapest
+/// thing this process can do — and it happens precisely when the process has no
+/// capacity to spare, so one formatted, allocated, shipped log line per refusal
+/// made the cheapest path the most expensive one exactly under overload, and
+/// turned a burst into a second burst on the log pipeline. Sampling was the
+/// other candidate and needs state (a counter, a window) for an event that
+/// **already has a counter**: `egret_dataapi_requests_total{code="overloaded"}`
+/// is incremented by [`bound_response`] on every shed, it is a rate an alert can
+/// read, and it does not grow with volume. So the metric is the instrument and
+/// the line is for someone who has turned `debug` on for this target.
 pub async fn serving_admit(sem: Arc<Semaphore>, req: Request, next: Next) -> Response {
     let Ok(_permit) = sem.try_acquire_owned() else {
-        tracing::warn!(
-            method = %req.method(), uri = %req.uri(),
+        tracing::debug!(
+            method = %req.method(), path = %logged_path(&req),
             "data-api serving bulkhead full; shedding with 503 overloaded"
         );
         return bound_response(
@@ -304,6 +361,11 @@ pub async fn serving_admit(sem: Arc<Semaphore>, req: Request, next: Next) -> Res
 }
 
 /// Answer `413` when a request declares a body larger than `max_bytes`.
+///
+/// DEBUG for the same reason as [`serving_admit`]: this refusal is a header read
+/// and nothing else, it is trivially repeatable by anyone who can reach the
+/// surface, and it is counted as
+/// `egret_dataapi_requests_total{code="payload_too_large"}`.
 pub async fn serving_body_limit(max_bytes: u64, req: Request, next: Next) -> Response {
     let declared = req
         .headers()
@@ -311,8 +373,8 @@ pub async fn serving_body_limit(max_bytes: u64, req: Request, next: Next) -> Res
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok());
     if declared.is_some_and(|n| n > max_bytes) {
-        tracing::warn!(
-            method = %req.method(), uri = %req.uri(), declared,
+        tracing::debug!(
+            method = %req.method(), path = %logged_path(&req), declared,
             "data-api serving request declared a body over the cap; answering 413"
         );
         return bound_response(
@@ -445,6 +507,70 @@ mod tests {
              decoration: the edge answers the caller first and egret's 504 is written to a \
              connection nobody is reading"
         );
+    }
+
+    /// The seam between what a bound answers and what the per-endpoint OpenAPI
+    /// document promises.
+    ///
+    /// `openapi_gen` builds the document a consuming team generates a client
+    /// from, and it is NOT the repo's root `openapi.json` — the root document is
+    /// built from `#[utoipa::path]` on the handlers and cannot see a status
+    /// produced by a layer wrapped around them. So `413` and `504` were
+    /// reachable and undeclared while the root file's diff stayed at zero lines.
+    /// This drives each bound for real and requires its status to be in the
+    /// declared set.
+    #[tokio::test]
+    async fn every_status_a_bound_answers_is_declared_in_the_generated_contract() {
+        let declared = crate::serving::error::wire_answers();
+
+        let full = serving_bulkhead(0);
+        let shedding = Router::new()
+            .route("/x", post(|| async { "unreachable" }))
+            .layer(axum::middleware::from_fn(move |req, next| {
+                serving_admit(full.clone(), req, next)
+            }));
+        let capped = Router::new()
+            .route("/x", post(|| async { "unreachable" }))
+            .layer(axum::middleware::from_fn(move |req, next| {
+                serving_body_limit(4, req, next)
+            }));
+        let slow = Router::new()
+            .route(
+                "/x",
+                post(|| async {
+                    std::future::pending::<()>().await;
+                    "unreachable"
+                }),
+            )
+            .layer(axum::middleware::from_fn(move |req, next| {
+                serving_deadline(Duration::ZERO, req, next)
+            }));
+
+        for (app, what) in [
+            (shedding, "the bulkhead shed"),
+            (capped, "the body cap"),
+            (slow, "the deadline"),
+        ] {
+            let res = app
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/x")
+                        .header(header::CONTENT_LENGTH, "1048576")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = res.status().as_u16();
+            assert!(
+                declared.contains_key(&status),
+                "{what} answers {status}, which the taxonomy derivation does not \
+                 produce — so `openapi_gen` cannot declare it and a generated \
+                 client meets a status its contract never named. Declared: \
+                 {declared:?}"
+            );
+        }
     }
 
     /// The chart and this module must agree about the 60. Reads the template

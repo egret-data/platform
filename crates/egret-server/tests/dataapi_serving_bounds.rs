@@ -109,6 +109,29 @@ impl SigningKeyStore for FastKeys {
     }
 }
 
+/// A signing-key store that takes a fixed amount of time, so a test can drive a
+/// request whose duration it chose against a deadline it did not.
+///
+/// Used with `#[tokio::test(start_paused = true)]`: the sleep is virtual, so
+/// "this endpoint takes 60 seconds" costs nothing to run.
+struct SleepyKeys(Duration);
+
+#[async_trait::async_trait]
+impl SigningKeyStore for SleepyKeys {
+    async fn active(&self) -> Result<KeyMaterial, IdpError> {
+        tokio::time::sleep(self.0).await;
+        let km = active_key();
+        Ok(KeyMaterial {
+            kid: km.kid.clone(),
+            private_pem: km.private_pem.clone(),
+            public_jwk: km.public_jwk.clone(),
+        })
+    }
+    async fn all_public_jwks(&self) -> Result<Vec<serde_json::Value>, IdpError> {
+        unreachable!("not reached on the serving path")
+    }
+}
+
 /// A signing-key store that **parks**, holding the request inside the handler.
 ///
 /// `entered` counts how many requests have reached this point, so a test can
@@ -147,6 +170,19 @@ impl SigningKeyStore for SlowKeys {
 }
 
 fn composed_app(keys: Arc<dyn SigningKeyStore>) -> axum::Router {
+    build_router(AppState::without_db().with_dataapi(dataapi_state(keys)))
+}
+
+/// The trial path's router, nested at the same prefix the console's trial uses,
+/// and built by the SAME function `try_it` calls — not an equivalent assembled
+/// here, which would assert against a copy of the wiring rather than the wiring.
+fn trial_app(keys: Arc<dyn SigningKeyStore>) -> axum::Router {
+    axum::Router::new()
+        .nest("/data-api/v1", egret_dataapi::trial_serving_router())
+        .with_state(dataapi_state(keys))
+}
+
+fn dataapi_state(keys: Arc<dyn SigningKeyStore>) -> DataApiState {
     // Port 1: nothing listens, and nothing in this file needs a query to
     // succeed. The short `acquire_timeout` matters though — `serve` writes its
     // `dataapi.access_log` row AFTER the response, so with sqlx's 30 s default
@@ -157,7 +193,7 @@ fn composed_app(keys: Arc<dyn SigningKeyStore>) -> axum::Router {
         .connect_lazy("postgres://egret:egret@127.0.0.1:1/egret")
         .expect("lazy pool");
     let db = Db { pool };
-    let state = DataApiState {
+    DataApiState {
         db: db.clone(),
         clients: ClientStore::new(db.clone()),
         endpoints: EndpointStore::new(db.clone()),
@@ -178,8 +214,7 @@ fn composed_app(keys: Arc<dyn SigningKeyStore>) -> axum::Router {
         cache: egret_dataapi::serving::ResponseCache::new(),
         rate_limits: Arc::new(egret_dataapi::serving::TokenBucket::new()),
         activity: egret_dataapi::ActivityStore::new(db.clone(), Some(90)),
-    };
-    build_router(AppState::without_db().with_dataapi(state))
+    }
 }
 
 fn serving_request(method: &str) -> axum::http::request::Builder {
@@ -411,4 +446,170 @@ async fn a_post_at_exactly_the_cap_still_reaches_the_handler() {
         "a body at the cap must be served (and then rejected by the handler's \
          own first step), not refused by the cap"
     );
+}
+
+/// The trial bulkhead is a process-wide `static` — that is the whole point of
+/// the fix below — so the three tests that fill or occupy it would see each
+/// other's permits if the harness ran them at the same time.
+///
+/// `tokio::sync::Mutex`, not `std`'s: this is held across awaits, and tokio's
+/// primitives are runtime-agnostic, so a test parked here is woken by whichever
+/// runtime releases it (each `#[tokio::test]` builds its own).
+static TRIAL_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// The finding: `try_it` builds a router **per trial**, so a bulkhead built with
+/// the router had `TRIAL_MAX_CONCURRENCY` permits per request and could never be
+/// reached by any number of concurrent trials.
+///
+/// Two routers are built here the way two concurrent trials build them — the
+/// first is filled, the second is a fresh call to the same constructor — and the
+/// second must be refused. Give the trial path a per-router semaphore again and
+/// the second router admits the request and answers `401` from the handler, so
+/// this fails on the status.
+#[tokio::test]
+async fn a_router_built_per_trial_still_shares_one_process_wide_bulkhead() {
+    let _serialised = TRIAL_TESTS.lock().await;
+    let entered = Arc::new(AtomicUsize::new(0));
+    let release = Arc::new(tokio::sync::Notify::new());
+    let keys = || -> Arc<dyn SigningKeyStore> {
+        Arc::new(SlowKeys {
+            entered: entered.clone(),
+            release: release.clone(),
+        })
+    };
+
+    let first = trial_app(keys());
+    let mut held = Vec::new();
+    for _ in 0..egret_dataapi::TRIAL_MAX_CONCURRENCY {
+        let app = first.clone();
+        held.push(tokio::spawn(async move {
+            app.oneshot(serving_request("GET").body(Body::empty()).unwrap())
+                .await
+                .unwrap()
+                .status()
+        }));
+    }
+    while entered.load(Ordering::SeqCst) < egret_dataapi::TRIAL_MAX_CONCURRENCY {
+        tokio::task::yield_now().await;
+    }
+
+    // A SECOND router, built exactly as the next trial would build it.
+    let second = trial_app(keys());
+    let res = second
+        .oneshot(serving_request("GET").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        res.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "a trial router built while {} trials are in flight must be shed. If it \
+         is not, the trial bulkhead is per-router and therefore per-request, \
+         which is a cap nobody can reach",
+        egret_dataapi::TRIAL_MAX_CONCURRENCY
+    );
+    assert_eq!(
+        entered.load(Ordering::SeqCst),
+        egret_dataapi::TRIAL_MAX_CONCURRENCY,
+        "the shed trial must not have reached the handler"
+    );
+    let body = body_json(res).await;
+    assert_eq!(body["error"]["code"], "overloaded");
+
+    release.notify_waiters();
+    for h in held {
+        assert_eq!(h.await.unwrap(), StatusCode::UNAUTHORIZED);
+    }
+}
+
+/// The deadline half of the same finding, driven against the configuration the
+/// review named: **two statements at the default `limits.timeout_seconds`**.
+///
+/// That is 2 x 30 = 60 s of legal worst case. The consumer path is bounded at 50
+/// s and answers `504` — correct, and derived from the ingress it crosses. The
+/// trial path crosses no such edge (it is a `tower::ServiceExt::oneshot`, in
+/// process, with no socket between the halves), and inheriting the consumer's
+/// number meant an author clicking **Try it** on a configuration egret itself
+/// accepts was told it timed out.
+///
+/// Both halves are driven here, in one test, from one duration. Set
+/// `TRIAL_REQUEST_DEADLINE` back to `SERVING_REQUEST_DEADLINE` and the trial
+/// assertion fails; delete the trial's own bound and the consumer assertion
+/// stops being a control for it.
+#[tokio::test(start_paused = true)]
+async fn a_legal_two_statement_endpoint_is_504d_for_a_consumer_and_not_for_a_trial() {
+    let _serialised = TRIAL_TESTS.lock().await;
+    // The legal worst case, built from the two constants that produce it rather
+    // than typed as `60`.
+    let worst_case = Duration::from_secs(2 * u64::from(egret_dataapi_api::DEFAULT_TIMEOUT_SECONDS));
+    assert!(
+        worst_case > egret_dataapi::serving::SERVING_REQUEST_DEADLINE,
+        "this test is only interesting while a legal two-statement endpoint can \
+         outrun the consumer deadline"
+    );
+
+    let consumer = composed_app(Arc::new(SleepyKeys(worst_case)));
+    let res = consumer
+        .oneshot(serving_request("GET").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::GATEWAY_TIMEOUT,
+        "the consumer path is bounded by the edge it crosses, and 60 s is past it"
+    );
+
+    let trial = trial_app(Arc::new(SleepyKeys(worst_case)));
+    let res = trial
+        .oneshot(serving_request("GET").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::UNAUTHORIZED,
+        "the SAME endpoint tried from the console must reach the handler and be \
+         answered on its own merits (401 — the token in this file is not real). \
+         A 504 here is the trial path inheriting a bound derived from an edge it \
+         never crosses"
+    );
+}
+
+/// And the trial deadline is still a bound, not the absence of one.
+///
+/// The published ceiling is `MAX_STATEMENTS x TIMEOUT_CEILING_SECS` — 80 minutes
+/// — and a browser tab held open for that is a hang, not a diagnosis. Past
+/// `TRIAL_REQUEST_DEADLINE` the author gets egret's own envelope with a code.
+#[tokio::test(start_paused = true)]
+async fn a_trial_that_outruns_its_own_deadline_is_answered_504_in_the_envelope() {
+    let _serialised = TRIAL_TESTS.lock().await;
+
+    // The bound has to be a NUMBER and not merely present. The drive below
+    // sleeps `TRIAL_REQUEST_DEADLINE + 1s`, so raising the constant raises the
+    // sleep with it and a `504` would arrive at any value — including an hour,
+    // which is no bound at all for the thing actually being bounded, a person
+    // watching a browser tab. Held to five minutes, well under the 80-minute
+    // published worst case that motivates having a deadline here at all.
+    assert!(
+        egret_dataapi::TRIAL_REQUEST_DEADLINE <= Duration::from_secs(300),
+        "TRIAL_REQUEST_DEADLINE is {:?}; past a few minutes the console hangs \
+         rather than diagnoses, and the deadline stops being a bound",
+        egret_dataapi::TRIAL_REQUEST_DEADLINE
+    );
+
+    let over = egret_dataapi::TRIAL_REQUEST_DEADLINE + Duration::from_secs(1);
+    let trial = trial_app(Arc::new(SleepyKeys(over)));
+
+    let res = trial
+        .oneshot(serving_request("GET").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        res.status(),
+        StatusCode::GATEWAY_TIMEOUT,
+        "the trial path has its own deadline; without one a published 80-minute \
+         worst case would hang the console"
+    );
+    let body = body_json(res).await;
+    assert_eq!(body["error"]["code"], "timeout");
 }

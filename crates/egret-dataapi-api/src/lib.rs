@@ -178,8 +178,19 @@ pub struct LimitsSpec {
 fn default_max_rows() -> u32 {
     10_000
 }
+
+/// What one statement is allowed to take when the author says nothing.
+///
+/// Named rather than inlined because it is a **multiplicand**: an endpoint's
+/// worst case is this times its statement count, and that product is what the
+/// request-scoped deadlines on the serving and trial paths have to be reconciled
+/// against (`egret_dataapi::serving::SERVING_REQUEST_DEADLINE`,
+/// `egret_dataapi::TRIAL_REQUEST_DEADLINE`). Those reconciliations were written
+/// against the literal `30`, which nothing would have updated.
+pub const DEFAULT_TIMEOUT_SECONDS: u32 = 30;
+
 fn default_timeout() -> u32 {
-    30
+    DEFAULT_TIMEOUT_SECONDS
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
@@ -935,10 +946,11 @@ pub enum StatementError {
 /// # What it is not derived from
 ///
 /// **Not from a target response time.** The deployed ingress gives a Data API
-/// call 60 seconds: egret's `Ingress` sets no `proxy-read-timeout` annotation,
-/// so ingress-nginx's default applies, and the running controller's generated
-/// config reads `proxy_read_timeout 60s` (read out of the live pod, not assumed).
-/// The default `limits.timeout_seconds` is 30, so **two** statements already
+/// call 60 seconds — originally ingress-nginx's default, read out of the live
+/// pod's generated config rather than assumed, and since pinned explicitly by
+/// egret's `Ingress` (`proxy-read-timeout: "60"`) because
+/// `egret_dataapi::serving::SERVING_REQUEST_DEADLINE` is derived from it.
+/// The default [`DEFAULT_TIMEOUT_SECONDS`] is 30, so **two** statements already
 /// reach that cut-off in the worst case. No value of N makes the worst case fit
 /// inside 60 s; keeping a real endpoint inside it is `timeout_seconds`'s job,
 /// per statement. This bound exists because N was a multiplier on two costs that

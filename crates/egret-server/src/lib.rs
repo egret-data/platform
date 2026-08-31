@@ -405,6 +405,54 @@ async fn healthz() -> impl IntoResponse {
     Json(serde_json::json!({ "status": "ok" }))
 }
 
+/// How long `/readyz` waits for the database before answering `503` itself.
+///
+/// # The probe had no bound of its own, and the pool's is 30 s
+///
+/// `Db::connect` builds the pool with sqlx's default `acquire_timeout` of **30
+/// seconds**. Without a bound here, a `/readyz` that cannot get a connection
+/// waits all 30 of them — long past the kubelet's `timeoutSeconds`, which means
+/// the kubelet abandons the probe and the abandoned `acquire` stays queued
+/// behind the traffic that was already there. Under the load that causes it,
+/// that is one more waiter every `periodSeconds`.
+///
+/// # Bulkhead width, pool size and probe timings are ONE set of numbers
+///
+/// They were chosen in three different places and only make sense read together,
+/// so they are written down here:
+///
+/// | number | value | where |
+/// |---|---|---|
+/// | serving bulkhead | 64 in flight | `SERVING_MAX_CONCURRENCY` |
+/// | trial bulkhead | 8 in flight | `egret_dataapi::TRIAL_MAX_CONCURRENCY` |
+/// | metastore pool | 10 connections | `egret_config`'s `database.max_connections` |
+/// | pool acquire timeout | 30 s | sqlx's default, via `Db::connect` |
+/// | request deadline | 50 s | `SERVING_REQUEST_DEADLINE` |
+/// | readiness probe | 3 s × 5 s × N | `backend-deployment.yaml` |
+///
+/// The bulkhead is deliberately **8× the pool** — see its own doc: it is a wall
+/// against the Data API consuming the process, not a throughput limit, and the
+/// pool is meant to be the thing that paces ordinary work. The consequence is
+/// that **a pool with no free connection is the normal busy state of a healthy
+/// pod**, not a fault. Two things follow, and both are the reconciliation:
+///
+/// 1. **`/readyz` must answer before the kubelet gives up**, so this bound sits
+///    below the probe's `timeoutSeconds: 3`. An answer egret writes is one the
+///    operator can read; a probe the kubelet abandons is a timeout with no
+///    explanation and a queued waiter left behind.
+/// 2. **Withdrawal must take longer than one request.** One admitted request may
+///    legitimately hold its connection for `SERVING_REQUEST_DEADLINE`, so a
+///    readiness budget shorter than that is guaranteed to withdraw pods that are
+///    merely busy — and every withdrawal moves that load onto the peers, which
+///    then fail the same check. `periodSeconds × failureThreshold` is therefore
+///    set above 50 s in the chart, and `deployment_probes.rs` asserts both
+///    relations against these constants rather than against a comment.
+///
+/// The residual, stated: a genuinely dead database keeps receiving traffic for
+/// the whole withdrawal budget. Those requests fail fast and loudly with a 500
+/// each; a healthy pod withdrawn under load fails an entire deployment quietly.
+pub const READYZ_DB_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Readiness: dependencies are reachable. 200 when the DB (if any) responds.
 async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
     match &state.db {
@@ -412,14 +460,23 @@ async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
             StatusCode::OK,
             Json(serde_json::json!({ "status": "ok", "db": "none" })),
         ),
-        Some(db) => match db.ping().await {
-            Ok(()) => (
+        // `timeout` CANCELS the ping, which is the half that matters: the
+        // dropped future takes its place in the pool's acquire queue with it.
+        Some(db) => match tokio::time::timeout(READYZ_DB_TIMEOUT, db.ping()).await {
+            Ok(Ok(())) => (
                 StatusCode::OK,
                 Json(serde_json::json!({ "status": "ok", "db": "up" })),
             ),
-            Err(_) => (
+            Ok(Err(_)) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(serde_json::json!({ "status": "degraded", "db": "down" })),
+            ),
+            // Distinguished in the body, not in the status: for the kubelet this
+            // is the same "not ready", but for the operator reading a probe
+            // response by hand "slow" and "refused" are different incidents.
+            Err(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "status": "degraded", "db": "slow" })),
             ),
         },
     }
@@ -644,6 +701,62 @@ mod tests {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(json["db"], "down");
+    }
+
+    /// The readiness probe must not inherit the pool's 30-second patience.
+    ///
+    /// A refused connection answers instantly and is the easy case; the one that
+    /// matters is a database that **accepts and then says nothing** — a failing
+    /// over primary, a blackholed route, a saturated pool. This binds a socket
+    /// and never accepts on it, so the client completes the TCP handshake in the
+    /// kernel's backlog and then blocks forever waiting for the Postgres
+    /// greeting. The pool is built with sqlx's real default `acquire_timeout`,
+    /// so with the bound deleted this test does not fail fast — it waits the
+    /// full 30 s and then reports `db: "down"`, which is both slower than the
+    /// kubelet's `timeoutSeconds` and the wrong diagnosis.
+    #[tokio::test]
+    async fn readyz_gives_up_on_a_hung_database_long_before_the_pool_does() {
+        // Never accepted. Held for the duration of the test so the port stays
+        // bound and the connection stays parked rather than being refused.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind blackhole");
+        let port = listener.local_addr().expect("addr").port();
+
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy(&format!("postgres://egret:egret@127.0.0.1:{port}/egret"))
+            .expect("lazy pool");
+        let mut state = AppState::without_db();
+        state.db = Some(Db { pool });
+        let app = build_router(state);
+
+        let started = std::time::Instant::now();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/readyz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let elapsed = started.elapsed();
+
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            elapsed < READYZ_DB_TIMEOUT * 3,
+            "/readyz took {elapsed:?} against a hung database. Its own bound is \
+             {READYZ_DB_TIMEOUT:?}; anything near sqlx's 30 s acquire_timeout \
+             means the probe has no bound of its own and the kubelet is deciding \
+             it instead"
+        );
+
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            json["db"], "slow",
+            "a database that hangs is a different incident from one that refuses, \
+             and the body is the only place an operator can tell them apart: {json}"
+        );
+        drop(listener);
     }
 
     /// A `Pdp` that must never actually be consulted in this test: every
