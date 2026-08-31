@@ -16,6 +16,8 @@ import { SqlEditor } from "@/components/sqllab/SqlEditor";
 import MonacoEditor from "@/components/monaco/MonacoEditor";
 import { useIsDark } from "@/hooks/useIsDark";
 import { useDatabases } from "@/api/databases";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { GOVERNED_BLOCKED_MESSAGE, governedWithoutPerPrincipal } from "../governance";
 import { useEndpointDetail } from "../EndpointDetail";
 import { ParamEditor } from "./ParamEditor";
 import { PreviewBlock, type PreviewHandle } from "./PreviewBlock";
@@ -445,15 +447,42 @@ export default function Query() {
                   <SelectValue placeholder="Choose a database" />
                 </SelectTrigger>
                 <SelectContent>
+                  {/* Governed connections are still offered — see
+                      `EndpointCreate` for why hiding them is the wrong shape —
+                      and the ones that cannot carry a publish are named by the
+                      warning below rather than by an absence. */}
                   {(databases ?? []).map((d) => (
                     <SelectItem key={d.id} value={d.id}>
                       {d.name}
+                      {d.governed ? (
+                        <span className="ml-1.5 text-xs text-muted-foreground">Governed</span>
+                      ) : null}
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
             </ConfigTableRow>
           </ConfigTable>
+
+          {/* The refusal an author would otherwise meet only at Publish, said at
+              the moment the database is chosen.
+
+              It names Run too, because Run is refused too. An earlier version of
+              this comment claimed the opposite — "a preview runs as the author,
+              under the author's own engine policy" — and that was simply untrue:
+              `preview::run` goes through the same `execute_as` path as a served
+              request, so on a connection that is neither delegated nor
+              impersonating the engine sees the SERVICE ACCOUNT and the preview
+              returns unmasked rows. The server gates it now
+              (`preview::run` → `lifecycle::check_governed_connection`), and this
+              sentence has to match or the author finds out at the first press. */}
+          {governedWithoutPerPrincipal(
+            (databases ?? []).find((d) => d.id === form.database_id),
+          ) ? (
+            <Alert>
+              <AlertDescription>{GOVERNED_BLOCKED_MESSAGE}</AlertDescription>
+            </Alert>
+          ) : null}
 
           <ParamEditor params={form.params} onChange={(params) => setForm((f) => ({ ...f, params }))} />
         </div>

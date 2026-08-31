@@ -224,6 +224,7 @@ use super::error::{is_permission_denied, to_wire, ServingErrorBody};
 // Aliased: `metrics` unqualified would read as the FACADE crate at every
 // call site in this file, and the two are one keystroke apart.
 use super::metrics as serving_metrics;
+use super::governance::{governance_allows_serving, LiveConnection};
 use super::params;
 use super::ratelimit::{check_request, retry_after_secs};
 use super::{verify_serving_token, ServingError};
@@ -658,7 +659,7 @@ impl utoipa::Modify for BearerAddon {
         (status = 404, description = "`not_found` — no such live endpoint in this workspace", body = ServingErrorBody),
         (status = 429, description = "`rate_limited` — a published rate limit was exceeded; `Retry-After` states when the bucket refills", body = ServingErrorBody),
         (status = 500, description = "`internal` — an egret-side fault; quote `request_id` to support", body = ServingErrorBody),
-        (status = 503, description = "`schema_drift` / `output_naming_collision` / `cache_scope_stale` / `param_gate_stale` — the published configuration no longer describes the data, or was frozen before the current parameter-safety rules existed. `Retry-After` is a floor, not a forecast: only a re-publish clears these", body = ServingErrorBody),
+        (status = 503, description = "`schema_drift` / `output_naming_collision` / `cache_scope_stale` / `governance_stale` / `param_gate_stale` — the published configuration no longer describes the data, was frozen before the current parameter-safety rules existed, or points at a `governed` database through a connection that does not run queries as the caller. `Retry-After` is a floor, not a forecast: a re-publish clears the first four, and `governance_stale` is cleared only by restoring the connection or the database's `governed` flag", body = ServingErrorBody),
     ),
     security(("data_api_bearer" = [])),
 )]
@@ -689,7 +690,7 @@ async fn serve_get(
         (status = 404, description = "`not_found` — no such live endpoint in this workspace", body = ServingErrorBody),
         (status = 429, description = "`rate_limited` — a published rate limit was exceeded; `Retry-After` states when the bucket refills", body = ServingErrorBody),
         (status = 500, description = "`internal` — an egret-side fault; quote `request_id` to support", body = ServingErrorBody),
-        (status = 503, description = "`schema_drift` / `output_naming_collision` / `cache_scope_stale` / `param_gate_stale` — the published configuration no longer describes the data, or was frozen before the current parameter-safety rules existed. `Retry-After` is a floor, not a forecast: only a re-publish clears these", body = ServingErrorBody),
+        (status = 503, description = "`schema_drift` / `output_naming_collision` / `cache_scope_stale` / `governance_stale` / `param_gate_stale` — the published configuration no longer describes the data, was frozen before the current parameter-safety rules existed, or points at a `governed` database through a connection that does not run queries as the caller. `Retry-After` is a floor, not a forecast: a re-publish clears the first four, and `governance_stale` is cleared only by restoring the connection or the database's `governed` flag", body = ServingErrorBody),
     ),
     security(("data_api_bearer" = [])),
 )]
@@ -947,9 +948,13 @@ async fn run(
         .filter(|w| w.id.0 == principal.workspace_id && w.status == "active")
         .ok_or(ServingError::NotFound)?;
 
-    let (endpoint_id, version, snap) = live_snapshot(&st.db, ws.id.0, method.as_str(), &path)
-        .await?
-        .ok_or(ServingError::NotFound)?;
+    // `live_conn` rides in on this same statement — see `live_snapshot`. It is
+    // READ here, at step 2, and ACTED ON below, after the invoke grant and the
+    // limiter: nothing between the two consults it.
+    let (endpoint_id, version, snap, live_conn) =
+        live_snapshot(&st.db, ws.id.0, method.as_str(), &path)
+            .await?
+            .ok_or(ServingError::NotFound)?;
     // From here every failure is attributable to a specific published version,
     // which is what makes "this endpoint started 503ing at 14:02" answerable
     // from the log alone.
@@ -1024,7 +1029,14 @@ async fn run(
     if !snap.params.is_empty() && snap.param_gate < egret_dataapi_api::PARAM_GATE {
         return Err(ServingError::ParamGateStale);
     }
-    let shared = shared_cache_allowed(&st.db, &snap).await?;
+    // Package 1. BEFORE the cache lookup, for the reason every check on this
+    // path is before it: a warm entry would otherwise keep answering with
+    // governed rows read under the service account for the whole of its TTL.
+    // Evaluated against the LIVE row rather than compared with a frozen witness
+    // — see `serving::governance` for why the shared-cache shape would stay
+    // silent in the exact case that matters.
+    governance_allows_serving(live_conn)?;
+    let shared = shared_cache_allowed(live_conn, &snap)?;
     // The list is never empty — `EndpointSnapshotRepr` refuses a snapshot that
     // carries neither `statements` nor the pre-M2 `sql`+`columns` pair, and
     // `params::resolve` below refuses an empty list a second time. Checked here
@@ -1055,8 +1067,10 @@ async fn run(
     );
 
     // `cache_ttl` is the single decision about whether this endpoint caches at
-    // all: `enabled: false` and a `ttl_seconds` of 0 both answer `None`.
-    let ttl = cache_ttl(&snap);
+    // all: `enabled: false`, a `ttl_seconds` of 0, and a database row that is
+    // GONE all answer `None`. The third is what keeps `governance`'s
+    // missing-row reasoning honest — see that function's doc.
+    let ttl = cache_ttl(live_conn, &snap);
     // Counted INSIDE this `if`, so an endpoint with caching off contributes
     // neither a hit nor a miss. Counting its every success as a miss would put a
     // 0% hit rate on a dashboard for an endpoint that has no cache to miss.
@@ -2048,16 +2062,72 @@ async fn invoke_allowed(
 /// The `state = 'live'` predicate is what makes a DISABLED endpoint a 404: the
 /// row and its `live_version_id` both survive a disable (that is the point — an
 /// enable must restore the same version), so the join alone would still find it.
+/// # The `LEFT JOIN` carries the live connection, and costs nothing
+///
+/// `d.governed, d.delegated, d.options` are the three columns
+/// [`governance_allows_serving`] and [`shared_cache_allowed`] decide from, and
+/// they ride in here rather than in a `SELECT` of their own: same statement,
+/// same round trip, and the snapshot and the connection are then read at ONE
+/// moment. See [`super::governance`]'s Cost section for why the round trip
+/// mattered enough to fold.
+///
+/// `LEFT`, so a DELETED database still routes: `governed` comes back `NULL`, the
+/// column is `NOT NULL` in the schema, and [`LiveConnection::from_row`] reads
+/// that as "the row is gone" — a state both readers answer deliberately, and
+/// differently. An INNER join would instead turn a deleted connection into a
+/// 404, hiding the one fact that explains everything the operator is seeing.
+///
+/// The join key is the SNAPSHOT's `database_id`, not `e.database_id`. They are
+/// usually the same and are allowed to differ: `e.database_id` follows the
+/// DRAFT, so an author who re-points the picker without publishing would
+/// otherwise have the safety of a live version decided by a connection that
+/// version never used. The `::uuid` cast can only fail on a snapshot `publish`
+/// did not write, which is the same corruption the `from_value` below answers
+/// with a 500 — the `map_err` on the query says so, because Postgres' own
+/// `22P02` names neither the endpoint nor the field.
+///
+/// # `d.workspace_id = $1`, on a key that came out of a snapshot
+///
+/// It is the same predicate [`crate::lifecycle::EndpointStore::connection_safety_opt`]
+/// carries, and it is here for the same reason: `database_id` is the worst
+/// column in this crate to resolve unscoped, because what it opens is a
+/// CREDENTIAL — a foreign row would hand this request another workspace's
+/// engine connection to decide safety from. Nothing published can reach that
+/// state today (publish and rollback both read the connection through
+/// `connection_safety_opt`, which is scoped, so a foreign id never enters
+/// `endpoint_versions`), so this is insurance rather than a fix — and this repo
+/// has already shipped one cross-workspace `database_id` leak of exactly this
+/// shape.
+///
+/// It does not fail open. A foreign — or legacy `workspace_id IS NULL` — row
+/// simply does not match, so `governed` comes back `NULL` and both readers take
+/// the row-is-gone branch: [`governance_allows_serving`] allows, and
+/// [`crate::serving::cache_ttl`] answers `None` so nothing is served from or
+/// written to the cache. What is left is execution, and that is where the
+/// refusal lands: `execute_as_with_params` resolves through `connect_as`, which
+/// calls `get_in_workspace` and reports a foreign id as `NotFound` before any
+/// connection is opened. Strictly tighter than without the predicate, which
+/// could serve such a request from a warm cache entry.
 async fn live_snapshot(
     db: &Db,
     ws: Uuid,
     method: &str,
     path: &str,
-) -> Result<Option<(Uuid, i32, EndpointSnapshot)>, ServingError> {
-    let row: Option<(Uuid, i32, serde_json::Value)> = sqlx::query_as(
-        "SELECT e.id, v.version, v.snapshot \
+) -> Result<Option<(Uuid, i32, EndpointSnapshot, Option<LiveConnection>)>, ServingError> {
+    type Row = (
+        Uuid,
+        i32,
+        serde_json::Value,
+        Option<bool>,
+        Option<bool>,
+        Option<serde_json::Value>,
+    );
+    let row: Option<Row> = sqlx::query_as(
+        "SELECT e.id, v.version, v.snapshot, d.governed, d.delegated, d.options \
          FROM dataapi.endpoints e \
          JOIN dataapi.endpoint_versions v ON v.id = e.live_version_id \
+         LEFT JOIN query.databases d \
+           ON d.id = (v.snapshot->>'database_id')::uuid AND d.workspace_id = $1 \
          WHERE e.workspace_id = $1 AND e.method = $2 AND e.path = $3 \
            AND e.state = 'live'",
     )
@@ -2066,16 +2136,37 @@ async fn live_snapshot(
     .bind(path)
     .fetch_optional(&db.pool)
     .await
-    .map_err(ServingError::internal)?;
+    .map_err(|e| {
+        // The one expression here that can fail on DATA rather than on the
+        // database being unreachable is the `::uuid` cast, and Postgres reports
+        // it as `22P02 invalid input syntax for type uuid: "…"` — which names
+        // the cast and nothing else. The `from_value` below, which this cast
+        // used to be reached before, answered the same corruption with the field
+        // name. Say the same thing here rather than leaving the operator with a
+        // driver message about a type.
+        if e.as_database_error().and_then(|d| d.code()).as_deref() == Some("22P02") {
+            return ServingError::internal(format!(
+                "the live version of {method} {path} has a snapshot whose `database_id` is not a \
+                 uuid; publish is the only writer of that field, so this row was not written by \
+                 this server: {e}"
+            ));
+        }
+        ServingError::internal(e)
+    })?;
 
-    let Some((id, version, raw)) = row else {
+    let Some((id, version, raw, governed, delegated, options)) = row else {
         return Ok(None);
     };
     // A snapshot that will not deserialise is OUR fault, not the caller's: the
     // only writer is publish. 500, not 404 — a 404 would quietly hide a
     // corrupted or forward-incompatible version behind "no such endpoint".
     let snapshot: EndpointSnapshot = serde_json::from_value(raw).map_err(ServingError::internal)?;
-    Ok(Some((id, version, snapshot)))
+    Ok(Some((
+        id,
+        version,
+        snapshot,
+        LiveConnection::from_row(governed, delegated, options),
+    )))
 }
 
 /// The `Authorization: Bearer …` value, or [`ServingError::Unauthorized`].

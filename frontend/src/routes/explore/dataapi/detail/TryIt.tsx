@@ -77,13 +77,23 @@ function CopyButton({ value }: { value: string }) {
  * the response body, and is rendered here as a RESULT, never as a page-level
  * failure.
  *
- * **The distinction this section exists to make.** A trial runs as the chosen
- * SERVICE ACCOUNT; `Query`'s preview runs as the AUTHOR. `PreviewBlock`'s note
- * says the same thing from the other side, and the two were measured to differ
- * live on kind (`who=admin` from a preview, `who=svc-kind-smoke-bot` from a
- * trial, same endpoint and same SQL). That is why both features exist, so the
- * copy carrying it is load-bearing: the section description, the `Caveat` under
- * the Service-account picker, and the note beside Run all say it.
+ * **The distinction this section exists to make, and it is NOT simply "whose
+ * identity".** A trial authenticates a real 60-second token for the chosen
+ * SERVICE ACCOUNT, is authorized by that account's invoke grant, spends the
+ * rate limit, reads and writes the cache, and runs the PUBLISHED version.
+ * `Query`'s preview does none of those: it authenticates nothing, checks no
+ * grant, and runs the SQL on screen. Those four are the difference that always
+ * holds, and they are what the copy has to carry.
+ *
+ * The ENGINE identity is a weaker distinction than this module used to claim.
+ * Preview runs under the endpoint's own connection identity, resolved by
+ * `egret-query/src/execution/mod.rs`'s `delegation_for`: the author only when
+ * that connection is `delegated` or `options.impersonate`, and the same shared
+ * service account otherwise — which is every ordinary connection. The live
+ * measurement on kind (`who=admin` from a preview, `who=svc-kind-smoke-bot` from
+ * a trial, same endpoint and same SQL) was taken on a DELEGATED connection,
+ * where the two do differ; on an ordinary one they are the same identity.
+ * `PreviewBlock`'s note says this from the other side.
  *
  * **The shape is `Query`'s in everything but the split** (`docs/en/ui-conventions.md`
  * §11): settings in tables, a run shortcut named in the result's header, and
@@ -435,16 +445,20 @@ export default function TryIt() {
                     a SERVICE ACCOUNT rather than as you (the section
                     description and the note beside Run are the others), and
                     `PreviewBlock` says the same thing from the other side.
-                    Measured live on kind: `who=admin` from a preview,
-                    `who=svc-kind-smoke-bot` from a trial, same endpoint and
-                    same SQL. */}
+
+                    What it must NOT say is that preview runs as the author:
+                    on an ordinary connection preview reaches the engine as
+                    the same service account a served call does. The trial's
+                    claim here is authentication and authorization, which is
+                    true on every connection — see the module doc. */}
                 <Caveat
                   summary="A green preview does not prove a consumer can call this endpoint"
                   className="text-xs"
                 >
                   A real 60-second token is minted for this account server-side and driven
                   through the actual serving path, so the answer is the one that account would
-                  get. Preview in Query runs as you instead.
+                  get. Preview in Query authenticates no token and checks no invoke grant, so it
+                  cannot answer that question however green it is.
                 </Caveat>
               </div>
             </ConfigTableRow>

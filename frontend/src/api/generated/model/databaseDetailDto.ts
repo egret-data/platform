@@ -19,6 +19,12 @@ export interface DatabaseDetailDto {
   status: string;
   delegated: boolean;
   /**
+     * See [`Database::governed`]. Surfaced on the detail DTO so the Data API
+     * author's database picker can warn BEFORE publish that the connection it
+     * is pointed at cannot carry a governed endpoint.
+     */
+  governed: boolean;
+  /**
      * Set (as a UUID string) when this connection was materialized by an
      * engine→workspace assignment (read-only, provisioned by egret); `None`
      * for a self-service connection. The frontend uses it to split the

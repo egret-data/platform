@@ -20,13 +20,17 @@ POST /api/ws/{workspace}/data-api/endpoints/{id}/preview
 
 Gated on **`data_api_endpoint:manage`** — the same gate `validate` carries, and for the same stated reason: this runs a query against the engine under the caller's identity, which is an authoring action rather than a read of metadata.
 
-### 2.1 It runs as the author, not as a service account
+### 2.1 The author is the PRINCIPAL — which is not the same as running as the author
 
 `validate` already does exactly this. `validated_draft` (`crates/egret-dataapi/src/routes.rs:1096`) passes `ctx.principal.user_id` into `validate`, whose comment records why: `describe_as` resolves under the caller's own identity, so a delegated connection applies **their** policy and an author cannot publish a contract over a table they cannot themselves see.
 
-Preview keeps that identity and changes only the verb — `execute_as_with_params` (`crates/egret-query-api/src/port.rs:196`) instead of `describe_as`.
+Preview keeps that principal and changes only the verb — `execute_as_with_params` (`crates/egret-query-api/src/port.rs:196`) instead of `describe_as`.
 
-**The consequence must reach the UI, not just this document.** A green preview does **not** prove a consumer can call the endpoint: the service account is a different principal and Ranger may refuse it. That is the question `Try it` answers, and it is why both exist rather than one being redundant.
+**This heading said "It runs as the author, not as a service account" and that was false.** Passing a `UserId` decides who the route bills the action to; it does not decide who the ENGINE sees. That is decided one layer down by `execution::delegation_for` (`crates/egret-query/src/execution/mod.rs:43-88`): with `delegated: false` and no `options.impersonate` it mints no bearer, Trino's connector sends the connection's SERVICE user as `X-Trino-User` (`bearer_token.is_some() || impersonate`) and StarRocks issues no `EXECUTE AS`. **On an ordinary connection — not delegated, not impersonating, which is the default — a preview and a served call reach the engine as the same identity.** The author's own policy applies only on a connection that is delegated or impersonating.
+
+A live measurement on kind returned `who=admin` from a preview and `who=svc-kind-smoke-bot` from a trial on the same endpoint and SQL; that was a DELEGATED connection, where the two genuinely differ, and it was wrongly generalised into the sentence above. Package 1 of the production-readiness programme made the strong reading true where it matters instead of restating it: on a `governed` database, `preview::run` now refuses unless the connection runs per principal.
+
+**The consequence must reach the UI, not just this document, and it is not "whose identity".** A green preview does **not** prove a consumer can call the endpoint, and the reason holds on every connection: preview authenticates no token, checks no invoke grant, spends no rate limit, touches no cache, and runs the SQL on screen rather than the published version. That is the question `Try it` answers, and it is why both exist rather than one being redundant.
 
 ### 2.2 The body carries the on-screen draft, not just test values
 
@@ -69,11 +73,11 @@ Two deliberate differences from what a consumer sees, both because preview serve
 
 **Column names come back as the engine returns them — `output.naming` is not applied.** An author debugging SQL needs the names they wrote; `Response` is where the published contract, naming transform included, is inspected. Say which is which in the UI or the two will be confused.
 
-**Engine errors surface verbatim.** Serving deliberately maps an engine permission failure to `data_access_denied` and never echoes the engine's text, because a consumer must not learn the shape of the tables. Preview is the opposite case: the author owns the SQL, is running as themselves, and cannot fix a syntax error from a sanitised message. So preview returns the engine's message as-is — and that is precisely why it must never be reachable below `data_api_endpoint:manage`.
+**Engine errors surface verbatim.** Serving deliberately maps an engine permission failure to `data_access_denied` and never echoes the engine's text, because a consumer must not learn the shape of the tables. Preview is the opposite case: the author owns the SQL and cannot fix a syntax error from a sanitised message. So preview returns the engine's message as-is — and that is precisely why it must never be reachable below `data_api_endpoint:manage`.
 
 ### 2.5 Not audited
 
-`validate` emits no audit event, and preview matches it. Both run a read-only query as the caller themselves — the same thing SQL Lab does, which is also unaudited. This is deliberate and stated here so its absence does not read as an oversight: the audited actions are the ones that change what consumers receive (publish, rollback, disable, enable, delete) plus impersonation (`try`).
+`validate` emits no audit event, and preview matches it. Both run a read-only query with the caller as the principal — the same thing SQL Lab does, which is also unaudited. This is deliberate and stated here so its absence does not read as an oversight: the audited actions are the ones that change what consumers receive (publish, rollback, disable, enable, delete) plus impersonation (`try`).
 
 ## 3. The detail route's sections
 
@@ -89,7 +93,7 @@ The index route. Holds the database picker, the SQL editor, the parameter **decl
 
 **Layout is vertical — editor above, results below — following SQL Lab, not ChartExplore's left/right split.** ChartExplore owns the full page width; a section inside the detail route does not, and a right-hand results column would squeeze both halves.
 
-**Parameters carry two roles here, and merging them is the trap.** A parameter has a *declaration* (name, type, required, default, allowed) and, for preview only, a *test value*. Putting the test value in the same row as the declaration invites the reader to think it is saved with the endpoint. So `ParamEditor` keeps declarations, and the preview block has its own input per declared parameter, the way `Try it` does. That duplicates `Try it`'s input row, which is acceptable: the two sections are never on screen together, and they run as different principals.
+**Parameters carry two roles here, and merging them is the trap.** A parameter has a *declaration* (name, type, required, default, allowed) and, for preview only, a *test value*. Putting the test value in the same row as the declaration invites the reader to think it is saved with the endpoint. So `ParamEditor` keeps declarations, and the preview block has its own input per declared parameter, the way `Try it` does. That duplicates `Try it`'s input row, which is acceptable: the two sections are never on screen together, and they answer different questions — a trial authenticates a service account and goes through the published contract, a preview does neither (§2.1).
 
 ### 3.2 `Config` — everything about the endpoint as an HTTP object
 
@@ -127,7 +131,7 @@ Stated positively so it cannot be read as an omission:
 
 Every backend test here is DB-gated: missing `DATABASE_URL` makes it report `ok` while asserting nothing, so run against `egret_test` and read the duration.
 
-- **Preview runs as the author, not the service account.** With a connection whose engine reports the session user, assert the returned rows name the *caller*. A preview that ran as a service account would be `Try it` wearing the wrong label.
+- **Preview passes the author as the PRINCIPAL.** Assert the route hands `ctx.principal.user_id` to the query port. That is all this level can assert, and saying more is the mistake §2.1 records: which identity the ENGINE applies policy for is `delegation_for`'s answer, not this route's, and on an ordinary connection it is the service account. A test that asserted "the rows name the caller" would only hold on a delegated connection.
 - **Preview reflects unsaved SQL.** Send a body whose `sql` differs from the stored draft and assert the result matches the body. This is the property §2.2 exists for, and it fails if anyone later "simplifies" the handler to read the draft.
 - **Preview writes no `access_log` row.** Count rows before and after; the count must not move. Then mutate: write a row deliberately and confirm the test fails.
 - **Preview does not populate the cache.** Preview, then call the endpoint as a service account, and assert the serving response is `cached: false`.

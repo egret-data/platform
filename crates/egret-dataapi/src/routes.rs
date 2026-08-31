@@ -1363,7 +1363,8 @@ pub struct RollbackEndpointInput {
     pub version_id: Option<Uuid>,
 }
 
-/// Resolve the draft, its connection's delegation mode, and its output columns.
+/// Resolve the draft, its connection's [`ConnectionSafety`], and its output
+/// columns.
 ///
 /// Shared by `validate` and `publish` so a definition that validates is exactly a
 /// definition that publishes — two separate call sites would be two chances to
@@ -1381,14 +1382,14 @@ async fn validated_draft(
     DataApiError,
 > {
     let draft = st.endpoints.get(ws, id).await?;
-    let (delegated, impersonate) = st
+    let conn = st
         .endpoints
-        .connection_per_principal_pair(ws, draft.database_id)
+        .connection_safety(ws, draft.database_id)
         .await?;
     // `ctx.principal`, not the service account: `describe_as` resolves under the
     // caller's own identity so a delegated connection applies THEIR policy, and
     // an author cannot publish a contract over a table they cannot themselves see.
-    let described = validate(&*st.query, ws, principal, &draft, delegated, impersonate).await?;
+    let described = validate(&*st.query, ws, principal, &draft, conn).await?;
     Ok((draft, described))
 }
 
@@ -1450,7 +1451,7 @@ async fn validate_endpoint(
     request_body = crate::preview::PreviewEndpointInput,
     responses(
         (status = 200, description = "The draft ran; up to 100 rows, with the engine's own column names", body = crate::preview::DataApiPreviewDto),
-        (status = 400, description = "Not a single SELECT, a parameter mismatch, a test value that does not satisfy its declared type, or SQL the engine rejects — with the engine's own message", body = ErrorBody),
+        (status = 400, description = "Not a single SELECT, a parameter mismatch, a test value that does not satisfy its declared type, SQL the engine rejects — with the engine's own message — or a `governed` database reached through a connection that does not run queries as the caller, which is refused here for the same reason publishing onto it is", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing data_api_endpoint:manage permission, or the engine's policy denies a table the query names", body = ErrorBody),
         (status = 404, description = "No such endpoint in this workspace, or a database_id belonging to another workspace", body = ErrorBody),
@@ -1464,8 +1465,15 @@ async fn preview_endpoint(
     Json(body): Json<crate::preview::PreviewEndpointInput>,
 ) -> Result<Json<crate::preview::DataApiPreviewDto>, DataApiError> {
     // `:manage`, exactly like `validate` and for a stronger reason: preview
-    // executes author-supplied SQL as the caller and returns the engine's own
-    // error text, which serving deliberately hides from consumers.
+    // executes author-supplied SQL against a real connection and returns the
+    // engine's own error text, which serving deliberately hides from consumers.
+    //
+    // NOT "as the caller" — that is what this comment used to say and it is
+    // false on a connection that is neither delegated nor impersonating, where
+    // the engine sees the service account. The identity the ENGINE applies its
+    // policy to is decided by `execution::delegation_for`, not by this route
+    // passing a `UserId`; on a `governed` database `preview::run` therefore
+    // refuses outright rather than reading under the machine identity.
     egret_core::authz::require(&*st.pdp, &ctx, EP_MANAGE).await?;
     // The endpoint row is read for containment only — the draft's CONTENT comes
     // from the body, which is the whole point of this route. A `{id}` naming
@@ -1546,7 +1554,7 @@ async fn publish_endpoint(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing data_api_endpoint:manage permission", body = ErrorBody),
         (status = 404, description = "No such endpoint here, or no such version OF THIS ENDPOINT", body = ErrorBody),
-        (status = 409, description = "The endpoint is in the trash — restore it before changing which version it serves", body = ErrorBody),
+        (status = 409, description = "The endpoint is in the trash — restore it before changing which version it serves; or the named version can no longer be published onto its database (it became `governed` without a per-principal connection, or a `shared` cache became unsafe), which is refused here rather than left to 503 on every request", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]

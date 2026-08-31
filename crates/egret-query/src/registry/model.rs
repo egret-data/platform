@@ -33,6 +33,36 @@ pub struct DatabaseInput {
     /// B3a: run BI queries as the caller's per-user engine JWT (delegation).
     #[serde(default)]
     pub delegated: bool,
+    /// The data behind this connection is governed at the engine (Ranger row
+    /// filters / column masks). Publishing a Data API endpoint onto it — or
+    /// previewing one against it — requires `delegated` or
+    /// `options.impersonate`; see [`Database::governed`].
+    ///
+    /// # Why this one field is `Option` on a body where nothing else is
+    ///
+    /// `PUT /ws/{ws}/databases/{id}` is a WHOLE-ROW update: every field of this
+    /// body is written, so an omitted field is written as its `serde` default.
+    /// For `name` or `port` that is merely an API a client must send in full.
+    /// For a security flag it is a control that a client which predates the
+    /// field — a script, an IaC provider, a `curl` recipe copied before this
+    /// shipped — **silently turns off by editing a port**, with a 200, nothing
+    /// logged, and the endpoints on that connection quietly un-gated. That is
+    /// the same failure class the flag exists to prevent: a protection that
+    /// depends on every writer remembering it.
+    ///
+    /// So `None` means "leave it as it is" and only an explicit `false` clears
+    /// it. Absence cannot clear the control; clearing is a thing a client says.
+    /// The keep-current semantics live in the SQL (`COALESCE($n, governed)` in
+    /// [`crate::registry::repo::DatabaseRepo::update_in_workspace`]) rather than
+    /// in a read-modify-write here, so there is no window between reading the
+    /// old value and writing it back.
+    ///
+    /// On CREATE there is nothing to keep, and `None` is `false` — the same
+    /// direction migration 0130 defaulted the column to, for the reason stated
+    /// there: it is the value that changes nothing, not the value that is
+    /// safest.
+    #[serde(default)]
+    pub governed: Option<bool>,
 }
 
 /// Body for testing an unsaved connection (no `name`).
@@ -60,6 +90,10 @@ pub struct DatabaseDetailDto {
     pub has_secret: bool,
     pub status: String,
     pub delegated: bool,
+    /// See [`Database::governed`]. Surfaced on the detail DTO so the Data API
+    /// author's database picker can warn BEFORE publish that the connection it
+    /// is pointed at cannot carry a governed endpoint.
+    pub governed: bool,
     /// Set (as a UUID string) when this connection was materialized by an
     /// engine→workspace assignment (read-only, provisioned by egret); `None`
     /// for a self-service connection. The frontend uses it to split the
@@ -79,12 +113,20 @@ impl From<Database> for DatabaseDetailDto {
             has_secret: d.has_secret,
             status: d.status,
             delegated: d.delegated,
+            governed: d.governed,
             engine_id: d.engine_id.map(|u| u.to_string()),
         }
     }
 }
 
 /// Minimal listing for the Explorer DB picker (no connection internals).
+///
+/// **Nothing constructs this today.** `GET /ws/{ws}/databases` answers
+/// `Vec<DatabaseDetailDto>`; this type survives only as a published schema
+/// component. Adding a field here therefore ships a documented field that no
+/// response ever carries — Package 1 added `governed` to it and the field was
+/// dead on arrival. If a caller needs a narrower listing, give `list` this
+/// return type first; until then, leave it alone.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct DatabaseListDto {
     pub id: String,

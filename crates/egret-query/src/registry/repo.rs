@@ -26,6 +26,7 @@ pub(crate) struct Row {
     secret_id: Option<Uuid>,
     status: String,
     delegated: bool,
+    governed: bool,
     engine_id: Option<Uuid>,
 }
 
@@ -67,6 +68,7 @@ impl Row {
             has_secret: self.secret_id.is_some(),
             status: self.status,
             delegated: self.delegated,
+            governed: self.governed,
             engine_id: self.engine_id,
         })
     }
@@ -107,9 +109,9 @@ impl DatabaseRepo {
     ) -> Result<Database, DatabaseError> {
         let opts = serde_json::to_value(&input.options).unwrap_or(serde_json::json!({}));
         sqlx::query_as::<_, Row>(
-            "INSERT INTO query.databases (name, engine, host, port, options, secret_id, created_by, workspace_id, delegated) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
-             RETURNING id, name, engine, host, port, options, secret_id, status, delegated, engine_id",
+            "INSERT INTO query.databases (name, engine, host, port, options, secret_id, created_by, workspace_id, delegated, governed) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
+             RETURNING id, name, engine, host, port, options, secret_id, status, delegated, governed, engine_id",
         )
         .bind(&input.name)
         .bind(input.engine.as_str())
@@ -120,6 +122,10 @@ impl DatabaseRepo {
         .bind(created_by.map(|u| u.0))
         .bind(workspace_id)
         .bind(input.delegated)
+        // CREATE has nothing to keep, so an absent `governed` is `false` — see
+        // [`DatabaseInput::governed`] for why absence means something different
+        // on UPDATE.
+        .bind(input.governed.unwrap_or(false))
         .fetch_one(&self.db.pool)
         .await
         .map_err(|e| match &e {
@@ -154,7 +160,7 @@ impl DatabaseRepo {
             "INSERT INTO query.databases \
                (name, engine, host, port, options, secret_id, created_by, workspace_id, delegated, engine_id) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true, $9) \
-             RETURNING id, name, engine, host, port, options, secret_id, status, delegated, engine_id",
+             RETURNING id, name, engine, host, port, options, secret_id, status, delegated, governed, engine_id",
         )
         .bind(name)
         .bind(engine)
@@ -230,7 +236,7 @@ impl DatabaseRepo {
 
     pub async fn get(&self, id: Uuid) -> Result<Database, DatabaseError> {
         sqlx::query_as::<_, Row>(
-            "SELECT id, name, engine, host, port, options, secret_id, status, delegated, engine_id \
+            "SELECT id, name, engine, host, port, options, secret_id, status, delegated, governed, engine_id \
              FROM query.databases WHERE id = $1",
         )
         .bind(id)
@@ -250,7 +256,7 @@ impl DatabaseRepo {
         workspace_id: Uuid,
     ) -> Result<Vec<Database>, DatabaseError> {
         let rows = sqlx::query_as::<_, Row>(
-            "SELECT id, name, engine, host, port, options, secret_id, status, delegated, engine_id \
+            "SELECT id, name, engine, host, port, options, secret_id, status, delegated, governed, engine_id \
              FROM query.databases WHERE workspace_id = $1 ORDER BY name",
         )
         .bind(workspace_id)
@@ -312,7 +318,7 @@ impl DatabaseRepo {
         id: Uuid,
     ) -> Result<Database, DatabaseError> {
         sqlx::query_as::<_, Row>(
-            "SELECT id, name, engine, host, port, options, secret_id, status, delegated, engine_id \
+            "SELECT id, name, engine, host, port, options, secret_id, status, delegated, governed, engine_id \
              FROM query.databases WHERE id = $1 AND workspace_id = $2",
         )
         .bind(id)
@@ -342,9 +348,19 @@ impl DatabaseRepo {
         self.get_in_workspace(workspace_id, id).await?; // 404 if not owned, before any mutation
         let opts = serde_json::to_value(&input.options).unwrap_or(serde_json::json!({}));
 
+        // `governed = COALESCE($10, governed)` and NOT `governed = $10`. This is
+        // a whole-row update, so every other column here is overwritten by
+        // whatever the body carried — including its `serde` default when the
+        // body omitted it. For a security flag that is a control a client which
+        // predates the field CLEARS by accident, editing a port; see
+        // [`crate::registry::model::DatabaseInput::governed`]. NULL means "leave
+        // it", so only an explicit `false` turns it off, and the keep-current
+        // value is read and written in ONE statement rather than across a
+        // read-modify-write with a window in it.
         sqlx::query(
             "UPDATE query.databases SET name=$2, engine=$3, host=$4, port=$5, options=$6, \
-                 secret_id=$7, delegated=$9, updated_at=now() WHERE id=$1 AND workspace_id=$8",
+                 secret_id=$7, delegated=$9, governed=COALESCE($10, governed), updated_at=now() \
+               WHERE id=$1 AND workspace_id=$8",
         )
         .bind(id)
         .bind(&input.name)
@@ -355,6 +371,7 @@ impl DatabaseRepo {
         .bind(secret_id)
         .bind(workspace_id)
         .bind(input.delegated)
+        .bind(input.governed)
         .execute(&self.db.pool)
         .await
         .map_err(|e| match &e {

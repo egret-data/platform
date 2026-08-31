@@ -34,6 +34,9 @@ use sqlx::PgPool;
 // their shape CHECKs, plus access_log_ws_ep_ts_idx — renumbered from 0127 to
 // 0128 during the rebase onto main, which had independently taken 0127 for
 // render_tokens_workspace_id)
+// re-embed: 0130 database_governed (query.databases.governed — the per-database
+// switch that makes a Data API publish require a per-principal connection;
+// DEFAULT false so the migration changes no live endpoint's behaviour)
 /// All SQL migrations, embedded at compile time from the workspace `migrations/` dir.
 pub static MIGRATOR: Migrator = sqlx::migrate!("../../migrations");
 

@@ -373,6 +373,26 @@ pub enum ValidationError {
          shared cache would serve one caller's rows to another"
     )]
     SharedCacheOnPerPrincipalConnection,
+    // Names both fields it will accept, for the same reason the arm above names
+    // both: an author told only "turn on delegation" has been told one of two
+    // answers, and the one they can actually reach may be the other.
+    //
+    // "published onto it OR PREVIEWED against it", because both refuse through
+    // this one variant and an author who meets it at Run must not read a
+    // sentence that is only about Publish — see [`crate::preview::run`] for why
+    // preview is gated and what the note it replaced got wrong.
+    #[error(
+        "this database is marked `governed` — engine-side row filters and column masks apply to \
+         its data — so a statement may only be published onto it, or previewed against it, \
+         through a connection that runs queries as the CALLER. This connection has \
+         `delegated: false` and no `options.impersonate`, so every request would run on the \
+         shared service credential and those filters would be evaluated for the service account \
+         rather than for the consumer — a preview included, which is why Run is refused too. \
+         Turn on delegation (or `options.impersonate`) for the connection, point the endpoint at \
+         a connection that already has it, or — if this data is not in fact governed — clear \
+         `governed` on the database"
+    )]
+    GovernedDatabaseNeedsPerPrincipalConnection,
     #[error("enum parameter `{0}` must declare a non-empty `allowed` list")]
     EnumWithoutAllowed(String),
     #[error(
@@ -1552,6 +1572,103 @@ pub fn runs_per_principal(delegated: bool, impersonate: bool) -> bool {
 /// this function is the one place that has to learn it.
 pub fn impersonate_flag(options: &serde_json::Value) -> bool {
     options.get("impersonate") == Some(&serde_json::Value::Bool(true))
+}
+
+/// The three `query.databases` columns a publish decision is made from, carried
+/// as one value so a call site cannot transpose them.
+///
+/// Three adjacent `bool` parameters is a signature where `(governed,
+/// delegated)` and `(delegated, governed)` both compile and one of them is a
+/// silent hole; the pair this replaces was already two. Every field is a LIVE,
+/// mutable column, which is why this type is read at each decision point rather
+/// than cached anywhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConnectionSafety {
+    /// `query.databases.governed` — the data is filtered per principal at the
+    /// ENGINE, so a query that does not run as the caller reads it under the
+    /// service account's policy.
+    pub governed: bool,
+    /// `query.databases.delegated`.
+    pub delegated: bool,
+    /// `query.databases.options.impersonate`, read through [`impersonate_flag`].
+    pub impersonate: bool,
+}
+
+impl ConnectionSafety {
+    /// What a freshly registered connection is: ungoverned, non-delegated, no
+    /// impersonation — the three column defaults in `query.databases`, and the
+    /// shape every rule that is not ABOUT the connection is tested against.
+    pub const UNGOVERNED: Self = Self {
+        governed: false,
+        delegated: false,
+        impersonate: false,
+    };
+
+    /// Whether the engine runs this connection's queries as the caller. Thin
+    /// wrapper over [`runs_per_principal`] so the predicate stays one
+    /// expression — see its doc comment for why it is two fields and not one.
+    pub fn runs_per_principal(&self) -> bool {
+        runs_per_principal(self.delegated, self.impersonate)
+    }
+}
+
+/// A `governed` database may only carry an endpoint whose connection runs each
+/// query as the CALLER — see [`runs_per_principal`] for why that is two fields
+/// and not one.
+///
+/// # The defect this closes
+///
+/// A served request executes through `execute_as`, which runs the SQL as the
+/// SERVICE ACCOUNT unless the connection is delegated or impersonating
+/// (`egret-query/src/execution/mod.rs:44-88`). Ranger row filters and column
+/// masks are therefore evaluated at MACHINE-identity granularity: every
+/// consumer of the endpoint reads exactly what the service account may read,
+/// whatever their own policy says. Nothing required a delegated connection
+/// before this check — publishing onto a non-delegated database was permitted
+/// with no warning, so the bypass was not an edge case but the default.
+///
+/// # Why a per-database flag and not a blanket refusal
+///
+/// Refusing every non-delegated publish is one line and would break the
+/// endpoints that work today, most of which are over data with no engine-side
+/// policy at all. The design (§4, Decision A) took the per-database flag over a
+/// workspace-wide switch and over an author acknowledgement because it is the
+/// only one of the three where the SAFE answer does not depend on someone
+/// remembering: the decision is recorded once, by the person who knows the
+/// data, on the row the data is behind.
+///
+/// # Refused at VALIDATE time, exactly like [`check_cache_scope`]
+///
+/// Same position and the same reason: the unsafe configuration can never enter
+/// `endpoint_versions`, rather than being caught (or not) on a request path.
+/// The two checks sit side by side in [`validate_endpoint`] so both entry points
+/// — `POST …/validate` and `EndpointStore::publish`'s in-transaction re-run —
+/// get them by construction.
+///
+/// # And at PREVIEW, which is the third caller and not a publish
+///
+/// [`crate::preview::run`] calls this directly, off the `validate_endpoint`
+/// path, because a preview is not a definition being frozen — it is a read of
+/// the same governed data, executed as the SERVICE ACCOUNT exactly like a
+/// served request. That doc comment carries the decision and the measurement
+/// behind it; what matters here is that this predicate now guards every route
+/// by which this crate reads a governed database: preview, try-it, publish,
+/// serve. `runs_per_principal` remains the one expression of "runs as the
+/// caller" and this remains the one expression of the rule built on it.
+///
+/// **This is not the whole guard, and cannot be.** Both `governed` and
+/// `delegated` are mutable columns, so a legitimately published endpoint becomes
+/// unsafe the moment someone marks the database governed or turns delegation
+/// off. What happens then is decided on the serving side; see
+/// [`crate::serving::governance_allows_serving`], which explains why it does NOT
+/// use the frozen-witness shape the `shared`-cache drift check uses.
+pub fn check_governed_connection(
+    conn: ConnectionSafety,
+) -> std::result::Result<(), ValidationError> {
+    if conn.governed && !conn.runs_per_principal() {
+        return Err(ValidationError::GovernedDatabaseNeedsPerPrincipalConnection);
+    }
+    Ok(())
 }
 
 /// `Shared` cache is refused on any connection that runs queries per principal —
@@ -3188,8 +3305,7 @@ fn validate_endpoint(
     params: &[ParamSpec],
     cache: &CacheSpec,
     output: &OutputSpec,
-    delegated: bool,
-    impersonate: bool,
+    conn: ConnectionSafety,
     script_eval: ScriptEval<'_>,
 ) -> std::result::Result<Validated, ValidationError> {
     egret_dataapi_api::validate_statements(statements)?;
@@ -3285,7 +3401,15 @@ fn validate_endpoint(
     // anything; see [`GeneratedStatement`].
     read.extend(generated.varying_params().map(str::to_owned));
     check_every_parameter_is_read(&read, params)?;
-    check_cache_scope(cache, delegated, impersonate)?;
+    check_cache_scope(cache, conn.delegated, conn.impersonate)?;
+    // Beside the cache rule, and after it, deliberately. Both read the same
+    // connection and neither renders; ordering them cache-then-governance keeps
+    // `check_cache_scope`'s message first for the one draft that breaks both
+    // (`scope: shared` on a governed, non-delegated connection), which is the
+    // message that names a field on the DRAFT the author is editing. The
+    // governance refusal names a field on the DATABASE, which is often a
+    // different person's fix.
+    check_governed_connection(conn)?;
     // ONE shape decision for the endpoint, made before the first render and
     // handed to every one of them. See [`IteratedParams`] for what deciding it
     // per statement cost. Returned rather than recomputed by [`validate`],
@@ -4212,8 +4336,7 @@ pub async fn validate(
     workspace: Uuid,
     principal: UserId,
     draft: &DataApiEndpointDto,
-    delegated: bool,
-    impersonate: bool,
+    conn: ConnectionSafety,
 ) -> Result<Vec<StatementSnapshot>> {
     // The shape decision comes back from the validator that just used it, so the
     // renders that DESCRIBE each statement below and the renders that VALIDATED
@@ -4226,8 +4349,7 @@ pub async fn validate(
         &draft.params,
         &draft.cache,
         &draft.output,
-        delegated,
-        impersonate,
+        conn,
         ScriptEval::Here,
     )?;
 
@@ -4825,34 +4947,65 @@ fn db_err(e: sqlx::Error) -> Error {
 }
 
 impl EndpointStore {
-    /// The `(delegated, options.impersonate)` pair for `database` (which must
-    /// belong to `workspace`) — the two columns that decide whether the engine
-    /// runs a query as the CALLER. See [`runs_per_principal`].
+    /// The [`ConnectionSafety`] of `database` (which must belong to
+    /// `workspace`) — the three columns that decide what may be published onto
+    /// it. See [`runs_per_principal`] and [`check_governed_connection`].
     ///
     /// Read here rather than passed in: it is the input to
-    /// [`check_cache_scope`], and a caller who supplied it would be supplying the
-    /// answer to the safety question. `NotFound` for a database outside the
-    /// workspace, matching every other cross-workspace answer in this crate.
+    /// [`check_cache_scope`] and [`check_governed_connection`], and a caller who
+    /// supplied it would be supplying the answer to the safety question.
+    /// `NotFound` for a database outside the workspace, matching every other
+    /// cross-workspace answer in this crate.
     ///
-    /// **Returns the PAIR, and used to return `delegated` alone.** The old
-    /// signature could not express the unsafe configuration at all, so every
-    /// caller of it was structurally incapable of noticing
-    /// `{delegated: false, impersonate: true}`.
-    pub async fn connection_per_principal_pair(
+    /// **It returned `delegated` alone once, then the
+    /// `(delegated, impersonate)` pair, and now the triple.** Each widening was
+    /// the same lesson: a signature that cannot express the unsafe configuration
+    /// makes every caller structurally incapable of noticing it. All three
+    /// columns are read in ONE statement so they cannot come from three
+    /// different moments.
+    pub async fn connection_safety(
         &self,
         workspace: Uuid,
         database: Uuid,
-    ) -> Result<(bool, bool)> {
-        let row: Option<(bool, serde_json::Value)> = sqlx::query_as(
-            "SELECT delegated, options FROM query.databases WHERE id = $1 AND workspace_id = $2",
+    ) -> Result<ConnectionSafety> {
+        self.connection_safety_opt(workspace, database)
+            .await?
+            .ok_or_else(|| Error::NotFound("database".into()))
+    }
+
+    /// [`Self::connection_safety`] without the `NotFound`, for the one caller
+    /// that has something to say about a database row that is GONE.
+    ///
+    /// Every other caller is deciding what may be written onto a connection, and
+    /// for them "no such connection here" is the answer. [`Self::rollback`] is
+    /// re-checking a version that was published long ago and whose database may
+    /// since have been deleted; a 404 naming a database the caller never
+    /// mentioned would send them looking for the wrong thing, and there is
+    /// nothing to check anyway — a row that does not exist cannot be `governed`.
+    /// Same asymmetry, same reason, as
+    /// [`crate::serving::governance_allows_serving`].
+    ///
+    /// ONE statement for all three columns so they cannot come from three
+    /// different moments; the public wrapper adds only the error.
+    async fn connection_safety_opt(
+        &self,
+        workspace: Uuid,
+        database: Uuid,
+    ) -> Result<Option<ConnectionSafety>> {
+        let row: Option<(bool, bool, serde_json::Value)> = sqlx::query_as(
+            "SELECT delegated, governed, options \
+               FROM query.databases WHERE id = $1 AND workspace_id = $2",
         )
         .bind(database)
         .bind(workspace)
         .fetch_optional(&self.db.pool)
         .await
         .map_err(db_err)?;
-        let (delegated, options) = row.ok_or_else(|| Error::NotFound("database".into()))?;
-        Ok((delegated, impersonate_flag(&options)))
+        Ok(row.map(|(delegated, governed, options)| ConnectionSafety {
+            governed,
+            delegated,
+            impersonate: impersonate_flag(&options),
+        }))
     }
 
     /// Freeze `draft` into a new immutable version and make it the live one.
@@ -5010,28 +5163,30 @@ impl EndpointStore {
             ));
         }
 
-        // Same statement as `connection_per_principal_pair`, issued on the
-        // transaction so the validation below and the values frozen into the
-        // snapshot are the same read — and one statement, so the two halves of
-        // the pair cannot come from two different moments.
+        // Same statement as `connection_safety`, issued on the transaction so the
+        // validation below and the values frozen into the snapshot are the same
+        // read — and one statement, so the three columns cannot come from three
+        // different moments.
         //
-        // That is all it buys. It does NOT pin the column: there is no `FOR SHARE`
-        // on `query.databases` and the isolation level is READ COMMITTED, so a
-        // concurrent flip can commit before this transaction does. Locking it
-        // would not help either, because the flip is equally free the instant
-        // after the commit. That residual is precisely what the frozen witness
-        // PAIR exists for — P4 compares both halves against the live row and
-        // refuses a shared cache when either disagrees — and it is not something
-        // publish can close on its own.
+        // That is all it buys. It does NOT pin the columns: there is no
+        // `FOR SHARE` on `query.databases` and the isolation level is READ
+        // COMMITTED, so a concurrent flip can commit before this transaction
+        // does. Locking would not help either, because the flip is equally free
+        // the instant after the commit. That residual is precisely what the
+        // frozen witness PAIR exists for — P4 compares both halves against the
+        // live row and refuses a shared cache when either disagrees — and for
+        // `governed` it is what `serving::governance_allows_serving` exists for.
+        // Neither is something publish can close on its own.
         //
-        // Read in ONE statement so the two halves cannot come from two different
+        // Read in ONE statement so the three cannot come from three different
         // moments. `options` is JSONB and the key is spelled exactly as
         // `egret_query_api::ConnOptions::impersonate` serialises it — this crate
         // deliberately depends on no other feature seam, so the coupling is by
         // name, read through `impersonate_flag`, and pinned from the owning side
         // by `egret-query-api`'s `wire_names`.
-        let (delegated, options): (bool, serde_json::Value) = sqlx::query_as(
-            "SELECT delegated, options FROM query.databases WHERE id = $1 AND workspace_id = $2",
+        let (delegated, governed, options): (bool, bool, serde_json::Value) = sqlx::query_as(
+            "SELECT delegated, governed, options \
+               FROM query.databases WHERE id = $1 AND workspace_id = $2",
         )
         .bind(current.database_id)
         .bind(workspace)
@@ -5039,7 +5194,11 @@ impl EndpointStore {
         .await
         .map_err(db_err)?
         .ok_or_else(|| Error::NotFound("database".into()))?;
-        let impersonate = impersonate_flag(&options);
+        let conn = ConnectionSafety {
+            governed,
+            delegated,
+            impersonate: impersonate_flag(&options),
+        };
 
         // The whole pure validator, against the row actually being frozen. See the
         // doc comment: this is what closes the window, not the identity check above.
@@ -5054,8 +5213,7 @@ impl EndpointStore {
             &current.params,
             &current.cache,
             &current.output,
-            delegated,
-            impersonate,
+            conn,
             // The script was evaluated above, before this transaction opened,
             // and the identity check above says the row locked here carries the
             // same one. See `ScriptEval`.
@@ -5139,8 +5297,25 @@ impl EndpointStore {
             // only `delegated` — which is what this did — left
             // `{delegated: false, impersonate: true}` indistinguishable from a
             // genuinely shared-safe connection forever after.
-            delegated,
-            impersonate,
+            //
+            // **`conn.governed` is deliberately NOT frozen beside them**, and
+            // the asymmetry is the point rather than an omission. A witness is
+            // for a question of the form "is the live row still what this
+            // version was published against?", which is the whole of the
+            // `shared`-cache rule: the unsafe half (`scope: shared`) lives in
+            // the snapshot, so the live row is the only thing that can move.
+            // Governance is not that question. BOTH halves of
+            // `governed && !runs_per_principal(…)` are live, mutable columns, so
+            // an equality against a frozen witness answers the wrong thing in
+            // the exact case that matters: an endpoint published on an
+            // ungoverned, non-delegated connection freezes
+            // `governed: false, delegated: false`, and when an admin marks the
+            // database governed the pair `(delegated)` still AGREES — the
+            // witness stays silent while the endpoint becomes the defect. So
+            // serving evaluates the live triple instead; see
+            // [`crate::serving::governance_allows_serving`].
+            delegated: conn.delegated,
+            impersonate: conn.impersonate,
             // The stamp, written here and nowhere else, because this is the one
             // place `validate_definition` has just run against the row being
             // frozen. §7 of the parameters spec said "every endpoint with
@@ -5206,6 +5381,84 @@ impl EndpointStore {
         })
     }
 
+    /// The two rules a FROZEN version can fall out of without being touched,
+    /// asked again against the connection as it is right now.
+    ///
+    /// Both read `query.databases` columns that no version owns:
+    /// [`check_governed_connection`] (the database became `governed`, or the
+    /// connection stopped running per principal) and [`check_cache_scope`] (the
+    /// connection STARTED running per principal under a `shared` cache). Publish
+    /// asks both; nothing re-asked them for a version made live by any other
+    /// route, which is the gap [`Self::rollback`] closes by calling this.
+    ///
+    /// Only these two. It deliberately does NOT re-run [`validate_endpoint`]:
+    /// every other rule there is a property of the frozen definition, which
+    /// cannot have changed, and re-running the lot would make a rollback fail
+    /// for a rule that did not exist when the version was published — turning
+    /// "put yesterday's version back" into an upgrade gate during an incident,
+    /// which is the one moment rollback has to work. What is checked here is the
+    /// pair whose INPUTS are live.
+    ///
+    /// # `param_gate` is the near-miss, and it is left out on purpose
+    ///
+    /// A version frozen before the publish-time parameter gate also 503s
+    /// forever once made live ([`crate::serving::ServingError::ParamGateStale`]),
+    /// so it looks like the same shape. It is not, and the difference is the one
+    /// that matters to whoever is holding the incident: `param_gate_stale`'s
+    /// message tells the operator to RE-PUBLISH, and re-publishing works — the
+    /// gate stamps the new version and the endpoint comes back. `governance_stale`
+    /// cannot say that, because the publish it would send them to is refused by
+    /// the very rule that produced it. Refusing at the point of action buys the
+    /// most where the serve-time message can offer no way out; adding
+    /// `param_gate` here would take a version offline at rollback that the
+    /// operator could otherwise revive with the next thing they were told to do.
+    ///
+    /// # A snapshot this cannot READ is neither a refusal nor a 500
+    ///
+    /// The first version answered `Internal` on a snapshot that would not
+    /// deserialise, reasoning that the only writer is `publish` so anything else
+    /// is corruption worth naming. That is a worse trade than it looks, and a
+    /// test caught it: such a version cannot serve at all —
+    /// `serving::router::live_snapshot` already answers 500 for it — so making
+    /// it live changes nothing this route is responsible for, while refusing the
+    /// rollback takes away the action an operator reaches for during an
+    /// incident, on a route that used to work. This check is for a version that
+    /// is valid and has DRIFTED; a version whose snapshot cannot be read is a
+    /// different failure, not one rollback caused and not one rollback can fix.
+    ///
+    /// Nor is it a hole worth guarding: writing an unreadable snapshot needs
+    /// direct database access, which is already past every gate in this file.
+    async fn check_version_still_publishable(
+        &self,
+        workspace: Uuid,
+        raw: serde_json::Value,
+    ) -> Result<()> {
+        let Ok(snap) = serde_json::from_value::<EndpointSnapshot>(raw) else {
+            return Ok(());
+        };
+        let Some(conn) = self
+            .connection_safety_opt(workspace, snap.database_id)
+            .await?
+        else {
+            return Ok(());
+        };
+        let conflict = |e: ValidationError| {
+            Error::Conflict(format!(
+                "this version cannot be made live as things stand: {e}"
+            ))
+        };
+        // Governance first, for the same reason `validate_endpoint` puts the
+        // cache rule first there and this one second: the ordering names which
+        // fix the operator hears about, and here the two are the reverse of
+        // publish's case. At publish the author is editing the DRAFT, so the
+        // rule about a field they are holding comes first; at rollback the
+        // version is immutable and BOTH fixes are on the database, so the one
+        // that decides whether the data may be read at all leads.
+        check_governed_connection(conn).map_err(conflict)?;
+        check_cache_scope(&snap.cache, conn.delegated, conn.impersonate).map_err(conflict)?;
+        Ok(())
+    }
+
     /// Point `live_version_id` at an existing version of THIS endpoint.
     ///
     /// `v.endpoint_id = e.id` in the statement below is the containment predicate:
@@ -5226,6 +5479,37 @@ impl EndpointStore {
     /// TRASHED endpoint succeeded: it silently repointed which frozen SQL the
     /// endpoint would serve the moment anything enabled it. A guarantee that lives
     /// in a constraint on `state` cannot cover a writer that does not touch `state`.
+    ///
+    /// # The two LIVE-CONNECTION rules are re-checked, because rollback is a
+    /// publish decision wearing different clothes
+    ///
+    /// [`check_governed_connection`] and [`check_cache_scope`] both read columns
+    /// on `query.databases` that move independently of any version. A version
+    /// frozen when the database was ungoverned, or when the connection did not
+    /// run per principal, is a version `publish` would REFUSE today — and
+    /// rollback used to make exactly that version live, whereupon the serving
+    /// path answered `503 governance_stale` (or `cache_scope_stale`) to every
+    /// consumer, forever, with the explanation arriving nowhere near the act
+    /// that caused it. The operator's next move is a *different* endpoint's
+    /// settings page, and nothing told them so.
+    ///
+    /// So both are asked here, against the TARGET version's frozen snapshot and
+    /// the connection as it is right now, and a refusal is a `409` carrying the
+    /// publish-time sentence. `Conflict`, not `InvalidInput`: the body named a
+    /// version that exists and belongs to this endpoint, so nothing about the
+    /// request is malformed — the endpoint is in a state this act cannot be
+    /// asked of, which is the same thing the trash case answers here.
+    ///
+    /// **No transaction, and that is not an oversight.** `endpoint_versions` is
+    /// immutable, so the snapshot read below cannot be stale by the time the
+    /// UPDATE runs; and the connection columns are LIVE, so no lock held here
+    /// could stop them moving a millisecond after commit — which is precisely
+    /// why [`crate::serving::governance_allows_serving`] exists and stays the
+    /// authority. This check is about telling the operator at the point of
+    /// action, not about making the window smaller.
+    ///
+    /// A database row that has been DELETED is not refused, for the reason
+    /// [`Self::connection_safety_opt`] gives.
     pub async fn rollback(
         &self,
         workspace: Uuid,
@@ -5236,6 +5520,29 @@ impl EndpointStore {
             VersionRef::Number(n) => (Some(n), None),
             VersionRef::Id(v) => (None, Some(v)),
         };
+        // Resolve the target's SNAPSHOT first, under exactly the predicates the
+        // UPDATE below uses, so a version this cannot see is not one the UPDATE
+        // would have written either. `None` here is left to the UPDATE to
+        // report: it owns the 404/409 split, and duplicating that decision is
+        // how the two answers drift apart.
+        let target_snapshot: Option<serde_json::Value> = sqlx::query_scalar(
+            "SELECT v.snapshot \
+               FROM dataapi.endpoint_versions v \
+               JOIN dataapi.endpoints e ON e.id = v.endpoint_id \
+              WHERE e.id = $1 AND e.workspace_id = $2 \
+                AND e.deleted_at IS NULL \
+                AND (v.version = $3 OR v.id = $4)",
+        )
+        .bind(id)
+        .bind(workspace)
+        .bind(number)
+        .bind(version_id)
+        .fetch_optional(&self.db.pool)
+        .await
+        .map_err(db_err)?;
+        if let Some(raw) = target_snapshot {
+            self.check_version_still_publishable(workspace, raw).await?;
+        }
         let row: Option<(Uuid, i32, String)> = sqlx::query_as(
             "UPDATE dataapi.endpoints e SET live_version_id = v.id, updated_at = now() \
                FROM dataapi.endpoint_versions v \
@@ -5510,8 +5817,7 @@ mod tests {
             &params,
             &cache(CacheScope::PerPrincipal),
             &OutputSpec::default(),
-            false,
-            false,
+            ConnectionSafety::UNGOVERNED,
             ScriptEval::Here,
         );
         let elapsed = started.elapsed();
@@ -5547,8 +5853,7 @@ mod tests {
             params,
             &cache(CacheScope::PerPrincipal),
             &OutputSpec::default(),
-            false,
-            false,
+            ConnectionSafety::UNGOVERNED,
             ScriptEval::Here,
         )
     }
@@ -5704,8 +6009,7 @@ mod tests {
             &params,
             &cache(CacheScope::PerPrincipal),
             &OutputSpec::default(),
-            false,
-            false,
+            ConnectionSafety::UNGOVERNED,
             ScriptEval::Here,
         )
         .expect("a written and a generated statement publish together");
@@ -5737,8 +6041,7 @@ mod tests {
             &[],
             &cache(CacheScope::PerPrincipal),
             &OutputSpec::default(),
-            false,
-            false,
+            ConnectionSafety::UNGOVERNED,
             ScriptEval::Here,
         )
         .expect_err("the script calls fail()");
@@ -5780,8 +6083,7 @@ mod tests {
             &[],
             &cache(CacheScope::PerPrincipal),
             &OutputSpec::default(),
-            false,
-            false,
+            ConnectionSafety::UNGOVERNED,
             ScriptEval::Here,
         )
         .expect_err("the script emits more than the cap");
@@ -5834,8 +6136,7 @@ mod tests {
             &params,
             &cache(CacheScope::PerPrincipal),
             &OutputSpec::default(),
-            false,
-            false,
+            ConnectionSafety::UNGOVERNED,
             ScriptEval::Here,
         )
         .expect_err("the None probe emits more than the cap");
@@ -6126,8 +6427,7 @@ mod tests {
                 &params,
                 &cache(CacheScope::PerPrincipal),
                 &OutputSpec::default(),
-                false,
-                false,
+                ConnectionSafety::UNGOVERNED,
                 ScriptEval::AlreadyRunBeforeTheLock {
                     generated: &innocent
                 },
@@ -6157,8 +6457,7 @@ mod tests {
                 &grain,
                 &cache(CacheScope::PerPrincipal),
                 &OutputSpec::default(),
-                false,
-                false,
+                ConnectionSafety::UNGOVERNED,
                 ScriptEval::AlreadyRunBeforeTheLock {
                     generated: &generated
                 },
@@ -6263,8 +6562,7 @@ mod tests {
                     &[],
                     &cache(CacheScope::PerPrincipal),
                     &OutputSpec::default(),
-                    false,
-                    false,
+                    ConnectionSafety::UNGOVERNED,
                     ScriptEval::Here,
                 ),
                 Err(ValidationError::StatementScriptFailed { .. })
@@ -6277,8 +6575,7 @@ mod tests {
                 &[],
                 &cache(CacheScope::PerPrincipal),
                 &OutputSpec::default(),
-                false,
-                false,
+                ConnectionSafety::UNGOVERNED,
                 ScriptEval::AlreadyRunBeforeTheLock {
                     generated: &generated
                 },
@@ -6306,8 +6603,7 @@ mod tests {
                 &[],
                 &cache(CacheScope::PerPrincipal),
                 &OutputSpec::default(),
-                false,
-                false,
+                ConnectionSafety::UNGOVERNED,
                 ScriptEval::AlreadyRunBeforeTheLock {
                     generated: &smuggled
                 },
@@ -6341,8 +6637,7 @@ mod tests {
                 &[],
                 &cache(CacheScope::PerPrincipal),
                 &OutputSpec::default(),
-                false,
-                false,
+                ConnectionSafety::UNGOVERNED,
                 ScriptEval::AlreadyRunBeforeTheLock {
                     generated: &generated
                 },
@@ -6420,8 +6715,7 @@ mod tests {
                 &[],
                 &cache(CacheScope::PerPrincipal),
                 &OutputSpec::default(),
-                false,
-                false,
+                ConnectionSafety::UNGOVERNED,
                 ScriptEval::Here,
             ),
             Err(too_many),
@@ -6448,8 +6742,7 @@ mod tests {
                 &params,
                 &cache(CacheScope::PerPrincipal),
                 &OutputSpec::default(),
-                false,
-                false,
+                ConnectionSafety::UNGOVERNED,
                 ScriptEval::Here,
             )
             .map(|v| v.iterated),
@@ -6512,8 +6805,7 @@ mod tests {
                 &params,
                 &cache(CacheScope::PerPrincipal),
                 &OutputSpec::default(),
-                false,
-                false,
+                ConnectionSafety::UNGOVERNED,
                 ScriptEval::Here,
             ),
             Err(ValidationError::Render(
@@ -6593,8 +6885,7 @@ mod tests {
             &params,
             &cache(CacheScope::PerPrincipal),
             &OutputSpec::default(),
-            false,
-            false,
+            ConnectionSafety::UNGOVERNED,
             ScriptEval::Here,
         )
         .expect("the §4.2 pair publishes")
@@ -6659,8 +6950,7 @@ mod tests {
             &params,
             &cache(CacheScope::PerPrincipal),
             &OutputSpec::default(),
-            false,
-            false,
+            ConnectionSafety::UNGOVERNED,
             ScriptEval::Here,
         )
         .expect("the endpoint publishes: every emitted template is a plain read")
@@ -6812,8 +7102,7 @@ mod tests {
                 &[param("region", ParamType::String)],
                 &cache(CacheScope::PerPrincipal),
                 &OutputSpec::default(),
-                false,
-                false,
+                ConnectionSafety::UNGOVERNED,
                 ScriptEval::Here,
             )
             .map(|v| v.iterated),
@@ -7488,6 +7777,170 @@ mod tests {
                 check_cache_scope(&cache(CacheScope::PerPrincipal), delegated, impersonate).is_ok()
             );
         }
+    }
+
+    /// Package 1's rule, over all eight corners.
+    ///
+    /// Exactly one of the eight is refused, and enumerating them is the point:
+    /// the mutations this rule can suffer are all *widenings or narrowings* of
+    /// the same expression, and each moves a DIFFERENT row. Dropping the
+    /// `!conn.runs_per_principal()` half turns three currently-permitted rows
+    /// red; dropping `conn.governed` turns three more red; replacing the `&&`
+    /// with `||` does both; and `false &&` turns the refusing row green. A
+    /// single-case assertion would survive two of those four.
+    #[test]
+    fn only_a_governed_database_without_a_per_principal_connection_is_refused() {
+        for governed in [false, true] {
+            for delegated in [false, true] {
+                for impersonate in [false, true] {
+                    let conn = ConnectionSafety {
+                        governed,
+                        delegated,
+                        impersonate,
+                    };
+                    let got = check_governed_connection(conn);
+                    if governed && !delegated && !impersonate {
+                        assert_eq!(
+                            got,
+                            Err(ValidationError::GovernedDatabaseNeedsPerPrincipalConnection),
+                            "a governed database on a service-account connection must not \
+                             publish (governed={governed}, delegated={delegated}, \
+                             impersonate={impersonate})"
+                        );
+                    } else {
+                        assert!(
+                            got.is_ok(),
+                            "nothing else may be refused (governed={governed}, \
+                             delegated={delegated}, impersonate={impersonate})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// `impersonate` alone satisfies a governed database, which is the half a
+    /// reader who knows only `delegated` gets wrong — it is exactly what made
+    /// the shared-cache check a live cross-identity leak once already, and this
+    /// rule was written against the same pair for the same reason.
+    #[test]
+    fn impersonate_alone_lets_a_governed_database_publish() {
+        assert!(check_governed_connection(ConnectionSafety {
+            governed: true,
+            delegated: false,
+            impersonate: true,
+        })
+        .is_ok());
+    }
+
+    /// `ConnectionSafety::UNGOVERNED` is what the other ~30 call sites in this
+    /// file pass, so if it ever stopped meaning "all three columns at their
+    /// `query.databases` default" every one of those tests would quietly be
+    /// testing a different connection than it says it is.
+    #[test]
+    fn the_ungoverned_constant_is_all_three_column_defaults() {
+        // `assert_eq!` against a constructed value rather than three
+        // `assert!`s on the constant's fields: clippy refuses the latter as an
+        // assertion with a constant value, and it is right — the version that
+        // reads better also happens to be the one that states the whole shape
+        // in one comparison rather than three that could each be forgotten.
+        assert_eq!(
+            ConnectionSafety::UNGOVERNED,
+            ConnectionSafety {
+                governed: false,
+                delegated: false,
+                impersonate: false,
+            }
+        );
+        assert!(!ConnectionSafety::UNGOVERNED.runs_per_principal());
+        assert!(check_governed_connection(ConnectionSafety::UNGOVERNED).is_ok());
+    }
+
+    /// **The gate is reached through the real validator, not only through its
+    /// own unit.** `validate_endpoint` is what `POST …/validate` and
+    /// `EndpointStore::publish` both run; a rule that passes its own test and is
+    /// never called from there is a rule that does not exist. The fixture is a
+    /// draft that is otherwise entirely publishable — the ONLY thing wrong with
+    /// it is the connection — so the refusal cannot be an artefact of some other
+    /// rule answering first.
+    #[test]
+    fn validate_endpoint_refuses_a_governed_service_account_connection() {
+        let statements = [StatementSpec::from_sql("rows", "SELECT 1 AS n")];
+        let unsafe_conn = ConnectionSafety {
+            governed: true,
+            delegated: false,
+            impersonate: false,
+        };
+        assert_eq!(
+            validate_endpoint(
+                &statements,
+                &[],
+                &cache(CacheScope::PerPrincipal),
+                &OutputSpec::default(),
+                unsafe_conn,
+                ScriptEval::Here,
+            )
+            .err(),
+            Some(ValidationError::GovernedDatabaseNeedsPerPrincipalConnection),
+        );
+        // ONE field flipped, nothing else, and the same draft publishes. That is
+        // what makes the assertion above about the connection rather than about
+        // the definition — a fixture that could never validate at all would
+        // "prove" this rule with the rule deleted.
+        for safe in [
+            ConnectionSafety {
+                governed: true,
+                delegated: true,
+                impersonate: false,
+            },
+            ConnectionSafety {
+                governed: true,
+                delegated: false,
+                impersonate: true,
+            },
+            ConnectionSafety {
+                governed: false,
+                delegated: false,
+                impersonate: false,
+            },
+        ] {
+            assert!(
+                validate_endpoint(
+                    &statements,
+                    &[],
+                    &cache(CacheScope::PerPrincipal),
+                    &OutputSpec::default(),
+                    safe,
+                    ScriptEval::Here,
+                )
+                .is_ok(),
+                "{safe:?} must publish"
+            );
+        }
+    }
+
+    /// The two connection rules are independent, and the order they answer in is
+    /// pinned because it is a decision rather than an accident: a draft that
+    /// breaks both is told about `cache.scope` first, because that is the field
+    /// on the DRAFT the author is editing.
+    #[test]
+    fn the_cache_rule_answers_before_the_governance_rule() {
+        assert_eq!(
+            validate_endpoint(
+                &[StatementSpec::from_sql("rows", "SELECT 1 AS n")],
+                &[],
+                &cache(CacheScope::Shared),
+                &OutputSpec::default(),
+                ConnectionSafety {
+                    governed: true,
+                    delegated: true,
+                    impersonate: false,
+                },
+                ScriptEval::Here,
+            )
+            .err(),
+            Some(ValidationError::SharedCacheOnPerPrincipalConnection),
+        );
     }
 
     /// The predicate is OR, and it is asserted directly so the corner above
@@ -8356,8 +8809,7 @@ mod tests {
                     &[],
                     &cache(CacheScope::PerPrincipal),
                     &unparseable,
-                    false,
-                    false,
+                    ConnectionSafety::UNGOVERNED,
                     ScriptEval::Here,
                 ),
                 Err(ValidationError::TransformScriptInvalid(_))
@@ -8371,8 +8823,7 @@ mod tests {
                 &[],
                 &cache(CacheScope::PerPrincipal),
                 &unparseable,
-                false,
-                false,
+                ConnectionSafety::UNGOVERNED,
                 ScriptEval::AlreadyRunBeforeTheLock {
                     generated: &generated
                 },
@@ -8390,8 +8841,7 @@ mod tests {
                 &[],
                 &cache(CacheScope::PerPrincipal),
                 &shape_broken,
-                false,
-                false,
+                ConnectionSafety::UNGOVERNED,
                 ScriptEval::AlreadyRunBeforeTheLock {
                     generated: &generated
                 },
@@ -8546,8 +8996,7 @@ mod tests {
             &[],
             &cache(CacheScope::PerPrincipal),
             &output,
-            false,
-            false,
+            ConnectionSafety::UNGOVERNED,
             ScriptEval::Here,
         );
         assert_eq!(
@@ -8587,8 +9036,7 @@ mod tests {
                 &[],
                 &cache(CacheScope::PerPrincipal),
                 output,
-                false,
-                false,
+                ConnectionSafety::UNGOVERNED,
                 ScriptEval::Here,
             )
             .map(|_| ())
@@ -9346,8 +9794,7 @@ mod tests {
             Uuid::new_v4(),
             UserId::new(),
             &draft,
-            false,
-            false,
+            ConnectionSafety::UNGOVERNED,
         )
         .await
         .expect_err("the script declares `total` and returns `wrong`");
@@ -9384,8 +9831,7 @@ mod tests {
             Uuid::new_v4(),
             UserId::new(),
             &draft,
-            false,
-            false,
+            ConnectionSafety::UNGOVERNED,
         )
         .await
         .expect_err("the script raises on every input");
@@ -9412,8 +9858,7 @@ mod tests {
             Uuid::new_v4(),
             UserId::new(),
             &draft,
-            false,
-            false,
+            ConnectionSafety::UNGOVERNED,
         )
         .await
         .expect("a conforming transform publishes");
@@ -9528,8 +9973,7 @@ mod tests {
             Uuid::new_v4(),
             UserId::new(),
             &generated_draft(script, vec![param("wide", ParamType::Boolean)]),
-            false,
-            false,
+            ConnectionSafety::UNGOVERNED,
         )
         .await
         .expect("both branches describe");
@@ -9578,8 +10022,7 @@ mod tests {
             Uuid::new_v4(),
             UserId::new(),
             &generated_draft(script, vec![param("narrow", ParamType::Boolean)]),
-            false,
-            false,
+            ConnectionSafety::UNGOVERNED,
         )
         .await
         .expect("both branches describe");
@@ -9612,8 +10055,7 @@ mod tests {
             Uuid::new_v4(),
             UserId::new(),
             &generated_draft(script, vec![]),
-            false,
-            false,
+            ConnectionSafety::UNGOVERNED,
         )
         .await
         .expect("one branch describes");
@@ -9688,8 +10130,7 @@ mod tests {
                 &params,
                 &cache(CacheScope::PerPrincipal),
                 &OutputSpec::default(),
-                false,
-                false,
+                ConnectionSafety::UNGOVERNED,
                 ScriptEval::Here,
             )
         };
@@ -9725,8 +10166,7 @@ mod tests {
                 &[],
                 &cache(CacheScope::PerPrincipal),
                 &OutputSpec::default(),
-                false,
-                false,
+                ConnectionSafety::UNGOVERNED,
                 ScriptEval::Here,
             )
         };
@@ -9750,8 +10190,7 @@ mod tests {
                 &params,
                 &cache(CacheScope::PerPrincipal),
                 &OutputSpec::default(),
-                false,
-                false,
+                ConnectionSafety::UNGOVERNED,
                 ScriptEval::Here,
             ),
             Err(ValidationError::TooManyGeneratedTemplates {
@@ -9801,8 +10240,7 @@ mod tests {
                 &params,
                 &cache(CacheScope::PerPrincipal),
                 &OutputSpec::default(),
-                false,
-                false,
+                ConnectionSafety::UNGOVERNED,
                 ScriptEval::Here,
             )
             .map(|_| ())

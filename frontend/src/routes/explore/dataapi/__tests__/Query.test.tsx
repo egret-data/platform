@@ -572,7 +572,20 @@ describe("Query section — preview", () => {
     vi.mocked(api.useDataApiPreviewEndpoint).mockReturnValue({ mutateAsync: vi.fn(), isPending: false } as never);
     renderQuery(endpoint);
     // Spec §2.1: "The consequence must reach the UI, not just this document."
-    expect(await screen.findByText(/runs as you/i)).toBeInTheDocument();
+    //
+    // What the consequence IS changed, and this assertion changed with it. The
+    // note used to say a preview "runs as you rather than as a service account",
+    // and four tests pinned that sentence — but `preview::run` reaches the engine
+    // through `delegation_for`, which sends the SERVICE user on any connection
+    // that is neither `delegated` nor impersonating. So the identity is NOT the
+    // difference on an ordinary connection; what is always true is that a preview
+    // authenticates nothing and checks no grant. Both halves are pinned: the
+    // conditional identity, and the negative — the old absolute claim must not
+    // come back.
+    const note = await screen.findByText(/as you only when that connection delegates or impersonates/i);
+    expect(note).toHaveTextContent(/otherwise as the shared service account/i);
+    expect(note).toHaveTextContent(/authenticates no token, checks no invoke grant/i);
+    expect(screen.queryByText(/runs as you rather than as a service account/i)).toBeNull();
   });
 
   /**
@@ -1610,7 +1623,7 @@ describe("Query section — the editor, the split and the preview", () => {
       /including edits you have not saved/i,
       /does not save, publish, spend a rate limit/i,
       /Column names come from the engine/i,
-      /rather than as a service account/i,
+      /otherwise as the shared service account/i,
     ]) {
       const node = within(details).getByText(re);
       expect(node.closest("summary")).toBeNull();

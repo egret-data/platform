@@ -890,13 +890,21 @@ describe("TryIt — the setup reads as tables, not as cards", () => {
 });
 
 /**
- * The one thing this section exists to say. A trial runs as the chosen SERVICE
- * ACCOUNT; `Query`'s preview runs as the AUTHOR. Measured live on kind: the same
- * endpoint and the same SQL answered `who=svc-kind-smoke-bot` from a trial and
- * `who=admin` from a preview. `PreviewBlock` carries the claim from the other
- * side; these are the three places on this side.
+ * The one thing this section exists to say. A trial authenticates a real token
+ * for the chosen SERVICE ACCOUNT and is authorized by that account's invoke
+ * grant; `Query`'s preview authenticates nothing and checks no grant. That is
+ * the difference on EVERY connection, and it is what these three places must
+ * carry.
+ *
+ * They used to carry "preview runs as the AUTHOR" instead, and that was false:
+ * `delegation_for` sends the service user on any connection that is neither
+ * `delegated` nor impersonating, so on an ordinary connection preview and a
+ * served call reach the engine as the same identity. The live kind measurement
+ * (`who=svc-kind-smoke-bot` from a trial, `who=admin` from a preview) was taken
+ * on a DELEGATED connection, where the identities do differ — it was true of
+ * that connection and was generalised to all of them.
  */
-describe("TryIt — says whose identity a trial runs as", () => {
+describe("TryIt — says what a trial proves that a preview cannot", () => {
   it("says it in the section description, in the picker's help, and beside Run", () => {
     mockTry(OK);
     renderTryIt();
@@ -908,7 +916,13 @@ describe("TryIt — says whose identity a trial runs as", () => {
     const picker = screen.getByText("A green preview does not prove a consumer can call this endpoint");
     fireEvent.click(picker);
     expect(picker.closest("details")).toHaveAttribute("open");
-    expect(within(picker.closest("details")!).getByText(/Preview in Query runs as you/i)).toBeInTheDocument();
+    expect(
+      within(picker.closest("details")!).getByText(
+        /Preview in Query authenticates no token and checks no invoke grant/i,
+      ),
+    ).toBeInTheDocument();
+    // …and the false absolute it replaced does not come back.
+    expect(within(picker.closest("details")!).queryByText(/Preview in Query runs as you/i)).toBeNull();
 
     const run = screen.getByText("A trial is a real call, not a dry run");
     fireEvent.click(run);
@@ -1053,7 +1067,7 @@ describe("TryIt — the prose sits beside the control it describes", () => {
     const details = collapsedDisclosureAround(summary);
     const body = within(details).getByText(/60-second token is minted/i);
     expect(body.closest("summary")).toBeNull();
-    expect(body).toHaveTextContent(/Preview in Query runs as you instead/i);
+    expect(body).toHaveTextContent(/Preview in Query authenticates no token and checks no invoke grant/i);
 
     // Reachable: the gesture a user makes opens it.
     fireEvent.click(summary);

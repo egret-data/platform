@@ -50,14 +50,20 @@ fn transformed(script: &str, returns: &[&str]) -> serde_json::Value {
     })
 }
 
-/// Spec §5: **preview runs as the author, not the service account.**
+/// Spec §5: **preview passes the AUTHOR as the principal, not a service
+/// account.**
 ///
-/// `FakePort` folds the principal into the value it returns (`marker`), the way
-/// Ranger filters per principal. A preview that ran as a service account would
-/// be `Try it` wearing the wrong label — and the author would be told their SQL
-/// works against rows they cannot actually see.
+/// `FakePort` folds the principal into the value it returns (`marker`), so this
+/// pins which `UserId` the route hands the port. **It does not, and cannot, show
+/// that the ENGINE runs the query as that user** — the real port only reaches
+/// the author's identity when the connection is delegated or impersonating
+/// (`egret-query/src/execution/mod.rs:43-88`); on a plain connection the engine
+/// sees the service account whatever this argument says. The comment here used
+/// to claim the stronger thing, and part of Package 1 was justified on top of
+/// that claim. The rule that closes the gap on governed data is
+/// [`preview_is_refused_on_a_governed_service_account_connection`] below.
 #[tokio::test]
-async fn preview_runs_as_the_author() {
+async fn preview_passes_the_author_as_the_principal() {
     let Some(f) = fixture().await else { return };
     let (status, body) = f
         .mgmt_post(&preview_path(&f), Some(draft(&f, "SELECT 1 AS n")))
@@ -66,8 +72,103 @@ async fn preview_runs_as_the_author() {
     assert_eq!(
         body["rows"][0][0].as_i64(),
         Some(marker(UserId(f.author))),
-        "preview must run as the session's own user, not a service account"
+        "preview must be given the session's own user as the principal, not a \
+         service account"
     );
+}
+
+/// **Package 1: a governed database refuses the PREVIEW too, and this is where
+/// the sentence that used to sit in `preview.rs` was made true.**
+///
+/// That comment justified leaving preview ungated with "a preview runs as the
+/// author, under the author's own engine policy". It does not: `preview::run`
+/// reaches `execute_as_with_params` -> `connect_as` -> `delegation_for`, and
+/// with `delegated: false` and no `options.impersonate` there is no bearer,
+/// Trino is sent the SERVICE user as `X-Trino-User` and StarRocks issues no
+/// `EXECUTE AS`. So a `:manage` holder could press Run on a Ranger-masked
+/// database and read unmasked rows while publish was refused and serving 503'd
+/// — with the UI telling them the opposite. See `preview::run`'s doc for why
+/// the answer chosen was to gate rather than to reword.
+///
+/// Every refusal below is bracketed by a case that must NOT refuse, one field
+/// apart, because a fixture that could never preview would "prove" this rule
+/// with the rule deleted.
+#[tokio::test]
+async fn preview_is_refused_on_a_governed_service_account_connection() {
+    let Some(f) = fixture().await else { return };
+
+    // Anti-triviality FIRST: this exact body previews while nothing is governed.
+    let (status, body) = f
+        .mgmt_post(&preview_path(&f), Some(draft(&f, "SELECT 1 AS n")))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the fixture's own draft must preview while the database is ungoverned: {body}"
+    );
+
+    // ONE column, on the database. Nothing about the draft changes.
+    f.set_database_governed(f.database_id, true).await;
+
+    let (status, body) = f
+        .mgmt_post(&preview_path(&f), Some(draft(&f, "SELECT 1 AS n")))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a preview on a governed database through a connection that runs every \
+         query as the service account reads that data under the MACHINE's \
+         policy — the exact thing publish and serving refuse: {body}"
+    );
+    let text = body.to_string();
+    assert!(
+        text.contains("governed"),
+        "the refusal must name the flag that caused it: {body}"
+    );
+    assert!(
+        text.contains("previewed"),
+        "...and it must be a sentence about what the author just pressed, not \
+         one about publishing only: {body}"
+    );
+    assert!(
+        body.get("rows").is_none(),
+        "a refused preview must not carry rows: {body}"
+    );
+
+    // One field apart, twice: a governed database whose connection DOES run per
+    // principal previews normally -- first `delegated`...
+    f.set_database_governed(f.delegated_database_id, true).await;
+    let mut on_delegated = draft(&f, "SELECT 1 AS n");
+    on_delegated["database_id"] = serde_json::json!(f.delegated_database_id);
+    let (status, body) = f.mgmt_post(&preview_path(&f), Some(on_delegated)).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "authoring on a governed database with a per-principal connection is \
+         precisely what this package asks for and must not be blocked: {body}"
+    );
+
+    // ...then `options.impersonate` alone, which is the half a reader who knows
+    // only `delegated` gets wrong.
+    f.set_database_governed(f.impersonating_database_id, true)
+        .await;
+    let mut on_impersonating = draft(&f, "SELECT 1 AS n");
+    on_impersonating["database_id"] = serde_json::json!(f.impersonating_database_id);
+    let (status, body) = f.mgmt_post(&preview_path(&f), Some(on_impersonating)).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "`options.impersonate` makes the engine run as the caller independently \
+         of `delegated`, so it satisfies the gate on its own: {body}"
+    );
+
+    // And clearing the flag restores the first case -- the rule reads the live
+    // column rather than latching on the first refusal.
+    f.set_database_governed(f.database_id, false).await;
+    let (status, body) = f
+        .mgmt_post(&preview_path(&f), Some(draft(&f, "SELECT 1 AS n")))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
 }
 
 /// Spec §5: **preview reflects unsaved SQL.**
@@ -1097,7 +1198,9 @@ async fn a_written_statement_generates_nothing_to_show() {
 /// generated per request, because a script may branch on a value no probe
 /// supplies. Preview generates from the author's test values, which is the same
 /// situation and the same risk in both directions: the statement below is not a
-/// read at all, and preview runs as the AUTHOR against a real engine.
+/// read at all, and preview reaches a real engine — on an ordinary connection
+/// under the SERVICE account's credentials, which is a stronger reason to refuse
+/// a generated `DELETE` than "the author is running it", not a weaker one.
 ///
 /// Both halves are asserted. The refusal, and that **nothing reached the
 /// engine** — "a 400" and "a 400 after running DML" are the same status code and

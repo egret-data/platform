@@ -22,13 +22,17 @@ POST /api/ws/{workspace}/data-api/endpoints/{id}/preview
 
 Gate **`data_api_endpoint:manage`** — cùng gate `validate` mang, và cùng lý do đã nêu: nó chạy một truy vấn tới engine dưới danh nghĩa caller, đó là hành động soạn thảo chứ không phải đọc metadata.
 
-### 2.1 Nó chạy như tác giả, không như service account
+### 2.1 Tác giả là PRINCIPAL — điều đó không đồng nghĩa với "chạy như tác giả"
 
 `validate` đã làm đúng điều này. `validated_draft` (`crates/egret-dataapi/src/routes.rs:1096`) truyền `ctx.principal.user_id` vào `validate`, và comment ở đó ghi lý do: `describe_as` resolve dưới danh nghĩa chính caller, nên một connection delegated áp policy của **họ**, và tác giả không thể publish một hợp đồng trên bảng mà chính họ không xem được.
 
-Preview giữ nguyên danh tính đó và chỉ đổi động từ — `execute_as_with_params` (`crates/egret-query-api/src/port.rs:196`) thay cho `describe_as`.
+Preview giữ nguyên principal đó và chỉ đổi động từ — `execute_as_with_params` (`crates/egret-query-api/src/port.rs:196`) thay cho `describe_as`.
 
-**Hệ quả phải tới được UI, không chỉ nằm trong tài liệu này.** Preview xanh **không** chứng minh consumer gọi được endpoint: service account là principal khác và Ranger có thể từ chối nó. Đó là câu `Try it` trả lời, và là lý do cả hai cùng tồn tại chứ không cái nào dư.
+**Tiêu đề này từng ghi "Nó chạy như tác giả, không như service account" và điều đó SAI.** Truyền một `UserId` quyết định route quy hành động cho ai; nó không quyết định ENGINE nhìn thấy ai. Việc đó do một tầng dưới quyết định — `execution::delegation_for` (`crates/egret-query/src/execution/mod.rs:43-88`): với `delegated: false` và không có `options.impersonate` thì không có bearer nào được mint, connector Trino gửi SERVICE user làm `X-Trino-User` (`bearer_token.is_some() || impersonate`) còn StarRocks không phát `EXECUTE AS`. **Trên một connection thông thường — không delegated, không impersonate, tức là mặc định — preview và một lời gọi đã phục vụ tới engine dưới cùng một danh tính.** Policy của chính tác giả chỉ được áp khi connection delegated hoặc impersonate.
+
+Một phép đo thật trên kind trả `who=admin` từ preview và `who=svc-kind-smoke-bot` từ trial trên cùng endpoint và cùng SQL; đó là một connection DELEGATED, nơi hai bên thực sự khác nhau, và nó đã bị khái quát nhầm thành câu ở trên. Gói 1 của chương trình production-readiness làm cho cách hiểu mạnh đó thành sự thật ở chỗ nó quan trọng thay vì lặp lại: trên một database `governed`, `preview::run` nay từ chối trừ khi connection chạy per principal.
+
+**Hệ quả phải tới được UI, không chỉ nằm trong tài liệu này, và nó không phải chuyện "danh tính của ai".** Preview xanh **không** chứng minh consumer gọi được endpoint, và lý do đúng trên mọi connection: preview không xác thực token nào, không kiểm invoke grant nào, không tiêu rate limit, không chạm cache, và chạy SQL đang trên màn hình chứ không phải bản đã publish. Đó là câu `Try it` trả lời, và là lý do cả hai cùng tồn tại chứ không cái nào dư.
 
 ### 2.2 Body mang draft đang trên màn hình, không chỉ giá trị test
 
@@ -71,11 +75,11 @@ Hai khác biệt cố ý so với thứ consumer thấy, cả hai vì preview ph
 
 **Tên cột trả về đúng như engine trả — `output.naming` KHÔNG được áp.** Tác giả đang debug SQL cần đúng những tên họ viết; `Response` mới là chỗ xem hợp đồng đã publish, gồm cả phép đổi tên. Phải nói rõ đâu là đâu trên UI, nếu không hai thứ sẽ bị lẫn.
 
-**Lỗi engine hiện nguyên văn.** Serving cố ý map lỗi permission của engine thành `data_access_denied` và không bao giờ vọng lại text của engine, vì consumer không được biết hình dạng các bảng. Preview là trường hợp ngược lại: tác giả sở hữu SQL, đang chạy như chính mình, và không thể sửa một lỗi cú pháp từ một thông báo đã bị làm sạch. Nên preview trả về thông báo của engine y nguyên — và chính vì thế nó không bao giờ được với tới được dưới quyền `data_api_endpoint:manage`.
+**Lỗi engine hiện nguyên văn.** Serving cố ý map lỗi permission của engine thành `data_access_denied` và không bao giờ vọng lại text của engine, vì consumer không được biết hình dạng các bảng. Preview là trường hợp ngược lại: tác giả sở hữu SQL và không thể sửa một lỗi cú pháp từ một thông báo đã bị làm sạch. Nên preview trả về thông báo của engine y nguyên — và chính vì thế nó không bao giờ được với tới được dưới quyền `data_api_endpoint:manage`.
 
 ### 2.5 Không audit
 
-`validate` không phát audit event, và preview theo đúng nó. Cả hai chạy một truy vấn chỉ-đọc dưới danh nghĩa chính caller — cùng thứ SQL Lab làm, và SQL Lab cũng không audit. Điều này là cố ý và ghi ở đây để sự vắng mặt của nó không bị đọc thành thiếu sót: những hành động được audit là những hành động **thay đổi thứ consumer nhận** (publish, rollback, disable, enable, delete) cộng với impersonation (`try`).
+`validate` không phát audit event, và preview theo đúng nó. Cả hai chạy một truy vấn chỉ-đọc với caller làm principal — cùng thứ SQL Lab làm, và SQL Lab cũng không audit. Điều này là cố ý và ghi ở đây để sự vắng mặt của nó không bị đọc thành thiếu sót: những hành động được audit là những hành động **thay đổi thứ consumer nhận** (publish, rollback, disable, enable, delete) cộng với impersonation (`try`).
 
 ## 3. Các mục của trang detail
 
@@ -91,7 +95,7 @@ Là route index. Chứa picker database, editor SQL, phần **khai báo** tham s
 
 **Layout dọc — editor trên, kết quả dưới — theo SQL Lab, không theo split trái/phải của ChartExplore.** ChartExplore sở hữu toàn bộ bề rộng trang; một mục bên trong trang detail thì không, và một cột kết quả bên phải sẽ bóp cả hai nửa.
 
-**Tham số mang hai vai ở đây, và gộp chúng lại là cái bẫy.** Một tham số có *khai báo* (tên, kiểu, required, default, allowed) và, chỉ dành cho preview, một *giá trị test*. Đặt giá trị test vào cùng hàng với khai báo sẽ mời người đọc tưởng nó được lưu cùng endpoint. Nên `ParamEditor` giữ phần khai báo, và khối preview có input riêng cho từng tham số đã khai báo, đúng cách `Try it` làm. Điều đó trùng lặp với hàng input của `Try it`, và chấp nhận được: hai mục không bao giờ cùng trên màn hình, và chúng chạy dưới principal khác nhau.
+**Tham số mang hai vai ở đây, và gộp chúng lại là cái bẫy.** Một tham số có *khai báo* (tên, kiểu, required, default, allowed) và, chỉ dành cho preview, một *giá trị test*. Đặt giá trị test vào cùng hàng với khai báo sẽ mời người đọc tưởng nó được lưu cùng endpoint. Nên `ParamEditor` giữ phần khai báo, và khối preview có input riêng cho từng tham số đã khai báo, đúng cách `Try it` làm. Điều đó trùng lặp với hàng input của `Try it`, và chấp nhận được: hai mục không bao giờ cùng trên màn hình, và chúng trả lời hai câu hỏi khác nhau — trial xác thực một service account và đi qua hợp đồng đã publish, preview thì không làm cả hai (§2.1).
 
 ### 3.2 `Config` — mọi thứ về endpoint như một đối tượng HTTP
 
@@ -129,7 +133,7 @@ Nêu ở dạng khẳng định để không bị đọc thành thiếu sót:
 
 Mọi test backend ở đây đều bị gate bởi DB: thiếu `DATABASE_URL` thì test báo `ok` mà không assert gì, nên hãy chạy với `egret_test` và đọc thời lượng.
 
-- **Preview chạy như tác giả, không như service account.** Với một connection mà engine báo lại session user, assert các dòng trả về nêu tên *caller*. Một preview chạy như service account chính là `Try it` mang nhãn sai.
+- **Preview truyền tác giả làm PRINCIPAL.** Assert route trao `ctx.principal.user_id` cho query port. Ở tầng này chỉ khẳng định được đến thế, và nói hơn thế chính là sai lầm §2.1 ghi lại: ENGINE áp policy cho danh tính nào là câu trả lời của `delegation_for`, không phải của route này, và trên một connection thông thường đó là service account. Một test assert "các dòng nêu tên caller" chỉ đúng trên connection delegated.
 - **Preview phản ánh SQL chưa lưu.** Gửi body có `sql` khác draft đã lưu và assert kết quả khớp body. Đây là tính chất §2.2 tồn tại vì nó, và nó vỡ nếu sau này ai đó "đơn giản hoá" handler thành đọc draft.
 - **Preview không ghi dòng `access_log`.** Đếm số dòng trước và sau; số phải không đổi. Rồi mutate: ghi một dòng có chủ ý và xác nhận test vỡ.
 - **Preview không nạp cache.** Preview, rồi gọi endpoint như service account, và assert response serving là `cached: false`.

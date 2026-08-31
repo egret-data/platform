@@ -27,6 +27,7 @@ fn input(name: &str) -> egret_query::registry::model::DatabaseInput {
         secret_id: None,
         new_secret: None,
         delegated: false,
+        governed: None,
     }
 }
 
@@ -230,6 +231,89 @@ async fn delegated_flag_roundtrips() {
 
     r.delete_in_workspace(wid, default_db.id).await.unwrap();
     r.delete_in_workspace(wid, del_db.id).await.unwrap();
+}
+
+/// **An omitted `governed` cannot CLEAR `governed`.**
+///
+/// `PUT …/databases/{id}` is a whole-row update and every other field of
+/// `DatabaseInput` is `#[serde(default)]`, so a client that predates this field
+/// — a script, an IaC provider, a `curl` recipe — sends a body without it while
+/// editing a port. Written straight through, that turns a security control off
+/// with a 200 and nothing logged; the endpoints on the connection are silently
+/// un-gated and the next `governance_stale` never happens because the gate is
+/// gone. `None` therefore means keep, and only an explicit `Some(false)` clears.
+///
+/// Three states, each one field apart from the last, so the assertion is about
+/// the OPTION and not about the column: set it, omit it (must survive), clear it
+/// explicitly (must go). Without the middle step a repo that ignored `governed`
+/// on update entirely would pass; without the last, one that never wrote it
+/// would.
+#[tokio::test]
+async fn an_omitted_governed_does_not_clear_it() {
+    let Some((r, _ws, wid)) = repo(true).await else {
+        eprintln!("skip");
+        return;
+    };
+    // Create with the flag ON.
+    let mut on = input(&uniq("db"));
+    on.governed = Some(true);
+    let created = r.create_in_workspace(wid, &on, None, None).await.unwrap();
+    assert!(
+        r.get(created.id).await.unwrap().governed,
+        "create must persist governed=true"
+    );
+
+    // The stale client: same row, a body that never heard of the field.
+    let mut silent = input("");
+    silent.name = created.name.clone();
+    silent.governed = None;
+    // A DIFFERENT port, so "the update happened" is observable below. With the
+    // helper's own 8080 the whole-row assertion would hold for an update that
+    // wrote nothing at all.
+    silent.port = 9090;
+    let after = r
+        .update_in_workspace(wid, created.id, &silent, None, None)
+        .await
+        .unwrap();
+    assert!(
+        after.governed,
+        "a body that omits `governed` must not clear it — that is a security \
+         control turned off by a client that never knew it existed"
+    );
+    // …and the omission really did write the rest of the row, so the assertion
+    // above is about `governed` surviving an update rather than about the update
+    // not happening.
+    assert_eq!(
+        r.get(created.id).await.unwrap().port,
+        9090,
+        "the update must still be a whole-row update — otherwise `governed` \
+         surviving says nothing"
+    );
+
+    // Clearing is a thing a client SAYS.
+    let mut off = input("");
+    off.name = created.name.clone();
+    off.governed = Some(false);
+    let cleared = r
+        .update_in_workspace(wid, created.id, &off, None, None)
+        .await
+        .unwrap();
+    assert!(
+        !cleared.governed,
+        "an explicit false must clear it, or the flag could never be turned off"
+    );
+
+    // And create still defaults to false when the field is absent — the
+    // direction migration 0130 chose, and the one `None` means where there is
+    // nothing to keep.
+    let fresh = r
+        .create_in_workspace(wid, &input(&uniq("db")), None, None)
+        .await
+        .unwrap();
+    assert!(!fresh.governed, "create with no `governed` is ungoverned");
+
+    r.delete_in_workspace(wid, created.id).await.unwrap();
+    r.delete_in_workspace(wid, fresh.id).await.unwrap();
 }
 
 #[tokio::test]

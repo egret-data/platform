@@ -28,8 +28,13 @@ const PREVIEW_MAX_ROWS = 100;
  * declaration invites the reader to think it is stored with the endpoint.
  *
  * This duplicates `TryIt`'s input row, and that is accepted: the two sections
- * are never on screen together and they run as DIFFERENT principals — preview as
- * the author, a trial as a service account.
+ * are never on screen together and they answer different questions. A trial
+ * authenticates a real token for a chosen SERVICE ACCOUNT, is authorized by that
+ * account's invoke grant, spends the rate limit and runs the PUBLISHED version;
+ * a preview authenticates nothing, checks no grant, and runs the SQL on screen
+ * under the endpoint's connection identity — the author only when that
+ * connection is delegated or impersonating, and the same shared service account
+ * otherwise (`egret-query/src/execution/mod.rs`, `delegation_for`).
  */
 /** What `Query` can drive from outside: run the preview. The SQL editor's
  *  ⌘↵ command calls this, so the affordance that makes the split pane worth
@@ -226,11 +231,13 @@ export const PreviewBlock = forwardRef<PreviewHandle, PreviewBlockProps>(functio
         >
           Preview runs the {statementName ? <>statement <span className="font-mono">{statementName}</span></> : "SQL"}{" "}
           and parameters as they are on screen right now — including edits you
-          have not saved — as you, against the database above, and returns up to {PREVIEW_MAX_ROWS}{" "}
+          have not saved — against the database above, and returns up to {PREVIEW_MAX_ROWS}{" "}
           rows. It does not save, publish, spend a rate limit, fill the cache, or appear in Activity.
           Column names come from the engine, not from the published contract — see Response for the names a
-          consumer receives. It runs as you rather than as a service account, which is why Try it is
-          what answers whether a consumer can call this endpoint.
+          consumer receives. It runs under the database connection&apos;s own identity — as you only when
+          that connection delegates or impersonates, otherwise as the shared service account — and it
+          authenticates no token, checks no invoke grant and spends no rate limit. Try it is what answers
+          whether a consumer can call this endpoint.
         </Caveat>
 
         {form.params.length > 0 && (

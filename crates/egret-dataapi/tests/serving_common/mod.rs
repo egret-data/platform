@@ -1639,6 +1639,28 @@ impl Fixture {
     /// Flip the live `delegated` column AFTER a version was published against
     /// it. Nothing re-validates when this happens — which is the entire reason
     /// the snapshot freezes a witness.
+    /// Mark a live connection `governed` (or clear it) AFTER a version was
+    /// published against it — Package 1's drift case, and the reason the
+    /// governance rule is evaluated live rather than against a frozen witness.
+    ///
+    /// Note what does NOT move when this runs: `delegated` and
+    /// `options.impersonate` are untouched, so a witness-pair comparison of the
+    /// kind `shared_cache_allowed` performs still AGREES. That is the whole
+    /// argument for the departure, and a test that flipped `delegated` instead
+    /// would not distinguish the two designs.
+    pub async fn set_database_governed(&self, database_id: Uuid, governed: bool) {
+        let done = sqlx::query("UPDATE query.databases SET governed = $1 WHERE id = $2")
+            .bind(governed)
+            .bind(database_id)
+            .execute(&self.db.pool)
+            .await
+            .expect("flip governed");
+        // A forge that matched no row would leave every assertion below
+        // measuring the un-flipped connection, i.e. passing for the wrong
+        // reason — the exact shape this repo has shipped twelve times.
+        assert_eq!(done.rows_affected(), 1, "no database row was flipped");
+    }
+
     pub async fn set_database_delegated(&self, database_id: Uuid, delegated: bool) {
         sqlx::query("UPDATE query.databases SET delegated = $1 WHERE id = $2")
             .bind(delegated)

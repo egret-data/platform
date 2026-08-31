@@ -28,6 +28,25 @@ export interface Database {
   /** B3a: run BI queries as the caller's per-user engine JWT (delegation). */
   delegated?: boolean;
   /**
+     * The data behind this connection is governed at the ENGINE — Ranger row
+     * filters and column masks apply to it.
+     *
+     * Consumed by `egret-dataapi`, which refuses to publish an endpoint onto a
+     * governed connection unless [`Database::delegated`] or
+     * `options.impersonate` makes the engine run each query as the CALLER. On a
+     * shared service credential those filters are evaluated for the machine
+     * identity, so every consumer of the endpoint reads what the service
+     * account may read.
+     *
+     * `#[serde(default)]` for rows and payloads written before the column
+     * existed: `false` is what migration 0130 gave every existing row, and it
+     * is the value that changes nothing. It is NOT the fail-safe direction and
+     * is not claimed to be — the gate is opt-in per database by design (see the
+     * migration's own comment for why the alternative was a migration-time
+     * outage).
+     */
+  governed?: boolean;
+  /**
      * Set when this row was materialized by an engine→workspace assignment.
      * A non-null `engine_id` marks the connection provisioned (read-only,
      * per-user-delegated) and links it back to the source engine.
