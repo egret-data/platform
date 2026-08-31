@@ -911,3 +911,247 @@ async fn shared_and_in_process_caches_agree_on_hit_miss_and_payload() {
         assert_eq!(row_counts, vec![3, 4]);
     }
 }
+
+// ---------------------------------------------------------------------------
+// 8. The clocks. Two replicas do not share one, and the bucket must survive it.
+// ---------------------------------------------------------------------------
+
+/// How far apart two replicas' clocks are taken to be. Absurd for NTP, chosen
+/// on purpose: the point of the fix is that the leak is bounded by `burst`
+/// **regardless of the magnitude**, so a small number would let a bounded-leak
+/// implementation and an unbounded one look alike.
+const CLOCK_SKEW: Duration = Duration::from_millis(500);
+
+/// Two replicas whose clocks disagree cannot mint tokens.
+///
+/// # The defect this closes, measured before the fix
+///
+/// `now` is supplied by the caller, so N replicas send N slightly different
+/// numbers for one real moment. The first version of the Lua bucket wrote
+/// `l = now` unconditionally, which meant a lagging replica REWOUND the stored
+/// timestamp and the leading replica then re-billed an interval it had already
+/// been charged for. Every alternation minted tokens and nothing bounded it.
+/// Driving the shipped script directly on Valkey 8 at `qps = 10, burst = 10`,
+/// 400 calls at one real instant:
+///
+/// | skew | admitted, before | admitted, after |
+/// |---|---|---|
+/// | 0 ms | 10 | 10 |
+/// | 5 ms | 20 | 10 |
+/// | 50 ms | 110 | 10 |
+/// | 500 ms | **400 — the limiter is gone** | 11 |
+/// | 1 hour | **400** | 11 |
+///
+/// This test is that measurement through the real `check_at`, with two real
+/// `SharedStore` handles. Skew is applied as the `now` each replica reports for
+/// the same real moment, which is the only place skew is observable at all: the
+/// script cannot tell a clock that is behind from a caller that passed an
+/// earlier instant, and does not need to.
+///
+/// # Why this could not have been caught by the tests that were here
+///
+/// Every other bucket test in this file passes ONE clock reading to every
+/// handle. Under one clock the defect is invisible — the stored timestamp never
+/// goes backwards, so nothing is ever re-billed. A skew test that reuses a
+/// single `now` proves nothing, which is exactly how this survived the first
+/// round.
+///
+/// # The two-sided bound
+///
+/// `>= burst` because a limiter that admitted nothing would sail past a
+/// one-sided ceiling; `<= burst + 1` because the envelope's ONE-TIME forward
+/// jump can refill the bucket once and `tokens > burst` clamps that to the
+/// published allowance. There is no third possibility that is not a leak.
+#[tokio::test]
+async fn two_replicas_whose_clocks_disagree_cannot_mint_tokens() {
+    use redis::AsyncCommands;
+    let url = skip_without_store!();
+    let behind = SharedStore::connect(&url)
+        .await
+        .expect("the lagging replica");
+    let ahead = SharedStore::connect(&url)
+        .await
+        .expect("the leading replica");
+    let mut peek = peek(&url).await;
+    let key = unique("skew");
+    let rate = Rate {
+        qps: 10.0,
+        burst: 10.0,
+    };
+
+    // ONE real instant, so no admission can be explained by refill: the only
+    // time that passes in this loop is the difference between the two clocks.
+    let t = Instant::now();
+    let mut admitted = 0usize;
+    for _ in 0..200 {
+        if RateLimitStore::check_at(&behind, &key, rate, t)
+            .await
+            .is_ok()
+        {
+            admitted += 1;
+        }
+        if RateLimitStore::check_at(&ahead, &key, rate, t + CLOCK_SKEW)
+            .await
+            .is_ok()
+        {
+            admitted += 1;
+        }
+    }
+    assert!(
+        admitted >= rate.burst as usize,
+        "a 10-token bucket must still admit its burst; {admitted} admissions means the \
+         clock guard refuses traffic the author published for"
+    );
+    assert!(
+        admitted <= rate.burst as usize + 1,
+        "{admitted} of 400 calls admitted from a {}-token bucket at ONE real instant. \
+         The clocks of two replicas are being turned into tokens: each alternation \
+         rewinds the stored timestamp and lets the other replica re-bill the same \
+         interval. Bounded by nothing — at {CLOCK_SKEW:?} of skew the published limit \
+         does not exist",
+        rate.burst
+    );
+
+    // And the MECHANISM, not only the count: the stored timestamp is a monotone
+    // envelope, so a call from the replica that is behind cannot move it back.
+    let found: Vec<String> = peek.keys(format!("*{key}")).await.expect("keys");
+    let before: f64 = peek.hget(&found[0], "l").await.expect("l before");
+    RateLimitStore::check_at(&behind, &key, rate, t)
+        .await
+        .expect_err("the bucket is empty by now");
+    let after: f64 = peek.hget(&found[0], "l").await.expect("l after");
+    assert_eq!(
+        before, after,
+        "a call from the lagging replica moved the stored timestamp from {before} to \
+         {after}. Every millisecond it rewinds is a millisecond the leading replica is \
+         charged for twice"
+    );
+}
+
+/// A rate of zero refuses; it does not admit, and it does not panic.
+///
+/// Unreachable through `Rate::from_spec`, which answers `None` for a zero rate
+/// — and reachable through `Rate`'s public fields, which is the whole reason
+/// this is asserted rather than assumed away. The two implementations used to
+/// fail differently and both badly: the Lua bucket computed `(1 - tokens) / 0`,
+/// i.e. `inf`, whose conversion to a Redis integer reply is undefined and can
+/// arrive as `0` — which this caller reads as **admitted**, from a rate of zero
+/// per second; and `TokenBucket` handed the same `inf` to
+/// `Duration::from_secs_f64`, which **panics**.
+///
+/// Both now answer a bounded refusal. The exact wait is not asserted (they pick
+/// it differently, and neither number means anything beyond "not soon"); that
+/// it is a refusal at all is the claim.
+#[tokio::test]
+async fn a_rate_of_zero_refuses_on_both_implementations() {
+    let url = skip_without_store!();
+    let shared = SharedStore::connect(&url).await.expect("store");
+    let local = TokenBucket::new();
+    let rate = Rate {
+        qps: 0.0,
+        burst: 1.0,
+    };
+    let now = Instant::now();
+
+    for (name, store) in [
+        ("shared", &shared as &dyn RateLimitStore),
+        ("in-process", &local as &dyn RateLimitStore),
+    ] {
+        let key = unique("zero-qps");
+        // The first sighting is a FULL bucket, so one token exists even here.
+        store
+            .check_at(&key, rate, now)
+            .await
+            .unwrap_or_else(|e| panic!("{name}: a full bucket must admit the first call: {e:?}"));
+        match store.check_at(&key, rate, now).await {
+            Err(Refusal::Exhausted(d)) => assert!(
+                d > Duration::ZERO,
+                "{name}: a bucket that never refills must not answer a zero wait"
+            ),
+            other => panic!(
+                "{name}: a rate of zero per second must REFUSE the second call, got {other:?}"
+            ),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 9. The one place the two caches do NOT agree, held as a witness.
+// ---------------------------------------------------------------------------
+
+/// The 4 MiB entry bound is the same constant on both sides and **not the same
+/// quantity**, so one body shape changes its cacheability when a deployment
+/// scales out.
+///
+/// `ResponseCache::put_at` bounds `cache_entry_estimate`; `SharedStore::put_at`
+/// bounds the SERIALISED length. The estimate charges every JSON number a flat
+/// 16 bytes and a full-precision `f64` prints as more — so a float-heavy body
+/// can estimate under the bound and serialise over it.
+///
+/// This test is the witness for the paragraph in `SharedStore::put_at` that
+/// says so. It exists because that paragraph used to claim the opposite — "the
+/// same 4 MiB the in-process cache applies, so an endpoint does not start or
+/// stop being cacheable when a deployment scales out" — and prose is not an
+/// instrument. Should someone make the two agree, this reddens and the
+/// paragraph gets rewritten with it, which is the point.
+///
+/// It is not a defect being pinned open. The direction is the safe one: the
+/// shared store refuses to hold what it cannot actually afford, the caller
+/// misses, and a miss re-executes and re-shapes against the frozen contract.
+#[tokio::test]
+async fn a_float_heavy_body_caches_in_process_and_not_in_the_store() {
+    let url = skip_without_store!();
+    let shared = SharedStore::connect(&url).await.expect("store");
+    let local = ResponseCache::new();
+    let now = Instant::now();
+    let key = unique("float-heavy");
+
+    // 220 000 full-precision f64s: 16 bytes each to the estimate (3.4 MiB, under
+    // the bound) and 24 characters each on the wire (5.0 MiB, over it).
+    let data = Arc::new(serde_json::json!({
+        "rows": (0..220_000)
+            .map(|i| serde_json::json!(-1.234_567_890_123_456_7e-300 * (1.0 + i as f64)))
+            .collect::<Vec<_>>()
+    }));
+    let estimate = egret_dataapi::serving::cache_entry_estimate(&data);
+    let serialised = serde_json::to_vec(&*data).expect("serialise").len();
+    const BOUND: usize = 4 * 1024 * 1024;
+    assert!(
+        estimate < BOUND && serialised > BOUND,
+        "the witness must actually straddle the bound, or this test asserts nothing: \
+         estimate {estimate}, serialised {serialised}, bound {BOUND}"
+    );
+
+    assert!(
+        local.put_at(
+            key.clone(),
+            Arc::clone(&data),
+            vec![220_000],
+            Duration::from_secs(60),
+            now
+        ),
+        "the in-process cache bounds the ESTIMATE ({estimate}), which is under {BOUND}"
+    );
+    assert!(
+        local.get_at(&key, now).is_some(),
+        "and it really is retrievable, or the `true` above means nothing"
+    );
+
+    assert!(
+        !ResponseStore::put_at(
+            &shared,
+            key.clone(),
+            Arc::clone(&data),
+            vec![220_000],
+            Duration::from_secs(60),
+            now
+        )
+        .await,
+        "the shared store bounds the SERIALISED length ({serialised}), which is over \
+         {BOUND}, so it must refuse this body"
+    );
+    assert!(
+        ResponseStore::get_at(&shared, &key, now).await.is_none(),
+        "a refused put must leave nothing behind"
+    );
+}

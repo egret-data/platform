@@ -763,6 +763,96 @@ mod tests {
         });
     }
 
+    /// The replica count reaches the process from the environment, under the
+    /// name the CHART writes — and the chart is asserted to write it.
+    ///
+    /// This is the one knob whose failure mode is silence in the safe-looking
+    /// direction. `default_replicas()` is `1`, and `1` is the value that lets
+    /// `choose_store` through; so a mis-spelled section, a renamed field or a
+    /// changed env separator does not error — it reads as a single-replica
+    /// deployment, and a four-replica deployment boots with four private
+    /// limiters and four private caches, which is exactly the defect Package 4
+    /// exists to remove. Nothing else in the tree fails when that mapping
+    /// breaks, so it is asserted here.
+    ///
+    /// Both halves in ONE test on purpose. The chart's key and the config's
+    /// path are only correct together, and two tests that each assert their own
+    /// half agree with a literal string would both stay green while the pair
+    /// disagreed.
+    #[test]
+    fn the_replica_count_arrives_under_the_name_the_chart_writes() {
+        const KEY: &str = "EGRET_DATA_API__REPLICAS";
+        let chart = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../deploy/helm/egret/templates/configmap-env.yaml"
+        ))
+        .expect("reading configmap-env.yaml");
+        let line = chart
+            .lines()
+            .find(|l| l.trim_start().starts_with(KEY))
+            .unwrap_or_else(|| panic!("the chart no longer writes {KEY}"));
+        assert!(
+            line.contains(".Values.backend.replicas"),
+            "{KEY} must be rendered from the SAME value the Deployment's \
+             spec.replicas uses, or the two can disagree: {line}"
+        );
+
+        figment::Jail::expect_with(|jail| {
+            jail.set_env(KEY, "4");
+            let cfg: Config = Config::figment().extract()?;
+            assert_eq!(
+                cfg.data_api.replicas, 4,
+                "{KEY} is what the chart sets; if it does not land on \
+                 data_api.replicas the multi-replica refusal never fires"
+            );
+            Ok(())
+        });
+    }
+
+    /// Absent, it reads as one replica — stated as a test because it is a
+    /// DEFAULT THAT DISARMS A GUARD, not a neutral fallback.
+    ///
+    /// It is the right default (a deployment that never heard of the key runs
+    /// one process, and erroring instead would fail every deployment that
+    /// predates it), and it is also the reason the test above exists.
+    #[test]
+    fn an_absent_replica_count_reads_as_one_and_therefore_disarms_the_guard() {
+        figment::Jail::expect_with(|_jail| {
+            let cfg: Config = Config::figment().extract()?;
+            assert_eq!(cfg.data_api.replicas, 1);
+            assert_eq!(cfg.data_api.shared_store_url, None);
+            Ok(())
+        });
+    }
+
+    /// And the store URL under the name the chart writes for it.
+    ///
+    /// Same seam, milder failure: a URL that did not arrive is a process that
+    /// refuses to start (above one replica) or runs process-local (at one),
+    /// neither of which is silent.
+    #[test]
+    fn the_shared_store_url_arrives_under_the_name_the_chart_writes() {
+        const KEY: &str = "EGRET_DATA_API__SHARED_STORE_URL";
+        let chart = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../deploy/helm/egret/templates/configmap-env.yaml"
+        ))
+        .expect("reading configmap-env.yaml");
+        assert!(
+            chart.lines().any(|l| l.trim_start().starts_with(KEY)),
+            "the chart no longer writes {KEY}"
+        );
+        figment::Jail::expect_with(|jail| {
+            jail.set_env(KEY, "redis://valkey:6379/1");
+            let cfg: Config = Config::figment().extract()?;
+            assert_eq!(
+                cfg.data_api.shared_store_url.as_deref(),
+                Some("redis://valkey:6379/1")
+            );
+            Ok(())
+        });
+    }
+
     /// Blank is absent, not an empty origin.
     ///
     /// `EGRET_DATA_API__PUBLIC_URL=` is what a half-written env file produces,

@@ -7,6 +7,10 @@ metadata:
     app: minio
 spec:
   replicas: 1
+  # As for postgres: a rolling update surges a second pod that cannot mount the
+  # ReadWriteOnce `minio-data` PVC, so the upgrade wedges rather than rolls.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: minio

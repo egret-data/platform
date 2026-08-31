@@ -22,6 +22,23 @@ spec:
   # replicas; two unsynchronised copies of it would reintroduce exactly the
   # split-state defect this package removes, one level down.
   replicas: 1
+  # And `replicas: 1` does NOT on its own deliver that, which is the whole
+  # reason this line exists. The default strategy is RollingUpdate, which SURGES
+  # a second pod before terminating the old one — so any change to the pod spec
+  # above (the image, `maxmemory`, a resource number) would briefly put two
+  # Valkeys behind the one `app: valkey` Service, splitting the store during its
+  # own upgrade. Buckets and cache entries would land in whichever pod the
+  # Service picked, which is this package's defect one level down and would show
+  # up as limits transiently doubling on a `helm upgrade` that touched nothing
+  # to do with limits.
+  #
+  # Recreate: the old pod is gone before the new one starts. The cost is a gap
+  # in which the store is unreachable — during which the limiter fails CLOSED
+  # (503 on rate-limited endpoints) and the cache fails open — and that is the
+  # correct trade, because the alternative is not an outage but a WRONG ANSWER
+  # nobody would see.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: valkey
@@ -38,8 +55,9 @@ spec:
           # and because the limiter fails closed, that would turn a full cache
           # into 503s on every rate-limited endpoint. `allkeys-lru` instead
           # sheds the coldest keys; see `serving/shared.rs` for the one
-          # consequence that carries (an evicted bucket comes back full, at most
-          # one extra burst for a client that was idle anyway).
+          # consequence that carries (an evicted bucket comes back FULL, at most
+          # one extra burst — and LRU is approximate, so that can land on an
+          # active client, not only an idle one).
           args:
             - "--maxmemory"
             - "{{ .Values.sharedStore.maxmemory }}"

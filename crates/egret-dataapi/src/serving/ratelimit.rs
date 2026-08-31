@@ -63,6 +63,16 @@ const RATE_CEILING: f64 = 10_000.0;
 const IDLE_SECS: u64 = 600;
 const PRUNE_ABOVE: usize = 4_096;
 
+/// What a bucket that can never refill answers.
+///
+/// Reachable only by constructing [`Rate`] directly with a non-positive `qps`,
+/// which [`Rate::from_spec`] cannot produce. A day, matching
+/// `shared::BUCKET_TTL_CEILING_MS`, so the two implementations answer the same
+/// shape for the same impossible input: refused, with the longest wait either
+/// can express. The alternative — the honest "never" — is `Duration::MAX`, and
+/// `retry_after_secs` would put its 584-billion-year value on the wire.
+const NEVER_REFILLS: Duration = Duration::from_secs(24 * 60 * 60);
+
 /// A sized allowance: `qps` tokens per second, at most `burst` held at once.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rate {
@@ -204,14 +214,28 @@ impl TokenBucket {
         // passing an earlier instant) adds nothing rather than panicking.
         let elapsed = now.saturating_duration_since(b.last).as_secs_f64();
         b.tokens = (b.tokens + elapsed * rate.qps).min(rate.burst);
-        b.last = now;
+        // The stored timestamp never runs backwards. Vacuous here — one process
+        // has one monotonic clock, so `Instant::now()` never regresses — and
+        // written anyway because the SHARED bucket's identical line is
+        // load-bearing (see `shared::BUCKET_SCRIPT`: without it, skew between
+        // replicas mints tokens without bound), and the two implementations of
+        // this one rule are supposed to read the same.
+        b.last = now.max(b.last);
         if b.tokens >= 1.0 {
             b.tokens -= 1.0;
             Ok(())
-        } else {
+        } else if rate.qps > 0.0 {
             // Time until one WHOLE token exists — a shorter answer would send the
             // client back to be refused again.
             Err(Duration::from_secs_f64((1.0 - b.tokens) / rate.qps))
+        } else {
+            // A bucket that never refills. `(1 - tokens) / 0.0` is `inf`, and
+            // `Duration::from_secs_f64(inf)` **panics** — a panic on the serving
+            // path, from a value the public `Rate` fields can hold.
+            // `Rate::from_spec` answers `None` for a zero rate so nothing
+            // published can reach this, which is exactly why it would have gone
+            // unnoticed. The shared bucket has the same hole and the same fix.
+            Err(NEVER_REFILLS)
         }
     }
 }

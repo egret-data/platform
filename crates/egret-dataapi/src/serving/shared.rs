@@ -73,13 +73,30 @@
 //! The consequence of `allkeys-lru`, stated because it is real: an evicted
 //! limiter bucket comes back **full**, granting that key at most one extra
 //! `burst`. This is the identical caveat [`super::ratelimit::IDLE_SECS`] already
-//! documents for the in-process map, and it is bounded more tightly here in
-//! practice — LRU evicts the least recently used key, and a limiter bucket
-//! belonging to a client that is currently sending is by definition among the
-//! most recently used, while the buckets that do get evicted are the idle ones
-//! that would have refilled to full anyway. Every key this module writes also
-//! carries its own expiry, so the *steady* state is bounded by TTL rather than
-//! by eviction.
+//! documents for the in-process map.
+//!
+//! An earlier version of this paragraph went on to claim the exposure was
+//! bounded to idle clients, "since a client that is currently sending is by
+//! definition among the most recently used". **That is not true and the
+//! sentence is gone.** Redis' LRU is approximate — it samples a handful of keys
+//! and evicts the oldest of the sample — so a bucket belonging to a client
+//! mid-burst can be evicted, and that client gets a fresh full `burst`. The
+//! honest bound is *one burst per eviction*, on any key, not *only idle keys*.
+//!
+//! What is true is where the pressure comes from, and it is worth an operator's
+//! attention: a bucket is a two-field hash of a few dozen bytes, while a cache
+//! entry is up to [`MAX_ENTRY_BYTES`] (4 MiB). The chart's default `maxmemory`
+//! is 256 MB, which is as few as ~64 largest-size entries — so the instance
+//! reaching its ceiling is almost always a cache-pressure event, and the keys
+//! in the sample are almost always cache entries. Raising `sharedStore.maxmemory`
+//! is the lever; `egret_dataapi_store_calls_total` will not show eviction (an
+//! evicted key is a MISS and a fresh bucket, never an error), so the instrument
+//! for it is Valkey's own `evicted_keys`, not egret's.
+//!
+//! Eviction does **not** interact with the fail-closed limiter: it is not a
+//! write failure. `noeviction` would be — which is the whole reason the policy
+//! is set. Every key this module writes also carries its own expiry, so the
+//! *steady* state is bounded by TTL rather than by eviction.
 //!
 //! # Sharing one Redis between two deployments
 //!
@@ -152,6 +169,52 @@ const BUCKET_TTL_CEILING_MS: u64 = 24 * 60 * 60 * 1_000;
 /// already has an injected clock (so tests never sleep), and a script that
 /// reads the clock itself is one that cannot be driven deterministically from
 /// either side.
+///
+/// # The stored timestamp is a MONOTONE ENVELOPE, and that is the whole defence
+///
+/// Because `now` comes from the caller, N replicas send N slightly different
+/// numbers for the same real moment. The first version of this script wrote
+/// `l = now` unconditionally, and that made the skew a **token generator**: a
+/// replica whose clock lagged rewound the stored timestamp, and the next call
+/// from a leading replica measured `elapsed` over an interval that had already
+/// been billed. Every alternation minted tokens, and nothing bounded it —
+/// measured on Valkey 8 at `qps = 10, burst = 10`, 400 calls at ONE real
+/// instant, alternating two clocks:
+///
+/// | skew | admitted, before | admitted, now |
+/// |---|---|---|
+/// | 0 ms | 10 | 10 |
+/// | 5 ms | 20 | 10 |
+/// | 50 ms | 110 | 10 |
+/// | 500 ms | **400 — no limit at all** | 11 |
+/// | 1 hour | **400** | 11 |
+///
+/// `if now < last then now = last end` is what closes it, and it is a fix to
+/// the timestamp SOURCE rather than a clamp on a symptom: the value the bucket
+/// stores is now non-decreasing by construction, so the bucket runs on the
+/// monotone envelope of every replica's clock — one clock, which advances at
+/// exactly real rate because a maximum of clocks that each tick at real rate
+/// does. The old `if elapsed < 0 then elapsed = 0 end` guarded the *arithmetic*
+/// and then wrote the rewound value anyway, which is why it read as a fix and
+/// was not one; with the floor in place `elapsed` cannot be negative, so that
+/// line is gone rather than kept as reassurance.
+///
+/// What remains is a ONE-TIME offset bounded by `burst`, not a per-alternation
+/// leak: a clock that jumps the envelope forward (a lagging replica catching
+/// up, an NTP step) can refill the bucket once, and `tokens > burst` clamps
+/// that to the allowance the author published. That is the 11 above, at every
+/// skew from 500 ms to an hour. It is also why [`SharedStore::anchor_ms`] does
+/// not need re-syncing: a correction can only move the envelope forward, once,
+/// for at most one burst.
+///
+/// # `qps <= 0`
+///
+/// Unreachable through [`Rate::from_spec`], which returns `None` for `0`, but
+/// [`Rate`]'s fields are public and a zero divides. It used to produce
+/// `wait = inf`, whose conversion to a Redis integer reply is undefined and
+/// could come back as `0` — an ADMISSION, from a rate of zero per second. It
+/// now answers the key's own TTL: refused, with the longest wait this bucket
+/// can honestly express, since a bucket that never refills has no shorter one.
 const BUCKET_SCRIPT: &str = r#"
 local qps    = tonumber(ARGV[1])
 local burst  = tonumber(ARGV[2])
@@ -166,17 +229,27 @@ if tokens == nil or last == nil then
   last   = now
 end
 
+-- The bucket's clock never runs backwards. A caller behind the stored value
+-- contributes NO refill and, crucially, does not rewind `l` for the caller
+-- that is ahead. See the doc comment: without this line the skew between two
+-- replicas mints tokens on every alternation, without bound.
+if now < last then now = last end
+
 local elapsed = now - last
-if elapsed < 0 then elapsed = 0 end
 tokens = tokens + (elapsed / 1000.0) * qps
 if tokens > burst then tokens = burst end
 
 local wait = 0
 if tokens >= 1.0 then
   tokens = tokens - 1.0
-else
+elseif qps > 0 then
   wait = math.ceil(((1.0 - tokens) / qps) * 1000.0)
   if wait < 1 then wait = 1 end
+else
+  -- A bucket that never refills. `(1 - tokens) / 0` is inf, and an inf reply
+  -- converts to a Redis integer as anything at all -- including 0, which this
+  -- caller would read as ADMITTED. The key's own TTL instead: refused.
+  wait = ttl_ms
 end
 
 redis.call('HSET', KEYS[1], 't', tokens, 'l', now)
@@ -228,6 +301,22 @@ pub struct SharedStore {
     /// accuracy any wall-clock scheme would have had. It is also why the
     /// injected clock still works: a test that passes `t0 + 3600s` produces a
     /// `now_ms` an hour ahead, and the script sees exactly that.
+    ///
+    /// **The anchor is captured once and never re-synced, and that is now
+    /// safe.** It was not safe before [`BUCKET_SCRIPT`] gained its monotone
+    /// floor: any skew — including a permanent one left behind by an NTP step
+    /// after pod start, which this anchor by design never sees — minted tokens
+    /// on every alternation between replicas, without bound. With the floor,
+    /// the disagreement can only cost a ONE-TIME forward jump of the bucket's
+    /// envelope, itself clamped to `burst`. Re-syncing would not improve that
+    /// and would introduce backward steps, which is the direction that used to
+    /// hurt.
+    ///
+    /// Anchoring to the wall clock at all (rather than to `Instant` alone) is
+    /// what lets a restarted replica land near its peers instead of at zero:
+    /// `Instant`'s origin is arbitrary per process, so an un-anchored replica
+    /// would present a `now_ms` far below every stored `l` and — thanks to the
+    /// floor — simply contribute no refill, forever.
     anchor_instant: Instant,
     anchor_ms: u64,
 }
@@ -382,11 +471,37 @@ impl ResponseStore for SharedStore {
     /// It is not stored, the call answers `false`, and the next request for the
     /// same key misses and re-executes. Correctness is untouched: a response
     /// that is never cached is a response that is always fresh. The bound is
-    /// [`MAX_ENTRY_BYTES`] — the same 4 MiB the in-process cache applies, so an
-    /// endpoint does not start or stop being cacheable when a deployment scales
-    /// out.
+    /// [`MAX_ENTRY_BYTES`], 4 MiB.
     ///
-    /// It is checked twice, and **only the second check is a bound**. Stated
+    /// # The two caches share the constant and NOT the quantity it bounds
+    ///
+    /// This comment used to say the shared bound was "the same 4 MiB the
+    /// in-process cache applies, so an endpoint does not start or stop being
+    /// cacheable when a deployment scales out". The constant is the same; the
+    /// measured quantity is not, and the invariance claim was false.
+    /// [`super::cache::ResponseCache::put_at`] bounds [`estimate_bytes`]; this
+    /// bounds the **serialised** length.
+    ///
+    /// They diverge on numbers. [`estimate_bytes`] charges every
+    /// `serde_json::Value::Number` a flat 16 bytes, and a full-precision `f64`
+    /// serialises to more than that — `-1.2345678901234567e-300` is 24
+    /// characters. So a float-heavy body can estimate under 4 MiB and serialise
+    /// over it, and such a response **is cached by a single-replica deployment
+    /// and stops being cached once that deployment scales out**.
+    /// `a_float_heavy_body_caches_in_process_and_not_in_the_store` builds one —
+    /// 220 000 full-precision floats — and asserts both halves, so this
+    /// paragraph cannot quietly stop being true, in either direction.
+    ///
+    /// The consequence is a re-execution, never a wrong answer, and it is
+    /// strictly the safe direction: the shared store refuses what it cannot
+    /// actually afford to hold. Making the two agree would mean serialising on
+    /// every in-process `put` — paying the wire's work twice for every response
+    /// the process caches, to remove a performance difference on a body shape
+    /// that is already at the edge of cacheable.
+    ///
+    /// # Why the size is checked twice here
+    ///
+    /// **Only the second check is a bound.** Stated
     /// that way because the first version of this comment claimed the two were
     /// jointly load-bearing and a mutation showed they are not: deleting the
     /// [`estimate_bytes`] guard changes no outcome, because anything it would

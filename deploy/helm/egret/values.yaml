@@ -35,9 +35,15 @@ sharedStore:
   # which a full instance fails writes — and since the rate limiter fails CLOSED
   # on a store error, a full cache would become 503s on every rate-limited
   # endpoint. `allkeys-lru` sheds the coldest keys instead. The one consequence:
-  # an evicted limiter bucket comes back full, granting that key at most one
-  # extra burst — the same caveat the in-process map already documents, and in
-  # practice it lands on idle clients, whose buckets had refilled anyway.
+  # an evicted limiter bucket comes back FULL, granting that key at most one
+  # extra burst — the same caveat the in-process map already documents. Redis'
+  # LRU is approximate (it samples), so that can happen to a client that is
+  # actively sending, not only to an idle one.
+  #
+  # 256mb is as few as ~64 cache entries at their 4 MiB ceiling, while a limiter
+  # bucket is a few dozen bytes — so hitting this ceiling is a cache-pressure
+  # event, and this is the number to raise if `evicted_keys` on the store is
+  # non-zero in steady state.
   maxmemory: 256mb
   maxmemoryPolicy: allkeys-lru
   # Above `maxmemory`, which bounds the DATA only: the process, its client

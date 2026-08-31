@@ -1180,42 +1180,89 @@ mod tests {
         }
     }
 
+    /// Whether validating `body` **released the async worker** while it ran.
+    ///
+    /// # The instrument, and why it is not a spawned flag on its own
+    ///
+    /// A **current-thread** runtime, so there is exactly one worker and no
+    /// second thread can hide the difference. A spawned task is QUEUED and can
+    /// only run when something awaits; if validation were called inline it
+    /// would run to completion without ever yielding, and the flag would still
+    /// be false afterwards. That much is the original design and it is right.
+    ///
+    /// What it also had was an unstated ASSUMPTION: that the blocking task has
+    /// not already finished by the time its `JoinHandle` is first polled. An
+    /// already-`Ready` handle returns without yielding, so the probe never
+    /// runs, so a correct implementation reads as a broken one. That is a
+    /// structural flake, not an environmental one, and it duly fired once in
+    /// ~76 runs on the no-transform control — the more fragile of the pair
+    /// precisely because it does the least work.
+    ///
+    /// So the assumption is made TRUE instead of hoped for. The runtime is
+    /// built with `max_blocking_threads(1)` and that single thread is occupied
+    /// before the measurement starts, so the validation's own `spawn_blocking`
+    /// is *queued* and its handle cannot possibly be ready at the first poll.
+    /// The probe is then also the only thing that can release the occupier —
+    /// which means the validation can only COMPLETE by way of the worker being
+    /// released, and the measurement is decided by the property rather than by
+    /// a race.
+    ///
+    /// A `yield_now().await` before the assertion would have settled the flake
+    /// too, and it was rejected: it hands the queued probe a turn that the
+    /// validation never gave it, so an implementation that ran the CPU inline
+    /// would set the flag and pass. Confirmed by mutation rather than argued —
+    /// with `spawn_blocking` replaced by a direct call, the `yield_now` shape
+    /// passes and this one fails.
+    ///
+    /// The flag is read BEFORE the occupier is drained, for the same reason:
+    /// draining it awaits, which would give the probe its turn.
+    fn the_worker_was_released(body: PreviewEndpointInput) -> bool {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .expect("a current-thread runtime with a one-thread blocking pool");
+        rt.block_on(async move {
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+            let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
+            let occupier = tokio::task::spawn_blocking(move || {
+                let _ = started_tx.send(());
+                let _ = gate_rx.recv();
+            });
+            started_rx
+                .await
+                .expect("the occupier claimed the only blocking thread");
+
+            let ran = Arc::new(AtomicBool::new(false));
+            let flag = Arc::clone(&ran);
+            tokio::spawn(async move {
+                flag.store(true, Ordering::SeqCst);
+                let _ = gate_tx.send(());
+            });
+
+            let out = validate_off_the_worker(&body).await;
+            let released = ran.load(Ordering::SeqCst);
+            assert!(
+                out.is_ok(),
+                "the draft must really validate, or this measures a refusal instead of an \
+                 evaluation: {:?}",
+                out.err()
+            );
+            occupier.await.expect("the occupier returned");
+            released
+        })
+    }
+
     /// **Validating a draft must RELEASE the async worker**, not occupy it.
     ///
     /// The rule `MAX_DECLARED_PARAMS` states and this task had to redo: inline
     /// synchronous CPU on an async task was accepted at ~122 ms and is not
     /// acceptable at a Starlark evaluation's bound (2 s nominal, 28.8 s
     /// measured). See [`validate_off_the_worker`].
-    ///
-    /// # The instrument, and its one assumption
-    ///
-    /// A **current-thread** runtime, so there is exactly one worker and no
-    /// second thread can hide the difference. A task is spawned and therefore
-    /// QUEUED; on this flavour it can only run when something awaits. If
-    /// validation were called inline it would run to completion without ever
-    /// yielding, and the flag would still be false afterwards.
-    ///
-    /// The assumption is that the blocking task has not already finished by the
-    /// time its `JoinHandle` is first polled — a ready handle would return
-    /// without yielding. That is what the module-level work in [`slow_draft`]
-    /// buys, and it is why this test uses a script that costs milliseconds
-    /// rather than an empty one.
-    #[tokio::test(flavor = "current_thread")]
-    async fn validating_a_draft_releases_the_async_worker() {
-        let ran = Arc::new(AtomicBool::new(false));
-        let flag = Arc::clone(&ran);
-        tokio::spawn(async move { flag.store(true, Ordering::SeqCst) });
-
-        let body = slow_draft();
-        let out = validate_off_the_worker(&body).await;
+    #[test]
+    fn validating_a_draft_releases_the_async_worker() {
         assert!(
-            out.is_ok(),
-            "the draft must really validate, or this measures a refusal instead of an \
-             evaluation: {:?}",
-            out.err()
-        );
-        assert!(
-            ran.load(Ordering::SeqCst),
+            the_worker_was_released(slow_draft()),
             "a task queued before the validation had not run by the time it finished, so \
              the validation occupied the only worker instead of releasing it"
         );
@@ -1228,12 +1275,8 @@ mod tests {
     /// rather than about the call — and the whole of `validate_preview`
     /// (`check_definition_scans` and `check_render_rules`, the ~122 ms
     /// residual) is what moved, not just the transform check.
-    #[tokio::test(flavor = "current_thread")]
-    async fn a_draft_with_no_transform_releases_the_worker_too() {
-        let ran = Arc::new(AtomicBool::new(false));
-        let flag = Arc::clone(&ran);
-        tokio::spawn(async move { flag.store(true, Ordering::SeqCst) });
-
+    #[test]
+    fn a_draft_with_no_transform_releases_the_worker_too() {
         let body = PreviewEndpointInput {
             output: egret_dataapi_api::OutputSpec::default(),
             ..slow_draft()
@@ -1242,9 +1285,8 @@ mod tests {
             body.output.transform.is_none(),
             "the control must be untransformed"
         );
-        assert!(validate_off_the_worker(&body).await.is_ok());
         assert!(
-            ran.load(Ordering::SeqCst),
+            the_worker_was_released(body),
             "every draft's validation goes to the blocking pool, not only a transformed one"
         );
     }

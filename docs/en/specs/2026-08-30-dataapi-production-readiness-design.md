@@ -137,6 +137,29 @@ forward rather than rediscovering:
   the store keys on, verbatim, and `shared` scope still requires the live
   `(delegated, impersonate)` re-check. A shared cache makes a cross-principal leak
   fleet-wide rather than per-replica, so that was the constraint, not fragmentation.
+- **A shared bucket has N clocks, and that is a token generator unless the stored
+  timestamp is monotone.** Found in review, after the first version shipped: because
+  each replica supplies `now`, a lagging one rewound the stored `l` and the leading one
+  re-billed an interval it had already been charged for — on every alternation, without
+  bound. Measured on Valkey 8 at `qps=10, burst=10`, 400 calls at one real instant: 10
+  admitted at no skew, 20 at 5 ms, 110 at 50 ms, and **400 of 400 at 500 ms**, i.e. no
+  limit at all. The fix is a monotone floor inside the script (`if now < last then now =
+  last end`), which makes the bucket run on the envelope of every replica's clock — one
+  clock, advancing at real rate — and leaves a one-time offset bounded by `burst`. The
+  general lesson is what to carry: *any* shared counter driven by a caller-supplied clock
+  has this shape, and a test that hands one clock reading to every replica cannot see it.
+- **The two caches share the 4 MiB constant and not the quantity it bounds.** The
+  in-process cache bounds an estimate; the shared store bounds the serialised length,
+  and the estimate charges every number a flat 16 bytes. So a float-heavy response
+  caches on one replica and stops caching after scale-out. The bound is genuinely
+  enforced either way and the direction is the safe one (a miss re-executes), but the
+  "scale-out changes nothing" sentence the first version wrote was false, and there is
+  now a witness test rather than a claim.
+- **`replicas: 1` is not "one of these exists".** A Deployment's default RollingUpdate
+  surges a second pod before terminating the first, so the store split itself during its
+  own upgrade. `strategy: {type: Recreate}` on `deps-valkey.yaml` — and on
+  `deps-postgres.yaml` and `deps-minio.yaml`, which had the same shape and a
+  ReadWriteOnce PVC to wedge on.
 
 ## 5. The blind spot Package 2 exists to close
 

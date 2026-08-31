@@ -290,3 +290,74 @@ fn the_drain_deadline_outlasts_a_full_length_request() {
         egret_dataapi::serving::SERVING_REQUEST_DEADLINE
     );
 }
+
+/// Comment and blank lines removed, so the text assertions below cannot be
+/// satisfied by prose. These templates carry their argument in a comment right
+/// beside the line the assertion is about — which means a comment could spell
+/// the very string being looked for, and a test a comment can satisfy is the
+/// shape this repo has shipped a green test over sixteen times.
+fn without_comments(yaml: &str) -> String {
+    yaml.lines()
+        .filter(|l| !l.trim_start().starts_with('#') && !l.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// A single-instance dependency must be REPLACED on upgrade, never surged past.
+///
+/// `replicas: 1` does not on its own deliver "one of these exists". A
+/// Deployment's default strategy is RollingUpdate, which starts the new pod
+/// BEFORE terminating the old one, so any edit to the pod spec — the image, a
+/// memory number, an argument — briefly puts two pods behind the one Service
+/// that selects them.
+///
+/// For Valkey that is Package 4's own defect one level down: two stores means
+/// the Data API's rate-limit buckets and response cache split across them for
+/// the length of the rollout, and a published limit transiently doubles on a
+/// `helm upgrade` that touched nothing to do with limits. For postgres and
+/// minio it is older and blunter: the surged pod cannot mount a ReadWriteOnce
+/// PVC, so the upgrade wedges instead of rolling.
+///
+/// Only the stateful three. The frontend and keycloak Deployments are
+/// deliberately NOT in this list — they hold nothing behind their Service that
+/// two copies could disagree about, and Recreate would buy them a downtime gap
+/// for nothing.
+#[test]
+fn every_single_instance_store_is_recreated_rather_than_rolled() {
+    for (file, what) in [
+        (
+            "deps-valkey.yaml",
+            "two Valkeys behind one `app: valkey` Service split the Data API's \
+             rate-limit buckets and response cache — the very defect Package 4 \
+             removed, reintroduced by the store's own upgrade",
+        ),
+        (
+            "deps-postgres.yaml",
+            "a surged postgres cannot mount the ReadWriteOnce postgres-data PVC, \
+             and on a shared volume would be a second postmaster over one data \
+             directory",
+        ),
+        (
+            "deps-minio.yaml",
+            "a surged minio cannot mount the ReadWriteOnce minio-data PVC",
+        ),
+    ] {
+        let yaml = without_comments(&read(&format!("deploy/helm/egret/templates/{file}")));
+        assert!(
+            yaml.contains("kind: Deployment"),
+            "{file} is no longer a Deployment; this test's premise has moved"
+        );
+        assert!(
+            yaml.contains("\n  replicas: 1"),
+            "{file} no longer declares a single replica; this test's premise has moved"
+        );
+        let after = yaml
+            .split("\n  strategy:")
+            .nth(1)
+            .unwrap_or_else(|| panic!("{file} declares no `strategy:` — {what}"));
+        assert!(
+            after.starts_with("\n    type: Recreate"),
+            "{file} must declare `strategy: {{ type: Recreate }}`: {what}"
+        );
+    }
+}
