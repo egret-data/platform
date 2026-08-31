@@ -921,3 +921,12 @@ async fn a_dataapi_alert_email_carries_no_csv_attachment(pool: sqlx::PgPool) {
         "a dataapi_alert's mail must not name a csv attachment:\n{raw}"
     );
 }
+
+/// `#[sqlx::test]` resolves `DATABASE_URL` through dotenvy, so an unexported
+/// variable does not skip these tests — it silently points them at the database
+/// `.env` names, which is the DEV one. See
+/// `egret_test_db::assert_database_url_is_exported`.
+#[test]
+fn database_url_is_exported_rather_than_read_from_dotenv() {
+    egret_test_db::assert_database_url_is_exported();
+}

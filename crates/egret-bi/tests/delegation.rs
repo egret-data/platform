@@ -1,6 +1,6 @@
-//! B3a Task 3: `resolve_delegation` — the `(session_user, bearer_token)` picker
-//! that fronts the three object-scoped BI data endpoints. DB-gated; self-skips
-//! without DATABASE_URL.
+//! B3a Task 3: `resolve_delegation` — the `(session_user, bearer_token)` picker that fronts
+//! the three object-scoped BI data endpoints. DB-gated; self-skips without `DATABASE_URL`
+//! ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS.
 //!
 //! Covers all three branches with a fake `EngineTokenMinter`:
 //!  * DELEGATED connection + an OIDC user with a refresh token → mint succeeds →

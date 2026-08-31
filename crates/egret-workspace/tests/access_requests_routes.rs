@@ -1,7 +1,7 @@
 //! P2b requester-endpoint integration tests: the join-request lifecycle a plain
 //! authenticated user drives — list `joinable` workspaces, `create` a request
 //! (with duplicate + already-member rejection), list `mine`, and `cancel` (own
-//! only). DB-gated; self-skips without DATABASE_URL, mirroring the sibling
+//! only). DB-gated; self-skips without DATABASE_URL ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS, mirroring the sibling
 //! `members_ax1.rs` harness (same `connect`/`uniq`/`ws_state`/`login_cookie`).
 
 use axum::body::Body;

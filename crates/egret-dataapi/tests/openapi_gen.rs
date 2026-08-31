@@ -1,6 +1,6 @@
 //! Data API P5 §5 — the generated OpenAPI document a consumer is handed.
 //!
-//! DB-gated. Self-skips (passes) when `DATABASE_URL` is unset, so check the
+//! DB-gated. Self-skips ONLY when `EGRET_ALLOW_DB_SKIP` is set; without it a run with no `DATABASE_URL` FAILS, so check the
 //! DURATION, not just the `ok`.
 
 mod serving_common;

@@ -1,9 +1,9 @@
-//! Admin Policies router (`/policies`, `/principals`) HTTP tests — moved with the
-//! module out of egret-controlplane in E2d. DB-gated; self-skips without
-//! `DATABASE_URL`. Auth is a session cookie (the CSRF layer is applied above this
-//! router in egret-server, not here). The cross-seam engine-binding read is a
-//! mock `EngineBindingReader`; the real impl (over EngineMgmtStore) and the
-//! engine auto-bind round-trip are covered in egret-engine-mgmt.
+//! Admin Policies router (`/policies`, `/principals`) HTTP tests — moved with the module
+//! out of egret-controlplane in E2d. DB-gated; self-skips without `DATABASE_URL` ONLY under
+//! `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS. Auth is a session cookie (the CSRF layer is
+//! applied above this router in egret-server, not here). The cross-seam engine-binding read
+//! is a mock `EngineBindingReader`; the real impl (over EngineMgmtStore) and the engine
+//! auto-bind round-trip are covered in egret-engine-mgmt.
 use axum::body::Body;
 use axum::http::{Request as HttpRequest, StatusCode};
 use axum::response::Response;

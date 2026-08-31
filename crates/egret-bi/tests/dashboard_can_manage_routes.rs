@@ -1,4 +1,4 @@
-//! DB-gated `can_manage` ROUTE tests. Self-skip without DATABASE_URL.
+//! DB-gated `can_manage` ROUTE tests. Self-skip without DATABASE_URL ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAIL.
 //!
 //! WHY THESE EXIST. `DashboardDetailDto.can_manage` is what decides whether the browser offers
 //! an Edit button. Before this file the flag was pinned only in jsdom, with the value MOCKED —

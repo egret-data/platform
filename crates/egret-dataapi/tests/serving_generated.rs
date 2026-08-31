@@ -28,7 +28,7 @@
 //!   cold and watching it fail. A cache test whose mutation silently did not
 //!   happen is a cache test that passes with the cache deleted.
 //!
-//! DB-gated; self-skips when `DATABASE_URL` is unset — check the DURATION, not
+//! DB-gated; self-skips ONLY when `EGRET_ALLOW_DB_SKIP` is set, and a run with no `DATABASE_URL` otherwise FAILS — check the DURATION, not
 //! just the `ok`.
 
 mod serving_common;
@@ -37,14 +37,17 @@ use axum::http::StatusCode;
 use egret_query_api::Param;
 use serving_common::{bind_signature, fixture, marker, Fixture};
 
-/// Self-skip when there is no database. The DURATION is what says whether these
-/// ran; an `ok` alone does not.
+/// Self-skip when there is no database, which `egret_test_db::url()` now permits only under
+/// `EGRET_ALLOW_DB_SKIP`. The DURATION is what says whether these ran; an `ok` alone does
+/// not.
 macro_rules! skip_without_db {
     () => {
         match fixture().await {
             Some(f) => f,
             None => {
-                eprintln!("DATABASE_URL unset — skipping");
+                eprintln!(
+                    "SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set"
+                );
                 return;
             }
         }

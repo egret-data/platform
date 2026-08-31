@@ -1,6 +1,6 @@
 //! DB-gated tests for the `PolicyPort` (contract crate) impl over `PolicyStore`.
 //! Exercised through `&dyn PolicyPort` so it is the trait method under test, not
-//! the same-named inherent method it shadows. Self-skip without DATABASE_URL.
+//! the same-named inherent method it shadows. Self-skip without DATABASE_URL ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAIL.
 use egret_metastore::Db;
 use egret_policy::PolicyStore;
 use egret_policy_api::{PolicyError, PolicyPort};

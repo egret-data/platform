@@ -15,7 +15,8 @@
 //! `Resource::Platform` maps to the platform decision; `Resource::Workspace(W)`
 //! to the workspace decision. Cedar must match the oracle in every cell.
 //!
-//! Self-skips without DATABASE_URL. Model: `crates/egret-auth/tests/cedar_pdp.rs`.
+//! Self-skips without `DATABASE_URL` ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS.
+//! Model: `crates/egret-auth/tests/cedar_pdp.rs`.
 
 use egret_auth::pdp::CedarPdp;
 use egret_core::authz::{Pdp, Resource, Subject};

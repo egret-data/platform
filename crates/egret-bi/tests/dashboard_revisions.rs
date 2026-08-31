@@ -1,4 +1,4 @@
-//! DB-gated dashboard revision tests. Self-skip without DATABASE_URL.
+//! DB-gated dashboard revision tests. Self-skip without DATABASE_URL ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAIL.
 use egret_bi::{DashboardRepo, NewCard, NewTab};
 use egret_metastore::Db;
 use uuid::Uuid;

@@ -2,6 +2,15 @@
 
 set dotenv-load := true
 
+# The database every test recipe below runs against, stated here rather than inherited.
+#
+# `set dotenv-load` above puts `.env` into every recipe's environment, and `.env` (like
+# `.env.example`) points `DATABASE_URL` at the DEV database `egret`. A recipe that simply
+# ran `cargo test` therefore pointed the whole workspace suite — including `#[sqlx::test]`,
+# which resolves the variable through dotenvy unconditionally — at the database the dev
+# server boots from. Naming it explicitly on the recipe line overrides the dotenv value.
+test_database_url := "postgres://egret:egret@localhost:5432/egret_test"
+
 # Start the local dev stack (Postgres, MinIO, Trino, StarRocks)
 up:
     docker compose -f deploy/docker-compose.dev.yml up -d
@@ -10,6 +19,20 @@ up:
 down:
     docker compose -f deploy/docker-compose.dev.yml down
 
+# Scrub the DB-skip opt-out from any recipe that is supposed to actually run the tests.
+#
+# `EGRET_ALLOW_DB_SKIP` makes every DB-gated suite report `ok` having asserted nothing. An
+# opt-out that came from `.env` is refused in `egret_test_db` itself (it reads the file, so
+# `set dotenv-load` cannot smuggle one in) — but one exported in a shell profile is
+# indistinguishable in-process from one the operator typed, and would make `just check`
+# report a full green over ~315 empty tests, silently: the skip's `eprintln!` is swallowed
+# by libtest because the test PASSES.
+#
+# So the recipes that mean "everything ran" unset it. `tests/every_test_recipe_refuses_the
+# _skip.rs` in egret-test-db fails if a recipe here runs `cargo test` without either this
+# prefix or a deliberate `EGRET_ALLOW_DB_SKIP=` of its own.
+no_db_skip := "env -u EGRET_ALLOW_DB_SKIP"
+
 # Format, lint, and test everything
 check:
     # Cheap (0.2s) and visible: cargo never prunes deps/, and past ~100k files every test
@@ -17,7 +40,42 @@ check:
     ./deploy/prune-target.sh
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
-    cargo test --workspace
+    {{ no_db_skip }} DATABASE_URL={{ test_database_url }} cargo test --workspace
+
+# The workspace suite with NO database, skipping every DB-gated test on purpose.
+#
+# `EGRET_ALLOW_DB_SKIP` is the only thing that makes a database-less run green: without it
+# `egret_test_db::url()` panics rather than letting ~315 tests in `egret-dataapi` alone
+# report `ok` having asserted nothing (see docs/en/testing/db-gated-tests.md). Use this
+# when you want the compile + the database-free tests and nothing more — and read the
+# result knowing what it did not cover.
+#
+# `env -u DATABASE_URL` is load-bearing, not tidiness. `set dotenv-load` at the top of this
+# file puts `.env` into every recipe's environment, and `.env` points DATABASE_URL at the
+# DEV database — so without the `-u` this recipe would not skip anything. It would run the
+# whole DB-gated suite against the database `just serve` boots from, which is the precise
+# accident the rest of this package exists to make impossible.
+#
+# Caveat: this silences the suites gated on `egret_test_db::url()`. Tests using
+# `#[sqlx::test]` never call it — they resolve DATABASE_URL through dotenvy themselves —
+# so they are not covered by the opt-out and may still fail here.
+test-no-db:
+    env -u DATABASE_URL EGRET_ALLOW_DB_SKIP=1 cargo test --workspace
+
+# The one Data API test executed by a REAL engine, rather than a fake `QueryExecPort`.
+#
+# Every other suite in `egret-dataapi` drives `serving_common::FakePort`, so nothing
+# engine-side had ever been RUN by a test there and every claim about StarRocks behaviour
+# rested on reading the connector. This publishes an endpoint and serves it end to end
+# through `egret_query::EngineState`, asserting rows StarRocks computed.
+#
+# Opt-in behind `EGRET_TEST_STARROCKS_URL`, the same convention `egret-query`'s connector
+# suites use — CI has no engine, so this cannot be part of `just check`.
+# Prereq: `just up` (StarRocks takes ~30-60s to become healthy).
+test-dataapi-starrocks:
+    ./deploy/seed-starrocks-dataapi.sh
+    {{ no_db_skip }} DATABASE_URL={{ test_database_url }} EGRET_TEST_STARROCKS_URL=mysql://localhost:9030 \
+      cargo test -p egret-dataapi --test serving_starrocks_live -- --nocapture
 
 # Apply migrations against the running Postgres
 migrate:

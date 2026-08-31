@@ -7,7 +7,7 @@ use uuid::Uuid;
 #[tokio::test]
 async fn create_client_then_verify() {
     let Some(store) = common::store().await else {
-        eprintln!("DATABASE_URL unset — skipping");
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
         return;
     };
     let ws = common::seed_workspace(&store).await;

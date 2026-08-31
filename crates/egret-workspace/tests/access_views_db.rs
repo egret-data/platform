@@ -2,7 +2,7 @@
 //! `AccessViewsRepo::list_workspace_roles_with_perms` returns each
 //! workspace-scoped role with its direct permission keys, each enriched with a
 //! non-empty description + group from the code-defined catalog. DB-gated;
-//! self-skips without DATABASE_URL — matching the sibling `members_ax1.rs`
+//! self-skips without DATABASE_URL ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS — matching the sibling `members_ax1.rs`
 //! harness (same `connect`/`uniq` setup).
 
 use egret_metastore::Db;

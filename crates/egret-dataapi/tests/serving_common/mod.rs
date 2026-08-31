@@ -12,7 +12,7 @@
 //! disagree with the real one and then every assertion would be checking a
 //! fixture against itself.
 //!
-//! DB-gated. Self-skips (passes) when `DATABASE_URL` is unset, so check the
+//! DB-gated. Self-skips ONLY when `EGRET_ALLOW_DB_SKIP` is set; without it a run with no `DATABASE_URL` FAILS, so check the
 //! DURATION, not just the `ok`.
 
 #![allow(dead_code)]

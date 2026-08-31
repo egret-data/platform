@@ -1,5 +1,5 @@
 //! Per-object authorization for the `notebooks/{id}` handlers (Effort B / B2-2
-//! Task 2). DB-gated; self-skips without DATABASE_URL. Builds a REAL `CedarPdp`
+//! Task 2). DB-gated; self-skips without DATABASE_URL ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS. Builds a REAL `CedarPdp`
 //! AFTER `migrate()` so it snapshots the `ws_viewer`/`ws_editor` notebook perms.
 //!
 //! Proves notebooks are now object-scoped (`require_object`) AND ROLE-BASED (the

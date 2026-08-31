@@ -1,7 +1,7 @@
 //! A service account is a user row that can never log in.
 //!
-//! DB-gated integration tests. Skip (pass) when DATABASE_URL is unset so the
-//! suite stays green offline; CI / `just up` provides Postgres.
+//! DB-gated integration tests. Skips ONLY when `EGRET_ALLOW_DB_SKIP` is set; without it a
+//! run with no `DATABASE_URL` FAILS. CI / `just up` provides Postgres.
 
 use egret_auth::users::UserRepo;
 use egret_metastore::Db;
@@ -20,7 +20,7 @@ fn unique_email(tag: &str) -> String {
 #[tokio::test]
 async fn service_account_cannot_have_a_password() {
     let Some(db) = connect().await else {
-        eprintln!("DATABASE_URL unset — skipping");
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
         return;
     };
     let users = UserRepo::new(db.clone());
@@ -44,7 +44,7 @@ async fn service_account_cannot_have_a_password() {
 #[tokio::test]
 async fn service_accounts_are_absent_from_the_user_list() {
     let Some(db) = connect().await else {
-        eprintln!("DATABASE_URL unset — skipping");
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
         return;
     };
     let users = UserRepo::new(db.clone());
@@ -77,7 +77,7 @@ async fn service_account_is_still_findable_by_id() {
     // must keep working, or its name cannot be rendered next to its own grants
     // and audit rows.
     let Some(db) = connect().await else {
-        eprintln!("DATABASE_URL unset — skipping");
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
         return;
     };
     let users = UserRepo::new(db.clone());

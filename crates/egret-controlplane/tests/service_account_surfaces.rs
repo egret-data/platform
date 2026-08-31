@@ -1,7 +1,7 @@
 //! A service account is a `users` row (Data API P2), so the human-facing user
 //! routes must refuse to treat it as a person.
 //!
-//! DB-gated; self-skips without `DATABASE_URL`. Follows the harness in
+//! DB-gated; self-skips without `DATABASE_URL` ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS. Follows the harness in
 //! `routes_api.rs` (same `Fixture`/`setup`/`session_for`/`req`/`into_json`
 //! shape); the router here is `control_plane_router()` UNNESTED, so routes
 //! are relative (`/users/{id}`, not `/api/control-plane/users/{id}`).

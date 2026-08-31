@@ -1,5 +1,5 @@
-//! DB-gated e2e integration test for object-scoped authorization (Effort B /
-//! B2-1a Task 3). Self-skips without DATABASE_URL.
+//! DB-gated e2e integration test for object-scoped authorization (Effort B / B2-1a Task 3).
+//! Self-skips without `DATABASE_URL` ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS.
 //!
 //! Exercises the full object-grant decision path: `grants_for` loads object
 //! grants keyed by the object's own id AND its folder id, and `CedarPdp`

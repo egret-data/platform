@@ -1,4 +1,4 @@
-//! The `semantic_type` allow-list, end to end. DB-gated; self-skips without DATABASE_URL.
+//! The `semantic_type` allow-list, end to end. DB-gated; self-skips without DATABASE_URL ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS.
 //!
 //! WHY THIS EXISTS AS A ROUTE TEST AND NOT ONLY AS UNIT TESTS. `validate_semantic_type` has its own
 //! unit tests in `egret-analytics-api`, and they cover the vocabulary thoroughly. What they cannot

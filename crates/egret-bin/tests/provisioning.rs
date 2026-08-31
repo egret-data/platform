@@ -1,4 +1,4 @@
-//! DB-gated: self-skips without DATABASE_URL. Verifies that granting an IdP
+//! DB-gated: self-skips without DATABASE_URL ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS. Verifies that granting an IdP
 //! group access to a workspace makes a user in that group inherit its perms.
 
 use egret_auth::groups::GroupRepo;

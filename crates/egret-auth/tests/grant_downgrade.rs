@@ -5,7 +5,8 @@
 //! single store, `MemberRepo::add` writes it directly (delete + insert),
 //! and this test guards the same one-role-per-member invariant.
 //!
-//! Self-skips without DATABASE_URL. Model: `access_grants_migration.rs`.
+//! Self-skips without `DATABASE_URL` ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS.
+//! Model: `access_grants_migration.rs`.
 
 use egret_metastore::Db;
 use uuid::Uuid;

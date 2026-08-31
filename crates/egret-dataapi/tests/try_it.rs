@@ -8,7 +8,7 @@
 //! test is [`a_trial_without_a_grant_gets_the_real_403`] — mutate
 //! `serving::router::serve` to return any other status and it must go red.
 //!
-//! DB-gated. Self-skips (passes) when `DATABASE_URL` is unset, so check the
+//! DB-gated. Self-skips ONLY when `EGRET_ALLOW_DB_SKIP` is set; without it a run with no `DATABASE_URL` FAILS, so check the
 //! DURATION, not just the `ok`.
 
 mod serving_common;

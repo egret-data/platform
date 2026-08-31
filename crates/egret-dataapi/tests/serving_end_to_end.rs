@@ -23,7 +23,7 @@
 //! Driven through `serving_common`, which owns the REAL management router and the
 //! REAL serving router, so nothing here is a store call in disguise.
 //!
-//! DB-gated. Self-skips (passes) when `DATABASE_URL` is unset — check the DURATION,
+//! DB-gated. Self-skips ONLY when `EGRET_ALLOW_DB_SKIP` is set; without it a run with no `DATABASE_URL` FAILS — check the DURATION,
 //! not just the `ok`.
 
 mod serving_common;
@@ -36,7 +36,9 @@ macro_rules! skip_without_db {
         match fixture().await {
             Some(f) => f,
             None => {
-                eprintln!("DATABASE_URL unset — skipping");
+                eprintln!(
+                    "SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set"
+                );
                 return;
             }
         }

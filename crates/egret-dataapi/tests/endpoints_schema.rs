@@ -5,9 +5,10 @@
 //! client already calling it — P4's serving path reads ONLY this column, never
 //! the draft row.
 //!
-//! DB-gated integration test. Skips (passes) when DATABASE_URL is unset so the
-//! suite stays green offline; CI / `just up` provides Postgres. Fixture shape
-//! copied from `crates/egret-dataapi/tests/clients_store.rs`.
+//! DB-gated integration test. Skips ONLY when `EGRET_ALLOW_DB_SKIP` is set;
+//! without it a run with no DATABASE_URL FAILS rather than going green having
+//! asserted nothing. CI / `just up` provides Postgres. Fixture shape copied
+//! from `crates/egret-dataapi/tests/clients_store.rs`.
 use egret_dataapi_api::{
     CacheScope, CacheSpec, ColumnSpec, EndpointSnapshot, LimitsSpec, OutputSpec, ParamLocation,
     ParamSpec, ParamType, RateLimitSpec, StatementSnapshot, StatementSpec,
@@ -74,7 +75,9 @@ macro_rules! skip_without_db {
         match fixture().await {
             Some(f) => f,
             None => {
-                eprintln!("DATABASE_URL unset — skipping");
+                eprintln!(
+                    "SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set"
+                );
                 return;
             }
         }

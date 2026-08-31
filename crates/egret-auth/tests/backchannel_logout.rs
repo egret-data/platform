@@ -60,7 +60,7 @@ fn sign_logout_token(km: &KeyMaterial, sub: &str) -> String {
 #[tokio::test]
 async fn valid_logout_token_revokes_user_sessions() {
     let Some(db) = connect().await else {
-        eprintln!("DATABASE_URL unset — skipping");
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
         return;
     };
     let users = UserRepo::new(db.clone());
@@ -106,7 +106,7 @@ async fn valid_logout_token_revokes_user_sessions() {
 #[tokio::test]
 async fn unknown_sub_is_noop() {
     let Some(db) = connect().await else {
-        eprintln!("DATABASE_URL unset — skipping");
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
         return;
     };
     let users = UserRepo::new(db.clone());
@@ -147,7 +147,7 @@ async fn handler_returns_400_no_store_on_malformed_token() {
     use tower::ServiceExt;
 
     let Some(db) = connect().await else {
-        eprintln!("DATABASE_URL unset — skipping");
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
         return;
     };
 

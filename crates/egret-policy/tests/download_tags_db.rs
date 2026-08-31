@@ -1,4 +1,4 @@
-//! DB-gated Ranger `download_tags` tests. Self-skip without DATABASE_URL.
+//! DB-gated Ranger `download_tags` tests. Self-skip without DATABASE_URL ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAIL.
 //!
 //! Exercises the real tag-download path: 404 unknown service, 304 on matching
 //! `tagVersion`, and 200 serving a seeded `catalog_tag_assignments` row for the

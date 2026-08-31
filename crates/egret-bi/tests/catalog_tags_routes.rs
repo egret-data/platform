@@ -1,5 +1,5 @@
 //! Catalog resource-tag control-plane endpoints (Access P3.2). DB-gated;
-//! self-skips without DATABASE_URL. Builds a REAL `CedarPdp` after `migrate()`.
+//! self-skips without DATABASE_URL ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS. Builds a REAL `CedarPdp` after `migrate()`.
 //!
 //! Proves: a platform_admin (holds `warehouse:update`/`warehouse:read` via the
 //! PDP bypass) PUTs a table-level and a column-level tag → 200; GET

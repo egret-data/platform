@@ -1,4 +1,4 @@
-//! DB-gated `ScheduleRepo` tests. Self-skip without DATABASE_URL, following
+//! DB-gated `ScheduleRepo` tests. Self-skip without DATABASE_URL ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAIL, following
 //! `egret-bi/tests/dashboard_repo.rs`.
 
 use std::collections::HashMap;

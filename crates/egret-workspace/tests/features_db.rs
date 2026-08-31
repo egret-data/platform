@@ -1,4 +1,5 @@
-//! DB-gated tests for per-workspace feature entitlements; self-skip without DATABASE_URL.
+//! DB-gated tests for per-workspace feature entitlements; self-skips without `DATABASE_URL`
+//! ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS.
 
 use egret_auth::password::hash_password;
 use egret_auth::users::UserRepo;

@@ -1,5 +1,6 @@
-//! Per-object classification-tag endpoints (Access P3.1). DB-gated; self-skips
-//! without DATABASE_URL. Builds a REAL `CedarPdp` after `migrate()`.
+//! Per-object classification-tag endpoints (Access P3.1). DB-gated; self-skips without
+//! `DATABASE_URL` ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS. Builds a REAL
+//! `CedarPdp` after `migrate()`.
 //!
 //! Proves: a ws object-manager (ws_editor) PUTs a tag on a dataset → 200; GET
 //! `/tags` lists it; DELETE removes it (GET then empty). A ws_viewer (no

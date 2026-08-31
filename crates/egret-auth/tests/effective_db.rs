@@ -1,5 +1,5 @@
-//! DB-gated integration tests for the AX-3 effective-access resolver. Skip (pass)
-//! when DATABASE_URL is unset so the suite stays green offline; CI / `just up`
+//! DB-gated integration tests for the AX-3 effective-access resolver. Skips without
+//! `DATABASE_URL` ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS; CI / `just up`
 //! provides Postgres.
 //!
 //! Object-grant target choice: these tests use BARE uuids for `scope_id` on object
@@ -127,7 +127,7 @@ async fn grant(
 #[tokio::test]
 async fn resolves_direct_and_group_roles_with_source() {
     let Some(db) = connect().await else {
-        eprintln!("DATABASE_URL unset — skipping");
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
         return;
     };
     let r1 = uniq("r1");

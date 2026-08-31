@@ -24,7 +24,7 @@
 //!    a percent-encoded one could never be matched at all: P4 serves
 //!    `{*path}` and axum percent-DECODES a wildcard capture.
 //!
-//! DB-gated. Self-skips (passes) when DATABASE_URL is unset, like
+//! DB-gated. Self-skips ONLY when `EGRET_ALLOW_DB_SKIP` is set; without it a run with no DATABASE_URL FAILS, like
 //! `routes_authz.rs` — so check the duration, not just the `ok`.
 
 use axum::body::Body;
@@ -179,7 +179,9 @@ macro_rules! skip_without_db {
         match fixture().await {
             Some(f) => f,
             None => {
-                eprintln!("DATABASE_URL unset — skipping");
+                eprintln!(
+                    "SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set"
+                );
                 return;
             }
         }

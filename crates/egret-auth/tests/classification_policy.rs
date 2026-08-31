@@ -1,5 +1,5 @@
 //! DB-gated e2e integration test for tag-conditioned object access (Access P3.3).
-//! Self-skips without DATABASE_URL.
+//! Self-skips without `DATABASE_URL` ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS.
 //!
 //! Exercises the full classification-forbid decision path: `load_inner` compiles
 //! a `forbid` for a gated tag, `authorize` resolves the object's tag keys and the

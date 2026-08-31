@@ -1,6 +1,6 @@
 //! Engine-mgmt seam HTTP route tests (engine CRUD, catalogs, monitor, exec/log
 //! ownership). Moved from `egret-controlplane/tests/routes_api.rs` (E1c).
-//! DB-gated; self-skips without `DATABASE_URL`.
+//! DB-gated; self-skips without `DATABASE_URL` ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS.
 //!
 //! Run with:
 //!   export DATABASE_URL=postgres://egret:egret@localhost:5432/egret

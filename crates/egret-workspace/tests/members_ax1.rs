@@ -1,8 +1,9 @@
 //! AX-1 workspace-member integration tests: list enrichment (name / provenance /
-//! platform-admin flag), custom-role acceptance, one-role-per-member replace, and
-//! the last-admin guard. DB-gated; self-skip without DATABASE_URL — matching the
-//! sibling `workspace_db.rs` harness (same `connect`/`uniq`/`ws_state`/`login_cookie`
-//! setup, same repo-direct + router/oneshot styles).
+//! platform-admin flag), custom-role acceptance, one-role-per-member replace, and the
+//! last-admin guard. DB-gated; self-skips without `DATABASE_URL` ONLY under
+//! `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS — matching the sibling `workspace_db.rs`
+//! harness (same `connect`/`uniq`/`ws_state`/`login_cookie` setup, same repo-direct +
+//! router/oneshot styles).
 
 use axum::body::Body;
 use axum::http::{Request as HttpRequest, StatusCode};

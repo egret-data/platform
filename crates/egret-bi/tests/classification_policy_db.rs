@@ -1,5 +1,5 @@
 //! Classification access-policy model DB harness (Access P3.3). DB-gated;
-//! self-skips without DATABASE_URL. Covers the `ClassificationPolicyRepo`
+//! self-skips without DATABASE_URL ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS. Covers the `ClassificationPolicyRepo`
 //! set/get/clear/list round-trips + the `ON DELETE CASCADE` from `tags`
 //! against migration 0082's `classification_policies` table.
 //!

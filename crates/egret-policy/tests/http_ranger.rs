@@ -1,4 +1,4 @@
-//! DB-gated Ranger HTTP tests. Self-skip without DATABASE_URL.
+//! DB-gated Ranger HTTP tests. Self-skip without DATABASE_URL ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAIL.
 //!
 //! The Ranger `/service` surface is read-only (policy download + GETs) since E2e;
 //! services/policies are created through the store (as egret's admin API does),

@@ -1,5 +1,5 @@
 //! DB-gated storage_connections (global registry) store tests for the relocated
-//! `StorageRegistry` (E3a). Self-skip without DATABASE_URL.
+//! `StorageRegistry` (E3a). Self-skip without DATABASE_URL ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAIL.
 use egret_metastore::Db;
 use egret_storage::{StorageConn, StorageConnInput, StorageRegistry, StorageRegistryError};
 use uuid::Uuid;

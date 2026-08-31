@@ -1,5 +1,6 @@
-//! DB-gated tests for `seed_default_trino_policies`. Self-skip without
-//! DATABASE_URL — do NOT point this at the live demo Postgres on :5432.
+//! DB-gated tests for `seed_default_trino_policies`. Self-skips without `DATABASE_URL` ONLY
+//! under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS — do NOT point this at the live demo
+//! Postgres on :5432.
 use egret_metastore::Db;
 use egret_policy::PolicyStore;
 use serde_json::json;

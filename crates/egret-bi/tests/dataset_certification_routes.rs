@@ -1,4 +1,4 @@
-//! DB-gated dataset/metric certification ROUTE tests. Self-skip without DATABASE_URL.
+//! DB-gated dataset/metric certification ROUTE tests. Self-skip without DATABASE_URL ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAIL.
 //!
 //! WHY THESE EXIST. Certification rode on `dataset:manage` until 0109, which meant TWO defects,
 //! and each needs its own assertion because closing one does not close the other:

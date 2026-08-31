@@ -1,9 +1,9 @@
-//! DB-gated app-wiring regression test (Effort B / B1b-1 Task 3, F1 closure).
-//! Self-skips without DATABASE_URL. Proves the PDP, held as `Arc<dyn Pdp>`
-//! exactly as `CpState` stores it, hot-reloads from the SAME `EventBus` that
-//! `RoleRepo` publishes to. A different bus would silently never reload — this
-//! is the failure the F1 wiring guards against. Authorization is invoked through
-//! the trait object (dyn dispatch), not a concrete `CedarPdp`.
+//! DB-gated app-wiring regression test (Effort B / B1b-1 Task 3, F1 closure). Self-skips
+//! without `DATABASE_URL` ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS. Proves the
+//! PDP, held as `Arc<dyn Pdp>` exactly as `CpState` stores it, hot-reloads from the SAME
+//! `EventBus` that `RoleRepo` publishes to. A different bus would silently never reload —
+//! this is the failure the F1 wiring guards against. Authorization is invoked through the
+//! trait object (dyn dispatch), not a concrete `CedarPdp`.
 //!
 //! Model: `crates/egret-auth/tests/pdp_hot_reload.rs`.
 

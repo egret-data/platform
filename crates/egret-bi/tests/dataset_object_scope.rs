@@ -1,5 +1,5 @@
 //! Per-object authorization for `datasets/{id}` handlers (Effort B / B2-1a Task 5).
-//! DB-gated; self-skips without DATABASE_URL. Builds a REAL `CedarPdp` AFTER
+//! DB-gated; self-skips without DATABASE_URL ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS. Builds a REAL `CedarPdp` AFTER
 //! `migrate()` so it snapshots the `ws_viewer`/`ws_editor` BI perms (0012 +
 //! migration 0070).
 //!

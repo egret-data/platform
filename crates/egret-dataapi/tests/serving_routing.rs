@@ -22,7 +22,7 @@
 //! in production and green in CI for precisely this reason
 //! (`egret-automation/src/routes.rs:115-126`).
 //!
-//! DB-gated. Self-skips (passes) when `DATABASE_URL` is unset, like the sibling
+//! DB-gated. Self-skips ONLY when `EGRET_ALLOW_DB_SKIP` is set; without it a run with no `DATABASE_URL` FAILS, like the sibling
 //! suites — so check the DURATION, not just the `ok`.
 
 use axum::body::Body;
@@ -411,7 +411,9 @@ macro_rules! skip_without_db {
         match fixture().await {
             Some(f) => f,
             None => {
-                eprintln!("DATABASE_URL unset — skipping");
+                eprintln!(
+                    "SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set"
+                );
                 return;
             }
         }

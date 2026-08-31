@@ -1,5 +1,5 @@
-//! DB-gated `ImpersonationRepo` tests. Self-skip (pass) without `DATABASE_URL`
-//! so the suite stays green offline; CI / `just up` provides Postgres.
+//! DB-gated `ImpersonationRepo` tests. Self-skips without `DATABASE_URL` ONLY under
+//! `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS; CI / `just up` provides Postgres.
 
 use egret_auth::impersonation::{ImpersonationRepo, NewImpersonation};
 use egret_auth::password::hash_password;
@@ -80,7 +80,7 @@ async fn seed_session(db: &Db, user: UserId) -> uuid::Uuid {
 #[tokio::test]
 async fn start_lookup_exit_roundtrip() {
     let Some(db) = connect().await else {
-        eprintln!("DATABASE_URL unset — skipping");
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
         return;
     };
     let repo = ImpersonationRepo::new(db.clone());
@@ -114,7 +114,7 @@ async fn start_lookup_exit_roundtrip() {
 #[tokio::test]
 async fn expired_overlay_is_not_active_and_is_cleaned() {
     let Some(db) = connect().await else {
-        eprintln!("DATABASE_URL unset — skipping");
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
         return;
     };
     let repo = ImpersonationRepo::new(db.clone());
@@ -160,7 +160,7 @@ async fn expired_overlay_is_not_active_and_is_cleaned() {
 #[tokio::test]
 async fn start_twice_on_one_session_is_rejected() {
     let Some(db) = connect().await else {
-        eprintln!("DATABASE_URL unset — skipping");
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
         return;
     };
     let repo = ImpersonationRepo::new(db.clone());
@@ -189,7 +189,7 @@ async fn start_twice_on_one_session_is_rejected() {
 #[tokio::test]
 async fn start_reaps_expired_overlay_on_same_session() {
     let Some(db) = connect().await else {
-        eprintln!("DATABASE_URL unset — skipping");
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
         return;
     };
     let repo = ImpersonationRepo::new(db.clone());
@@ -396,7 +396,7 @@ async fn validate_disabled_target_falls_through_to_admin() {
 #[tokio::test]
 async fn a_service_account_cannot_be_impersonated() {
     let Some(db) = connect().await else {
-        eprintln!("DATABASE_URL unset — skipping");
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
         return;
     };
     let users = UserRepo::new(db.clone());
@@ -592,7 +592,7 @@ mod http {
     #[tokio::test]
     async fn platform_admin_impersonates_and_me_reflects_it() {
         let Some(db) = connect().await else {
-            eprintln!("DATABASE_URL unset — skipping");
+            eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
             return;
         };
         let app = app(&db);
@@ -635,7 +635,7 @@ mod http {
     #[tokio::test]
     async fn wrong_step_up_password_is_401_and_writes_nothing() {
         let Some(db) = connect().await else {
-            eprintln!("DATABASE_URL unset — skipping");
+            eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
             return;
         };
         let app = app(&db);
@@ -674,7 +674,7 @@ mod http {
     #[tokio::test]
     async fn cannot_impersonate_a_platform_admin() {
         let Some(db) = connect().await else {
-            eprintln!("DATABASE_URL unset — skipping");
+            eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
             return;
         };
         let app = app(&db);
@@ -702,7 +702,7 @@ mod http {
     #[tokio::test]
     async fn cannot_impersonate_self() {
         let Some(db) = connect().await else {
-            eprintln!("DATABASE_URL unset — skipping");
+            eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
             return;
         };
         let app = app(&db);
@@ -727,7 +727,7 @@ mod http {
     #[tokio::test]
     async fn reason_is_required() {
         let Some(db) = connect().await else {
-            eprintln!("DATABASE_URL unset — skipping");
+            eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
             return;
         };
         let app = app(&db);
@@ -754,7 +754,7 @@ mod http {
     #[tokio::test]
     async fn cannot_nest() {
         let Some(db) = connect().await else {
-            eprintln!("DATABASE_URL unset — skipping");
+            eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
             return;
         };
         let app = app(&db);
@@ -801,7 +801,7 @@ mod http {
     #[tokio::test]
     async fn exit_returns_to_admin() {
         let Some(db) = connect().await else {
-            eprintln!("DATABASE_URL unset — skipping");
+            eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
             return;
         };
         let app = app(&db);
@@ -950,7 +950,7 @@ mod http {
     #[tokio::test]
     async fn oidc_admin_start_returns_409_step_up() {
         let Some(db) = connect().await else {
-            eprintln!("DATABASE_URL unset — skipping");
+            eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
             return;
         };
         let oidc = discover_mock_oidc().await;
@@ -1085,7 +1085,7 @@ mod http {
     #[tokio::test]
     async fn oidc_callback_rejects_different_admin_and_writes_nothing() {
         let Some(db) = connect().await else {
-            eprintln!("DATABASE_URL unset — skipping");
+            eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
             return;
         };
         let st = oidc_routes_state(&db).await;
@@ -1116,7 +1116,7 @@ mod http {
     #[tokio::test]
     async fn oidc_callback_rejects_revoked_platform_admin() {
         let Some(db) = connect().await else {
-            eprintln!("DATABASE_URL unset — skipping");
+            eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
             return;
         };
         let st = oidc_routes_state(&db).await;
@@ -1158,7 +1158,7 @@ mod http {
     #[tokio::test]
     async fn oidc_callback_same_admin_creates_overlay_and_me_shows_it() {
         let Some(db) = connect().await else {
-            eprintln!("DATABASE_URL unset — skipping");
+            eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
             return;
         };
         let st = oidc_routes_state(&db).await;

@@ -1,5 +1,5 @@
 //! SQL snippet repo: CRUD + workspace scoping (no cross-tenant IDOR).
-//! DB-gated; self-skips without DATABASE_URL. Exercises migration 0096.
+//! DB-gated; self-skips without DATABASE_URL ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS. Exercises migration 0096.
 
 use egret_bi::SnippetRepo;
 use egret_core::UserId;

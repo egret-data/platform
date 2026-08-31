@@ -7,9 +7,9 @@
 //! this decomposition), so the only way to exercise the constraints is
 //! `sqlx::query` directly against `automation.schedules`.
 //!
-//! DB-gated, self-skipping without `DATABASE_URL`, following
-//! `crates/egret-automation/tests/schedule_repo.rs`'s `setup()` -> `Option`
-//! idiom.
+//! DB-gated, self-skipping without `DATABASE_URL` ONLY under `EGRET_ALLOW_DB_SKIP` and
+//! otherwise FAILING, following `crates/egret-automation/tests/schedule_repo.rs`'s
+//! `setup()` -> `Option` idiom.
 
 use uuid::Uuid;
 

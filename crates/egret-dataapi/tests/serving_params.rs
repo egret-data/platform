@@ -20,7 +20,7 @@
 //! * The percent-decoding and cache-key tests each have a named mutation in the
 //!   task report, and each was observed failing under it.
 //!
-//! DB-gated; self-skips when `DATABASE_URL` is unset — check the DURATION, not
+//! DB-gated; self-skips ONLY when `EGRET_ALLOW_DB_SKIP` is set, and a run with no `DATABASE_URL` otherwise FAILS — check the DURATION, not
 //! just the `ok`.
 
 mod serving_common;
@@ -34,7 +34,9 @@ macro_rules! skip_without_db {
         match fixture().await {
             Some(f) => f,
             None => {
-                eprintln!("DATABASE_URL unset — skipping");
+                eprintln!(
+                    "SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set"
+                );
                 return;
             }
         }
