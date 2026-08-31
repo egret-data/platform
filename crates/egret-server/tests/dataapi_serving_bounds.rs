@@ -279,8 +279,13 @@ async fn a_request_that_never_finishes_is_answered_504_by_the_deadline() {
     let body = body_json(res).await;
     assert_eq!(body["status"], "error");
     assert_eq!(
-        body["error"]["code"], "timeout",
-        "the deadline must answer in the serving envelope with its own code"
+        body["error"]["code"], "deadline_exceeded",
+        "the deadline must answer in the serving envelope with ITS OWN code, and \
+         `deadline_exceeded` is what makes it distinguishable from the other 504 \
+         on this surface — `timeout`, which is the endpoint author's published \
+         budget being exceeded (`ServingError::EngineTimeout`). One string for \
+         both and an operator could not separate `we are cutting callers off` \
+         from `their queries are too slow`"
     );
     assert!(
         body["error"]["request_id"]
@@ -572,8 +577,10 @@ async fn a_trial_is_cut_at_exactly_the_deadline_a_consumer_is() {
         );
         let body = body_json(res).await;
         assert_eq!(
-            body["error"]["code"], "timeout",
-            "and in egret's own envelope, with a code — not a gateway's HTML"
+            body["error"]["code"], "deadline_exceeded",
+            "and in egret's own envelope, with a code — not a gateway's HTML. \
+             `deadline_exceeded`, not `timeout`: the latter is the endpoint's \
+             published budget, a different actor answering the same status"
         );
     }
 }

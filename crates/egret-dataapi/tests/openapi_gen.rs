@@ -936,4 +936,3 @@ async fn a_bare_endpoint_is_documented_as_the_body_it_answers_with() {
         "a bare endpoint's refusals still reference it: {op}"
     );
 }
-

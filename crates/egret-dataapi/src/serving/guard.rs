@@ -28,19 +28,31 @@
 //! arriving with no envelope would make the bounds the one part of the API a
 //! client cannot handle uniformly, so the middleware is written out.
 //!
-//! # These three codes are NOT in [`super::ServingError`], deliberately
+//! # These three codes ARE the taxonomy's, and nothing here builds one
 //!
-//! The error taxonomy is owned by a sibling package and is not touched here. The
-//! envelopes below are built directly, and the codes they emit — `timeout`,
-//! `overloaded`, `payload_too_large` — are recorded in that package's report as
-//! variants to fold in. `timeout` is already spec §7's name for the first of
-//! them.
+//! They used to be built here: three `&'static str` literals and three
+//! hand-assembled [`super::error::ServingErrorBody`] values, sitting beside the
+//! exhaustive `to_wire` match rather than inside it. That is the arrangement
+//! that makes a new variant a compile error *everywhere except the place it was
+//! bypassed*, and it is why the same 504 could be spelled `timeout` by this
+//! module and `timeout` by `EngineTimeout` at the same time without anything
+//! noticing.
+//!
+//! [`super::ServingError::ServingDeadline`], [`super::ServingError::Overloaded`]
+//! and [`super::ServingError::PayloadTooLarge`] now carry them, and
+//! [`bound_response`] takes a variant and renders it with
+//! [`super::error::to_wire`]. So the status, the `error.code`, the message and
+//! the `Retry-After` of a bound refusal are decided in exactly the same match as
+//! every other serving answer — which is what puts them in
+//! [`super::error::wire_answers`], and therefore in the consumer's OpenAPI
+//! document and in the metrics module's cardinality bound, by construction
+//! rather than by anyone remembering.
 //!
 //! # What a `request_id` from here means
 //!
 //! Minted here, not threaded from the handler: at the moment a bound fires there
 //! either is no handler yet (`overloaded`, `payload_too_large`) or its id died
-//! with the cancelled future (`timeout`). It is still the id in the `tracing`
+//! with the cancelled future (`deadline_exceeded`). It is still the id in the `tracing`
 //! line for the same event, so "quote your request_id" remains actionable —
 //! but there is **no `dataapi.access_log` row** behind it, because that insert
 //! happens at the end of the handler. See [`SERVING_REQUEST_DEADLINE`].
@@ -49,15 +61,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::Request;
-use axum::http::{header, StatusCode};
+use axum::http::header;
 use axum::middleware::Next;
-use axum::response::{IntoResponse, Response};
-use axum::Json;
+use axum::response::Response;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 
-use super::error::{ServingErrorBody, ServingErrorDetail};
-use super::router::ServingStatus;
+use super::error::to_wire;
+use super::ServingError;
 
 /// What the deployed ingress will wait for a Data API call, in seconds.
 ///
@@ -130,19 +141,6 @@ pub const INGRESS_READ_TIMEOUT_SECS: u64 = 60;
 ///   place that survives cancellation, which belongs with the metrics package
 ///   that owns instrumentation.
 pub const SERVING_REQUEST_DEADLINE: Duration = Duration::from_secs(50);
-
-/// The `Retry-After` on an `overloaded` answer, in seconds.
-///
-/// A **prediction**, like the rate limiter's and unlike the config-drift 503s'
-/// fixed 300 s floor (`super::error`'s `CONFIG_DRIFT_RETRY_AFTER_SECS`): a shed
-/// request was refused because the surface was momentarily full, and the
-/// condition clears on the timescale of one request, not of a human noticing.
-/// Telling that caller to wait five minutes would turn a one-second dip into a
-/// five-minute outage for it.
-///
-/// It is also the cheapest way an operator tells the two 503s apart in a log of
-/// response headers alone — see the module list of codes.
-const OVERLOADED_RETRY_AFTER_SECS: u64 = 1;
 
 /// How many served requests may be in flight at once, per process.
 ///
@@ -228,31 +226,26 @@ pub const SERVING_MAX_BODY_BYTES: u64 = 64 * 1024;
 /// `egret_dataapi_requests_total{code="overloaded"}` sits beside
 /// `{code="rate_limited"}` on one dashboard and needs no second panel.
 ///
-/// Three new values for the `code` label — the metrics module's own doc counts
-/// them as bounded by `to_wire`'s exhaustive match, which is now "that match
-/// plus these three". Still a closed set of literals, still no interpolation.
-fn bound_response(
-    status: StatusCode,
-    code: &'static str,
-    message: &str,
-    retry_after: Option<u64>,
-    elapsed: Duration,
-) -> Response {
-    super::metrics::record_request(status, code, elapsed);
-    let request_id = Uuid::new_v4().to_string();
-    let body = Json(ServingErrorBody {
-        status: ServingStatus::mirroring(status),
-        message: message.to_string(),
-        error: ServingErrorDetail {
-            code: code.to_string(),
-            message: message.to_string(),
-            request_id,
-        },
-    });
-    match retry_after {
-        Some(secs) => (status, [(header::RETRY_AFTER, secs.to_string())], body).into_response(),
-        None => (status, body).into_response(),
-    }
+/// # The answer comes from [`to_wire`], and there is no second way to build one
+///
+/// This function used to take a status, a code literal, a message and a
+/// `Retry-After` and assemble the envelope itself. Four of the five things that
+/// distinguish one serving refusal from another were therefore chosen here, in
+/// argument position, next to an exhaustive match whose whole purpose is that
+/// they cannot be. Deleting an arm of `to_wire` did not break this module, and
+/// that is precisely how `deadline_exceeded` spent its first life sharing the
+/// string `timeout` with [`ServingError::EngineTimeout`].
+///
+/// Now the only argument is which bound fired. `to_wire` decides the status, the
+/// code, the message and the header; [`super::error::Wire::into_response`]
+/// renders it, the same call `serve` makes. Remove the `ServingDeadline` arm and
+/// this file stops compiling.
+fn bound_response(e: ServingError, elapsed: Duration) -> Response {
+    let wire = to_wire(&e);
+    super::metrics::record_request(wire.status, wire.code, elapsed);
+    // Minted here rather than threaded in — see the module comment on what a
+    // `request_id` from a bound means.
+    wire.into_response(&Uuid::new_v4().to_string())
 }
 
 /// What a bound may put in a log line, and it is the path — never the URI.
@@ -302,13 +295,7 @@ pub async fn serving_deadline(deadline: Duration, req: Request, next: Next) -> R
                 "data-api serving request exceeded its deadline; answering 504 \
                  (no access_log row is written for a cancelled request)"
             );
-            bound_response(
-                StatusCode::GATEWAY_TIMEOUT,
-                "timeout",
-                "this request exceeded the serving deadline",
-                None,
-                started.elapsed(),
-            )
+            bound_response(ServingError::ServingDeadline, started.elapsed())
         }
     }
 }
@@ -347,17 +334,11 @@ pub async fn serving_admit(sem: Arc<Semaphore>, req: Request, next: Next) -> Res
             method = %req.method(), path = %logged_path(&req),
             "data-api serving bulkhead full; shedding with 503 overloaded"
         );
-        return bound_response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "overloaded",
-            "too many requests are in flight; retry shortly",
-            Some(OVERLOADED_RETRY_AFTER_SECS),
-            // A shed costs one failed `try_acquire`. Recorded as zero rather
-            // than measured, because a latency histogram that mixes refusals in
-            // with served calls reports a system getting FASTER as it falls
-            // over.
-            Duration::ZERO,
-        );
+        // A shed costs one failed `try_acquire`. The elapsed time is recorded as
+        // zero rather than measured, because a latency histogram that mixes
+        // refusals in with served calls reports a system getting FASTER as it
+        // falls over.
+        return bound_response(ServingError::Overloaded, Duration::ZERO);
     };
     next.run(req).await
 }
@@ -379,15 +360,9 @@ pub async fn serving_body_limit(max_bytes: u64, req: Request, next: Next) -> Res
             method = %req.method(), path = %logged_path(&req), declared,
             "data-api serving request declared a body over the cap; answering 413"
         );
-        return bound_response(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "payload_too_large",
-            "request body is larger than this surface accepts",
-            None,
-            // Same reasoning as the shed above: a header read, not a served
-            // request, so it must not pull the latency histogram down.
-            Duration::ZERO,
-        );
+        // Same reasoning as the shed above: a header read, not a served request,
+        // so it must not pull the latency histogram down.
+        return bound_response(ServingError::PayloadTooLarge, Duration::ZERO);
     }
     next.run(req).await
 }
@@ -396,6 +371,7 @@ pub async fn serving_body_limit(max_bytes: u64, req: Request, next: Next) -> Res
 mod tests {
     use super::*;
     use axum::body::Body;
+    use axum::http::StatusCode;
     use axum::routing::post;
     use axum::Router;
     use tower::ServiceExt;
@@ -499,6 +475,68 @@ mod tests {
         );
     }
 
+    /// **The two 504s are told apart at the one instrument that sees them
+    /// both.**
+    ///
+    /// This surface answers `504` for two unrelated reasons: the endpoint
+    /// author's published time budget was exceeded
+    /// ([`ServingError::EngineTimeout`], code `timeout`) and the request outran
+    /// egret's own serving deadline ([`ServingError::ServingDeadline`], code
+    /// `deadline_exceeded`). They used to share the string `timeout`.
+    ///
+    /// `dataapi.access_log` cannot separate them, and never could: the deadline
+    /// fires OUTSIDE the handler, so the row is never written — the insert dies
+    /// with the cancelled future. `egret_dataapi_requests_total{code=…}` is
+    /// therefore the only place both can appear, which makes it the place the
+    /// rename has to hold. One string here and an operator cannot separate "we
+    /// are cutting callers off" from "their queries are too slow".
+    ///
+    /// The control is the second assertion: `timeout` must be ABSENT from a
+    /// scrape produced by the deadline alone. Without it, a `code` label that
+    /// had regressed to `timeout` would still satisfy a test that only looked
+    /// for `status="504"`.
+    #[test]
+    fn the_deadlines_metric_code_is_not_the_engine_timeouts() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        ::metrics::with_local_recorder(&recorder, || {
+            let slow = Router::new()
+                .route(
+                    "/x",
+                    post(|| async {
+                        std::future::pending::<()>().await;
+                        "unreachable"
+                    }),
+                )
+                .layer(axum::middleware::from_fn(move |req, next| {
+                    serving_deadline(Duration::ZERO, req, next)
+                }));
+            rt.block_on(async {
+                let res = slow.oneshot(firing_request()).await.unwrap();
+                assert_eq!(res.status(), StatusCode::GATEWAY_TIMEOUT);
+            });
+        });
+
+        let scrape = handle.render();
+        let want = to_wire(&ServingError::ServingDeadline).code;
+        assert!(
+            scrape.contains(&format!(r#"code="{want}""#)) && scrape.contains(r#"status="504""#),
+            "the serving deadline must be counted under its own code `{want}`:\n{scrape}"
+        );
+        assert!(
+            !scrape.contains(r#"code="timeout""#),
+            "`timeout` belongs to the endpoint author's published budget \
+             (`EngineTimeout`). The serving deadline appearing under it is the \
+             collision this rename removed, and it is invisible in the access \
+             log because a cut-off request writes no row:\n{scrape}"
+        );
+    }
+
     /// The one relationship that makes [`SERVING_REQUEST_DEADLINE`] a bound
     /// rather than decoration.
     #[test]
@@ -511,20 +549,13 @@ mod tests {
         );
     }
 
-    /// The seam between what a bound answers and what the per-endpoint OpenAPI
-    /// document promises.
+    /// Build the three bounds, each wired so that driving it once makes it
+    /// fire, paired with the [`ServingError`] variant it is supposed to answer
+    /// with.
     ///
-    /// `openapi_gen` builds the document a consuming team generates a client
-    /// from, and it is NOT the repo's root `openapi.json` — the root document is
-    /// built from `#[utoipa::path]` on the handlers and cannot see a status
-    /// produced by a layer wrapped around them. So `413` and `504` were
-    /// reachable and undeclared while the root file's diff stayed at zero lines.
-    /// This drives each bound for real and requires its status to be in the
-    /// declared set.
-    #[tokio::test]
-    async fn every_status_a_bound_answers_is_declared_in_the_generated_contract() {
-        let declared = crate::serving::error::wire_answers();
-
+    /// Shared by the two tests below so they cannot drift into testing two
+    /// different sets of bounds.
+    fn each_bound_firing() -> Vec<(&'static str, ServingError, Router)> {
         let full = serving_bulkhead(0);
         let shedding = Router::new()
             .route("/x", post(|| async { "unreachable" }))
@@ -547,30 +578,143 @@ mod tests {
             .layer(axum::middleware::from_fn(move |req, next| {
                 serving_deadline(Duration::ZERO, req, next)
             }));
+        vec![
+            ("the bulkhead shed", ServingError::Overloaded, shedding),
+            ("the body cap", ServingError::PayloadTooLarge, capped),
+            ("the deadline", ServingError::ServingDeadline, slow),
+        ]
+    }
 
-        for (app, what) in [
-            (shedding, "the bulkhead shed"),
-            (capped, "the body cap"),
-            (slow, "the deadline"),
-        ] {
-            let res = app
-                .oneshot(
-                    axum::http::Request::builder()
-                        .method("POST")
-                        .uri("/x")
-                        .header(header::CONTENT_LENGTH, "1048576")
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            let status = res.status().as_u16();
+    /// One request that makes any of the three bounds fire, with a declared
+    /// length over the body cap so the same request drives all of them.
+    fn firing_request() -> axum::http::Request<Body> {
+        axum::http::Request::builder()
+            .method("POST")
+            .uri("/x")
+            .header(header::CONTENT_LENGTH, "1048576")
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    /// Read a refusal's rendered envelope.
+    async fn error_body(res: Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(res.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// **A bound refusal is rendered by the taxonomy, not by this module.**
+    ///
+    /// # The defect this exists for
+    ///
+    /// [`bound_response`] used to take a status, a code literal, a message and a
+    /// `Retry-After` and assemble the envelope itself, so three of the surface's
+    /// answers were decided beside [`to_wire`]'s exhaustive match instead of
+    /// inside it. The visible consequence was that this module's 504 and
+    /// [`ServingError::EngineTimeout`]'s 504 were both spelled `timeout` — two
+    /// different actors, one string, and nothing in the crate could notice,
+    /// because only one of them went through the match.
+    ///
+    /// # What it asserts, and why it is not a string comparison
+    ///
+    /// The expectation is not written down here. It is `to_wire` applied to the
+    /// variant each bound names, compared against the response the bound
+    /// actually produced — status line, `error.code`, message and `Retry-After`
+    /// together. Change what `to_wire` says about `Overloaded` and this test
+    /// follows it; make this module disagree with `to_wire` and it fails.
+    ///
+    /// The structural half of the claim is not testable from here and does not
+    /// need to be: `bound_response` takes a `ServingError`, so deleting an arm
+    /// of `to_wire` makes that match non-exhaustive and **the crate stops
+    /// compiling**. That is the property the literals in this file destroyed.
+    #[tokio::test]
+    async fn each_bound_answers_exactly_what_the_taxonomy_says_for_its_variant() {
+        for (what, variant, app) in each_bound_firing() {
+            let want = to_wire(&variant);
+            let res = app.oneshot(firing_request()).await.unwrap();
+
+            assert_eq!(
+                res.status(),
+                want.status,
+                "{what} must answer the status `to_wire` gives its variant"
+            );
+            assert_eq!(
+                res.headers().get(header::RETRY_AFTER).map(|v| v
+                    .to_str()
+                    .unwrap()
+                    .parse::<u64>()
+                    .unwrap()),
+                want.retry_after,
+                "{what} must carry the `Retry-After` the taxonomy decided, or \
+                 none — the three meanings of that header are reconciled in \
+                 `serving::error` and nowhere else"
+            );
+
+            let body = error_body(res).await;
+            assert_eq!(
+                body["error"]["code"], want.code,
+                "{what} must answer with the code `to_wire` gives its variant. A \
+                 literal here is how the serving deadline and the endpoint's \
+                 published budget came to share the string `timeout`"
+            );
+            assert_eq!(
+                body["error"]["message"],
+                want.message.as_ref(),
+                "{what}'s message is the taxonomy's too — this surface's \
+                 messages are deliberately leak-proof, and a second wording here \
+                 is a second thing to audit"
+            );
             assert!(
-                declared.contains_key(&status),
-                "{what} answers {status}, which the taxonomy derivation does not \
-                 produce — so `openapi_gen` cannot declare it and a generated \
-                 client meets a status its contract never named. Declared: \
-                 {declared:?}"
+                body["error"]["request_id"]
+                    .as_str()
+                    .is_some_and(|s| !s.is_empty()),
+                "{what} must still carry a correlation id: {body}"
+            );
+        }
+    }
+
+    /// The seam between what a bound answers and what the per-endpoint OpenAPI
+    /// document promises.
+    ///
+    /// `openapi_gen` builds the document a consuming team generates a client
+    /// from, and it is NOT the repo's root `openapi.json` — the root document is
+    /// built from `#[utoipa::path]` on the handlers and cannot see a status
+    /// produced by a layer wrapped around them. So `413` and `504` were
+    /// reachable and undeclared while the root file's diff stayed at zero lines.
+    ///
+    /// The declared set is no longer a hand-written const in `openapi_gen`. It
+    /// is [`crate::serving::error::wire_answers`] — `to_wire` over the taxonomy
+    /// census — which is the same derivation `openapi_gen::error_responses`
+    /// renders from. This drives each bound for real and requires the **status
+    /// and the code it actually answered with** to be in it: a status alone
+    /// would pass for a bound that answered 504 with the wrong one of the two
+    /// codes that status carries.
+    #[tokio::test]
+    async fn every_answer_a_bound_gives_is_in_the_derived_contract() {
+        let declared = crate::serving::error::wire_answers();
+
+        for (what, _, app) in each_bound_firing() {
+            let res = app.oneshot(firing_request()).await.unwrap();
+            let status = res.status().as_u16();
+            let body = error_body(res).await;
+            let code = body["error"]["code"].as_str().unwrap().to_string();
+
+            let codes = declared.get(&status).unwrap_or_else(|| {
+                panic!(
+                    "{what} answers {status}, which the taxonomy derivation does \
+                     not produce — so `openapi_gen` cannot declare it and a \
+                     generated client meets a status its contract never named. \
+                     Declared: {declared:?}"
+                )
+            });
+            assert!(
+                codes.contains(code.as_str()),
+                "{what} answers {status} with `{code}`, which is not one of the \
+                 codes the derivation says that status carries ({codes:?}). The \
+                 consumer document names its codes per status, so a client told \
+                 to branch on `error.code` would meet a value its contract never \
+                 listed"
             );
         }
     }
