@@ -40,15 +40,34 @@ Ordered by value-per-effort, not by severity. Dependencies noted.
 
 | # | Package | Why it is here | Depends on |
 |---|---|---|---|
-| 0 | **Test foundation** | Missing `DATABASE_URL` becomes an error, not a skip; add a path that touches a real engine. | — (parallel stream) |
-| 1 | **Governance gate at publish** | A served query runs as the **service account**, never the caller, so Ranger row filters and column masks are evaluated at machine-identity granularity. Nothing today requires a delegated connection. | §4 decision A |
-| 2 | **Metrics + `/metrics`** | *In progress.* There are no metrics at all. One outage class is invisible to all three existing instruments simultaneously — see §5. | — |
-| 3 | **Deployment hardening** | No engine connection pool (a TCP+TLS handshake **per statement**); no graceful shutdown, so every deploy kills in-flight queries; no resource limits; `/readyz` exists and is never called (probes are `tcpSocket`); no concurrency cap, body limit, or timeout layer on the composed router. | — |
+| 0 | **Test foundation** — ✅ `6aa2399a` (#555) | Missing `DATABASE_URL` becomes an error, not a skip; add a path that touches a real engine. | — (parallel stream) |
+| 1 | **Governance gate at publish** — ✅ `2d7a3ba6` (#556) | A served query runs as the **service account**, never the caller, so Ranger row filters and column masks are evaluated at machine-identity granularity. Nothing today requires a delegated connection. | §4 decision A |
+| 2 | **Metrics + `/metrics`** — ✅ `0caf720b` (#554) | There are no metrics at all. One outage class is invisible to all three existing instruments simultaneously — see §5. | — |
+| 3a | **Serving guard rails** — ✅ `5de17862` (#558) | No graceful shutdown, so every deploy kills in-flight queries; no resource limits; `/readyz` exists and is never called (probes are `tcpSocket`); no concurrency cap, body limit, or timeout layer on the composed router. | — |
+| 3b | **Engine coupling** — ✅ `3ff8096d` (#557) | No engine connection pool (a TCP+TLS handshake **per statement**); a retryable Trino 503 discarded as a 500; `internal` the single code for six causes. | — |
 | 4 | **Multi-replica correctness** | Response cache and token bucket are **process-local** while replica count is a Helm value, so every published rate limit silently multiplies by replica count and the cache fragments. | §4 decision B |
 | 5 | **Script parameter constraints** | Package S lets a script concatenate a caller's value into SQL text. The publish-time sentinel probe has **two bypasses pinned open by tests asserting `is_ok()`** (`lifecycle.rs:6058`, `:6083`). Nothing re-asks at serve time. | — |
 | 6 | **Publish-time diff + acknowledgement** | `publish` validates the draft against *itself*; the only read of `endpoint_versions` is `MAX(version)`. A removed column, narrowed type, renamed parameter or new required parameter publishes silently. Worst case: adding a second statement flips top-level `data` from an array to an object. | — |
 | 7 | **Consumer version pinning** | Serving resolves `live_version_id` only; a publish moves every caller at commit. `meta.version` lets a consumer *observe* which version answered but never *ask* for one. | 6 |
 | 8 | **Contract reachability** | The OpenAPI document sits behind a human session + `:manage`, so a consumer holding only a `data-api` token cannot fetch its own contract; `error.code` has no `enum` despite being documented as the stable code to branch on. | — |
+
+**Carried out of packages 0–3, not fixed, so they are not rediscovered as new:**
+
+- **StarRocks cannot be pooled**, and this was measured live rather than argued:
+  `EXECUTE AS … WITH NO REVERT` survives `COM_RESET_CONNECTION`, the mechanism
+  `mysql_async` uses to recycle a connection. StarRocks endpoints therefore still pay a
+  handshake per statement, and the ~400–500 req/s ceiling stands for them.
+- **`starrocks.rs`'s `execute`/`execute_with_params` do not call
+  `reject_statement_separator`** while `describe` does, so a SQL Lab user can send
+  `EXECUTE AS 'x' WITH NO REVERT; SELECT …`. Contained today **precisely because
+  StarRocks is not pooled** — pooling it before fixing this turns a same-session
+  escalation into a cross-principal leak. Pre-existing; needs its own package.
+- **Nothing in package 3 was observed on a live cluster.** The drain has not been watched
+  through a real `kubectl rollout restart`, nor the probes flipping a pod out of
+  Endpoints.
+- The latency histogram carries only a `status` label, so a refusal's `Duration::ZERO`
+  shares a series with real latencies. `MAX_ROWS_CEILING` was not lowered — a contract
+  change that belongs with streaming.
 
 Two smaller items fold into the packages that own them rather than standing alone:
 
