@@ -223,8 +223,8 @@ use super::cache::{cache_key, cache_ttl, shared_cache_allowed};
 use super::error::{is_permission_denied, to_wire, ServingErrorBody};
 // Aliased: `metrics` unqualified would read as the FACADE crate at every
 // call site in this file, and the two are one keystroke apart.
-use super::metrics as serving_metrics;
 use super::governance::{governance_allows_serving, LiveConnection};
+use super::metrics as serving_metrics;
 use super::params;
 use super::ratelimit::{check_request, retry_after_secs};
 use super::{verify_serving_token, ServingError};
@@ -643,6 +643,23 @@ impl utoipa::Modify for BearerAddon {
     }
 }
 
+// A `//` comment and NOT a doc comment: `utoipa` lifts a doc comment on a handler
+// into the operation's `summary`/`description`, and this is a note to whoever
+// edits the annotation, not something a machine consumer should read.
+//
+// **Every status and code below is pinned by
+// `the_published_contract_names_every_answer_the_surface_can_give`**, which reads
+// them out of the generated document and compares them against `to_wire`'s table
+// rather than against a list. Before that test the responses declared
+// `500 internal` and nothing else, so `502`, `504` and `endpoint_query_failed` —
+// all of them live — were statuses a machine consumer branching on this document
+// had no case for. The `openapi.json` byte gate did not notice, because nothing
+// in the document had changed: that gate answers "is the committed file
+// current", never "is the document true".
+//
+// `serve_post` below carries the same list, verbatim. `utoipa::path` takes
+// literals, so the duplication cannot be factored out — the test asserts the two
+// operations independently for that reason.
 #[utoipa::path(
     get,
     path = "/data-api/v1/{ws}/{path}",
@@ -658,8 +675,11 @@ impl utoipa::Modify for BearerAddon {
         (status = 403, description = "`data_access_denied` — the engine refused this service account the underlying data, either because it lacks a data permission (a Ranger grant, say) or because its engine credential is bad or expired; one code, because the two recognitions available (Trino's typed 401/403 from the coordinator, and every other engine failure matched on its own message) cannot tell those causes apart. `not_granted` — egret refused the call because the service account holds no invoke grant on this endpoint", body = ServingErrorBody),
         (status = 404, description = "`not_found` — no such live endpoint in this workspace", body = ServingErrorBody),
         (status = 429, description = "`rate_limited` — a published rate limit was exceeded; `Retry-After` states when the bucket refills", body = ServingErrorBody),
-        (status = 500, description = "`internal` — an egret-side fault; quote `request_id` to support", body = ServingErrorBody),
-        (status = 503, description = "`schema_drift` / `output_naming_collision` / `cache_scope_stale` / `governance_stale` / `param_gate_stale` — the published configuration no longer describes the data, was frozen before the current parameter-safety rules existed, or points at a `governed` database through a connection that does not run queries as the caller. `Retry-After` is a floor, not a forecast: a re-publish clears the first four, and `governance_stale` is cleared only by restoring the connection or the database's `governed` flag", body = ServingErrorBody),
+        (status = 413, description = "`payload_too_large` — the request declared a body larger than this surface accepts", body = ServingErrorBody),
+        (status = 500, description = "`internal` — an egret-side fault (the metastore, the secret store, a corrupt snapshot); quote `request_id` to support. `endpoint_query_failed` — the engine ran the endpoint's published statement and refused it: the request was fine and the endpoint is what broke, so it is a 5xx rather than a 4xx, and its own code so that `which endpoints are failing` is separable from `egret is failing`", body = ServingErrorBody),
+        (status = 502, description = "`engine_unavailable` — the query engine behind this endpoint could not be reached. An operator's problem, not the endpoint author's; the engine, its host and its port are deliberately not named", body = ServingErrorBody),
+        (status = 503, description = "`schema_drift` / `output_naming_collision` / `cache_scope_stale` / `governance_stale` / `param_gate_stale` — the published configuration no longer describes the data, was frozen before the current parameter-safety rules existed, or points at a `governed` database through a connection that does not run queries as the caller. `Retry-After` is a floor, not a forecast: a re-publish clears the first four, and `governance_stale` is cleared only by restoring the connection or the database's `governed` flag. `overloaded` — egret shed the request because the serving surface was at its concurrency limit; that one clears by itself and its `Retry-After` is a prediction", body = ServingErrorBody),
+        (status = 504, description = "`timeout` — the endpoint's statement exceeded the time budget its author published (`limits.timeout`); the fix is the endpoint's, not the caller's. `deadline_exceeded` — the request outran egret's own serving deadline. Two codes for one status on purpose: they name two different actors, and `code` is what tells them apart", body = ServingErrorBody),
     ),
     security(("data_api_bearer" = [])),
 )]
@@ -689,8 +709,11 @@ async fn serve_get(
         (status = 403, description = "`data_access_denied` — the engine refused this service account the underlying data, either because it lacks a data permission (a Ranger grant, say) or because its engine credential is bad or expired; one code, because the two recognitions available (Trino's typed 401/403 from the coordinator, and every other engine failure matched on its own message) cannot tell those causes apart. `not_granted` — egret refused the call because the service account holds no invoke grant on this endpoint", body = ServingErrorBody),
         (status = 404, description = "`not_found` — no such live endpoint in this workspace", body = ServingErrorBody),
         (status = 429, description = "`rate_limited` — a published rate limit was exceeded; `Retry-After` states when the bucket refills", body = ServingErrorBody),
-        (status = 500, description = "`internal` — an egret-side fault; quote `request_id` to support", body = ServingErrorBody),
-        (status = 503, description = "`schema_drift` / `output_naming_collision` / `cache_scope_stale` / `governance_stale` / `param_gate_stale` — the published configuration no longer describes the data, was frozen before the current parameter-safety rules existed, or points at a `governed` database through a connection that does not run queries as the caller. `Retry-After` is a floor, not a forecast: a re-publish clears the first four, and `governance_stale` is cleared only by restoring the connection or the database's `governed` flag", body = ServingErrorBody),
+        (status = 413, description = "`payload_too_large` — the request declared a body larger than this surface accepts", body = ServingErrorBody),
+        (status = 500, description = "`internal` — an egret-side fault (the metastore, the secret store, a corrupt snapshot); quote `request_id` to support. `endpoint_query_failed` — the engine ran the endpoint's published statement and refused it: the request was fine and the endpoint is what broke, so it is a 5xx rather than a 4xx, and its own code so that `which endpoints are failing` is separable from `egret is failing`", body = ServingErrorBody),
+        (status = 502, description = "`engine_unavailable` — the query engine behind this endpoint could not be reached. An operator's problem, not the endpoint author's; the engine, its host and its port are deliberately not named", body = ServingErrorBody),
+        (status = 503, description = "`schema_drift` / `output_naming_collision` / `cache_scope_stale` / `governance_stale` / `param_gate_stale` — the published configuration no longer describes the data, was frozen before the current parameter-safety rules existed, or points at a `governed` database through a connection that does not run queries as the caller. `Retry-After` is a floor, not a forecast: a re-publish clears the first four, and `governance_stale` is cleared only by restoring the connection or the database's `governed` flag. `overloaded` — egret shed the request because the serving surface was at its concurrency limit; that one clears by itself and its `Retry-After` is a prediction", body = ServingErrorBody),
+        (status = 504, description = "`timeout` — the endpoint's statement exceeded the time budget its author published (`limits.timeout`); the fix is the endpoint's, not the caller's. `deadline_exceeded` — the request outran egret's own serving deadline. Two codes for one status on purpose: they name two different actors, and `code` is what tells them apart", body = ServingErrorBody),
     ),
     security(("data_api_bearer" = [])),
 )]
@@ -4879,6 +4902,66 @@ mod tests {
                 detail.contains("`main`") && detail.contains(named),
                 "the detail names the statement and what it was: {detail}"
             );
+        }
+    }
+
+    /// **The published contract answers for every answer the surface gives.**
+    ///
+    /// The finding: the two `utoipa::path` blocks declared `500 internal` and no
+    /// `502`, no `504` and no `endpoint_query_failed`, while all three were live
+    /// on this branch. A machine consumer branching on the document — which is
+    /// what a document is for — receives an undocumented status, which is the
+    /// same "the operator cannot act on it" defect this package exists to fix,
+    /// one layer out.
+    ///
+    /// It survived review because the `openapi.json` byte gate was green: it
+    /// compares the committed file to the generated one and passes *precisely
+    /// because nothing changed*. Nothing in the pipeline compared the document
+    /// to the taxonomy. This does.
+    ///
+    /// Driven off `census::every_variant` (checked against the enum itself), so
+    /// a variant added later fails here until both operations document it —
+    /// and, because the assertion is on the generated document, the committed
+    /// `openapi.json` has to be regenerated too.
+    ///
+    /// Asserted on the SERIALISED document rather than through utoipa's typed
+    /// model, because the serialised form is what a consumer reads.
+    #[test]
+    fn the_published_contract_names_every_answer_the_surface_can_give() {
+        use crate::serving::error::to_wire;
+
+        let doc = serde_json::to_value(super::serving_openapi()).expect("serialise");
+        let item = &doc["paths"]["/data-api/v1/{ws}/{path}"];
+        assert!(item.is_object(), "the serving path must be in the document");
+
+        for verb in ["get", "post"] {
+            let responses = &item[verb]["responses"];
+            assert!(
+                responses["200"].is_object(),
+                "{verb}: the success answer must be documented"
+            );
+            for (name, e) in crate::serving::census::every_variant() {
+                let w = to_wire(&e);
+                let status = w.status.as_str();
+                let described = &responses[status]["description"];
+                let described = described.as_str().unwrap_or_else(|| {
+                    panic!(
+                        "{verb}: `{name}` answers {status} `{}`, and the \
+                         published contract has no {status} response at all. A \
+                         consumer branching on this document cannot handle a \
+                         status it was never told about.",
+                        w.code
+                    )
+                });
+                assert!(
+                    described.contains(&format!("`{}`", w.code)),
+                    "{verb}: the {status} response does not name `{}` (from \
+                     `{name}`). `error.code` is what a client branches on, so a \
+                     status documented without its codes is documented in name \
+                     only.\n  description: {described}",
+                    w.code
+                );
+            }
         }
     }
 }

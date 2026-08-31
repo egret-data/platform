@@ -348,10 +348,16 @@ impl TrinoConnector {
     /// Measured (spec §3.1): the `X-Trino-Prepared-Statement` header is
     /// required only on the initial POST — the `nextUri` GET loop below never
     /// sends it, verified across a 200 000-row, 10-hop live fetch.
+    ///
+    /// `retryable` applies to the FIRST request only — the statement POST, which
+    /// is the one that can execute something. Every `nextUri` poll below is a
+    /// read of a query that already exists and is retried unconditionally. See
+    /// [`send`].
     async fn run_statement(
         &self,
         client: &reqwest::Client,
         req: reqwest::RequestBuilder,
+        retryable: Retryable,
         limits: &Limits,
         cancel: CancellationToken,
     ) -> Result<TabularResult, EngineError> {
@@ -360,7 +366,7 @@ impl TrinoConnector {
         let mut rows: Vec<Vec<serde_json::Value>> = Vec::new();
         let mut bytes_scanned: Option<u64> = None;
 
-        let mut resp: TrinoResp = send(req).await?;
+        let mut resp: TrinoResp = send(req, retryable).await?;
         loop {
             if let Some(err) = resp.error.take() {
                 return Err(EngineError::Engine(err.message));
@@ -415,7 +421,12 @@ impl TrinoConnector {
             match next {
                 None => break,
                 Some(uri) => {
-                    resp = send(Self::timed(self.auth(client.get(&uri)), limits.timeout)).await?;
+                    // A poll, never an execution: always retryable.
+                    resp = send(
+                        Self::timed(self.auth(client.get(&uri)), limits.timeout),
+                        Retryable::Yes,
+                    )
+                    .await?;
                 }
             }
         }
@@ -458,7 +469,16 @@ impl Connector for TrinoConnector {
             limits.timeout,
         );
 
-        self.run_statement(&client, req, limits, cancel).await
+        // The only call site where the SQL is arbitrary: `job.rs`'s `run_query`
+        // hands SQL Lab and notebook text straight to this method, so what a 503
+        // here may re-execute is decided from the statement itself.
+        let retryable = if is_read_statement(sql) {
+            Retryable::Yes
+        } else {
+            Retryable::No
+        };
+        self.run_statement(&client, req, retryable, limits, cancel)
+            .await
     }
 
     /// Execute `sql` as a Trino prepared statement, rendering `params` as the
@@ -494,7 +514,16 @@ impl Connector for TrinoConnector {
         let client = self.client()?;
         let req = self.prepared_request(&client, sql, params, limits);
 
-        self.run_statement(&client, req, limits, cancel).await
+        // `sql` is the prepared statement's text (it travels in the
+        // `X-Trino-Prepared-Statement` header); the body is `EXECUTE p1 USING …`,
+        // which executes it. So the classification is of `sql`, not of the body.
+        let retryable = if is_read_statement(sql) {
+            Retryable::Yes
+        } else {
+            Retryable::No
+        };
+        self.run_statement(&client, req, retryable, limits, cancel)
+            .await
     }
 
     /// Typed columns of a parameterised `SELECT`, without supplying values.
@@ -561,8 +590,17 @@ impl Connector for TrinoConnector {
             max_rows: 100_000,
             timeout,
         };
+        // The body is `DESCRIBE OUTPUT p1`: it reads a prepared statement's
+        // output schema and runs nothing, so re-sending it cannot execute the
+        // wrapped query even once.
         let result = self
-            .run_statement(&client, req, &limits, CancellationToken::new())
+            .run_statement(
+                &client,
+                req,
+                Retryable::Yes,
+                &limits,
+                CancellationToken::new(),
+            )
             .await?;
 
         let name_idx = result
@@ -723,27 +761,119 @@ async fn send_once(req: reqwest::RequestBuilder) -> Attempt {
     )
 }
 
+/// May a 503 on THIS request be re-sent?
+///
+/// The distinction exists because the two requests this connector sends are not
+/// equally safe to repeat, and the difference is not visible from a
+/// `RequestBuilder`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Retryable {
+    /// Re-sending cannot execute anything twice: a `nextUri` poll (a read of a
+    /// query that already exists), or a statement POST carrying SQL this
+    /// connector could prove is a read.
+    Yes,
+    /// A statement POST carrying SQL that may change data. The 503 is reported
+    /// as the error it is, which is what happened to every request before this
+    /// package.
+    No,
+}
+
+/// Is `sql` a statement that running twice is indistinguishable from running
+/// once?
+///
+/// **Deliberately narrow, and conservative in the safe direction.** Anything it
+/// cannot prove is a read gets [`Retryable::No`], which costs a retry that might
+/// have succeeded — the behaviour every request had before this package — while
+/// the opposite mistake would re-execute an `INSERT`. Leading comments are not
+/// stripped, for the same reason: `-- note` followed by a `SELECT` classifies as
+/// not-a-read and merely loses its retry.
+///
+/// A `;` anywhere but at the very end disqualifies the statement too. Trino
+/// accepts one statement per POST, so a multi-statement body is already a
+/// rejection; the check is here so that reading the first keyword cannot stand
+/// in for reading the whole string.
+fn is_read_statement(sql: &str) -> bool {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    if trimmed.contains(';') {
+        return false;
+    }
+    // A parenthesised query — `(SELECT 1) UNION (SELECT 2)` — is still a query;
+    // no statement that writes may be wrapped in parentheses.
+    let first = trimmed
+        .trim_start_matches(|c: char| c == '(' || c.is_whitespace())
+        .split(|c: char| c.is_whitespace() || c == '(')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    matches!(
+        first.as_str(),
+        "select" | "with" | "show" | "describe" | "desc" | "explain"
+    )
+}
+
+/// The wait before re-sending, given the attempt number (1-based) and whatever
+/// the coordinator asked for.
+///
+/// **Its whole job is the cap**, which is why it is a function rather than two
+/// lines inside [`send`]: `Retry-After` is a number the *coordinator* chooses,
+/// and honouring it unbounded hands the thing egret is waiting on the power to
+/// decide how long egret waits. See [`TRINO_RETRY_MAX_BACKOFF`].
+fn retry_wait(attempt: u32, retry_after: Option<std::time::Duration>) -> std::time::Duration {
+    match retry_after {
+        // The coordinator's own number, under egret's ceiling.
+        Some(d) => d.min(TRINO_RETRY_MAX_BACKOFF),
+        // `1 << (attempt - 1)` over a u32 attempt bounded by
+        // TRINO_RETRY_MAX_ATTEMPTS cannot overflow, and the result is capped
+        // anyway.
+        None => TRINO_RETRY_BASE_BACKOFF
+            .saturating_mul(1u32 << (attempt.saturating_sub(1)))
+            .min(TRINO_RETRY_MAX_BACKOFF),
+    }
+}
+
 /// Send one Trino request, honouring the protocol's 503-means-retry rule.
 ///
-/// # Why re-POSTing a statement is safe
+/// # What makes re-sending safe, and where the line is
 ///
-/// A 503 on `POST /v1/statement` means the coordinator did **not** accept the
-/// statement — there is no query to duplicate, which is exactly why the protocol
-/// says to send it again. A 503 on a `nextUri` GET is a poll that produced
-/// nothing; re-issuing the same `nextUri` is how the protocol advances. Neither
-/// retry can execute a statement twice, and this connector only ever carries
-/// `SELECT`s. The `DELETE` sent to cancel is deliberately NOT routed through
-/// here: it is already best-effort (`let _ =`), and retrying a cancellation
-/// while the caller has stopped waiting buys nothing.
+/// A 503 on a `nextUri` GET is a poll that produced nothing; re-issuing the same
+/// `nextUri` is how the protocol advances, and it cannot execute anything. That
+/// one is unconditionally safe.
+///
+/// A 503 on `POST /v1/statement` is different, and the reason is that **this
+/// connector does not only carry `SELECT`s** — an earlier version of this
+/// comment claimed it did, and that claim was false. `execution/job.rs`'s
+/// `run_query` sends SQL Lab and notebook SQL straight through
+/// `Connector::execute`, and `apply_sql_limit` explicitly leaves non-`SELECT`
+/// and multi-statement SQL unchanged, so an `INSERT` or a `CREATE TABLE` does
+/// travel this path.
+///
+/// A coordinator's own 503 is emitted before the statement is registered, so
+/// re-POSTing it duplicates nothing — that is why the protocol says to send it
+/// again. But egret does not always talk to the coordinator directly: an
+/// ingress, a service mesh or any proxy in front of it can synthesise a 503
+/// *after* forwarding the POST, and then a re-POST is a second execution. For a
+/// read that is a wasted query; for an `INSERT` it is a duplicated row.
+///
+/// So the retry is bounded to the case where the claim holds: [`Retryable::Yes`]
+/// for every poll, and for a statement POST only when [`is_read_statement`]
+/// proves the body is a read. Everything else reports the 503 exactly as it did
+/// before this package.
+///
+/// The `DELETE` sent to cancel is deliberately NOT routed through here: it is
+/// already best-effort (`let _ =`), and retrying a cancellation while the caller
+/// has stopped waiting buys nothing.
 ///
 /// # Bounded, always
 ///
 /// [`TRINO_RETRY_MAX_ATTEMPTS`] attempts, exponential backoff capped by
-/// [`TRINO_RETRY_MAX_BACKOFF`], and `Retry-After` honoured under the same cap.
-/// When the attempts run out the caller gets the same `http 503` error it used
-/// to get immediately — a permanently unavailable coordinator is still an error,
-/// just no longer one produced on the first try.
-async fn send(req: reqwest::RequestBuilder) -> Result<TrinoResp, EngineError> {
+/// [`TRINO_RETRY_MAX_BACKOFF`], and `Retry-After` honoured under the same cap
+/// ([`retry_wait`]). When the attempts run out the caller gets the same
+/// `http 503` error it used to get immediately — a permanently unavailable
+/// coordinator is still an error, just no longer one produced on the first try.
+async fn send(
+    req: reqwest::RequestBuilder,
+    retryable: Retryable,
+) -> Result<TrinoResp, EngineError> {
     let mut req = req;
     let mut attempt: u32 = 1;
     loop {
@@ -756,6 +886,13 @@ async fn send(req: reqwest::RequestBuilder) -> Result<TrinoResp, EngineError> {
         match send_once(req).await {
             Attempt::Done(r) => return r,
             Attempt::Retry(retry_after) => {
+                // A statement whose re-execution egret cannot rule out is
+                // reported, never repeated — see this function's doc comment.
+                if retryable == Retryable::No {
+                    return Err(EngineError::Engine(
+                        "http 503 Service Unavailable".to_string(),
+                    ));
+                }
                 let Some(next_req) = next else {
                     return Err(EngineError::Engine(
                         "http 503 Service Unavailable".to_string(),
@@ -766,15 +903,7 @@ async fn send(req: reqwest::RequestBuilder) -> Result<TrinoResp, EngineError> {
                         "http 503 Service Unavailable".to_string(),
                     ));
                 }
-                // `1 << (attempt - 1)` over a u32 attempt bounded by
-                // TRINO_RETRY_MAX_ATTEMPTS cannot overflow, and the result is
-                // capped anyway.
-                let backoff = TRINO_RETRY_BASE_BACKOFF
-                    .saturating_mul(1u32 << (attempt - 1))
-                    .min(TRINO_RETRY_MAX_BACKOFF);
-                let wait = retry_after
-                    .map(|d| d.min(TRINO_RETRY_MAX_BACKOFF))
-                    .unwrap_or(backoff);
+                let wait = retry_wait(attempt, retry_after);
                 tracing::debug!(
                     attempt,
                     wait_ms = wait.as_millis() as u64,
@@ -1397,16 +1526,111 @@ mod tests {
         );
     }
 
-    /// The bound the retry loop promises, checked as arithmetic rather than by
-    /// waiting for it: four retries, each capped, cannot outlast the shortest
-    /// caller budget in the system.
+    /// **The cap on `Retry-After`, pinned on the function that applies it.**
+    ///
+    /// A coordinator answering `Retry-After: 3600` is asking egret to hold a
+    /// caller's request for an hour; `describe`'s path would have obeyed, and a
+    /// fixture that sends `Retry-After: 1` cannot tell the difference because
+    /// one second IS the cap (`d.min(cap) == d` either way). This asks for an
+    /// hour and asserts on the second.
+    ///
+    /// Mutation: delete `.min(TRINO_RETRY_MAX_BACKOFF)` from `retry_wait`'s
+    /// `Some` arm and this fails with 3600s.
+    #[test]
+    fn an_absurd_retry_after_is_capped_at_one_sleep() {
+        assert_eq!(
+            retry_wait(1, Some(std::time::Duration::from_secs(3600))),
+            TRINO_RETRY_MAX_BACKOFF,
+            "the coordinator must not be able to choose how long egret waits"
+        );
+        // Under the cap the coordinator's number is used as asked — the header
+        // is honoured, not ignored.
+        assert_eq!(
+            retry_wait(1, Some(std::time::Duration::from_millis(250))),
+            std::time::Duration::from_millis(250)
+        );
+    }
+
+    /// egret's own backoff doubles and is capped by the same ceiling.
+    #[test]
+    fn the_exponential_backoff_doubles_and_is_capped() {
+        let ms = |n| std::time::Duration::from_millis(n);
+        assert_eq!(retry_wait(1, None), ms(50));
+        assert_eq!(retry_wait(2, None), ms(100));
+        assert_eq!(retry_wait(3, None), ms(200));
+        assert_eq!(retry_wait(4, None), ms(400));
+        // The fifth attempt never happens (TRINO_RETRY_MAX_ATTEMPTS is 5, so
+        // there are four retries) but the cap holds past it either way.
+        assert_eq!(retry_wait(9, None), TRINO_RETRY_MAX_BACKOFF);
+    }
+
+    /// The bound the retry loop promises, summed over the ACTUAL waits the loop
+    /// would take rather than over the constants.
+    ///
+    /// The worst case is every attempt carrying an absurd `Retry-After`; this
+    /// sums exactly what `send` would sleep, so removing either cap moves this
+    /// number.
     #[test]
     fn the_retry_budget_is_bounded() {
-        let worst: std::time::Duration = TRINO_RETRY_MAX_BACKOFF * (TRINO_RETRY_MAX_ATTEMPTS - 1);
+        let hour = Some(std::time::Duration::from_secs(3600));
+        let worst: std::time::Duration = (1..TRINO_RETRY_MAX_ATTEMPTS)
+            .map(|attempt| retry_wait(attempt, hour))
+            .sum();
         assert!(
             worst <= TRINO_RETRY_MAX_TOTAL_WAIT,
             "retries may sleep at most {TRINO_RETRY_MAX_TOTAL_WAIT:?}, got {worst:?}"
         );
+        let own: std::time::Duration = (1..TRINO_RETRY_MAX_ATTEMPTS)
+            .map(|attempt| retry_wait(attempt, None))
+            .sum();
+        assert_eq!(
+            own,
+            std::time::Duration::from_millis(750),
+            "50 + 100 + 200 + 400"
+        );
+    }
+
+    /// What a 503 on a statement POST may re-send, and what it may not.
+    ///
+    /// The `INSERT` rows are the finding: `job.rs`'s `run_query` sends SQL Lab
+    /// and notebook SQL straight through this connector, and `apply_sql_limit`
+    /// leaves non-`SELECT` SQL unchanged, so a write really does travel this
+    /// path.
+    #[test]
+    fn only_a_provable_read_may_be_re_posted() {
+        for sql in [
+            "SELECT 1",
+            "select 1",
+            "  \n SELECT * FROM t WHERE a = 1;",
+            "WITH a AS (SELECT 1) SELECT * FROM a",
+            "SHOW CATALOGS",
+            "DESCRIBE t",
+            "EXPLAIN SELECT 1",
+            "(SELECT 1) UNION (SELECT 2)",
+        ] {
+            assert!(is_read_statement(sql), "{sql:?} is a read");
+        }
+        for sql in [
+            "INSERT INTO t VALUES (1)",
+            "insert into t select * from u",
+            "CREATE TABLE t AS SELECT 1",
+            "DELETE FROM t",
+            "UPDATE t SET a = 1",
+            "MERGE INTO t USING u ON t.a = u.a WHEN MATCHED THEN DELETE",
+            "CALL system.runtime.kill_query('x')",
+            "ALTER TABLE t ADD COLUMN c bigint",
+            // Multi-statement: the first keyword reads like a query and the
+            // second one is not.
+            "SELECT 1; INSERT INTO t VALUES (1)",
+            // A leading comment is not stripped — conservative on purpose.
+            "-- a note\nSELECT 1",
+            "",
+        ] {
+            assert!(
+                !is_read_statement(sql),
+                "{sql:?} must not be re-POSTed after a 503"
+            );
+        }
     }
 
     /// Over genuine TLS the redundant `X-Forwarded-Proto` header is omitted.

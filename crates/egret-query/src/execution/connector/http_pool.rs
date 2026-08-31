@@ -98,6 +98,25 @@ fn cache() -> &'static Mutex<HashMap<HttpClientKey, reqwest::Client>> {
 /// Pinning the coordinator's self-signed cert as a trusted root supersedes
 /// `danger_accept_invalid_certs`; without a pinned cert the client falls back to
 /// system roots (unchanged for plain-HTTP engines).
+///
+/// # A pinned PEM that contains no certificate is refused here
+///
+/// `Certificate::from_pem` does not parse anything under the rustls backend — it
+/// keeps the bytes, and `add_to_rustls` later reads certificates out of them and
+/// returns `Ok(())` **when it finds none** (measured against reqwest 0.12.28).
+/// `tls_built_in_root_certs` defaults to `true`, so a registry row holding a
+/// truncated, base64-mangled or otherwise certificate-free PEM used to build a
+/// perfectly good client **on the system roots with the pin silently gone**. That
+/// only fails closed if the coordinator's certificate is not publicly trusted;
+/// against a coordinator behind a public CA — or anything holding a certificate
+/// from one — the pin an operator configured would simply not be there, and
+/// nothing would say so.
+///
+/// So the PEM is parsed here, through `from_pem_bundle`, and an empty result is
+/// an error rather than a client. `starrocks.rs` has never had this hole (it
+/// hands the PEM to `with_root_certs`, and an empty root store rejects every
+/// peer); this is the asymmetry closed, and it matters more on this side because
+/// this branch caches the client for the process lifetime.
 fn build_client(key: &HttpClientKey) -> Result<reqwest::Client, EngineError> {
     // No timeout here: it is per-request now (see the module comment).
     let mut b = reqwest::Client::builder()
@@ -106,9 +125,18 @@ fn build_client(key: &HttpClientKey) -> Result<reqwest::Client, EngineError> {
         // line away from carrying one principal's session to the next request.
         .cookie_store(false);
     if let Some(pem) = &key.tls_cert {
-        let cert = reqwest::Certificate::from_pem(pem.as_bytes())
+        let certs = reqwest::Certificate::from_pem_bundle(pem.as_bytes())
             .map_err(|e| EngineError::Connect(format!("engine cert: {e}")))?;
-        b = b.add_root_certificate(cert);
+        if certs.is_empty() {
+            return Err(EngineError::Connect(
+                "engine cert: the configured PEM contains no certificate, so nothing would be \
+                 pinned"
+                    .into(),
+            ));
+        }
+        for cert in certs {
+            b = b.add_root_certificate(cert);
+        }
     }
     b.build().map_err(|e| EngineError::Connect(e.to_string()))
 }
@@ -207,17 +235,6 @@ mod tests {
     /// A pinned PEM that is well-formed PEM but not a certificate is a
     /// configuration error, and it must not be REMEMBERED: an operator who fixes
     /// the registry row should not have to restart egret to clear it.
-    ///
-    /// Note what this test also documents, because it is not obvious and the old
-    /// `build_client` made the same (wrong) claim: `reqwest::Certificate::from_pem`
-    /// does not parse anything under the rustls backend — it stores the bytes and
-    /// the failure surfaces at `ClientBuilder::build()`. And a string containing
-    /// no PEM block at all (`"not a pem"`) produces **no error at all**: the
-    /// reader simply finds zero certificates, so the client is built with the
-    /// built-in roots and the pin silently does not exist. That fails closed at
-    /// connect time — a self-signed coordinator is then untrusted — but it fails
-    /// there and not here, which is worth knowing before believing a green
-    /// `client_for` means the pin took.
     #[test]
     fn a_bad_pem_is_refused_and_not_cached() {
         let base = "https://bad-pem.invalid:8443";
@@ -235,5 +252,51 @@ mod tests {
             0,
             "a failed build must leave nothing behind"
         );
+    }
+
+    /// **A PEM that yields ZERO certificates is refused, not silently unpinned.**
+    ///
+    /// This is the case the previous test could not reach and the old comment
+    /// mis-described. `Certificate::from_pem` accepts any bytes under rustls, and
+    /// `add_to_rustls` returns `Ok(())` having added nothing when the buffer
+    /// holds no `CERTIFICATE` block — so with `tls_built_in_root_certs` defaulting
+    /// to `true` the operator got a working client on the SYSTEM roots with their
+    /// pin absent. Against a coordinator whose certificate chains to a public CA
+    /// that is not a broken build, it is a pin that quietly is not applied.
+    ///
+    /// Mutation: put `Certificate::from_pem` back (no `is_empty` check) and every
+    /// row below returns `Ok` — the shape this test exists to make impossible.
+    ///
+    /// Each input gets its own host so a refusal is asserted per input rather
+    /// than once for whichever failed first.
+    #[test]
+    fn a_pem_with_no_certificate_in_it_is_refused_rather_than_silently_unpinned() {
+        let cases = [
+            ("not-a-pem", "not a pem"),
+            ("empty", ""),
+            ("whitespace", "   \n\n"),
+            // The shape a truncated copy-paste actually takes.
+            ("truncated", "-----BEGIN CERTIFICATE-----\n"),
+            // A key, not a certificate — the wrong half of a keypair pasted in.
+            (
+                "private-key",
+                "-----BEGIN PRIVATE KEY-----\nAAAAAA==\n-----END PRIVATE KEY-----\n",
+            ),
+        ];
+        for (name, pem) in cases {
+            let host = format!("no-cert-{name}.invalid");
+            let k = key(&format!("https://{host}:8443"), Some(pem));
+            let got = client_for(&k);
+            assert!(
+                matches!(got, Err(EngineError::Connect(_))),
+                "{name}: a PEM with no certificate in it must be refused, not built \
+                 on the system roots with the pin missing"
+            );
+            assert_eq!(
+                cached_clients_for_host(&host),
+                0,
+                "{name}: a refused PEM must leave nothing cached"
+            );
+        }
     }
 }

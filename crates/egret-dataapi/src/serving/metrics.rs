@@ -209,9 +209,17 @@ pub(crate) fn status_label(status: StatusCode) -> &'static str {
         401 => "401",
         403 => "403",
         404 => "404",
+        // The request-bounds layer's body cap.
+        413 => "413",
         429 => "429",
         500 => "500",
+        // The engine could not be reached.
+        502 => "502",
         503 => "503",
+        // Two of them: the endpoint's published budget (`timeout`) and egret's
+        // own serving deadline (`deadline_exceeded`). The `code` label is what
+        // separates those two; this one only has to stop being `other`.
+        504 => "504",
         _ => "other",
     }
 }
@@ -326,72 +334,91 @@ mod tests {
     /// Every status the serving taxonomy can produce has its own label, so
     /// `status="500"` means what an operator's alert rule assumes it means.
     ///
-    /// Spelled out rather than looped over `to_wire` so that a status added
-    /// there shows up here as a missing line rather than as a silent `other`.
+    /// **Looped over the taxonomy itself, not over a written-down list.** The
+    /// written-down list is what this used to be, and it is why `502` and `504`
+    /// — both live since Package 3b — were both silently labelled `other` with
+    /// this test green: a spelled-out list can only assert about statuses
+    /// somebody remembered to spell out, and the failure it must catch is
+    /// exactly the one nobody remembered.
     #[test]
     fn every_status_the_taxonomy_produces_has_its_own_label() {
-        let cases = [
-            (StatusCode::OK, "200"),
-            (StatusCode::BAD_REQUEST, "400"),
-            (StatusCode::UNAUTHORIZED, "401"),
-            (StatusCode::FORBIDDEN, "403"),
-            (StatusCode::NOT_FOUND, "404"),
-            (StatusCode::TOO_MANY_REQUESTS, "429"),
-            (StatusCode::INTERNAL_SERVER_ERROR, "500"),
-            (StatusCode::SERVICE_UNAVAILABLE, "503"),
-        ];
-        for (status, expected) in cases {
+        use crate::serving::error::to_wire;
+
+        // The success path, which no `ServingError` produces.
+        assert_eq!(status_label(StatusCode::OK), "200");
+
+        for (name, e) in crate::serving::census::every_variant() {
+            let status = to_wire(&e).status;
             assert_eq!(
                 status_label(status),
-                expected,
-                "{status} must have its own label value, not fall into `other`"
+                status.as_str(),
+                "{name} answers {status}, which falls into `other` — an alert \
+                 rule on `status` cannot see it, and every such status shares \
+                 one series with every other unforeseen one"
             );
         }
     }
 
     /// Every code `to_wire` can return is reachable as a label, and the whole
-    /// set is small and fixed.
+    /// set is small, fixed, and **exactly** what is written here.
     ///
     /// This is the cardinality claim stated as an assertion rather than as
     /// prose: the product of the label sets is what bounds the series count, and
     /// `code` is the larger of the two factors. If someone adds a variant whose
     /// wire code is built with `format!`, `Wire::code`'s `&'static str` stops
-    /// compiling first — but if the type is ever widened, this is the line that
-    /// notices the count moved.
+    /// compiling first.
+    ///
+    /// # Why this is a set and no longer a count over a hand-written array
+    ///
+    /// It was `codes.len() == 14` over thirteen hand-listed variants plus
+    /// `OK_CODE`, and it was **already stale on `main`**: `governance_stale` was
+    /// missing from the list, so the count described a taxonomy the code had
+    /// outgrown and the assertion passed anyway. Three more codes would have
+    /// slipped past it the same way. A count cannot notice a value it was never
+    /// shown; the variants now come from
+    /// [`crate::serving::census::every_variant`], which is checked against the
+    /// enum itself, and the expectation is the set of strings rather than its
+    /// size.
     #[test]
     fn the_code_label_set_is_the_error_taxonomy_and_nothing_else() {
         use crate::serving::error::to_wire;
-        use crate::serving::ServingError;
         use std::collections::BTreeSet;
 
-        let every_variant = [
-            ServingError::Unauthorized,
-            ServingError::NotFound,
-            ServingError::DataAccessDenied { raw: None },
-            ServingError::NotGranted,
-            ServingError::ParamMissing,
-            ServingError::ParamInvalid,
-            ServingError::RowLimitExceeded { cap: 1 },
-            ServingError::RateLimited {
-                retry_after: Duration::from_secs(1),
-            },
-            ServingError::SchemaDrift,
-            ServingError::OutputNamingCollision,
-            ServingError::CacheScopeStale,
-            ServingError::ParamGateStale,
-            ServingError::internal("boom"),
-        ];
-        let mut codes: BTreeSet<&'static str> =
-            every_variant.iter().map(|e| to_wire(e).code).collect();
+        let expected: BTreeSet<&'static str> = BTreeSet::from([
+            OK_CODE,
+            "key_invalid",
+            "not_found",
+            "data_access_denied",
+            "not_granted",
+            "param_missing",
+            "param_invalid",
+            "row_limit_exceeded",
+            "rate_limited",
+            "schema_drift",
+            "output_naming_collision",
+            "cache_scope_stale",
+            "governance_stale",
+            "param_gate_stale",
+            "endpoint_query_failed",
+            "timeout",
+            "engine_unavailable",
+            "deadline_exceeded",
+            "overloaded",
+            "payload_too_large",
+            "internal",
+        ]);
+
+        let mut codes: BTreeSet<&'static str> = crate::serving::census::every_variant()
+            .iter()
+            .map(|(_, e)| to_wire(e).code)
+            .collect();
         codes.insert(OK_CODE);
 
         assert_eq!(
-            codes.len(),
-            14,
+            codes, expected,
             "the `code` label's value set changed; re-read the cardinality note \
-             in this module before accepting it: {codes:?}"
+             in this module before accepting it, and remember every value here \
+             is a Prometheus series that lives until the retention window rolls"
         );
-        assert!(codes.contains("key_invalid"));
-        assert!(codes.contains(OK_CODE));
     }
 }

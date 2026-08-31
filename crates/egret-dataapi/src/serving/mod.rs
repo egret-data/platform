@@ -17,11 +17,11 @@ pub mod access_log;
 pub mod auth;
 pub mod cache;
 pub mod error;
+pub mod governance;
 /// Prometheus instrumentation for this surface. `pub` because the composition
 /// root calls [`metrics::describe`] once at startup; everything else in it is
 /// crate-private.
 pub mod metrics;
-pub mod governance;
 pub(crate) mod params;
 pub mod ratelimit;
 pub mod router;
@@ -379,9 +379,10 @@ pub enum ServingError {
     /// a dropped socket.
     ///
     /// Spec §7 named this `engine_unavailable` (502) and recorded why P4 could
-    /// not produce it: `port_impl` folded the engine's `Connect`/`Storage`
-    /// failures and **egret's own** faults (resolving the principal's email,
-    /// opening the database secret) into one `Error::Internal`, so answering 502
+    /// not produce it: `port_impl` folded the engine's `Connect` failures and
+    /// **egret's own** faults (resolving the principal's email, opening the
+    /// database secret, reaching egret's object store) into one
+    /// `Error::Internal`, so answering 502
     /// "would page an operator about Trino when the metastore is what failed".
     /// That is now decidable — only the engine's own transport failures carry
     /// `ExecFailureKind::EngineUnavailable`, and egret's faults deliberately
@@ -396,6 +397,48 @@ pub enum ServingError {
         #[source]
         raw: Option<anyhow::Error>,
     },
+    /// The request outran **egret's** serving deadline — not the endpoint's
+    /// published budget, which is [`Self::EngineTimeout`].
+    ///
+    /// # Why this is a variant here and not a string in the middleware
+    ///
+    /// The request-bounds layer (`serving/guard.rs`, Package 3a) answers a
+    /// deadline, a shed and an over-size body from *outside* the handler, and it
+    /// built its envelopes directly — bypassing [`super::error::to_wire`]'s
+    /// exhaustive match, which is the one place this crate forces a status/code
+    /// decision to be made deliberately. Three codes that no `ServingError`
+    /// produces are three codes the taxonomy's own tests cannot see, and the
+    /// `code` label's bound in `serving/metrics.rs` stops being "that match" and
+    /// becomes "that match plus whatever else someone wrote".
+    ///
+    /// # And its code is NOT `timeout`
+    ///
+    /// This is the part that would have been expensive later. Both this and
+    /// [`Self::EngineTimeout`] are 504s, and the bounds layer called this one
+    /// `timeout` too — the same code, the same status, for **two different
+    /// actors**: there, egret's own serving clock; here, the budget the endpoint's
+    /// author published. `dataapi.access_log.error_code` records one string, so
+    /// an operator asking "are we cutting callers off, or are their queries too
+    /// slow?" would have had no way to tell — which is the exact question this
+    /// package split `internal` to make answerable. So this one is
+    /// `deadline_exceeded` and `timeout` stays spec §7's name for the author's
+    /// budget.
+    #[error("the request exceeded egret's serving deadline")]
+    ServingDeadline,
+    /// egret shed the request: every concurrency permit on the serving surface
+    /// was in use.
+    ///
+    /// A refusal by egret about egret, and the only 503 here that is not
+    /// configuration drift — it clears by itself, so its `Retry-After` is a
+    /// second rather than the config-drift floor.
+    #[error("the serving surface is at its concurrency limit")]
+    Overloaded,
+    /// The request declared a body larger than the serving surface accepts.
+    ///
+    /// The one 413 in the taxonomy, and the one refusal here that really is the
+    /// caller's own doing.
+    #[error("the request body is larger than the serving surface accepts")]
+    PayloadTooLarge,
     /// Something on egret's side failed — the IdP key store was unreachable, say.
     /// Deliberately NOT folded into [`Self::Unauthorized`]: a 401 tells an
     /// operator their credential is bad and sends them to rotate it, while the
@@ -423,5 +466,172 @@ impl ServingError {
     /// fault" a decision at the call site.
     pub(crate) fn internal(e: impl std::fmt::Display) -> Self {
         Self::Internal(anyhow::anyhow!("{e}"))
+    }
+}
+
+/// One constructed value per [`ServingError`] variant, and the check that the
+/// list is COMPLETE.
+///
+/// # Why this exists
+///
+/// Three tests describe the taxonomy as a whole — the spec §7 code table in
+/// [`super::error`], the `code` label set and the status label set in
+/// [`super::metrics`] — and all three were hand-written lists of variants. Two
+/// of them had already gone stale on `main` (`governance_stale` was missing from
+/// the metrics list while its assertion still read `codes.len() == 14`, and
+/// passed; the status-label list had neither `502` nor `504`, both live since
+/// Package 3b). And the comment above the code table claimed a new variant
+/// "shows up as a missing line here", which was false: only `to_wire`'s
+/// exhaustive match fails to compile, and a `to_wire` arm can be added without
+/// touching any list.
+///
+/// So the lists are one list, and the list is checked against the enum itself.
+/// A new variant now fails [`every_declared_variant_has_a_sample`] by name; once
+/// sampled, it fails the two tables that have no row for it. That is three
+/// failures a new variant cannot land without, in place of three tests that
+/// silently kept passing.
+///
+/// Sampled by NAME, and the name is what the census compares — a sample that
+/// constructs the wrong variant under a right name would pass the census and
+/// then fail the code table, which reads its expectations by the same name.
+#[cfg(test)]
+pub(crate) mod census {
+    use super::ServingError;
+
+    /// Every variant, each with the name it is declared under. More than one
+    /// row per variant is allowed (and used: the two `raw` shapes are two
+    /// construction sites), so the census compares the SET of names.
+    pub(crate) fn every_variant() -> Vec<(&'static str, ServingError)> {
+        vec![
+            ("Unauthorized", ServingError::Unauthorized),
+            ("NotFound", ServingError::NotFound),
+            (
+                "DataAccessDenied",
+                ServingError::DataAccessDenied { raw: None },
+            ),
+            (
+                "DataAccessDenied",
+                ServingError::DataAccessDenied {
+                    raw: Some(anyhow::anyhow!(
+                        "Access Denied: Cannot select from table sales"
+                    )),
+                },
+            ),
+            ("NotGranted", ServingError::NotGranted),
+            ("ParamMissing", ServingError::ParamMissing),
+            ("ParamInvalid", ServingError::ParamInvalid),
+            (
+                "RowLimitExceeded",
+                ServingError::RowLimitExceeded { cap: 100 },
+            ),
+            (
+                "RateLimited",
+                ServingError::RateLimited {
+                    retry_after: std::time::Duration::from_secs(2),
+                },
+            ),
+            ("SchemaDrift", ServingError::SchemaDrift),
+            ("OutputNamingCollision", ServingError::OutputNamingCollision),
+            ("CacheScopeStale", ServingError::CacheScopeStale),
+            ("GovernanceStale", ServingError::GovernanceStale),
+            ("ParamGateStale", ServingError::ParamGateStale),
+            (
+                "EndpointQueryFailed",
+                ServingError::EndpointQueryFailed { raw: None },
+            ),
+            (
+                "EndpointQueryFailed",
+                ServingError::EndpointQueryFailed {
+                    raw: Some(anyhow::anyhow!(
+                        "line 1:15: Table 'hive.a.b' does not exist"
+                    )),
+                },
+            ),
+            ("EngineTimeout", ServingError::EngineTimeout),
+            (
+                "EngineUnavailable",
+                ServingError::EngineUnavailable { raw: None },
+            ),
+            ("ServingDeadline", ServingError::ServingDeadline),
+            ("Overloaded", ServingError::Overloaded),
+            ("PayloadTooLarge", ServingError::PayloadTooLarge),
+            ("Internal", ServingError::internal("boom")),
+        ]
+    }
+
+    /// The variant names DECLARED by the enum, read out of this file.
+    ///
+    /// Reading the source is the only mechanism available that a new variant
+    /// cannot pass: `match` is exhaustive but cannot enumerate, and nothing in
+    /// this workspace derives an iterator over variants. It is not clever and it
+    /// is not fragile in the way that matters — it parses `rustfmt`'s output of
+    /// one enum in one file, and if it ever failed to find the enum it fails
+    /// LOUD rather than reporting an empty set (see the assertion below).
+    fn declared_variants() -> Vec<String> {
+        let src =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/serving/mod.rs"))
+                .expect("serving/mod.rs must be readable from its own crate");
+        let body = src
+            .split_once("pub enum ServingError {")
+            .expect("the enum this census is about must exist")
+            .1;
+        let body = body.split_once("\n}").expect("the enum must end").0;
+        body.lines()
+            .filter_map(|line| {
+                // A variant is a line at one level of indentation whose first
+                // token starts with a capital: `Unauthorized,`,
+                // `RowLimitExceeded { cap: u32 },`, `DataAccessDenied {`,
+                // `Internal(#[source] anyhow::Error),`. Field lines are indented
+                // deeper and attribute/doc lines start with `#` or `/`.
+                let rest = line.strip_prefix("    ")?;
+                if rest.starts_with(' ') || rest.starts_with('#') || rest.starts_with('/') {
+                    return None;
+                }
+                let name: String = rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric())
+                    .collect();
+                let first = name.chars().next()?;
+                first.is_ascii_uppercase().then_some(name)
+            })
+            .collect()
+    }
+
+    /// The census itself: no variant may exist without a sample.
+    ///
+    /// Mutation: delete any row from `every_variant` and this names it.
+    #[test]
+    fn every_declared_variant_has_a_sample() {
+        use std::collections::BTreeSet;
+
+        let declared: BTreeSet<String> = declared_variants().into_iter().collect();
+        // A floor, not a count of today's enum: its only job is to fail loudly
+        // if the parser ever stops matching the source, because a census that
+        // finds nothing agrees with every sample list there is.
+        assert!(
+            declared.len() >= 10,
+            "the parser found only {} variants, which means it stopped matching \
+             the source rather than that the enum shrank: {declared:?}",
+            declared.len()
+        );
+        let sampled: BTreeSet<String> = every_variant()
+            .into_iter()
+            .map(|(name, _)| name.to_string())
+            .collect();
+
+        let missing: Vec<_> = declared.difference(&sampled).collect();
+        assert!(
+            missing.is_empty(),
+            "ServingError variants with no sample in `census::every_variant`: \
+             {missing:?}. Every test that describes the taxonomy as a whole \
+             iterates that list, so an unsampled variant is a variant those \
+             tests cannot see."
+        );
+        let unknown: Vec<_> = sampled.difference(&declared).collect();
+        assert!(
+            unknown.is_empty(),
+            "`census::every_variant` names variants the enum does not declare \
+             (a rename?): {unknown:?}"
+        );
     }
 }

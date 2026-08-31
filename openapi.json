@@ -25619,6 +25619,16 @@
               }
             }
           },
+          "413": {
+            "description": "`payload_too_large` — the request declared a body larger than this surface accepts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServingErrorBody"
+                }
+              }
+            }
+          },
           "429": {
             "description": "`rate_limited` — a published rate limit was exceeded; `Retry-After` states when the bucket refills",
             "content": {
@@ -25630,7 +25640,17 @@
             }
           },
           "500": {
-            "description": "`internal` — an egret-side fault; quote `request_id` to support",
+            "description": "`internal` — an egret-side fault (the metastore, the secret store, a corrupt snapshot); quote `request_id` to support. `endpoint_query_failed` — the engine ran the endpoint's published statement and refused it: the request was fine and the endpoint is what broke, so it is a 5xx rather than a 4xx, and its own code so that `which endpoints are failing` is separable from `egret is failing`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServingErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`engine_unavailable` — the query engine behind this endpoint could not be reached. An operator's problem, not the endpoint author's; the engine, its host and its port are deliberately not named",
             "content": {
               "application/json": {
                 "schema": {
@@ -25640,7 +25660,17 @@
             }
           },
           "503": {
-            "description": "`schema_drift` / `output_naming_collision` / `cache_scope_stale` / `governance_stale` / `param_gate_stale` — the published configuration no longer describes the data, was frozen before the current parameter-safety rules existed, or points at a `governed` database through a connection that does not run queries as the caller. `Retry-After` is a floor, not a forecast: a re-publish clears the first four, and `governance_stale` is cleared only by restoring the connection or the database's `governed` flag",
+            "description": "`schema_drift` / `output_naming_collision` / `cache_scope_stale` / `governance_stale` / `param_gate_stale` — the published configuration no longer describes the data, was frozen before the current parameter-safety rules existed, or points at a `governed` database through a connection that does not run queries as the caller. `Retry-After` is a floor, not a forecast: a re-publish clears the first four, and `governance_stale` is cleared only by restoring the connection or the database's `governed` flag. `overloaded` — egret shed the request because the serving surface was at its concurrency limit; that one clears by itself and its `Retry-After` is a prediction",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServingErrorBody"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "`timeout` — the endpoint's statement exceeded the time budget its author published (`limits.timeout`); the fix is the endpoint's, not the caller's. `deadline_exceeded` — the request outran egret's own serving deadline. Two codes for one status on purpose: they name two different actors, and `code` is what tells them apart",
             "content": {
               "application/json": {
                 "schema": {
@@ -25732,6 +25762,16 @@
               }
             }
           },
+          "413": {
+            "description": "`payload_too_large` — the request declared a body larger than this surface accepts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServingErrorBody"
+                }
+              }
+            }
+          },
           "429": {
             "description": "`rate_limited` — a published rate limit was exceeded; `Retry-After` states when the bucket refills",
             "content": {
@@ -25743,7 +25783,17 @@
             }
           },
           "500": {
-            "description": "`internal` — an egret-side fault; quote `request_id` to support",
+            "description": "`internal` — an egret-side fault (the metastore, the secret store, a corrupt snapshot); quote `request_id` to support. `endpoint_query_failed` — the engine ran the endpoint's published statement and refused it: the request was fine and the endpoint is what broke, so it is a 5xx rather than a 4xx, and its own code so that `which endpoints are failing` is separable from `egret is failing`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServingErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`engine_unavailable` — the query engine behind this endpoint could not be reached. An operator's problem, not the endpoint author's; the engine, its host and its port are deliberately not named",
             "content": {
               "application/json": {
                 "schema": {
@@ -25753,7 +25803,17 @@
             }
           },
           "503": {
-            "description": "`schema_drift` / `output_naming_collision` / `cache_scope_stale` / `governance_stale` / `param_gate_stale` — the published configuration no longer describes the data, was frozen before the current parameter-safety rules existed, or points at a `governed` database through a connection that does not run queries as the caller. `Retry-After` is a floor, not a forecast: a re-publish clears the first four, and `governance_stale` is cleared only by restoring the connection or the database's `governed` flag",
+            "description": "`schema_drift` / `output_naming_collision` / `cache_scope_stale` / `governance_stale` / `param_gate_stale` — the published configuration no longer describes the data, was frozen before the current parameter-safety rules existed, or points at a `governed` database through a connection that does not run queries as the caller. `Retry-After` is a floor, not a forecast: a re-publish clears the first four, and `governance_stale` is cleared only by restoring the connection or the database's `governed` flag. `overloaded` — egret shed the request because the serving surface was at its concurrency limit; that one clears by itself and its `Retry-After` is a prediction",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServingErrorBody"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "`timeout` — the endpoint's statement exceeded the time budget its author published (`limits.timeout`); the fix is the endpoint's, not the caller's. `deadline_exceeded` — the request outran egret's own serving deadline. Two codes for one status on purpose: they name two different actors, and `code` is what tells them apart",
             "content": {
               "application/json": {
                 "schema": {

@@ -361,6 +361,103 @@ async fn a_retry_after_header_is_honoured() {
     );
 }
 
+/// **The cap, at the socket, with a header no test could previously notice.**
+///
+/// The other `Retry-After` test asks for one second, which IS the cap — so
+/// `d.min(cap) == d` and it passes with the cap deleted. This one asks for an
+/// hour. With the cap, the request waits a second and is served; without it,
+/// `send` sleeps for an hour and the outer bound below fires.
+///
+/// The outer `tokio::time::timeout` is what makes the failure an assertion
+/// rather than a hung suite: it is deliberately far above the 1s the cap allows
+/// and far below the 3600s the coordinator asked for, so it can only fire when
+/// the cap is gone.
+///
+/// Why it matters beyond this connector: `describe`/`describe_with_params` run at
+/// publish time, and until this package they had no outer wall clock at all
+/// (`port_impl::describe_bounded` now provides one) — an unbounded honouring of
+/// this header held a publish-validate open for as long as the coordinator said.
+#[tokio::test]
+async fn an_absurd_retry_after_is_capped_and_cannot_hang_the_request() {
+    let mut s = stub();
+    s.retry_after = Some(3600);
+    s.fail_with_503.store(1, Ordering::SeqCst);
+    let (port, seen) = start(s).await;
+
+    let c = build_connector(&spec_impersonating(port, "alice"));
+    let started = std::time::Instant::now();
+    let out = tokio::time::timeout(
+        Duration::from_secs(8),
+        c.execute("SELECT 1", &limits(30), CancellationToken::new()),
+    )
+    .await
+    .expect("`Retry-After: 3600` was obeyed unbounded — the cap is gone")
+    .expect("the query survives one 503");
+    let elapsed = started.elapsed();
+
+    assert_eq!(out.row_count, 1);
+    assert_eq!(seen.lock().unwrap().len(), 2, "503 then 200");
+    // Capped at exactly one `TRINO_RETRY_MAX_BACKOFF`, so the whole call is
+    // about a second — not the hour it was asked for.
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "one sleep is capped at 1s; waited {elapsed:?}"
+    );
+    // And the header was still honoured up to that cap rather than ignored:
+    // egret's own first backoff is 50ms.
+    assert!(
+        elapsed >= Duration::from_millis(900),
+        "the header was ignored entirely — waited only {elapsed:?}"
+    );
+}
+
+/// **A statement that could change data is never re-POSTed.**
+///
+/// The retry-safety argument used to rest on "this connector only ever carries
+/// `SELECT`s", which is false: `execution/job.rs`'s `run_query` sends SQL Lab and
+/// notebook SQL straight through `Connector::execute`, and `apply_sql_limit`
+/// leaves non-`SELECT` SQL unchanged. A coordinator's own 503 is emitted before
+/// the statement is registered, but a proxy in front of one can synthesise a 503
+/// *after* forwarding the POST — and then a re-POST is a second `INSERT`.
+///
+/// So the write is asked exactly once, while the read beside it is asked five
+/// times. Both halves are here because either alone would pass for the wrong
+/// reason: the write alone would pass with the whole retry deleted.
+#[tokio::test]
+async fn a_write_statement_is_never_re_posted_after_a_503() {
+    let mut s = stub();
+    s.always_503 = true;
+    let (port, seen) = start(s).await;
+
+    let c = build_connector(&spec_impersonating(port, "alice"));
+    let err = c
+        .execute(
+            "INSERT INTO t SELECT * FROM u",
+            &limits(30),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("a permanent 503 is still an error");
+    assert!(err.to_string().contains("503"), "{err}");
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        1,
+        "an INSERT that got a 503 must be reported, not sent again — a 503 \
+         synthesised after the POST was forwarded would duplicate the rows"
+    );
+
+    seen.lock().unwrap().clear();
+    let _ = c
+        .execute("SELECT * FROM u", &limits(30), CancellationToken::new())
+        .await
+        .expect_err("still a permanent 503");
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        5,
+        "a read on the same connector still gets the full retry budget"
+    );
+}
+
 /// A 401/403 is NOT a 503 and must not be retried: the credential will not
 /// improve, and four extra requests to an engine that is rejecting identity is
 /// exactly the wrong response to it.

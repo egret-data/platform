@@ -82,8 +82,10 @@ fn describe_error(e: EngineError) -> Error {
 ///   `Limits`. Reported as a typed [`ExecFailureKind::Timeout`] rather than as
 ///   `InvalidInput("query timed out")`, so a consumer classifies it by value.
 ///   `describe_error` keeps the old mapping, for the reason written there.
-/// * **`Connect`/`Storage`** — the engine could not be reached. Reported as a
-///   typed [`ExecFailureKind::EngineUnavailable`].
+/// * **`Connect`** — the engine could not be reached. Reported as a typed
+///   [`ExecFailureKind::EngineUnavailable`]. It is the ONLY variant that earns
+///   that tag: it is produced by the connectors themselves, from a failed
+///   socket, TLS handshake or HTTP send to the coordinator.
 ///
 /// Both stay `Error::Internal` on the wire, so **no existing consumer changes
 /// shape**: still a 500, still redacted to `"internal error"`, still logged with
@@ -93,9 +95,14 @@ fn describe_error(e: EngineError) -> Error {
 ///
 /// # What is deliberately NOT typed
 ///
-/// `Db` and `Cancelled` are egret's own faults, not the engine's, so they stay
-/// an untyped `Internal` — a consumer that turned them into `engine_unavailable`
-/// would send an operator to look at Trino for a bug in egret. And
+/// `Db`, `Storage` and `Cancelled` are egret's own faults, not the engine's, so
+/// they stay an untyped `Internal` — a consumer that turned them into
+/// `engine_unavailable` would send an operator to look at Trino for a bug in
+/// egret. `Storage` used to be tagged with `Connect`, and it does not belong
+/// there: it wraps `egret_storage::StorageError`, egret's own object-store
+/// client, so a failing S3 would have answered `502 engine_unavailable` and sent
+/// an operator to a query engine that was healthy. That is exactly the claim the
+/// 502 is supposed to make honest. And
 /// `Engine`/`BadRequest`/`Limit` stay `InvalidInput` carrying the engine's own
 /// words: that message is the one thing the endpoint author can act on, the
 /// preview loop shows it to them, and at the serving seam `InvalidInput` is
@@ -113,17 +120,18 @@ fn execute_error(e: EngineError) -> Error {
             egret_query_api::ExecFailure::new(egret_query_api::ExecFailureKind::Timeout, detail)
                 .into_error()
         }
-        EngineError::Connect(_) | EngineError::Storage(_) => egret_query_api::ExecFailure::new(
+        EngineError::Connect(_) => egret_query_api::ExecFailure::new(
             egret_query_api::ExecFailureKind::EngineUnavailable,
             detail,
         )
         .into_error(),
-        // egret's own faults. `Cancelled` is unreachable today: `execute_as`
-        // triggers its own token only AFTER `tokio::time::timeout` has already
-        // dropped the connector future — so the connector is never around to
-        // observe it and report `Cancelled`. (That path surfaces as `Timeout`
-        // instead, mapped above.)
-        EngineError::Db(_) | EngineError::Cancelled => {
+        // egret's own faults. `Storage` is egret's object-store client, not the
+        // engine — see the doc comment. `Cancelled` is unreachable today:
+        // `execute_as` triggers its own token only AFTER `tokio::time::timeout`
+        // has already dropped the connector future — so the connector is never
+        // around to observe it and report `Cancelled`. (That path surfaces as
+        // `Timeout` instead, mapped above.)
+        EngineError::Db(_) | EngineError::Storage(_) | EngineError::Cancelled => {
             Error::Internal(anyhow::anyhow!("query port: {detail}"))
         }
     }
@@ -214,10 +222,8 @@ impl egret_query_api::QueryExecPort for EngineState {
         sql: &str,
     ) -> Result<Vec<ColumnMeta>, Error> {
         let spec = connect_as(self, ws, database_id, principal).await?;
-        build_connector(&spec)
-            .describe(sql, DESCRIBE_TIMEOUT)
-            .await
-            .map_err(describe_error)
+        let connector = build_connector(&spec);
+        describe_bounded(connector.describe(sql, DESCRIBE_TIMEOUT)).await
     }
 
     async fn describe_as_with_params(
@@ -232,10 +238,8 @@ impl egret_query_api::QueryExecPort for EngineState {
         // — only the connector call differs, and it differs because the text path
         // given a `?` answers with zero columns and no error on StarRocks.
         let spec = connect_as(self, ws, database_id, principal).await?;
-        build_connector(&spec)
-            .describe_with_params(sql, param_count, DESCRIBE_TIMEOUT)
-            .await
-            .map_err(describe_error)
+        let connector = build_connector(&spec);
+        describe_bounded(connector.describe_with_params(sql, param_count, DESCRIBE_TIMEOUT)).await
     }
 
     async fn execute_as(
@@ -293,8 +297,9 @@ impl egret_query_api::QueryExecPort for EngineState {
 ///   restarts that per-request clock on every poll, so total wall-clock is
 ///   unbounded without this.
 ///
-/// `describe_as` needs no equivalent only because `Connector::describe` takes a
-/// timeout argument and both engines honour it.
+/// `describe_as` has its own, [`describe_bounded`], for the reason written
+/// there — the sentence that used to sit here (that `Connector::describe` taking
+/// a timeout argument was enough) was false for Trino.
 ///
 /// On expiry `tokio::time::timeout` drops the inner future, so the client is
 /// released either way; the `cancel()` below is deliberately kept to match
@@ -314,6 +319,36 @@ impl egret_query_api::QueryExecPort for EngineState {
 /// `connector/starrocks.rs`, and the trait's own default), so one call site
 /// keeps the unparameterised path from acquiring a second, subtly different
 /// spelling.
+/// Bound a `describe`, the way [`run_bounded`] bounds an execution.
+///
+/// **The `timeout` argument `Connector::describe` takes is not a wall clock on
+/// this side of Trino.** `TrinoConnector` turns it into a per-REQUEST `reqwest`
+/// timeout, and one describe is several requests: the statement POST, one
+/// `nextUri` poll per page, and — since this package — a sleep between 503
+/// retries. Each is individually bounded and the total was not, so a coordinator
+/// answering `503, Retry-After: <n>` to every attempt could hold a
+/// publish-validate for as long as it liked. StarRocks' own `describe` already
+/// wraps itself in `tokio::time::timeout`; this is the same bound applied on the
+/// caller's side, where it covers both engines and both describe verbs.
+///
+/// The value is [`DESCRIBE_TIMEOUT`] — the same number already handed to the
+/// connector, so nothing that finishes today starts failing: this only ends the
+/// case where the sum of the parts outran the budget every part was measured
+/// against. It is exactly what `run_bounded` does with `limits.timeout`.
+///
+/// The error is mapped through [`describe_error`], so an expiry reads as the
+/// author's `400 "query timed out"` here and NOT as the serving surface's 504 —
+/// `describe` runs at publish time, under a human, and that mapping is the one
+/// thing this package deliberately left alone.
+async fn describe_bounded(
+    fut: impl std::future::Future<Output = Result<Vec<ColumnMeta>, EngineError>>,
+) -> Result<Vec<ColumnMeta>, Error> {
+    match tokio::time::timeout(DESCRIBE_TIMEOUT, fut).await {
+        Ok(r) => r.map_err(describe_error),
+        Err(_) => Err(describe_error(EngineError::Timeout)),
+    }
+}
+
 async fn run_bounded(
     spec: &ConnSpec,
     sql: &str,
@@ -336,7 +371,7 @@ async fn run_bounded(
 mod tests {
     use super::{describe_error, execute_error};
     use crate::execution::EngineError;
-    use egret_core::Error;
+    use egret_core::{ColumnMeta, Error};
     use egret_query_api::{ExecFailure, ExecFailureKind};
 
     /// The finding this exists for: a Ranger deny on the table is a 403, not
@@ -451,19 +486,70 @@ mod tests {
 
     /// The execute path additionally says *which* infrastructure failed, so an
     /// operator can be told "the engine is unreachable" rather than "internal".
+    ///
+    /// `Connect` and nothing else: it is the variant the connectors raise from a
+    /// failed socket, TLS handshake or HTTP send to the coordinator, which is
+    /// the only thing `engine_unavailable` claims.
     #[test]
     fn an_unreachable_engine_is_typed_on_the_execute_path() {
-        for e in [
-            EngineError::Connect("connection refused".into()),
-            EngineError::Storage(egret_storage::StorageError::S3(
-                "object store unreachable".into(),
-            )),
-        ] {
-            assert_eq!(
-                ExecFailure::kind_of(&execute_error(e)),
-                Some(ExecFailureKind::EngineUnavailable)
-            );
+        assert_eq!(
+            ExecFailure::kind_of(&execute_error(EngineError::Connect(
+                "connection refused".into()
+            ))),
+            Some(ExecFailureKind::EngineUnavailable)
+        );
+    }
+
+    /// **A failing object store is not the query engine.**
+    ///
+    /// `EngineError::Storage` wraps `egret_storage::StorageError` — egret's own
+    /// object-store client — and it used to share the `Connect` arm, so an
+    /// unreachable S3 answered the serving surface's `502 engine_unavailable`.
+    /// That sends an operator to a Trino that is fine, and it is the one arm
+    /// that made "the 502 is honest" untrue. It is an untyped `Internal` now,
+    /// like every other egret-side fault.
+    #[test]
+    fn a_failing_object_store_is_not_reported_as_the_engine_being_down() {
+        let mapped = execute_error(EngineError::Storage(egret_storage::StorageError::S3(
+            "object store unreachable".into(),
+        )));
+        assert_eq!(
+            ExecFailure::kind_of(&mapped),
+            None,
+            "egret's object store is not the query engine; a 502 here would page \
+             the wrong team"
+        );
+        assert!(matches!(mapped, Error::Internal(_)));
+    }
+
+    /// **The describe path has a wall clock, not just a per-request one.**
+    ///
+    /// Driven with a future that never completes, under a paused clock, so the
+    /// assertion is about the bound rather than about waiting 30 seconds for it.
+    /// `tokio`'s auto-advance moves time only while the runtime is idle, which
+    /// is precisely the state a hung engine leaves it in.
+    ///
+    /// Mutation: `fut.await.map_err(describe_error)` in place of the
+    /// `tokio::time::timeout` and this test never returns — a publish-validate
+    /// against a coordinator that never answers is exactly that hang, one
+    /// process out.
+    #[tokio::test(start_paused = true)]
+    async fn a_describe_that_never_answers_is_still_bounded() {
+        let started = tokio::time::Instant::now();
+        let never = std::future::pending::<Result<Vec<ColumnMeta>, EngineError>>();
+        let out = super::describe_bounded(never).await;
+        match out {
+            Err(Error::InvalidInput(m)) => assert!(
+                m.contains("timed out"),
+                "a describe that outran its budget must read as the author's \
+                 timeout, got {m:?}"
+            ),
+            other => panic!("expected the describe timeout, got {other:?}"),
         }
+        assert!(
+            started.elapsed() >= super::DESCRIBE_TIMEOUT,
+            "the bound must be DESCRIBE_TIMEOUT, not something shorter"
+        );
     }
 
     /// **The half that keeps the 502 honest.** egret's OWN faults must stay an
