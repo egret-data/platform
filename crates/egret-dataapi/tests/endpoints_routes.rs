@@ -110,7 +110,7 @@ fn build_state(db: Db, pdp: Arc<dyn egret_core::authz::Pdp>) -> DataApiState {
         // Best-effort sink with its receiver dropped — see `audit.rs` for the
         // suite that actually reads the events.
         audit: egret_audit::AuditSink::new(1).0,
-        cache: egret_dataapi::serving::ResponseCache::new(),
+        cache: std::sync::Arc::new(egret_dataapi::serving::ResponseCache::new()),
         rate_limits: std::sync::Arc::new(egret_dataapi::serving::TokenBucket::new()),
         // This file is about draft CRUD, not Activity — a fixed retention is
         // enough to satisfy the field.

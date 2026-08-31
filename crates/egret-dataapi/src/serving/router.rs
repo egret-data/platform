@@ -748,7 +748,7 @@ impl utoipa::Modify for BearerAddon {
         (status = 413, description = "`payload_too_large` — the request declared a body larger than this surface accepts", body = ServingErrorBody),
         (status = 500, description = "`internal` — an egret-side fault (the metastore, the secret store, a corrupt snapshot); quote `request_id` to support. `endpoint_query_failed` — the engine ran the endpoint's published statement and refused it: the request was fine and the endpoint is what broke, so it is a 5xx rather than a 4xx, and its own code so that `which endpoints are failing` is separable from `egret is failing`", body = ServingErrorBody),
         (status = 502, description = "`engine_unavailable` — the query engine behind this endpoint could not be reached. An operator's problem, not the endpoint author's; the engine, its host and its port are deliberately not named", body = ServingErrorBody),
-        (status = 503, description = "`schema_drift` / `output_naming_collision` / `cache_scope_stale` / `governance_stale` / `param_gate_stale` — the published configuration no longer describes the data, was frozen before the current parameter-safety rules existed, or points at a `governed` database through a connection that does not run queries as the caller. `Retry-After` is a floor, not a forecast: a re-publish clears the first four, and `governance_stale` is cleared only by restoring the connection or the database's `governed` flag. `overloaded` — egret shed the request because the serving surface was at its concurrency limit; that one clears by itself and its `Retry-After` is a prediction", body = ServingErrorBody),
+        (status = 503, description = "`schema_drift` / `output_naming_collision` / `cache_scope_stale` / `governance_stale` / `param_gate_stale` — the published configuration no longer describes the data, was frozen before the current parameter-safety rules existed, or points at a `governed` database through a connection that does not run queries as the caller. `Retry-After` is a floor, not a forecast: a re-publish clears the first four, and `governance_stale` is cleared only by restoring the connection or the database's `governed` flag. `overloaded` — egret shed the request because the serving surface was at its concurrency limit; that one clears by itself and its `Retry-After` is a prediction. `rate_limiter_unavailable` — the shared rate-limit store could not be consulted, so the request was refused rather than admitted without an allowance; it also clears by itself", body = ServingErrorBody),
         (status = 504, description = "`timeout` — the endpoint's statement exceeded the time budget its author published (`limits.timeout`); the fix is the endpoint's, not the caller's. `deadline_exceeded` — the request outran egret's own serving deadline. Two codes for one status on purpose: they name two different actors, and `code` is what tells them apart", body = ServingErrorBody),
     ),
     security(("data_api_bearer" = [])),
@@ -782,7 +782,7 @@ async fn serve_get(
         (status = 413, description = "`payload_too_large` — the request declared a body larger than this surface accepts", body = ServingErrorBody),
         (status = 500, description = "`internal` — an egret-side fault (the metastore, the secret store, a corrupt snapshot); quote `request_id` to support. `endpoint_query_failed` — the engine ran the endpoint's published statement and refused it: the request was fine and the endpoint is what broke, so it is a 5xx rather than a 4xx, and its own code so that `which endpoints are failing` is separable from `egret is failing`", body = ServingErrorBody),
         (status = 502, description = "`engine_unavailable` — the query engine behind this endpoint could not be reached. An operator's problem, not the endpoint author's; the engine, its host and its port are deliberately not named", body = ServingErrorBody),
-        (status = 503, description = "`schema_drift` / `output_naming_collision` / `cache_scope_stale` / `governance_stale` / `param_gate_stale` — the published configuration no longer describes the data, was frozen before the current parameter-safety rules existed, or points at a `governed` database through a connection that does not run queries as the caller. `Retry-After` is a floor, not a forecast: a re-publish clears the first four, and `governance_stale` is cleared only by restoring the connection or the database's `governed` flag. `overloaded` — egret shed the request because the serving surface was at its concurrency limit; that one clears by itself and its `Retry-After` is a prediction", body = ServingErrorBody),
+        (status = 503, description = "`schema_drift` / `output_naming_collision` / `cache_scope_stale` / `governance_stale` / `param_gate_stale` — the published configuration no longer describes the data, was frozen before the current parameter-safety rules existed, or points at a `governed` database through a connection that does not run queries as the caller. `Retry-After` is a floor, not a forecast: a re-publish clears the first four, and `governance_stale` is cleared only by restoring the connection or the database's `governed` flag. `overloaded` — egret shed the request because the serving surface was at its concurrency limit; that one clears by itself and its `Retry-After` is a prediction. `rate_limiter_unavailable` — the shared rate-limit store could not be consulted, so the request was refused rather than admitted without an allowance; it also clears by itself", body = ServingErrorBody),
         (status = 504, description = "`timeout` — the endpoint's statement exceeded the time budget its author published (`limits.timeout`); the fix is the endpoint's, not the caller's. `deadline_exceeded` — the request outran egret's own serving deadline. Two codes for one status on purpose: they name two different actors, and `code` is what tells them apart", body = ServingErrorBody),
     ),
     security(("data_api_bearer" = [])),
@@ -1089,6 +1089,14 @@ async fn run(
 
     // Step 5 — rate limit. BOTH published keys: the client's own allowance and
     // the endpoint-wide one. Keyed on `endpoint_id`, never on the path.
+    //
+    // The two refusals are answered with two different codes, which is the whole
+    // reason `Refusal` has two variants. `Exhausted` is the caller's own doing
+    // and logs at `debug`, because a flood of them is exactly what a working
+    // limiter produces. `Unavailable` is egret's dependency failing and logs at
+    // `warn`, because it means requests are being refused that nobody's
+    // allowance had anything to do with — see `serving::shared` for why the
+    // refusal is nevertheless the right answer.
     check_request(
         &*st.rate_limits,
         endpoint_id,
@@ -1096,14 +1104,25 @@ async fn run(
         &snap.rate_limit,
         now,
     )
-    .map_err(|retry_after| {
-        tracing::debug!(
-            endpoint_id = %endpoint_id,
-            client_id = %principal.client_id,
-            retry_after_secs = retry_after_secs(retry_after),
-            "data-api request rate limited"
-        );
-        ServingError::RateLimited { retry_after }
+    .await
+    .map_err(|refusal| match refusal {
+        super::ratelimit::Refusal::Exhausted(retry_after) => {
+            tracing::debug!(
+                endpoint_id = %endpoint_id,
+                client_id = %principal.client_id,
+                retry_after_secs = retry_after_secs(retry_after),
+                "data-api request rate limited"
+            );
+            ServingError::RateLimited { retry_after }
+        }
+        super::ratelimit::Refusal::Unavailable => {
+            tracing::warn!(
+                endpoint_id = %endpoint_id,
+                "data-api rate limit could not be checked; refusing the request rather than \
+                 admitting it without an allowance"
+            );
+            ServingError::LimiterUnavailable
+        }
     })?;
 
     // Step 6 — the cache.
@@ -1168,7 +1187,7 @@ async fn run(
     // neither a hit nor a miss. Counting its every success as a miss would put a
     // 0% hit rate on a dashboard for an endpoint that has no cache to miss.
     if ttl.is_some() {
-        if let Some(hit) = st.cache.get_at(&key, now) {
+        if let Some(hit) = st.cache.get_at(&key, now).await {
             // The LENGTH is checked before the counts are zipped onto the
             // statement list. `version` is in the cache key, so an entry can only
             // belong to this frozen list and the two can only disagree if that
@@ -1351,7 +1370,8 @@ async fn run(
     };
     if let Some(ttl) = ttl {
         st.cache
-            .put_at(key, Arc::new(data.clone()), row_counts.clone(), ttl, now);
+            .put_at(key, Arc::new(data.clone()), row_counts.clone(), ttl, now)
+            .await;
     }
 
     Ok(Served {

@@ -91,7 +91,7 @@ const CACHE_BYTE_BUDGET: usize = 64 * 1024 * 1024;
 /// Largest single response that may be cached. One enormous entry must not be
 /// able to evict every small one, and re-running one wide query is cheaper than
 /// pinning 64 MiB for its TTL.
-const MAX_ENTRY_BYTES: usize = 4 * 1024 * 1024;
+pub(crate) const MAX_ENTRY_BYTES: usize = 4 * 1024 * 1024;
 
 /// Entries held at once, across every endpoint and workspace in the process.
 ///
@@ -441,11 +441,71 @@ impl Inner {
     }
 }
 
+/// Where a cached response lives.
+///
+/// The seam this trait creates did not exist: [`ResponseCache`] was a concrete
+/// struct with inherent synchronous methods, so a multi-replica deployment
+/// fragmented the cache with nothing to swap in. [`super::shared::SharedStore`]
+/// is the other implementation.
+///
+/// # The failure policy here is the OPPOSITE of the limiter's, deliberately
+///
+/// When the shared store is unreachable this **fails open**: [`Self::get_at`]
+/// answers `None` (a miss) and [`Self::put_at`] answers `false` (not stored).
+/// Both are outcomes the caller already handles on every cold start, and a miss
+/// is correct by construction — it re-executes the query and shapes the rows
+/// against the frozen contract, which is the same work a hit is a shortcut for.
+/// The cache is an optimisation and is never a control: nothing about who may
+/// see what is decided here.
+///
+/// [`super::ratelimit::Refusal::Unavailable`] is the counterpart and it fails
+/// CLOSED, because an unconsulted allowance is not an allowance. Two stores,
+/// two policies, and the difference is exactly that one of them is a control.
+///
+/// The failure is not silent in either direction —
+/// [`super::metrics::record_store_call`] counts it under
+/// `result="error"`, so "the cache quietly stopped working" is a query an
+/// operator can write.
+///
+/// # `now` and a store that keeps its own clock
+///
+/// `now: Instant` stays in the signature so every existing caller and test is
+/// unchanged. A shared implementation cannot compare an `Instant` minted in
+/// another process, so expiry there is the store's own (Redis `PX`) rather than
+/// a comparison against this argument — stated here because it is the one place
+/// the two implementations do not answer a question the same way, and a test
+/// that advances an injected clock to prove expiry proves it only for
+/// [`ResponseCache`].
+#[async_trait::async_trait]
+pub trait ResponseStore: Send + Sync {
+    /// A live entry for `key`, or `None` — including when the store could not
+    /// be reached.
+    async fn get_at(&self, key: &str, now: Instant) -> Option<CachedResponse>;
+
+    /// Store a response under `key` for `ttl`; `false` if it was not stored.
+    ///
+    /// `false` is a performance outcome and never a correctness one: it means
+    /// the next call misses and re-executes. Both implementations answer it for
+    /// a body over their maximum entry size, and the shared one also answers it
+    /// when the store is unreachable.
+    async fn put_at(
+        &self,
+        key: String,
+        data: Arc<serde_json::Value>,
+        row_counts: Vec<u64>,
+        ttl: Duration,
+        now: Instant,
+    ) -> bool;
+}
+
 /// In-memory, per-process response cache with an injected clock.
 ///
-/// Per-process is correct while the serving surface is in-process: a second
-/// replica simply misses and re-executes, which is slower but never wrong. The
-/// key format ([`cache_key`]) is what a shared implementation would reuse.
+/// Correct only while there is ONE process. With more than one replica it does
+/// not become wrong — a second replica misses and re-executes — it becomes
+/// *fragmented*, which is why the interim guard
+/// ([`super::shared::choose_store`]) refuses to start rather than shipping a
+/// deployment whose cache and whose limits both quietly depend on which pod
+/// answered.
 ///
 /// `Instant` (monotonic) rather than a wall clock, so an NTP step cannot make a
 /// live entry immortal or expire the whole cache at once.
@@ -559,12 +619,35 @@ impl ResponseCache {
     }
 }
 
+#[async_trait::async_trait]
+impl ResponseStore for ResponseCache {
+    /// Delegates to the inherent method, which is where the semantics are
+    /// asserted. Kept as a thin forward rather than moved so this module's own
+    /// tests stay synchronous — they are about the map's arithmetic (bytes,
+    /// eviction order, expiry against the injected clock), none of which needs
+    /// a runtime.
+    async fn get_at(&self, key: &str, now: Instant) -> Option<CachedResponse> {
+        ResponseCache::get_at(self, key, now)
+    }
+
+    async fn put_at(
+        &self,
+        key: String,
+        data: Arc<serde_json::Value>,
+        row_counts: Vec<u64>,
+        ttl: Duration,
+        now: Instant,
+    ) -> bool {
+        ResponseCache::put_at(self, key, data, row_counts, ttl, now)
+    }
+}
+
 /// Roughly how much memory a cached body occupies.
 ///
 /// Serialising to measure would double the work already done for the wire, so
 /// this walks the value instead. It is an estimate and says so — its job is to
 /// keep the budget bounded, not to be exact.
-fn estimate_bytes(v: &serde_json::Value) -> usize {
+pub fn estimate_bytes(v: &serde_json::Value) -> usize {
     match v {
         serde_json::Value::Null | serde_json::Value::Bool(_) => 8,
         serde_json::Value::Number(_) => 16,

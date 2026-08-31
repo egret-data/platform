@@ -311,7 +311,7 @@ async fn live() -> Result<Live, String> {
         issuer: "https://egret.test".into(),
         consumer_base_url: "https://egret.test".into(),
         audit: egret_audit::AuditSink::new(1).0,
-        cache: egret_dataapi::serving::ResponseCache::new(),
+        cache: std::sync::Arc::new(egret_dataapi::serving::ResponseCache::new()),
         rate_limits: Arc::new(egret_dataapi::serving::TokenBucket::new()),
         activity: ActivityStore::new(db.clone(), Some(90)),
     };

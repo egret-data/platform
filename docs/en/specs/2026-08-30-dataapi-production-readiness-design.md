@@ -45,7 +45,7 @@ Ordered by value-per-effort, not by severity. Dependencies noted.
 | 2 | **Metrics + `/metrics`** — ✅ `0caf720b` (#554) | There are no metrics at all. One outage class is invisible to all three existing instruments simultaneously — see §5. | — |
 | 3a | **Serving guard rails** — ✅ `5de17862` (#558) | No graceful shutdown, so every deploy kills in-flight queries; no resource limits; `/readyz` exists and is never called (probes are `tcpSocket`); no concurrency cap, body limit, or timeout layer on the composed router. | — |
 | 3b | **Engine coupling** — ✅ `3ff8096d` (#557) | No engine connection pool (a TCP+TLS handshake **per statement**); a retryable Trino 503 discarded as a 500; `internal` the single code for six causes. | — |
-| 4 | **Multi-replica correctness** | Response cache and token bucket are **process-local** while replica count is a Helm value, so every published rate limit silently multiplies by replica count and the cache fragments. | §4 decision B |
+| 4 | **Multi-replica correctness** — ✅ `0c3febe5` | Response cache and token bucket are **process-local** while replica count is a Helm value, so every published rate limit silently multiplies by replica count and the cache fragments. | §4 decision B |
 | 5 | **Script parameter constraints** | Package S lets a script concatenate a caller's value into SQL text. The publish-time sentinel probe has **two bypasses pinned open by tests asserting `is_ok()`** (`lifecycle.rs:6058`, `:6083`). Nothing re-asks at serve time. | — |
 | 6 | **Publish-time diff + acknowledgement** | `publish` validates the draft against *itself*; the only read of `endpoint_versions` is `MAX(version)`. A removed column, narrowed type, renamed parameter or new required parameter publishes silently. Worst case: adding a second statement flips top-level `data` from an array to an object. | — |
 | 7 | **Consumer version pinning** | Serving resolves `live_version_id` only; a publish moves every caller at commit. `meta.version` lets a consumer *observe* which version answered but never *ask* for one. | 6 |
@@ -116,6 +116,50 @@ operational dependency. The seam exists: `RateLimitStore` is a trait
 
 Recommendation: **1 for the limiter and the cache, with 3 as the interim guard** so that a
 multi-replica deployment can never silently multiply limits in the window before 1 lands.
+
+**Delivered as recommended.** `serving/shared.rs` is one `SharedStore` behind both seams
+(`RateLimitStore`, and a `ResponseStore` trait the cache did not previously have), the
+token bucket is a Lua script so the check is atomic in one round trip, and
+`choose_store(replicas, url)` refuses to start on >1 replica with no store — wired from
+`backend.replicas` through `EGRET_DATA_API__REPLICAS`. Three decisions worth carrying
+forward rather than rediscovering:
+
+- **The two failure policies are opposite.** The cache fails OPEN (a store error is a
+  miss, which re-executes); the limiter fails CLOSED (`503 rate_limiter_unavailable`, a
+  new taxonomy variant), because admitting would reinstate the multiplied-limit defect
+  unbounded, at the one moment nobody is watching. The blast radius is bounded by
+  `check_request` only touching the store for a limit an author actually configured.
+- **The eviction policy is stated, not inherited.** Redis defaults to `noeviction`, under
+  which a full instance fails writes — which, with a fail-closed limiter, would turn a
+  full cache into 503s. The chart sets `allkeys-lru`. Cost: an evicted bucket comes back
+  full, at most one extra burst, the same caveat the in-process map already carries.
+- **The cache key is untouched.** The length-prefixed, principal-trailing digest is what
+  the store keys on, verbatim, and `shared` scope still requires the live
+  `(delegated, impersonate)` re-check. A shared cache makes a cross-principal leak
+  fleet-wide rather than per-replica, so that was the constraint, not fragmentation.
+- **A shared bucket has N clocks, and that is a token generator unless the stored
+  timestamp is monotone.** Found in review, after the first version shipped: because
+  each replica supplies `now`, a lagging one rewound the stored `l` and the leading one
+  re-billed an interval it had already been charged for — on every alternation, without
+  bound. Measured on Valkey 8 at `qps=10, burst=10`, 400 calls at one real instant: 10
+  admitted at no skew, 20 at 5 ms, 110 at 50 ms, and **400 of 400 at 500 ms**, i.e. no
+  limit at all. The fix is a monotone floor inside the script (`if now < last then now =
+  last end`), which makes the bucket run on the envelope of every replica's clock — one
+  clock, advancing at real rate — and leaves a one-time offset bounded by `burst`. The
+  general lesson is what to carry: *any* shared counter driven by a caller-supplied clock
+  has this shape, and a test that hands one clock reading to every replica cannot see it.
+- **The two caches share the 4 MiB constant and not the quantity it bounds.** The
+  in-process cache bounds an estimate; the shared store bounds the serialised length,
+  and the estimate charges every number a flat 16 bytes. So a float-heavy response
+  caches on one replica and stops caching after scale-out. The bound is genuinely
+  enforced either way and the direction is the safe one (a miss re-executes), but the
+  "scale-out changes nothing" sentence the first version wrote was false, and there is
+  now a witness test rather than a claim.
+- **`replicas: 1` is not "one of these exists".** A Deployment's default RollingUpdate
+  surges a second pod before terminating the first, so the store split itself during its
+  own upgrade. `strategy: {type: Recreate}` on `deps-valkey.yaml` — and on
+  `deps-postgres.yaml` and `deps-minio.yaml`, which had the same shape and a
+  ReadWriteOnce PVC to wedge on.
 
 ## 5. The blind spot Package 2 exists to close
 

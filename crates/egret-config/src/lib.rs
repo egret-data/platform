@@ -291,6 +291,51 @@ pub struct DataApiConfig {
     /// business pointing somewhere unreachable.
     #[serde(default)]
     pub public_url: Option<String>,
+    /// How many replicas of this backend the deployment runs — **what the chart
+    /// says**, not what this process can see.
+    ///
+    /// The Data API's rate-limit buckets and response cache are process-local
+    /// unless [`Self::shared_store_url`] is set, so more than one replica
+    /// multiplies every published rate limit by the replica count and fragments
+    /// the cache. A process cannot discover its own replica count: a pod knows
+    /// its name and namespace, and the count is a property of the Deployment —
+    /// reading it would mean granting every backend pod RBAC to
+    /// `get deployments` for a number the chart already holds as a literal
+    /// (`backend.replicas`, `deploy/helm/egret/values.yaml`). So the chart tells
+    /// it, through `EGRET_DATA_API__REPLICAS`.
+    ///
+    /// `egret_dataapi::serving::choose_store` reads this and **refuses to
+    /// start** on more than one replica with no shared store configured. That
+    /// is §4 decision B's interim guard, and it is a refusal rather than a
+    /// warning because the condition is static, known at startup, and has two
+    /// one-line remedies.
+    ///
+    /// Default `1`: a deployment that never sets it is a single-replica
+    /// deployment, which is what the process-local state is correct for.
+    #[serde(default = "default_replicas")]
+    pub replicas: u32,
+    /// Redis/Valkey URL backing the serving surface's rate limiter and response
+    /// cache across replicas (§4 decision B). Unset (or blank) means
+    /// process-local state, which is correct at one replica and refused above
+    /// one.
+    ///
+    /// Set at ONE replica too, if a deployment configures it. That is
+    /// deliberate — see `choose_store` — because otherwise the shared path would
+    /// first run in production, on the day someone scaled out.
+    ///
+    /// Numbered logical databases separate two egret deployments that must share
+    /// one instance: `redis://valkey:6379/1`.
+    #[serde(default)]
+    pub shared_store_url: Option<String>,
+}
+
+/// Serde's fallback for [`DataApiConfig::replicas`].
+///
+/// `1` rather than `0`: the number describes how many of this process exist,
+/// and at least this one does. It also has to be a value the multi-replica guard
+/// lets through, or every deployment that predates the key would fail to start.
+fn default_replicas() -> u32 {
+    1
 }
 
 impl DataApiConfig {
@@ -362,6 +407,10 @@ fn default_data_api() -> DataApiConfig {
         // Unset: fall back to `catalog.public_url`. See
         // `DataApiConfig::public_url` for why this is a separate key at all.
         public_url: None,
+        replicas: default_replicas(),
+        // Unset: process-local limiter and cache, which is correct at one
+        // replica and refused above one.
+        shared_store_url: None,
     }
 }
 
@@ -709,6 +758,96 @@ mod tests {
             assert_eq!(
                 cfg.data_api.consumer_base_url("http://egret.svc:8080"),
                 "http://egret.localtest.me"
+            );
+            Ok(())
+        });
+    }
+
+    /// The replica count reaches the process from the environment, under the
+    /// name the CHART writes — and the chart is asserted to write it.
+    ///
+    /// This is the one knob whose failure mode is silence in the safe-looking
+    /// direction. `default_replicas()` is `1`, and `1` is the value that lets
+    /// `choose_store` through; so a mis-spelled section, a renamed field or a
+    /// changed env separator does not error — it reads as a single-replica
+    /// deployment, and a four-replica deployment boots with four private
+    /// limiters and four private caches, which is exactly the defect Package 4
+    /// exists to remove. Nothing else in the tree fails when that mapping
+    /// breaks, so it is asserted here.
+    ///
+    /// Both halves in ONE test on purpose. The chart's key and the config's
+    /// path are only correct together, and two tests that each assert their own
+    /// half agree with a literal string would both stay green while the pair
+    /// disagreed.
+    #[test]
+    fn the_replica_count_arrives_under_the_name_the_chart_writes() {
+        const KEY: &str = "EGRET_DATA_API__REPLICAS";
+        let chart = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../deploy/helm/egret/templates/configmap-env.yaml"
+        ))
+        .expect("reading configmap-env.yaml");
+        let line = chart
+            .lines()
+            .find(|l| l.trim_start().starts_with(KEY))
+            .unwrap_or_else(|| panic!("the chart no longer writes {KEY}"));
+        assert!(
+            line.contains(".Values.backend.replicas"),
+            "{KEY} must be rendered from the SAME value the Deployment's \
+             spec.replicas uses, or the two can disagree: {line}"
+        );
+
+        figment::Jail::expect_with(|jail| {
+            jail.set_env(KEY, "4");
+            let cfg: Config = Config::figment().extract()?;
+            assert_eq!(
+                cfg.data_api.replicas, 4,
+                "{KEY} is what the chart sets; if it does not land on \
+                 data_api.replicas the multi-replica refusal never fires"
+            );
+            Ok(())
+        });
+    }
+
+    /// Absent, it reads as one replica — stated as a test because it is a
+    /// DEFAULT THAT DISARMS A GUARD, not a neutral fallback.
+    ///
+    /// It is the right default (a deployment that never heard of the key runs
+    /// one process, and erroring instead would fail every deployment that
+    /// predates it), and it is also the reason the test above exists.
+    #[test]
+    fn an_absent_replica_count_reads_as_one_and_therefore_disarms_the_guard() {
+        figment::Jail::expect_with(|_jail| {
+            let cfg: Config = Config::figment().extract()?;
+            assert_eq!(cfg.data_api.replicas, 1);
+            assert_eq!(cfg.data_api.shared_store_url, None);
+            Ok(())
+        });
+    }
+
+    /// And the store URL under the name the chart writes for it.
+    ///
+    /// Same seam, milder failure: a URL that did not arrive is a process that
+    /// refuses to start (above one replica) or runs process-local (at one),
+    /// neither of which is silent.
+    #[test]
+    fn the_shared_store_url_arrives_under_the_name_the_chart_writes() {
+        const KEY: &str = "EGRET_DATA_API__SHARED_STORE_URL";
+        let chart = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../deploy/helm/egret/templates/configmap-env.yaml"
+        ))
+        .expect("reading configmap-env.yaml");
+        assert!(
+            chart.lines().any(|l| l.trim_start().starts_with(KEY)),
+            "the chart no longer writes {KEY}"
+        );
+        figment::Jail::expect_with(|jail| {
+            jail.set_env(KEY, "redis://valkey:6379/1");
+            let cfg: Config = Config::figment().extract()?;
+            assert_eq!(
+                cfg.data_api.shared_store_url.as_deref(),
+                Some("redis://valkey:6379/1")
             );
             Ok(())
         });

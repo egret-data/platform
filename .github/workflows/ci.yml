@@ -18,6 +18,14 @@ env:
   # every DB-gated suite report `ok` having asserted nothing. Removing it does not make
   # CI skip those tests — it makes CI fail, which is the point.
   DATABASE_URL: postgres://egret:egret@localhost:5432/egret_test
+  # Package 4's shared limiter/cache store. Same fail-closed reasoning as the
+  # line above and the same consequence: with this unset,
+  # `tests/serving_shared_store.rs` panics rather than reporting `ok` for a
+  # suite whose entire subject is that serving state is no longer per process.
+  # That suite is the only thing standing between "the shared store works" and
+  # "the shared store silently fell back to a HashMap", so it may not be
+  # optional in CI.
+  EGRET_TEST_SHARED_STORE_URL: redis://localhost:6379
 
 jobs:
   rust:
@@ -33,6 +41,18 @@ jobs:
           - 5432:5432
         options: >-
           --health-cmd "pg_isready -U egret"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      # Package 4. Valkey rather than Redis: same protocol, same client, BSD
+      # licence — and it is what the chart runs, so CI exercises the same server
+      # a deployment gets.
+      valkey:
+        image: valkey/valkey:8
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
           --health-interval 5s
           --health-timeout 3s
           --health-retries 10

@@ -83,6 +83,8 @@
 //! | `egret_dataapi_cache_lookups_total` | `result` | `"hit"` or `"miss"`; nothing else is constructible. |
 //! | `egret_dataapi_preauth_rejections_total` | *(none)* | it is reached before anything about the caller has been verified, so there is no value here that is not the caller's own word. |
 //! | `egret_dataapi_access_log_write_failures_total` | *(none)* | the failing thing is the metastore, not the call; the sqlx error's text is a runtime string and would be unbounded. |
+//! | `egret_dataapi_store_calls_total` | `store`, `op`, `result` | all three come from [`StoreOp::labels`] and a `bool` — three combinations of the first two, two of the third, and nothing else is constructible. The redis error's text is deliberately NOT a label: it is a runtime string, and it is in the log line instead. |
+//! | `egret_dataapi_store_duration_seconds` | `store`, `op` | as above. |
 //!
 //! `code` and `status` are both present and that costs nothing: `code`
 //! determines `status` (each arm of `to_wire` pairs one with one), so the two
@@ -127,6 +129,13 @@ use axum::http::StatusCode;
 use super::access_log::Recorded;
 
 /// One increment per served call, whatever the answer.
+///
+/// Package 4's refusal is a NEW code on this counter
+/// (`code="rate_limiter_unavailable"`) and deliberately not a second reason for
+/// `code="rate_limited"` to move: an alert or a dashboard panel written against
+/// `rate_limited` means "callers are exceeding their published allowance", and
+/// a store outage moving it would report every consuming team as over their
+/// limit during a failure of egret's own dependency.
 pub const REQUESTS_TOTAL: &str = "egret_dataapi_requests_total";
 /// End-to-end latency as the CALLER experienced it, in seconds because that is
 /// Prometheus' base unit.
@@ -137,6 +146,15 @@ pub const REQUESTS_TOTAL: &str = "egret_dataapi_requests_total";
 /// separate readings with this comment claiming otherwise.
 pub const REQUEST_DURATION_SECONDS: &str = "egret_dataapi_request_duration_seconds";
 /// Hit/miss, counted only where a lookup actually happened.
+///
+/// **Unchanged in meaning by Package 4**, which is worth saying because the
+/// shared store gives a lookup a second way to fail. A store error is counted
+/// here as a `miss` — which is what it IS from the endpoint's point of view: the
+/// request re-executed. What it is *not* is a cache that was consulted and had
+/// nothing; that distinction lives in [`STORE_CALLS_TOTAL`]'s `result="error"`,
+/// so an operator seeing the hit rate collapse can tell "the working set turned
+/// over" from "the store stopped answering" by looking at exactly one other
+/// series.
 pub const CACHE_LOOKUPS_TOTAL: &str = "egret_dataapi_cache_lookups_total";
 /// The calls refused before a workspace was known, which is the larger of the
 /// two ways a call leaves no `access_log` row — see the module comment.
@@ -146,6 +164,57 @@ pub const PREAUTH_REJECTIONS_TOTAL: &str = "egret_dataapi_preauth_rejections_tot
 /// Its own counter rather than a second reason for [`PREAUTH_REJECTIONS_TOTAL`]
 /// to move, because the two name different faults — see the module comment.
 pub const ACCESS_LOG_WRITE_FAILURES_TOTAL: &str = "egret_dataapi_access_log_write_failures_total";
+/// Round trips to the SHARED limiter/cache store (Package 4), by operation and
+/// outcome.
+///
+/// Only [`super::shared::SharedStore`] moves it: an in-process store makes no
+/// round trip, so a deployment that has not configured one reports nothing here
+/// rather than reporting zeros — the absence of the series is itself the answer
+/// to "is this deployment sharing state?".
+///
+/// The `result="error"` stream is the one an operator alerts on, and it means
+/// two different things depending on `store`, which is exactly why the label
+/// exists: on `ratelimit` it counts requests that were **refused** because the
+/// allowance could not be consulted (fail closed), and on `cache_get`/
+/// `cache_put` it counts lookups that silently became misses (fail open). See
+/// [`super::shared`] for why the two policies are opposite.
+pub const STORE_CALLS_TOTAL: &str = "egret_dataapi_store_calls_total";
+/// How long a shared-store round trip took, in seconds.
+///
+/// Timed around the timeout, so a call that gave up at
+/// `shared::STORE_TIMEOUT` records that duration rather than vanishing — a
+/// store that has stopped answering must be visible as latency and not only as
+/// a missing observation.
+pub const STORE_DURATION_SECONDS: &str = "egret_dataapi_store_duration_seconds";
+
+/// Which shared-store round trip this was.
+///
+/// An enum rather than two `&str` arguments, so the label pair cannot be
+/// assembled wrongly at a call site and the value set is closed by the type —
+/// the same reason [`super::error::Wire::code`] is `&'static str`. See the
+/// cardinality note in this module's comment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StoreOp {
+    /// The token-bucket script.
+    RateLimit,
+    /// A response-cache read.
+    CacheGet,
+    /// A response-cache write.
+    CachePut,
+}
+
+impl StoreOp {
+    /// `(store, op)` — two labels rather than one, so `sum by (store)` answers
+    /// "is the cache healthy" without an operator having to know that a cache
+    /// has two operations and the limiter one.
+    pub(crate) fn labels(self) -> (&'static str, &'static str) {
+        match self {
+            Self::RateLimit => ("ratelimit", "check"),
+            Self::CacheGet => ("cache", "get"),
+            Self::CachePut => ("cache", "put"),
+        }
+    }
+}
 
 /// The `code` label's value on a success, where there is no [`super::error::Wire`]
 /// to read one off.
@@ -188,6 +257,16 @@ pub fn describe() {
         ACCESS_LOG_WRITE_FAILURES_TOTAL,
         "Data API serving calls whose dataapi.access_log INSERT failed, so no row exists for them \
          either"
+    );
+    ::metrics::describe_counter!(
+        STORE_CALLS_TOTAL,
+        "Data API serving round trips to the shared limiter/cache store; result=error means a \
+         rate-limit refusal (fail closed) or a cache miss (fail open) depending on store"
+    );
+    ::metrics::describe_histogram!(
+        STORE_DURATION_SECONDS,
+        ::metrics::Unit::Seconds,
+        "Data API serving shared-store round-trip latency, including calls that timed out"
     );
 }
 
@@ -259,6 +338,29 @@ pub(crate) fn record_cache_lookup(hit: bool) {
 /// Neither counter has labels and neither may gain one: at a pre-auth refusal
 /// everything known is the caller's unverified word, and the write failure's
 /// only distinguishing value is a sqlx error string.
+/// One shared-store round trip: the counter and the latency histogram, together.
+///
+/// `ok` rather than a `Result` because the two failure shapes a store call has —
+/// an error reply and a timeout — are the SAME outcome to both failure policies,
+/// and giving them two label values would invite one of them to be treated as
+/// admissible later. The distinction is in the log line, where it belongs.
+///
+/// The duration is recorded on both arms. A store that has stopped answering
+/// shows up as `STORE_TIMEOUT`-long observations on the histogram, so a
+/// dashboard sees the outage as latency and not as a gap.
+pub(crate) fn record_store_call(op: StoreOp, ok: bool, duration: Duration) {
+    let (store, operation) = op.labels();
+    ::metrics::counter!(
+        STORE_CALLS_TOTAL,
+        "store" => store,
+        "op" => operation,
+        "result" => if ok { "ok" } else { "error" },
+    )
+    .increment(1);
+    ::metrics::histogram!(STORE_DURATION_SECONDS, "store" => store, "op" => operation)
+        .record(duration.as_secs_f64());
+}
+
 pub(crate) fn record_access_log_outcome(recorded: Recorded) {
     match recorded {
         Recorded::Row => {}
@@ -405,6 +507,7 @@ mod tests {
             "deadline_exceeded",
             "overloaded",
             "payload_too_large",
+            "rate_limiter_unavailable",
             "internal",
         ]);
 

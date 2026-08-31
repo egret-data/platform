@@ -26,21 +26,34 @@ pub mod metrics;
 pub(crate) mod params;
 pub mod ratelimit;
 pub mod router;
+/// Package 4's shared limiter/cache store, and the startup refusal that stands
+/// in for it until one is configured. `pub` because the composition root builds
+/// the store and reads [`shared::choose_store`]'s verdict.
+pub mod shared;
 
 pub use access_log::{scheduled_retention, AccessLogEntry, AccessLogStore, Recorded};
 pub use auth::{verify_serving_token, ServingPrincipal, DATA_API_AUDIENCE};
-pub use cache::{cache_key, shared_cache_allowed, CachedResponse, ResponseCache};
+/// The cheap structural size estimate a store applies before serialising.
+///
+/// Exported only so `tests/serving_shared_store.rs` can construct a body that
+/// deliberately passes it and is caught by the exact serialised length instead.
+/// Without that, a test cannot tell which of `SharedStore::put_at`'s two size
+/// checks is the one that decides — and a first version of it proved only the
+/// cheaper one, which turns out not to be a bound at all.
+pub use cache::estimate_bytes as cache_entry_estimate;
+pub use cache::{cache_key, shared_cache_allowed, CachedResponse, ResponseCache, ResponseStore};
 pub use error::{ServingErrorBody, ServingErrorDetail};
 pub use governance::{governance_allows_serving, LiveConnection};
 pub use guard::{
     INGRESS_READ_TIMEOUT_SECS, SERVING_MAX_BODY_BYTES, SERVING_MAX_CONCURRENCY,
     SERVING_REQUEST_DEADLINE,
 };
-pub use ratelimit::{Rate, RateLimitStore, TokenBucket};
+pub use ratelimit::{Rate, RateLimitStore, Refusal, TokenBucket};
 pub use router::{
     serving_openapi, serving_router, MetaContract, ServingMeta, ServingResponse, ServingStatus,
     StatementMeta,
 };
+pub use shared::{choose_store, SharedStore, StoreChoice};
 
 /// A serving-path failure.
 ///
@@ -450,6 +463,31 @@ pub enum ServingError {
     /// caller's own doing.
     #[error("the request body is larger than the serving surface accepts")]
     PayloadTooLarge,
+    /// The shared rate-limit store could not be consulted, so no allowance was
+    /// checked (Package 4).
+    ///
+    /// **A new variant rather than an answer built outside the taxonomy, and
+    /// rather than one of the existing 503s.** It is not `overloaded` — nothing
+    /// about egret is full, and an operator told "we shed your request" would go
+    /// looking at concurrency permits. It is not `internal` either: that code
+    /// is now deliberately a statement about egret's own components failing,
+    /// and while this is one of those, folding it in would re-widen the very
+    /// code Package 3b narrowed and would answer 500 for a condition that is
+    /// both transient and retryable. And it is emphatically not a 429: a `429
+    /// rate_limited` is a promise that the caller sent too much, which here
+    /// would be a lie about the caller.
+    ///
+    /// The refusal itself is the deliberate half — see
+    /// [`ratelimit::Refusal::Unavailable`]. Admitting the request would restore
+    /// the multiplied-limit defect this package exists to remove, unbounded,
+    /// at the one moment nobody is watching.
+    ///
+    /// Carries the same short `Retry-After` as [`Self::Overloaded`], for the
+    /// same reason: it clears on its own when the store comes back, so a
+    /// prediction is honest and the config-drift floor (which means "a human
+    /// must act") would not be.
+    #[error("the shared rate-limit store could not be reached")]
+    LimiterUnavailable,
     /// Something on egret's side failed — the IdP key store was unreachable, say.
     /// Deliberately NOT folded into [`Self::Unauthorized`]: a 401 tells an
     /// operator their credential is bad and sends them to rotate it, while the
@@ -581,6 +619,7 @@ pub(crate) mod census {
             ("ServingDeadline", ServingError::ServingDeadline),
             ("Overloaded", ServingError::Overloaded),
             ("PayloadTooLarge", ServingError::PayloadTooLarge),
+            ("LimiterUnavailable", ServingError::LimiterUnavailable),
             ("Internal", ServingError::internal("boom")),
         ]
     }

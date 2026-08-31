@@ -1378,6 +1378,47 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     let identity = egret_bin::identity::EgretIdentity::from_config(&config);
     let dataapi_consumer_url = identity.consumer_base_url().to_string();
 
+    // Package 4 — decide what backs the Data API's rate-limit buckets and
+    // response cache, BEFORE anything expensive is built.
+    //
+    // Placed this early on purpose: the interim guard is a startup REFUSAL, and
+    // a refusal that fires after the pool, the PDP and every seam have been
+    // constructed is one an operator meets thirty seconds into a rollout instead
+    // of immediately. `?` on the error string makes it a hard exit — the process
+    // does not come up with silently-multiplied rate limits.
+    let (dataapi_cache, dataapi_rate_limits): (
+        std::sync::Arc<dyn egret_dataapi::serving::ResponseStore>,
+        std::sync::Arc<dyn egret_dataapi::serving::RateLimitStore>,
+    ) = match egret_dataapi::serving::choose_store(
+        config.data_api.replicas,
+        config.data_api.shared_store_url.as_deref(),
+    )
+    .map_err(|msg| anyhow::anyhow!(msg))?
+    {
+        egret_dataapi::serving::StoreChoice::InProcess => {
+            tracing::info!(
+                "data-api serving state is process-local (one replica, no shared store)"
+            );
+            (
+                std::sync::Arc::new(egret_dataapi::serving::ResponseCache::new()),
+                std::sync::Arc::new(egret_dataapi::serving::TokenBucket::new()),
+            )
+        }
+        // ONE store behind BOTH seams, so a deployment cannot end up with a
+        // shared limiter and a process-local cache by configuring half of it,
+        // and so each replica holds one connection rather than two.
+        //
+        // A connect failure is fatal for the same reason the replica guard is:
+        // an operator who configured a shared store and cannot reach it must not
+        // be quietly downgraded to the state that multiplies every limit.
+        egret_dataapi::serving::StoreChoice::Shared(url) => {
+            let store =
+                std::sync::Arc::new(egret_dataapi::serving::SharedStore::connect(&url).await?);
+            tracing::info!("data-api serving state is shared across replicas");
+            (store.clone(), store)
+        }
+    };
+
     // Task 4 (STS cutover): the machine-IdP mints the short-lived per-user
     // engine JWT carried in the notebook-runtime manifest — replacing the old
     // Keycloak refresh-grant broker (deleted; couldn't mint for local users or
@@ -1961,11 +2002,13 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         // publishing an endpoint or minting a client lands in the one `audit_log`
         // an operator already queries, not in a Data-API-local trail.
         audit: audit_sink.clone(),
-        // The serving surface's per-process cache and rate-limit buckets (P4
-        // Task 4). Constructed ONCE, here: built per request they would be a
-        // cache that never hits and a limit nobody reaches.
-        cache: egret_dataapi::serving::ResponseCache::new(),
-        rate_limits: std::sync::Arc::new(egret_dataapi::serving::TokenBucket::new()),
+        // The serving surface's cache and rate-limit buckets (P4 Task 4).
+        // Constructed ONCE, above: built per request they would be a cache that
+        // never hits and a limit nobody reaches. Process-local or shared across
+        // replicas depending on `choose_store` — see there for the refusal that
+        // stops a multi-replica deployment from getting the process-local pair.
+        cache: dataapi_cache,
+        rate_limits: dataapi_rate_limits,
         // The SAME guard the prune scheduler above was built with (recomputed
         // here rather than shared, since that `retention` binding is local to
         // its own block): the UI is told what is actually happening — whether a

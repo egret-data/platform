@@ -199,6 +199,25 @@ arc-swap = "1"
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.17", default-features = false }
 rcgen = { version = "0.14", default-features = false, features = ["pem", "crypto", "ring"] }
+# Package 4: the SHARED limiter/cache store behind `egret-dataapi`'s
+# `RateLimitStore` and `ResponseStore` seams.
+#
+# Chosen over `fred` and over a `deadpool-redis`/`bb8-redis` pool for one
+# measured reason: with `default-features = false` and only `script`,
+# `tokio-comp` and `connection-manager` it adds exactly THREE packages to
+# `Cargo.lock` — `redis`, `combine`, `arcstr` — and `connection-manager` is
+# itself a reconnecting, multiplexed connection, so no second pooling crate
+# joins the tree either.
+#
+# `script` is load-bearing, not a convenience: the token bucket is a Lua script,
+# because a read-modify-write across a network over-admits under exactly the
+# concurrency a limiter exists to bound. `redis::Script` is EVALSHA with an EVAL
+# fallback, so the whole check is ONE round trip.
+#
+# TLS features are deliberately absent. The store is an in-cluster Service, and
+# `tls-rustls-comp` would add a second rustls configuration story for a hop that
+# never leaves the pod network. Add it with the deployment that needs it.
+redis = { version = "1", default-features = false, features = ["script", "tokio-comp", "connection-manager"] }
 
 # Vendored mysql_async: patched to support StarRocks' JWT/OIDC auth-switch
 # (`authentication_openid_connect_client`). See third_party/mysql_async.

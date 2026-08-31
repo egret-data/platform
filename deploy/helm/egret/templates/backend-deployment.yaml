@@ -1,3 +1,16 @@
+{{- /*
+Package 4 — the same refusal the backend makes at startup, made here so an
+operator meets it at `helm upgrade` rather than in a CrashLoopBackOff.
+
+`serving::choose_store` is the AUTHORITY: it runs in every deployment, chart or
+no chart, and it is what actually stops a process from serving with
+process-local limits. This guard cannot be more permissive than that one (it
+tests the same two values with the same comparison) and exists only to move the
+message earlier.
+*/ -}}
+{{- if and (gt (int .Values.backend.replicas) 1) (not .Values.sharedStore.enabled) (not .Values.sharedStore.url) }}
+{{- fail (printf "backend.replicas is %d, but no shared store is configured: the Data API's rate-limit buckets and response cache are held per process, so every published rate limit would be multiplied by %d and the response cache fragmented %d ways, silently.\n\nTwo remedies, either of which clears this:\n  1. Set sharedStore.enabled=true (or sharedStore.url=redis://…) so all replicas share one limiter and one cache.\n  2. Set backend.replicas=1, which makes the process-local state correct again." (int .Values.backend.replicas) (int .Values.backend.replicas) (int .Values.backend.replicas)) }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata: { name: egret, namespace: {{ .Release.Namespace }} }
