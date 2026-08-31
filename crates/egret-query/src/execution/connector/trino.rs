@@ -183,18 +183,50 @@ impl TrinoConnector {
         }
     }
 
-    /// Build the reqwest client, pinning the coordinator's self-signed cert as a
-    /// trusted root when `tls_cert` is set (jwt-mode/TLS). Pinning supersedes
-    /// `danger_accept_invalid_certs`; without a pinned cert the client falls back
-    /// to system roots (unchanged for plain-HTTP engines).
-    fn build_client(&self, timeout: std::time::Duration) -> Result<reqwest::Client, EngineError> {
-        let mut b = reqwest::Client::builder().timeout(timeout);
-        if let Some(pem) = &self.tls_cert {
-            let cert = reqwest::Certificate::from_pem(pem.as_bytes())
-                .map_err(|e| EngineError::Connect(format!("engine cert: {e}")))?;
-            b = b.add_root_certificate(cert);
+    /// This connection's cache key in [`super::http_pool`] — the coordinator's
+    /// origin and its pinned PEM, and deliberately nothing else.
+    ///
+    /// **This is the projection the pool's safety argument rests on.** Every
+    /// per-principal value on a `TrinoConnector` — `secret`, `session_user`,
+    /// `bearer` — is absent here by construction, so no two principals can be
+    /// told apart by the key and therefore none can be *conflated* by it either:
+    /// the client they share carries no identity at all, and each request
+    /// attaches its own in [`Self::auth`]. See the module comment on
+    /// [`super::http_pool`], and
+    /// `the_client_key_ignores_every_identity_field` below.
+    fn client_key(&self) -> super::http_pool::HttpClientKey {
+        super::http_pool::HttpClientKey {
+            base_url: self.base_url.clone(),
+            tls_cert: self.tls_cert.clone(),
         }
-        b.build().map_err(|e| EngineError::Connect(e.to_string()))
+    }
+
+    /// The shared `reqwest::Client` for this coordinator, built on first use.
+    ///
+    /// Pinning the coordinator's self-signed cert as a trusted root when
+    /// `tls_cert` is set (jwt-mode/TLS) supersedes `danger_accept_invalid_certs`;
+    /// without a pinned cert the client falls back to system roots (unchanged for
+    /// plain-HTTP engines).
+    ///
+    /// The per-query deadline is **not** on the client any more — it is applied
+    /// per request by [`Self::timed`], because one client now serves callers that
+    /// pass different budgets.
+    fn client(&self) -> Result<reqwest::Client, EngineError> {
+        super::http_pool::client_for(&self.client_key())
+    }
+
+    /// Apply the caller's deadline to one request.
+    ///
+    /// Every request this connector builds goes through here. It used to be
+    /// `Client::builder().timeout(...)`, which was the same deadline configured
+    /// one level up; moving it did not weaken it, but forgetting it on a request
+    /// would leave that request unbounded, which is why there is exactly one
+    /// spelling of it.
+    fn timed(
+        req: reqwest::RequestBuilder,
+        timeout: std::time::Duration,
+    ) -> reqwest::RequestBuilder {
+        req.timeout(timeout)
     }
 
     /// The `X-Trino-User` identity (impersonated end-user, or the service user).
@@ -366,20 +398,24 @@ impl TrinoConnector {
             let next = resp.next_uri.take().map(|u| self.rebase(&u));
             if cancel.is_cancelled() {
                 if let Some(uri) = &next {
-                    let _ = self.auth(client.delete(uri)).send().await;
+                    let _ = Self::timed(self.auth(client.delete(uri)), limits.timeout)
+                        .send()
+                        .await;
                 }
                 return Err(EngineError::Cancelled);
             }
             if rows.len() > cap {
                 if let Some(uri) = &next {
-                    let _ = self.auth(client.delete(uri)).send().await;
+                    let _ = Self::timed(self.auth(client.delete(uri)), limits.timeout)
+                        .send()
+                        .await;
                 }
                 break;
             }
             match next {
                 None => break,
                 Some(uri) => {
-                    resp = send(self.auth(client.get(&uri))).await?;
+                    resp = send(Self::timed(self.auth(client.get(&uri)), limits.timeout)).await?;
                 }
             }
         }
@@ -409,14 +445,17 @@ impl Connector for TrinoConnector {
         if let Some(reason) = &self.insecure_bearer {
             return Err(EngineError::Connect(reason.clone()));
         }
-        let client = self.build_client(limits.timeout)?;
+        let client = self.client()?;
 
         let session = format!("query_max_run_time={}s", limits.timeout.as_secs().max(1));
-        let req = self.auth(
-            client
-                .post(format!("{}/v1/statement", self.base_url))
-                .header("X-Trino-Session", session)
-                .body(sql.to_string()),
+        let req = Self::timed(
+            self.auth(
+                client
+                    .post(format!("{}/v1/statement", self.base_url))
+                    .header("X-Trino-Session", session)
+                    .body(sql.to_string()),
+            ),
+            limits.timeout,
         );
 
         self.run_statement(&client, req, limits, cancel).await
@@ -452,7 +491,7 @@ impl Connector for TrinoConnector {
         if let Some(reason) = &self.insecure_bearer {
             return Err(EngineError::Connect(reason.clone()));
         }
-        let client = self.build_client(limits.timeout)?;
+        let client = self.client()?;
         let req = self.prepared_request(&client, sql, params, limits);
 
         self.run_statement(&client, req, limits, cancel).await
@@ -500,17 +539,20 @@ impl Connector for TrinoConnector {
         if let Some(reason) = &self.insecure_bearer {
             return Err(EngineError::Connect(reason.clone()));
         }
-        let client = self.build_client(timeout)?;
+        let client = self.client()?;
         let wrapped = format!("SELECT * FROM (\n{sql}\n) AS _egret_ds LIMIT 0");
         let name = "p1";
         let prepared_header = format!("{name}={}", percent_encode(&wrapped));
         let session = format!("query_max_run_time={}s", timeout.as_secs().max(1));
-        let req = self.auth(
-            client
-                .post(format!("{}/v1/statement", self.base_url))
-                .header("X-Trino-Session", session)
-                .header("X-Trino-Prepared-Statement", prepared_header)
-                .body(format!("DESCRIBE OUTPUT {name}")),
+        let req = Self::timed(
+            self.auth(
+                client
+                    .post(format!("{}/v1/statement", self.base_url))
+                    .header("X-Trino-Session", session)
+                    .header("X-Trino-Prepared-Statement", prepared_header)
+                    .body(format!("DESCRIBE OUTPUT {name}")),
+            ),
+            timeout,
         );
         // DESCRIBE OUTPUT's own result has one row per output column of the
         // wrapped query, never per-row query data — a generous cap costs
@@ -573,35 +615,178 @@ impl TrinoConnector {
             .join(", ");
         let body = format!("EXECUTE {name} USING {using}");
         let prepared_header = format!("{name}={}", percent_encode(sql));
-        self.auth(
-            client
-                .post(format!("{}/v1/statement", self.base_url))
-                .header("X-Trino-Session", session)
-                .header("X-Trino-Prepared-Statement", prepared_header)
-                .body(body),
+        Self::timed(
+            self.auth(
+                client
+                    .post(format!("{}/v1/statement", self.base_url))
+                    .header("X-Trino-Session", session)
+                    .header("X-Trino-Prepared-Statement", prepared_header)
+                    .body(body),
+            ),
+            limits.timeout,
         )
     }
 }
 
-async fn send(req: reqwest::RequestBuilder) -> Result<TrinoResp, EngineError> {
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| EngineError::Connect(e.to_string()))?;
+/// How many times one Trino request is sent before a 503 is reported as a
+/// failure — the initial attempt plus four retries.
+///
+/// Bounded on purpose. The Trino client protocol says to keep retrying a 503,
+/// and its own Java client does so for up to two minutes; egret cannot, because
+/// every caller here already sits under a wall-clock budget it did not choose
+/// (`Limits::timeout`, `DESCRIBE_TIMEOUT`, the JobManager's). Retrying past that
+/// budget cannot succeed — the outer `tokio::time::timeout` drops this future —
+/// so the only thing an unbounded loop would add is a request the caller is no
+/// longer waiting for. Five attempts with the backoff below cost at most
+/// [`TRINO_RETRY_MAX_TOTAL_WAIT`] of sleeping, which fits inside every budget in
+/// the system.
+const TRINO_RETRY_MAX_ATTEMPTS: u32 = 5;
+
+/// First backoff, doubled per retry and capped: 50ms, 100ms, 200ms, 400ms.
+///
+/// The Trino protocol documents ~50-100ms as the right initial interval for a
+/// coordinator that is busy rather than broken.
+const TRINO_RETRY_BASE_BACKOFF: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Ceiling on ONE sleep, whether it came from the backoff or from `Retry-After`.
+///
+/// `Retry-After` is a value the coordinator chooses, and this connector is the
+/// thing on the other end of a request a human or a Data API caller is waiting
+/// on. Honouring an arbitrary `Retry-After: 3600` would turn a busy coordinator
+/// into a hung egret request. Capping it means egret still *respects* the
+/// header — it waits longer than its own backoff would have — without handing
+/// the engine control of egret's latency.
+const TRINO_RETRY_MAX_BACKOFF: std::time::Duration = std::time::Duration::from_millis(1000);
+
+/// The most time the retries of a single request can spend asleep.
+/// Stated as a constant so the bound is checkable rather than inferred from the
+/// two above: 50 + 100 + 200 + 400 = 750ms of backoff, and at most
+/// 4 x 1000ms if every attempt carries a `Retry-After`.
+#[cfg(test)]
+const TRINO_RETRY_MAX_TOTAL_WAIT: std::time::Duration = std::time::Duration::from_millis(4000);
+
+/// The `Retry-After` value, as a duration, when the header is present and is a
+/// delta-seconds count.
+///
+/// **Delta-seconds only, not the HTTP-date form.** RFC 9110 permits both, and a
+/// date requires a clock comparison against a server whose clock egret does not
+/// trust — a coordinator running five minutes fast would produce a negative or
+/// absurd wait from a perfectly well-formed header. Trino sends the numeric form
+/// when it sends one at all. An unparseable or date-shaped header is treated as
+/// absent, which falls back to egret's own backoff: strictly safe, because the
+/// fallback is shorter.
+fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<std::time::Duration> {
+    let raw = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
+    let secs: u64 = raw.trim().parse().ok()?;
+    Some(std::time::Duration::from_secs(secs))
+}
+
+/// The outcome of ONE attempt, separating "retry this" from every other answer
+/// so [`send`] can decide without re-inspecting a consumed response.
+enum Attempt {
+    /// A final answer — success or a failure that retrying cannot change.
+    Done(Result<TrinoResp, EngineError>),
+    /// The coordinator said 503. Per the Trino client protocol the query is
+    /// still alive and the same URI should be re-requested.
+    Retry(Option<std::time::Duration>),
+}
+
+async fn send_once(req: reqwest::RequestBuilder) -> Attempt {
+    let resp = match req.send().await {
+        Ok(r) => r,
+        Err(e) => return Attempt::Done(Err(EngineError::Connect(e.to_string()))),
+    };
     if !resp.status().is_success() {
         let status = resp.status();
+        // **503 is not a failure in this protocol.** The Trino client protocol
+        // defines a 503 on `POST /v1/statement` and on a `nextUri` GET as
+        // "the coordinator is busy, the query is still alive, send the same
+        // request again". Reporting it as an engine error abandoned a query
+        // that was still running and answered the caller with a 500 —
+        // egret's own bug reported as the engine's.
+        if status == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+            return Attempt::Retry(parse_retry_after(resp.headers()));
+        }
         // Per-user delegation: a 401/403 means the engine rejected THIS user's
         // identity or denied the tables (bad/expired JWT, or a Ranger/file-ACL deny).
         // Surface a clean Forbidden (→ HTTP 403 with a data-access message) instead of
         // an opaque engine error, so the BI client can explain it.
         if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            return Err(EngineError::Forbidden);
+            return Attempt::Done(Err(EngineError::Forbidden));
         }
-        return Err(EngineError::Engine(format!("http {status}")));
+        return Attempt::Done(Err(EngineError::Engine(format!("http {status}"))));
     }
-    resp.json::<TrinoResp>()
-        .await
-        .map_err(|e| EngineError::Engine(format!("decode: {e}")))
+    Attempt::Done(
+        resp.json::<TrinoResp>()
+            .await
+            .map_err(|e| EngineError::Engine(format!("decode: {e}"))),
+    )
+}
+
+/// Send one Trino request, honouring the protocol's 503-means-retry rule.
+///
+/// # Why re-POSTing a statement is safe
+///
+/// A 503 on `POST /v1/statement` means the coordinator did **not** accept the
+/// statement — there is no query to duplicate, which is exactly why the protocol
+/// says to send it again. A 503 on a `nextUri` GET is a poll that produced
+/// nothing; re-issuing the same `nextUri` is how the protocol advances. Neither
+/// retry can execute a statement twice, and this connector only ever carries
+/// `SELECT`s. The `DELETE` sent to cancel is deliberately NOT routed through
+/// here: it is already best-effort (`let _ =`), and retrying a cancellation
+/// while the caller has stopped waiting buys nothing.
+///
+/// # Bounded, always
+///
+/// [`TRINO_RETRY_MAX_ATTEMPTS`] attempts, exponential backoff capped by
+/// [`TRINO_RETRY_MAX_BACKOFF`], and `Retry-After` honoured under the same cap.
+/// When the attempts run out the caller gets the same `http 503` error it used
+/// to get immediately — a permanently unavailable coordinator is still an error,
+/// just no longer one produced on the first try.
+async fn send(req: reqwest::RequestBuilder) -> Result<TrinoResp, EngineError> {
+    let mut req = req;
+    let mut attempt: u32 = 1;
+    loop {
+        // Cloned BEFORE the send, because `send` consumes the builder.
+        // `try_clone` returns `None` only for a streaming body, which this
+        // connector never builds (every body is a `String`); if one ever
+        // appears, the `None` arm below reports the 503 rather than silently
+        // retrying something it cannot reproduce.
+        let next = req.try_clone();
+        match send_once(req).await {
+            Attempt::Done(r) => return r,
+            Attempt::Retry(retry_after) => {
+                let Some(next_req) = next else {
+                    return Err(EngineError::Engine(
+                        "http 503 Service Unavailable".to_string(),
+                    ));
+                };
+                if attempt >= TRINO_RETRY_MAX_ATTEMPTS {
+                    return Err(EngineError::Engine(
+                        "http 503 Service Unavailable".to_string(),
+                    ));
+                }
+                // `1 << (attempt - 1)` over a u32 attempt bounded by
+                // TRINO_RETRY_MAX_ATTEMPTS cannot overflow, and the result is
+                // capped anyway.
+                let backoff = TRINO_RETRY_BASE_BACKOFF
+                    .saturating_mul(1u32 << (attempt - 1))
+                    .min(TRINO_RETRY_MAX_BACKOFF);
+                let wait = retry_after
+                    .map(|d| d.min(TRINO_RETRY_MAX_BACKOFF))
+                    .unwrap_or(backoff);
+                tracing::debug!(
+                    attempt,
+                    wait_ms = wait.as_millis() as u64,
+                    honoured_retry_after = retry_after.is_some(),
+                    "trino coordinator returned 503; the query is still alive, retrying"
+                );
+                tokio::time::sleep(wait).await;
+                attempt += 1;
+                req = next_req;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1073,7 +1258,155 @@ mod tests {
             bearer_token: Some("eyJ.jwt.sig".into()),
         });
         assert!(c.secure);
-        assert!(c.build_client(std::time::Duration::from_secs(5)).is_ok());
+        assert!(c.client().is_ok());
+    }
+
+    /// **The pool's safety property, asserted where the projection lives.**
+    ///
+    /// Two connections to one coordinator that differ in EVERY identity a Trino
+    /// request can carry — the basic-auth secret, the impersonated
+    /// `X-Trino-User`, and the per-user OIDC bearer — must produce the same
+    /// cache key, because the client they share carries none of those. The
+    /// request each one builds must still carry its own.
+    ///
+    /// Mutating `client_key` to include any of the three makes the first
+    /// assertion fail; moving an identity onto the client (a `default_headers`
+    /// on the shared builder, say) is caught by
+    /// `a_shared_client_never_carries_one_principals_cookie_to_another` and
+    /// `two_principals_on_one_coordinator_share_a_client_and_never_an_identity`
+    /// in `tests/connector_trino_pool.rs`, which drive a real server.
+    #[test]
+    fn the_client_key_ignores_every_identity_field() {
+        let base = |secret: Option<&str>, user: &str, bearer: Option<&str>| ConnSpec {
+            engine: Engine::Trino,
+            host: "shared.svc".into(),
+            port: 8080,
+            options: ConnOptions {
+                impersonate: Some(true),
+                ..Default::default()
+            },
+            secret: secret.map(str::to_string),
+            session_user: Some(user.to_string()),
+            bearer_token: bearer.map(str::to_string),
+        };
+        let alice = TrinoConnector::new(&base(Some("secret-a"), "alice", Some("jwt-alice")));
+        let bob = TrinoConnector::new(&base(Some("secret-b"), "bob", Some("jwt-bob")));
+
+        assert_eq!(
+            alice.client_key(),
+            bob.client_key(),
+            "two principals on one coordinator must share one client"
+        );
+
+        // And the shared key has not cost them their identities: each request
+        // still carries its own.
+        let client = reqwest::Client::new();
+        let req_a = alice
+            .auth(client.get("http://shared.svc:8080/v1/statement"))
+            .build()
+            .expect("build alice");
+        let req_b = bob
+            .auth(client.get("http://shared.svc:8080/v1/statement"))
+            .build()
+            .expect("build bob");
+        assert_eq!(req_a.headers().get("X-Trino-User").unwrap(), "alice");
+        assert_eq!(req_b.headers().get("X-Trino-User").unwrap(), "bob");
+        assert_eq!(
+            req_a.headers().get("authorization").unwrap(),
+            "Bearer jwt-alice"
+        );
+        assert_eq!(
+            req_b.headers().get("authorization").unwrap(),
+            "Bearer jwt-bob"
+        );
+    }
+
+    /// The cert is the one thing that MUST stay in the key: a client built with
+    /// one coordinator's pinned root would trust the wrong CA for the other.
+    #[test]
+    fn the_client_key_separates_two_pinned_certs() {
+        let spec = |pem: &str| ConnSpec {
+            engine: Engine::Trino,
+            host: "pinned.svc".into(),
+            port: 8443,
+            options: ConnOptions {
+                http_scheme: Some("https".into()),
+                tls_cert: Some(pem.to_string()),
+                ..Default::default()
+            },
+            secret: None,
+            session_user: None,
+            bearer_token: None,
+        };
+        assert_ne!(
+            TrinoConnector::new(&spec("-----PEM A-----")).client_key(),
+            TrinoConnector::new(&spec("-----PEM B-----")).client_key()
+        );
+    }
+
+    /// The deadline moved from the client to the request; a request that lost it
+    /// would be unbounded.
+    #[test]
+    fn every_request_carries_the_callers_deadline() {
+        let c = TrinoConnector::new(&ConnSpec {
+            engine: Engine::Trino,
+            host: "deadline.svc".into(),
+            port: 8080,
+            options: ConnOptions::default(),
+            secret: None,
+            session_user: None,
+            bearer_token: None,
+        });
+        let client = reqwest::Client::new();
+        let req = TrinoConnector::timed(
+            c.auth(client.get("http://deadline.svc:8080/v1/statement")),
+            std::time::Duration::from_secs(7),
+        )
+        .build()
+        .expect("build");
+        assert_eq!(req.timeout(), Some(&std::time::Duration::from_secs(7)));
+    }
+
+    // --- Retry-After parsing (the 503 path; the loop itself is driven against a
+    // real server in `tests/connector_trino_pool.rs`) ---
+
+    #[test]
+    fn retry_after_reads_the_delta_seconds_form() {
+        let mut h = reqwest::header::HeaderMap::new();
+        h.insert(reqwest::header::RETRY_AFTER, "2".parse().unwrap());
+        assert_eq!(
+            parse_retry_after(&h),
+            Some(std::time::Duration::from_secs(2))
+        );
+    }
+
+    #[test]
+    fn retry_after_ignores_the_http_date_form_and_anything_unparseable() {
+        // Deliberate: a date needs a clock comparison against a server whose
+        // clock egret does not trust. Treated as absent, which falls back to
+        // egret's own (shorter) backoff.
+        for v in ["Wed, 21 Oct 2015 07:28:00 GMT", "soon", "-3"] {
+            let mut h = reqwest::header::HeaderMap::new();
+            h.insert(reqwest::header::RETRY_AFTER, v.parse().unwrap());
+            assert_eq!(parse_retry_after(&h), None, "should ignore {v:?}");
+        }
+        assert_eq!(
+            parse_retry_after(&reqwest::header::HeaderMap::new()),
+            None,
+            "an absent header is absent"
+        );
+    }
+
+    /// The bound the retry loop promises, checked as arithmetic rather than by
+    /// waiting for it: four retries, each capped, cannot outlast the shortest
+    /// caller budget in the system.
+    #[test]
+    fn the_retry_budget_is_bounded() {
+        let worst: std::time::Duration = TRINO_RETRY_MAX_BACKOFF * (TRINO_RETRY_MAX_ATTEMPTS - 1);
+        assert!(
+            worst <= TRINO_RETRY_MAX_TOTAL_WAIT,
+            "retries may sleep at most {TRINO_RETRY_MAX_TOTAL_WAIT:?}, got {worst:?}"
+        );
     }
 
     /// Over genuine TLS the redundant `X-Forwarded-Proto` header is omitted.

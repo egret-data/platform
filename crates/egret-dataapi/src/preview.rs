@@ -854,6 +854,31 @@ async fn generate_off_the_worker(
     })
 }
 
+/// Restore the author-facing answer for the one execution failure the port
+/// stopped spelling out.
+///
+/// Package 3b split `QueryExecPort`'s error table so `execute_as` could report a
+/// timeout as a value rather than as the string `"query timed out"` — the
+/// serving surface needs it to answer `504 timeout`, and matching another
+/// crate's wording was the thing that could not be allowed to keep compiling.
+/// The cost lands here: the tagged failure is an `Error::Internal`, so without
+/// this the author previewing a slow draft would be told `500 internal error`
+/// instead of what actually happened.
+///
+/// So this is not a widening of what preview discloses — it restores exactly the
+/// sentence and the status this route already produced. Only the timeout is
+/// remapped: an unreachable engine stays `Internal`, because it is genuinely not
+/// the author's problem and its detail (a coordinator's host:port) is what
+/// `Internal`'s redaction exists to withhold.
+fn preview_engine_error(e: egret_core::Error) -> egret_core::Error {
+    match egret_query_api::ExecFailure::kind_of(&e) {
+        Some(egret_query_api::ExecFailureKind::Timeout) => {
+            egret_core::Error::InvalidInput("query timed out".into())
+        }
+        _ => e,
+    }
+}
+
 /// Run `body` as `principal` and return what the engine said.
 ///
 /// Every error variant passes through unchanged, which is the deliberate
@@ -972,7 +997,8 @@ pub(crate) async fn run(
                 timeout: std::time::Duration::from_secs(PREVIEW_TIMEOUT_SECS),
             },
         )
-        .await?;
+        .await
+        .map_err(preview_engine_error)?;
 
     Ok(DataApiPreviewDto {
         columns: out.columns,

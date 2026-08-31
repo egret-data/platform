@@ -47,3 +47,8 @@ egret-workspace.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 rcgen = { workspace = true }
+# Already a runtime dependency; named again here so an INTEGRATION test can open
+# a raw MySQL-protocol connection. `connector_starrocks.rs` needs one to measure
+# what `COM_RESET_CONNECTION` does to an `EXECUTE AS` identity — the fact the
+# decision not to pool StarRocks connections rests on.
+mysql_async.workspace = true

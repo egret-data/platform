@@ -1,4 +1,40 @@
 //! StarRocks connector — MySQL protocol (mysql_async) with row-cap + cancellation.
+//!
+//! # These connections are deliberately NOT pooled
+//!
+//! Package 3b introduced connection reuse for Trino — one `reqwest::Client` per
+//! coordinator, every credential attached per request (see
+//! `connector/http_pool.rs`) — and deliberately did not do the equivalent here.
+//! Recorded as a decision with its evidence, because "there is no pool" reads
+//! like an omission and this one is not.
+//!
+//! A `mysql_async::Pool` is keyed by its `Opts`, and recycles a connection by
+//! sending `COM_RESET_CONNECTION` (`PoolOpts::reset_connection`, on by default).
+//! That is the property that makes a pool *look* safe here. It is not:
+//!
+//! 1. **`EXECUTE AS <user> WITH NO REVERT` survives the reset.** Measured live
+//!    against StarRocks and pinned by
+//!    `execute_as_survives_a_connection_reset_which_is_why_starrocks_is_not_pooled`
+//!    in `tests/connector_starrocks.rs`: after the reset, `current_user()` is
+//!    still the impersonated user. A recycled connection would therefore run the
+//!    next request as the **previous principal** — a cross-principal data leak,
+//!    and the most serious defect this programme could introduce.
+//! 2. **The identity switch is not only ours to make.** SQL Lab and notebooks
+//!    send arbitrary user SQL through this same connector, and StarRocks
+//!    executes every statement in a `COM_QUERY` payload regardless of the
+//!    client's capability flags (see [`reject_statement_separator`]). So a user
+//!    can issue `EXECUTE AS` themselves and poison a pooled connection even on
+//!    the path where egret never switches identity.
+//! 3. **The delegated path has no safe key anyway.** Under
+//!    `authentication_jwt` the MySQL login user and password ARE the per-user
+//!    identity and its short-lived token, so an `Opts`-keyed pool would hold one
+//!    entry per user per token refresh — a cache of expiring credentials rather
+//!    than a pool.
+//!
+//! What would have to change before pooling is reconsidered: (1) must stop being
+//! true, or the pool must key on the post-`EXECUTE AS` identity AND be able to
+//! prove no user SQL can move it — which (2) says it cannot. Until then the cost
+//! stands: one TCP (and, with a pinned FE cert, one TLS) handshake per statement.
 
 use async_trait::async_trait;
 use mysql_async::prelude::Queryable;

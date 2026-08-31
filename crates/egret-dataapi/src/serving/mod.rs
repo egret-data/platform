@@ -58,26 +58,20 @@ pub use router::{
 /// a silent 500, and would inherit whatever the wildcard did with any engine
 /// message the new variant carried.
 ///
-/// # The variants spec §7 names that do NOT exist here
+/// # The two variants spec §7 named and P4 could not produce — now it can
 ///
-/// Recorded so their absence reads as a decision rather than as an oversight.
-/// None of them is constructible on today's serving path, and a dead variant
-/// would make the table look finished while nothing could ever produce the code:
-///
-/// * `engine_unavailable` (502) and `timeout` (504) — **not decidable at this
-///   seam.** `QueryExecPort` returns `egret_core::Error`, and `port_impl` folds
-///   BOTH the engine's infrastructure failures (`Connect`/`Storage`/`Db`) AND
-///   its own egret-side faults — resolving the principal's email, opening the
-///   database secret (`egret-query/src/execution/port_impl.rs:120-137`) — into
-///   the same `Error::Internal`. Mapping that to 502 would page an operator
-///   about the engine when the metastore is what failed. `Timeout` is worse:
-///   `engine_error` maps `EngineError::Timeout` to
-///   `Error::InvalidInput("query timed out")`, deliberately, because for
-///   `describe_as` a timeout means the query is too expensive to plan — so the
-///   only way to recognise it here would be to match another crate's message
-///   string, which breaks silently the day someone rewords it. Making these two
-///   real means widening the port's error type, which is a cross-crate contract
-///   change and not this task's.
+/// `engine_unavailable` (502) and `timeout` (504) were recorded here for four
+/// phases as "not decidable at this seam", and the reason was true: `port_impl`
+/// folded the engine's infrastructure failures **and** egret's own faults into
+/// one `Error::Internal`, so a 502 would have paged an operator about Trino when
+/// the metastore was what failed; and `EngineError::Timeout` arrived as
+/// `Error::InvalidInput("query timed out")`, so recognising it would have meant
+/// matching another crate's message string. Package 3b widened the port —
+/// additively, via `egret_query_api::ExecFailure` inside the existing
+/// `Error::Internal` — so both causes now arrive as values. They are
+/// [`Self::EngineUnavailable`] and [`Self::EngineTimeout`], and
+/// [`Self::EndpointQueryFailed`] is the third code that widening required (spec
+/// §7's requirement (b): an author-fault code that is not a 4xx).
 ///
 /// Everything a caller CAN receive today is in the table, and everything in the
 /// table is reachable.
@@ -321,10 +315,98 @@ pub enum ServingError {
     /// would tell an operator to look for a deleted endpoint.
     #[error("published before the parameter validation gate")]
     ParamGateStale,
+    /// The engine ran the endpoint's published statement and refused it: the SQL
+    /// no longer parses, a relation it names has been dropped, a column changed
+    /// type, a resource group rejected it.
+    ///
+    /// # The finding this closes
+    ///
+    /// This used to be [`Self::Internal`], and it is the largest share of the
+    /// six unrelated causes that shared the `internal` code. The cost is not
+    /// abstract: an operator reading `dataapi.access_log.error_code` to answer
+    /// *"which endpoints are failing?"* could not separate **an author's broken
+    /// endpoint** from **egret itself being broken**, and those are two
+    /// different people's problems. The design doc has argued this since P4
+    /// (`docs/vi/specs/2026-08-14-data-api-design.md` §7, requirement (b)); PR
+    /// #552 put the cause in the *log*, which helps someone already reading the
+    /// log for one request and does nothing for the column an alert aggregates.
+    ///
+    /// # 500, and specifically NOT a 4xx
+    ///
+    /// Requirement (c) of that same paragraph, and it is the whole reason this
+    /// variant is not simply `param_invalid`'s neighbour: **the caller did
+    /// nothing wrong.** It sent a well-formed request to an endpoint someone
+    /// published; the endpoint is what broke. A 4xx would tell a machine client
+    /// to fix its own request, which it cannot do, and would make the failure
+    /// invisible in every "5xx rate" an operator alerts on.
+    ///
+    /// Not a 503 either, unlike the four config-drift codes: those are cleared
+    /// by an action the message can name (re-publish, restore the connection),
+    /// and they carry a `Retry-After` saying so. This one may be permanent (the
+    /// table is gone) or transient (the cluster was out of resources), and egret
+    /// cannot tell which — so it neither invites a retry nor forbids one.
+    ///
+    /// # `raw`
+    ///
+    /// Kept for the same reason [`Self::DataAccessDenied`] keeps its own, and
+    /// with the same guarantee: [`super::error::to_wire`] never renders it, so
+    /// the engine's words — which name tables and columns — reach the server log
+    /// and nothing else.
+    #[error("the endpoint's published statement failed at the engine")]
+    EndpointQueryFailed {
+        #[source]
+        raw: Option<anyhow::Error>,
+    },
+    /// The statement outran the endpoint's own published `limits.timeout`.
+    ///
+    /// Spec §7 named this `timeout` (504) and recorded why P4 could not produce
+    /// it: `QueryExecPort` mapped `EngineError::Timeout` to
+    /// `InvalidInput("query timed out")` — a fixed string egret itself wrote —
+    /// so recognising it here would have meant matching another crate's message
+    /// text, "a check that keeps compiling and silently stops working the day
+    /// someone rewords it". `egret_query_api::ExecFailure` closed that: the
+    /// cause now arrives as a value.
+    ///
+    /// **504 and not 500**, because the distinction is real and actionable: the
+    /// endpoint works, its budget was too small (or its data grew). The fix is
+    /// the author's `limits.timeout`, not a bug report.
+    ///
+    /// No `raw`: the port's timeout carries no engine text, only egret's own
+    /// note of which budget expired.
+    #[error("the endpoint's statement exceeded its published time budget")]
+    EngineTimeout,
+    /// The engine could not be reached at all — connection refused, TLS failure,
+    /// a dropped socket.
+    ///
+    /// Spec §7 named this `engine_unavailable` (502) and recorded why P4 could
+    /// not produce it: `port_impl` folded the engine's `Connect`/`Storage`
+    /// failures and **egret's own** faults (resolving the principal's email,
+    /// opening the database secret) into one `Error::Internal`, so answering 502
+    /// "would page an operator about Trino when the metastore is what failed".
+    /// That is now decidable — only the engine's own transport failures carry
+    /// `ExecFailureKind::EngineUnavailable`, and egret's faults deliberately
+    /// carry nothing and still land on [`Self::Internal`].
+    ///
+    /// Kept apart from [`Self::EndpointQueryFailed`] because the two send
+    /// different people to different systems: this one is an operator's problem
+    /// with the engine or the network, that one is the endpoint author's problem
+    /// with their statement.
+    #[error("the engine could not be reached")]
+    EngineUnavailable {
+        #[source]
+        raw: Option<anyhow::Error>,
+    },
     /// Something on egret's side failed — the IdP key store was unreachable, say.
     /// Deliberately NOT folded into [`Self::Unauthorized`]: a 401 tells an
     /// operator their credential is bad and sends them to rotate it, while the
     /// actual fault is ours. Task 5 maps this to a 500 with a fixed message.
+    ///
+    /// **Narrower than it was.** Until Package 3b this was also every engine
+    /// failure the seam could not type — see [`Self::EndpointQueryFailed`],
+    /// [`Self::EngineTimeout`] and [`Self::EngineUnavailable`], which took three
+    /// of those causes away. What remains really is egret: the metastore, the
+    /// secret store, a corrupt snapshot, the cache. That narrowing is the point
+    /// — `internal` is now a statement about egret rather than a shrug.
     #[error("internal error")]
     Internal(#[source] anyhow::Error),
 }

@@ -34,6 +34,9 @@ pub use dialect::quote_string;
 pub mod port;
 pub use port::QueryExecPort;
 
+pub mod failure;
+pub use failure::{ExecFailure, ExecFailureKind};
+
 /// Execution guards for one query: the row cap and the wall-clock budget.
 ///
 /// Lives in the contract crate because [`QueryExecPort::execute_as`] takes it,

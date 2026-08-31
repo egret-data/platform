@@ -356,6 +356,44 @@ pub(crate) fn to_wire(e: &ServingError) -> Wire {
              re-publish it"
                 .into(),
         ),
+        // The author's endpoint is broken, not egret and not the caller's
+        // request. A 5xx because the caller did nothing wrong (spec §7's
+        // requirement (c)), and its OWN code because the whole point is that
+        // `access_log.error_code` can now separate "which endpoints are failing"
+        // from "egret is failing".
+        //
+        // The message says which of the two it is and who fixes it, and it says
+        // it WITHOUT the engine's words: `raw` is not read here, exactly as
+        // `Internal`'s source is not, because the engine's text names tables and
+        // columns and this surface is authenticated by a machine credential
+        // alone. The endpoint's OWNER is named rather than the mechanics of a
+        // fix, for the same reason `not_granted` names them: the caller is
+        // somebody else's client and can act on none of it.
+        ServingError::EndpointQueryFailed { .. } => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "endpoint_query_failed",
+            "this endpoint's published statement was rejected by the engine; \
+             the request was fine — ask the endpoint's owner to check it"
+                .into(),
+        ),
+        // Spec §7's `timeout`. The endpoint works; its published budget did not
+        // fit this query. A caller CAN act on this one — retrying a narrower
+        // request may succeed — but no `Retry-After` is offered, because egret
+        // has no idea when (or whether) the same query would fit.
+        ServingError::EngineTimeout => (
+            StatusCode::GATEWAY_TIMEOUT,
+            "timeout",
+            "this endpoint's query exceeded its published time budget".into(),
+        ),
+        // Spec §7's `engine_unavailable`. The one code here that is an
+        // OPERATOR's, and the message says so without naming the engine, its
+        // host or its port — that detail is precisely what a 502 body must not
+        // teach a caller outside the network.
+        ServingError::EngineUnavailable { .. } => (
+            StatusCode::BAD_GATEWAY,
+            "engine_unavailable",
+            "the query engine behind this endpoint could not be reached".into(),
+        ),
         // The source is NOT rendered. It is the only thing in this file that
         // could carry a table name or a host, and it goes to `tracing` instead.
         ServingError::Internal(_) => (
@@ -374,6 +412,15 @@ pub(crate) fn to_wire(e: &ServingError) -> Wire {
         | ServingError::CacheScopeStale
         | ServingError::GovernanceStale
         | ServingError::ParamGateStale => Some(CONFIG_DRIFT_RETRY_AFTER_SECS),
+        // The three engine codes carry no `Retry-After`, and each for its own
+        // reason. `endpoint_query_failed` may be permanent (the table is gone)
+        // or transient (the cluster was busy) and egret cannot tell which, so
+        // naming a floor would be a guess. `timeout` is the caller's own query
+        // being too big — waiting changes nothing. `engine_unavailable` is the
+        // one where a bare 5xx and a client's own backoff is exactly right: the
+        // engine comes back when an operator brings it back, and unlike the
+        // config-drift 503s there is no human who needs the fleet to go quiet in
+        // order to notice.
         ServingError::Unauthorized
         | ServingError::NotFound
         | ServingError::DataAccessDenied { .. }
@@ -381,6 +428,9 @@ pub(crate) fn to_wire(e: &ServingError) -> Wire {
         | ServingError::ParamMissing
         | ServingError::ParamInvalid
         | ServingError::RowLimitExceeded { .. }
+        | ServingError::EndpointQueryFailed { .. }
+        | ServingError::EngineTimeout
+        | ServingError::EngineUnavailable { .. }
         | ServingError::Internal(_) => None,
     };
 
@@ -473,6 +523,31 @@ mod tests {
             ),
             (ServingError::CacheScopeStale, 503, "cache_scope_stale"),
             (ServingError::GovernanceStale, 503, "governance_stale"),
+            // The three Package 3b codes. `endpoint_query_failed` is spelled
+            // out with and without `raw` for the same reason
+            // `data_access_denied` is: the two shapes are two construction
+            // sites, and a change that gave either its own code would have to
+            // edit this list.
+            (
+                ServingError::EndpointQueryFailed { raw: None },
+                500,
+                "endpoint_query_failed",
+            ),
+            (
+                ServingError::EndpointQueryFailed {
+                    raw: Some(anyhow::anyhow!(
+                        "line 1:15: Table 'hive.a.b' does not exist"
+                    )),
+                },
+                500,
+                "endpoint_query_failed",
+            ),
+            (ServingError::EngineTimeout, 504, "timeout"),
+            (
+                ServingError::EngineUnavailable { raw: None },
+                502,
+                "engine_unavailable",
+            ),
             (
                 ServingError::Internal(anyhow::anyhow!("boom")),
                 500,
@@ -559,6 +634,100 @@ mod tests {
             std::error::Error::source(&ServingError::DataAccessDenied { raw: None }).is_none(),
             "the typed arm has no engine message and must not fabricate one"
         );
+    }
+
+    /// **The leak-proofness rule, applied to the three codes Package 3b added.**
+    ///
+    /// Splitting `internal` into named causes is exactly the kind of change that
+    /// takes a message from "internal error" to something that quotes the
+    /// engine, because the whole point of the split is to be more specific. It
+    /// is more specific about the CAUSE and not one word more specific about the
+    /// data: `EndpointQueryFailed` and `EngineUnavailable` both carry a `raw`,
+    /// and neither may render it.
+    ///
+    /// Mutating either arm to interpolate its source fails here.
+    #[test]
+    fn the_engine_codes_never_render_what_the_engine_said() {
+        let failed = ServingError::EndpointQueryFailed {
+            raw: Some(anyhow::anyhow!(
+                "line 1:15: Table 'hive.analytics.salaries' does not exist"
+            )),
+        };
+        let w = to_wire(&failed);
+        for leak in ["hive.analytics.salaries", "line 1:15", "Table"] {
+            assert!(
+                !w.message.contains(leak),
+                "leaked {leak:?} from the engine: {}",
+                w.message
+            );
+        }
+        // The other half: the words still reach the log, through the same
+        // `#[source]` chain `serve`'s `error = ?e` line prints.
+        let src = std::error::Error::source(&failed).expect("the engine's words reach the log");
+        assert!(src.to_string().contains("hive.analytics.salaries"));
+
+        let unavailable = ServingError::EngineUnavailable {
+            raw: Some(anyhow::anyhow!(
+                "engine unavailable: connect: error sending request for url \
+                 (https://trino-coordinator.internal:8443/v1/statement)"
+            )),
+        };
+        let w = to_wire(&unavailable);
+        for leak in ["trino-coordinator.internal", "8443", "v1/statement"] {
+            assert!(
+                !w.message.contains(leak),
+                "a 502 taught a caller outside the network where the engine lives: {leak:?} in {}",
+                w.message
+            );
+        }
+        assert!(std::error::Error::source(&unavailable)
+            .expect("the address reaches the log")
+            .to_string()
+            .contains("trino-coordinator.internal"));
+
+        // `EngineTimeout` carries nothing to leak, and that is a statement: the
+        // port's timeout has no engine text behind it, only egret's own note of
+        // which budget expired.
+        assert!(std::error::Error::source(&ServingError::EngineTimeout).is_none());
+    }
+
+    /// The split is only worth anything if the codes are DISTINCT — an operator
+    /// aggregating `access_log.error_code` to answer "which endpoints are
+    /// failing" needs the author's broken endpoint separable from egret's own
+    /// fault and from the engine being down.
+    ///
+    /// Collapsing any two of them back onto one string fails here.
+    #[test]
+    fn the_four_5xx_causes_have_four_different_codes() {
+        let codes = [
+            to_wire(&ServingError::EndpointQueryFailed { raw: None }).code,
+            to_wire(&ServingError::EngineTimeout).code,
+            to_wire(&ServingError::EngineUnavailable { raw: None }).code,
+            to_wire(&ServingError::Internal(anyhow::anyhow!("boom"))).code,
+        ];
+        let mut seen: Vec<&str> = codes.to_vec();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(
+            seen.len(),
+            codes.len(),
+            "two 5xx causes share one error_code: {codes:?}"
+        );
+        // And none of them is a 4xx — spec §7's requirement (c). The caller did
+        // nothing wrong in any of the four.
+        for e in [
+            ServingError::EndpointQueryFailed { raw: None },
+            ServingError::EngineTimeout,
+            ServingError::EngineUnavailable { raw: None },
+        ] {
+            let w = to_wire(&e);
+            assert!(
+                w.status.is_server_error(),
+                "{} must not be a client error, got {}",
+                w.code,
+                w.status
+            );
+        }
     }
 
     /// The rule the module comment states, asserted on the only two answers

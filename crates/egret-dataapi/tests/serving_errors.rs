@@ -86,14 +86,40 @@ impl egret_query_api::QueryExecPort for FakePort {
         sql: &str,
         limits: egret_query_api::Limits,
     ) -> Result<TabularResult, Error> {
-        // Exactly the three shapes `port_impl::engine_error` can hand the
-        // serving path, spelled with the payloads a real engine attaches.
+        // Exactly the shapes `port_impl::execute_error` can hand the serving
+        // path, spelled with the payloads a real engine attaches — and, for the
+        // two typed ones, built with the SAME `ExecFailure` constructor
+        // `execute_error` uses, so a change to that contract breaks here too.
         if sql.contains("does_not_exist") {
             return Err(Error::NotFound(MISSING_TABLE.into()));
         }
         if sql.contains("unreachable_engine") {
+            return Err(egret_query_api::ExecFailure::new(
+                egret_query_api::ExecFailureKind::EngineUnavailable,
+                format!("connect: connect {ENGINE_HOST}: connection refused"),
+            )
+            .into_error());
+        }
+        if sql.contains("slow_query") {
+            return Err(egret_query_api::ExecFailure::new(
+                egret_query_api::ExecFailureKind::Timeout,
+                "timeout",
+            )
+            .into_error());
+        }
+        if sql.contains("broken_endpoint") {
+            // The published statement stopped working: the engine parsed it and
+            // refused it. `InvalidInput` carrying the engine's own words is what
+            // `execute_error` produces for `EngineError::Engine`.
+            return Err(Error::InvalidInput(format!(
+                "line 1:15: Table '{MISSING_TABLE}' does not exist"
+            )));
+        }
+        if sql.contains("egret_is_broken") {
+            // egret's OWN fault, untagged — what `connect_as` produces when the
+            // metastore or the secret store fails. Must stay `internal`.
             return Err(Error::Internal(anyhow::anyhow!(
-                "query port: connect {ENGINE_HOST}: connection refused"
+                "open secret: connection pool timed out"
             )));
         }
         if sql.contains("denied_table") {
@@ -623,6 +649,11 @@ async fn an_engine_error_never_reaches_the_caller_verbatim() {
 }
 
 /// The same rule for the other payload an engine attaches: where it lives.
+///
+/// Since Package 3b this is a **502 `engine_unavailable`** rather than a 500
+/// `internal` — the port now says the ENGINE was unreachable, as a value — and
+/// the leak rule is unchanged, which is the half worth re-asserting: being more
+/// specific about the cause must not become more specific about the address.
 #[tokio::test]
 async fn a_connect_failure_never_reaches_the_caller_verbatim() {
     let f = skip_without_db!();
@@ -641,8 +672,146 @@ async fn a_connect_failure_never_reaches_the_caller_verbatim() {
         "leaked the transport detail: {}",
         res.text
     );
-    assert_eq!(res.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(res.status, StatusCode::BAD_GATEWAY, "{}", res.text);
+    assert_eq!(res.code(), "engine_unavailable");
+}
+
+// ---------------------------------------------------------------------------
+// Package 3b: `internal` was one code for six unrelated causes
+// ---------------------------------------------------------------------------
+//
+// Every test below drives the WHOLE handler — token, snapshot, render, port,
+// wire envelope, access-log row — rather than asserting a code string against a
+// hand-built error. That matters here specifically: the classification these
+// pin lives at a seam between two crates that cannot see each other, and the
+// only way to know the two halves agree is to run one request through both.
+
+/// **The finding.** An endpoint whose published statement the engine rejects is
+/// the AUTHOR's problem, and it used to be indistinguishable in
+/// `access_log.error_code` from egret being broken.
+///
+/// 500 and not a 4xx: the caller sent a perfectly good request (spec §7 (c)).
+#[tokio::test]
+async fn a_broken_endpoint_is_not_reported_as_egret_being_broken() {
+    let f = skip_without_db!();
+    f.publish_endpoint("GET", "/broken", "SELECT n FROM broken_endpoint")
+        .await;
+
+    let res = f.call("broken").await;
+
+    assert_eq!(
+        res.status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "{}",
+        res.text
+    );
+    assert_eq!(res.code(), "endpoint_query_failed");
+    // Still leak-proof: the engine named the missing relation, the caller may
+    // not learn it.
+    assert!(
+        !res.text.contains(MISSING_TABLE),
+        "leaked a relation name: {}",
+        res.text
+    );
+
+    // And the operator gets the distinction where they actually read it.
+    let row = f
+        .log_for(res.request_id())
+        .await
+        .expect("every call leaves a row");
+    assert_eq!(
+        row.error_code.as_deref(),
+        Some("endpoint_query_failed"),
+        "access_log.error_code is the column an operator aggregates"
+    );
+    assert_eq!(row.status_code, 500);
+}
+
+/// The other half of the same finding, and the one that keeps it honest: egret's
+/// OWN faults must still be `internal`. If both landed on the same code the
+/// split would have bought nothing.
+#[tokio::test]
+async fn an_egret_side_fault_is_still_internal() {
+    let f = skip_without_db!();
+    f.publish_endpoint("GET", "/ourfault", "SELECT n FROM egret_is_broken")
+        .await;
+
+    let res = f.call("ourfault").await;
+
+    assert_eq!(
+        res.status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "{}",
+        res.text
+    );
     assert_eq!(res.code(), "internal");
+    assert_eq!(
+        f.log_for(res.request_id())
+            .await
+            .expect("row")
+            .error_code
+            .as_deref(),
+        Some("internal")
+    );
+}
+
+/// Spec §7's `timeout` (504), which P4 recorded as undecidable at this seam
+/// because the port spelled it as the string `"query timed out"`.
+#[tokio::test]
+async fn an_execution_timeout_is_a_504_not_a_500() {
+    let f = skip_without_db!();
+    f.publish_endpoint("GET", "/slow", "SELECT n FROM slow_query")
+        .await;
+
+    let res = f.call("slow").await;
+
+    assert_eq!(res.status, StatusCode::GATEWAY_TIMEOUT, "{}", res.text);
+    assert_eq!(res.code(), "timeout");
+    let row = f.log_for(res.request_id()).await.expect("row");
+    assert_eq!(row.error_code.as_deref(), Some("timeout"));
+    assert_eq!(row.status_code, 504);
+}
+
+/// The property the whole split exists for, asserted as one statement: four
+/// different 5xx causes, four different `access_log.error_code` values.
+///
+/// Collapsing any two of them back onto `internal` fails here, and this is the
+/// test an operator's question — "which endpoints are failing?" — actually
+/// depends on.
+#[tokio::test]
+async fn four_5xx_causes_leave_four_different_codes_in_the_access_log() {
+    let f = skip_without_db!();
+    let cases = [
+        ("brk", "broken_endpoint", "endpoint_query_failed"),
+        ("slw", "slow_query", "timeout"),
+        ("dwn", "unreachable_engine", "engine_unavailable"),
+        ("our", "egret_is_broken", "internal"),
+    ];
+    for (slug, table, expected) in cases {
+        f.publish_endpoint(
+            "GET",
+            &format!("/{slug}"),
+            &format!("SELECT n FROM {table}"),
+        )
+        .await;
+        let res = f.call(slug).await;
+        assert!(
+            res.status.is_server_error(),
+            "{slug} should be a 5xx, got {} {}",
+            res.status,
+            res.text
+        );
+        assert_eq!(res.code(), expected, "wire code for {slug}");
+        assert_eq!(
+            f.log_for(res.request_id())
+                .await
+                .expect("row")
+                .error_code
+                .as_deref(),
+            Some(expected),
+            "access_log.error_code for {slug}"
+        );
+    }
 }
 
 /// The author's SQL is fine; their policy denies the table. Telling them their
