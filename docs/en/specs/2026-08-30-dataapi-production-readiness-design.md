@@ -46,7 +46,7 @@ Ordered by value-per-effort, not by severity. Dependencies noted.
 | 3a | **Serving guard rails** — ✅ `5de17862` (#558) | No graceful shutdown, so every deploy kills in-flight queries; no resource limits; `/readyz` exists and is never called (probes are `tcpSocket`); no concurrency cap, body limit, or timeout layer on the composed router. | — |
 | 3b | **Engine coupling** — ✅ `3ff8096d` (#557) | No engine connection pool (a TCP+TLS handshake **per statement**); a retryable Trino 503 discarded as a 500; `internal` the single code for six causes. | — |
 | 4 | **Multi-replica correctness** — ✅ `0c3febe5` | Response cache and token bucket are **process-local** while replica count is a Helm value, so every published rate limit silently multiplies by replica count and the cache fragments. | §4 decision B |
-| 5 | **Script parameter constraints** | Package S lets a script concatenate a caller's value into SQL text. The publish-time sentinel probe has **two bypasses pinned open by tests asserting `is_ok()`** (`lifecycle.rs:6058`, `:6083`). Nothing re-asks at serve time. | — |
+| 5 | **Script parameter constraints** — ✅ | Package S lets a script concatenate a caller's value into SQL text. The publish-time sentinel probe has **two bypasses pinned open by tests asserting `is_ok()`**. Nothing re-asks at serve time. Closed by construction rather than by a better probe — see §5.1. | — |
 | 6 | **Publish-time diff + acknowledgement** | `publish` validates the draft against *itself*; the only read of `endpoint_versions` is `MAX(version)`. A removed column, narrowed type, renamed parameter or new required parameter publishes silently. Worst case: adding a second statement flips top-level `data` from an array to an object. | — |
 | 7 | **Consumer version pinning** | Serving resolves `live_version_id` only; a publish moves every caller at commit. `meta.version` lets a consumer *observe* which version answered but never *ask* for one. | 6 |
 | 8 | **Contract reachability** | The OpenAPI document sits behind a human session + `:manage`, so a consumer holding only a `data-api` token cannot fetch its own contract; `error.code` has no `enum` despite being documented as the stable code to branch on. | — |
@@ -160,6 +160,97 @@ forward rather than rediscovering:
   own upgrade. `strategy: {type: Recreate}` on `deps-valkey.yaml` — and on
   `deps-postgres.yaml` and `deps-minio.yaml`, which had the same shape and a
   ReadWriteOnce PVC to wedge on.
+
+## 5.1 Package 5, as delivered: a rule instead of a better probe
+
+**The instrument was never going to be enough, and that is a property of
+instruments.** The sentinel probe evaluates a script with a long improbable value in
+each parameter's place and refuses the definition if that value comes back inside the
+emitted SQL. It is a **positive** test: it can prove a value *did* reach the text. It
+cannot prove one never will, and its two documented bypasses are exactly that gap —
+`params["region"].upper()` emits something that is not the sentinel, and a script that
+length-checks its input *raises* on the sentinel so the concatenation on the accepting
+path is never observed. There is a third shape the probe is equally blind to and
+package 5 found it: a concatenation behind a branch chosen by a value no probe
+supplies (`if params["mode"] == "raw"`), which does not even show up in `varies_with`.
+
+Scanning the emitted bytes harder is the P4.5 mistake — five independent reviews, five
+different bypasses of one byte scanner guarding a template language. **So the probe is
+untouched, and the two tests pinning its residue still assert that it accepts both
+scripts.** What changed is that a definition now has to pass a second rule that never
+looks at the emitted text at all.
+
+**The rule.** On an endpoint where any statement is a `script`, every `string`
+parameter must carry a `pattern` whose accepted language is contained in **ASCII
+letters, ASCII digits and `_`**. `check_script_parameter_constraints` in `lifecycle.rs`,
+run from `validate_endpoint` and `validate_preview`. This is the move
+`check_enum_params` already makes for `Enum` — the only safe form for something that
+may reach an identifier position is one the author wrote down — extended to the
+`String` case package S opened.
+
+**Why that alphabet.** It is exactly the body of an unquoted identifier on both
+engines, chosen for what it excludes: nothing in it can open or close a string literal,
+begin a comment, separate a statement, escape the next byte (the StarRocks half of the
+dual-dialect proof), qualify a name into another schema, or end a token so a keyword
+can follow. And — the property that actually matters, since the whole problem is that a
+script may transform the value — **the set is closed under every Starlark string
+operation that selects from its input**: case mapping (`.upper()` of `[a-z]+` is
+`[A-Z]+`, still inside), slicing, indexing, `strip`, `split`/`join`.
+
+**Where the assumption fails, stated rather than implied.** It is *not* closed under
+operations that introduce bytes the value never contained — `replace("a", "'")`,
+`format`, `chr(ord(c)+1)`, a table lookup keyed by the value. A script can still emit a
+quote that way, but the quote is a literal the **author** typed at a position the
+author chose, and no caller decides whether it appears. That is package S's accepted
+residue, unchanged; what package 5 removes is the other half, where the caller supplies
+the metacharacter and an honest script passes it along. Non-ASCII is refused as
+conservatism, not as proof: no Unicode case mapping produces a SQL metacharacter, but
+"very likely safe" is not the standard for a rule whose job is to hold under
+transformations nobody enumerated.
+
+**Sufficiency is decided on the pattern's LANGUAGE, not on its text.** The author's
+pattern is parsed (`regex-syntax`, already in the lock as `regex`'s own dependency) and
+every node of the HIR must be placeable inside the alphabet; the match over `HirKind`
+has **no `_` arm**, so a dependency upgrade that adds a way to match a character fails
+the build rather than being waved through. This is refusal-on-doubt, the opposite of a
+scanner that passes what it fails to recognise. `[A-z]` — the classic typo for
+"letters", which admits `[`, `\`, `]`, `^` and `` ` `` — is refused with `[` as the
+witness, and a check that only looked at a range's endpoints would have passed it.
+
+**Which parameters, and the honest cost.** Every `string` parameter on the endpoint,
+not the ones a script was observed to use. Deciding "this parameter reaches the text"
+is precisely what the probe cannot do, so a rule resting on that decision would inherit
+its blind spots. The other five types need nothing, and that is a fact about `coerce`
+rather than a judgement: `Number` is gated by `is_plain_decimal`, `Boolean` is one of
+two words, `Date`/`Timestamp` are chrono-reformatted so the caller's spelling never
+reaches the engine, and `Enum` returns the **author's** own `allowed` entry.
+
+The cost is real and is named rather than hidden: **an endpoint cannot combine a
+generated statement with a free-text `string` parameter.** No pattern over the safe
+alphabet accepts a search phrase, so an author who needs one must write that endpoint's
+statements as `sql`, where `{{ q }}` binds and no script can reach the value. Endpoints
+already published are unaffected — the rule runs at publish and preview, never at
+serve — but such an endpoint will be refused the next time it is republished.
+
+**Serving re-asks nothing, and that is the design.** The constraint lives in `pattern`
+precisely because `coerce` already applies `pattern` to every `string` value on every
+request, on the same path that produces the `Param` the script is handed. The rule the
+author is refused by and the rule the caller is bounded by are one rule, so they cannot
+drift — package C1's property, and package 5 is only sound because of it. `allowed` is
+**not** accepted as an alternative constraint on a `String` for the same reason
+inverted: `coerce` reads it only for `Enum`, so accepting it would be a publish-time
+rule resting on an enforcement that does not exist.
+
+**Carried forward, not fixed:** `ParamSpec::allowed` on a `String` is silently ignored
+by `coerce` today and `check_constraints` does not refuse it, which is the "teaches the
+author a model where constraints apply everywhere" failure that function's own comment
+warns about. Package 5 refuses to *rely* on it and says so in an error, but does not
+refuse the declaration — that is a separate change with a migration question attached.
+And `validate_preview` applies the rule only to the statement on screen, because
+`SiblingStatements` carries the other statements' text and cannot say whether any of
+them is a script; so previewing a *written* statement whose sibling is a script is
+silent about the rule and publish refuses it. Closing that needs the preview body to
+carry each sibling's source.
 
 ## 5. The blind spot Package 2 exists to close
 

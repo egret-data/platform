@@ -84,6 +84,11 @@ tower.workspace = true
 # C1 Task 2: `check_constraints`/`compile_pattern` in `lifecycle.rs` compiles
 # and applies an author-declared `ParamSpec::pattern` at publish time.
 regex.workspace = true
+# Package 5: the same author `pattern`, asked a question a `Regex` cannot answer
+# — not "does this VALUE match" but "can this pattern's language contain a
+# character that is unsafe in SQL text". `pattern_confines_to_safe_alphabet`
+# walks the parsed HIR to decide it, and refuses anything it cannot prove safe.
+regex-syntax.workspace = true
 # C2 Task 1: the response-transform evaluator (`transform.rs`). The sandbox is a
 # property of the LANGUAGE, not of globals we remembered to strip — the module's
 # first test is what pins that claim.
