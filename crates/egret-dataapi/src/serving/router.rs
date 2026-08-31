@@ -2499,6 +2499,21 @@ fn bearer(headers: &HeaderMap) -> Result<&str, ServingError> {
 
 /// Turn the snapshot's frozen `limits` into the port's [`egret_query_api::Limits`],
 /// clamped. See [`MAX_ROWS_CEILING`] for why a published value is not trusted.
+///
+/// # Why `limits` follows the pin while `rate_limit` does not
+///
+/// `max_rows` is quoted back to the caller in `row_limit_exceeded`, so it is part
+/// of the contract a consumer pinned; the rate limit is not — it is one bucket per
+/// endpoint with no version in its key, so taking it from the pin would let a
+/// caller choose the refill rate with a header.
+///
+/// **The cost of that split is larger than "one bigger query", and is stated here
+/// rather than discovered during an incident.** With [`MAX_ROWS_CEILING`] at 1M,
+/// [`TIMEOUT_CEILING_SECS`] at 300 and up to `MAX_STATEMENTS` statements, an author
+/// who tightens `max_rows` from 1M to 10k has tightened nothing at all for a caller
+/// already pinned to the older version — and that caller sustains it at the *live*
+/// rate limit, because the rate is the one thing the pin does not carry. Retiring a
+/// version is the lever that would close it, and there is none below live today.
 fn execution_limits(snap: &EndpointSnapshot) -> egret_query_api::Limits {
     egret_query_api::Limits {
         max_rows: snap.limits.max_rows.clamp(1, MAX_ROWS_CEILING) as usize,
