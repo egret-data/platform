@@ -455,6 +455,23 @@ pub(crate) fn to_wire(e: &ServingError) -> Wire {
             "payload_too_large",
             "request body is larger than this surface accepts".into(),
         ),
+        // Package 4. The shared rate-limit store could not be consulted, so the
+        // request is refused rather than admitted without an allowance.
+        //
+        // The message says what egret could not do and NOT what the caller did,
+        // because the caller did nothing: a message shaped like `rate_limited`'s
+        // would have every consumer's dashboard reporting that they were sending
+        // too much during an outage of egret's own dependency. It also names no
+        // host, no URL and no error text — the store's address is egret's
+        // infrastructure, and the same rule that keeps `internal`'s source out of
+        // the body applies here.
+        ServingError::LimiterUnavailable => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "rate_limiter_unavailable",
+            "this endpoint's rate limit could not be checked, so the request was not run; \
+             retry shortly"
+                .into(),
+        ),
         // The source is NOT rendered. It is the only thing in this file that
         // could carry a table name or a host, and it goes to `tracing` instead.
         ServingError::Internal(_) => (
@@ -474,7 +491,13 @@ pub(crate) fn to_wire(e: &ServingError) -> Wire {
         | ServingError::GovernanceStale
         | ServingError::ParamGateStale => Some(CONFIG_DRIFT_RETRY_AFTER_SECS),
         // A prediction again, and a short one: the permits drain on their own.
-        ServingError::Overloaded => Some(SHED_RETRY_AFTER_SECS),
+        //
+        // `LimiterUnavailable` shares the value and the reasoning: the store
+        // comes back without anyone re-publishing anything, so the config-drift
+        // floor — whose meaning is "a human must act before this clears" —
+        // would be the wrong promise, and a five-minute floor would keep a
+        // fleet away long after a two-second blip had ended.
+        ServingError::Overloaded | ServingError::LimiterUnavailable => Some(SHED_RETRY_AFTER_SECS),
         // The three engine codes carry no `Retry-After`, and each for its own
         // reason. `endpoint_query_failed` may be permanent (the table is gone)
         // or transient (the cluster was busy) and egret cannot tell which, so
@@ -620,6 +643,9 @@ mod tests {
             ("ServingDeadline", (504, "deadline_exceeded")),
             ("Overloaded", (503, "overloaded")),
             ("PayloadTooLarge", (413, "payload_too_large")),
+            // Package 4: the shared limiter could not be consulted, so the
+            // request was refused rather than admitted unlimited.
+            ("LimiterUnavailable", (503, "rate_limiter_unavailable")),
             ("Internal", (500, "internal")),
         ]);
 
@@ -667,6 +693,8 @@ mod tests {
             ("ParamGateStale", Some(CONFIG_DRIFT_RETRY_AFTER_SECS)),
             // Drains on its own, and fast.
             ("Overloaded", Some(SHED_RETRY_AFTER_SECS)),
+            // Clears when the store returns; no human has to act.
+            ("LimiterUnavailable", Some(SHED_RETRY_AFTER_SECS)),
         ]);
 
         for (name, e) in crate::serving::census::every_variant() {

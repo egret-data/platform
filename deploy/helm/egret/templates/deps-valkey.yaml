@@ -1,0 +1,89 @@
+{{- if and .Values.sharedStore.enabled (not .Values.sharedStore.url) }}
+# Package 4 — the shared store behind the Data API's rate limiter and response
+# cache. OPTIONAL by construction: rendered only when `sharedStore.enabled` is
+# true AND no external `sharedStore.url` was supplied, so a single-replica
+# deployment needs nothing new and a deployment with a managed Redis/Valkey
+# points at it instead of running this one.
+#
+# Valkey rather than Redis: same protocol, same client, BSD-licensed. The client
+# (`redis` crate) speaks to either.
+#
+# NOT a StatefulSet and NOT backed by a PVC, deliberately. Everything in here is
+# reconstructible: a lost bucket refills, a lost cache entry re-executes. Adding
+# durability would buy nothing and would make an upgrade slower and able to fail.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: valkey
+  labels:
+    app: valkey
+spec:
+  # ONE. The store exists to be a single point of agreement between backend
+  # replicas; two unsynchronised copies of it would reintroduce exactly the
+  # split-state defect this package removes, one level down.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: valkey
+  template:
+    metadata:
+      labels:
+        app: valkey
+    spec:
+      containers:
+        - name: valkey
+          image: {{ .Values.sharedStore.image }}
+          # The eviction policy is set EXPLICITLY rather than inherited. The
+          # default is `noeviction`, under which a full instance fails WRITES —
+          # and because the limiter fails closed, that would turn a full cache
+          # into 503s on every rate-limited endpoint. `allkeys-lru` instead
+          # sheds the coldest keys; see `serving/shared.rs` for the one
+          # consequence that carries (an evicted bucket comes back full, at most
+          # one extra burst for a client that was idle anyway).
+          args:
+            - "--maxmemory"
+            - "{{ .Values.sharedStore.maxmemory }}"
+            - "--maxmemory-policy"
+            - "{{ .Values.sharedStore.maxmemoryPolicy }}"
+            # No AOF and no RDB: nothing in here is worth surviving a restart,
+            # and a fork-to-disk on a memory-bound pod is a latency spike on the
+            # serving path for no benefit.
+            - "--save"
+            - ""
+            - "--appendonly"
+            - "no"
+          ports:
+            - containerPort: 6379
+          # `maxmemory` bounds the data; the limit is that plus room for the
+          # process itself and its client buffers.
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "{{ .Values.sharedStore.memoryRequest }}"
+            limits:
+              cpu: "500m"
+              memory: "{{ .Values.sharedStore.memoryLimit }}"
+          readinessProbe:
+            exec:
+              command: ["valkey-cli", "ping"]
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 6379
+            initialDelaySeconds: 10
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: valkey
+  labels:
+    app: valkey
+spec:
+  selector:
+    app: valkey
+  ports:
+    - port: 6379
+      targetPort: 6379
+{{- end }}

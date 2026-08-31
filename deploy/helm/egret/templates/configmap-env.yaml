@@ -17,6 +17,23 @@ data:
   EGRET_RANGER__ENABLED: "{{ .Values.ranger.enabled }}"
   EGRET_RANGER__AUTH_TOKEN: ""
   EGRET_ADMIN_EMAIL: "{{ .Values.admin.email }}"
+  # Package 4 — HOW MANY OF ME THERE ARE. A pod cannot discover this: the count
+  # belongs to the Deployment, and reading it would mean granting every backend
+  # pod RBAC to `get deployments` for a number this chart already holds as a
+  # literal. Wired from the same value the Deployment's `spec.replicas` uses, so
+  # the two cannot disagree.
+  #
+  # The backend REFUSES TO START when this is above 1 and no shared store is
+  # configured — the Data API's rate-limit buckets and response cache would be
+  # per process, so every published rate limit would be multiplied by this
+  # number. See `sharedStore` in values.yaml for the two remedies.
+  EGRET_DATA_API__REPLICAS: "{{ .Values.backend.replicas }}"
+{{- if or .Values.sharedStore.enabled .Values.sharedStore.url }}
+  # An explicit `sharedStore.url` wins over the in-chart Valkey, so a deployment
+  # with a managed Redis/Valkey points at it and `deps-valkey.yaml` renders
+  # nothing.
+  EGRET_DATA_API__SHARED_STORE_URL: "{{ .Values.sharedStore.url | default (printf "redis://valkey.%s.svc.cluster.local:6379" .Release.Namespace) }}"
+{{- end }}
   EGRET_LOG__FILTER: "info,egret=debug"
   EGRET_AUTOMATION__RENDERER_URL: "http://{{ include "egret.fullname" . }}-renderer:8080"
   EGRET_AUTOMATION__PUBLIC_URL: "http://{{ include "egret.fullname" . }}-frontend"

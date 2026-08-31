@@ -114,6 +114,30 @@ green-and-silent.
 change does not alter what CI does**. It changes what a laptop with no database does:
 previously green-and-empty, now a failure with both ways forward in the message.
 
+## The shared store is gated the same way, and for the same reason
+
+Package 4 moved the Data API's rate-limit buckets and response cache into a shared
+Redis/Valkey. `crates/egret-dataapi/tests/serving_shared_store.rs` is the only suite that
+can tell whether that actually happened — it inspects the store from an **independent**
+connection, so an implementation that had quietly answered from a `HashMap` reddens it.
+
+A suite with that job may not self-skip, so it follows the rule above rather than the
+engine table below:
+
+| variable | behaviour when unset |
+| --- | --- |
+| `EGRET_TEST_SHARED_STORE_URL` | **panics** — e.g. `redis://127.0.0.1:6399` |
+| `EGRET_ALLOW_STORE_SKIP=1` | opts out, in the invocation |
+
+```bash
+docker run -d --name egret-test-valkey -p 6399:6379 valkey/valkey:8
+EGRET_TEST_SHARED_STORE_URL=redis://127.0.0.1:6399 cargo test -p egret-dataapi
+```
+
+CI runs a `valkey/valkey:8` service and sets the variable at workflow level, so CI is
+never the environment where this goes quiet. Nothing else in the workspace reads it: the
+suite needs no database, and every other Data API suite drives the in-process store.
+
 ## Engine-gated tests are a separate axis
 
 Tests that need a live query engine gate on their own variables and still self-skip,

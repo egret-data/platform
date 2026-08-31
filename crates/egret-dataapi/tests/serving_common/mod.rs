@@ -472,15 +472,23 @@ impl TestClock {
     }
 }
 
+#[async_trait::async_trait]
 impl egret_dataapi::serving::RateLimitStore for TestClock {
-    fn check_at(
+    /// Substitutes the clock and NOTHING else: the arithmetic is
+    /// `TokenBucket::take`'s, and the refusal is mapped through the same
+    /// `Refusal::Exhausted` the shipped in-process store answers. A `Duration`
+    /// invented here would let these suites assert a wire mapping the product
+    /// does not have.
+    async fn check_at(
         &self,
         key: &str,
         rate: egret_dataapi::serving::Rate,
         _now: Instant,
-    ) -> Result<(), Duration> {
+    ) -> Result<(), egret_dataapi::serving::Refusal> {
         let now = *self.now.lock().unwrap();
-        self.inner.check_at(key, rate, now)
+        self.inner
+            .take(key, rate, now)
+            .map_err(egret_dataapi::serving::Refusal::Exhausted)
     }
 }
 
@@ -861,7 +869,7 @@ pub async fn fixture() -> Option<Fixture> {
         // ONE cache and ONE set of buckets for the whole fixture — built per
         // request they would be a cache that never hits and a limit nobody
         // reaches, and every test here would pass vacuously.
-        cache: egret_dataapi::serving::ResponseCache::new(),
+        cache: std::sync::Arc::new(egret_dataapi::serving::ResponseCache::new()),
         rate_limits: clock.clone(),
         // A fixed, sensible retention rather than a config read — nothing in
         // this fixture boots `egret-config`.

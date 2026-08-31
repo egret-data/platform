@@ -215,15 +215,22 @@ pub struct DataApiState {
     /// The serving surface's response cache (spec §6.2 step 6).
     ///
     /// Held in the state rather than built per request for the obvious reason —
-    /// a cache constructed per call is not one — and cloned cheaply (an `Arc`
-    /// inside), so every route built from this state shares the one map.
-    pub cache: crate::serving::ResponseCache,
+    /// a cache constructed per call is not one.
+    ///
+    /// Behind a trait since Package 4, for the same reason `rate_limits` below
+    /// always was: it was a concrete `ResponseCache` with no seam at all, so a
+    /// deployment that scaled out fragmented its cache with nothing to swap in.
+    /// `crate::serving::shared::SharedStore` is the other implementation and
+    /// `choose_store` decides which one this process gets.
+    pub cache: std::sync::Arc<dyn crate::serving::ResponseStore>,
     /// The serving surface's rate-limit buckets (spec §6.2 step 5).
     ///
     /// Behind a trait so a multi-replica deployment can swap a shared store in
     /// without a call site changing; in-process buckets are correct only while
     /// the serving surface is in-process, and splitting the binary would
     /// otherwise multiply every published limit by the replica count in silence.
+    /// Package 4 supplied that shared implementation and made >1 replica without
+    /// one a startup refusal.
     pub rate_limits: std::sync::Arc<dyn crate::serving::RateLimitStore>,
     /// The Activity tab's store (P5 §4) — call statistics from `dataapi.access_log`.
     pub activity: ActivityStore,

@@ -337,7 +337,7 @@ async fn fixture() -> Option<Fixture> {
         // which is what every deployment produces today.
         consumer_base_url: "https://egret.test".into(),
         audit: egret_audit::AuditSink::new(1).0,
-        cache: egret_dataapi::serving::ResponseCache::new(),
+        cache: std::sync::Arc::new(egret_dataapi::serving::ResponseCache::new()),
         rate_limits: std::sync::Arc::new(egret_dataapi::serving::TokenBucket::new()),
         // This file is about serving-path authz, not Activity — a fixed
         // retention is enough to satisfy the field.

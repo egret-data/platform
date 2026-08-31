@@ -99,7 +99,7 @@ fn build_state(db: Db, pdp: Arc<dyn egret_core::authz::Pdp>) -> DataApiState {
         // which is what every deployment produces today.
         consumer_base_url: "https://egret.test".into(),
         audit: egret_audit::AuditSink::new(1).0,
-        cache: egret_dataapi::serving::ResponseCache::new(),
+        cache: std::sync::Arc::new(egret_dataapi::serving::ResponseCache::new()),
         rate_limits: std::sync::Arc::new(egret_dataapi::serving::TokenBucket::new()),
         activity: egret_dataapi::ActivityStore::new(db.clone(), Some(90)),
     }

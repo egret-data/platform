@@ -291,6 +291,51 @@ pub struct DataApiConfig {
     /// business pointing somewhere unreachable.
     #[serde(default)]
     pub public_url: Option<String>,
+    /// How many replicas of this backend the deployment runs — **what the chart
+    /// says**, not what this process can see.
+    ///
+    /// The Data API's rate-limit buckets and response cache are process-local
+    /// unless [`Self::shared_store_url`] is set, so more than one replica
+    /// multiplies every published rate limit by the replica count and fragments
+    /// the cache. A process cannot discover its own replica count: a pod knows
+    /// its name and namespace, and the count is a property of the Deployment —
+    /// reading it would mean granting every backend pod RBAC to
+    /// `get deployments` for a number the chart already holds as a literal
+    /// (`backend.replicas`, `deploy/helm/egret/values.yaml`). So the chart tells
+    /// it, through `EGRET_DATA_API__REPLICAS`.
+    ///
+    /// `egret_dataapi::serving::choose_store` reads this and **refuses to
+    /// start** on more than one replica with no shared store configured. That
+    /// is §4 decision B's interim guard, and it is a refusal rather than a
+    /// warning because the condition is static, known at startup, and has two
+    /// one-line remedies.
+    ///
+    /// Default `1`: a deployment that never sets it is a single-replica
+    /// deployment, which is what the process-local state is correct for.
+    #[serde(default = "default_replicas")]
+    pub replicas: u32,
+    /// Redis/Valkey URL backing the serving surface's rate limiter and response
+    /// cache across replicas (§4 decision B). Unset (or blank) means
+    /// process-local state, which is correct at one replica and refused above
+    /// one.
+    ///
+    /// Set at ONE replica too, if a deployment configures it. That is
+    /// deliberate — see `choose_store` — because otherwise the shared path would
+    /// first run in production, on the day someone scaled out.
+    ///
+    /// Numbered logical databases separate two egret deployments that must share
+    /// one instance: `redis://valkey:6379/1`.
+    #[serde(default)]
+    pub shared_store_url: Option<String>,
+}
+
+/// Serde's fallback for [`DataApiConfig::replicas`].
+///
+/// `1` rather than `0`: the number describes how many of this process exist,
+/// and at least this one does. It also has to be a value the multi-replica guard
+/// lets through, or every deployment that predates the key would fail to start.
+fn default_replicas() -> u32 {
+    1
 }
 
 impl DataApiConfig {
@@ -362,6 +407,10 @@ fn default_data_api() -> DataApiConfig {
         // Unset: fall back to `catalog.public_url`. See
         // `DataApiConfig::public_url` for why this is a separate key at all.
         public_url: None,
+        replicas: default_replicas(),
+        // Unset: process-local limiter and cache, which is correct at one
+        // replica and refused above one.
+        shared_store_url: None,
     }
 }
 

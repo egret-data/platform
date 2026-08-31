@@ -25660,7 +25660,7 @@
             }
           },
           "503": {
-            "description": "`schema_drift` / `output_naming_collision` / `cache_scope_stale` / `governance_stale` / `param_gate_stale` — the published configuration no longer describes the data, was frozen before the current parameter-safety rules existed, or points at a `governed` database through a connection that does not run queries as the caller. `Retry-After` is a floor, not a forecast: a re-publish clears the first four, and `governance_stale` is cleared only by restoring the connection or the database's `governed` flag. `overloaded` — egret shed the request because the serving surface was at its concurrency limit; that one clears by itself and its `Retry-After` is a prediction",
+            "description": "`schema_drift` / `output_naming_collision` / `cache_scope_stale` / `governance_stale` / `param_gate_stale` — the published configuration no longer describes the data, was frozen before the current parameter-safety rules existed, or points at a `governed` database through a connection that does not run queries as the caller. `Retry-After` is a floor, not a forecast: a re-publish clears the first four, and `governance_stale` is cleared only by restoring the connection or the database's `governed` flag. `overloaded` — egret shed the request because the serving surface was at its concurrency limit; that one clears by itself and its `Retry-After` is a prediction. `rate_limiter_unavailable` — the shared rate-limit store could not be consulted, so the request was refused rather than admitted without an allowance; it also clears by itself",
             "content": {
               "application/json": {
                 "schema": {
@@ -25803,7 +25803,7 @@
             }
           },
           "503": {
-            "description": "`schema_drift` / `output_naming_collision` / `cache_scope_stale` / `governance_stale` / `param_gate_stale` — the published configuration no longer describes the data, was frozen before the current parameter-safety rules existed, or points at a `governed` database through a connection that does not run queries as the caller. `Retry-After` is a floor, not a forecast: a re-publish clears the first four, and `governance_stale` is cleared only by restoring the connection or the database's `governed` flag. `overloaded` — egret shed the request because the serving surface was at its concurrency limit; that one clears by itself and its `Retry-After` is a prediction",
+            "description": "`schema_drift` / `output_naming_collision` / `cache_scope_stale` / `governance_stale` / `param_gate_stale` — the published configuration no longer describes the data, was frozen before the current parameter-safety rules existed, or points at a `governed` database through a connection that does not run queries as the caller. `Retry-After` is a floor, not a forecast: a re-publish clears the first four, and `governance_stale` is cleared only by restoring the connection or the database's `governed` flag. `overloaded` — egret shed the request because the serving surface was at its concurrency limit; that one clears by itself and its `Retry-After` is a prediction. `rate_limiter_unavailable` — the shared rate-limit store could not be consulted, so the request was refused rather than admitted without an allowance; it also clears by itself",
             "content": {
               "application/json": {
                 "schema": {

@@ -63,6 +63,12 @@ minijinja.workspace = true
 # concatenation so the key is fixed-length however many parameters an endpoint
 # declares, and so no separator question arises from a value containing one.
 sha2.workspace = true
+# Package 4: the SHARED rate-limit/response-cache store (`serving/shared.rs`),
+# which is what stops a multi-replica deployment from multiplying every published
+# rate limit by its replica count. Feature set is pinned in the workspace
+# manifest; `script` is load-bearing, not a convenience — read the comment there
+# before touching it.
+redis.workspace = true
 # `url::form_urlencoded` — the serving path's parameter decoding
 # (`serving/params.rs`). Reached through `url` rather than by adding
 # `form_urlencoded` directly because `url` is already the workspace's pinned
@@ -87,6 +93,12 @@ starlark = { workspace = true }
 # One private, already-migrated database per test process. Replaces the
 # `#[path]`-included `tests/test_db/mod.rs` this crate used to own.
 egret-test-db.workspace = true
+# `serving_shared_store.rs` opens its OWN connection to look at what
+# `SharedStore` actually wrote. Asking the implementation whether it stored
+# something is asking it to confirm its own claim, and would pass just as well
+# against an in-process map — which is the one failure this suite is written to
+# make impossible.
+redis.workspace = true
 # `serving_auth.rs` asserts that every rejection arm LOGS its reason. The doc on
 # `verify_serving_token` promises an operator can tell a stale token from a
 # replayed catalog one; without a subscriber to capture the events, that promise

@@ -13,6 +13,37 @@ backend:
   # Must stay ABOVE egret_server::DRAIN_DEADLINE (55 s), or SIGKILL arrives
   # before the drain finishes and the graceful shutdown is decoration.
   terminationGracePeriodSeconds: 65
+# Package 4 — where the Data API's rate-limit buckets and response cache live.
+#
+# Both are process-local unless this is configured. Raising `backend.replicas`
+# above 1 without it would multiply every PUBLISHED rate limit by the replica
+# count and fragment the response cache, silently — so the backend REFUSES TO
+# START in that combination (`serving::choose_store`), and `configmap-env.yaml`
+# passes `backend.replicas` down as EGRET_DATA_API__REPLICAS so it can.
+#
+# Optional on purpose: a single-replica deployment needs nothing here.
+sharedStore:
+  # Render and use the in-chart Valkey below.
+  enabled: false
+  # OR point at a Redis/Valkey you already run, in which case nothing is
+  # rendered and this URL is used as-is. Wins over `enabled`.
+  # Numbered logical databases separate two egret deployments sharing one
+  # instance: redis://valkey:6379/1
+  url: ""
+  image: valkey/valkey:8-alpine
+  # Set EXPLICITLY, not inherited. Redis/Valkey default to `noeviction`, under
+  # which a full instance fails writes — and since the rate limiter fails CLOSED
+  # on a store error, a full cache would become 503s on every rate-limited
+  # endpoint. `allkeys-lru` sheds the coldest keys instead. The one consequence:
+  # an evicted limiter bucket comes back full, granting that key at most one
+  # extra burst — the same caveat the in-process map already documents, and in
+  # practice it lands on idle clients, whose buckets had refilled anyway.
+  maxmemory: 256mb
+  maxmemoryPolicy: allkeys-lru
+  # Above `maxmemory`, which bounds the DATA only: the process, its client
+  # buffers and its copy-on-write headroom are on top of it.
+  memoryRequest: 128Mi
+  memoryLimit: 512Mi
 frontend:
   image: { repository: egret-frontend, tag: dev, pullPolicy: IfNotPresent }
   nodePort: 30080
