@@ -19,3 +19,4 @@
 //! it testable without standing anything up (spec §6.5).
 
 pub mod models;
+pub mod spec;

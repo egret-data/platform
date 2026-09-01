@@ -1,0 +1,13 @@
+//! Turning YAML source into a validated `Flow`: located parse errors, the
+//! task-type registry, and the three validation layers.
+//!
+//! `registry` stays a module path (`spec::registry::known_type`), not
+//! flattened, because it is meant to be read like a table, not called like a
+//! single function alongside `parse`/`validate`.
+
+mod parse;
+pub mod registry;
+mod validate;
+
+pub use parse::{parse, ParseError};
+pub use validate::{validate, Finding, ValidationReport};
