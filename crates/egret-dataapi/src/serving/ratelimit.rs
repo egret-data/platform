@@ -265,6 +265,64 @@ pub fn endpoint_key(endpoint_id: Uuid) -> String {
     format!("e:{endpoint_id}")
 }
 
+/// The contract route's bucket key: this SERVICE ACCOUNT, in this workspace.
+///
+/// A third namespace (`d:`, for the document), and it has to be a third one.
+/// Reusing `e:` or `c:` would let a contract fetch spend a token an endpoint
+/// CALL then needs — the limiter would be refusing paid traffic in order to
+/// bound a discovery request — and the prefixes are what keep a client id from
+/// being spelled into either of the other two buckets.
+///
+/// # Both dimensions are read off the token, and neither can be chosen
+///
+/// [`super::contract`] keys this on `principal.workspace_id` and
+/// `principal.user_id`, both claims of a signed bearer. Package 4's measured
+/// lesson is that a bucket keyed without the dimension that varies lets a caller
+/// pick its own rate; the dimension that varies here is the SERVICE ACCOUNT,
+/// because that is what the document varies by.
+///
+/// **Not `client_id`.** That is the per-call key's second dimension and it is
+/// the wrong one here: an account holding several clients would get a full
+/// allowance per client for a document identical across all of them. Minting a
+/// client needs `service_account:manage`, so that is not a hole a consumer can
+/// open on its own — it is simply the wrong denominator for a per-account
+/// answer.
+pub fn contract_key(workspace_id: Uuid, service_account: Uuid) -> String {
+    format!("d:{workspace_id}:{service_account}")
+}
+
+/// Tokens per second for [`contract_key`]'s bucket.
+///
+/// **Not published, not author-configurable, and therefore always consulted.**
+/// `rate_limit` is a property of an ENDPOINT and this request names none, so
+/// there is no author to have written a number down and the surface has to pick
+/// one. See [`super::contract`] for why the route is limited at all — briefly,
+/// it is the most expensive request this surface serves and it was the only
+/// unlimited one.
+pub const CONTRACT_QPS: u32 = 1;
+
+/// Burst depth for [`contract_key`]'s bucket.
+///
+/// 10 rather than 1 because the realistic legitimate spike is a deployment's
+/// worth of replicas sharing one service account and fetching their contract at
+/// start-up; a burst of 1 would 429 all but the first of them on every rollout.
+/// Past the spike it is [`CONTRACT_QPS`] that bounds a loop, and one document
+/// per second per account is already far more than a document which changes only
+/// when somebody publishes or writes a grant is legitimately fetched.
+pub const CONTRACT_BURST: u32 = 10;
+
+/// [`CONTRACT_QPS`]/[`CONTRACT_BURST`] as a [`Rate`].
+///
+/// Through [`Rate::from_spec`] rather than by constructing the struct, so the
+/// contract bucket is sized by the same ceiling-and-floor arithmetic every
+/// published limit is. The `expect` cannot fire — `from_spec` returns `None`
+/// only for `qps == 0` — and `the_contract_rate_is_a_real_allowance` below is
+/// what makes that an assertion rather than a hope.
+pub fn contract_rate() -> Rate {
+    Rate::from_spec(CONTRACT_QPS, CONTRACT_BURST)
+        .expect("CONTRACT_QPS is non-zero, so this is always a rate")
+}
+
 /// Apply both of a snapshot's limits, returning the `Retry-After` of whichever
 /// refused.
 ///
@@ -549,5 +607,77 @@ mod tests {
             Err(Refusal::Exhausted(d)) => assert!(d > Duration::ZERO),
             other => panic!("an in-process bucket has no unreachable state: {other:?}"),
         }
+    }
+
+    /// The contract bucket's rate is an allowance somebody can actually spend.
+    ///
+    /// [`contract_rate`] `expect`s, and an `expect` in a request handler is only
+    /// safe while the constant it reads is non-zero — `Rate::from_spec` answers
+    /// `None` for `qps == 0` and the route would panic rather than refuse.
+    /// Asserting the arithmetic rather than the constants, so a future
+    /// adjustment of either number is still checked for the property that
+    /// matters: a positive rate and a burst of at least one.
+    #[test]
+    fn the_contract_rate_is_a_real_allowance() {
+        let rate = contract_rate();
+        assert!(rate.qps > 0.0, "a bucket that never refills is a lockout");
+        assert!(
+            rate.burst >= 1.0,
+            "a burst below one token refuses the FIRST request"
+        );
+        assert_eq!(rate.qps, f64::from(CONTRACT_QPS));
+        assert_eq!(rate.burst, f64::from(CONTRACT_BURST));
+    }
+
+    /// **A contract fetch cannot spend a token a CALL then needs**, and no
+    /// caller-supplied string can reach into the contract's bucket either.
+    ///
+    /// The three key builders share one flat key space in one store, so the
+    /// separation is entirely in the prefixes. `client_id` is the only part of
+    /// any of them a caller supplies, so it is the one tried against the other
+    /// two namespaces here — and the endpoint/workspace/account halves are given
+    /// the SAME uuid on purpose, which is the collision an unprefixed
+    /// `format!("{a}:{b}")` scheme would have.
+    #[test]
+    fn the_contract_bucket_is_its_own_namespace() {
+        let id = Uuid::from_u128(1);
+        let other = Uuid::from_u128(2);
+
+        let contract = contract_key(id, other);
+        assert_ne!(contract, endpoint_key(id));
+        assert_ne!(contract, endpoint_key(other));
+        assert_ne!(contract, client_key(id, &other.to_string()));
+
+        // A client id spelled to look like the other two keys, in full.
+        for spelling in [
+            format!("d:{id}:{other}"),
+            format!("{id}:{other}"),
+            endpoint_key(id),
+        ] {
+            assert_ne!(
+                client_key(id, &spelling),
+                contract,
+                "a caller-supplied client id must not land in the contract bucket"
+            );
+        }
+
+        // And the arithmetic agrees with the naming: exhausting the contract
+        // bucket leaves both call buckets full.
+        let tb = TokenBucket::new();
+        let one = Rate {
+            qps: 1.0,
+            burst: 1.0,
+        };
+        let t = t0();
+        assert!(tb.take(&contract, one, t).is_ok());
+        assert!(tb.take(&contract, one, t).is_err(), "spent");
+        assert!(
+            tb.take(&client_key(id, "c"), one, t).is_ok(),
+            "a contract fetch must not spend a client's call allowance"
+        );
+        assert!(
+            tb.take(&endpoint_key(id), one, t).is_ok(),
+            "nor the endpoint-wide one"
+        );
     }
 }

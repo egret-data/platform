@@ -51,6 +51,156 @@ const withQueryKey = <T extends object, K>(query: T, queryKey: K): T & { queryKe
   return result;
 };
 
+export type dataApiServingServeContractResponse200 = {
+  data: unknown
+  status: 200
+}
+
+export type dataApiServingServeContractResponse401 = {
+  data: ServingErrorBody
+  status: 401
+}
+
+export type dataApiServingServeContractResponse404 = {
+  data: ServingErrorBody
+  status: 404
+}
+
+export type dataApiServingServeContractResponse413 = {
+  data: ServingErrorBody
+  status: 413
+}
+
+export type dataApiServingServeContractResponse429 = {
+  data: ServingErrorBody
+  status: 429
+}
+
+export type dataApiServingServeContractResponse500 = {
+  data: ServingErrorBody
+  status: 500
+}
+
+export type dataApiServingServeContractResponse503 = {
+  data: ServingErrorBody
+  status: 503
+}
+
+export type dataApiServingServeContractResponse504 = {
+  data: ServingErrorBody
+  status: 504
+}
+
+export type dataApiServingServeContractResponseSuccess = (dataApiServingServeContractResponse200) & {
+  headers: Headers;
+};
+export type dataApiServingServeContractResponseError = (dataApiServingServeContractResponse401 | dataApiServingServeContractResponse404 | dataApiServingServeContractResponse413 | dataApiServingServeContractResponse429 | dataApiServingServeContractResponse500 | dataApiServingServeContractResponse503 | dataApiServingServeContractResponse504) & {
+  headers: Headers;
+};
+
+export type dataApiServingServeContractResponse = (dataApiServingServeContractResponseSuccess | dataApiServingServeContractResponseError)
+
+export const getDataApiServingServeContractUrl = (ws: string,) => {
+
+
+
+
+  return `/data-api/v1/${encodeURIComponent(ws)}`
+}
+
+/**
+ * Returns an OpenAPI 3.0.3 document describing every published endpoint THIS service account may invoke in this workspace, taken from each endpoint's frozen published version. The account is read from the bearer token, so the document is always the caller's own and never another account's. Endpoints the account holds no invoke grant on are absent entirely — paths, parameters and column names alike — so an empty `paths` object means this account has been granted nothing rather than that the workspace is empty. The document is generated per request and reflects grants, publishes and endpoint state as they are at that instant; it is not cacheable.
+ * @summary Fetch this service account's own API contract
+ */
+export const dataApiServingServeContract = async (ws: string, options?: Parameters<typeof customInstance>[1]): Promise<dataApiServingServeContractResponse> => {
+
+  return customInstance<dataApiServingServeContractResponse>(getDataApiServingServeContractUrl(ws),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getDataApiServingServeContractQueryKey = (ws: string,) => {
+    return [
+    `/data-api/v1/${encodeURIComponent(ws)}`
+    ] as const;
+    }
+
+
+export const getDataApiServingServeContractQueryOptions = <TData = Awaited<ReturnType<typeof dataApiServingServeContract>>, TError = ServingErrorBody>(ws: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof dataApiServingServeContract>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getDataApiServingServeContractQueryKey(ws);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof dataApiServingServeContract>>> = ({ signal }) => dataApiServingServeContract(ws, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: ws !== null && ws !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof dataApiServingServeContract>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type DataApiServingServeContractQueryResult = NonNullable<Awaited<ReturnType<typeof dataApiServingServeContract>>>
+export type DataApiServingServeContractQueryError = ServingErrorBody
+
+
+export function useDataApiServingServeContract<TData = Awaited<ReturnType<typeof dataApiServingServeContract>>, TError = ServingErrorBody>(
+ ws: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof dataApiServingServeContract>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof dataApiServingServeContract>>,
+          TError,
+          Awaited<ReturnType<typeof dataApiServingServeContract>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useDataApiServingServeContract<TData = Awaited<ReturnType<typeof dataApiServingServeContract>>, TError = ServingErrorBody>(
+ ws: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof dataApiServingServeContract>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof dataApiServingServeContract>>,
+          TError,
+          Awaited<ReturnType<typeof dataApiServingServeContract>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useDataApiServingServeContract<TData = Awaited<ReturnType<typeof dataApiServingServeContract>>, TError = ServingErrorBody>(
+ ws: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof dataApiServingServeContract>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Fetch this service account's own API contract
+ */
+
+export function useDataApiServingServeContract<TData = Awaited<ReturnType<typeof dataApiServingServeContract>>, TError = ServingErrorBody>(
+ ws: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof dataApiServingServeContract>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getDataApiServingServeContractQueryOptions(ws,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
 export type dataApiServingServeGetResponse200 = {
   data: ServingResponse
   status: 200

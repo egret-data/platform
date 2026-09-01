@@ -936,3 +936,41 @@ async fn a_bare_endpoint_is_documented_as_the_body_it_answers_with() {
         "a bare endpoint's refusals still reference it: {op}"
     );
 }
+
+/// **The generated document is never stored, on this route either.**
+///
+/// The bearer-reachable contract (`serving::contract`) carries
+/// `Cache-Control: no-store` and states why: the document varies by service
+/// account, so a shared cache hands one consumer another's. This route is the
+/// more sensitive of the two — it is `:manage`-gated precisely because it
+/// answers that question **per account and iterable** — and it returned no
+/// cache header at all.
+///
+/// Being behind a session is not a substitute. `Cache-Control` governs
+/// intermediaries and the browser's own disk cache, both downstream of
+/// authorization and neither of which knows the response is per account.
+///
+/// Mutation: drop the header tuple from `get_openapi`'s `Ok(...)` and this is
+/// `None`.
+#[tokio::test]
+async fn the_management_document_is_never_stored_either() {
+    let Some(f) = fixture().await else { return };
+    let sa = f.create_service_account("no-store-sa").await;
+
+    let (status, cache_control) = f
+        .mgmt_get_cache_control(&format!(
+            "/api/ws/{}/data-api/openapi?service_account_id={sa}",
+            f.ws_slug
+        ))
+        .await;
+
+    // The 200 first: a 403 or a 404 would carry no header either, and would
+    // make the assertion below pass for the wrong reason.
+    assert_eq!(status, 200);
+    assert_eq!(
+        cache_control.as_deref(),
+        Some("no-store"),
+        "a per-service-account document must not be stored by anything between \
+         egret and the admin reading it"
+    );
+}

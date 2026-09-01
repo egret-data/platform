@@ -300,6 +300,7 @@ export * from './secretDto';
 export * from './seedResult';
 export * from './servingErrorBody';
 export * from './servingErrorDetail';
+export * from './servingErrorDetailCode';
 export * from './servingMeta';
 export * from './servingResponse';
 export * from './servingStatus';

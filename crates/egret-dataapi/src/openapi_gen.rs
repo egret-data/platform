@@ -938,10 +938,25 @@ pub async fn build(
                     "type": "object",
                     "required": ["code", "message", "request_id"],
                     "properties": {
+                        // The `enum` is DERIVED — `wire_codes` is `to_wire`
+                        // applied to the variant census. Written out by hand
+                        // it would be the third hand-maintained list of this
+                        // surface's answers in this programme, and the first
+                        // two both went stale; see `serving::error::wire_codes`.
+                        //
+                        // Without it a generated client typed this field
+                        // `string`, so the ONE field the description calls
+                        // "the stable code to branch on" was the one field a
+                        // consumer could not branch on safely. `example` stays:
+                        // it shows the shape at a glance in a rendered document,
+                        // where an enum of two dozen strings is a wall.
                         "code": {
                             "type": "string",
                             "description": "The stable code to branch on. `message` is for \
-                                            humans and may be reworded.",
+                                            humans and may be reworded. The list is every \
+                                            code this surface can answer with, so a client \
+                                            may treat an unlisted value as a protocol error.",
+                            "enum": crate::serving::error::wire_codes(),
                             "example": "row_limit_exceeded"
                         },
                         "message": { "type": "string" },

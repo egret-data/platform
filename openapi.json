@@ -16555,7 +16555,7 @@
         ],
         "responses": {
           "200": {
-            "description": "OpenAPI 3.0.3 document describing what service_account_id may invoke. `servers[0].url` already carries the workspace slug, so joining it with a `paths` key gives the URL a consumer calls",
+            "description": "OpenAPI 3.0.3 document describing what service_account_id may invoke. `servers[0].url` already carries the workspace slug, so joining it with a `paths` key gives the URL a consumer calls. `Cache-Control: no-store`: the document is per service account and reflects grants as they are at this instant",
             "content": {
               "application/json": {
                 "schema": {}
@@ -25542,6 +25542,112 @@
         }
       }
     },
+    "/data-api/v1/{ws}": {
+      "get": {
+        "tags": [
+          "data-api-serving"
+        ],
+        "summary": "Fetch this service account's own API contract",
+        "description": "Returns an OpenAPI 3.0.3 document describing every published endpoint THIS service account may invoke in this workspace, taken from each endpoint's frozen published version. The account is read from the bearer token, so the document is always the caller's own and never another account's. Endpoints the account holds no invoke grant on are absent entirely — paths, parameters and column names alike — so an empty `paths` object means this account has been granted nothing rather than that the workspace is empty. The document is generated per request and reflects grants, publishes and endpoint state as they are at that instant; it is not cacheable.",
+        "operationId": "serve_contract",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace slug; must match the token's `ws` claim",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "An OpenAPI 3.0.3 document describing exactly the endpoints THIS service account may invoke, and nothing else in the workspace. `servers[0].url` is this same URL, so joining it with a `paths` key gives a URL that can be called with the same token. `Cache-Control: no-store`: the document is per service account and reflects grants as they are at this instant",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "`key_invalid` — bearer token missing, expired, or not for this audience",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServingErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`not_found` — no such workspace, or it is not the one the token was issued for, or it is archived. One code for all three, so a caller cannot learn that a workspace exists",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServingErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "`payload_too_large` — the request declared a body larger than this surface accepts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServingErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`rate_limited` — this service account's contract allowance is spent; `Retry-After` states when it refills. The allowance is egret's, not an endpoint's: building this document is the most expensive request on the surface, so it has a bucket of its own, keyed on the service account and shared by every client the account holds",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServingErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "`internal` — an egret-side fault, including a workspace with more live endpoints than one document may describe; quote `request_id` to support",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServingErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`output_naming_collision` — an endpoint this account may invoke has a published output that maps two columns onto one key, so there is no document to describe it; its author must re-publish. `overloaded` — egret shed the request because the serving surface was at its concurrency limit. `rate_limiter_unavailable` — the shared rate-limit store could not be consulted, so the request was refused rather than admitted without an allowance. The last two clear by themselves",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServingErrorBody"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "`deadline_exceeded` — the request outran egret's own serving deadline",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServingErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "data_api_bearer": []
+          }
+        ]
+      }
+    },
     "/data-api/v1/{ws}/{path}": {
       "get": {
         "tags": [
@@ -33611,6 +33717,31 @@
           "code": {
             "type": "string",
             "description": "The stable, machine-readable code from spec §7. Clients branch on this;\n`message` is for humans and may be reworded.",
+            "enum": [
+              "cache_scope_stale",
+              "data_access_denied",
+              "deadline_exceeded",
+              "endpoint_query_failed",
+              "engine_unavailable",
+              "governance_stale",
+              "internal",
+              "key_invalid",
+              "not_found",
+              "not_granted",
+              "output_naming_collision",
+              "overloaded",
+              "param_gate_stale",
+              "param_invalid",
+              "param_missing",
+              "payload_too_large",
+              "rate_limited",
+              "rate_limiter_unavailable",
+              "row_limit_exceeded",
+              "schema_drift",
+              "timeout",
+              "version_pin_invalid",
+              "version_unavailable"
+            ],
             "example": "row_limit_exceeded"
           },
           "message": {

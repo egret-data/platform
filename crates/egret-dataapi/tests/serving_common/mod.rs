@@ -1131,6 +1131,35 @@ impl Fixture {
         self.mgmt_send("GET", path, None).await
     }
 
+    /// The same GET, reporting `Cache-Control` instead of the body.
+    ///
+    /// A separate helper rather than a wider return type on [`Fixture::mgmt_get`]
+    /// because exactly one management response has a header worth asserting on —
+    /// the generated OpenAPI document, which is per service account and must not
+    /// be stored (see `routes::get_openapi`). Widening every caller's tuple to
+    /// carry a `None` would be noise.
+    pub async fn mgmt_get_cache_control(&self, path: &str) -> (StatusCode, Option<String>) {
+        let res = self
+            .mgmt
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(path)
+                    .header("Cookie", format!("egret_session={}", self.session))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let cache_control = res
+            .headers()
+            .get("cache-control")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        (res.status(), cache_control)
+    }
+
     /// A POST through the management router, with the session cookie
     /// [`Fixture::mgmt_send`] already attaches. Needed to republish an
     /// EXISTING endpoint id a second time (producing version 2) rather than
@@ -1860,5 +1889,113 @@ impl Fixture {
             .expect("store rate_limit")
             .rows_affected();
         assert_eq!(touched, 1, "the rate limit must actually be stored");
+    }
+
+    /// Package 8: `GET /data-api/v1/{ws}` as `principal`, with a valid bearer.
+    ///
+    /// The URL is built from `self.ws_slug` and NOT from a caller-supplied
+    /// string, so the ordinary case cannot accidentally be a cross-workspace
+    /// one; [`Fixture::contract_raw`] is what a test uses when the mismatch is
+    /// the subject.
+    pub async fn contract_as(&self, principal: UserId) -> ContractRes {
+        let token = mint(
+            self.ws_id,
+            principal,
+            &format!("client-{}", principal.0.simple()),
+        );
+        self.contract_raw(&self.ws_slug, &format!("Bearer {token}"))
+            .await
+    }
+
+    /// The same fetch with the slug and the `Authorization` header supplied
+    /// VERBATIM.
+    ///
+    /// Both halves have to be forgeable for the refusals to be measurable: a
+    /// token minted for another workspace, an archived workspace's slug, a
+    /// header that will not verify, or no header at all. [`Fixture::contract_as`]
+    /// can express none of those, because it always mints a valid token for this
+    /// workspace.
+    pub async fn contract_raw(&self, ws_slug: &str, authorization: &str) -> ContractRes {
+        let mut builder = Request::builder()
+            .method("GET")
+            .uri(format!("/data-api/v1/{ws_slug}"));
+        if !authorization.is_empty() {
+            builder = builder.header("authorization", authorization);
+        }
+        let res = self
+            .serving
+            .clone()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        contract_res(res).await
+    }
+}
+
+/// Read a contract response off the wire. Shared by [`Fixture::contract_raw`]
+/// and by a test that drives the route through a router of its own — a test
+/// substituting the rate-limit store has to build the router itself, and it must
+/// still read the answer exactly the way the ordinary path does or it is
+/// asserting on a different thing.
+pub async fn contract_res(res: axum::response::Response) -> ContractRes {
+    let status = res.status();
+    let header = |name: &str| {
+        res.headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+    };
+    let cache_control = header("cache-control");
+    let retry_after = header("retry-after");
+    let bytes = axum::body::to_bytes(res.into_body(), 8 * 1024 * 1024)
+        .await
+        .unwrap();
+    ContractRes {
+        status,
+        cache_control,
+        retry_after,
+        body: serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+    }
+}
+
+/// One fetch of the bearer-reachable contract.
+///
+/// Separate from [`Res`] because the two assertions this route needs are not
+/// the ones a served call needs: `Cache-Control` (which `Res` does not carry,
+/// and whose absence is a real defect here — see `serving::contract`) and the
+/// document itself rather than a `data` array.
+pub struct ContractRes {
+    pub status: StatusCode,
+    pub cache_control: Option<String>,
+    /// `Retry-After`, in seconds. Carried because this route is rate limited —
+    /// see `serving::contract` — and a 429 without it tells a consumer to guess.
+    pub retry_after: Option<String>,
+    pub body: serde_json::Value,
+}
+
+impl ContractRes {
+    /// The `paths` keys, sorted — "which endpoints does this document describe".
+    ///
+    /// Sorted so an assertion is about the SET and not about `serde_json`'s
+    /// insertion order, and panicking rather than defaulting to empty: a
+    /// document with no `paths` object at all is a failure, and a helper that
+    /// quietly returned `[]` for it would make "this account sees nothing" pass
+    /// for the wrong reason.
+    pub fn paths(&self) -> Vec<String> {
+        let mut keys: Vec<String> = self.body["paths"]
+            .as_object()
+            .unwrap_or_else(|| panic!("no paths object in {}", self.body))
+            .keys()
+            .cloned()
+            .collect();
+        keys.sort();
+        keys
+    }
+
+    /// The wire `error.code`, for a refusal.
+    pub fn code(&self) -> &str {
+        self.body["error"]["code"]
+            .as_str()
+            .unwrap_or_else(|| panic!("no error.code in {}", self.body))
     }
 }

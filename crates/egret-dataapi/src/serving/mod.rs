@@ -16,6 +16,11 @@
 pub mod access_log;
 pub mod auth;
 pub mod cache;
+/// Package 8's bearer-reachable contract: `GET /data-api/v1/{ws}`, the OpenAPI
+/// document for the service account the token belongs to. Read its module
+/// comment before touching the scoping — it is the same `can_invoke` the call
+/// path uses, on purpose.
+pub(crate) mod contract;
 pub mod error;
 pub mod governance;
 pub mod guard;

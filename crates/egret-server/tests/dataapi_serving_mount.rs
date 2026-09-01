@@ -255,6 +255,59 @@ async fn the_serving_route_is_mounted_where_the_spec_says() {
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 }
 
+/// **The two-segment contract URL survives composition too.**
+///
+/// Package 8 mounts `GET /data-api/v1/{ws}` beside `/{ws}/{*path}`, and its
+/// whole safety argument is that no published endpoint can occupy that URL —
+/// `normalize_path` refuses an empty path, so every published URL has a segment
+/// after the slug. That argument is about `serving_router()`'s own route table.
+/// It says nothing about what `build_router` merges AFTER it, and a two-segment
+/// URL is exactly the shape a redirect layer, a trailing-slash normaliser or an
+/// SPA fallback added later would claim. All 15 of `egret-dataapi`'s tests for
+/// this route drive `serving_router()` directly, so every one of them would stay
+/// green while the composed application answered something else — which is the
+/// distinction this file exists for.
+///
+/// There is no such layer today, so this is prevention: the assertion is here to
+/// fail on the day one is added, in the file whose subject is composition.
+///
+/// No `Authorization` header, so the answer is `verify_serving_token`'s own 401
+/// and no database is needed — the same evidence the sibling test above uses,
+/// for the same reason: a 401 in the SERVING envelope can only have come from
+/// this handler.
+#[tokio::test]
+async fn the_contract_route_is_mounted_where_the_spec_says() {
+    let app = composed_app_with_dataapi();
+
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri("/data-api/v1/default")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let status = res.status();
+    let body = body_text(res).await;
+    // 404 would mean nothing is mounted at the two-segment URL; 405 would mean
+    // something is, but not a GET; a redirect would mean a layer claimed it.
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "the contract handler must answer at /data-api/v1/{{ws}} through the \
+         COMPOSED router, got {status} {body}"
+    );
+    // …and the 401 is the serving surface's own envelope, not some other
+    // handler's. Without this the assertion above would also pass if a later
+    // layer intercepted the URL and happened to answer 401 itself.
+    assert!(
+        body.contains("key_invalid"),
+        "the serving handler's own refusal envelope is the evidence it ran: {body}"
+    );
+}
+
 #[test]
 fn the_serving_operations_security_requirement_resolves_to_a_declared_scheme() {
     // `security(("data_api_bearer" = []))` on the two operations is the ONLY

@@ -49,7 +49,7 @@ Ordered by value-per-effort, not by severity. Dependencies noted.
 | 5 | **Script parameter constraints** — ✅ | Package S lets a script concatenate a caller's value into SQL text. The publish-time sentinel probe has **two bypasses pinned open by tests asserting `is_ok()`**. Closed by construction rather than by a better probe, at publish AND — for endpoints frozen before the rule — at serve time; see §5.1. | — |
 | 6 | **Publish-time diff + acknowledgement** — ✅ | `publish` validates the draft against *itself*; the only read of `endpoint_versions` is `MAX(version)`. A removed column, narrowed type, renamed parameter or new required parameter publishes silently. Worst case: adding a second statement flips top-level `data` from an array to an object. | — |
 | 7 | **Consumer version pinning** — ✅ | Serving resolves `live_version_id` only; a publish moves every caller at commit. `meta.version` lets a consumer *observe* which version answered but never *ask* for one. | 6 |
-| 8 | **Contract reachability** | The OpenAPI document sits behind a human session + `:manage`, so a consumer holding only a `data-api` token cannot fetch its own contract; `error.code` has no `enum` despite being documented as the stable code to branch on. | — |
+| 8 | **Contract reachability** — ✅ | The OpenAPI document sits behind a human session + `:manage`, so a consumer holding only a `data-api` token cannot fetch its own contract; `error.code` has no `enum` despite being documented as the stable code to branch on. | — |
 
 ### Package 6 as delivered, and the four decisions inside it
 
@@ -262,6 +262,82 @@ Two smaller items fold into the packages that own them rather than standing alon
   *logging*; the classification is unchanged.
 - **Trino 503 handling** (into Package 3): the Trino client protocol defines 503 as *retry, the
   query is alive*; it currently becomes a 500 and abandons a live query.
+
+### Package 8 as delivered: the document, reachable by the credential that needs it
+
+`GET /api/ws/{workspace}/data-api/openapi` was — and remains — behind a human
+session and `data_api_endpoint:manage`. `routes.rs`' module comment gives the
+reason and it is still true: reading grants "enumerates every consumer of the
+endpoint", and this route "answers that question per account and iterable", so a
+`:read` caller could walk a workspace's service accounts and reconstruct the
+whole grant graph along with every path, parameter and column name in it.
+
+So the answer is a **second route**, not a looser gate:
+`GET /data-api/v1/{ws}`, authenticated by the `data-api` bearer alone. Four
+things are worth carrying forward.
+
+- **The bearer cannot name an account, because it IS one.** The service account
+  comes from the token's `egret_user_id` claim; nothing in the request can
+  change it. The `:manage` route's danger is that it takes a
+  `service_account_id` and is therefore iterable — this one has no such
+  parameter and no roster to enumerate.
+
+- **Scoping is the same expression the call path uses, not a second answer.**
+  `openapi_gen::build` already asks `invoke::can_invoke` per candidate endpoint,
+  which is what `serving::router`'s step 4 evaluates before it runs anything. A
+  document listing endpoints the account may not invoke would be an information
+  disclosure — endpoint paths and parameter names are exactly the reconnaissance
+  an unauthorised caller wants — and the way that is prevented is by there being
+  one answer to "what may this account call". A grant revoked between two
+  fetches is gone from the second document, and an endpoint reachable only
+  through the Cedar `ws_admin` cascade is in both the document and the call.
+
+- **The URL is `servers[0].url` itself, and it is the one URL under this mount a
+  published endpoint can never take.** `normalize_path` refuses an empty path,
+  so every published URL has at least one segment after the slug. A reserved
+  literal *below* the slug — `/{ws}/openapi.json` — would have had no such
+  guarantee: that spelling publishes today, and axum prefers a static segment to
+  a wildcard, so the author's endpoint would have been silently shadowed by a
+  document.
+
+- **Not cacheable, and the reason is not cost.** The document varies by service
+  account, so a cache keyed on the URL would hand one consumer another's
+  contract — the trap `serving::cache`'s principal-keyed key exists to avoid,
+  and worse here because what leaks is the paths and parameters of endpoints the
+  recipient was never granted. Keying on the principal would fix that and still
+  be wrong: the document also varies with every grant and every publish, neither
+  of which invalidates anything, and a contract must not be staler than the
+  calls it describes. `Cache-Control: no-store`.
+
+- **It has a rate-limit bucket of its own, because it is the most expensive request the
+  surface serves.** Building the document costs one PDP decision per live endpoint — two DB
+  round trips each, up to about 400 for one request — and a holder of one valid bearer can
+  loop it. Package 3a's bulkhead does not close that: it bounds concurrency, so a serial loop
+  never trips it. The per-endpoint limiter genuinely does not fit (it is keyed on
+  `endpoint_id` and this request names none), but that is an argument for a different bucket,
+  not for no bucket — otherwise the cheapest request on the surface is limited and the most
+  expensive one is not. So: a third `d:` namespace keyed on the workspace and the **service
+  account**, both read off the signed token, at a fixed 1 qps with a burst of 10. Its own
+  namespace so a contract fetch can never spend a token a CALL then needs; keyed on the
+  account rather than `client_id` because the account is the dimension the document varies by
+  (Package 4's lesson: a bucket keyed without the varying dimension lets a caller choose its
+  own rate). No second workspace-wide bucket — that would let one account's loop deny every
+  other consumer its contract, and the workspace-wide bound is the bulkhead. Because the rate
+  is a constant rather than an author's published number, this route **always** consults the
+  store, so a store outage refuses it (`503 rate_limiter_unavailable`) where a call to an
+  endpoint with no configured limit keeps serving; that is the fail-closed policy applied to a
+  route with no unlimited mode, and it is the cheaper failure — a consumer needs this document
+  when it builds a client, not per call.
+
+The second half is `error.code`. Both published documents described it as "the
+stable code to branch on" and emitted a bare `{"type": "string"}`, so a
+generated client typed it `string` and a consumer branching on it had nothing to
+branch on. Both now carry an `enum` **derived** from
+`serving::error::wire_codes()` — `to_wire` applied to the variant census — for
+the reason `wire_answers` exists at all: the hand-maintained status lists in
+these same two documents went stale twice in this programme, and a third hand
+list would have gone the same way. The frontend client now exposes the codes as
+a union type rather than `string`.
 
 ## 4. Two decisions — both taken
 
@@ -544,6 +620,26 @@ The system goes dark and reports itself healthy. Three instruments, one cause, a
 - **Signing-key rotation** remains a documented mass outage: `active()` is the only key consulted,
   so rotation invalidates every live token at once. Not in this programme; recorded here so it is
   not rediscovered as new.
+- **A workspace over `MAX_DOCUMENTED_ENDPOINTS` (200) live endpoints cannot serve the bearer
+  contract at all.** `GET /data-api/v1/{ws}` answers `500 internal` and the consumer has no remedy.
+  The management route's remedy is `?endpoint_id=`, which the bearer route deliberately does not
+  offer: a consumer asking "what may I call" cannot narrow by an id it does not yet know, and
+  accepting one would make the route an existence oracle over endpoint ids.
+
+  Two things make deferring this right rather than merely convenient. First, **the fix a reader
+  reaches for is worse than the defect**: a dedicated `ServingError` variant would be forced by
+  `the_published_contract_names_every_answer_the_surface_can_give` onto `serve_get` and
+  `serve_post`'s published response lists — those two operations can never produce it, so the
+  document would be made untrue in order to satisfy a test. Second, the cap is what bounds the
+  request's cost (one PDP decision per candidate endpoint), so raising it trades a refusal for an
+  amplification.
+
+  The oracle it carries, recorded so it is not rediscovered either: **the count runs over all live
+  rows before `can_invoke` filters**, so an account granted nothing still learns that the workspace
+  has more than 200 live endpoints — a 500 rather than the empty document it would otherwise get.
+  That is a coarse fact about workspace size and nothing about any endpoint's path, parameters or
+  columns. It is inherent to bounding the cost before paying it: a count taken after the filter
+  would mean running exactly the PDP decisions the cap exists to avoid.
 
 ## 7. What "done" means for this programme
 
