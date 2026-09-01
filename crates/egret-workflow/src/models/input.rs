@@ -61,6 +61,8 @@ pub struct Input {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub defaults: Option<Property<serde_json::Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefill: Option<Property<serde_json::Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub depends_on: Option<DependsOn>,
@@ -139,5 +141,29 @@ required: true
     fn required_defaults_to_true() {
         let i: Input = serde_norway::from_str("id: x\ntype: STRING\n").unwrap();
         assert!(i.required);
+    }
+
+    /// `Input.java`'s base class declares `defaults` AND `prefill` as separate
+    /// fields (`Property<T> defaults; Property<T> prefill;`), both between
+    /// `required` and `displayName`. A round 1 review caught that a first pass
+    /// ported only `defaults` -- with no `deny_unknown_fields` on `models/`,
+    /// that meant a Kestra flow carrying `prefill:` parsed successfully and
+    /// silently dropped the value on re-serialisation. This test fails the
+    /// same way the omission would have, had it existed from the start.
+    #[test]
+    fn defaults_and_prefill_both_survive_round_trip() {
+        let yaml = r#"
+id: x
+type: STRING
+defaults: hello
+prefill: world
+"#;
+        let i: Input = serde_norway::from_str(yaml).unwrap();
+        assert_eq!(i.defaults.as_ref().unwrap().source(), "hello");
+        assert_eq!(i.prefill.as_ref().unwrap().source(), "world");
+
+        let json = serde_json::to_value(&i).unwrap();
+        assert_eq!(json["defaults"], "hello");
+        assert_eq!(json["prefill"], "world");
     }
 }

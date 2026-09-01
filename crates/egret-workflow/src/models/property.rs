@@ -43,7 +43,20 @@ impl<'de, T> Deserialize<'de> for Property<T> {
         let v = serde_json::Value::deserialize(d)?;
         let source = match v {
             serde_json::Value::String(s) => s,
-            serde_json::Value::Null => String::new(),
+            // Kestra's PropertyDeserializer has no `getNullValue()` override, so
+            // Jackson never flattens a null -- the field is simply left null.
+            // There is no source text to invent for that: a `String::new()`
+            // fallback here would let a null reach W2's renderer as `""`, a
+            // silent wrong value instead of an error. A field that may be
+            // absent should be `Option<Property<T>>`, which short-circuits
+            // before this branch is ever reached.
+            serde_json::Value::Null => {
+                return Err(serde::de::Error::custom(
+                    "Property<T> has no null representation (Kestra's PropertyDeserializer \
+                     never flattens a null); use Option<Property<T>> to allow this field to be \
+                     absent instead",
+                ));
+            }
             other => other.to_string(),
         };
         Ok(Self::from_source(source))
@@ -83,5 +96,16 @@ mod tests {
     fn serialises_back_to_its_source() {
         let p: Property<String> = serde_norway::from_str("hello").unwrap();
         assert_eq!(serde_json::to_string(&p).unwrap(), "\"hello\"");
+    }
+
+    /// Round 1 review: Kestra's `PropertyDeserializer` has no `getNullValue()`
+    /// override, so Jackson never flattens a null into a `Property` -- the
+    /// field is simply left null. A bare (non-`Option`) `Property<T>` field
+    /// must therefore reject `null` rather than inventing an empty-string
+    /// source, which would silently reach W2's renderer as `""`.
+    #[test]
+    fn bare_property_rejects_null() {
+        let err = serde_norway::from_str::<Property<String>>("null").unwrap_err();
+        assert!(err.to_string().contains("null"), "unexpected error: {err}");
     }
 }
