@@ -4,6 +4,8 @@
 mod input;
 mod property;
 mod state;
+mod task;
 pub use input::{DependsOn, Input, InputType};
 pub use property::Property;
 pub use state::State;
+pub use task::{Task, TaskKind};
