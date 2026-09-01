@@ -19,6 +19,7 @@ pub use flow::{
 pub use input::{DependsOn, Input, InputType};
 pub use property::Property;
 pub use state::State;
+pub(crate) use task::canonical_flow_type;
 pub use task::{Retry, Task, TaskKind};
 pub use trigger::{
     Dependency, FetchType, FlowTrigger, FlowTriggerMode, Schedule, Trigger, TriggerKind, Webhook,

@@ -445,11 +445,30 @@ impl Serialize for Task {
 /// task; it is applied here to every real control-flow class name found by
 /// reading `core/src/main/java/io/kestra/plugin/core/flow/`, including the
 /// two names (`loop`, `loopuntil`) the plan's own reading missed.
-fn kind_for(r#type: &str, rest: serde_json::Value) -> Result<TaskKind, serde_json::Error> {
-    let canonical = r#type
+/// The canonical (lower-cased, prefix-stripped) short name for a task
+/// `type` string, if it uses either spelling this crate accepts for a
+/// Kestra `io.kestra.plugin.core.flow.*` class -- the FQCN itself, or the
+/// `core.` + lower-cased-class-name alias. `None` for any other `type` (an
+/// egret type like `egret.sql`, or a third-party plugin FQCN).
+///
+/// Shared by `kind_for` below (which `TaskKind` variant a canonical name
+/// maps to) and `crate::spec::validate` (which canonical names are Kestra
+/// flow-control classes this crate has NOT ported to a `TaskKind` variant --
+/// `Pause` today -- and so must warn about rather than silently falling
+/// through to `Leaf`, indistinguishable from an ordinary task). `pub(crate)`
+/// rather than re-exported: it's an implementation detail of dispatch, not
+/// part of this module's public interface, but `spec` is a sibling of
+/// `models`, not a descendant, so plain module-private visibility can't
+/// reach it.
+pub(crate) fn canonical_flow_type(r#type: &str) -> Option<String> {
+    r#type
         .strip_prefix("io.kestra.plugin.core.flow.")
         .map(str::to_ascii_lowercase)
-        .or_else(|| r#type.strip_prefix("core.").map(str::to_ascii_lowercase));
+        .or_else(|| r#type.strip_prefix("core.").map(str::to_ascii_lowercase))
+}
+
+fn kind_for(r#type: &str, rest: serde_json::Value) -> Result<TaskKind, serde_json::Error> {
+    let canonical = canonical_flow_type(r#type);
 
     Ok(match canonical.as_deref() {
         Some("sequential") => TaskKind::Sequential(serde_json::from_value(rest)?),

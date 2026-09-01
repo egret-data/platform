@@ -5,21 +5,37 @@
 //!    do: unique task ids across the WHOLE tree (walked via `Task::children()`,
 //!    not just `flow.tasks` -- `duplicate_task_ids_are_found_inside_control_flow`
 //!    is what proves the walk is recursive), no dependency cycle inside a
-//!    `core.dag`, and no `core.subflow` that names the flow it lives in.
+//!    `core.dag`, every `dependsOn` in a `core.dag` names a task that exists
+//!    in that dag, `errors:`/`finally:`/`afterExecution:` handlers can never
+//!    collide with a normal successor's id (the shared `seen_ids` namespace
+//!    the duplicate-id check already builds), and no `core.subflow` that
+//!    names the flow it lives in.
 //! 2. **Semantic** -- fields Tasks 1-3 left `Option<T>` purely so parsing
 //!    would accept `null`/absent the way Kestra's Jackson layer does,
-//!    deferring the `@NotNull` bean-validation check to here. Every field
-//!    tagged "Task 4 owes ..." in `models/` is checked in this layer; see
-//!    the task report for the full list found by grepping for that phrase.
+//!    deferring the `@NotNull` bean-validation check to here (every field
+//!    tagged "Task 4 owes ..." in `models/`; see the task report for the
+//!    full list found by grepping for that phrase); `namespace`'s pattern;
+//!    input ids unique; a `Switch` with neither `cases` nor `defaults` (the
+//!    statically-decidable half of "exhaustive-or-defaulted" -- see the
+//!    `Switch` arm in `walk_task` for why the other half is an explicit,
+//!    documented deferral rather than a check).
 //! 3. **Not-yet-enforced** -- features that parse and validate cleanly but
 //!    that no package in this branch actually acts on yet
-//!    (`NOT_YET_ENFORCED` below). These are warnings, never errors: a
-//!    declared-but-unimplemented feature must still publish, or a green
-//!    publish would lie about what the product does.
+//!    (`NOT_YET_ENFORCED` and, for Kestra control-flow classes this crate
+//!    hasn't ported to a `TaskKind` variant -- `Pause` today --
+//!    `KESTRA_FLOW_CONTROL`, both below). These are warnings, never errors:
+//!    a declared-but-unimplemented feature must still publish, or a green
+//!    publish would lie about what the product does. This layer is why an
+//!    unported control-flow type must never be left to fall silently through
+//!    to `Leaf`: a `Pause` a user believes is a manual-approval gate that
+//!    quietly runs straight through it is worse than refusing to publish the
+//!    flow at all.
 
 use std::collections::{HashMap, HashSet};
 
-use crate::models::{Flow, Retry, Sla, SlaCommon, Task, TaskKind, Trigger, TriggerKind};
+use crate::models::{
+    canonical_flow_type, Flow, Input, Retry, Sla, SlaCommon, Task, TaskKind, Trigger, TriggerKind,
+};
 
 /// A single validation finding: a machine-checkable `code`, a human message,
 /// and a `path` locating it inside the flow.
@@ -55,6 +71,59 @@ const NOT_YET_ENFORCED: &[(&str, &str)] = &[
     ("triggers", "W6"),
 ];
 
+/// Whether a Kestra `io.kestra.plugin.core.flow.*` class that changes what
+/// runs next (`FlowableTask`/`ExecutableTask` -- as opposed to an ordinary
+/// `RunnableTask` that just runs and produces an output, like `Sleep` or
+/// `PurgeFlows`, which live in the same Java package but are *not* listed
+/// here) has a `TaskKind` variant in this crate.
+#[derive(Debug, Clone, Copy)]
+enum KestraFlowControl {
+    /// Ported -- ordinary structural/semantic checks apply, same as any
+    /// other `TaskKind` variant.
+    Ported,
+    /// Not ported: falls through to `TaskKind::Leaf`, which is
+    /// indistinguishable from an ordinary task -- so whatever control-flow
+    /// behaviour it declared (a manual-approval gate, for `Pause`) silently
+    /// does not happen. Must warn, naming the package that will port it.
+    Unported { package: &'static str },
+}
+
+/// Fix round 1, finding 1: every class under
+/// `kestra/core/src/main/java/io/kestra/plugin/core/flow/` (checked at the
+/// pinned `96893b589`) whose whole purpose is to change control flow, and
+/// whether this crate has ported it to a `TaskKind` variant. Both the ported
+/// AND unported classes are listed -- not just `pause` -- so this table is
+/// the single place a reviewer checks when `TaskKind` grows a new variant
+/// (flip that entry to `Ported`) or Kestra's `flow/` package grows a new
+/// class (add a row; it defaults to needing a decision, not to silence).
+///
+/// This is what makes the "unported control-flow type" warning generic
+/// rather than a hand-typed `if type == "pause"` special case: `walk_task`
+/// below checks every `Leaf` task's canonical type against this table, so
+/// the NEXT unported class Kestra adds starts warning the moment a row is
+/// added here, without touching the check itself.
+///
+/// `Sequential`/`Parallel`/`If`/`Switch`/`Dag`/`Loop`/`LoopUntil`/`Subflow`/
+/// `AllowFailure`/`WorkingDirectory` are `TaskKind` variants (Task 2).
+/// `Pause` (`Pause.java`) is a manual-approval / scheduled-resume gate with
+/// no variant -- Task 2's own report flagged it ("a real `FlowableTask` ...
+/// I did *not* port ... in case a later task expects it") and this is that
+/// later task. Package per the programme spec's table (row W8: "pause/resume
+/// ... W8").
+const KESTRA_FLOW_CONTROL: &[(&str, KestraFlowControl)] = &[
+    ("sequential", KestraFlowControl::Ported),
+    ("parallel", KestraFlowControl::Ported),
+    ("if", KestraFlowControl::Ported),
+    ("switch", KestraFlowControl::Ported),
+    ("dag", KestraFlowControl::Ported),
+    ("loop", KestraFlowControl::Ported),
+    ("loopuntil", KestraFlowControl::Ported),
+    ("subflow", KestraFlowControl::Ported),
+    ("allowfailure", KestraFlowControl::Ported),
+    ("workingdirectory", KestraFlowControl::Ported),
+    ("pause", KestraFlowControl::Unported { package: "W8" }),
+];
+
 /// Which of `NOT_YET_ENFORCED`'s features this flow actually declares.
 /// Accumulated while walking the flow so each feature warns exactly once,
 /// regardless of how many tasks/places declare it.
@@ -87,6 +156,22 @@ pub fn validate(flow: &Flow) -> ValidationReport {
 
     check_retry(&flow.retry, "retry", &mut report);
 
+    // `seen_ids` spans all FOUR root lists in one shared id-namespace, not
+    // just `flow.tasks` -- matching Kestra's own `Flow.allTasks()` (`tasks`,
+    // `errors`, `_finally`, `afterExecution` concatenated into one stream)
+    // and `findTaskByTaskId`, which searches that same combined stream. This
+    // is also the concrete, checkable form §9's structural-layer bullet
+    // "errors:/finally: handlers are not referenced as normal successors"
+    // takes in THIS model: Kestra's Java additionally walks each
+    // control-flow node's own local `errors`/`finally` fields
+    // (`AbstractBranch.allChildTasks()`), but Task 2 deliberately did not
+    // port those per-node fields at all (dropped, not modeled -- see
+    // `task.rs`'s comment on `Sequential`), so the only place an
+    // errors/finally handler's id COULD collide with a normal successor's
+    // id in this crate's model is across these four flow-level lists. A
+    // shared namespace here means a task id declared under `errors:`/
+    // `finally:`/`afterExecution:` can never silently double as (be
+    // "referenced as") a normal `tasks:` successor.
     let mut seen_ids: HashMap<String, Vec<String>> = HashMap::new();
     for (list_name, list) in [
         ("tasks", &flow.tasks),
@@ -112,6 +197,8 @@ pub fn validate(flow: &Flow) -> ValidationReport {
             });
         }
     }
+
+    validate_inputs(&flow.inputs, &mut report);
 
     for trigger in &flow.triggers {
         validate_trigger(trigger, &mut report);
@@ -213,6 +300,35 @@ fn validate_flow_level_fields(flow: &Flow, report: &mut ValidationReport) {
     }
 }
 
+/// Fix round 1, finding 3: §9's semantic layer requires "input ids unique";
+/// `validate()` never read `flow.inputs` at all before this. Same shape as
+/// the task-id duplicate check, but its own pass -- `Input` ids and `Task`
+/// ids are different namespaces in Kestra (`{{ inputs.x }}` vs a task's own
+/// id), so an input and a task are allowed to share an id and this check
+/// must not conflate them with `seen_ids` above.
+///
+/// §9 names only "input ids unique" for this layer; `Input::r#type` is
+/// already a required (non-`Option`) field with no `#[serde(default)]`
+/// (`input.rs`), so an absent or wrong-typed `type` is already a *parse*
+/// error today, same as `Flow::id`/`Flow::namespace` -- there is no separate
+/// `Option`-then-validate debt for it the way `FlowOutput::type` has, so
+/// nothing else on `Input` is owed here.
+fn validate_inputs(inputs: &[Input], report: &mut ValidationReport) {
+    let mut seen: HashMap<&str, usize> = HashMap::new();
+    for input in inputs {
+        *seen.entry(input.id.as_str()).or_insert(0) += 1;
+    }
+    for (id, count) in seen {
+        if count > 1 {
+            report.errors.push(Finding {
+                code: "duplicate_input_id",
+                message: format!("input id '{id}' is declared more than once"),
+                path: format!("inputs.{id}"),
+            });
+        }
+    }
+}
+
 fn sla_common(sla: &Sla) -> &SlaCommon {
     match sla {
         Sla::MaxDuration { common, .. } => common,
@@ -279,6 +395,31 @@ fn walk_task(
                 .iter()
                 .map(|n| (n.task.id.clone(), n.depends_on.clone()))
                 .collect();
+
+            // Fix round 1, finding 2: a `dependsOn` naming a task that
+            // doesn't exist in this dag was previously silent -- `has_cycle`
+            // only ever walks edges that ARE present in the adjacency map,
+            // so a dangling reference just never gets visited rather than
+            // failing anything. Checked against this dag's own node ids
+            // only (not the whole flow): `dependsOn` is Kestra's dag-local
+            // dependency syntax, not a flow-wide task reference.
+            let known_ids: HashSet<&str> = edges.iter().map(|(id, _)| id.as_str()).collect();
+            for (node_id, deps) in &edges {
+                for dep in deps {
+                    if !known_ids.contains(dep.as_str()) {
+                        report.errors.push(Finding {
+                            code: "dag_dependency_not_found",
+                            message: format!(
+                                "task '{}': dag node '{node_id}' has dependsOn '{dep}', which \
+                                 does not name a task in this dag",
+                                task.id
+                            ),
+                            path: format!("{path}.tasks.{node_id}.dependsOn"),
+                        });
+                    }
+                }
+            }
+
             if has_cycle(&edges) {
                 report.errors.push(Finding {
                     code: "dag_cycle",
@@ -293,6 +434,33 @@ fn walk_task(
                     code: "switch_value_required",
                     message: format!("task '{}': value is required (explicit null)", task.id),
                     path: format!("{path}.value"),
+                });
+            }
+            // Fix round 1, finding 4: §9 requires "Switch cases exhaustive-
+            // or-defaulted". The half of that this crate CAN check
+            // statically: a switch with neither `cases` nor `defaults` has
+            // no branch to run under any match and is unreachable dead
+            // control flow. The other half -- whether a non-empty `cases`
+            // actually covers every value `value` (a rendered runtime
+            // expression, W2) could ever produce, when `defaults` is absent
+            // -- is not decidable here: `value`'s domain isn't known until
+            // it's rendered, and `cases`' keys are arbitrary strings, so
+            // there is no sound way to prove exhaustiveness at validate
+            // time without either false negatives (accepting a switch that
+            // misses a case) or false positives (rejecting a switch whose
+            // author knows their input domain is fully covered by `cases`
+            // and deliberately omitted `defaults`). Deferring that half
+            // explicitly, the same way `Execution::original_id` is deferred
+            // -- not implemented, not silent.
+            if s.cases.is_empty() && s.defaults.is_empty() {
+                report.errors.push(Finding {
+                    code: "switch_no_branches",
+                    message: format!(
+                        "task '{}': switch has neither cases nor defaults, so it runs nothing \
+                         under any match",
+                        task.id
+                    ),
+                    path: path.clone(),
                 });
             }
         }
@@ -323,6 +491,33 @@ fn walk_task(
                 ),
                 path: path.clone(),
             });
+        }
+        // Fix round 1, finding 1: a `Leaf` is how every *ordinary* task is
+        // represented (`egret.sql`, an unrecognised third-party plugin,
+        // ...), but it is ALSO where a genuine Kestra control-flow class
+        // lands if this crate hasn't ported it to a `TaskKind` variant --
+        // `Pause` today. Both look identical here (an opaque `spec` map), so
+        // the only way to tell them apart is to check the task's own
+        // canonical type against `KESTRA_FLOW_CONTROL`.
+        TaskKind::Leaf { .. } => {
+            if let Some(canonical) = canonical_flow_type(&task.r#type) {
+                if let Some((_, KestraFlowControl::Unported { package })) = KESTRA_FLOW_CONTROL
+                    .iter()
+                    .find(|(name, _)| *name == canonical)
+                {
+                    report.warnings.push(Finding {
+                        code: "not_yet_enforced",
+                        message: format!(
+                            "task '{}' has type '{}', a Kestra control-flow type this crate has \
+                             not ported to a typed task kind yet; it currently runs as an inert \
+                             no-op instead of doing what it declares. Enforcement lands in \
+                             {package}",
+                            task.id, task.r#type
+                        ),
+                        path: path.clone(),
+                    });
+                }
+            }
         }
         _ => {}
     }
@@ -569,5 +764,181 @@ mod tests {
         .unwrap();
         let r = validate(&f);
         assert!(r.errors.iter().any(|e| e.code == "self_subflow"), "{r:?}");
+    }
+
+    // -- Fix round 1 --
+
+    /// Finding 1 (CRITICAL): `Pause` has no `TaskKind` variant, so it falls
+    /// through to `Leaf` and is indistinguishable from an ordinary task --
+    /// previously invisible to validation entirely. A user pasting a Kestra
+    /// flow whose `Pause` is a manual-approval gate must be told it does not
+    /// gate anything yet, not shown a green publish.
+    #[test]
+    fn pause_falls_through_to_leaf_and_warns_naming_its_package() {
+        for spelling in ["io.kestra.plugin.core.flow.Pause", "core.pause"] {
+            let yaml =
+                format!("id: f\nnamespace: a.b\ntasks:\n  - id: gate\n    type: {spelling}\n");
+            let f = parse(&yaml).unwrap();
+            let r = validate(&f);
+            let w = r
+                .warnings
+                .iter()
+                .find(|w| w.code == "not_yet_enforced" && w.path == "tasks.gate")
+                .unwrap_or_else(|| {
+                    panic!("{spelling}: no unported-control-flow warning for 'gate': {r:?}")
+                });
+            assert!(w.message.contains("W8"), "{spelling}: {}", w.message);
+            assert!(
+                r.errors.is_empty(),
+                "{spelling}: an unported control-flow type is a warning, not an error: {r:?}"
+            );
+        }
+    }
+
+    /// An ordinary, ALREADY-ported control-flow type must not trip the
+    /// unported-control-flow warning -- guards against the check matching
+    /// too broadly (e.g. on canonical-name substring rather than exact
+    /// lookup).
+    #[test]
+    fn an_ordinary_leaf_type_does_not_warn_as_unported_control_flow() {
+        let f = parse(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: egret.sql\n    sql: SELECT 1\n",
+        )
+        .unwrap();
+        let r = validate(&f);
+        assert!(
+            !r.warnings
+                .iter()
+                .any(|w| w.code == "not_yet_enforced" && w.path == "tasks.t"),
+            "an ordinary leaf type must not be mistaken for unported control flow: {r:?}"
+        );
+    }
+
+    /// Finding 2 (Important): a `dependsOn` naming a task that does not
+    /// exist in the same dag was silent -- `has_cycle` only ever walks
+    /// edges that exist, so a dangling reference was simply absent from the
+    /// adjacency map.
+    #[test]
+    fn dag_dependency_naming_a_missing_task_is_an_error() {
+        let f = parse(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: d\n    type: core.dag\n    tasks:\n      - task:\n          id: a\n          type: x\n        dependsOn: [nope]\n",
+        )
+        .unwrap();
+        let r = validate(&f);
+        assert!(
+            r.errors
+                .iter()
+                .any(|e| e.code == "dag_dependency_not_found"),
+            "{r:?}"
+        );
+    }
+
+    /// Companion to the above: a `dependsOn` naming a task that DOES exist
+    /// must not be flagged -- the check must not be satisfiable by
+    /// rejecting everything.
+    #[test]
+    fn dag_dependency_naming_a_real_task_is_not_an_error() {
+        let f = parse(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: d\n    type: core.dag\n    tasks:\n      - task:\n          id: a\n          type: x\n      - task:\n          id: b\n          type: x\n        dependsOn: [a]\n",
+        )
+        .unwrap();
+        let r = validate(&f);
+        assert!(
+            !r.errors
+                .iter()
+                .any(|e| e.code == "dag_dependency_not_found"),
+            "a valid dependsOn chain must not be flagged: {r:?}"
+        );
+    }
+
+    /// Finding 3 (Important): `validate()` never read `flow.inputs` at all,
+    /// so duplicate input ids were silent.
+    #[test]
+    fn duplicate_input_ids_are_an_error() {
+        let f = parse(
+            "id: f\nnamespace: a.b\ninputs:\n  - id: x\n    type: STRING\n  - id: x\n    type: STRING\ntasks:\n  - id: t\n    type: x\n",
+        )
+        .unwrap();
+        let r = validate(&f);
+        assert!(
+            r.errors.iter().any(|e| e.code == "duplicate_input_id"),
+            "{r:?}"
+        );
+    }
+
+    /// Companion: distinct input ids must not be flagged.
+    #[test]
+    fn distinct_input_ids_are_not_an_error() {
+        let f = parse(
+            "id: f\nnamespace: a.b\ninputs:\n  - id: x\n    type: STRING\n  - id: y\n    type: STRING\ntasks:\n  - id: t\n    type: x\n",
+        )
+        .unwrap();
+        let r = validate(&f);
+        assert!(
+            !r.errors.iter().any(|e| e.code == "duplicate_input_id"),
+            "{r:?}"
+        );
+    }
+
+    /// Finding 4 (Minor): the statically-decidable half of "Switch cases
+    /// exhaustive-or-defaulted" -- neither `cases` nor `defaults` means the
+    /// switch runs nothing under any match.
+    #[test]
+    fn switch_with_no_cases_and_no_defaults_is_an_error() {
+        let f = parse(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: s\n    type: core.switch\n    value: x\n",
+        )
+        .unwrap();
+        let r = validate(&f);
+        assert!(
+            r.errors.iter().any(|e| e.code == "switch_no_branches"),
+            "{r:?}"
+        );
+    }
+
+    /// `defaults` alone is a complete, legitimate switch (matches nothing ->
+    /// falls to `defaults`) and must not be flagged.
+    #[test]
+    fn switch_with_only_defaults_is_not_an_error() {
+        let f = parse(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: s\n    type: core.switch\n    value: x\n    defaults:\n      - id: d\n        type: x\n",
+        )
+        .unwrap();
+        let r = validate(&f);
+        assert!(
+            !r.errors.iter().any(|e| e.code == "switch_no_branches"),
+            "{r:?}"
+        );
+    }
+
+    /// `cases` alone is also legitimate (an author may know their input
+    /// domain is fully covered) -- must not be flagged either, since
+    /// exhaustiveness itself is an explicit, documented deferral, not an
+    /// error.
+    #[test]
+    fn switch_with_only_cases_is_not_an_error() {
+        let f = parse(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: s\n    type: core.switch\n    value: x\n    cases:\n      a:\n        - id: c\n          type: x\n",
+        )
+        .unwrap();
+        let r = validate(&f);
+        assert!(
+            !r.errors.iter().any(|e| e.code == "switch_no_branches"),
+            "{r:?}"
+        );
+    }
+
+    /// The rule that governs every check added in this fix round: false
+    /// positives matter as much as false negatives, because this validator
+    /// runs on every keystroke-pause in W7's editor. A legitimate flow using
+    /// nested control flow, a valid `Dag` dependency chain,
+    /// `errors:`/`finally:` handlers, and an input referencing another input
+    /// via `dependsOn` must produce zero errors.
+    #[test]
+    fn a_legitimate_flow_with_nested_control_flow_produces_no_spurious_errors() {
+        let yaml = "id: nightly\nnamespace: company.analytics\ninputs:\n  - id: run_date\n    type: DATE\n  - id: dry_run\n    type: BOOL\n    dependsOn:\n      inputs: [run_date]\ntasks:\n  - id: pipeline\n    type: core.dag\n    tasks:\n      - task:\n          id: extract\n          type: egret.sql\n          database: d\n          sql: SELECT 1\n      - task:\n          id: load\n          type: egret.sql\n          database: d\n          sql: SELECT 2\n        dependsOn: [extract]\n  - id: fanout\n    type: core.parallel\n    tasks:\n      - id: enrich\n        type: egret.python\n        notebook: nb\nerrors:\n  - id: alert\n    type: core.slack\nfinally:\n  - id: cleanup\n    type: core.log\n";
+        let f = parse(yaml).unwrap();
+        let r = validate(&f);
+        assert!(r.errors.is_empty(), "{r:?}");
     }
 }
