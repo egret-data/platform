@@ -31,10 +31,11 @@ const EXPLORE_GROUPS: NavGroup[] = [
   },
   {
     heading: "Data API",
-    // Its own area, not a page inside Data Engineering: three sibling sections
-    // plus a detail route behave like a module, the same reason Charts and
-    // Datasets are each their own group rather than items under a shared
-    // shell. Every item carries `feature: "data_api"` so the whole group
+    // Its own top-level group, not an item nested under another group's
+    // shell: three sibling sections plus a detail route behave like a
+    // module, the same reason Charts and Datasets are each their own group
+    // rather than items under a shared shell. Every item carries
+    // `feature: "data_api"` so the whole group
     // hides when the workspace lacks the entitlement — see
     // docs/en/specs/2026-08-16-data-api-p5-design.md §2.1.
     items: [

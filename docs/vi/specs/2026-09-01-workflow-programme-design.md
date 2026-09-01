@@ -305,8 +305,7 @@ thành một `dataapi/src/lifecycle.rs` nữa — 12.091 dòng trong một file.
    biên dịch cho Java 25, 1.3.x cho Java 21; JDK của image host bám theo tham
    chiếu artifact.
 2. **Tên module Rust phản chiếu tên package Java**: `models/`, `runners/`,
-   `executor/`, `worker/`, `scheduler/`, `plugins/`, `storages/`, `queues/`,
-   `repositories/`.
+   `executor/`, `worker/`, `plugins/`.
 3. **Giữ nguyên tên kiểu**: `Execution`, `TaskRun`, `WorkerTask`,
    `WorkerTaskResult`, `FlowableUtils`. `State` giữ đủ **17** biến thể —
    `CREATED, SUBMITTED, RUNNING, PAUSED, RESTARTED, KILLING, SUCCESS, WARNING,

@@ -15,8 +15,8 @@ export interface Me {
     expires_at: string;
   } | null;
 }
-/** `features` = the module keys (`sql_lab`/`datasets`/`charts`/`dashboards`/
- * `notebooks`) this workspace currently has switched on — drives both the
+/** `features` = the feature entitlement keys this workspace currently has
+ * switched on (a subset of whatever the catalog defines) — drives both the
  * Sidebar's per-item visibility and `RequireFeature`'s route gate. */
 export interface WorkspaceSummary { id: string; slug: string; name: string; features: string[]; }
 

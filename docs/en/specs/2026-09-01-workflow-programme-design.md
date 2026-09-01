@@ -310,8 +310,7 @@ in one file.
    Note that Kestra 2.x is compiled for Java 25 and 1.3.x for Java 21; the host
    image's JDK follows the artifact reference.
 2. **Rust module names mirror the Java package names**: `models/`, `runners/`,
-   `executor/`, `worker/`, `scheduler/`, `plugins/`, `storages/`, `queues/`,
-   `repositories/`.
+   `executor/`, `worker/`, `plugins/`.
 3. **Type names are kept**: `Execution`, `TaskRun`, `WorkerTask`,
    `WorkerTaskResult`, `FlowableUtils`. `State` keeps all **17** variants —
    `CREATED, SUBMITTED, RUNNING, PAUSED, RESTARTED, KILLING, SUCCESS, WARNING,

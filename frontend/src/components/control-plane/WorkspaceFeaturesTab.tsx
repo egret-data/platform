@@ -9,7 +9,8 @@ import { Switch } from "@/components/ui/switch";
 /**
  * Control Plane → Workspaces → detail → Features tab.
  *
- * These five switches are an ENTITLEMENT, not a role: they decide which
+ * These switches — one per feature key the catalog returns — are an
+ * ENTITLEMENT, not a role: they decide which
  * modules this workspace HAS at all, not what any particular user inside it
  * may do with them. RBAC (`ws_viewer`/`ws_editor`/`ws_admin`) still governs
  * read/write depth once a module is on — a feature has no "read-only" state
@@ -19,10 +20,11 @@ import { Switch } from "@/components/ui/switch";
  *
  * One editing surface + one Save, mirroring the engine/StarRocks config tabs:
  * local `draft` state seeded from the loaded features, Save disabled until it
- * differs from what's stored, and the PUT always sends the full five-key map.
- * The API itself merges (a key omitted from the body is left as-is), but this
- * UI shows and edits all five, so it should own all five — sending the full
- * map keeps the saved state exactly matching what the switches display.
+ * differs from what's stored, and the PUT always sends every key the catalog
+ * returned. The API itself merges (a key omitted from the body is left as-is),
+ * but this UI shows and edits every key, so it should own every key — sending
+ * the full map keeps the saved state exactly matching what the switches
+ * display.
  *
  * `dashboards` depends on `charts`: a dashboard's saved cards render through
  * the `dashboards`-gated surface, but its interactive filter dropdowns and

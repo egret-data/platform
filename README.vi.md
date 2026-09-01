@@ -324,7 +324,7 @@ flowchart TB
         subgraph DATA["Dữ liệu & engine"]
             CATE["egret-catalog-engine · Iceberg REST (lakekeeper)"]
             EMG["egret-engine-mgmt · engine + catalog"]
-            ORCH["egret-orchestrator · Trino trên k8s"]
+            ORCH["egret-provisioner · Trino trên k8s"]
             QRY["egret-query · router SQL federated"]
             STOR["egret-storage · S3/MinIO"]
             SEC["egret-secrets · vault"]
