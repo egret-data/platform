@@ -8,6 +8,7 @@ mod property;
 mod state;
 mod task;
 mod trigger;
+mod wire;
 pub use execution::{
     Execution, ExecutionKind, StateHistory, StateTransition, TaskRun, TaskRunAttempt,
 };

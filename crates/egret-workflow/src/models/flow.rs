@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::models::task::Retry;
+use crate::models::wire::required;
 use crate::models::{Input, InputType, Property, Task, Trigger};
 
 /// A flow: the top-level unit Kestra schedules and runs.
@@ -168,7 +169,14 @@ pub struct FlowOutput {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<Property<serde_json::Value>>,
-    pub r#type: InputType,
+    // `@NotNull @Valid Type type`, no Java default -- same shape as
+    // `Concurrency::limit`/`Schedule::cron`. Fix round 1 finding 5: this was
+    // left required in the first pass with no comment explaining why it was
+    // exempt from the `@NotNull` principle applied everywhere else in this
+    // task; it isn't exempt, so it is `Option` too. Task 4 owes the
+    // not-null check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub r#type: Option<InputType>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -319,30 +327,65 @@ pub(super) fn deserialize_labels<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<
     let value = serde_json::Value::deserialize(d)?;
     match value {
         serde_json::Value::Null => Ok(Vec::new()),
+        // Fix round 1 finding 3: `ListOrMapOfLabelDeserializer.java`'s array
+        // branch reads each item as a raw `Map<String, Object>` and coerces
+        // `value` with the SAME `String.valueOf` rule its map branch uses --
+        // `labels: [{key: count, value: 5}]` (a bare number) is accepted by
+        // Kestra. The first pass here instead deserialized each item
+        // straight into `Label` (whose derived `Deserialize` requires an
+        // already-`String` `value`), so it rejected exactly that input.
+        // `coerce_label_value` below is now shared by both branches so they
+        // can't drift apart again.
         serde_json::Value::Array(items) => items
             .into_iter()
-            .map(|item| serde_json::from_value(item).map_err(D::Error::custom))
+            .map(|item| {
+                let mut obj = match item {
+                    serde_json::Value::Object(obj) => obj,
+                    other => {
+                        return Err(D::Error::custom(format!(
+                            "each item in a `labels` list must be an object with `key`/`value`, \
+                             got {other}"
+                        )))
+                    }
+                };
+                // `required` (see `wire.rs`) so a present-but-wrong-typed
+                // `key` (e.g. `key: 5`) is a real type error, not silently
+                // read as "missing" the way `.as_str()` would.
+                let key: String = required(&mut obj, "key")?;
+                let raw_value = obj
+                    .remove("value")
+                    .ok_or_else(|| D::Error::missing_field("value"))?;
+                let value = coerce_label_value(&key, raw_value).map_err(D::Error::custom)?;
+                Ok(Label { key, value })
+            })
             .collect(),
         serde_json::Value::Object(map) => map
             .into_iter()
             .map(|(key, v)| {
-                let value = match v {
-                    serde_json::Value::String(s) => s,
-                    serde_json::Value::Number(n) => n.to_string(),
-                    serde_json::Value::Bool(b) => b.to_string(),
-                    other => {
-                        return Err(D::Error::custom(format!(
-                            "label '{key}': unsupported value {other} (labels must be strings, \
-                             numbers, or booleans)"
-                        )))
-                    }
-                };
+                let value = coerce_label_value(&key, v).map_err(D::Error::custom)?;
                 Ok(Label { key, value })
             })
             .collect(),
         other => Err(D::Error::custom(format!(
             "labels must be a list of {{key, value}} or a map of string to scalar, got {other}"
         ))),
+    }
+}
+
+/// `ListOrMapOfLabelDeserializer.java`'s scalar coercion
+/// (`String.valueOf(value)` for `String/Integer/Long/Float/Double/Boolean`),
+/// shared by both branches of `deserialize_labels` above so the list form and
+/// the map form accept the same value types, exactly as Kestra's own
+/// deserializer does identically in both of its branches.
+fn coerce_label_value(key: &str, v: serde_json::Value) -> Result<String, String> {
+    match v {
+        serde_json::Value::String(s) => Ok(s),
+        serde_json::Value::Number(n) => Ok(n.to_string()),
+        serde_json::Value::Bool(b) => Ok(b.to_string()),
+        other => Err(format!(
+            "label '{key}': unsupported value {other} (labels must be strings, numbers, or \
+             booleans)"
+        )),
     }
 }
 
@@ -458,5 +501,41 @@ triggers:
         )
         .unwrap();
         assert_eq!(list_form.labels, map_form.labels);
+    }
+
+    /// Fix round 1 finding 3: `ListOrMapOfLabelDeserializer.java`'s array
+    /// branch coerces `value` the SAME way its map branch does
+    /// (`String.valueOf` for `String/Integer/Long/Float/Double/Boolean`) --
+    /// `labels: [{key: count, value: 5}]` (a bare number) is accepted by
+    /// Kestra. The first pass here deserialized each list item straight
+    /// into `Label`, which requires an already-`String` `value` and
+    /// rejected exactly this input.
+    #[test]
+    fn labels_list_form_coerces_scalars_like_the_map_form_does() {
+        let f: Flow = serde_norway::from_str(
+            "id: f\nnamespace: a.b\nlabels:\n  - key: count\n    value: 5\n  - key: active\n    value: true\ntasks:\n  - id: t\n    type: x\n",
+        )
+        .unwrap();
+        assert_eq!(
+            f.labels,
+            vec![
+                super::Label {
+                    key: "count".to_string(),
+                    value: "5".to_string(),
+                },
+                super::Label {
+                    key: "active".to_string(),
+                    value: "true".to_string(),
+                },
+            ]
+        );
+
+        // The map form already coerced -- this locks in that both branches
+        // now agree, not just that the list branch alone was fixed.
+        let map_form: Flow = serde_norway::from_str(
+            "id: f\nnamespace: a.b\nlabels:\n  count: 5\ntasks:\n  - id: t\n    type: x\n",
+        )
+        .unwrap();
+        assert_eq!(map_form.labels[0].value, "5");
     }
 }

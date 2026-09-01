@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::models::wire::{optional, required, with_default};
 use crate::models::Property;
 
 /// A task node in a flow. Control flow is typed (`TaskKind`'s non-`Leaf`
@@ -329,29 +330,18 @@ impl<'de> Deserialize<'de> for Task {
 
         let mut map = serde_json::Map::deserialize(d)?;
 
-        let id = map
-            .remove("id")
-            .and_then(|v| v.as_str().map(str::to_owned))
-            .ok_or_else(|| D::Error::missing_field("id"))?;
-        let r#type = map
-            .remove("type")
-            .and_then(|v| v.as_str().map(str::to_owned))
-            .ok_or_else(|| D::Error::missing_field("type"))?;
-        let description = map
-            .remove("description")
-            .and_then(|v| v.as_str().map(str::to_owned));
-        let retry = match map.remove("retry") {
-            Some(v) => Some(serde_json::from_value(v).map_err(D::Error::custom)?),
-            None => None,
-        };
-        let timeout = match map.remove("timeout") {
-            Some(v) => Some(serde_json::from_value(v).map_err(D::Error::custom)?),
-            None => None,
-        };
-        let disabled = map
-            .remove("disabled")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        // `required`/`optional`/`with_default` (see `wire.rs`) always try to
+        // deserialize a *present* value as the target type -- a caller-
+        // supplied `disabled: "true"` (a quoted string) is a real type error
+        // here, not a silent fall-through to `false`. Only a genuinely
+        // *absent* key takes `missing_field`/`None`/the given default. See
+        // the task report, Fix round 1 finding 1.
+        let id: String = required(&mut map, "id")?;
+        let r#type: String = required(&mut map, "type")?;
+        let description: Option<String> = optional(&mut map, "description")?;
+        let retry: Option<Retry> = optional(&mut map, "retry")?;
+        let timeout: Option<Property<Duration>> = optional(&mut map, "timeout")?;
+        let disabled: bool = with_default(&mut map, "disabled", false)?;
 
         let rest = serde_json::Value::Object(map);
         let kind = kind_for(&r#type, rest).map_err(D::Error::custom)?;
@@ -930,5 +920,57 @@ inputs:
             TaskKind::Switch(s) => assert!(s.value.is_none()),
             other => panic!("expected Switch, got {other:?}"),
         }
+    }
+
+    // -- Fix round 1, finding 1 (CRITICAL): a present-but-wrong-typed value
+    // must be a parse error, never a silent fall-through to a type's
+    // default. `disabled: "true"` (a quoted string) previously parsed
+    // successfully with `disabled == false` -- a user who writes it believes
+    // they disabled the task, and it runs anyway with no error and nothing
+    // in a validation report.
+
+    #[test]
+    fn disabled_with_a_string_value_is_a_parse_error_not_a_silent_false() {
+        let yaml = "id: t\ntype: egret.sql\nsql: SELECT 1\ndisabled: \"true\"\n";
+        let err = serde_norway::from_str::<Task>(yaml).unwrap_err();
+        assert!(
+            err.to_string().to_lowercase().contains("bool")
+                || err.to_string().to_lowercase().contains("invalid type"),
+            "expected a type error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn disabled_with_a_number_value_is_a_parse_error() {
+        let yaml = "id: t\ntype: egret.sql\nsql: SELECT 1\ndisabled: 1\n";
+        assert!(serde_norway::from_str::<Task>(yaml).is_err());
+    }
+
+    #[test]
+    fn description_with_a_non_string_value_is_a_parse_error() {
+        let yaml = "id: t\ntype: egret.sql\nsql: SELECT 1\ndescription: [not, a, string]\n";
+        assert!(serde_norway::from_str::<Task>(yaml).is_err());
+    }
+
+    /// The bug also affected `id`/`type` themselves, though less visibly:
+    /// `.as_str()` swallowing a wrong-typed value meant the reported error
+    /// was a misleading `missing field` rather than a real type mismatch.
+    #[test]
+    fn wrong_typed_id_is_a_type_error_not_a_misleading_missing_field() {
+        let yaml = "id: 5\ntype: egret.sql\nsql: SELECT 1\n";
+        let err = serde_norway::from_str::<Task>(yaml).unwrap_err();
+        assert!(
+            !err.to_string().to_lowercase().contains("missing field"),
+            "a wrong-typed `id` must not report as a missing field: {err}"
+        );
+    }
+
+    /// The default still applies when the key is genuinely absent -- the fix
+    /// must not turn every optional field into a hard requirement.
+    #[test]
+    fn disabled_still_defaults_to_false_when_the_key_is_absent() {
+        let yaml = "id: t\ntype: egret.sql\nsql: SELECT 1\n";
+        let t: Task = serde_norway::from_str(yaml).unwrap();
+        assert!(!t.disabled);
     }
 }
