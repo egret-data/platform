@@ -11,10 +11,29 @@
 //!
 //! **Workspace containment lives HERE, in exactly one place**, the same
 //! convention `crates/egret-dataapi/src/endpoints.rs` documents: every
-//! statement that reads or writes a specific flow carries
+//! statement that reads or writes a *draft* (`workflow.flows`) carries
 //! `WHERE id = $1 AND workspace_id = $2`, and there is no route-level
-//! pre-check to forget. [`FlowRepo::workspace_of`] is the one deliberate
-//! exception -- see its own doc for why.
+//! pre-check to forget.
+//!
+//! **Four methods are deliberate exceptions** -- each keys off a bare id with
+//! no `workspace_id` predicate of its own, and each says so on its own doc
+//! comment below:
+//!
+//! - [`FlowRepo::workspace_of`] -- the scoping PRIMITIVE itself; a caller
+//!   asks this before it knows which workspace an id belongs to, so it
+//!   cannot also take `ws`.
+//! - [`FlowRepo::insert_version`] and [`FlowRepo::set_live`] -- writes whose
+//!   callers (Task 6's `publish`) have already confirmed containment via a
+//!   prior scoped [`FlowRepo::get`] before either is reached.
+//! - [`FlowRepo::list_versions`] and [`FlowRepo::get_version`] -- reads, and
+//!   the sharpest of the four: an unscoped **read** handed a foreign flow id
+//!   returns that flow's version snapshots and notes with no error at all,
+//!   which is the exact shape migration 0128 is this programme's recorded
+//!   case of. Nothing in this crate calls either yet (Task 6's `publish`
+//!   explicitly does not; see its own module doc), so the obligation to
+//!   scope-check before calling stays with whoever calls them first --
+//!   presently Task 7's route handlers, which will always have a scoped
+//!   [`FlowRepo::get`] of their own on the same request already.
 
 use chrono::{DateTime, Utc};
 use egret_core::{Error, Result, UserId};
@@ -252,13 +271,27 @@ impl FlowRepo {
     /// `INSERT ... SELECT $1, COALESCE(MAX(version), 0) + 1, ... FROM
     /// workflow.flow_versions WHERE flow_id = $1`, not a prior `SELECT` --
     /// following `EndpointStore::publish` in
-    /// `crates/egret-dataapi/src/lifecycle.rs`. That is what makes
-    /// `concurrent_publishes_do_not_collide_on_a_version_number` (below) hold
-    /// without callers serialising themselves: two inserts racing for the
-    /// same next number cannot both win, because `UNIQUE (flow_id, version)`
-    /// lets at most one of them commit. A loser returns `Err`; this function
-    /// does not retry it, and neither does the caller -- publish (Task 6)
-    /// decides what a failed publish means, not this repository.
+    /// `crates/egret-dataapi/src/lifecycle.rs`.
+    ///
+    /// **What this does and does not buy.** `UNIQUE (flow_id, version)` is
+    /// what actually guarantees no two committed rows can ever share a
+    /// version number (or leave a gap) -- that holds regardless of whether
+    /// the next number is computed here or in a prior, separate `SELECT`; a
+    /// two-round-trip `insert_version` would be equally correct in that
+    /// sense, and fix round 1 of Task 5 confirmed there is no version-race
+    /// *correctness* bug in either shape. What the single statement buys is
+    /// concurrency THROUGHPUT: it holds one pooled connection for the whole
+    /// read-then-write, so racers are naturally staggered through the
+    /// connection pool instead of all reading the same stale `MAX` before any
+    /// of them commit. Measured against this crate's tests
+    /// (`concurrent_publishes_do_not_collide_on_a_version_number`, 5-connection
+    /// pool, 8 concurrent callers): this shape lets roughly half of the 8
+    /// succeed on the first attempt, every run; a genuine two-round-trip
+    /// rewrite let only about a quarter through, every run -- both numbers
+    /// recorded in `task-5-report.md`, "Fix round 1". A loser still returns
+    /// `Err` either way; this function does not retry it, and neither does
+    /// the caller -- publish (Task 6) decides what a failed publish means,
+    /// not this repository.
     pub async fn insert_version(
         &self,
         flow: Uuid,
@@ -300,6 +333,15 @@ impl FlowRepo {
 
     /// Every version of `flow`, newest first -- the index migration 0132
     /// adds (`flow_id, version DESC`) is for exactly this read.
+    ///
+    /// UNSCOPED by workspace, and -- unlike [`Self::insert_version`] and
+    /// [`Self::set_live`] -- a READ: calling this with a flow id from another
+    /// workspace hands back that flow's version snapshots and notes with no
+    /// error, which is exactly the shape migration 0128 is this programme's
+    /// recorded case of. The caller MUST establish containment itself first
+    /// -- e.g. a preceding scoped [`Self::get`] on the same `flow` in the
+    /// caller's own `ws` -- before passing the id here. See the module doc
+    /// for the full list of this repository's unscoped exceptions.
     pub async fn list_versions(&self, flow: Uuid) -> Result<Vec<FlowVersionRow>> {
         sqlx::query_as(
             "SELECT id, flow_id, version, snapshot, note, created_by, created_at \
@@ -312,6 +354,12 @@ impl FlowRepo {
     }
 
     /// One version by its per-flow number.
+    ///
+    /// UNSCOPED by workspace, for the same reason and with the same
+    /// obligation as [`Self::list_versions`] -- see that method's doc and the
+    /// module doc's list of unscoped exceptions. The caller must confirm
+    /// `flow` belongs to its own `ws` (e.g. via a preceding [`Self::get`])
+    /// before calling this.
     pub async fn get_version(&self, flow: Uuid, version: i32) -> Result<FlowVersionRow> {
         let row: Option<FlowVersionRow> = sqlx::query_as(
             "SELECT id, flow_id, version, snapshot, note, created_by, created_at \
