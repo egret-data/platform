@@ -140,23 +140,46 @@
 //! `a_published_endpoint_cannot_be_shadowed_by_the_contract_url` pins both
 //! halves, and it fails under exactly that refactor.
 //!
-//! # No access-log row and no metric, deliberately
+//! # No access-log row; a metric, under a label of its own
 //!
-//! `dataapi.access_log` and `serving::metrics` are both shaped around a CALL to
-//! an endpoint: the row carries `endpoint_id`, `version` and `row_count`, and
-//! `activity` aggregates call counts and error rates PER ENDPOINT from it. A
-//! contract fetch names no endpoint, so every one of those columns would be
-//! NULL — and the rows would still be counted by the workspace-level statistics
-//! and by the Package 2 alerting built on them, quietly changing what "this
-//! endpoint's error rate" means. The same argument applies to
-//! `egret_dataapi_requests_total`, which an operator reads as serving traffic.
+//! `dataapi.access_log` is shaped around a CALL to an endpoint: the row carries
+//! `endpoint_id`, `version` and `row_count`, and `activity` aggregates call
+//! counts and error rates PER ENDPOINT from it. A contract fetch names no
+//! endpoint, so every one of those columns would be NULL — and the rows would
+//! still be counted by the workspace-level statistics and by the Package 2
+//! alerting built on them, quietly changing what "this endpoint's error rate"
+//! means. So there is no row, and if "who fetched a contract, and when" is ever
+//! wanted as a queryable fact it belongs in `egret-audit` beside the other
+//! management-plane events, not in a table whose every consumer assumes a row is
+//! a served query.
 //!
-//! So this route emits `tracing` lines instead — one `debug` on success naming
-//! how many paths were described, one `warn` on every refusal — and leaves both
-//! instruments measuring the thing they are documented to measure. If "who
-//! fetched a contract, and when" is ever wanted as a queryable fact, it belongs
-//! in `egret-audit` beside the other management-plane events, not in a table
-//! whose every consumer assumes a row is a served query.
+//! **The metrics are a different case, and this module used to get it wrong.**
+//! The argument above was extended to `egret_dataapi_requests_total` on the
+//! grounds that an operator reads it as serving traffic. What that produced was
+//! measured on a two-replica cluster: twenty concurrent contract fetches
+//! answered nineteen `200`s and one `429`, and afterwards `/metrics` on BOTH
+//! replicas showed only the serving path's `key_invalid` and `not_granted`
+//! refusals. Neither the successes nor the rate-limit refusal existed anywhere.
+//! The most expensive request this surface serves — up to
+//! [`crate::openapi_gen::MAX_DOCUMENTED_ENDPOINTS`] PDP decisions, two DB round
+//! trips each — and the bucket added specifically to bound it were invisible to
+//! the only instrument that can see them, which is the design doc's §5 blind
+//! spot exactly: a refusal no instrument records. It is worse here than on the
+//! call path, because the access log cannot be the backstop — a contract fetch
+//! is not merely unrecorded by it, it is unrecordABLE.
+//!
+//! So this route now records the same counter and the same histogram the call
+//! path does, under `route="contract"` — see [`super::metrics::Route`] for why
+//! that is a label rather than a second metric name, and why the label names
+//! which of two ROUTES answered rather than anything about the caller.
+//! `{route="call"}` is what every panel written before this change meant, so an
+//! operator narrows back to it in one selector; `sum by (code)` without a route
+//! selector is now the whole mount rather than most of it.
+//!
+//! The `tracing` lines stay as they are — one `debug` on success naming how many
+//! paths were described, one `warn` on every refusal. They carry the
+//! `request_id`, the workspace and the service account, which is what a metric
+//! must not.
 //!
 //! # Not cacheable, and not by omission
 //!
@@ -180,13 +203,14 @@
 //! and the same `MAX_DOCUMENTED_ENDPOINTS` cap the management route pays.
 
 use axum::extract::{Path, State};
-use axum::http::{header, HeaderMap};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use std::time::Instant;
 use uuid::Uuid;
 
 use super::error::{to_wire, ServingErrorBody};
+use super::metrics;
 // No `RateLimitStore` import: `st.rate_limits` is a `dyn` trait object, whose
 // trait methods are inherent to the object type.
 use super::ratelimit;
@@ -295,27 +319,35 @@ pub(super) async fn serve_contract(
     headers: HeaderMap,
 ) -> Response {
     let request_id = Uuid::new_v4().to_string();
-    match build_contract(&st, &ws_slug, &headers).await {
+    // ONE reading, feeding the counter and the histogram, taken around
+    // everything the caller waited for — `router::serve` measures the same span
+    // for the same reason.
+    let started = Instant::now();
+    let (response, status, code) = match build_contract(&st, &ws_slug, &headers).await {
         Ok(doc) => {
-            // The one operator-visible record that this happened. See the
-            // module comment for why there is no `dataapi.access_log` row and
-            // no metric: both are shaped around a CALL to an endpoint, and this
-            // request names none.
+            // The line carries what a metric may not: the request id and the
+            // size of the answer. See the module comment for why there is no
+            // `dataapi.access_log` row — that instrument is per ENDPOINT, and
+            // this request names none.
             tracing::debug!(
                 %request_id,
                 paths = doc["paths"].as_object().map_or(0, serde_json::Map::len),
                 "data-api contract served"
             );
             (
-                // `no-store`, not `no-cache`: see the module comment. A shared
-                // proxy that kept this by URL would serve one consumer another's
-                // contract, because the URL is the same for every service
-                // account in the workspace and the token is what tells them
-                // apart.
-                [(header::CACHE_CONTROL, "no-store")],
-                Json(doc),
+                (
+                    // `no-store`, not `no-cache`: see the module comment. A
+                    // shared proxy that kept this by URL would serve one
+                    // consumer another's contract, because the URL is the same
+                    // for every service account in the workspace and the token
+                    // is what tells them apart.
+                    [(header::CACHE_CONTROL, "no-store")],
+                    Json(doc),
+                )
+                    .into_response(),
+                StatusCode::OK,
+                metrics::OK_CODE,
             )
-                .into_response()
         }
         Err(e) => {
             let wire = to_wire(&e);
@@ -329,9 +361,19 @@ pub(super) async fn serve_contract(
                 error = ?e,
                 "data-api contract request failed"
             );
-            wire.into_response(&request_id)
+            let (status, code) = (wire.status, wire.code);
+            (wire.into_response(&request_id), status, code)
         }
-    }
+    };
+
+    // The same two labels the call path records, under `route="contract"`.
+    // Taken from the match above rather than re-derived from the response, so
+    // one request is one increment and the counter cannot disagree with the
+    // `tracing` line about what happened — `router::serve`'s arrangement, for
+    // its reason. `Route::Contract` is named here, not read off the URI: this
+    // IS the contract handler.
+    metrics::record_request(metrics::Route::Contract, status, code, started.elapsed());
+    response
 }
 
 /// Spend one token from this service account's contract bucket.

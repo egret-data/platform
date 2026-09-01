@@ -321,6 +321,87 @@ pub struct SharedStore {
     anchor_ms: u64,
 }
 
+/// What an operator is told when the shared store cannot be opened at startup.
+///
+/// # Why a refusal needs prose at all
+///
+/// The behaviour this message accompanies is correct and is not changed by it:
+/// an operator who configured a shared store and cannot reach it must not be
+/// quietly downgraded to the process-local state that multiplies every
+/// published rate limit by the replica count. Kubernetes resolves it by
+/// restarting the pod until the store answers, so a rollout that crash-loops
+/// for a few seconds while Valkey starts is this working.
+///
+/// What was wrong is that the process said none of that. `anyhow`'s report was
+/// `Connection refused (os error 111)` and its cause was the same string again:
+/// nothing named the dependency, the address, or the deliberateness. An
+/// operator holding only that has to guess which of egret's dependencies is
+/// down, and correct fail-closed behaviour reads as a broken deployment. A
+/// failure that says nothing to the operator is a defect even when the
+/// behaviour is right — [`choose_store`]'s refusal below is the same shape, and
+/// this brings the two into line.
+///
+/// # The URL is named, and the credential in it is not
+///
+/// The address is the single most useful fact here — "is this the host I think
+/// it is, can this pod resolve it" is the first question asked — and the same
+/// string can carry a password (`redis://:secret@host:6379`). Startup errors are
+/// printed to stdout and shipped by whatever collects a pod's logs, so it goes
+/// through [`redacted_store_url`] and the credential never appears.
+fn connect_refusal(url: &str) -> String {
+    format!(
+        "refusing to start: cannot reach the Data API's shared store at {}.\n\
+         \n\
+         That store (Redis/Valkey, `sharedStore` in the chart or \
+         EGRET_DATA_API__SHARED_STORE_URL) holds the Data API's rate-limit buckets and \
+         response cache for every replica. Booting without it would silently fall back to \
+         per-process state — every published rate limit multiplied by the replica count and \
+         the response cache fragmented the same way — with the configuration on disk saying \
+         that cannot happen. The limiter fails CLOSED, so egret refuses to start instead.\n\
+         \n\
+         This is expected for a few seconds during a rollout and clears itself: the \
+         connection was already retried with backoff before this fired, and Kubernetes will \
+         restart this pod until the store answers. If it does not clear, check in this \
+         order:\n\
+         \x20 1. the store is running and this pod can reach that host and port (name \
+         resolution, NetworkPolicy, and the credential if one is set);\n\
+         \x20 2. the URL above is the one you meant;\n\
+         \x20 3. if the shared store was configured by accident, remove it AND set \
+         `backend.replicas: 1` — one replica with process-local state is correct, more than \
+         one is what this store exists for.",
+        redacted_store_url(url)
+    )
+}
+
+/// The store URL with any credential removed, for a message an operator reads.
+///
+/// Everything between `://` and the last `@` of the authority goes, rather than
+/// only the part after a `:` — `redis://:secret@host` puts the password in the
+/// empty-username position, and a bare `redis://secret@host` is a password too
+/// as far as several clients are concerned. Host, port and the logical-database
+/// path survive, because those are what the message is FOR.
+///
+/// A string with no `://` is not echoed at all. It cannot be parsed into parts,
+/// so there is no way to tell which of it is a credential, and a URL this
+/// malformed is refused by `Client::open` before anything is attempted anyway.
+fn redacted_store_url(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return "<the configured store URL, which is not a URL>".to_string();
+    };
+    let (authority, path) = match rest.split_once('/') {
+        Some((a, p)) => (a, Some(p)),
+        None => (rest, None),
+    };
+    let authority = match authority.rsplit_once('@') {
+        Some((_credential, host)) => format!("***@{host}"),
+        None => authority.to_string(),
+    };
+    match path {
+        Some(p) => format!("{scheme}://{authority}/{p}"),
+        None => format!("{scheme}://{authority}"),
+    }
+}
+
 impl SharedStore {
     /// Open the store, or fail.
     ///
@@ -335,9 +416,24 @@ impl SharedStore {
     /// After construction the manager reconnects on its own; a connection lost
     /// mid-flight surfaces as a per-call error and is handled by the two
     /// policies above, not by another connect.
+    ///
+    /// # The message is the whole of what an operator gets
+    ///
+    /// This failure's entire output used to be `Error: Connection refused (os
+    /// error 111)`, twice. An operator meeting it sees a crash-looping pod and a
+    /// message naming neither the dependency, nor the address it tried, nor the
+    /// fact that a rollout produces exactly this until Valkey is ready — so the
+    /// one instrument they have says nothing about which of egret's dependencies
+    /// is down, and the correct behaviour reads as a broken build. The behaviour
+    /// below is unchanged and must stay unchanged; only what it says changed.
+    /// See [`connect_refusal`].
     pub async fn connect(url: &str) -> anyhow::Result<Self> {
-        let client = redis::Client::open(url)?;
-        let conn = redis::aio::ConnectionManager::new(client).await?;
+        use anyhow::Context as _;
+
+        let client = redis::Client::open(url).with_context(|| connect_refusal(url))?;
+        let conn = redis::aio::ConnectionManager::new(client)
+            .await
+            .with_context(|| connect_refusal(url))?;
         Ok(Self {
             conn,
             bucket: redis::Script::new(BUCKET_SCRIPT),
@@ -648,6 +744,95 @@ pub fn choose_store(replicas: u32, url: Option<&str>) -> Result<StoreChoice, Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A startup refusal names the dependency, the address, and why the process
+    /// stops.
+    ///
+    /// Driven through the real [`SharedStore::connect`] against a port nothing
+    /// listens on, because the claim is about what an OPERATOR sees — the
+    /// `anyhow` report of the error the binary exits with, cause chain and all —
+    /// and not about what a helper returns. `{:#}` is `main`'s own rendering.
+    ///
+    /// It deliberately asserts nothing about the underlying error's own words:
+    /// "Connection refused" is one platform's phrasing of one cause, and the
+    /// property here is that egret's half of the message is present whatever the
+    /// cause was.
+    #[tokio::test]
+    async fn a_store_that_cannot_be_reached_says_what_it_could_not_reach() {
+        // Port 1 is reserved and unbound, and the credential is in the URL
+        // because it must not come back out.
+        //
+        // Matched rather than `expect_err`: `SharedStore` holds a connection
+        // manager and is deliberately not `Debug`, and an `Ok` here is a store
+        // that answered on a port nothing listens on — worth its own message.
+        let err = match SharedStore::connect("redis://someone:hunter2@127.0.0.1:1/3").await {
+            Ok(_) => panic!("nothing listens on 127.0.0.1:1; this must not connect"),
+            Err(e) => e,
+        };
+        let report = format!("{err:#}");
+
+        for expected in [
+            // The dependency, by a name an operator can act on.
+            "shared store",
+            // Its two spellings in configuration, so the message reaches both
+            // the person holding the chart and the person holding the env.
+            "sharedStore",
+            "EGRET_DATA_API__SHARED_STORE_URL",
+            // The address it could not reach, host, port and logical database.
+            "127.0.0.1:1/3",
+            // That stopping is the decision, not a crash.
+            "refusing to start",
+            // And that a rollout produces this until the dependency is up,
+            // which is the fact that turns a crash-looping pod from a mystery
+            // into a wait.
+            "rollout",
+        ] {
+            assert!(
+                report.contains(expected),
+                "the startup refusal must name {expected:?}; an operator who sees only \
+                 an OS error has to guess which dependency is down:\n{report}"
+            );
+        }
+
+        assert!(
+            !report.contains("hunter2"),
+            "the store credential reached a startup message, which is printed to \
+             stdout and shipped by whatever collects this pod's logs:\n{report}"
+        );
+    }
+
+    /// The credential comes out of every shape a redis URL can carry one in, and
+    /// the address survives.
+    ///
+    /// Both halves are asserted per case: a redaction that returned a constant
+    /// would pass the "no secret" half of every one of these, and it is the
+    /// address that makes the message worth printing.
+    #[test]
+    fn the_redacted_url_keeps_the_address_and_drops_the_credential() {
+        for (url, expected) in [
+            ("redis://127.0.0.1:6379", "redis://127.0.0.1:6379"),
+            ("redis://valkey.egret:6379/1", "redis://valkey.egret:6379/1"),
+            // The standard redis spelling: password in the empty-username slot.
+            ("redis://:hunter2@valkey:6379", "redis://***@valkey:6379"),
+            (
+                "redis://user:hunter2@valkey:6379/2",
+                "redis://***@valkey:6379/2",
+            ),
+            // A bare userinfo, which several clients read as a password.
+            ("rediss://hunter2@valkey:6380", "rediss://***@valkey:6380"),
+        ] {
+            assert_eq!(redacted_store_url(url), expected, "for {url}");
+            assert!(
+                !redacted_store_url(url).contains("hunter2"),
+                "a credential survived redaction of {url}"
+            );
+        }
+
+        // Unparseable: not echoed at all, because there is no way to tell which
+        // part of it is a credential.
+        let opaque = redacted_store_url("hunter2");
+        assert!(!opaque.contains("hunter2"), "{opaque}");
+    }
 
     /// The whole decision table, including the two rows a reader is most likely
     /// to get wrong: a configured store wins at ONE replica (so the shared path

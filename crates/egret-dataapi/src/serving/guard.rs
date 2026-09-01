@@ -240,9 +240,20 @@ pub const SERVING_MAX_BODY_BYTES: u64 = 64 * 1024;
 /// code, the message and the header; [`super::error::Wire::into_response`]
 /// renders it, the same call `serve` makes. Remove the `ServingDeadline` arm and
 /// this file stops compiling.
-fn bound_response(e: ServingError, elapsed: Duration) -> Response {
+///
+/// # The `route` argument, and why a bound is the one place it is derived
+///
+/// These three layers wrap the WHOLE mount, so a bound can refuse either of its
+/// two routes — an endpoint call or a contract fetch — and neither handler has
+/// run to say which. The two handlers name their own
+/// [`super::metrics::Route`]; here it is read off the request path by
+/// [`super::metrics::Route::of_path`], whose rule is the routing table's own.
+/// Left to a constant, every shed and every deadline on a contract fetch would
+/// be counted as endpoint-call traffic, which is the conflation the label was
+/// added to end.
+fn bound_response(route: super::metrics::Route, e: ServingError, elapsed: Duration) -> Response {
     let wire = to_wire(&e);
-    super::metrics::record_request(wire.status, wire.code, elapsed);
+    super::metrics::record_request(route, wire.status, wire.code, elapsed);
     // Minted here rather than threaded in — see the module comment on what a
     // `request_id` from a bound means.
     wire.into_response(&Uuid::new_v4().to_string())
@@ -295,7 +306,11 @@ pub async fn serving_deadline(deadline: Duration, req: Request, next: Next) -> R
                 "data-api serving request exceeded its deadline; answering 504 \
                  (no access_log row is written for a cancelled request)"
             );
-            bound_response(ServingError::ServingDeadline, started.elapsed())
+            bound_response(
+                super::metrics::Route::of_path(&path),
+                ServingError::ServingDeadline,
+                started.elapsed(),
+            )
         }
     }
 }
@@ -338,7 +353,11 @@ pub async fn serving_admit(sem: Arc<Semaphore>, req: Request, next: Next) -> Res
         // zero rather than measured, because a latency histogram that mixes
         // refusals in with served calls reports a system getting FASTER as it
         // falls over.
-        return bound_response(ServingError::Overloaded, Duration::ZERO);
+        return bound_response(
+            super::metrics::Route::of_path(req.uri().path()),
+            ServingError::Overloaded,
+            Duration::ZERO,
+        );
     };
     next.run(req).await
 }
@@ -362,7 +381,11 @@ pub async fn serving_body_limit(max_bytes: u64, req: Request, next: Next) -> Res
         );
         // Same reasoning as the shed above: a header read, not a served request,
         // so it must not pull the latency histogram down.
-        return bound_response(ServingError::PayloadTooLarge, Duration::ZERO);
+        return bound_response(
+            super::metrics::Route::of_path(req.uri().path()),
+            ServingError::PayloadTooLarge,
+            Duration::ZERO,
+        );
     }
     next.run(req).await
 }

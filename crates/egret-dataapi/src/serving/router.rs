@@ -1024,7 +1024,15 @@ async fn serve(
     // of the match above rather than being re-derived, so one call is one
     // increment and the counter cannot disagree with the row about what happened.
     // `elapsed` is the reading the row's `duration_ms` was computed from.
-    serving_metrics::record_request(metric_status, metric_code, elapsed);
+    // `Route::Call` named here rather than derived from the URI: this IS the
+    // call handler, so the label cannot drift from the route that produced it.
+    // Only the bounds, which fire before any handler, have to read the path.
+    serving_metrics::record_request(
+        serving_metrics::Route::Call,
+        metric_status,
+        metric_code,
+        elapsed,
+    );
 
     // Unconditional, INCLUDING the 429 and the 404 — accepted deliberately, not
     // overlooked. The reasoning, because "the rate limiter protects the

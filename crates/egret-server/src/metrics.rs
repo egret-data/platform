@@ -37,7 +37,9 @@
 //! the label discipline one layer down: `egret_dataapi::serving::metrics` carries
 //! no workspace, no endpoint id, no path and no client id, so a scrape reveals
 //! deployment-wide request rates and latency and nothing that belongs to a
-//! tenant. **A label added later that names a tenant would silently turn this
+//! tenant. Its `route` label is not an exception: it is one of two constants
+//! naming WHICH of that mount's two routes answered — an endpoint call or a
+//! contract fetch — and never the URL a caller asked for. **A label added later that names a tenant would silently turn this
 //! into a cross-tenant disclosure** — read that module's cardinality section
 //! before adding one, because the same rule that keeps the series count finite
 //! is the one that keeps this endpoint safe to leave open.
