@@ -1,7 +1,7 @@
 //! Package 8 — a consumer can fetch its own contract with the credential it
 //! holds, and the document tells it what to branch on.
 //!
-//! Two halves, and they fail for different reasons:
+//! Three groups of assertions, and they fail for different reasons:
 //!
 //! * **Reachability and scoping.** `GET /data-api/v1/{ws}` with a `data-api`
 //!   bearer returns the OpenAPI document for the service account that token was
@@ -10,6 +10,11 @@
 //!   test is granted ONE, because a fixture with one endpoint, or one where the
 //!   account happens to hold every grant, cannot tell "scoped correctly" from
 //!   "returned everything".
+//! * **The route is bounded.** Building the document costs one PDP decision per
+//!   live endpoint, so it is the highest-amplification request on this surface
+//!   and it has a bucket of its own — keyed on the service account, in its own
+//!   namespace, always consulted. The assertions drive it past the limit rather
+//!   than checking that a limiter was installed.
 //! * **`error.code` carries an `enum`.** The field both documents describe as
 //!   "the stable code to branch on" was a bare `string`, so a generated client
 //!   gave a consumer nothing to branch on.
@@ -121,6 +126,29 @@ async fn scoped(f: &Fixture) -> Scoped {
         alpha,
         beta,
     }
+}
+
+/// `account` still holds invoke on `endpoint`, asked of the real PDP.
+///
+/// Every "the contract is empty" assertion needs this beside it. An empty
+/// `paths` object has two causes — the endpoint is not live, or the account may
+/// not invoke it — and they are indistinguishable in the response. Without this
+/// the state assertions would pass just as well against an implementation whose
+/// authorization had silently broken, which is the "empty for the wrong reason"
+/// hole.
+async fn still_granted(f: &Fixture, account: UserId, endpoint: Uuid) {
+    assert!(
+        egret_dataapi::can_invoke_for_test(
+            &f.state,
+            account,
+            egret_core::WorkspaceId(f.ws_id),
+            endpoint,
+        )
+        .await
+        .expect("pdp"),
+        "the grant on {endpoint} must still be in place, or the emptiness this \
+         asserts is about authorization rather than about state"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -445,11 +473,93 @@ async fn an_archived_workspace_answers_no_contract() {
 /// `build`'s `state = 'live'` predicate is what does it, and the reason it
 /// matters here is the same reason it matters there: a documented path that
 /// answers 404 sends a consumer to debug their own client.
+///
+/// **All three states, because they are excluded by different things** — the
+/// docstring claimed all three before the test drove only `disable`, and the
+/// three are not one predicate:
+///
+/// * a **disabled** endpoint keeps its `live_version_id` (`disable` only writes
+///   `state`), so `e.state = 'live'` is the whole of what excludes it;
+/// * a **draft** has never been published, so it is excluded by `build`'s
+///   `JOIN … ON ev.id = e.live_version_id` — a different clause, which would
+///   still hold if the state predicate were dropped and vice versa;
+/// * a **trashed** endpoint is excluded by neither clause directly. It is
+///   excluded because `trash` refuses a LIVE endpoint (its UPDATE's own `WHERE`,
+///   with migration 0126's `dataapi_endpoints_trashed_not_live` under it), so a
+///   trashed row can never be `state = 'live'`. `build` has no `deleted_at`
+///   predicate at all. That is a real dependency between two files and it is
+///   what this case pins; the assertion on the row's state below is there to
+///   name it rather than let it be inferred.
+///
+/// Every case re-asserts that the grant is still in place. Without that, an
+/// empty document is ambiguous: "not live" and "no longer authorized" produce
+/// exactly the same `paths: {}`, and a mutation to the grant path would pass
+/// here while the state predicate was gone.
 #[tokio::test]
-async fn a_disabled_endpoint_leaves_the_contract() {
+async fn a_draft_a_disabled_and_a_trashed_endpoint_all_leave_the_contract() {
     let f = skip_without_db!();
     let s = scoped(&f).await;
 
+    let account = UserId(s.alpha_account);
+
+    // 1. A DRAFT the account may invoke. Never published, so there is no frozen
+    //    version to describe — and `/alpha` is still there, which is what makes
+    //    the assertion about the draft rather than about an empty document.
+    let draft = f.create_draft_endpoint("pkg8-draft", "/pkg8-draft").await;
+    grant_invoke(&f.db, UserId(s.alpha_account), draft).await;
+    still_granted(&f, account, draft).await;
+
+    let res = f.contract_as(UserId(s.alpha_account)).await;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.body);
+    assert_eq!(
+        res.paths(),
+        vec!["/alpha".to_string()],
+        "a draft has no published version to describe: {}",
+        res.body
+    );
+
+    // 2. A TRASHED endpoint the account may invoke. Trash keeps the row, the
+    //    versions and the grants — the doc on `trash_endpoint` says so — so this
+    //    is a state predicate and not an absence of data.
+    let trashed = f
+        .create_draft_endpoint("pkg8-trashed", "/pkg8-trashed")
+        .await;
+    grant_invoke(&f.db, UserId(s.alpha_account), trashed).await;
+    let (status, body) = f
+        .mgmt_post(
+            &format!("/api/ws/{}/data-api/endpoints/{}/trash", f.ws_slug, trashed),
+            Some(serde_json::json!({})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "trash failed: {body}");
+    still_granted(&f, account, trashed).await;
+    // The dependency, named. `build` has no `deleted_at` predicate; what keeps a
+    // trashed endpoint out of the document is that it cannot be `live`.
+    let state: String = sqlx::query_scalar(
+        "SELECT state FROM dataapi.endpoints WHERE id = $1 AND deleted_at IS NOT NULL",
+    )
+    .bind(trashed)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("the trashed row is there and really is trashed");
+    assert_ne!(
+        state, "live",
+        "trash must leave the endpoint non-live — that, and not a `deleted_at` \
+         predicate in `build`, is what keeps it out of the contract"
+    );
+
+    let res = f.contract_as(UserId(s.alpha_account)).await;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.body);
+    assert_eq!(
+        res.paths(),
+        vec!["/alpha".to_string()],
+        "a trashed endpoint keeps its grants and its versions, and must still \
+         leave the contract: {}",
+        res.body
+    );
+
+    // 3. DISABLED — the one that was live and stopped being so, which is the
+    //    case a consumer is most likely to meet.
     let (status, body) = f
         .mgmt_post(
             &format!(
@@ -460,6 +570,7 @@ async fn a_disabled_endpoint_leaves_the_contract() {
         )
         .await;
     assert_eq!(status, StatusCode::OK, "disable failed: {body}");
+    still_granted(&f, account, s.alpha).await;
 
     let res = f.contract_as(UserId(s.alpha_account)).await;
     assert_eq!(res.status, StatusCode::OK, "{}", res.body);
@@ -469,20 +580,216 @@ async fn a_disabled_endpoint_leaves_the_contract() {
          debug their own client: {}",
         res.body
     );
-    // And the account still holds the grant — so the emptiness is about STATE,
-    // not about authorization having been revoked underneath the assertion.
-    assert!(
-        egret_dataapi::can_invoke_for_test(
-            &f.state,
-            UserId(s.alpha_account),
-            egret_core::WorkspaceId(f.ws_id),
-            s.alpha,
-        )
-        .await
-        .expect("pdp"),
-        "the grant must still be in place, or this test proves nothing about state"
-    );
     let _ = s.beta;
+}
+
+// ---------------------------------------------------------------------------
+// Half (a) — the bucket the contract route has of its own
+// ---------------------------------------------------------------------------
+
+/// **The most expensive request on this surface is bounded, and by a real
+/// allowance rather than a layer that was installed.**
+///
+/// The clock is frozen (`TestClock`), so nothing refills between requests and
+/// every admission below is a token that was genuinely there — the property a
+/// wall-clock version of this test would lose the moment the machine was slow.
+///
+/// Driven past the limit rather than asserted against the constant: the loop
+/// spends `CONTRACT_BURST` tokens and the next fetch is refused. Then the clock
+/// advances and the same account is admitted again, which is the difference
+/// between a limiter and a lockout.
+///
+/// Mutation: delete the `contract_limit(st, &principal).await?;` line in
+/// `build_contract` and every request below is a 200.
+#[tokio::test]
+async fn a_contract_loop_is_rate_limited_and_refills() {
+    let f = skip_without_db!();
+    let s = scoped(&f).await;
+    let account = UserId(s.alpha_account);
+
+    let burst = egret_dataapi::serving::ratelimit::CONTRACT_BURST;
+    for i in 0..burst {
+        let res = f.contract_as(account).await;
+        assert_eq!(
+            res.status,
+            StatusCode::OK,
+            "request {i} of a burst of {burst} must be admitted: {}",
+            res.body
+        );
+    }
+
+    let refused = f.contract_as(account).await;
+    assert_eq!(
+        refused.status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "a burst of {burst} is spent; the next fetch must be refused. Building \
+         this document costs one PDP decision per live endpoint, and it was the \
+         only unlimited request on the surface: {}",
+        refused.body
+    );
+    assert_eq!(refused.code(), "rate_limited", "{}", refused.body);
+    assert!(
+        refused.body["paths"].is_null(),
+        "a refusal must not carry a document: {}",
+        refused.body
+    );
+    // A 429 with no `Retry-After` tells a consumer to guess, and guessing is a
+    // retry storm.
+    assert_eq!(
+        refused.retry_after.as_deref(),
+        Some("1"),
+        "the refusal must say when the allowance refills"
+    );
+
+    // The refill. One second at `CONTRACT_QPS` is one token, and one token is
+    // one document.
+    f.clock.advance(std::time::Duration::from_secs(1));
+    let after = f.contract_as(account).await;
+    assert_eq!(
+        after.status,
+        StatusCode::OK,
+        "the bucket must refill — a limit that never lets the caller back in is \
+         a lockout: {}",
+        after.body
+    );
+}
+
+/// **The contract bucket cannot starve a call, and cannot starve another
+/// account.**
+///
+/// The two ways a new bucket goes wrong, in one test because they are the same
+/// mistake seen from two sides: a key that is too coarse. Reusing the endpoint's
+/// bucket would make a discovery loop refuse paid traffic; keying on the
+/// workspace alone would make one consumer's loop deny every other consumer its
+/// contract.
+///
+/// The call half is driven against an endpoint whose published allowance is a
+/// burst of **one**, so a single stolen token is the difference between 200 and
+/// 429. Driving it against `/probe` — which publishes `{}` and therefore never
+/// touches the store at all — would have passed under every implementation,
+/// including one that spent the endpoint's tokens.
+///
+/// Mutations: drop the service-account half of `contract_key` and the second
+/// account is refused; key the contract on the endpoint-wide bucket under a
+/// synthetic id (one of the shapes weighed for this) and the second account is
+/// refused too, because every account in the workspace then shares one bucket.
+/// The namespace claim itself — that `d:` can never be spelled as `c:` or `e:` —
+/// is pinned by `ratelimit`'s `the_contract_bucket_is_its_own_namespace`, which
+/// is where a key-format assertion belongs.
+#[tokio::test]
+async fn one_accounts_contract_loop_starves_neither_a_call_nor_another_account() {
+    let f = skip_without_db!();
+    let s = scoped(&f).await;
+    let account = UserId(s.alpha_account);
+
+    // A published allowance of exactly one request. Anything the contract loop
+    // takes from it is visible immediately.
+    let limited = f
+        .publish(
+            "/pkg8-limited",
+            f.database_id,
+            no_cache(),
+            serde_json::json!({ "per_key_qps": 1, "burst": 1, "per_endpoint_qps": 1 }),
+        )
+        .await;
+    grant_invoke(&f.db, f.principal_a, limited).await;
+
+    // Spend the whole allowance, then confirm it really is spent — otherwise
+    // both assertions below would pass against a route with no limiter at all.
+    for _ in 0..egret_dataapi::serving::ratelimit::CONTRACT_BURST {
+        assert_eq!(f.contract_as(account).await.status, StatusCode::OK);
+    }
+    assert_eq!(
+        f.contract_as(account).await.status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "the premise of this test is an exhausted contract bucket"
+    );
+
+    // A CALL to the endpoint with the one-request allowance. Both of its buckets
+    // — the per-client one and the endpoint-wide one — must be untouched.
+    let call = f.call_as(f.principal_a, "pkg8-limited").await;
+    assert_eq!(
+        call.status,
+        StatusCode::OK,
+        "a contract fetch must never spend a token an endpoint call then needs; \
+         this endpoint's published burst is 1: {}",
+        call.body
+    );
+
+    // And another service account's contract is untouched.
+    let other = f.contract_as(UserId(s.beta_account)).await;
+    assert_eq!(
+        other.status,
+        StatusCode::OK,
+        "one account's discovery loop must not deny another its contract: {}",
+        other.body
+    );
+    assert_eq!(other.paths(), vec!["/beta".to_string()], "{}", other.body);
+}
+
+/// **A store outage does not turn this route into an unlimited one.**
+///
+/// The route's rate is a constant rather than an author's published number, so
+/// unlike a call it ALWAYS consults the store — which is exactly why the outage
+/// answer has to be a refusal. `503 rate_limiter_unavailable`, the same code and
+/// the same reasoning the call path uses: an admission here would mean an
+/// uncounted, unbounded allowance under the one condition nobody is watching.
+///
+/// The router is built here rather than taken from the fixture because the
+/// substitution IS the subject: only a store that fails can produce
+/// `Refusal::Unavailable`, and the in-process bucket has no unreachable state.
+///
+/// Mutation: map `Refusal::Unavailable` to `Ok(())` in `contract_limit` and this
+/// is a 200.
+#[tokio::test]
+async fn an_unreachable_limiter_refuses_the_contract_rather_than_admitting_it() {
+    let f = skip_without_db!();
+    let s = scoped(&f).await;
+
+    struct Unreachable;
+
+    #[async_trait::async_trait]
+    impl egret_dataapi::serving::RateLimitStore for Unreachable {
+        async fn check_at(
+            &self,
+            _key: &str,
+            _rate: egret_dataapi::serving::Rate,
+            _now: std::time::Instant,
+        ) -> Result<(), egret_dataapi::serving::Refusal> {
+            Err(egret_dataapi::serving::Refusal::Unavailable)
+        }
+    }
+
+    let mut state = f.state.clone();
+    state.rate_limits = std::sync::Arc::new(Unreachable);
+    let router = axum::Router::new()
+        .nest("/data-api/v1", egret_dataapi::serving_router())
+        .with_state(state);
+
+    let token = mint(f.ws_id, UserId(s.alpha_account), "client-outage");
+    let request = axum::http::Request::builder()
+        .method("GET")
+        .uri(format!("/data-api/v1/{}", f.ws_slug))
+        .header("authorization", format!("Bearer {token}"))
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let res =
+        serving_common::contract_res(tower::ServiceExt::oneshot(router, request).await.unwrap())
+            .await;
+
+    assert_eq!(
+        res.status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "with the limiter unreachable the contract must be refused, not served \
+         without an allowance: {}",
+        res.body
+    );
+    assert_eq!(res.code(), "rate_limiter_unavailable", "{}", res.body);
+    assert!(
+        res.body["paths"].is_null(),
+        "a refusal must not carry a document: {}",
+        res.body
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -654,8 +961,13 @@ fn the_contract_route_is_itself_published() {
     );
     // The refusals it can actually give, so a generated client has a case for
     // each. 503 is `output_naming_collision`, which only this route's own
-    // failure mode produces here.
-    for status in ["200", "401", "404", "500", "503"] {
+    // failure mode produces here — and `rate_limiter_unavailable`, which it can
+    // now produce because it consults a limiter. 429 is `rate_limited`: this
+    // route has a bucket of its own (see `serving::contract`), and a status a
+    // consumer will really meet and that the document did not name would be the
+    // same defect `the_published_contract_names_every_answer_the_surface_can_give`
+    // exists for, one operation over.
+    for status in ["200", "401", "404", "429", "500", "503"] {
         assert!(
             op["responses"][status].is_object(),
             "the contract route must document {status}: {op}"

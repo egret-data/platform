@@ -71,6 +71,11 @@ export type dataApiServingServeContractResponse413 = {
   status: 413
 }
 
+export type dataApiServingServeContractResponse429 = {
+  data: ServingErrorBody
+  status: 429
+}
+
 export type dataApiServingServeContractResponse500 = {
   data: ServingErrorBody
   status: 500
@@ -89,7 +94,7 @@ export type dataApiServingServeContractResponse504 = {
 export type dataApiServingServeContractResponseSuccess = (dataApiServingServeContractResponse200) & {
   headers: Headers;
 };
-export type dataApiServingServeContractResponseError = (dataApiServingServeContractResponse401 | dataApiServingServeContractResponse404 | dataApiServingServeContractResponse413 | dataApiServingServeContractResponse500 | dataApiServingServeContractResponse503 | dataApiServingServeContractResponse504) & {
+export type dataApiServingServeContractResponseError = (dataApiServingServeContractResponse401 | dataApiServingServeContractResponse404 | dataApiServingServeContractResponse413 | dataApiServingServeContractResponse429 | dataApiServingServeContractResponse500 | dataApiServingServeContractResponse503 | dataApiServingServeContractResponse504) & {
   headers: Headers;
 };
 

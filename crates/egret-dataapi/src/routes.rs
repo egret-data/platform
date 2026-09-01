@@ -72,7 +72,7 @@
 //! contract.
 
 use axum::extract::{FromRef, Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{header, StatusCode};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
@@ -2232,7 +2232,7 @@ fn openapi_gen_err(e: crate::openapi_gen::OpenApiGenError) -> DataApiError {
     tag = "data-api",
     params(WorkspacePath, OpenApiQuery),
     responses(
-        (status = 200, description = "OpenAPI 3.0.3 document describing what service_account_id may invoke. `servers[0].url` already carries the workspace slug, so joining it with a `paths` key gives the URL a consumer calls", body = serde_json::Value),
+        (status = 200, description = "OpenAPI 3.0.3 document describing what service_account_id may invoke. `servers[0].url` already carries the workspace slug, so joining it with a `paths` key gives the URL a consumer calls. `Cache-Control: no-store`: the document is per service account and reflects grants as they are at this instant", body = serde_json::Value),
         (status = 400, description = "The workspace has more live endpoints than one document may describe; request them one at a time with endpoint_id", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing data_api_endpoint:manage permission. The gate matches `/grants` LIST, not the other read routes: this document is the grant roster, resolved per service account", body = ErrorBody),
@@ -2245,7 +2245,13 @@ async fn get_openapi(
     State(st): State<DataApiState>,
     WsContext(ctx): WsContext,
     Query(q): Query<OpenApiQuery>,
-) -> Result<Json<serde_json::Value>, DataApiError> {
+) -> Result<
+    (
+        [(header::HeaderName, &'static str); 1],
+        Json<serde_json::Value>,
+    ),
+    DataApiError,
+> {
     // **`:manage`, not `:read`, and matching `/grants` LIST on purpose.** This
     // route takes a `service_account_id` and answers with exactly the set of
     // endpoints that account may invoke — the grant roster, read from the other
@@ -2273,7 +2279,25 @@ async fn get_openapi(
     let doc = crate::openapi_gen::build(&st, ctx.workspace_id, UserId(sa), q.endpoint_id)
         .await
         .map_err(openapi_gen_err)?;
-    Ok(Json(doc))
+    // **`no-store`, for the same reason `serving::contract` carries it, and this
+    // is the stronger case of the two.** That route's argument is that the
+    // document varies by service account while the URL does not; here the
+    // account is a QUERY PARAMETER, so the URL does vary — but the response is
+    // still session-scoped (two admins with different permissions get different
+    // documents from the same URL) and still describes, per account, which
+    // endpoints exist and what their parameters are called. A shared cache
+    // holding that is the grant roster at rest.
+    //
+    // It is also the staler-than-the-calls-it-describes problem: the document
+    // changes with every grant and every publish, neither of which invalidates
+    // anything. This route is where an admin checks what a consumer can see
+    // right now, and a stored copy answers what it could see earlier.
+    //
+    // Being behind a session and `:manage` is not a substitute. `Cache-Control`
+    // governs intermediaries and the browser's own disk cache, both of which
+    // are downstream of authorization and neither of which knows the response
+    // is per account.
+    Ok(([(header::CACHE_CONTROL, "no-store")], Json(doc)))
 }
 
 /// The Data API management router. Mount under `/api` so the live paths are

@@ -743,6 +743,19 @@ impl utoipa::Modify for BearerAddon {
 /// lookups therefore `expect`, and `tests/contract_reachable.rs`'s
 /// `the_published_root_document_names_every_code_too` is the test that executes
 /// this path and reads the result back out of the document.
+///
+/// # What a panic here would actually take down — NOT the server
+///
+/// Worth stating, because "a `Modify` that panics" reads like a boot hazard and
+/// is not one. Nothing in `build_router` builds this document:
+/// `egret_server::openapi_doc()` has exactly two callers, the `/openapi.json`
+/// handler (a dev doc route, mounted unauthenticated and outside every layer)
+/// and `egret-bin`'s `openapi` subcommand, which prints the spec and exits
+/// before it reads config or touches the database. So the blast radius of the
+/// drift this guards against is a 500 on `/openapi.json` and a non-zero exit
+/// from the code generator — loud, immediate, and caught in CI long before a
+/// deployment, while served traffic is unaffected. That is the trade this
+/// `expect` is making, and it is a cheap one.
 struct ErrorCodeEnumAddon;
 
 impl utoipa::Modify for ErrorCodeEnumAddon {

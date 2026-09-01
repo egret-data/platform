@@ -65,13 +65,61 @@
 //!   a workspace exists;
 //! * the per-endpoint invoke grant, via `build`, as above.
 //!
-//! What it deliberately does NOT apply is the per-endpoint rate limit and the
-//! response cache. Both are keyed on `endpoint_id`, and this request names no
-//! endpoint. The surface-wide bounds — body cap, deadline, bulkhead — DO apply,
-//! because the route is registered inside `serving_router_sharing_bulkhead`'s
-//! layers; that matters more here than on a call, because building a document
-//! costs one PDP decision per live endpoint (two DB round trips each), bounded
-//! by [`crate::openapi_gen::MAX_DOCUMENTED_ENDPOINTS`].
+//! What it deliberately does NOT apply is the response cache, and the reason is
+//! in "Not cacheable" below. The surface-wide bounds — body cap, deadline,
+//! bulkhead — DO apply, because the route is registered inside
+//! `serving_router_sharing_bulkhead`'s layers.
+//!
+//! # It IS rate limited, and the asymmetry is the reason
+//!
+//! Building this document costs one PDP decision per live endpoint — two DB
+//! round trips each — bounded only by
+//! [`crate::openapi_gen::MAX_DOCUMENTED_ENDPOINTS`], i.e. **up to about 400
+//! round trips for one request**, and a holder of one valid bearer can loop it.
+//! That makes it the highest-amplification request on this surface. Left
+//! unlimited it would also have been the ONLY unlimited one: the cheapest
+//! request here — a call to an endpoint whose author configured a limit — is
+//! bounded, and the most expensive was not. The bulkhead does not close that.
+//! It bounds CONCURRENCY, so a serial loop never trips it; it caps how many
+//! expensive requests run at once, not how many an account may issue.
+//!
+//! The per-endpoint limiter genuinely does not fit — it is keyed on
+//! `endpoint_id` and this request names none — but "the existing bucket does not
+//! fit" is an argument for a different bucket, not for no bucket. So the route
+//! takes its own: [`crate::serving::ratelimit::contract_key`], a third `d:`
+//! namespace keyed on the workspace and the SERVICE ACCOUNT, both read off the
+//! signed token, at [`crate::serving::ratelimit::contract_rate`].
+//!
+//! Three properties that bucket has to have, and why it has them:
+//!
+//! * **It cannot starve a call.** Its own namespace, so a contract fetch never
+//!   spends a token an endpoint call then needs. Reusing the endpoint-wide
+//!   bucket under a synthetic key would have done exactly that — refusing paid
+//!   traffic in order to bound a discovery request.
+//! * **The caller cannot choose its own rate.** Both halves of the key are token
+//!   claims. Package 4's lesson is that a bucket keyed without the dimension
+//!   that varies lets a caller pick its rate; the dimension the document varies
+//!   by is the service account, and that is the key. Not `client_id` — see
+//!   `contract_key`.
+//! * **A store outage does not make it unlimited.** The rate is a constant
+//!   rather than an author's published number, so unlike a call this route
+//!   ALWAYS consults the store, and a `Refusal::Unavailable` is `503
+//!   rate_limiter_unavailable` exactly as on the call path. The cost of that is
+//!   stated rather than hidden: a call to an endpoint with no configured limit
+//!   keeps serving through a store outage and a contract fetch does not. That is
+//!   the fail-closed policy applied to a route that has no unlimited mode to
+//!   fall back to, and it is the cheaper failure — a consumer needs this
+//!   document when it BUILDS a client, not per call, and the one it already has
+//!   keeps working.
+//!
+//! There is deliberately no second, workspace-wide contract bucket. It would let
+//! one account's loop deny every other consumer in the workspace its contract —
+//! a worse failure than the load it prevents — and the workspace-wide bound that
+//! does exist is the bulkhead.
+//!
+//! The refusal is `429 rate_limited` with `Retry-After`, the same variant and
+//! the same header the call path answers with, so a consumer needs no new case
+//! for it. No new [`ServingError`] variant: see `contract_error`.
 //!
 //! # Why the URL is the server URL itself, and why it cannot be shadowed
 //!
@@ -135,9 +183,13 @@ use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use std::time::Instant;
 use uuid::Uuid;
 
 use super::error::{to_wire, ServingErrorBody};
+// No `RateLimitStore` import: `st.rate_limits` is a `dyn` trait object, whose
+// trait methods are inherent to the object type.
+use super::ratelimit;
 use super::ServingError;
 use crate::openapi_gen::OpenApiGenError;
 use crate::routes::DataApiState;
@@ -230,8 +282,9 @@ fn contract_error(ws: egret_core::WorkspaceId, e: OpenApiGenError) -> ServingErr
         (status = 401, description = "`key_invalid` — bearer token missing, expired, or not for this audience", body = ServingErrorBody),
         (status = 404, description = "`not_found` — no such workspace, or it is not the one the token was issued for, or it is archived. One code for all three, so a caller cannot learn that a workspace exists", body = ServingErrorBody),
         (status = 413, description = "`payload_too_large` — the request declared a body larger than this surface accepts", body = ServingErrorBody),
+        (status = 429, description = "`rate_limited` — this service account's contract allowance is spent; `Retry-After` states when it refills. The allowance is egret's, not an endpoint's: building this document is the most expensive request on the surface, so it has a bucket of its own, keyed on the service account and shared by every client the account holds", body = ServingErrorBody),
         (status = 500, description = "`internal` — an egret-side fault, including a workspace with more live endpoints than one document may describe; quote `request_id` to support", body = ServingErrorBody),
-        (status = 503, description = "`output_naming_collision` — an endpoint this account may invoke has a published output that maps two columns onto one key, so there is no document to describe it; its author must re-publish. `overloaded` — egret shed the request because the serving surface was at its concurrency limit; `rate_limiter_unavailable` cannot occur here, because this route consults no rate limiter", body = ServingErrorBody),
+        (status = 503, description = "`output_naming_collision` — an endpoint this account may invoke has a published output that maps two columns onto one key, so there is no document to describe it; its author must re-publish. `overloaded` — egret shed the request because the serving surface was at its concurrency limit. `rate_limiter_unavailable` — the shared rate-limit store could not be consulted, so the request was refused rather than admitted without an allowance. The last two clear by themselves", body = ServingErrorBody),
         (status = 504, description = "`deadline_exceeded` — the request outran egret's own serving deadline", body = ServingErrorBody),
     ),
     security(("data_api_bearer" = [])),
@@ -281,6 +334,50 @@ pub(super) async fn serve_contract(
     }
 }
 
+/// Spend one token from this service account's contract bucket.
+///
+/// See the module comment for why this route has a bucket of its own rather than
+/// none and rather than the endpoint's. The two refusals are mapped exactly as
+/// `router::run` maps them, deliberately: a consumer already has a case for
+/// `429 rate_limited` and for `503 rate_limiter_unavailable` from the call path,
+/// and inventing a third answer for the same two conditions would give it a
+/// third case to write for no new information.
+///
+/// The log lines differ from the call path's in one way only — they name the
+/// service account instead of the endpoint, because there is no endpoint. An
+/// operator seeing these is looking at one account looping on discovery, which
+/// is a different picture from one client hammering one endpoint and should not
+/// be reported as if it were the same.
+async fn contract_limit(
+    st: &DataApiState,
+    principal: &super::ServingPrincipal,
+) -> Result<(), ServingError> {
+    let key = ratelimit::contract_key(principal.workspace_id, principal.user_id.0);
+    st.rate_limits
+        .check_at(&key, ratelimit::contract_rate(), Instant::now())
+        .await
+        .map_err(|refusal| match refusal {
+            ratelimit::Refusal::Exhausted(retry_after) => {
+                tracing::debug!(
+                    workspace_id = %principal.workspace_id,
+                    service_account_id = %principal.user_id.0,
+                    retry_after_secs = ratelimit::retry_after_secs(retry_after),
+                    "data-api contract request rate limited"
+                );
+                ServingError::RateLimited { retry_after }
+            }
+            ratelimit::Refusal::Unavailable => {
+                tracing::warn!(
+                    workspace_id = %principal.workspace_id,
+                    service_account_id = %principal.user_id.0,
+                    "data-api contract rate limit could not be checked; refusing the request \
+                     rather than admitting it without an allowance"
+                );
+                ServingError::LimiterUnavailable
+            }
+        })
+}
+
 /// The chain proper, so [`serve_contract`] owns only the envelope.
 ///
 /// The order is `router::run`'s order for the steps that apply: authenticate,
@@ -292,6 +389,18 @@ async fn build_contract(
     headers: &HeaderMap,
 ) -> Result<serde_json::Value, ServingError> {
     let principal = super::verify_serving_token(&*st.keys, super::router::bearer(headers)?).await?;
+
+    // The limiter, BEFORE the workspace lookup and therefore before any query
+    // this request would otherwise run. Both halves of the key are claims of the
+    // token just verified, so nothing in the request — not the slug, not a
+    // header — can move this caller to a different bucket or a different rate.
+    //
+    // A consequence worth naming: a request whose slug is wrong spends a token
+    // before it is answered 404. That is not an oracle (the key never consults
+    // the slug, so the answer is the same for every slug) and it is the right
+    // way round — a caller looping on a slug that does not exist is exactly the
+    // loop this bucket is here to bound.
+    contract_limit(st, &principal).await?;
 
     // The workspace comes from the TOKEN; the slug in the path must agree, and
     // the workspace must still be active. Byte for byte `router::run`'s step 2,

@@ -309,6 +309,26 @@ things are worth carrying forward.
   of which invalidates anything, and a contract must not be staler than the
   calls it describes. `Cache-Control: no-store`.
 
+- **It has a rate-limit bucket of its own, because it is the most expensive request the
+  surface serves.** Building the document costs one PDP decision per live endpoint — two DB
+  round trips each, up to about 400 for one request — and a holder of one valid bearer can
+  loop it. Package 3a's bulkhead does not close that: it bounds concurrency, so a serial loop
+  never trips it. The per-endpoint limiter genuinely does not fit (it is keyed on
+  `endpoint_id` and this request names none), but that is an argument for a different bucket,
+  not for no bucket — otherwise the cheapest request on the surface is limited and the most
+  expensive one is not. So: a third `d:` namespace keyed on the workspace and the **service
+  account**, both read off the signed token, at a fixed 1 qps with a burst of 10. Its own
+  namespace so a contract fetch can never spend a token a CALL then needs; keyed on the
+  account rather than `client_id` because the account is the dimension the document varies by
+  (Package 4's lesson: a bucket keyed without the varying dimension lets a caller choose its
+  own rate). No second workspace-wide bucket — that would let one account's loop deny every
+  other consumer its contract, and the workspace-wide bound is the bulkhead. Because the rate
+  is a constant rather than an author's published number, this route **always** consults the
+  store, so a store outage refuses it (`503 rate_limiter_unavailable`) where a call to an
+  endpoint with no configured limit keeps serving; that is the fail-closed policy applied to a
+  route with no unlimited mode, and it is the cheaper failure — a consumer needs this document
+  when it builds a client, not per call.
+
 The second half is `error.code`. Both published documents described it as "the
 stable code to branch on" and emitted a bare `{"type": "string"}`, so a
 generated client typed it `string` and a consumer branching on it had nothing to
@@ -600,6 +620,26 @@ The system goes dark and reports itself healthy. Three instruments, one cause, a
 - **Signing-key rotation** remains a documented mass outage: `active()` is the only key consulted,
   so rotation invalidates every live token at once. Not in this programme; recorded here so it is
   not rediscovered as new.
+- **A workspace over `MAX_DOCUMENTED_ENDPOINTS` (200) live endpoints cannot serve the bearer
+  contract at all.** `GET /data-api/v1/{ws}` answers `500 internal` and the consumer has no remedy.
+  The management route's remedy is `?endpoint_id=`, which the bearer route deliberately does not
+  offer: a consumer asking "what may I call" cannot narrow by an id it does not yet know, and
+  accepting one would make the route an existence oracle over endpoint ids.
+
+  Two things make deferring this right rather than merely convenient. First, **the fix a reader
+  reaches for is worse than the defect**: a dedicated `ServingError` variant would be forced by
+  `the_published_contract_names_every_answer_the_surface_can_give` onto `serve_get` and
+  `serve_post`'s published response lists — those two operations can never produce it, so the
+  document would be made untrue in order to satisfy a test. Second, the cap is what bounds the
+  request's cost (one PDP decision per candidate endpoint), so raising it trades a refusal for an
+  amplification.
+
+  The oracle it carries, recorded so it is not rediscovered either: **the count runs over all live
+  rows before `can_invoke` filters**, so an account granted nothing still learns that the workspace
+  has more than 200 live endpoints — a 500 rather than the empty document it would otherwise get.
+  That is a coarse fact about workspace size and nothing about any endpoint's path, parameters or
+  columns. It is inherent to bounding the cost before paying it: a count taken after the filter
+  would mean running exactly the PDP decisions the cap exists to avoid.
 
 ## 7. What "done" means for this programme
 

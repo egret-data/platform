@@ -16555,7 +16555,7 @@
         ],
         "responses": {
           "200": {
-            "description": "OpenAPI 3.0.3 document describing what service_account_id may invoke. `servers[0].url` already carries the workspace slug, so joining it with a `paths` key gives the URL a consumer calls",
+            "description": "OpenAPI 3.0.3 document describing what service_account_id may invoke. `servers[0].url` already carries the workspace slug, so joining it with a `paths` key gives the URL a consumer calls. `Cache-Control: no-store`: the document is per service account and reflects grants as they are at this instant",
             "content": {
               "application/json": {
                 "schema": {}
@@ -25600,6 +25600,16 @@
               }
             }
           },
+          "429": {
+            "description": "`rate_limited` — this service account's contract allowance is spent; `Retry-After` states when it refills. The allowance is egret's, not an endpoint's: building this document is the most expensive request on the surface, so it has a bucket of its own, keyed on the service account and shared by every client the account holds",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServingErrorBody"
+                }
+              }
+            }
+          },
           "500": {
             "description": "`internal` — an egret-side fault, including a workspace with more live endpoints than one document may describe; quote `request_id` to support",
             "content": {
@@ -25611,7 +25621,7 @@
             }
           },
           "503": {
-            "description": "`output_naming_collision` — an endpoint this account may invoke has a published output that maps two columns onto one key, so there is no document to describe it; its author must re-publish. `overloaded` — egret shed the request because the serving surface was at its concurrency limit; `rate_limiter_unavailable` cannot occur here, because this route consults no rate limiter",
+            "description": "`output_naming_collision` — an endpoint this account may invoke has a published output that maps two columns onto one key, so there is no document to describe it; its author must re-publish. `overloaded` — egret shed the request because the serving surface was at its concurrency limit. `rate_limiter_unavailable` — the shared rate-limit store could not be consulted, so the request was refused rather than admitted without an allowance. The last two clear by themselves",
             "content": {
               "application/json": {
                 "schema": {

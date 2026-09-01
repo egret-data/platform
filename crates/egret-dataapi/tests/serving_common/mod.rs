@@ -1131,6 +1131,35 @@ impl Fixture {
         self.mgmt_send("GET", path, None).await
     }
 
+    /// The same GET, reporting `Cache-Control` instead of the body.
+    ///
+    /// A separate helper rather than a wider return type on [`Fixture::mgmt_get`]
+    /// because exactly one management response has a header worth asserting on —
+    /// the generated OpenAPI document, which is per service account and must not
+    /// be stored (see `routes::get_openapi`). Widening every caller's tuple to
+    /// carry a `None` would be noise.
+    pub async fn mgmt_get_cache_control(&self, path: &str) -> (StatusCode, Option<String>) {
+        let res = self
+            .mgmt
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(path)
+                    .header("Cookie", format!("egret_session={}", self.session))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let cache_control = res
+            .headers()
+            .get("cache-control")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        (res.status(), cache_control)
+    }
+
     /// A POST through the management router, with the session cookie
     /// [`Fixture::mgmt_send`] already attaches. Needed to republish an
     /// EXISTING endpoint id a second time (producing version 2) rather than
@@ -1899,20 +1928,33 @@ impl Fixture {
             .oneshot(builder.body(Body::empty()).unwrap())
             .await
             .unwrap();
-        let status = res.status();
-        let cache_control = res
-            .headers()
-            .get("cache-control")
+        contract_res(res).await
+    }
+}
+
+/// Read a contract response off the wire. Shared by [`Fixture::contract_raw`]
+/// and by a test that drives the route through a router of its own — a test
+/// substituting the rate-limit store has to build the router itself, and it must
+/// still read the answer exactly the way the ordinary path does or it is
+/// asserting on a different thing.
+pub async fn contract_res(res: axum::response::Response) -> ContractRes {
+    let status = res.status();
+    let header = |name: &str| {
+        res.headers()
+            .get(name)
             .and_then(|v| v.to_str().ok())
-            .map(str::to_string);
-        let bytes = axum::body::to_bytes(res.into_body(), 8 * 1024 * 1024)
-            .await
-            .unwrap();
-        ContractRes {
-            status,
-            cache_control,
-            body: serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
-        }
+            .map(str::to_string)
+    };
+    let cache_control = header("cache-control");
+    let retry_after = header("retry-after");
+    let bytes = axum::body::to_bytes(res.into_body(), 8 * 1024 * 1024)
+        .await
+        .unwrap();
+    ContractRes {
+        status,
+        cache_control,
+        retry_after,
+        body: serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
     }
 }
 
@@ -1925,6 +1967,9 @@ impl Fixture {
 pub struct ContractRes {
     pub status: StatusCode,
     pub cache_control: Option<String>,
+    /// `Retry-After`, in seconds. Carried because this route is rate limited —
+    /// see `serving::contract` — and a 429 without it tells a consumer to guess.
+    pub retry_after: Option<String>,
     pub body: serde_json::Value,
 }
 
