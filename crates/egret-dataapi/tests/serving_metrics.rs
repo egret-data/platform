@@ -681,3 +681,232 @@ fn no_caller_controlled_value_reaches_a_label() {
         assert_eq!(m.series(REQUESTS_TOTAL, &[("code", "ok")]), 1.0, "{text}");
     });
 }
+
+// ---------------------------------------------------------------------------
+// The mount's SECOND route, and telling it apart from the first.
+// ---------------------------------------------------------------------------
+
+/// A contract fetch moves the request counter, under a route label that is not
+/// the call path's.
+///
+/// # Why both halves are one test
+///
+/// The defect was not "the contract route had the wrong label" — it had no
+/// increment at all, so `/metrics` showed a workspace's contract traffic as if
+/// it did not exist, including the 429s from the bucket that route has to
+/// itself. The obvious repair, folding it into the existing series, would be
+/// just as wrong in the other direction: an operator reading
+/// `egret_dataapi_requests_total` as endpoint traffic would find contract
+/// fetches in the endpoint error rate, and a contract 503 would page someone
+/// about queries.
+///
+/// So the claim is "counted AND distinguishable", and it needs one call and one
+/// contract fetch in the same registry. Each assertion below fails under a
+/// different mutation:
+///
+/// * delete `metrics::record_request(...)` from `contract::serve_contract` and
+///   the `route="contract"` readings are `0`;
+/// * pass `Route::Call` there instead and `route="call"` reads `2` while
+///   `route="contract"` reads `0`;
+/// * drop the `route` label from `record_request` and BOTH selectors read `0`,
+///   because a series that carries no `route` at all matches neither.
+#[test]
+fn a_contract_fetch_is_counted_and_told_apart_from_a_call() {
+    with_isolated_recorder(|m| async move {
+        let f = skip_without_db!();
+        f.publish("/counted-apart", f.database_id, no_cache(), no_rate_limit())
+            .await;
+
+        let called = f.call_as(f.principal_a, "counted-apart").await;
+        assert_eq!(called.status, StatusCode::OK, "{}", called.body);
+
+        let fetched = f.contract_as(f.principal_a).await;
+        assert_eq!(fetched.status, StatusCode::OK, "{}", fetched.body);
+
+        assert_eq!(
+            m.series(
+                REQUESTS_TOTAL,
+                &[("code", "ok"), ("status", "200"), ("route", "contract")]
+            ),
+            1.0,
+            "the contract fetch must be counted. It is the most expensive request \
+             this surface serves — one PDP decision per live endpoint — and it \
+             was invisible to the only instrument that can see it:\n{}",
+            m.text()
+        );
+        assert_eq!(
+            m.series(
+                REQUESTS_TOTAL,
+                &[("code", "ok"), ("status", "200"), ("route", "call")]
+            ),
+            1.0,
+            "and the endpoint call must still be counted as exactly one call — \
+             not two, which is what folding the two routes into one series \
+             looks like:\n{}",
+            m.text()
+        );
+        assert_eq!(
+            m.series(
+                &format!("{REQUEST_DURATION_SECONDS}_count"),
+                &[("route", "contract")]
+            ),
+            1.0,
+            "the latency of a contract fetch is observed too — it is the request \
+             whose cost grows with the workspace, so a p95 that excludes it \
+             describes the cheap half of the surface:\n{}",
+            m.text()
+        );
+    });
+}
+
+/// The contract route's OWN rate-limit refusal is counted, under the contract
+/// route.
+///
+/// This is the refusal the design doc's §5 shape is about: measured on the
+/// cluster, twenty concurrent fetches produced one `429` that appeared in no
+/// series anywhere. A `dataapi.access_log` row cannot be the backstop for it —
+/// the table is per endpoint and a contract fetch names none — so if the counter
+/// does not move, nothing in the system knows the bucket ever fired.
+///
+/// The burst is spent through the real route with the fixture's frozen clock, so
+/// the refusal is the shipped limiter's and not a constant this test asserts
+/// against itself.
+#[test]
+fn a_refused_contract_fetch_is_counted_under_the_contract_route() {
+    with_isolated_recorder(|m| async move {
+        let f = skip_without_db!();
+
+        let burst = egret_dataapi::serving::ratelimit::CONTRACT_BURST;
+        for i in 0..burst {
+            let res = f.contract_as(f.principal_a).await;
+            assert_eq!(res.status, StatusCode::OK, "fetch {i}: {}", res.body);
+        }
+        let refused = f.contract_as(f.principal_a).await;
+        assert_eq!(
+            refused.status,
+            StatusCode::TOO_MANY_REQUESTS,
+            "the burst is spent: {}",
+            refused.body
+        );
+
+        assert_eq!(
+            m.series(
+                REQUESTS_TOTAL,
+                &[
+                    ("code", "rate_limited"),
+                    ("status", "429"),
+                    ("route", "contract")
+                ]
+            ),
+            1.0,
+            "the contract bucket's refusal must be visible. Nothing else in the \
+             system records it: there is no access_log row for a contract \
+             fetch:\n{}",
+            m.text()
+        );
+        assert_eq!(
+            m.series(
+                REQUESTS_TOTAL,
+                &[("code", "rate_limited"), ("route", "call")]
+            ),
+            0.0,
+            "and it must not read as an endpoint being rate limited — that is an \
+             alert about a consuming team exceeding a published allowance, fired \
+             for a discovery loop:\n{}",
+            m.text()
+        );
+        assert_eq!(
+            m.series(REQUESTS_TOTAL, &[("code", "ok"), ("route", "contract")]),
+            burst as f64,
+            "the admitted fetches are counted too:\n{}",
+            m.text()
+        );
+    });
+}
+
+/// A bound that fires is counted under the route it refused — for BOTH routes.
+///
+/// The three bounds wrap the whole mount and fire before any handler, so unlike
+/// the two handlers they cannot name their own route: `metrics::Route::of_path`
+/// reads it off the request path, which is a second reading of the routing
+/// table. This drives the real router at both real URLs so that second reading
+/// is checked against the first, rather than by calling the classifier with
+/// strings — the unit test in `serving/metrics.rs` does that, and it would agree
+/// with a routing table that had changed underneath it.
+///
+/// The body cap is the bound used because it is the one a test can trip with a
+/// header and no waiting. Its label comes from the same expression the other two
+/// use.
+#[test]
+fn a_bound_that_fires_is_counted_under_the_route_it_refused() {
+    with_isolated_recorder(|m| async move {
+        let f = skip_without_db!();
+
+        // The real router, with only the body cap changed — four bytes, so any
+        // declared body trips it. The other two bounds stay at production
+        // values: this test is about the label, not about the bound.
+        let app = axum::Router::new()
+            .nest(
+                "/data-api/v1",
+                egret_dataapi::serving::router::serving_router_with_bounds(
+                    egret_dataapi::serving::SERVING_REQUEST_DEADLINE,
+                    egret_dataapi::serving::SERVING_MAX_CONCURRENCY,
+                    4,
+                ),
+            )
+            .with_state(f.state.clone());
+
+        let over_the_cap = |uri: String| {
+            let app = app.clone();
+            async move {
+                let res = app
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri(uri)
+                            .header("content-length", "1024")
+                            .body(Body::from(vec![b'x'; 1024]))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                res.status()
+            }
+        };
+
+        // The contract URL. No token: the cap fires before routing, so it never
+        // reaches authentication — which is exactly why the metric is the only
+        // instrument that sees this at all.
+        assert_eq!(
+            over_the_cap(format!("/data-api/v1/{}", f.ws_slug)).await,
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+        // And a call URL.
+        assert_eq!(
+            over_the_cap(format!("/data-api/v1/{}/probe", f.ws_slug)).await,
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+
+        assert_eq!(
+            m.series(
+                REQUESTS_TOTAL,
+                &[("code", "payload_too_large"), ("route", "contract")]
+            ),
+            1.0,
+            "a bound firing on the contract URL must be filed under the contract \
+             route:\n{}",
+            m.text()
+        );
+        assert_eq!(
+            m.series(
+                REQUESTS_TOTAL,
+                &[("code", "payload_too_large"), ("route", "call")]
+            ),
+            1.0,
+            "and one firing on an endpoint URL under the call route. A constant \
+             here would make every shed and every deadline on a contract fetch \
+             read as endpoint-call traffic:\n{}",
+            m.text()
+        );
+    });
+}

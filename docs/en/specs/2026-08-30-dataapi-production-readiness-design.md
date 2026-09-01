@@ -631,6 +631,31 @@ endpoint breaks or the signing key rotates:
 
 The system goes dark and reports itself healthy. Three instruments, one cause, all blind.
 
+### The same shape, found again on the contract route
+
+Package 2 instrumented the CALL path. Package 8 then added a second route to the
+same mount — `GET /data-api/v1/{ws}` — and, in its fix round, gave it a
+rate-limit bucket of its own; neither was ever counted. Driving the deployed
+cluster showed it: twenty concurrent contract fetches answered **19 × 200 and
+1 × 429**, and afterwards `/metrics` on both replicas carried only the serving
+path's `key_invalid` and `not_granted` refusals. The most expensive request the
+surface serves and the refusal protecting it were invisible to the only
+instrument that can see them, and no access-log row can be the backstop — the
+table is per endpoint and a contract fetch names none.
+
+Closed by bringing the route into the EXISTING counters under a new `route`
+label (`call` | `contract`), rather than by a second pair of metric names that
+every dashboard written against the first pair would have silently excluded.
+The label's value set is closed by a two-variant enum for the same reason `code`
+is `&'static str`: `/metrics` is unauthenticated and cluster-internal, so it
+names which of two routes answered and nothing about the caller — a
+workspace-, account- or path-scoped label there would be a cross-tenant
+disclosure, not merely a cardinality problem. The bounds (body cap, deadline,
+bulkhead) fire before any handler and so read the label off the request path;
+`a_bound_that_fires_is_counted_under_the_route_it_refused` drives the real
+router at both real URLs so that second reading of the routing table is checked
+against the first.
+
 ## 6. Deliberate exclusions
 
 - **Data classification / PII.** There is none today: `SELECT ssn, email FROM employees` publishes

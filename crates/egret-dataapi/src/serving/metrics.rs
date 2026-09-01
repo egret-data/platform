@@ -78,8 +78,8 @@
 //!
 //! | metric | labels | why the value set is bounded |
 //! |---|---|---|
-//! | `egret_dataapi_requests_total` | `code`, `status` | `code` is [`super::error::Wire::code`], typed `&'static str` and written as a literal in every arm of `to_wire`'s exhaustive match over `ServingError` — a runtime string cannot reach it without leaking one. `status` is mapped through [`status_label`], whose fallback arm is `"other"`. |
-//! | `egret_dataapi_request_duration_seconds` | `status` | as above. |
+//! | `egret_dataapi_requests_total` | `code`, `status`, `route` | `code` is [`super::error::Wire::code`], typed `&'static str` and written as a literal in every arm of `to_wire`'s exhaustive match over `ServingError` — a runtime string cannot reach it without leaking one. `status` is mapped through [`status_label`], whose fallback arm is `"other"`. `route` comes from [`Route`], a two-variant enum whose `label` is a literal per arm. |
+//! | `egret_dataapi_request_duration_seconds` | `status`, `route` | as above. |
 //! | `egret_dataapi_cache_lookups_total` | `result` | `"hit"` or `"miss"`; nothing else is constructible. |
 //! | `egret_dataapi_preauth_rejections_total` | *(none)* | it is reached before anything about the caller has been verified, so there is no value here that is not the caller's own word. |
 //! | `egret_dataapi_access_log_write_failures_total` | *(none)* | the failing thing is the metastore, not the call; the sqlx error's text is a runtime string and would be unbounded. |
@@ -91,6 +91,38 @@
 //! together produce the same number of series as `code` alone rather than their
 //! product. `status` earns its place by making `rate(...{status="500"})` a query
 //! an operator can write without memorising egret's code table.
+//!
+//! ## `route`, and why the surface's second route needed one
+//!
+//! This mount serves two things: a CALL to a published endpoint
+//! (`/{ws}/{*path}`) and a fetch of the calling account's own contract
+//! (`/{ws}`, [`super::contract`]). Only the first was ever counted. Measured on
+//! a two-replica cluster, twenty concurrent contract fetches produced nineteen
+//! `200`s and one `429` — and afterwards **not one of the twenty appeared in
+//! any series on either replica's `/metrics`**. So the most expensive request
+//! the surface serves (one PDP decision per live endpoint, up to
+//! [`crate::openapi_gen::MAX_DOCUMENTED_ENDPOINTS`] of them) and the bucket
+//! that exists to bound it were both invisible to the only instrument that can
+//! see them — the design doc's §5 blind spot, in a second place: a refusal no
+//! instrument records. `dataapi.access_log` cannot close it either, and for a
+//! structural reason rather than a policy one (see [`super::contract`]).
+//!
+//! It is ONE label rather than a second pair of metric names because the
+//! question "is this surface healthy" must have one answer: `sum by (code)
+//! (rate(egret_dataapi_requests_total[5m]))` covers everything the mount
+//! answers, and `{route="call"}` narrows it back to what the old series meant.
+//! Two metric names would have made every existing dashboard panel and alert
+//! silently exclude the contract route, which is the state this fixes.
+//!
+//! The value set is two, closed by [`Route`] — an enum, not a string, for the
+//! same reason `code` is `&'static str`. It costs at most a doubling of a
+//! series count already bounded by `code`, and in practice far less: the
+//! contract route can only answer a handful of the taxonomy's codes. It names
+//! no tenant, no account and no path: `/metrics` is unauthenticated and
+//! cluster-internal, so a label carrying any of those would be a cross-tenant
+//! disclosure, not merely a cardinality problem — which is exactly why the
+//! route is identified by WHICH OF TWO ROUTES it was, and never by the URL it
+//! asked for.
 //!
 //! ## What is deliberately NOT a label
 //!
@@ -216,6 +248,66 @@ impl StoreOp {
     }
 }
 
+/// Which of this mount's two routes answered the request.
+///
+/// An enum rather than a `&str` argument, so the `route` label's value set is
+/// closed by the type — the same discipline [`StoreOp`] and
+/// [`super::error::Wire::code`] are held to, and the reason the cardinality
+/// claim in this module's comment is a property of the code rather than of
+/// call-site care.
+///
+/// Two values and no `Unknown`: every request that reaches this mount is one or
+/// the other, including the ones that are refused before any handler runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Route {
+    /// `GET|POST /{ws}/{*path}` — a call to a published endpoint.
+    Call,
+    /// `GET /{ws}` — [`super::contract`], the calling account's own OpenAPI
+    /// document.
+    Contract,
+}
+
+impl Route {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Call => "call",
+            Self::Contract => "contract",
+        }
+    }
+
+    /// Which route a request path belongs to, for the **bounds** — which fire
+    /// outside every handler and so cannot be told by the handler that would
+    /// have run.
+    ///
+    /// The two handlers do not use this: [`super::router::serve`] and
+    /// [`super::contract::serve_contract`] each name their own variant, so for
+    /// them the label cannot drift from the route at all. It exists for
+    /// [`super::guard`]'s three layers, which are applied to the whole mount and
+    /// see only a URI.
+    ///
+    /// The rule is the routing table's own shape, stated once: the contract
+    /// route is the only one under this mount with a single segment, because
+    /// [`crate::endpoints::normalize_path`] refuses an empty path and therefore
+    /// every published URL has at least one segment after the slug. That is the
+    /// same property `serving_router_sharing_bulkhead` relies on to register the
+    /// two routes side by side without one shadowing the other. Anything else —
+    /// including a path that matches neither route and will be answered `404` by
+    /// the wildcard's handler — is [`Route::Call`].
+    ///
+    /// It is a second reading of the routing table, so
+    /// `a_bound_that_fires_is_counted_under_the_route_it_refused` in
+    /// `tests/serving_metrics.rs` drives real requests at both real URLs through
+    /// the real router and asserts the labels, rather than calling this function
+    /// with strings.
+    pub(crate) fn of_path(path: &str) -> Self {
+        let mut segments = path.split('/').filter(|s| !s.is_empty());
+        match (segments.next(), segments.next()) {
+            (Some(_), None) => Self::Contract,
+            _ => Self::Call,
+        }
+    }
+}
+
 /// The `code` label's value on a success, where there is no [`super::error::Wire`]
 /// to read one off.
 ///
@@ -237,12 +329,13 @@ pub(crate) const OK_CODE: &str = "ok";
 pub fn describe() {
     ::metrics::describe_counter!(
         REQUESTS_TOTAL,
-        "Data API serving requests, by outcome code and HTTP status"
+        "Data API serving requests, by outcome code, HTTP status and route (route=call is an \
+         endpoint call, route=contract is a service account fetching its own OpenAPI document)"
     );
     ::metrics::describe_histogram!(
         REQUEST_DURATION_SECONDS,
         ::metrics::Unit::Seconds,
-        "Data API serving request latency as the caller experienced it"
+        "Data API serving request latency as the caller experienced it, by route"
     );
     ::metrics::describe_counter!(
         CACHE_LOOKUPS_TOTAL,
@@ -314,10 +407,22 @@ pub(crate) fn status_label(status: StatusCode) -> &'static str {
 /// `code` is `&'static str` on purpose — it is the type of
 /// [`super::error::Wire::code`], and taking `&str` here would let a future
 /// caller pass an interpolated message and blow the series count up.
-pub(crate) fn record_request(status: StatusCode, code: &'static str, duration: Duration) {
+///
+/// `route` is the first argument and has no default, so a NEW route added under
+/// this mount cannot be instrumented without deciding what it is called — which
+/// is the mistake the contract route spent a release in: not a wrong label, no
+/// increment at all. See [`Route`].
+pub(crate) fn record_request(
+    route: Route,
+    status: StatusCode,
+    code: &'static str,
+    duration: Duration,
+) {
     let status = status_label(status);
-    ::metrics::counter!(REQUESTS_TOTAL, "code" => code, "status" => status).increment(1);
-    ::metrics::histogram!(REQUEST_DURATION_SECONDS, "status" => status)
+    let route = route.label();
+    ::metrics::counter!(REQUESTS_TOTAL, "code" => code, "status" => status, "route" => route)
+        .increment(1);
+    ::metrics::histogram!(REQUEST_DURATION_SECONDS, "status" => status, "route" => route)
         .record(duration.as_secs_f64());
 }
 
@@ -422,6 +527,49 @@ mod tests {
                  metastore problem while naming authentication:\n{text}"
             );
         });
+    }
+
+    /// The `route` label has exactly two values, and they are these two.
+    ///
+    /// Stated as the whole set rather than as "contract is not call", because
+    /// the cardinality bound in this module's comment is a claim about the SET:
+    /// a third variant added later doubles the series count of the surface's
+    /// busiest metric again, and whoever adds it has to come here and say so.
+    #[test]
+    fn the_route_label_has_exactly_two_values() {
+        use std::collections::BTreeSet;
+
+        let labels: BTreeSet<&'static str> = [Route::Call, Route::Contract]
+            .into_iter()
+            .map(Route::label)
+            .collect();
+        assert_eq!(labels, BTreeSet::from(["call", "contract"]));
+        assert_eq!(
+            labels.len(),
+            2,
+            "two variants must not map onto one label: `sum by (route)` would then \
+             report the contract route's traffic as endpoint calls, which is the \
+             conflation this label exists to end"
+        );
+    }
+
+    /// The bounds' classifier follows the routing table: one segment is the
+    /// contract, anything else is a call.
+    ///
+    /// The `/{ws}/{*path}` cases are the ones that matter — a bound firing on an
+    /// endpoint call must not be filed under `contract`, or an operator reading
+    /// the contract route's refusals would be reading the call path's overload.
+    /// The unroutable shapes are here because the layers see them too: they are
+    /// answered by the wildcard's handler as `404`, so they are calls.
+    #[test]
+    fn the_bounds_classifier_follows_the_routing_table() {
+        assert_eq!(Route::of_path("/acme"), Route::Contract);
+        assert_eq!(Route::of_path("/acme/orders"), Route::Call);
+        assert_eq!(Route::of_path("/acme/orders/by-region"), Route::Call);
+        // Not a route at all: no workspace segment. The wildcard's 404, so a
+        // call.
+        assert_eq!(Route::of_path("/"), Route::Call);
+        assert_eq!(Route::of_path(""), Route::Call);
     }
 
     /// The status label is a closed set, and the fallback is what closes it.
