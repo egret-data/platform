@@ -63,6 +63,11 @@ const EXTRA_FILES: &[&str] = &[
     // Data API seam's management router, using the `SA_READ`/`SA_MANAGE` consts
     // the scan resolves below.
     "../egret-dataapi/src/routes.rs",
+    // `data_api_endpoint:invoke` is gated on the SERVING path, which has a JWT
+    // principal rather than a `WorkspaceContext` and so calls `Pdp::authorize`
+    // directly. `can_invoke` is that call and is the one thing in this file; see
+    // `GATE_FNS`.
+    "../egret-dataapi/src/invoke.rs",
 ];
 
 /// Gate function names whose permission-key argument (an inline
@@ -97,16 +102,41 @@ const GATE_CALLS: &[&str] = &[
 /// enough to match any table would let a genuinely dead key hide in one.
 const PERM_TABLE_FNS: &[&str] = &["fn kind_perms("];
 
-/// Permission literals inside the body of a `PERM_TABLE_FNS` function.
+/// Functions whose whole body IS the gate, so the permission is named inside
+/// them rather than on the line that calls the gate.
+///
+/// `egret-dataapi`'s `can_invoke` is the case, and it is a deliberate seam
+/// rather than an oversight. The serving path holds a `ServingPrincipal` — three
+/// fields read out of a JWT — not the `WorkspaceContext` every `authz::require*`
+/// wrapper takes, so it calls `Pdp::authorize` directly, which IS the decision
+/// point the wrappers are a convenience over (`serving/router.rs`'s
+/// `invoke_allowed` states the reasoning at length). Two separate properties of
+/// that call defeat the line-at-a-time scan below: it spans six lines, so the
+/// `.authorize(` and the action never share a line, and it names the action as
+/// `crate::routes::EP_INVOKE`, a const defined in a DIFFERENT file.
+///
+/// The consequence was not theoretical. `data_api_endpoint:invoke` read as
+/// enforced nowhere while `serving_authz.rs` was proving, against a live PDP,
+/// that it is checked on every served request — so this test was red on `main`
+/// for the whole Data API programme, and stayed invisible because
+/// `cargo test --workspace` stops at the first failing binary and one in
+/// `egret-automation` (alphabetically earlier) was failing ahead of it.
+///
+/// Named, like `PERM_TABLE_FNS` and for the same reason: "any function that
+/// calls `authorize`" would let a genuinely dead key hide behind any PDP call.
+const GATE_FNS: &[&str] = &["fn can_invoke("];
+
+/// Permission keys named inside the body of one of `fns` — inline literals, and
+/// `const` identifiers resolved through `consts`.
 ///
 /// The body is taken from the `fn` line to the first line that closes it at
 /// column 0 (`}`), which is how every function in these files is formatted.
-fn perm_table_literals(src: &str) -> HashSet<String> {
+fn fn_body_keys(src: &str, fns: &[&str], consts: &[(String, String)]) -> HashSet<String> {
     let mut out = HashSet::new();
     let mut inside = false;
     for line in src.lines() {
         if !inside {
-            inside = PERM_TABLE_FNS.iter().any(|f| line.contains(f));
+            inside = fns.iter().any(|f| line.contains(f));
             continue;
         }
         if line == "}" {
@@ -120,6 +150,11 @@ fn perm_table_literals(src: &str) -> HashSet<String> {
                 .filter(|s| is_resource_action_shaped(s))
                 .map(str::to_string),
         );
+        for (ident, lit) in consts {
+            if references_ident_as_word(line, ident) {
+                out.insert(lit.clone());
+            }
+        }
     }
     out
 }
@@ -151,8 +186,21 @@ fn is_resource_action_shaped(s: &str) -> bool {
 /// Parse a `const IDENT: &str = "resource:action";` definition, returning
 /// `(IDENT, "resource:action")` when the literal is permission-shaped. This lets
 /// gate calls that pass a const (rather than an inline literal) still resolve.
+///
+/// A VISIBILITY MODIFIER IS SKIPPED, and that was not cosmetic: this used to
+/// require the line to START with `const`, so `pub(crate) const EP_INVOKE` was
+/// not a const definition as far as the scan was concerned and every gate that
+/// named it resolved to nothing. A const's visibility says who may read it, and
+/// has nothing to do with whether the key it holds is enforced.
 fn perm_const_def(line: &str) -> Option<(String, String)> {
-    let rest = line.trim().strip_prefix("const ")?;
+    let decl = line.trim();
+    let decl = decl.strip_prefix("pub ").unwrap_or(decl);
+    let decl = match decl.find(") ") {
+        // `pub(crate) `, `pub(super) `, `pub(in path) ` — take what follows.
+        Some(end) if decl.starts_with("pub(") => &decl[end + 2..],
+        _ => decl,
+    };
+    let rest = decl.strip_prefix("const ")?;
     let (ident, _) = rest.split_once(':')?;
     let ident = ident.trim();
     if ident.is_empty()
@@ -187,16 +235,25 @@ fn references_ident_as_word(line: &str, ident: &str) -> bool {
 
 /// Every `resource:action` key enforced within a single source file: inline
 /// literals passed to a gate call, plus `const` identifiers referenced on a
-/// gate-call line resolved back to their defining literal.
-fn enforced_in_file(src: &str) -> HashSet<String> {
-    let consts: Vec<(String, String)> = src.lines().filter_map(perm_const_def).collect();
-    let mut out = perm_table_literals(src);
+/// gate-call line (or inside a `GATE_FNS`/`PERM_TABLE_FNS` body) resolved back
+/// to their defining literal.
+///
+/// `consts` is the WHOLE scanned tree's const table, not this file's. A const
+/// and the gate that uses it are allowed to live apart — `EP_INVOKE` is declared
+/// in `egret-dataapi/src/routes.rs` beside its two siblings, precisely so the
+/// three action strings are one list, and used in `invoke.rs` — and a
+/// per-file table cannot see across that. It stays narrow because a const is
+/// only ever resolved when its identifier is referenced ON a gate line or inside
+/// a named gate function, never merely because it exists.
+fn enforced_in_file(src: &str, consts: &[(String, String)]) -> HashSet<String> {
+    let mut out = fn_body_keys(src, PERM_TABLE_FNS, consts);
+    out.extend(fn_body_keys(src, GATE_FNS, consts));
     for line in src.lines() {
         if !GATE_CALLS.iter().any(|g| line.contains(g)) {
             continue;
         }
         out.extend(resource_action_literals_in_line(line));
-        for (ident, lit) in &consts {
+        for (ident, lit) in consts {
             if references_ident_as_word(line, ident) {
                 out.insert(lit.clone());
             }
@@ -205,20 +262,38 @@ fn enforced_in_file(src: &str) -> HashSet<String> {
     out
 }
 
+/// Absolute paths of every file the scan reads, in the two flavours of relative
+/// root the two lists use.
+fn scanned_paths() -> Vec<String> {
+    let cp = CONTROLPLANE_FILES
+        .iter()
+        .map(|rel| format!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/{}"), rel));
+    let extra = EXTRA_FILES
+        .iter()
+        .map(|rel| format!(concat!(env!("CARGO_MANIFEST_DIR"), "/{}"), rel));
+    cp.chain(extra).collect()
+}
+
 /// Every `resource:action` key enforced somewhere in the scanned source tree.
+///
+/// TWO PASSES, because const definitions and the gates that use them cross file
+/// boundaries: collect the const table from every scanned file first, then scan
+/// each file for gates against that whole table.
 fn enforced_keys() -> HashSet<String> {
-    let mut out = HashSet::new();
-    for rel in CONTROLPLANE_FILES {
-        let path = format!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/{}"), rel);
-        let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {path}: {e}"));
-        out.extend(enforced_in_file(&src));
-    }
-    for rel in EXTRA_FILES {
-        let path = format!(concat!(env!("CARGO_MANIFEST_DIR"), "/{}"), rel);
-        let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {path}: {e}"));
-        out.extend(enforced_in_file(&src));
-    }
-    out
+    let sources: Vec<String> = scanned_paths()
+        .into_iter()
+        .map(|path| {
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {path}: {e}"))
+        })
+        .collect();
+    let consts: Vec<(String, String)> = sources
+        .iter()
+        .flat_map(|src| src.lines().filter_map(perm_const_def))
+        .collect();
+    sources
+        .iter()
+        .flat_map(|src| enforced_in_file(src, &consts))
+        .collect()
 }
 
 #[test]
