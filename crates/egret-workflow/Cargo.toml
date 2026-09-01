@@ -1,0 +1,16 @@
+[package]
+name = "egret-workflow"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+
+[dev-dependencies]
+# Unit-test only: proves `State` serialises exactly as Kestra spells it.
+serde_json.workspace = true
+
+# NOTE: no `egret-workflow-api` dependency yet. That crate is empty at W0, and
+# an unused dep is noise a reviewer has to re-justify. It arrives in W1 with
+# the first type this crate needs from it.
