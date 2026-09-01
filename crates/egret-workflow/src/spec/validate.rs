@@ -36,6 +36,7 @@ use std::collections::{HashMap, HashSet};
 use crate::models::{
     canonical_flow_type, Flow, Input, Retry, Sla, SlaCommon, Task, TaskKind, Trigger, TriggerKind,
 };
+use crate::spec::registry;
 
 /// A single validation finding: a machine-checkable `code`, a human message,
 /// and a `path` locating it inside the flow.
@@ -88,20 +89,25 @@ enum KestraFlowControl {
     Unported { package: &'static str },
 }
 
-/// Fix round 1, finding 1: every class under
-/// `kestra/core/src/main/java/io/kestra/plugin/core/flow/` (checked at the
-/// pinned `96893b589`) whose whole purpose is to change control flow, and
-/// whether this crate has ported it to a `TaskKind` variant. Both the ported
-/// AND unported classes are listed -- not just `pause` -- so this table is
-/// the single place a reviewer checks when `TaskKind` grows a new variant
-/// (flip that entry to `Ported`) or Kestra's `flow/` package grows a new
-/// class (add a row; it defaults to needing a decision, not to silence).
+/// Every class under `kestra/core/src/main/java/io/kestra/plugin/core/flow/`
+/// (checked at the pinned `96893b589`) whose whole purpose is to change
+/// control flow, and whether this crate has ported it to a `TaskKind`
+/// variant. Both the ported AND unported classes are listed -- not just
+/// `pause` -- so this table is the single place a reviewer checks when
+/// `TaskKind` grows a new variant (flip that entry to `Ported`) or Kestra's
+/// `flow/` package grows a new class (add a row).
 ///
-/// This is what makes the "unported control-flow type" warning generic
-/// rather than a hand-typed `if type == "pause"` special case: `walk_task`
-/// below checks every `Leaf` task's canonical type against this table, so
-/// the NEXT unported class Kestra adds starts warning the moment a row is
-/// added here, without touching the check itself.
+/// Fix round 1, finding 1 first added this table keyed to a `find(...)`
+/// lookup: `walk_task` warned only when a `Leaf` task's canonical type had a
+/// row here. That was fail-OPEN -- it reproduced the exact bug it was meant
+/// to fix, one layer up: `Pause` warned because someone had already noticed
+/// it and added a row, but a class Kestra adds tomorrow (or a typo of an
+/// existing one) fell straight through in silence, same as `Pause` did
+/// before round 1. Fix round 2 made the CHECK fail-closed instead (anything
+/// spelled like Kestra's control-flow namespace that reaches `Leaf` warns
+/// unconditionally -- see the `TaskKind::Leaf` arm in `walk_task`) and
+/// demoted this table to supplying only the package name for an entry that
+/// has one; a miss still warns, just without naming a package.
 ///
 /// `Sequential`/`Parallel`/`If`/`Switch`/`Dag`/`Loop`/`LoopUntil`/`Subflow`/
 /// `AllowFailure`/`WorkingDirectory` are `TaskKind` variants (Task 2).
@@ -110,6 +116,18 @@ enum KestraFlowControl {
 /// I did *not* port ... in case a later task expects it") and this is that
 /// later task. Package per the programme spec's table (row W8: "pause/resume
 /// ... W8").
+///
+/// Staleness in this table is asymmetric, and only one direction is
+/// dangerous. If `TaskKind` later grows a variant for something marked
+/// `Unported` here (say, a future `TaskKind::Pause`) and this row is never
+/// updated to `Ported`, that is HARMLESS: `kind_for` in `task.rs` would
+/// dispatch that canonical name to the new variant before `walk_task` ever
+/// reaches the `TaskKind::Leaf` arm, so this row becomes dead documentation,
+/// never a wrong warning. The dangerous direction -- a real unported class
+/// with no row, or no table at all -- is the one the fail-closed check
+/// below now covers regardless of this table's contents. Silence is what
+/// made fix round 2 necessary; this table is not allowed to be the only
+/// thing standing between a new Kestra class and silence again.
 const KESTRA_FLOW_CONTROL: &[(&str, KestraFlowControl)] = &[
     ("sequential", KestraFlowControl::Ported),
     ("parallel", KestraFlowControl::Ported),
@@ -492,31 +510,73 @@ fn walk_task(
                 path: path.clone(),
             });
         }
-        // Fix round 1, finding 1: a `Leaf` is how every *ordinary* task is
-        // represented (`egret.sql`, an unrecognised third-party plugin,
-        // ...), but it is ALSO where a genuine Kestra control-flow class
-        // lands if this crate hasn't ported it to a `TaskKind` variant --
-        // `Pause` today. Both look identical here (an opaque `spec` map), so
-        // the only way to tell them apart is to check the task's own
-        // canonical type against `KESTRA_FLOW_CONTROL`.
-        TaskKind::Leaf { .. } => {
+        // Fix round 2: round 1's version of this check only warned when the
+        // task's canonical type had a row in `KESTRA_FLOW_CONTROL` --
+        // fail-OPEN, reproducing the exact bug it was meant to fix, one
+        // layer up. Fail-CLOSED instead: the table supplies only the
+        // package name for the message, never the decision to warn.
+        //
+        // A `Leaf` is how every *ordinary* task is represented (`egret.sql`,
+        // an unrecognised third-party plugin, ...), but it is ALSO where a
+        // genuine Kestra control-flow class lands if this crate hasn't
+        // ported it to a `TaskKind` variant. Both look identical here (an
+        // opaque `spec` map), so:
+        //   1. Anything spelled like Kestra's control-flow namespace (the
+        //      FQCN prefix, or the `core.` alias this crate ALSO shares
+        //      with its own registered leaf types) warns unconditionally --
+        //      a table hit names the package; a miss still warns, just
+        //      without naming one, so the next class Kestra adds warns the
+        //      moment it's written, not the moment someone adds a row.
+        //   2. Anything else that is neither a `TaskKind` variant nor
+        //      `registry::known_type(...)` warns too, under its own code --
+        //      this is what catches a typo like `egret.sqll` before Task 6
+        //      turns it into a hard publish refusal.
+        // `registry::known_type` is checked FIRST, so `core.log`/`core.http`/
+        // `core.slack` -- which share the `core.` alias spelling with real
+        // Kestra control-flow aliases -- never reach either warning: the
+        // rule is "neither a control-flow variant nor a registered type",
+        // not "starts with `core.`".
+        TaskKind::Leaf { .. } if registry::known_type(&task.r#type).is_none() => {
             if let Some(canonical) = canonical_flow_type(&task.r#type) {
-                if let Some((_, KestraFlowControl::Unported { package })) = KESTRA_FLOW_CONTROL
+                let package = KESTRA_FLOW_CONTROL
                     .iter()
-                    .find(|(name, _)| *name == canonical)
-                {
-                    report.warnings.push(Finding {
-                        code: "not_yet_enforced",
-                        message: format!(
-                            "task '{}' has type '{}', a Kestra control-flow type this crate has \
-                             not ported to a typed task kind yet; it currently runs as an inert \
-                             no-op instead of doing what it declares. Enforcement lands in \
-                             {package}",
-                            task.id, task.r#type
-                        ),
-                        path: path.clone(),
+                    .find_map(|(name, status)| match status {
+                        KestraFlowControl::Unported { package } if *name == canonical => {
+                            Some(*package)
+                        }
+                        _ => None,
                     });
-                }
+                let message = match package {
+                    Some(package) => format!(
+                        "task '{}' has type '{}', a Kestra control-flow type this crate has not \
+                         ported to a typed task kind yet; it currently runs as an inert no-op \
+                         instead of doing what it declares. Enforcement lands in {package}",
+                        task.id, task.r#type
+                    ),
+                    None => format!(
+                        "task '{}' has type '{}', which is spelled like a Kestra control-flow \
+                         task (a `io.kestra.plugin.core.flow.*` FQCN or its `core.` alias) but \
+                         egret does not implement it yet; it currently runs as an inert no-op \
+                         instead of doing what it declares",
+                        task.id, task.r#type
+                    ),
+                };
+                report.warnings.push(Finding {
+                    code: "not_yet_enforced",
+                    message,
+                    path: path.clone(),
+                });
+            } else {
+                report.warnings.push(Finding {
+                    code: "unknown_task_type",
+                    message: format!(
+                        "task '{}' has type '{}', which egret does not recognise as a task type; \
+                         check for a typo, or add it to the task-type registry if it's meant to \
+                         be a real type",
+                        task.id, task.r#type
+                    ),
+                    path: path.clone(),
+                });
             }
         }
         _ => {}
@@ -939,6 +999,98 @@ mod tests {
         let yaml = "id: nightly\nnamespace: company.analytics\ninputs:\n  - id: run_date\n    type: DATE\n  - id: dry_run\n    type: BOOL\n    dependsOn:\n      inputs: [run_date]\ntasks:\n  - id: pipeline\n    type: core.dag\n    tasks:\n      - task:\n          id: extract\n          type: egret.sql\n          database: d\n          sql: SELECT 1\n      - task:\n          id: load\n          type: egret.sql\n          database: d\n          sql: SELECT 2\n        dependsOn: [extract]\n  - id: fanout\n    type: core.parallel\n    tasks:\n      - id: enrich\n        type: egret.python\n        notebook: nb\nerrors:\n  - id: alert\n    type: core.slack\nfinally:\n  - id: cleanup\n    type: core.log\n";
         let f = parse(yaml).unwrap();
         let r = validate(&f);
+        assert!(r.errors.is_empty(), "{r:?}");
+    }
+
+    // -- Fix round 2: fail-CLOSED on the namespace, not on table membership --
+
+    /// The test that would have caught round 1's regression: a Kestra
+    /// control-flow FQCN this crate has never heard of -- not in
+    /// `KESTRA_FLOW_CONTROL` at all -- must still warn, because the whole
+    /// point is catching the next class Kestra adds BEFORE anyone notices it
+    /// and adds a row for it.
+    #[test]
+    fn a_fictional_kestra_flow_control_fqcn_warns_even_with_no_table_row() {
+        let f = parse(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: gate\n    type: io.kestra.plugin.core.flow.NotARealClass\n",
+        )
+        .unwrap();
+        let r = validate(&f);
+        let w = r
+            .warnings
+            .iter()
+            .find(|w| w.code == "not_yet_enforced" && w.path == "tasks.gate")
+            .unwrap_or_else(|| {
+                panic!("a Kestra flow-control FQCN with no table row must still warn: {r:?}")
+            });
+        assert!(
+            !w.message.contains("W1")
+                && !w.message.contains("W3")
+                && !w.message.contains("W6")
+                && !w.message.contains("W8"),
+            "a class with no table row must not fabricate a package name: {}",
+            w.message
+        );
+        assert!(
+            r.errors.is_empty(),
+            "still a warning, never an error: {r:?}"
+        );
+    }
+
+    /// The same failure mode via the `core.` alias space: an unregistered
+    /// alias that looks like it could be a Kestra control-flow shorthand
+    /// must warn too, not just the FQCN spelling.
+    #[test]
+    fn an_unregistered_core_alias_also_warns() {
+        let f = parse("id: f\nnamespace: a.b\ntasks:\n  - id: gate\n    type: core.somenewgate\n")
+            .unwrap();
+        let r = validate(&f);
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.code == "not_yet_enforced" && w.path == "tasks.gate"),
+            "{r:?}"
+        );
+    }
+
+    /// Anything that is neither a `TaskKind` variant nor
+    /// `registry::known_type(...)`, and does not even look like Kestra's
+    /// control-flow namespace, still warns -- under its own code, so a typo
+    /// like `egret.sqll` is visible to the author before Task 6 turns it
+    /// into a hard publish refusal.
+    #[test]
+    fn a_completely_unknown_type_warns_as_unknown_task_type() {
+        let f = parse("id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: egret.sqll\n").unwrap();
+        let r = validate(&f);
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.code == "unknown_task_type" && w.path == "tasks.t"),
+            "{r:?}"
+        );
+        assert!(
+            r.errors.is_empty(),
+            "an unknown type is a warning today, not an error -- Task 6 hard-refuses it at publish: {r:?}"
+        );
+    }
+
+    /// The false-positive guard the fix round asked for by name: egret's own
+    /// registered leaf types (`core.log`/`core.http`/`core.slack`, which
+    /// share the `core.` alias spelling with real Kestra control-flow
+    /// aliases), an ordinary `egret.*` leaf, and every ported control-flow
+    /// type must all stay completely silent -- "neither a control-flow
+    /// variant nor a registered type", not "starts with `core.`".
+    #[test]
+    fn registered_leaf_types_and_every_ported_control_flow_type_stay_silent() {
+        let yaml = "id: f\nnamespace: a.b\ntasks:\n  - id: log\n    type: core.log\n  - id: http\n    type: core.http\n  - id: slack\n    type: core.slack\n  - id: sql\n    type: egret.sql\n    sql: SELECT 1\n  - id: seq\n    type: core.sequential\n    tasks:\n      - id: seq_child\n        type: egret.sql\n        sql: SELECT 1\n  - id: par\n    type: core.parallel\n    tasks:\n      - id: par_child\n        type: egret.sql\n        sql: SELECT 1\n  - id: cond\n    type: core.if\n    condition: \"true\"\n    then:\n      - id: cond_child\n        type: egret.sql\n        sql: SELECT 1\n  - id: sw\n    type: core.switch\n    value: x\n    defaults:\n      - id: sw_child\n        type: egret.sql\n        sql: SELECT 1\n  - id: d\n    type: core.dag\n    tasks:\n      - task:\n          id: d_child\n          type: egret.sql\n          sql: SELECT 1\n  - id: lp\n    type: core.loop\n    values: [1]\n    tasks:\n      - id: lp_child\n        type: egret.sql\n        sql: SELECT 1\n  - id: lpu\n    type: core.loopuntil\n    condition: x\n    tasks:\n      - id: lpu_child\n        type: egret.sql\n        sql: SELECT 1\n  - id: sf\n    type: core.subflow\n    namespace: a.b\n    flowId: other\n  - id: af\n    type: core.allowfailure\n    tasks:\n      - id: af_child\n        type: egret.sql\n        sql: SELECT 1\n  - id: wd\n    type: core.workingdirectory\n    tasks:\n      - id: wd_child\n        type: egret.sql\n        sql: SELECT 1\n";
+        let f = parse(yaml).unwrap();
+        let r = validate(&f);
+        assert!(
+            !r.warnings
+                .iter()
+                .any(|w| w.code == "not_yet_enforced" || w.code == "unknown_task_type"),
+            "registered leaf types and every ported control-flow type must stay silent: {r:?}"
+        );
         assert!(r.errors.is_empty(), "{r:?}");
     }
 }
