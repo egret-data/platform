@@ -74,7 +74,13 @@ impl Task {
                 .flatten()
                 .chain(s.defaults.iter())
                 .collect(),
-            TaskKind::Dag(d) => d.tasks.iter().map(|n| &n.task).collect(),
+            // `filter_map`, not `map`: `DagNode::task` is `Option<Task>` (Task
+            // 4 fix round 3 -- `@NotNull` in Java, bean validation not
+            // parsing), so a node with no task contributes no child here.
+            // `spec::validate` reports the missing task as its own error
+            // separately; this just has to not panic while walking a flow
+            // that hasn't been validated yet.
+            TaskKind::Dag(d) => d.tasks.iter().filter_map(|n| n.task.as_ref()).collect(),
             TaskKind::Loop(l) => l.tasks.iter().collect(),
             TaskKind::LoopUntil(l) => l.tasks.iter().collect(),
             TaskKind::AllowFailure(a) => a.tasks.iter().collect(),
@@ -89,9 +95,21 @@ impl Task {
 // dropped here along with every other control-flow type's `errors`/`finally`:
 // W1 is the model, not the executor, and nothing in this task's interface
 // (`children()`) walks them.
+//
+// `tasks` is `@NotEmpty` on `AbstractBranch` in Java (Task 4 fix round 3
+// owes the check), but that is bean validation, evaluated when Kestra
+// *validates* a flow, not when Jackson *parses* one -- same
+// `@NotNull`/`@NotEmpty`-is-bean-validation-not-parsing principle already
+// applied to `Parallel::concurrent` below, just never audited against this
+// field until fix round 3. `#[serde(default)]` on the plain `Vec<Task>`
+// (not `Option<Vec<Task>>`) is deliberate: an absent key becomes an empty
+// `Vec`, which `Task::children()`, the duplicate-id walk, and `has_cycle`
+// all already iterate safely -- no `Option` unwrapping needed anywhere
+// downstream, only the new emptiness check in `spec::validate`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Sequential {
+    #[serde(default)]
     pub tasks: Vec<Task>,
 }
 
@@ -101,9 +119,13 @@ pub struct Sequential {
 // not when Jackson *parses* one. So an explicit `concurrent: null` genuinely
 // parses in Kestra (it just fails validation later), which means parsing
 // here must accept it too: `Option<Property<i32>>`, not a bare `Property<i32>`.
+//
+// `tasks` carries the same `@NotEmpty`-on-`AbstractBranch` debt `Sequential`
+// documents above (Task 4 fix round 3).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Parallel {
+    #[serde(default)]
     pub tasks: Vec<Task>,
     #[serde(default = "default_concurrent")]
     pub concurrent: Option<Property<i32>>,
@@ -115,10 +137,19 @@ pub struct Parallel {
 // using If in a ForEach with concurrencyLimit > 1"
 // (https://github.com/kestra-io/kestra/issues/8697). The plan's brief typed
 // this field `Property<String>`; the source wins.
+//
+// `condition` is `@NotNull` in Java with no default (Task 4 fix round 3 owes
+// the check) -- same bean-validation-not-parsing principle as
+// `Parallel::concurrent`, so `Option<String>` here, not a bare `String`.
+// `then` is separately `@NotEmpty` in Java (`If.java`'s own `then` field,
+// distinct from this crate's own `@NotEmpty`-on-`AbstractBranch` findings
+// above) -- found in the same fix-round-3 sweep but NOT one of the 11 fields
+// the round scoped, and not fixed here; see the task report.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct If {
-    pub condition: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition: Option<String>,
     #[serde(default)]
     pub then: Vec<Task>,
     #[serde(default, rename = "else")]
@@ -143,9 +174,14 @@ pub struct Switch {
 // plain task list, and it carries the same `concurrent` field as `Parallel`
 // (Kestra's field, not this task's invention -- `Dag.java` line 98), same
 // `@NotNull`-is-bean-validation-not-parsing caveat as `Parallel::concurrent`.
+//
+// `tasks` is separately `@NotEmpty` in Java (`Dag.java`'s own field, not
+// inherited -- `Dag` extends `Task` directly, not `AbstractBranch`; Task 4
+// fix round 3 owes the check).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Dag {
+    #[serde(default)]
     pub tasks: Vec<DagNode>,
     #[serde(default = "default_concurrent")]
     pub concurrent: Option<Property<i32>>,
@@ -154,10 +190,17 @@ pub struct Dag {
 // kestra: Dag.DagTask (inner class). Named `DagNode` here per this task's
 // produced interface -- the Rust name isn't wire-visible (unlike `type`), so
 // it does not need to match Kestra's inner-class name.
+//
+// `task` is `@NotNull` in `DagTask` (Task 4 fix round 3 owes the check) --
+// the weakest of the 11 fields this round fixes (a dag node with no task is
+// unusable either way, parse-required or not), but ported as `Option<Task>`
+// for consistency with every other bean-validation-not-parsing field in
+// this file rather than carving out an exception.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DagNode {
-    pub task: Task,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<Task>,
     #[serde(default)]
     pub depends_on: Vec<String>,
 }
@@ -181,14 +224,25 @@ pub struct DagNode {
 // which was the actual defect flagged in review (silence, not the omission
 // itself); `outputs`/`fetchType` remain deliberately out (execution-plane,
 // unused before W3).
+//
+// `tasks` carries the same `@NotEmpty`-on-`AbstractBranch` debt `Sequential`
+// documents above (Task 4 fix round 3). `concurrencyLimit` is `@NotNull
+// @Builder.Default private Integer concurrencyLimit = 1;` in Java (verified
+// in `Loop.java`) -- boxed `Integer`, not a primitive `int`, so the same
+// bean-validation-not-parsing principle applies: `Option<i32>`, not a bare
+// `i32`. Round 2's version of this field accepted absence (via
+// `default_concurrency_limit`) but rejected an explicit `null` -- the exact
+// asymmetry `Parallel::concurrent`/`Dag::concurrent` were already fixed
+// against; Task 4 fix round 3 found and closed it here too.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Loop {
+    #[serde(default)]
     pub tasks: Vec<Task>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub values: Option<Property<serde_json::Value>>,
     #[serde(default = "default_concurrency_limit")]
-    pub concurrency_limit: i32,
+    pub concurrency_limit: Option<i32>,
     #[serde(default = "default_true")]
     pub transmit_failed: bool,
 }
@@ -202,9 +256,13 @@ pub struct Loop {
 // brief omits, add it with a test." `condition` is `@NotNull` in Java (Task 4
 // owes a check); parsing must still accept an explicit `condition: null`,
 // same reasoning as `Parallel::concurrent` above.
+//
+// `tasks` carries the same `@NotEmpty`-on-`AbstractBranch` debt `Sequential`
+// documents above (Task 4 fix round 3).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LoopUntil {
+    #[serde(default)]
     pub tasks: Vec<Task>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub condition: Option<Property<String>>,
@@ -214,11 +272,18 @@ pub struct LoopUntil {
 // (namespace/flowId/inputs/wait/transmitFailed); `revision`, `labels`,
 // `inheritLabels`, `scheduleDate`, and `restartBehavior` are dropped for now,
 // the same curation the brief already applied to this type.
+//
+// `namespace` is `@NotEmpty` and `flowId` is `@NotNull`, both in Java with no
+// default (Task 4 fix round 3 owes both checks) -- same bean-validation-not-
+// parsing principle as `Parallel::concurrent`, so both are `Option<String>`
+// here, not bare `String`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Subflow {
-    pub namespace: String,
-    pub flow_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inputs: Option<HashMap<String, serde_json::Value>>,
     #[serde(default = "default_true")]
@@ -229,18 +294,26 @@ pub struct Subflow {
 
 // kestra: AllowFailure.java -- `extends Sequential` with no fields of its
 // own, so its Rust shape is identical to `Sequential`'s.
+//
+// `tasks` carries the same `@NotEmpty`-on-`AbstractBranch` (via `Sequential`)
+// debt `Sequential` documents above (Task 4 fix round 3).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AllowFailure {
+    #[serde(default)]
     pub tasks: Vec<Task>,
 }
 
 // kestra: WorkingDirectory.java -- also `extends Sequential`; `cache`,
 // `namespaceFiles`, `inputFiles`, `outputFiles` are execution-plane concerns
 // dropped here (the same curation the brief applied to `Subflow`).
+//
+// `tasks` carries the same `@NotEmpty`-on-`AbstractBranch` (via `Sequential`)
+// debt `Sequential` documents above (Task 4 fix round 3).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkingDirectory {
+    #[serde(default)]
     pub tasks: Vec<Task>,
 }
 
@@ -254,8 +327,13 @@ fn default_concurrent() -> Option<Property<i32>> {
     Some(Property::from_source("0".to_string()))
 }
 
-fn default_concurrency_limit() -> i32 {
-    1
+// Same `#[serde(default = "...")]`-for-the-absent-case pattern as
+// `default_concurrent` above: matches Java's `@Builder.Default` value (`1`)
+// taking effect when the field is never assigned, while an explicit
+// `concurrencyLimit: null` bypasses this function entirely and lands on
+// `None` via `Option<i32>`'s own `Deserialize`.
+fn default_concurrency_limit() -> Option<i32> {
+    Some(1)
 }
 
 const fn default_true() -> bool {
@@ -716,7 +794,7 @@ else:
         let t: Task = serde_norway::from_str(yaml).unwrap();
         match &t.kind {
             TaskKind::If(i) => {
-                assert_eq!(i.condition, "{{ 1 == 1 }}");
+                assert_eq!(i.condition.as_deref(), Some("{{ 1 == 1 }}"));
                 assert_eq!(i.then.len(), 1);
                 assert_eq!(i.r#else.len(), 1);
             }
@@ -813,8 +891,8 @@ inputs:
         let t: Task = serde_norway::from_str(yaml).unwrap();
         match &t.kind {
             TaskKind::Subflow(s) => {
-                assert_eq!(s.namespace, "company.team");
-                assert_eq!(s.flow_id, "nightly_rollup");
+                assert_eq!(s.namespace.as_deref(), Some("company.team"));
+                assert_eq!(s.flow_id.as_deref(), Some("nightly_rollup"));
                 assert!(s.wait);
                 assert!(s.transmit_failed);
                 assert_eq!(

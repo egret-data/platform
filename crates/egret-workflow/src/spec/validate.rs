@@ -10,15 +10,21 @@
 //!    collide with a normal successor's id (the shared `seen_ids` namespace
 //!    the duplicate-id check already builds), and no `core.subflow` that
 //!    names the flow it lives in.
-//! 2. **Semantic** -- fields Tasks 1-3 left `Option<T>` purely so parsing
-//!    would accept `null`/absent the way Kestra's Jackson layer does,
-//!    deferring the `@NotNull` bean-validation check to here (every field
-//!    tagged "Task 4 owes ..." in `models/`; see the task report for the
-//!    full list found by grepping for that phrase); `namespace`'s pattern;
-//!    input ids unique; a `Switch` with neither `cases` nor `defaults` (the
-//!    statically-decidable half of "exhaustive-or-defaulted" -- see the
-//!    `Switch` arm in `walk_task` for why the other half is an explicit,
-//!    documented deferral rather than a check).
+//! 2. **Semantic** -- fields left `Option<T>` (or, for a list, a plain
+//!    `Vec<T>` with `#[serde(default)]`) purely so parsing would accept
+//!    `null`/absent the way Kestra's Jackson layer does, deferring the
+//!    `@NotNull`/`@NotEmpty` bean-validation check to here. Every field
+//!    tagged "Task 4 owes ..." in `models/`, plus 11 control-flow fields
+//!    fix round 3 found still hard-required at parse
+//!    (`Sequential`/`Parallel`/`Dag`/`Loop`/`LoopUntil`/`AllowFailure`/
+//!    `WorkingDirectory`'s `tasks`, `If::condition`, `DagNode::task`,
+//!    `Subflow::namespace`/`flow_id`) and `Loop::concurrency_limit`, which
+//!    accepted absence but rejected an explicit `null`; see the task report
+//!    for the full pairing of field -> `walk_task` arm -> test codes.
+//!    `namespace`'s pattern; input ids unique; a `Switch` with neither
+//!    `cases` nor `defaults` (the statically-decidable half of "exhaustive-
+//!    or-defaulted" -- see the `Switch` arm in `walk_task` for why the
+//!    other half is an explicit, documented deferral rather than a check).
 //! 3. **Not-yet-enforced** -- features that parse and validate cleanly but
 //!    that no package in this branch actually acts on yet
 //!    (`NOT_YET_ENFORCED` and, for Kestra control-flow classes this crate
@@ -386,12 +392,54 @@ fn walk_task(
     check_retry(&task.retry, &format!("{path}.retry"), report);
 
     match &task.kind {
+        // Fix round 3: `Sequential::tasks` is `@NotEmpty` on `AbstractBranch`
+        // in Java -- see `task.rs`'s doc comment on `Sequential` for why
+        // this was hard-required at parse instead until now, and why it's a
+        // plain `Vec<Task>` (empty on absence) rather than `Option<Vec<Task>>`.
+        TaskKind::Sequential(s) => {
+            if s.tasks.is_empty() {
+                report.errors.push(Finding {
+                    code: "sequential_tasks_required",
+                    message: format!(
+                        "task '{}': sequential must declare at least one task",
+                        task.id
+                    ),
+                    path: format!("{path}.tasks"),
+                });
+            }
+        }
         TaskKind::Parallel(p) => {
             if p.concurrent.is_none() {
                 report.errors.push(Finding {
                     code: "parallel_concurrent_required",
                     message: format!("task '{}': concurrent is required (explicit null)", task.id),
                     path: format!("{path}.concurrent"),
+                });
+            }
+            // Fix round 3: `tasks` carries the same `@NotEmpty`-on-
+            // `AbstractBranch` debt `Sequential` documents above.
+            if p.tasks.is_empty() {
+                report.errors.push(Finding {
+                    code: "parallel_tasks_required",
+                    message: format!(
+                        "task '{}': parallel must declare at least one task",
+                        task.id
+                    ),
+                    path: format!("{path}.tasks"),
+                });
+            }
+        }
+        // Fix round 3: `If::condition` is `@NotNull` in Java, same bean-
+        // validation-not-parsing principle as `Parallel::concurrent`. `then`
+        // is separately `@NotEmpty` -- found in the same sweep, NOT one of
+        // the 11 fields this round scoped, and deliberately left unfixed
+        // here; see the task report.
+        TaskKind::If(i) => {
+            if i.condition.is_none() {
+                report.errors.push(Finding {
+                    code: "if_condition_required",
+                    message: format!("task '{}': condition is required (explicit null)", task.id),
+                    path: format!("{path}.condition"),
                 });
             }
         }
@@ -408,10 +456,45 @@ fn walk_task(
                     path: format!("{path}.concurrent"),
                 });
             }
+            // Fix round 3: `Dag::tasks` is `@NotEmpty` in Java (`Dag.java`'s
+            // own field, not inherited from `AbstractBranch`).
+            if d.tasks.is_empty() {
+                report.errors.push(Finding {
+                    code: "dag_tasks_required",
+                    message: format!("task '{}': dag must declare at least one node", task.id),
+                    path: format!("{path}.tasks"),
+                });
+            }
+            // Fix round 3: `DagTask::task` is `@NotNull` in Java -- the
+            // weakest of the 11 fields this round fixes, but checked for
+            // consistency with every other field in this file rather than
+            // carving out an exception (see `DagNode::task`'s doc comment
+            // in `task.rs`).
+            for (i, node) in d.tasks.iter().enumerate() {
+                if node.task.is_none() {
+                    report.errors.push(Finding {
+                        code: "dag_node_task_required",
+                        message: format!(
+                            "task '{}': dag node #{i} has no task (explicit null)",
+                            task.id
+                        ),
+                        path: format!("{path}.tasks[{i}].task"),
+                    });
+                }
+            }
+            // A node with no task has no id to key an edge on, so it's
+            // excluded here rather than panicking or fabricating one --
+            // `dag_node_task_required` above already reports it, and any
+            // `dependsOn` some OTHER node aimed at this node's (unknowable)
+            // id will separately, correctly, read as dangling.
             let edges: Vec<(String, Vec<String>)> = d
                 .tasks
                 .iter()
-                .map(|n| (n.task.id.clone(), n.depends_on.clone()))
+                .filter_map(|n| {
+                    n.task
+                        .as_ref()
+                        .map(|t| (t.id.clone(), n.depends_on.clone()))
+                })
                 .collect();
 
             // Fix round 1, finding 2: a `dependsOn` naming a task that
@@ -490,6 +573,32 @@ fn walk_task(
                     path: format!("{path}.values"),
                 });
             }
+            // Fix round 3: `tasks` carries the same `@NotEmpty`-on-
+            // `AbstractBranch` debt `Sequential` documents above.
+            if l.tasks.is_empty() {
+                report.errors.push(Finding {
+                    code: "loop_tasks_required",
+                    message: format!("task '{}': loop must declare at least one task", task.id),
+                    path: format!("{path}.tasks"),
+                });
+            }
+            // Fix round 3 secondary item: `Loop::concurrency_limit` is
+            // `@NotNull @Builder.Default = 1` in Java -- a boxed `Integer`,
+            // not a primitive, so an explicit `null` genuinely parses in
+            // Kestra and must parse here too. Found in the same sweep as
+            // the 11 fields: it already accepted absence but rejected an
+            // explicit `null`, the exact asymmetry `Parallel::concurrent`
+            // was fixed against.
+            if l.concurrency_limit.is_none() {
+                report.errors.push(Finding {
+                    code: "loop_concurrency_limit_required",
+                    message: format!(
+                        "task '{}': concurrencyLimit is required (explicit null)",
+                        task.id
+                    ),
+                    path: format!("{path}.concurrencyLimit"),
+                });
+            }
         }
         TaskKind::LoopUntil(l) => {
             if l.condition.is_none() {
@@ -499,16 +608,83 @@ fn walk_task(
                     path: format!("{path}.condition"),
                 });
             }
+            // Fix round 3: `tasks` carries the same `@NotEmpty`-on-
+            // `AbstractBranch` debt `Sequential` documents above.
+            if l.tasks.is_empty() {
+                report.errors.push(Finding {
+                    code: "loop_until_tasks_required",
+                    message: format!(
+                        "task '{}': loopUntil must declare at least one task",
+                        task.id
+                    ),
+                    path: format!("{path}.tasks"),
+                });
+            }
         }
-        TaskKind::Subflow(s) if s.namespace == flow.namespace && s.flow_id == flow.id => {
-            report.errors.push(Finding {
-                code: "self_subflow",
-                message: format!(
-                    "task '{}' is a subflow that names its own flow ('{}/{}')",
-                    task.id, s.namespace, s.flow_id
-                ),
-                path: path.clone(),
-            });
+        // Fix round 3: `Subflow::namespace` is `@NotEmpty` and
+        // `Subflow::flow_id` is `@NotNull` in Java, both bean-validation-
+        // not-parsing like everything else in this file. No longer a match
+        // guard (round 2 had `TaskKind::Subflow(s) if s.namespace ==
+        // flow.namespace && s.flow_id == flow.id => { ... }`) because the
+        // required-field checks below must run for EVERY subflow, not only
+        // ones whose namespace/flow_id happen to be present and match --
+        // `self_subflow` is now a nested check, only reachable once both
+        // are known to be `Some`.
+        TaskKind::Subflow(s) => {
+            if s.namespace.is_none() {
+                report.errors.push(Finding {
+                    code: "subflow_namespace_required",
+                    message: format!("task '{}': namespace is required (explicit null)", task.id),
+                    path: format!("{path}.namespace"),
+                });
+            }
+            if s.flow_id.is_none() {
+                report.errors.push(Finding {
+                    code: "subflow_flow_id_required",
+                    message: format!("task '{}': flowId is required (explicit null)", task.id),
+                    path: format!("{path}.flowId"),
+                });
+            }
+            if let (Some(ns), Some(fid)) = (&s.namespace, &s.flow_id) {
+                if *ns == flow.namespace && *fid == flow.id {
+                    report.errors.push(Finding {
+                        code: "self_subflow",
+                        message: format!(
+                            "task '{}' is a subflow that names its own flow ('{ns}/{fid}')",
+                            task.id
+                        ),
+                        path: path.clone(),
+                    });
+                }
+            }
+        }
+        // Fix round 3: `AllowFailure`/`WorkingDirectory` both `extends
+        // Sequential` with no fields of their own, so `tasks` carries the
+        // same `@NotEmpty`-on-`AbstractBranch` (via `Sequential`) debt
+        // `Sequential` documents above.
+        TaskKind::AllowFailure(a) => {
+            if a.tasks.is_empty() {
+                report.errors.push(Finding {
+                    code: "allow_failure_tasks_required",
+                    message: format!(
+                        "task '{}': allowFailure must declare at least one task",
+                        task.id
+                    ),
+                    path: format!("{path}.tasks"),
+                });
+            }
+        }
+        TaskKind::WorkingDirectory(w) => {
+            if w.tasks.is_empty() {
+                report.errors.push(Finding {
+                    code: "working_directory_tasks_required",
+                    message: format!(
+                        "task '{}': workingDirectory must declare at least one task",
+                        task.id
+                    ),
+                    path: format!("{path}.tasks"),
+                });
+            }
         }
         // Fix round 2: round 1's version of this check only warned when the
         // task's canonical type had a row in `KESTRA_FLOW_CONTROL` --
@@ -579,7 +755,16 @@ fn walk_task(
                 });
             }
         }
-        _ => {}
+        // A registered `Leaf` (the guard above was false) -- an ordinary
+        // task type, nothing to check here. Written as an explicit arm for
+        // this specific variant rather than a trailing `_ => {}`: every
+        // `TaskKind` variant now has its own arm above, so this keeps the
+        // match exhaustive on variants rather than falling back to a
+        // wildcard -- a FUTURE `TaskKind` variant this match doesn't yet
+        // know about becomes a compile error here, not silent do-nothing,
+        // the same fail-closed instinct fix round 2 applied to the
+        // control-flow namespace check.
+        TaskKind::Leaf { .. } => {}
     }
 
     for child in task.children() {
@@ -1092,5 +1277,332 @@ mod tests {
             "registered leaf types and every ported control-flow type must stay silent: {r:?}"
         );
         assert!(r.errors.is_empty(), "{r:?}");
+    }
+
+    // -- Fix round 3: 11 control-flow fields were hard-required at parse
+    // where Kestra's requirement is bean-validation only (parse must accept
+    // absent/null; only THIS layer may reject it). Each pair below tests
+    // both directions: absent -> a semantic error with the right code (not
+    // a parse error), and present -> silent. Without the "present -> silent"
+    // half, a check that rejected everything would still pass.
+
+    #[test]
+    fn sequential_tasks_absent_is_a_semantic_error_not_a_parse_error() {
+        let f =
+            parse("id: f\nnamespace: a.b\ntasks:\n  - id: s\n    type: core.sequential\n").unwrap();
+        let r = validate(&f);
+        assert!(
+            r.errors
+                .iter()
+                .any(|e| e.code == "sequential_tasks_required"),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn sequential_tasks_present_is_silent() {
+        let f = parse(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: s\n    type: core.sequential\n    tasks:\n      - id: c\n        type: x\n",
+        )
+        .unwrap();
+        let r = validate(&f);
+        assert!(r.errors.is_empty(), "{r:?}");
+    }
+
+    #[test]
+    fn parallel_tasks_absent_is_a_semantic_error_not_a_parse_error() {
+        let f =
+            parse("id: f\nnamespace: a.b\ntasks:\n  - id: p\n    type: core.parallel\n").unwrap();
+        let r = validate(&f);
+        assert!(
+            r.errors.iter().any(|e| e.code == "parallel_tasks_required"),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn parallel_tasks_present_is_silent() {
+        let f = parse(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: p\n    type: core.parallel\n    tasks:\n      - id: c\n        type: x\n",
+        )
+        .unwrap();
+        let r = validate(&f);
+        assert!(r.errors.is_empty(), "{r:?}");
+    }
+
+    #[test]
+    fn if_condition_absent_is_a_semantic_error_not_a_parse_error() {
+        let f = parse(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: i\n    type: core.if\n    then:\n      - id: c\n        type: x\n",
+        )
+        .unwrap();
+        let r = validate(&f);
+        assert!(
+            r.errors.iter().any(|e| e.code == "if_condition_required"),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn if_condition_present_is_silent() {
+        let f = parse(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: i\n    type: core.if\n    condition: \"true\"\n    then:\n      - id: c\n        type: x\n",
+        )
+        .unwrap();
+        let r = validate(&f);
+        assert!(r.errors.is_empty(), "{r:?}");
+    }
+
+    #[test]
+    fn dag_tasks_absent_is_a_semantic_error_not_a_parse_error() {
+        let f = parse("id: f\nnamespace: a.b\ntasks:\n  - id: d\n    type: core.dag\n").unwrap();
+        let r = validate(&f);
+        assert!(
+            r.errors.iter().any(|e| e.code == "dag_tasks_required"),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn dag_tasks_present_is_silent() {
+        let f = parse(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: d\n    type: core.dag\n    tasks:\n      - task:\n          id: c\n          type: x\n",
+        )
+        .unwrap();
+        let r = validate(&f);
+        assert!(r.errors.is_empty(), "{r:?}");
+    }
+
+    /// The weakest of the 11 (a dag node with no task is unusable either
+    /// way), fixed for consistency rather than a concrete need -- see
+    /// `DagNode::task`'s doc comment in `task.rs`.
+    #[test]
+    fn dag_node_task_absent_is_a_semantic_error_not_a_parse_error() {
+        let f = parse(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: d\n    type: core.dag\n    tasks:\n      - {}\n",
+        )
+        .unwrap();
+        let r = validate(&f);
+        assert!(
+            r.errors.iter().any(|e| e.code == "dag_node_task_required"),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn dag_node_task_present_is_silent() {
+        let f = parse(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: d\n    type: core.dag\n    tasks:\n      - task:\n          id: c\n          type: x\n",
+        )
+        .unwrap();
+        let r = validate(&f);
+        assert!(r.errors.is_empty(), "{r:?}");
+    }
+
+    #[test]
+    fn loop_tasks_absent_is_a_semantic_error_not_a_parse_error() {
+        let f = parse(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: l\n    type: core.loop\n    values: [1]\n",
+        )
+        .unwrap();
+        let r = validate(&f);
+        assert!(
+            r.errors.iter().any(|e| e.code == "loop_tasks_required"),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn loop_tasks_present_is_silent() {
+        let f = parse(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: l\n    type: core.loop\n    values: [1]\n    tasks:\n      - id: c\n        type: x\n",
+        )
+        .unwrap();
+        let r = validate(&f);
+        assert!(r.errors.is_empty(), "{r:?}");
+    }
+
+    #[test]
+    fn loop_until_tasks_absent_is_a_semantic_error_not_a_parse_error() {
+        let f = parse(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: l\n    type: core.loopuntil\n    condition: x\n",
+        )
+        .unwrap();
+        let r = validate(&f);
+        assert!(
+            r.errors
+                .iter()
+                .any(|e| e.code == "loop_until_tasks_required"),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn loop_until_tasks_present_is_silent() {
+        let f = parse(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: l\n    type: core.loopuntil\n    condition: x\n    tasks:\n      - id: c\n        type: x\n",
+        )
+        .unwrap();
+        let r = validate(&f);
+        assert!(r.errors.is_empty(), "{r:?}");
+    }
+
+    #[test]
+    fn subflow_namespace_absent_is_a_semantic_error_not_a_parse_error() {
+        let f = parse(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: s\n    type: core.subflow\n    flowId: other\n",
+        )
+        .unwrap();
+        let r = validate(&f);
+        assert!(
+            r.errors
+                .iter()
+                .any(|e| e.code == "subflow_namespace_required"),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn subflow_namespace_present_is_silent() {
+        let f = parse(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: s\n    type: core.subflow\n    namespace: a.b\n    flowId: other\n",
+        )
+        .unwrap();
+        let r = validate(&f);
+        assert!(r.errors.is_empty(), "{r:?}");
+    }
+
+    #[test]
+    fn subflow_flow_id_absent_is_a_semantic_error_not_a_parse_error() {
+        let f = parse(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: s\n    type: core.subflow\n    namespace: a.b\n",
+        )
+        .unwrap();
+        let r = validate(&f);
+        assert!(
+            r.errors
+                .iter()
+                .any(|e| e.code == "subflow_flow_id_required"),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn subflow_flow_id_present_is_silent() {
+        let f = parse(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: s\n    type: core.subflow\n    namespace: a.b\n    flowId: other\n",
+        )
+        .unwrap();
+        let r = validate(&f);
+        assert!(r.errors.is_empty(), "{r:?}");
+    }
+
+    #[test]
+    fn allow_failure_tasks_absent_is_a_semantic_error_not_a_parse_error() {
+        let f = parse("id: f\nnamespace: a.b\ntasks:\n  - id: a\n    type: core.allowfailure\n")
+            .unwrap();
+        let r = validate(&f);
+        assert!(
+            r.errors
+                .iter()
+                .any(|e| e.code == "allow_failure_tasks_required"),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn allow_failure_tasks_present_is_silent() {
+        let f = parse(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: a\n    type: core.allowfailure\n    tasks:\n      - id: c\n        type: x\n",
+        )
+        .unwrap();
+        let r = validate(&f);
+        assert!(r.errors.is_empty(), "{r:?}");
+    }
+
+    #[test]
+    fn working_directory_tasks_absent_is_a_semantic_error_not_a_parse_error() {
+        let f =
+            parse("id: f\nnamespace: a.b\ntasks:\n  - id: w\n    type: core.workingdirectory\n")
+                .unwrap();
+        let r = validate(&f);
+        assert!(
+            r.errors
+                .iter()
+                .any(|e| e.code == "working_directory_tasks_required"),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn working_directory_tasks_present_is_silent() {
+        let f = parse(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: w\n    type: core.workingdirectory\n    tasks:\n      - id: c\n        type: x\n",
+        )
+        .unwrap();
+        let r = validate(&f);
+        assert!(r.errors.is_empty(), "{r:?}");
+    }
+
+    /// Secondary item: `Loop::concurrency_limit` accepted absence (it has a
+    /// `#[serde(default = "default_concurrency_limit")]`) but rejected an
+    /// explicit `null` before this round -- the same asymmetry
+    /// `Parallel::concurrent`/`Dag::concurrent` were already fixed against.
+    #[test]
+    fn loop_concurrency_limit_explicit_null_is_a_semantic_error_not_a_parse_error() {
+        let f = parse(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: l\n    type: core.loop\n    values: [1]\n    concurrencyLimit: null\n    tasks:\n      - id: c\n        type: x\n",
+        )
+        .unwrap();
+        let r = validate(&f);
+        assert!(
+            r.errors
+                .iter()
+                .any(|e| e.code == "loop_concurrency_limit_required"),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn loop_concurrency_limit_absent_key_defaults_and_is_silent() {
+        let f = parse(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: l\n    type: core.loop\n    values: [1]\n    tasks:\n      - id: c\n        type: x\n",
+        )
+        .unwrap();
+        let r = validate(&f);
+        assert!(
+            !r.errors
+                .iter()
+                .any(|e| e.code == "loop_concurrency_limit_required"),
+            "an absent key must take Kestra's own default of 1, not error: {r:?}"
+        );
+    }
+
+    /// Finding 2: nothing enforces that `registry::TASK_TYPES` and
+    /// `KESTRA_FLOW_CONTROL` are disjoint. If a future edit ever registers a
+    /// leaf type whose `r#type` canonicalises onto a `KESTRA_FLOW_CONTROL`
+    /// row (e.g. registering `core.pause` before a real `TaskKind::Pause`
+    /// variant exists), the `registry::known_type` guard on the
+    /// `TaskKind::Leaf` arm would silence that type -- reproducing this
+    /// task's original bug one layer further out. This makes that collision
+    /// impossible to introduce quietly.
+    #[test]
+    fn the_registry_and_the_control_flow_table_are_disjoint() {
+        use crate::models::canonical_flow_type;
+        use crate::spec::registry;
+
+        for spec in registry::TASK_TYPES {
+            if let Some(canonical) = canonical_flow_type(spec.r#type) {
+                assert!(
+                    !super::KESTRA_FLOW_CONTROL
+                        .iter()
+                        .any(|(name, _)| *name == canonical),
+                    "registry type '{}' canonicalises to '{canonical}', which collides with a \
+                     KESTRA_FLOW_CONTROL row -- registering it would silence the \
+                     unported-control-flow warning for that class",
+                    spec.r#type
+                );
+            }
+        }
     }
 }
