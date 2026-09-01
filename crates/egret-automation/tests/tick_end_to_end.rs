@@ -17,6 +17,9 @@ use egret_core::TabularResult;
 use egret_metastore::Db;
 use uuid::Uuid;
 
+// `trunc_subsecs`: see `run_now_writes_a_run_log_row_without_touching_next_run_at_or_last_state`.
+use chrono::SubsecRound as _;
+
 // ── fakes ────────────────────────────────────────────────────────────────
 
 /// An engine that returns one number, and remembers the identity it was given.
@@ -679,8 +682,19 @@ async fn run_now_writes_a_run_log_row_without_touching_next_run_at_or_last_state
     // not move the schedule's own cadence. Pin `next_run_at` and `last_state`
     // to known values first, so "unchanged" is checked against something
     // other than NULL.
+    //
+    // PINNED AT MICROSECONDS, and that is not cosmetic. `timestamptz` holds
+    // microseconds; `Utc::now()` holds nanoseconds. Binding the nanosecond value
+    // and then comparing the row against it compares two DIFFERENT precisions of
+    // the same instant — `…397028Z` vs `…397028939Z` — so the `assert_eq!` below
+    // only passed when the nanosecond remainder happened to be zero, roughly one
+    // run in a thousand. Truncating the pin first makes the value one Postgres
+    // can store exactly, which keeps the assertion EXACT: the stamp must come
+    // back byte-for-byte, not merely close. Weakening it to a tolerance instead
+    // would stop it catching the thing it exists for — a `run_now` that called
+    // `release` and moved the slot.
     let fx = setup(pool, serde_json::json!(7), false, false).await;
-    let pinned_next = chrono::Utc::now() + chrono::Duration::hours(3);
+    let pinned_next = (chrono::Utc::now() + chrono::Duration::hours(3)).trunc_subsecs(6);
     sqlx::query(
         "UPDATE automation.schedules SET next_run_at = $2, last_state = 'noop' WHERE id = $1",
     )

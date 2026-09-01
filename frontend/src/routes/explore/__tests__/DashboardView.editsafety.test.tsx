@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, within, act } from "@testing-library/react";
+import { render, screen, fireEvent, within, act, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
@@ -47,6 +47,45 @@ const enterEdit = () => fireEvent.click(screen.getByRole("button", { name: "Edit
 const bannerCancel = () => within(screen.getByText(/You're editing this dashboard/).closest("div")!)
   .getByRole("button", { name: "Cancel" });
 
+/**
+ * A button inside the discard dialog, once the dialog can actually be clicked.
+ *
+ * RADIX OPENS THIS DIALOG IN TWO COMMITS, AND THE FIRST ONE IS UNCLICKABLE. `DismissableLayer`
+ * sets `document.body { pointer-events: none }` in an effect and registers itself in a context
+ * `Set`; only the re-render that the registration schedules gives the content its own
+ * `pointer-events: auto`. Between the two, `pointer-events: none` is what the buttons inherit —
+ * so `getByRole("alertdialog")` finds a dialog that `user-event` refuses to click with
+ * "Unable to perform pointer interaction as the element has `pointer-events: none`".
+ *
+ * MEASURED, because the obvious reading of this ("a slow CI, a flake") is wrong and the fix that
+ * follows from it would be wrong too. Printing the inline/computed chain for the Cancel button
+ * straight after `fireEvent.click(bannerCancel())`:
+ *
+ *   node 20 and node 24, synchronously   content div inline=[]      button computed=[none]
+ *   node 24, after one awaited tick      content div inline=[auto]  button computed=[auto]
+ *   node 20, after one awaited tick      content div inline=[]      button computed=[none]
+ *   node 20, after `waitFor`             content div inline=[auto]  button computed=[auto]   (2 polls)
+ *
+ * So the dialog is unclickable on BOTH engines at the moment the old code clicked it; node 24
+ * merely happened to flush the second commit inside `user.click`'s own await and node 20 did not.
+ * The test was racing on every machine and passing on some — which is why it went red the first
+ * time CI ran it (CI is node 20; `.github/workflows/ci.yml` pins it) and not before.
+ *
+ * `await screen.findByRole("alertdialog")` — the wait `control-plane/__tests__/Policies.test.tsx`
+ * uses for its confirm dialog — is NOT enough here and the table above is why: it resolves as soon
+ * as the ROLE exists, which is the first commit. It works there because that tree settles in one
+ * tick; it does not work in this one. Waiting on the property that was actually being raced is the
+ * only wait that holds on both engines, so that is what this does — and it still asserts the click
+ * is real, unlike swapping to `fireEvent` (which skips the pointer-events check entirely, the way
+ * `sqllab/__tests__/SavedTab.test.tsx` does) and would have made this green while asserting less.
+ */
+async function dialogButton(name: string): Promise<HTMLElement> {
+  const dialog = await screen.findByRole("alertdialog");
+  const button = within(dialog).getByRole("button", { name });
+  await waitFor(() => expect(window.getComputedStyle(button).pointerEvents).not.toBe("none"));
+  return button;
+}
+
 beforeEach(() => vi.clearAllMocks());
 
 describe("DashboardView discard confirmation", () => {
@@ -69,8 +108,7 @@ describe("DashboardView discard confirmation", () => {
     await user.clear(nameInput);
     await user.type(nameInput, "Revenue");
     fireEvent.click(bannerCancel());
-    const dialog = screen.getByRole("alertdialog");
-    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await user.click(await dialogButton("Cancel"));
     expect(screen.queryByRole("alertdialog")).toBeNull();
     expect((screen.getByLabelText("dashboard name") as HTMLInputElement).value).toBe("Revenue");
   });
@@ -83,7 +121,7 @@ describe("DashboardView discard confirmation", () => {
     await user.clear(nameInput);
     await user.type(nameInput, "Revenue");
     fireEvent.click(bannerCancel());
-    await user.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Discard changes" }));
+    await user.click(await dialogButton("Discard changes"));
     expect(screen.queryByLabelText("dashboard name")).toBeNull();
     expect(screen.getByRole("heading", { name: "Sales" })).toBeTruthy();
   });

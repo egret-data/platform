@@ -301,7 +301,7 @@ describe("FormatSection — Currency", () => {
  * DECIMAL PLACES CANNOT BE ALLOWED TO STORE A VALUE THAT TAKES THE CHART DOWN.
  *
  * `formatValue` hands this straight to `Intl.NumberFormat` as both `minimumFractionDigits` and
- * `maximumFractionDigits`, which throw a `RangeError` outside 0..100 — and the throw fires during
+ * `maximumFractionDigits`, which throw a `RangeError` outside the engine's fraction-digit range — and the throw fires during
  * the OPTION BUILD (`baseOption` formats the widest axis tick to size the gutter), so the card is
  * replaced by `ChartErrorBoundary`'s message rather than showing a wrong number. See
  * `echarts/__tests__/decimalsOutOfRange.echarts.test.ts` for the measured table and the stack.

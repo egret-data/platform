@@ -83,8 +83,16 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      # `--no-fail-fast` because without it this step reports ONE failure and hides
+      # every other. Measured, not supposed: run 33460143378 stopped at
+      # `egret-automation --test tick_end_to_end` after 45 of ~114 binaries, so the
+      # whole of `egret-controlplane` never ran — and the failure waiting behind it
+      # (`catalog_drift`, a false negative in the scanner) had been mislabelled
+      # "pre-existing, environmental" for an entire programme because nobody could
+      # see past the first red binary. A red run costs longer; a red run that
+      # answers one question at a time costs weeks.
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --no-fail-fast
       # Prints on failure too, so a future disk exhaustion is a number in the log rather than a
       # mystery SIGBUS — this one cost a full investigation to identify.
       - name: Disk after build
