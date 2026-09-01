@@ -225,7 +225,8 @@ export function ColumnFormatFields({
 
             {/* CLAMPED IN THE HANDLER, not by `min`/`max`. `formatValue` passes this
                 straight to `Intl.NumberFormat` as both `minimumFractionDigits` and
-                `maximumFractionDigits`, which throw a RangeError outside 0..100 — and the
+                `maximumFractionDigits`, which throw a RangeError outside the engine's own
+                fraction-digit range — and the
                 throw lands during the OPTION BUILD (`baseOption` formats the widest axis
                 tick to size the gutter), so a typed `-1` did not draw a wrong number, it
                 replaced the whole card with `ChartErrorBoundary`'s message, and did so
@@ -240,10 +241,12 @@ export function ColumnFormatFields({
                 The bounds and the clamp are the pie's, copied rather than re-derived
                 (`PieDisplaySection`'s Decimal places, which has done this since it was
                 written): 0..10, truncating, and an empty box still means Auto. Ten rather
-                than Intl's own 100 because this is a Metabase-parity precision box, not an
-                arbitrary-precision one — `format.ts` allows the full 0..100 for a value
-                stored by anything else, so the ceiling here narrows what the panel offers
-                without making a legal saved value unrenderable. */}
+                than `format.ts`'s own 20 because this is a Metabase-parity precision box,
+                not an arbitrary-precision one — `format.ts` allows the full 0..20 for a
+                value stored by anything else, so the ceiling here narrows what the panel
+                offers without making a legal saved value unrenderable. (20, not Intl's
+                nominal 100: that upper bound is an ES2023 addition and older engines still
+                throw above 20. See `safeDecimals`.) */}
             <Field label="Decimal places">
               <Input className="w-full" type="number" min={0} max={10} step={1} placeholder="Auto"
                 value={fmt.decimals ?? ""}

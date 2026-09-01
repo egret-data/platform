@@ -45,7 +45,7 @@ function applySeparators(s: string, separators?: string): string {
 /**
  * The stored `decimals`, made safe to hand to `Intl.NumberFormat` / `Number#toExponential`.
  *
- * BOTH APIS THROW OUTSIDE 0..100 — `RangeError: …FractionDigits value is out of range`, naming
+ * BOTH APIS THROW OUT OF RANGE — `RangeError: …FractionDigits value is out of range`, naming
  * whichever option the branch set first — and `formatNumber` passed the stored number straight in
  * on all three of its branches. That throw is not cosmetic: `baseOption` formats the widest axis
  * tick while measuring the gutter, so it fires during the OPTION BUILD, inside React's render, and
@@ -65,8 +65,29 @@ function applySeparators(s: string, separators?: string): string {
  * measured, and that is not a defect — so `Math.trunc` keeps that behaviour rather than quietly
  * changing what a legal-but-odd stored value renders as. `NaN` is out of range to Intl too and
  * lands on 0, the same answer as a negative.
+ *
+ * THE CEILING IS OURS, NOT INTL'S — and it is 20, not 100. This clamp used to be 100 because that
+ * is what the local engine accepted, and it is not a portable number: ECMA-402 specified
+ * `maximum/minimumFractionDigits` as 0..20 until the ES2023 amendment raised it to 0..100, so the
+ * ceiling is a property of whatever V8/JSC/SpiderMonkey the page is running on. Measured, on the
+ * same probe (`new Intl.NumberFormat("en", {min,max: d})`, largest `d` that does not throw):
+ *
+ *   Node 18 / V8 10.2  → 20      Node 20 / V8 11.3  → 20
+ *   Node 22 / V8 12.4  → 100     Node 24 / V8 13.6  → 100
+ *
+ * So a chart with `decimals: 50` rendered on a new engine and threw `RangeError` on an older one —
+ * the SAME total card loss this function exists to prevent, just moved from "a bad stored value" to
+ * "a bad browser". Clamping to a ceiling this module owns is what makes the output a function of
+ * the stored settings alone. 20 rather than 100 because it is the value every engine can represent:
+ * clamping to the lower bound renders everywhere, clamping to the higher one only renders on the
+ * engines that have caught up. Nothing real is lost — `FormatSection` offers 0..10, and no axis
+ * label is legible past 20 fraction digits anyway.
+ *
+ * `Number#toExponential` is 0..100 on all four engines above (it has been since ES2018) and so is
+ * not the constraint here; one constant covering all three branches is still the point, because
+ * three per-branch guards is three chances for the next branch to forget.
  */
-const MAX_FRACTION_DIGITS = 100;
+const MAX_FRACTION_DIGITS = 20;
 function safeDecimals(fmt: ColumnFormat): number | undefined {
   if (typeof fmt.decimals !== "number") return undefined;
   if (!Number.isFinite(fmt.decimals)) return 0;
