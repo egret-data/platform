@@ -15,9 +15,13 @@
 //! `WHERE id = $1 AND workspace_id = $2`, and there is no route-level
 //! pre-check to forget.
 //!
-//! **Two methods are deliberate exceptions** -- each keys off a bare id with
-//! no `workspace_id` predicate of its own, and each says so on its own doc
-//! comment below. (Task 6 fix round 2, Finding 2: [`FlowRepo::list_versions`]
+//! **The following methods are deliberate exceptions** -- each keys off a
+//! bare id with no `workspace_id` predicate of its own, and each says so on
+//! its own doc comment below. No count is kept here on purpose (Task 6 fix
+//! round 3): a number maintained above the list it describes drifts every
+//! time the list changes and nothing catches it: the list below is the
+//! source of truth, so add a bullet, not a number, when this set changes
+//! again. (Task 6 fix round 2, Finding 2: [`FlowRepo::list_versions`]
 //! and [`FlowRepo::get_version`] used to be two more, undisclosed exceptions
 //! -- unlike the writes below, they were **reads**, and an unscoped read
 //! handed a foreign flow id returns that flow's version snapshots and notes
