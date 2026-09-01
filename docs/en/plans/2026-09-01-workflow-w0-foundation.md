@@ -36,8 +36,12 @@ Spec: `docs/en/specs/2026-09-01-workflow-programme-design.md` (§7 fidelity rule
     > /tmp/w0-<task>-after.log 2>&1; echo "EXIT=$?"
   grep -c '^test result:' /tmp/w0-<task>-after.log                        # binaries reached
   grep -E '^test result:' /tmp/w0-<task>-after.log | awk '{p+=$4; f+=$6} END {print "passed",p,"failed",f}'
-  grep -E '^test .* FAILED$' /tmp/w0-<task>-after.log | sort > /tmp/w0-<task>-after.failed
+  grep -E '^test .* FAILED$' /tmp/w0-<task>-after.log | sort -u > /tmp/w0-<task>-after.failed
   ```
+
+  `sort -u` is load-bearing: the same test name appears in several binaries, so an un-deduplicated
+  list compares 41 lines against a 26-line baseline and reports a spurious mismatch. Both sides must
+  be deduplicated or neither.
 
   The gate is that `/tmp/w0-<task>-after.failed` is **identical** to the same file captured before the
   change (`diff` them). A count alone is not enough — the same number of failures with different names
@@ -230,7 +234,7 @@ fail-fasts on a pre-existing `egret-audit` panic after 3 binaries):
 ```bash
 env -u DATABASE_URL EGRET_ALLOW_DB_SKIP=1 cargo test --workspace --no-fail-fast \
   > /tmp/w0-t2-after.log 2>&1; echo "EXIT=$?"
-grep -E '^test .* FAILED$' /tmp/w0-t2-after.log | sort > /tmp/w0-t2-after.failed
+grep -E '^test .* FAILED$' /tmp/w0-t2-after.log | sort -u > /tmp/w0-t2-after.failed
 diff /tmp/w0-t1-step6.failed /tmp/w0-t2-after.failed && echo "IDENTICAL FAILURE SET"
 ```
 
@@ -766,7 +770,7 @@ Open `kestra/core/src/main/java/io/kestra/core/models/flows/State.java` at the `
 cargo test -p egret-workflow --no-fail-fast
 env -u DATABASE_URL EGRET_ALLOW_DB_SKIP=1 cargo test --workspace --no-fail-fast \
   > /tmp/w0-t4-after.log 2>&1; echo "EXIT=$?"
-grep -E '^test .* FAILED$' /tmp/w0-t4-after.log | sort > /tmp/w0-t4-after.failed
+grep -E '^test .* FAILED$' /tmp/w0-t4-after.log | sort -u > /tmp/w0-t4-after.failed
 diff /tmp/w0-t2-after.failed /tmp/w0-t4-after.failed && echo "IDENTICAL FAILURE SET"
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
