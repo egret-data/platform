@@ -290,6 +290,24 @@ pub struct Subflow {
     pub wait: bool,
     #[serde(default = "default_true")]
     pub transmit_failed: bool,
+
+    // Task 6 fix round 1: `publish::resolve_task` fills this in once
+    // `namespace`/`flow_id` have been checked through `WorkflowRefPort` and
+    // confirmed to name a flow in the PUBLISHING workspace -- `None` on
+    // every draft, `Some` only inside a frozen `FlowVersionRow::snapshot`.
+    //
+    // A `Leaf`'s own reference field (e.g. `egret.sql`'s `database`) is
+    // overwritten IN PLACE with the resolved id once resolved, because that
+    // field's only job was ever to name the target -- see
+    // `publish::resolve_task`'s `TaskKind::Leaf` arm. `namespace`/`flow_id`
+    // cannot be overwritten the same way: they are Kestra's own identity
+    // pair, plausibly still needed by an error message or an editor after
+    // publish, so this is a THIRD field rather than a destructive rewrite of
+    // either existing one -- the resolved uuid `publish` already confirmed
+    // is safe to trust, sitting beside the human-readable name rather than
+    // replacing it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow_ref: Option<uuid::Uuid>,
 }
 
 // kestra: AllowFailure.java -- `extends Sequential` with no fields of its

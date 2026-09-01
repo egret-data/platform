@@ -164,3 +164,86 @@ async fn warnings_do_not_block_publish_but_errors_do() {
             .is_err()
     );
 }
+
+// -- Fix round 1: `subflow:` was the sixth row in spec section 8's own
+// reference table (`workflow.flows`, "this crate") and had no resolution at
+// all -- no `RefField`, no arm in `resolve_task`. Same three-way coverage as
+// `database:` above, plus the mutation below.
+
+/// The subflow twin of `a_flow_referencing_another_workspace_cannot_be_published`.
+#[tokio::test]
+async fn a_subflow_naming_another_workspaces_flow_cannot_be_published() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let other_ws = Uuid::new_v4();
+
+    let mut refs = FakeRefs::default();
+    refs.objects.insert(
+        (RefKind::Subflow, "company.analytics/nightly_rollup".into()),
+        (Uuid::new_v4(), other_ws), // owned by SOMEONE ELSE
+    );
+
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    let f = common::draft(
+        &repo, ws, user,
+        "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: core.subflow\n    namespace: company.analytics\n    flowId: nightly_rollup\n",
+    )
+    .await;
+
+    let err = egret_workflow::publish(&repo, &refs, ws, user, f.id, "")
+        .await
+        .expect_err("publishing a foreign subflow reference must fail");
+    assert!(
+        matches!(err, egret_core::Error::NotFound(_)),
+        "expected NotFound, got {err:?}"
+    );
+}
+
+/// The subflow twin of `an_unknown_reference_fails_the_same_way_as_a_foreign_one`.
+#[tokio::test]
+async fn a_subflow_naming_a_nonexistent_flow_fails_the_same_way() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    let f = common::draft(
+        &repo, ws, user,
+        "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: core.subflow\n    namespace: company.analytics\n    flowId: nope\n",
+    )
+    .await;
+
+    let err = egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, f.id, "")
+        .await
+        .expect_err("must fail");
+    assert!(matches!(err, egret_core::Error::NotFound(_)), "{err:?}");
+}
+
+/// The subflow twin of `a_resolvable_flow_publishes_and_freezes_its_references`.
+#[tokio::test]
+async fn a_subflow_naming_a_flow_in_the_callers_own_workspace_publishes_and_freezes_its_id() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let target_id = Uuid::new_v4();
+
+    let mut refs = FakeRefs::default();
+    refs.objects.insert(
+        (RefKind::Subflow, "company.analytics/nightly_rollup".into()),
+        (target_id, ws),
+    );
+
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    let f = common::draft(
+        &repo, ws, user,
+        "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: core.subflow\n    namespace: company.analytics\n    flowId: nightly_rollup\n",
+    )
+    .await;
+
+    let v = egret_workflow::publish(&repo, &refs, ws, user, f.id, "")
+        .await
+        .expect("publish");
+
+    let s = v.snapshot.to_string();
+    assert!(
+        s.contains(&target_id.to_string()),
+        "snapshot must carry the resolved subflow id: {s}"
+    );
+}

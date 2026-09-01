@@ -12,11 +12,17 @@
 //! 4. walk every task; `registry::known_type(&task.r#type)` -- `None` is
 //!    `InvalidInput`, naming the type, so a typo like `egret.sqll` fails to
 //!    publish instead of resolving vacuously and failing only at run time,
-//!    in W3, with no author present;
+//!    in W3, with no author present. A `core.subflow` task never reaches this
+//!    check at all -- it is a typed `TaskKind::Subflow`, not a `Leaf`, and is
+//!    resolved by its own arm below instead (fix round 1);
 //! 5. for each of that type's declared `RefField`s, read the leaf's own
 //!    field and ask `refs` which workspace owns it, refusing **both** an
 //!    absent object and one owned by a *different* workspace as the
-//!    identical `NotFound` -- see [`ref_not_found`];
+//!    identical `NotFound` -- see [`ref_not_found`]. A `core.subflow` task's
+//!    `namespace`/`flowId` pair is resolved the same way, through the same
+//!    port, under `RefKind::Subflow` -- see
+//!    `WorkflowRefPort`'s doc comment for the `name_or_id` encoding that
+//!    pair uses;
 //! 6. rewrite the resolved id into the plan in place;
 //! 7. `insert_version` with a snapshot of `{ source, plan (resolved),
 //!    warnings }`;
@@ -57,7 +63,7 @@ use uuid::Uuid;
 use crate::models::{Flow, Task, TaskKind};
 use crate::repo::{FlowRepo, FlowVersionRow};
 use crate::spec::{parse, registry, validate};
-use egret_workflow_api::WorkflowRefPort;
+use egret_workflow_api::{RefKind, WorkflowRefPort};
 
 /// The single, shared answer to "this reference does not resolve in the
 /// caller's workspace" -- whether `refs` never heard of the name at all, or
@@ -195,15 +201,50 @@ fn resolve_task<'a>(
             TaskKind::LoopUntil(l) => resolve_all(&mut l.tasks, ws, refs).await,
             TaskKind::AllowFailure(a) => resolve_all(&mut a.tasks, ws, refs).await,
             TaskKind::WorkingDirectory(w) => resolve_all(&mut w.tasks, ws, refs).await,
-            // A subflow spawns a DIFFERENT flow's execution rather than
-            // owning local tasks -- `Task::children()` returns none for it
-            // either, and `registry::known_type` never sees its type string
-            // (it dispatches to this typed variant before ever reaching a
-            // `Leaf`), so it is not subject to step 4's unknown-type
-            // refusal. No `RefField` in the registry names
-            // `RefKind::Subflow` yet, so there is nothing to resolve here
-            // either; that is future work, not this task's.
-            TaskKind::Subflow(_) => Ok(()),
+            // Fix round 1: a subflow spawns a DIFFERENT flow's execution
+            // rather than owning local tasks -- `Task::children()` returns
+            // none for it either, and `registry::known_type` never sees its
+            // type string (it dispatches to this typed variant before ever
+            // reaching a `Leaf`), so it is not subject to step 4's
+            // unknown-type refusal. That is also WHY resolution lives here,
+            // in this typed arm, rather than as a `RefField`/`TASK_TYPES`
+            // entry: `RefField` is read out of a `Leaf`'s opaque `spec` map
+            // by `registry::known_type`, a path a `Subflow` structurally
+            // never reaches (`kind_for` in `task.rs` dispatches
+            // `core.subflow`/its FQCN straight to this variant, before any
+            // `Leaf` match arm exists to consult the registry) -- an entry
+            // in `TASK_TYPES` for `core.subflow` would be dead: no code path
+            // would ever look it up. `spec::validate`'s own Subflow checks
+            // (`subflow_namespace_required`/`subflow_flow_id_required`/
+            // `self_subflow`) already made this same choice, in its own
+            // typed `TaskKind::Subflow` arm rather than a table.
+            //
+            // `namespace`/`flow_id` are `Option<String>` (Task 4's bean-
+            // validation-not-parsing debt), but `validate` (step 3, above)
+            // already refused this flow with `subflow_namespace_required`/
+            // `subflow_flow_id_required` if either were `None` -- so by the
+            // time this arm runs, both are guaranteed `Some` for any
+            // `Subflow` that reaches it. The `let...else` is defensive, not
+            // load-bearing: it cannot actually fire.
+            TaskKind::Subflow(s) => {
+                let (Some(namespace), Some(flow_id)) = (&s.namespace, &s.flow_id) else {
+                    return Ok(());
+                };
+                let name = subflow_ref_name(namespace, flow_id);
+                let resolved = refs.workspace_of(RefKind::Subflow, &name).await?;
+                let id = match resolved {
+                    // Identical rule to the `Leaf` arm below: `None` and a
+                    // foreign `owner` both refuse the same way.
+                    Some((id, owner)) if owner == ws => id,
+                    _ => return Err(ref_not_found()),
+                };
+                // `namespace`/`flow_id` are kept, unlike a `Leaf`'s single
+                // reference field -- see `Subflow::flow_ref`'s own doc
+                // comment in `models/task.rs` for why this is a third field
+                // rather than an overwrite of either existing one.
+                s.flow_ref = Some(id);
+                Ok(())
+            }
             TaskKind::Leaf { spec } => {
                 let type_spec = registry::known_type(&task.r#type).ok_or_else(|| {
                     Error::InvalidInput(format!(
@@ -243,4 +284,14 @@ fn resolve_task<'a>(
             }
         }
     })
+}
+
+/// The `name_or_id` a `core.subflow` task's `(namespace, flowId)` pair
+/// encodes into, before it is handed to
+/// `WorkflowRefPort::workspace_of(RefKind::Subflow, ..)`. See that trait's
+/// own doc comment for the full argument; kept here as one function so the
+/// encoding has exactly one writer, matching the one-reader contract stated
+/// there.
+fn subflow_ref_name(namespace: &str, flow_id: &str) -> String {
+    format!("{namespace}/{flow_id}")
 }
