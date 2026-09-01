@@ -269,6 +269,35 @@ fn is_valid_namespace(ns: &str) -> bool {
     chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'))
 }
 
+/// A Kestra flow `id` against Kestra's OWN pattern for that field --
+/// `AbstractFlow.java` (`data-portal/kestra` @ `96893b589`, lines 30-33):
+/// `@Pattern(regexp = "^[a-zA-Z0-9][a-zA-Z0-9._-]*") @Size(min = 1, max =
+/// 100)`. Deliberately NOT [`is_valid_namespace`] reused under a different
+/// name: a flow id's alphabet allows UPPERCASE letters (`namespace`'s does
+/// not) and its length cap is 100, not 150 -- Kestra draws these as two
+/// distinct patterns on two distinct fields, and collapsing them here would
+/// silently narrow what a real Kestra flow id can be.
+///
+/// Fix round 2 (Task 6), Finding 1: this is what makes
+/// `Subflow::flow_id` -- half of the pair `publish::subflow_ref_name`
+/// encodes into one `name_or_id` as `"{namespace}/{flowId}"` -- unable to
+/// carry a `/`. See `is_valid_namespace`'s use in the `TaskKind::Subflow`
+/// arm below for the other half.
+fn is_valid_flow_id(id: &str) -> bool {
+    let len = id.chars().count();
+    if len == 0 || len > 100 {
+        return false;
+    }
+    let mut chars = id.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_alphanumeric() {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
 /// Task 4's `@NotNull`/`@NotEmpty` debts that live directly on `Flow` --
 /// `tasks` (empty check), `Concurrency::limit`, `FlowOutput::type`, and both
 /// `Sla` fields (`duration` on `MaxDuration`, `behavior` shared by both
@@ -637,19 +666,43 @@ fn walk_task(
         // `self_subflow` is now a nested check, only reachable once both
         // are known to be `Some`.
         TaskKind::Subflow(s) => {
-            if s.namespace.is_none() {
-                report.errors.push(Finding {
+            match &s.namespace {
+                None => report.errors.push(Finding {
                     code: "subflow_namespace_required",
                     message: format!("task '{}': namespace is required (explicit null)", task.id),
                     path: format!("{path}.namespace"),
-                });
+                }),
+                Some(ns) if !is_valid_namespace(ns) => report.errors.push(Finding {
+                    code: "subflow_namespace_invalid",
+                    message: format!(
+                        "task '{}': subflow namespace '{ns}' must match ^[a-z0-9][a-z0-9._-]* \
+                         and be 1-150 characters long -- the same grammar `namespace:` itself \
+                         uses (see `validate_namespace`), so a subflow can never encode a `/` \
+                         into `publish::subflow_ref_name`'s namespace half",
+                        task.id
+                    ),
+                    path: format!("{path}.namespace"),
+                }),
+                Some(_) => {}
             }
-            if s.flow_id.is_none() {
-                report.errors.push(Finding {
+            match &s.flow_id {
+                None => report.errors.push(Finding {
                     code: "subflow_flow_id_required",
                     message: format!("task '{}': flowId is required (explicit null)", task.id),
                     path: format!("{path}.flowId"),
-                });
+                }),
+                Some(fid) if !is_valid_flow_id(fid) => report.errors.push(Finding {
+                    code: "subflow_flow_id_invalid",
+                    message: format!(
+                        "task '{}': subflow flowId '{fid}' must match \
+                         ^[a-zA-Z0-9][a-zA-Z0-9._-]* and be 1-100 characters long -- Kestra's \
+                         own flow id pattern (`AbstractFlow.java`'s `id` field), so a subflow \
+                         can never encode a `/` into `publish::subflow_ref_name`'s flowId half",
+                        task.id
+                    ),
+                    path: format!("{path}.flowId"),
+                }),
+                Some(_) => {}
             }
             if let (Some(ns), Some(fid)) = (&s.namespace, &s.flow_id) {
                 if *ns == flow.namespace && *fid == flow.id {
@@ -1497,6 +1550,60 @@ mod tests {
     fn subflow_flow_id_present_is_silent() {
         let f = parse(
             "id: f\nnamespace: a.b\ntasks:\n  - id: s\n    type: core.subflow\n    namespace: a.b\n    flowId: other\n",
+        )
+        .unwrap();
+        let r = validate(&f);
+        assert!(r.errors.is_empty(), "{r:?}");
+    }
+
+    // -- Task 6 fix round 2, Finding 1: presence was not enough. A subflow's
+    // `namespace`/`flowId` are encoded into one `publish::subflow_ref_name`
+    // string, and a value carrying its own `/` collides with the separator.
+
+    /// The exact collision the reviewer proved live: `namespace: "a/b"`,
+    /// `flowId: "c"` used to encode to `"a/b/c"` and decode, via
+    /// `split_once('/')`, as `("a", "b/c")` -- a different pair than
+    /// declared. `is_valid_namespace` (already enforced on `Flow::namespace`
+    /// itself, `validate_namespace` above) now closes it on the subflow side
+    /// too.
+    #[test]
+    fn subflow_namespace_containing_a_slash_is_an_error() {
+        let f = parse(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: s\n    type: core.subflow\n    namespace: \"a/b\"\n    flowId: c\n",
+        )
+        .unwrap();
+        let r = validate(&f);
+        assert!(
+            r.errors.iter().any(|e| e.code == "subflow_namespace_invalid"),
+            "{r:?}"
+        );
+    }
+
+    /// The same collision, the other half of the pair: a `flowId` carrying
+    /// its own `/` is rejected against Kestra's own flow `id` pattern
+    /// (`is_valid_flow_id`'s doc comment cites the exact `AbstractFlow.java`
+    /// lines), not a pattern invented for this check alone.
+    #[test]
+    fn subflow_flow_id_containing_a_slash_is_an_error() {
+        let f = parse(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: s\n    type: core.subflow\n    namespace: a.b2\n    flowId: \"c/d\"\n",
+        )
+        .unwrap();
+        let r = validate(&f);
+        assert!(
+            r.errors.iter().any(|e| e.code == "subflow_flow_id_invalid"),
+            "{r:?}"
+        );
+    }
+
+    /// Companion to both: a legitimate, dotted namespace (namespaces are
+    /// THEMSELVES dot-separated, which is exactly why `/` and not `.` had to
+    /// be the encoding's separator) must still publish silently -- the fix
+    /// must not reject everything with a `.` in it.
+    #[test]
+    fn subflow_with_a_legitimate_dotted_namespace_and_flow_id_is_not_an_error() {
+        let f = parse(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: s\n    type: core.subflow\n    namespace: company.analytics\n    flowId: nightly_rollup\n",
         )
         .unwrap();
         let r = validate(&f);
