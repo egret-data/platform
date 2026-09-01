@@ -6,10 +6,17 @@ license.workspace = true
 
 [dependencies]
 serde.workspace = true
+# Already in this workspace's tree via utoipa 5.5.0, so this adds zero new
+# transitive crates -- `cargo tree -i serde_norway` shows utoipa as its only
+# parent today. Chosen over the more popular serde_yaml because that crate is
+# archived upstream (0.9.34+deprecated) and reaches us only through kube-client.
+# Error::location() gives the line/column that spec section 9 layer 1 requires.
+serde_norway = "0.9"
+serde_json.workspace = true
 
 [dev-dependencies]
-# Unit-test only: proves `State` serialises exactly as Kestra spells it.
-serde_json.workspace = true
+# serde_json moved to [dependencies] in W1 (Property<T> uses it directly);
+# tests still reach it as `serde_json::...` via the crate's own dependency.
 
 # NOTE: no `egret-workflow-api` dependency yet. That crate is empty at W0, and
 # an unused dep is noise a reviewer has to re-justify. It arrives in W1 with
