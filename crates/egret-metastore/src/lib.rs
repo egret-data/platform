@@ -84,11 +84,50 @@ impl Db {
 mod tests {
     use super::*;
 
+    /// Every migration on disk is embedded in this binary.
+    ///
+    /// The previous form asserted `len() >= 7`, which is true of any tree that ever
+    /// had seven migrations — so it stayed green while the binary carried 130 and
+    /// the directory held 131, and the only symptom was every Data API Versions
+    /// request answering `500 — column v.compared_against does not exist`.
+    /// **A floor cannot see a gap; only equality can.**
+    ///
+    /// `build.rs` is what keeps the two equal by construction. This test is the
+    /// backstop, because a `cargo:rerun-if-changed` that quietly stops working looks
+    /// exactly like one that is doing its job.
     #[test]
-    fn migrator_embeds_baseline_migration() {
+    fn every_migration_on_disk_is_embedded() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
+        let on_disk: std::collections::BTreeSet<i64> = std::fs::read_dir(&dir)
+            .expect("migrations/ is readable from the crate dir")
+            .map(|e| e.expect("readable entry").file_name())
+            .filter_map(|n| {
+                // `0131_dataapi_version_breaking_changes.sql` -> 131
+                let n = n.to_string_lossy().into_owned();
+                n.strip_suffix(".sql")
+                    .and_then(|s| s.split('_').next())
+                    .and_then(|v| v.parse::<i64>().ok())
+            })
+            .collect();
+
+        // Without this, an unreadable directory would yield an empty set that
+        // trivially satisfies the check below — the instrument reporting "nothing
+        // missing" because it saw nothing at all.
         assert!(
-            MIGRATOR.migrations.len() >= 7,
-            "expected through the authz migration"
+            !on_disk.is_empty(),
+            "read no migrations from {dir:?}; the test's own instrument is broken"
+        );
+
+        let embedded: std::collections::BTreeSet<i64> =
+            MIGRATOR.migrations.iter().map(|m| m.version).collect();
+        let missing: Vec<i64> = on_disk.difference(&embedded).copied().collect();
+
+        assert!(
+            missing.is_empty(),
+            "migrations {missing:?} exist on disk but are NOT embedded, so they will never \
+             run: `sqlx::migrate!` reads the directory at COMPILE time. Rebuild — `build.rs` \
+             exists to force that — and if a rebuild does not fix it, the \
+             `cargo:rerun-if-changed` there has stopped working."
         );
     }
 }
