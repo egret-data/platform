@@ -605,6 +605,40 @@ pub fn wire_answers() -> BTreeMap<u16, BTreeSet<&'static str>> {
     out
 }
 
+/// Every `error.code` this taxonomy can put on the wire, flattened out of
+/// [`wire_answers`].
+///
+/// # Why a consumer needs this and a status list is not it
+///
+/// `error.code` is documented — in both OpenAPI documents this surface
+/// publishes — as "the stable code to branch on". It was nevertheless declared
+/// as a bare `{"type": "string"}` with a single `example`, so a generated client
+/// received `code: string` and a consumer writing a `switch` on it had nothing
+/// to switch over: neither the compiler nor the document could tell them that
+/// `row_limit_exceded` is a typo, or that `engine_unavailable` exists at all.
+/// The status list already published by [`wire_answers`] does not answer it —
+/// two statuses carry two codes each (500 and 504), which is the whole reason a
+/// consumer branches on `code` rather than on the status line.
+///
+/// # Derived, for the reason the twin above is derived
+///
+/// [`wire_answers`]' own comment records that a hand-maintained status list went
+/// stale **twice** in this programme, in two different documents, and that no
+/// gate could see it. An `enum` keyword is exactly the same kind of list, so it
+/// is built from exactly the same source: [`to_wire`] applied to
+/// [`crate::serving::census::every_variant`], which is itself checked against
+/// `ServingError`'s own declaration. A new variant cannot land without a
+/// `to_wire` arm (a compile error) and a census sample (a named test failure),
+/// and once it has both, both documents already list its code.
+///
+/// A `BTreeSet` for the reason [`wire_answers`] uses one: the keyword is
+/// serialised straight into a document, and a set that reordered itself between
+/// runs would make every regeneration look like a change. Alphabetical is also
+/// the order a human reads a `switch` in.
+pub fn wire_codes() -> BTreeSet<&'static str> {
+    wire_answers().into_values().flatten().collect()
+}
+
 impl Wire {
     /// Render the envelope. `request_id` is threaded in from the handler rather
     /// than minted here, because the same id must appear in the body, in the

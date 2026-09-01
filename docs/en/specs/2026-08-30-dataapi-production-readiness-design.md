@@ -49,7 +49,7 @@ Ordered by value-per-effort, not by severity. Dependencies noted.
 | 5 | **Script parameter constraints** — ✅ | Package S lets a script concatenate a caller's value into SQL text. The publish-time sentinel probe has **two bypasses pinned open by tests asserting `is_ok()`**. Closed by construction rather than by a better probe, at publish AND — for endpoints frozen before the rule — at serve time; see §5.1. | — |
 | 6 | **Publish-time diff + acknowledgement** — ✅ | `publish` validates the draft against *itself*; the only read of `endpoint_versions` is `MAX(version)`. A removed column, narrowed type, renamed parameter or new required parameter publishes silently. Worst case: adding a second statement flips top-level `data` from an array to an object. | — |
 | 7 | **Consumer version pinning** — ✅ | Serving resolves `live_version_id` only; a publish moves every caller at commit. `meta.version` lets a consumer *observe* which version answered but never *ask* for one. | 6 |
-| 8 | **Contract reachability** | The OpenAPI document sits behind a human session + `:manage`, so a consumer holding only a `data-api` token cannot fetch its own contract; `error.code` has no `enum` despite being documented as the stable code to branch on. | — |
+| 8 | **Contract reachability** — ✅ | The OpenAPI document sits behind a human session + `:manage`, so a consumer holding only a `data-api` token cannot fetch its own contract; `error.code` has no `enum` despite being documented as the stable code to branch on. | — |
 
 ### Package 6 as delivered, and the four decisions inside it
 
@@ -262,6 +262,62 @@ Two smaller items fold into the packages that own them rather than standing alon
   *logging*; the classification is unchanged.
 - **Trino 503 handling** (into Package 3): the Trino client protocol defines 503 as *retry, the
   query is alive*; it currently becomes a 500 and abandons a live query.
+
+### Package 8 as delivered: the document, reachable by the credential that needs it
+
+`GET /api/ws/{workspace}/data-api/openapi` was — and remains — behind a human
+session and `data_api_endpoint:manage`. `routes.rs`' module comment gives the
+reason and it is still true: reading grants "enumerates every consumer of the
+endpoint", and this route "answers that question per account and iterable", so a
+`:read` caller could walk a workspace's service accounts and reconstruct the
+whole grant graph along with every path, parameter and column name in it.
+
+So the answer is a **second route**, not a looser gate:
+`GET /data-api/v1/{ws}`, authenticated by the `data-api` bearer alone. Four
+things are worth carrying forward.
+
+- **The bearer cannot name an account, because it IS one.** The service account
+  comes from the token's `egret_user_id` claim; nothing in the request can
+  change it. The `:manage` route's danger is that it takes a
+  `service_account_id` and is therefore iterable — this one has no such
+  parameter and no roster to enumerate.
+
+- **Scoping is the same expression the call path uses, not a second answer.**
+  `openapi_gen::build` already asks `invoke::can_invoke` per candidate endpoint,
+  which is what `serving::router`'s step 4 evaluates before it runs anything. A
+  document listing endpoints the account may not invoke would be an information
+  disclosure — endpoint paths and parameter names are exactly the reconnaissance
+  an unauthorised caller wants — and the way that is prevented is by there being
+  one answer to "what may this account call". A grant revoked between two
+  fetches is gone from the second document, and an endpoint reachable only
+  through the Cedar `ws_admin` cascade is in both the document and the call.
+
+- **The URL is `servers[0].url` itself, and it is the one URL under this mount a
+  published endpoint can never take.** `normalize_path` refuses an empty path,
+  so every published URL has at least one segment after the slug. A reserved
+  literal *below* the slug — `/{ws}/openapi.json` — would have had no such
+  guarantee: that spelling publishes today, and axum prefers a static segment to
+  a wildcard, so the author's endpoint would have been silently shadowed by a
+  document.
+
+- **Not cacheable, and the reason is not cost.** The document varies by service
+  account, so a cache keyed on the URL would hand one consumer another's
+  contract — the trap `serving::cache`'s principal-keyed key exists to avoid,
+  and worse here because what leaks is the paths and parameters of endpoints the
+  recipient was never granted. Keying on the principal would fix that and still
+  be wrong: the document also varies with every grant and every publish, neither
+  of which invalidates anything, and a contract must not be staler than the
+  calls it describes. `Cache-Control: no-store`.
+
+The second half is `error.code`. Both published documents described it as "the
+stable code to branch on" and emitted a bare `{"type": "string"}`, so a
+generated client typed it `string` and a consumer branching on it had nothing to
+branch on. Both now carry an `enum` **derived** from
+`serving::error::wire_codes()` — `to_wire` applied to the variant census — for
+the reason `wire_answers` exists at all: the hand-maintained status lists in
+these same two documents went stale twice in this programme, and a third hand
+list would have gone the same way. The frontend client now exposes the codes as
+a union type rather than `string`.
 
 ## 4. Two decisions — both taken
 

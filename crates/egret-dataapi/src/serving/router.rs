@@ -636,6 +636,13 @@ pub fn serving_router_sharing_bulkhead(
 ) -> Router<DataApiState> {
     Router::new()
         .route("/{ws}/{*path}", get(serve_get).post(serve_post))
+        // Package 8. The contract for the calling service account, at the very
+        // URL `servers[0].url` names — and the one URL under this mount a
+        // published endpoint can never take, because `normalize_path` refuses an
+        // empty path so every published URL has a segment after the slug. Inside
+        // the three layers below on purpose: building a document costs one PDP
+        // decision per live endpoint. See `serving::contract`.
+        .route("/{ws}", get(super::contract::serve_contract))
         .layer(axum::middleware::from_fn(move |req, next| {
             guard::serving_admit(bulkhead.clone(), req, next)
         }))
@@ -665,7 +672,7 @@ pub fn serving_openapi() -> utoipa::openapi::OpenApi {
 
 #[derive(utoipa::OpenApi)]
 #[openapi(
-    paths(serve_get, serve_post),
+    paths(serve_get, serve_post, super::contract::serve_contract),
     components(schemas(
         ServingResponse,
         ServingStatus,
@@ -676,7 +683,7 @@ pub fn serving_openapi() -> utoipa::openapi::OpenApi {
         super::error::ServingErrorDetail,
         egret_dataapi_api::ColumnSpec
     )),
-    modifiers(&BearerAddon),
+    modifiers(&BearerAddon, &ErrorCodeEnumAddon),
     tags((
         name = "data-api-serving",
         description = "Published Data API endpoints, called by service accounts with a bearer token"
@@ -709,6 +716,59 @@ impl utoipa::Modify for BearerAddon {
                     ))
                     .build(),
             ),
+        );
+    }
+}
+
+/// Puts the DERIVED `enum` of serving error codes onto
+/// `ServingErrorDetail.code` in this document.
+///
+/// # Why a modifier and not `#[schema(...)]` on the field
+///
+/// The list is [`crate::serving::error::wire_codes`], computed from the variant
+/// census at run time. `#[schema(...)]` takes literals, so declaring it there
+/// would be a second hand-maintained copy of the taxonomy — the exact thing
+/// `wire_codes`' comment records going stale twice already, once in this very
+/// document. `openapi_gen`'s per-service-account document takes the same list
+/// from the same function, so the two cannot disagree about what a client may
+/// receive.
+///
+/// # It PANICS rather than silently doing nothing
+///
+/// A modifier that walks a path and returns quietly when it does not find it is
+/// a guard that cannot fail: rename the schema or the field and the `enum`
+/// vanishes from the published document with every test still green. The two
+/// names it walks are owned by [`super::error::ServingErrorDetail`]'s `ToSchema`
+/// derive, several files away, so nothing local would flag the drift. Both
+/// lookups therefore `expect`, and `tests/contract_reachable.rs`'s
+/// `the_published_root_document_names_every_code_too` is the test that executes
+/// this path and reads the result back out of the document.
+struct ErrorCodeEnumAddon;
+
+impl utoipa::Modify for ErrorCodeEnumAddon {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        use utoipa::openapi::{RefOr, Schema};
+
+        let components = openapi.components.get_or_insert_with(Default::default);
+        let detail = components
+            .schemas
+            .get_mut("ServingErrorDetail")
+            .expect("ServingErrorDetail must be a component of the serving document");
+        let RefOr::T(Schema::Object(detail)) = detail else {
+            panic!("ServingErrorDetail must be an inline object schema");
+        };
+        let code = detail
+            .properties
+            .get_mut("code")
+            .expect("ServingErrorDetail must carry a `code` property");
+        let RefOr::T(Schema::Object(code)) = code else {
+            panic!("ServingErrorDetail.code must be an inline object schema");
+        };
+        code.enum_values = Some(
+            super::error::wire_codes()
+                .into_iter()
+                .map(serde_json::Value::from)
+                .collect(),
         );
     }
 }
@@ -2484,7 +2544,7 @@ struct Routed {
 ///
 /// A missing header and a malformed one are the same answer for the same reason
 /// every other authentication failure is: see [`super::auth`].
-fn bearer(headers: &HeaderMap) -> Result<&str, ServingError> {
+pub(super) fn bearer(headers: &HeaderMap) -> Result<&str, ServingError> {
     headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())

@@ -5,13 +5,14 @@
  * egret unified data portal HTTP API.
  * OpenAPI spec version: 0.1.0
  */
+import type { ServingErrorDetailCode } from './servingErrorDetailCode';
 
 export interface ServingErrorDetail {
   /**
      * The stable, machine-readable code from spec §7. Clients branch on this;
      * `message` is for humans and may be reworded.
      */
-  code: string;
+  code: ServingErrorDetailCode;
   /**
      * A fixed string per code. Never rendered from an internal error — see the
      * module comment.

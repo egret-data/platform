@@ -932,25 +932,44 @@ async fn every_error_carries_the_same_envelope() {
 /// only in a Rust comment.
 ///
 /// If this ever needs to change, the fix is a router fallback, not a handler.
+///
+/// # What Package 8 changed here, and what it did not
+///
+/// The second case used to be `GET /data-api/v1/{ws}` — a single-segment URI,
+/// which `{*path}` cannot match. That URL is now a route: it is the contract
+/// `serving::contract` serves to the calling service account, and it answers
+/// with our envelope on every refusal. So the example moved DOWN one segment to
+/// `/data-api/v1` itself, which no route under this mount can match.
+///
+/// The claim being pinned is unchanged — the only answers on this surface that
+/// carry no envelope are the ones axum gives before any handler runs — and it is
+/// now pinned against a URI that is genuinely unmatched rather than one that has
+/// since been claimed. A test asserting "this URL 404s empty" would otherwise
+/// have gone on passing right up until the moment the URL meant something,
+/// which is exactly what happened.
 #[tokio::test]
 async fn axum_answers_before_the_handler_and_those_two_answers_carry_no_envelope() {
     let f = skip_without_db!();
 
     // A method the route does not declare. Same answer for every path under
     // this router, existing or not, so it leaks nothing.
-    let res = f
-        .raw("DELETE", &format!("/data-api/v1/{}/anything", f.ws_slug))
-        .await;
-    assert_eq!(res.status, StatusCode::METHOD_NOT_ALLOWED);
-    assert!(
-        res.text.is_empty(),
-        "405 must stay empty rather than grow a body with detail in it: {}",
-        res.text
-    );
+    for uri in [
+        format!("/data-api/v1/{}/anything", f.ws_slug),
+        // The contract route declares GET alone, so it answers 405 the same way.
+        format!("/data-api/v1/{}", f.ws_slug),
+    ] {
+        let res = f.raw("DELETE", &uri).await;
+        assert_eq!(res.status, StatusCode::METHOD_NOT_ALLOWED, "{uri}");
+        assert!(
+            res.text.is_empty(),
+            "405 must stay empty rather than grow a body with detail in it: {}",
+            res.text
+        );
+    }
 
-    // A single-segment URI: `{*path}` needs at least one segment, so this
-    // matches no route.
-    let res = f.raw("GET", &format!("/data-api/v1/{}", f.ws_slug)).await;
+    // No segment at all: `/{ws}` needs one and `/{ws}/{*path}` needs two, so
+    // this matches no route under the mount.
+    let res = f.raw("GET", "/data-api/v1").await;
     assert_eq!(res.status, StatusCode::NOT_FOUND);
     assert!(
         res.text.is_empty(),
