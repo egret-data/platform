@@ -1,0 +1,440 @@
+// kestra: core/src/main/java/io/kestra/core/models/triggers/AbstractTrigger.java
+// kestra: core/src/main/java/io/kestra/plugin/core/trigger/Schedule.java
+// kestra: core/src/main/java/io/kestra/plugin/core/trigger/AbstractWebhookTrigger.java
+// kestra: core/src/main/java/io/kestra/plugin/core/trigger/Webhook.java
+// kestra: core/src/main/java/io/kestra/plugin/core/trigger/Flow.java
+
+use std::collections::HashMap;
+
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+use crate::models::flow::{deserialize_labels, Label};
+use crate::models::{Property, State};
+
+/// A trigger node on a flow. Mirrors `Task`'s dispatch shape exactly: shared
+/// fields on `Trigger` itself, plus `kind: TriggerKind` for the fields
+/// specific to whichever trigger type this is.
+///
+/// Ported from `AbstractTrigger.java`, curated the same way Task 2 curated
+/// `Subflow`: kept to what a trigger's *scheduling and gating* behaviour
+/// needs, dropped what's infra/EE/logging plumbing unrelated to the model.
+/// Dropped fields and why:
+/// - `version` -- plugin versioning metadata, not modelled anywhere in this
+///   crate.
+/// - `workerSelector` -- worker-routing (tags + fallback), same as `Flow`'s
+///   dropped field of the same name; no type in this crate models it.
+/// - `policyRefs` -- Enterprise Edition governance-policy ids, same as
+///   `Flow`'s dropped field of the same name.
+/// - `logLevel` -- `org.slf4j.event.Level`, a logging concern with no
+///   equivalent type in this crate.
+/// - `assets` -- `AssetsDeclaration`, asset-lineage tracking, out of scope
+///   for W1 (`TaskRun`'s own `assetEmits` is dropped for the same reason).
+///
+/// `Serialize` is hand-written, the exact inverse of `Deserialize`, for the
+/// same reason `Task`'s is: a `#[serde(flatten)] kind: TriggerKind` derive
+/// would nest a `Leaf`'s fields under a `"spec"` key instead of at the top
+/// level, breaking round-trip.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Trigger {
+    pub id: String,
+    pub r#type: String,
+    pub description: Option<String>,
+    // `@Builder.Default @NotNull private String when = "true";` -- `Option`
+    // for the same `@NotNull`-is-bean-validation reason every other
+    // `@NotNull` `Property<T>` field in this crate is `Option`-wrapped (see
+    // `Parallel::concurrent` in `task.rs`); `default_when()` supplies
+    // Kestra's own default of `"true"` when the key is absent, and an
+    // explicit `when: null` still parses to `None` rather than erroring.
+    pub when: Option<Property<String>>,
+    pub disabled: bool,
+    pub labels: Vec<Label>,
+    pub stop_after: Vec<State>,
+    pub log_to_file: bool,
+    pub fail_on_trigger_error: bool,
+    pub allow_concurrent: bool,
+    pub kind: TriggerKind,
+}
+
+/// The trigger types this crate's scheduler must see into, versus the opaque
+/// leaf it must not -- same split `TaskKind` makes for tasks. Only
+/// `Schedule`, `Webhook`, and `Flow` (this checkout's three
+/// `io.kestra.plugin.core.trigger` types with a runnable `eval()`/`evaluate()`
+/// beyond `McpToolTrigger`, which is MCP-specific and out of scope) are typed;
+/// everything else -- third-party trigger plugins, `ScheduleOnDates` -- is an
+/// opaque `Leaf`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TriggerKind {
+    Schedule(Schedule),
+    Webhook(Webhook),
+    Flow(FlowTrigger),
+    Leaf { spec: serde_json::Value },
+}
+
+/// `io.kestra.plugin.core.trigger.Schedule`. Cron-scheduled trigger.
+///
+/// `cron` and `withSeconds` are plain (non-dynamic) `@PluginProperty` fields
+/// in Java -- not rendered, so plain Rust types, not `Property<T>`.
+/// `timezone` defaults to `ZoneId.systemDefault().toString()` in Java, which
+/// is JVM-environment-dependent (usually but not guaranteed UTC in a
+/// container) -- rather than hard-coding a guess, this is `None` when absent
+/// and left to the scheduler (W3+) to interpret "no timezone" as UTC, the
+/// same call Kestra's own `Schedule::convertDateTime` makes when
+/// `this.timezone == null`.
+///
+/// Dropped: `lateMaximumDelay` (a `Duration`, no parser for that type yet --
+/// same reasoning as `Sla::MaxDuration.duration`), `recoverMissedSchedules`,
+/// the deprecated `inputs` map, and the `executionTime`/`cachedCron` runtime
+/// caches (transient in Java, not wire fields at all).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Schedule {
+    pub cron: String,
+    #[serde(default)]
+    pub with_seconds: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+}
+
+/// `io.kestra.plugin.core.trigger.Webhook` + its
+/// `AbstractWebhookTrigger` base.
+///
+/// `key` is `@PluginProperty(dynamic = true)` in Java (a plain `String`
+/// field, not literally typed `Property<String>`) -- modelled as
+/// `Property<String>` anyway on the same basis `Loop::values` in `task.rs`
+/// already established: what matters is whether Kestra renders the field
+/// dynamically, not its literal Java type. `responseCode` IS literally
+/// `Property<Integer>` in Java.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Webhook {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<Property<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inputs: Option<HashMap<String, serde_json::Value>>,
+    #[serde(default)]
+    pub fetch_type: FetchType,
+    #[serde(default)]
+    pub wait: bool,
+    #[serde(default)]
+    pub return_outputs: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_content_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_code: Option<Property<i32>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum FetchType {
+    None,
+    #[default]
+    Fetch,
+    Store,
+}
+
+/// `io.kestra.plugin.core.trigger.Flow` -- Kestra's *"Flow trigger"*, which
+/// fires based on other flows' executions. Named `FlowTrigger` here (not
+/// `Flow`) for the same reason `Output` was renamed `FlowOutput`: the obvious
+/// name collides with this crate's own `Flow` (the flow model), and the
+/// brief's own `TriggerKind::Flow` variant name is what carries the wire
+/// identity, not this struct's name.
+///
+/// `states` defaults, in Java, to `terminatedTypes() + [PAUSED]` --
+/// reproduced field-for-field as `default_flow_trigger_states()` rather than
+/// hard-coding a shorter equivalent list, so a change to `State::is_terminated`
+/// (W0) cannot silently desync this default.
+///
+/// Dropped: `window` (`Window`/`TimeWindow`, the dependsOn evaluation-window
+/// config -- a nested type this task does not port) and the
+/// `dependsOnAsMultipleCondition()`/`DependencyCondition` machinery, which is
+/// W3/W8 evaluation logic, not model.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlowTrigger {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inputs: Option<HashMap<String, serde_json::Value>>,
+    #[serde(default = "default_flow_trigger_states")]
+    pub states: Vec<State>,
+    #[serde(default)]
+    pub depends_on: Vec<Dependency>,
+    #[serde(default)]
+    pub mode: FlowTriggerMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_satisfied: Option<i32>,
+}
+
+/// `Flow.Dependency` (inner class).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Dependency {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub states: Option<Vec<State>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub labels: Option<HashMap<String, serde_json::Value>>,
+    // `@Builder.Default private Property<String> when = Property.ofValue("true");`
+    // -- literally `Property<String>` in Java this time, with a real default,
+    // same `Option<Property<T>>` + `default_when()` treatment as `Trigger::when`.
+    #[serde(default = "default_when")]
+    pub when: Option<Property<String>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum FlowTriggerMode {
+    #[default]
+    All,
+    Any,
+    AtLeast,
+}
+
+fn default_when() -> Option<Property<String>> {
+    Some(Property::from_source("true".to_string()))
+}
+
+/// `State.Type.terminatedTypes()` (`SUCCESS, WARNING, FAILED, KILLED,
+/// CANCELLED, RETRIED, SKIPPED, RESUBMITTED`, in `State.Type`'s declaration
+/// order) with `PAUSED` appended, matching
+/// `ListUtils.concat(State.Type.terminatedTypes(), List.of(PAUSED))` exactly.
+fn default_flow_trigger_states() -> Vec<State> {
+    vec![
+        State::Success,
+        State::Warning,
+        State::Failed,
+        State::Killed,
+        State::Cancelled,
+        State::Retried,
+        State::Skipped,
+        State::Resubmitted,
+        State::Paused,
+    ]
+}
+
+impl<'de> Deserialize<'de> for Trigger {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+
+        let mut map = serde_json::Map::deserialize(d)?;
+
+        let id = map
+            .remove("id")
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .ok_or_else(|| D::Error::missing_field("id"))?;
+        let r#type = map
+            .remove("type")
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .ok_or_else(|| D::Error::missing_field("type"))?;
+        let description = map
+            .remove("description")
+            .and_then(|v| v.as_str().map(str::to_owned));
+        let when = match map.remove("when") {
+            Some(v) => serde_json::from_value(v).map_err(D::Error::custom)?,
+            None => default_when(),
+        };
+        let disabled = map
+            .remove("disabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let labels = match map.remove("labels") {
+            Some(v) => deserialize_labels(v).map_err(D::Error::custom)?,
+            None => Vec::new(),
+        };
+        let stop_after: Vec<State> = match map.remove("stopAfter") {
+            Some(v) => serde_json::from_value(v).map_err(D::Error::custom)?,
+            None => Vec::new(),
+        };
+        let log_to_file = map
+            .remove("logToFile")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let fail_on_trigger_error = map
+            .remove("failOnTriggerError")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let allow_concurrent = map
+            .remove("allowConcurrent")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let rest = serde_json::Value::Object(map);
+        let kind = kind_for(&r#type, rest).map_err(D::Error::custom)?;
+
+        Ok(Trigger {
+            id,
+            r#type,
+            description,
+            when,
+            disabled,
+            labels,
+            stop_after,
+            log_to_file,
+            fail_on_trigger_error,
+            allow_concurrent,
+            kind,
+        })
+    }
+}
+
+impl Serialize for Trigger {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::Error as _;
+
+        let kind_value = match &self.kind {
+            TriggerKind::Schedule(v) => serde_json::to_value(v),
+            TriggerKind::Webhook(v) => serde_json::to_value(v),
+            TriggerKind::Flow(v) => serde_json::to_value(v),
+            TriggerKind::Leaf { spec } => Ok(spec.clone()),
+        }
+        .map_err(S::Error::custom)?;
+
+        let mut map = match kind_value {
+            serde_json::Value::Object(map) => map,
+            other => {
+                return Err(S::Error::custom(format!(
+                    "trigger kind serialised to a non-object JSON value: {other}"
+                )))
+            }
+        };
+
+        map.insert("id".to_string(), serde_json::Value::String(self.id.clone()));
+        map.insert(
+            "type".to_string(),
+            serde_json::Value::String(self.r#type.clone()),
+        );
+        if let Some(description) = &self.description {
+            map.insert(
+                "description".to_string(),
+                serde_json::Value::String(description.clone()),
+            );
+        }
+        if let Some(when) = &self.when {
+            map.insert(
+                "when".to_string(),
+                serde_json::to_value(when).map_err(S::Error::custom)?,
+            );
+        }
+        map.insert(
+            "disabled".to_string(),
+            serde_json::Value::Bool(self.disabled),
+        );
+        if !self.labels.is_empty() {
+            map.insert(
+                "labels".to_string(),
+                serde_json::to_value(&self.labels).map_err(S::Error::custom)?,
+            );
+        }
+        if !self.stop_after.is_empty() {
+            map.insert(
+                "stopAfter".to_string(),
+                serde_json::to_value(&self.stop_after).map_err(S::Error::custom)?,
+            );
+        }
+        map.insert(
+            "logToFile".to_string(),
+            serde_json::Value::Bool(self.log_to_file),
+        );
+        map.insert(
+            "failOnTriggerError".to_string(),
+            serde_json::Value::Bool(self.fail_on_trigger_error),
+        );
+        map.insert(
+            "allowConcurrent".to_string(),
+            serde_json::Value::Bool(self.allow_concurrent),
+        );
+
+        serde_json::Value::Object(map).serialize(serializer)
+    }
+}
+
+/// Dispatch a trigger's remaining fields on its `type`, mirroring `Task`'s
+/// `kind_for` -- both the FQCN and the `core.` short alias resolve to the
+/// same three typed variants.
+fn kind_for(r#type: &str, rest: serde_json::Value) -> Result<TriggerKind, serde_json::Error> {
+    let canonical = r#type
+        .strip_prefix("io.kestra.plugin.core.trigger.")
+        .map(str::to_ascii_lowercase)
+        .or_else(|| r#type.strip_prefix("core.").map(str::to_ascii_lowercase));
+
+    Ok(match canonical.as_deref() {
+        Some("schedule") => TriggerKind::Schedule(serde_json::from_value(rest)?),
+        Some("webhook") => TriggerKind::Webhook(serde_json::from_value(rest)?),
+        Some("flow") => TriggerKind::Flow(serde_json::from_value(rest)?),
+        _ => TriggerKind::Leaf { spec: rest },
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FetchType, Trigger, TriggerKind};
+    use crate::models::State;
+
+    /// The reference flow's own trigger, exercised directly rather than only
+    /// through `Flow`.
+    #[test]
+    fn schedule_is_typed_under_both_spellings() {
+        for spelling in ["io.kestra.plugin.core.trigger.Schedule", "core.schedule"] {
+            let yaml = format!("id: nightly\ntype: {spelling}\ncron: \"0 2 * * *\"\n");
+            let t: Trigger = serde_norway::from_str(&yaml).unwrap();
+            match &t.kind {
+                TriggerKind::Schedule(s) => assert_eq!(s.cron, "0 2 * * *", "{spelling}"),
+                other => panic!("{spelling}: expected Schedule, got {other:?}"),
+            }
+            assert_eq!(
+                t.when.as_ref().unwrap().source(),
+                "true",
+                "when must default to Kestra's own \"true\""
+            );
+        }
+    }
+
+    #[test]
+    fn webhook_carries_its_own_key_and_fetch_type() {
+        let yaml = "id: hook\ntype: io.kestra.plugin.core.trigger.Webhook\nkey: abc123\nfetchType: STORE\n";
+        let t: Trigger = serde_norway::from_str(yaml).unwrap();
+        match &t.kind {
+            TriggerKind::Webhook(w) => {
+                assert_eq!(w.key.as_ref().unwrap().source(), "abc123");
+                assert_eq!(w.fetch_type, FetchType::Store);
+            }
+            other => panic!("expected Webhook, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn flow_trigger_states_default_to_terminated_plus_paused() {
+        let yaml = "id: chain\ntype: io.kestra.plugin.core.trigger.Flow\n";
+        let t: Trigger = serde_norway::from_str(yaml).unwrap();
+        match &t.kind {
+            TriggerKind::Flow(f) => {
+                assert!(f.states.contains(&State::Success));
+                assert!(f.states.contains(&State::Paused));
+                assert!(!f.states.contains(&State::Running));
+            }
+            other => panic!("expected Flow, got {other:?}"),
+        }
+    }
+
+    /// Anything not registered (third-party plugin triggers, `ScheduleOnDates`)
+    /// becomes an opaque `Leaf`, same as an unknown `Task` type.
+    #[test]
+    fn an_unknown_trigger_type_becomes_an_opaque_leaf() {
+        let yaml =
+            "id: custom\ntype: io.kestra.plugin.aws.sqs.Trigger\nqueueUrl: https://example\n";
+        let t: Trigger = serde_norway::from_str(yaml).unwrap();
+        match &t.kind {
+            TriggerKind::Leaf { spec } => assert_eq!(spec["queueUrl"], "https://example"),
+            other => panic!("expected Leaf, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn disabled_and_stop_after_round_trip() {
+        let yaml = "id: nightly\ntype: core.schedule\ncron: \"@daily\"\ndisabled: true\nstopAfter:\n  - FAILED\n";
+        let t: Trigger = serde_norway::from_str(yaml).unwrap();
+        assert!(t.disabled);
+        assert_eq!(t.stop_after, vec![State::Failed]);
+    }
+}
