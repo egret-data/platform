@@ -20,7 +20,32 @@ Spec: `docs/en/specs/2026-09-01-workflow-programme-design.md` (§7 fidelity rule
 - Workspace crates are globbed by `members = ["crates/*"]` in the root `Cargo.toml`, but each crate must **also** get a `workspace.dependencies` path entry to be referenced by name.
 - Feature entitlements are **absent-row-means-enabled** (`crates/egret-workspace/src/features.rs` module docs). Adding a key therefore needs **no migration**.
 - Commit messages follow Conventional Commits. Do **not** merge; open the PR and stop (`egret-no-auto-merge-await-approval`).
-- Verification command for Rust work in this plan: `just test-no-db` (nothing here is DB-gated). Frontend: `npx vitest run <path>` from `frontend/`.
+- **Verification command for Rust work — corrected during execution of Task 1.** `just test-no-db` is
+  NOT usable as a regression gate on this branch: `crates/egret-audit/tests/audit_store.rs:6` does
+  `egret_test_db::url().await.expect("DATABASE_URL")`, and under `EGRET_ALLOW_DB_SKIP=1` that `url()`
+  returns `None` **by design** (`egret-test-db/src/lib.rs:471`), so `.expect()` panics instead of
+  skipping. `cargo test --workspace` stops at the first failing binary, so the recipe validates only
+  3 of ~245 binaries and then exits 101. This is pre-existing and out of scope to fix here — the
+  mechanism was verified directly, not assumed.
+
+  Use instead, and compare the two logs rather than reading one:
+
+  ```bash
+  cd /Users/1pro-l4r8/Documents/github/data-portal/egret
+  env -u DATABASE_URL EGRET_ALLOW_DB_SKIP=1 cargo test --workspace --no-fail-fast \
+    > /tmp/w0-<task>-after.log 2>&1; echo "EXIT=$?"
+  grep -c '^test result:' /tmp/w0-<task>-after.log                        # binaries reached
+  grep -E '^test result:' /tmp/w0-<task>-after.log | awk '{p+=$4; f+=$6} END {print "passed",p,"failed",f}'
+  grep -E '^test .* FAILED$' /tmp/w0-<task>-after.log | sort > /tmp/w0-<task>-after.failed
+  ```
+
+  The gate is that `/tmp/w0-<task>-after.failed` is **identical** to the same file captured before the
+  change (`diff` them). A count alone is not enough — the same number of failures with different names
+  is a regression plus a coincidence. Baseline on this branch: ~245 binaries, 2425 passed / 41 failed.
+
+  Additionally run the touched crate's own suite, which must be fully green:
+  `cargo test -p <crate> --no-fail-fast`.
+- Frontend verification: `npx vitest run <path>` from `frontend/`.
 
 ---
 
@@ -196,8 +221,21 @@ Expected: PASS, including the pre-existing `assert_eq!(from_catalog, FEATURE_KEY
 
 `crates/egret-workspace/tests/features_routes.rs:198` asserts the API returns `FEATURE_KEYS.len()` entries, so it follows the catalog automatically — but run it to confirm nothing else pinned the old count.
 
-Run: `just test-no-db`
-Expected: PASS.
+Run: `cargo test -p egret-workspace --no-fail-fast`
+Expected: PASS, fully green.
+
+Then the workspace-wide regression gate, per Global Constraints (**not** `just test-no-db`, which
+fail-fasts on a pre-existing `egret-audit` panic after 3 binaries):
+
+```bash
+env -u DATABASE_URL EGRET_ALLOW_DB_SKIP=1 cargo test --workspace --no-fail-fast \
+  > /tmp/w0-t2-after.log 2>&1; echo "EXIT=$?"
+grep -E '^test .* FAILED$' /tmp/w0-t2-after.log | sort > /tmp/w0-t2-after.failed
+diff /tmp/w0-t1-step6.failed /tmp/w0-t2-after.failed && echo "IDENTICAL FAILURE SET"
+```
+
+Expected: `IDENTICAL FAILURE SET`. If `/tmp/w0-t1-step6.failed` does not exist, capture a baseline the
+same way from `git stash` first — do not skip the comparison.
 
 - [ ] **Step 7: Prove the test can fail (mutation)**
 
@@ -724,8 +762,19 @@ Open `kestra/core/src/main/java/io/kestra/core/models/flows/State.java` at the `
 
 - [ ] **Step 10: Full check**
 
-Run: `just test-no-db && cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings`
-Expected: PASS and clean. Clippy is what will object if `models/mod.rs` re-exports something unused.
+```bash
+cargo test -p egret-workflow --no-fail-fast
+env -u DATABASE_URL EGRET_ALLOW_DB_SKIP=1 cargo test --workspace --no-fail-fast \
+  > /tmp/w0-t4-after.log 2>&1; echo "EXIT=$?"
+grep -E '^test .* FAILED$' /tmp/w0-t4-after.log | sort > /tmp/w0-t4-after.failed
+diff /tmp/w0-t2-after.failed /tmp/w0-t4-after.failed && echo "IDENTICAL FAILURE SET"
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+Expected: `egret-workflow` fully green, `IDENTICAL FAILURE SET`, fmt and clippy clean. Clippy is what
+will object if `models/mod.rs` re-exports something unused. Do **not** use `just test-no-db` — see
+Global Constraints.
 
 - [ ] **Step 11: Commit**
 
@@ -746,7 +795,9 @@ arrives with its first caller."
 
 ## Done when
 
-- `just test-no-db` passes, `cargo fmt --check` and `cargo clippy -D warnings` are clean.
+- `cargo test --workspace --no-fail-fast` reaches ~245 binaries and its FAILED-test-name set is
+  identical to the branch baseline; `egret-workflow` and `egret-workspace` are fully green;
+  `cargo fmt --check` and `cargo clippy -D warnings` are clean.
 - `cd frontend && npx vitest run && npx tsc --noEmit && npx eslint src` are clean.
 - `grep -rn 'egret-orchestrator\|egret_orchestrator' --include='*.rs' --include='*.toml' Cargo.toml crates/` returns nothing.
 - `egret_workspace::features::FEATURE_KEYS` ends with `"workflows"`.
