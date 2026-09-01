@@ -3631,9 +3631,17 @@ dependencies = [
 name = "egret-workflow"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "chrono",
+ "egret-core",
+ "egret-metastore",
+ "egret-test-db",
  "serde",
  "serde_json",
  "serde_norway",
+ "sqlx",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

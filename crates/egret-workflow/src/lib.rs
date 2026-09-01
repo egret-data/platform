@@ -9,6 +9,7 @@
 //! Modules arrive with their package:
 //!
 //! - `models`    — W0 (this crate's first type) and W1
+//! - `repo`      — W1 (`workflow.flows` + `workflow.flow_versions`)
 //! - `runners`   — W2 (expression rendering)
 //! - `executor`  — W3 (`advance()`, the pure state machine)
 //! - `worker`    — W4 (claim loops, handlers, reaper)
@@ -19,4 +20,7 @@
 //! it testable without standing anything up (spec §6.5).
 
 pub mod models;
+pub mod repo;
 pub mod spec;
+
+pub use repo::{CreateFlowInput, FlowRepo, FlowRow, FlowVersionRow, ListFilter, UpdateFlowInput};
