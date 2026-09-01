@@ -439,6 +439,19 @@ forward rather than rediscovering:
   enforced either way and the direction is the safe one (a miss re-executes), but the
   "scale-out changes nothing" sentence the first version wrote was false, and there is
   now a witness test rather than a claim.
+- **A correct refusal that names nothing is still a defect.** With
+  `sharedStore.enabled=true` and two replicas the backend correctly refuses to start until
+  Valkey answers — the limiter fails closed, so booting into process-local state would be
+  the multiplied-limit defect arrived at by a different road. But the entire message was
+  `Error: Connection refused (os error 111)` and its cause was the same string again: an
+  operator saw a crash-looping pod naming neither the dependency, nor the address tried,
+  nor the fact that a rollout produces exactly this until the store is up. The behaviour is
+  unchanged — Kubernetes restarts until Valkey is ready and that is the design — and only
+  the message changed: it now names the shared store, both of its configuration spellings,
+  the URL **with any credential redacted** (a startup error is printed to stdout and shipped
+  by whatever collects the pod's logs), that stopping is deliberate, and the three things to
+  check if it does not clear. `choose_store`'s refusal was already written this way; the
+  connect failure was not.
 - **`replicas: 1` is not "one of these exists".** A Deployment's default RollingUpdate
   surges a second pod before terminating the first, so the store split itself during its
   own upgrade. `strategy: {type: Recreate}` on `deps-valkey.yaml` — and on
