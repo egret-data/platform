@@ -275,7 +275,7 @@ pub trait TaskHandler: Send + Sync {
 | `egret.dataapi.call` | `DataApiEndpointPort` |
 | `egret.dataset.refresh`, `egret.report.send` | `egret-automation` renderer + delivery |
 | `core.http`, `core.slack` | `automation/deliver/*`; must block SSRF (host allow-list, no internal IPs) |
-| `core.{sequential,parallel,if,switch,dag,foreach,subflow}` | no handler — the state machine |
+| `core.{sequential,parallel,if,switch,dag,loop,loopUntil,subflow}` | no handler — the state machine |
 
 Handlers depend on port traits, never on concrete crates, exactly as
 `egret-dataapi` holds `Arc<dyn QueryExecPort>` and does not know `egret-query`.
@@ -359,7 +359,7 @@ W7 — a screen inventory is not a UX review.
 | **W0** Foundation & renames | crate skeleton mirroring Kestra module names; delete the two placeholders; `workflows` entitlement; rename `egret-orchestrator` → `egret-provisioner` (it currently means k8s engine provisioning and will collide with a workflow orchestrator) as a separate mechanical PR | — |
 | **W1** Model & language | `models/{flows,tasks,executions,triggers,property}`; YAML parse/validate; draft/version tables; publish + reference resolution | W0 |
 | **W2** Expressions | minijinja + 37 filters + 40 functions + `??`/`?:` rewrite + **the Pebble differential oracle** | W0 |
-| **W3** Core executor | `advance()`; claim loops; `sequential/parallel/if/switch/dag/foreach`; retry/timeout/`errors:`; tasks `core.log`, `egret.sql` | W1, W2 |
+| **W3** Core executor | `advance()`; claim loops; `sequential/parallel/if/switch/dag/loop/loopUntil`; retry/timeout/`errors:`; tasks `core.log`, `egret.sql` | W1, W2 |
 | **W4** Runner & container | `TaskCommands` contract; `egret.container`, `egret.python`; log streaming; output files; cancel/kill | W3 |
 | **W5** Kestra plugin host | the JVM image, `ShimRunContext`, `StorageInterface` bridge, `kestra.<FQCN>` dispatch, plugin jar resolution | W4 |
 | **W6** Triggers & subflow | cron, webhook, flow trigger, `subflow`, backfill | W3 |
