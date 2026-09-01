@@ -20,7 +20,14 @@
 //! it testable without standing anything up (spec §6.5).
 
 pub mod models;
+pub mod publish;
 pub mod repo;
 pub mod spec;
 
+pub use publish::publish;
 pub use repo::{CreateFlowInput, FlowRepo, FlowRow, FlowVersionRow, ListFilter, UpdateFlowInput};
+// Task 6: `RefKind` moved to `egret-workflow-api` so `WorkflowRefPort` (also
+// re-exported here) can name it without this crate's engine dependencies.
+// Re-exported at the crate root -- not just via `spec::registry::RefKind` --
+// because `publish` and its port live at this level too.
+pub use egret_workflow_api::{RefKind, WorkflowRefPort};

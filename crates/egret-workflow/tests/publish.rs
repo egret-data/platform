@@ -1,0 +1,166 @@
+//! Publish, and the reference-resolution seam. Requires DATABASE_URL.
+
+mod common;
+
+use egret_workflow::{RefKind, WorkflowRefPort};
+use uuid::Uuid;
+
+/// A fake that owns objects in a NAMED workspace, so a test can put an object in
+/// a different workspace than the caller's and watch publish refuse.
+#[derive(Default)]
+struct FakeRefs {
+    objects: std::collections::HashMap<(RefKind, String), (Uuid, Uuid)>,
+}
+
+#[async_trait::async_trait]
+impl WorkflowRefPort for FakeRefs {
+    async fn workspace_of(
+        &self,
+        kind: RefKind,
+        name: &str,
+    ) -> Result<Option<(Uuid, Uuid)>, egret_core::Error> {
+        Ok(self.objects.get(&(kind, name.to_owned())).copied())
+    }
+}
+
+/// THE test of this task. Migration 0128 shipped a plain FK with no workspace
+/// predicate and a Cedar check that was told the CALLER's workspace, never the
+/// object's; five columns had that shape. A flow is a machine for creating more
+/// of them, so a foreign reference must make the flow UNPUBLISHABLE rather than
+/// something a handler must remember to refuse later.
+#[tokio::test]
+async fn a_flow_referencing_another_workspace_cannot_be_published() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let other_ws = Uuid::new_v4();
+
+    let mut refs = FakeRefs::default();
+    refs.objects.insert(
+        (RefKind::Database, "trino_prod".into()),
+        (Uuid::new_v4(), other_ws), // owned by SOMEONE ELSE
+    );
+
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    let f = common::draft(
+        &repo, ws, user,
+        "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: egret.sql\n    database: trino_prod\n    sql: SELECT 1\n",
+    )
+    .await;
+
+    let err = egret_workflow::publish(&repo, &refs, ws, user, f.id, "")
+        .await
+        .expect_err("publishing a foreign reference must fail");
+
+    // NotFound, not Forbidden: absence and denial must be indistinguishable, or
+    // publish becomes a probe for which objects exist in other workspaces.
+    assert!(
+        matches!(err, egret_core::Error::NotFound(_)),
+        "expected NotFound, got {err:?}"
+    );
+}
+
+/// The same refusal for an id that never existed anywhere. If these two produced
+/// different errors, the difference would be the probe.
+#[tokio::test]
+async fn an_unknown_reference_fails_the_same_way_as_a_foreign_one() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    let f = common::draft(
+        &repo, ws, user,
+        "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: egret.sql\n    database: nope\n    sql: SELECT 1\n",
+    )
+    .await;
+
+    let err = egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, f.id, "")
+        .await
+        .expect_err("must fail");
+    assert!(matches!(err, egret_core::Error::NotFound(_)), "{err:?}");
+}
+
+#[tokio::test]
+async fn a_resolvable_flow_publishes_and_freezes_its_references() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let db_id = Uuid::new_v4();
+
+    let mut refs = FakeRefs::default();
+    refs.objects
+        .insert((RefKind::Database, "trino_prod".into()), (db_id, ws));
+
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    let f = common::draft(
+        &repo, ws, user,
+        "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: egret.sql\n    database: trino_prod\n    sql: SELECT 1\n",
+    )
+    .await;
+
+    let v = egret_workflow::publish(&repo, &refs, ws, user, f.id, "first")
+        .await
+        .expect("publish");
+    assert_eq!(v.version, 1);
+
+    // The snapshot must be self-contained: the RESOLVED id, not the name.
+    let s = v.snapshot.to_string();
+    assert!(
+        s.contains(&db_id.to_string()),
+        "snapshot must carry the resolved id: {s}"
+    );
+
+    let live = repo.get(ws, f.id).await.expect("get");
+    assert_eq!(live.live_version_id, Some(v.id));
+    assert_eq!(live.state, "live");
+}
+
+/// An unknown task type contributes no references, so it would resolve
+/// vacuously. Publish must refuse it instead -- otherwise a typo'd type
+/// publishes cleanly and fails only at run time, in W3, with no author present.
+#[tokio::test]
+async fn an_unknown_task_type_cannot_be_published() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    let f = common::draft(
+        &repo,
+        ws,
+        user,
+        "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: egret.sqll\n    sql: SELECT 1\n",
+    )
+    .await;
+
+    let err = egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, f.id, "")
+        .await
+        .expect_err("an unknown type must not publish");
+    assert!(matches!(err, egret_core::Error::InvalidInput(_)), "{err:?}");
+}
+
+/// Validation errors block publish; warnings do not. A flow declaring
+/// `concurrency` must publish -- it just is not enforced yet.
+#[tokio::test]
+async fn warnings_do_not_block_publish_but_errors_do() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+
+    let warns = common::draft(
+        &repo, ws, user,
+        "id: w\nnamespace: a.b\nconcurrency:\n  limit: 1\ntasks:\n  - id: t\n    type: core.log\n    message: hi\n",
+    )
+    .await;
+    egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, warns.id, "")
+        .await
+        .expect("a warning must not block publish");
+
+    let bad = common::draft(
+        &repo,
+        ws,
+        user,
+        "id: e\nnamespace: BAD\ntasks:\n  - id: t\n    type: core.log\n    message: hi\n",
+    )
+    .await;
+    assert!(
+        egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, bad.id, "")
+            .await
+            .is_err()
+    );
+}

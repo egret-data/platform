@@ -39,6 +39,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use serde::Serialize;
+
 use crate::models::{
     canonical_flow_type, Flow, Input, Retry, Sla, SlaCommon, Task, TaskKind, Trigger, TriggerKind,
 };
@@ -46,7 +48,11 @@ use crate::spec::registry;
 
 /// A single validation finding: a machine-checkable `code`, a human message,
 /// and a `path` locating it inside the flow.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// `Serialize` (Task 6): a warning must survive into `publish`'s frozen
+/// snapshot, so a reader of a published version can see what was declared
+/// but is not yet enforced -- see `publish`'s own doc comment.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Finding {
     pub code: &'static str,
     pub message: String,

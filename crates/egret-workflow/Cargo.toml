@@ -25,13 +25,19 @@ uuid.workspace = true
 chrono.workspace = true
 anyhow.workspace = true
 
+# Task 6 (publish): `RefKind` and `WorkflowRefPort` -- the port trait publish
+# resolves every reference through -- now live in this leaf crate rather than
+# here, so `egret-dataapi`/`egret-automation`/etc. can implement it without
+# depending on the workflow engine. This is the "first type this crate needs
+# from it" the [dev-dependencies] note below used to promise.
+egret-workflow-api.workspace = true
+
 [dev-dependencies]
 # serde_json moved to [dependencies] in W1 (Property<T> uses it directly);
 # tests still reach it as `serde_json::...` via the crate's own dependency.
 
-# NOTE: no `egret-workflow-api` dependency yet. That crate is empty at W0, and
-# an unused dep is noise a reviewer has to re-justify. It arrives in W1 with
-# the first type this crate needs from it.
+# tests/publish.rs's FakeRefs implements WorkflowRefPort.
+async-trait.workspace = true
 
 # repo.rs's DB-gated tests (`tests/repo.rs`): one private, already-migrated
 # database per test process, per `egret-test-db`'s own doc.

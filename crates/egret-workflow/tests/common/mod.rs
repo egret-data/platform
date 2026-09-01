@@ -45,3 +45,33 @@ pub async fn seed_workspace(db: &Db) -> (Uuid, UserId) {
 
     (wid, UserId(uid))
 }
+
+/// Parse `source` and create a draft through `FlowRepo` -- shared by
+/// `tests/publish.rs`, which needs a draft row to publish in every test.
+///
+/// `namespace`/`flow_id` come from the parsed flow itself (the same fields
+/// `FlowRepo::create`'s caller is expected to supply, per `repo.rs`'s own
+/// doc), not hard-coded here, so a test's YAML is the single source of truth
+/// for what gets stored.
+pub async fn draft(
+    repo: &egret_workflow::FlowRepo,
+    ws: Uuid,
+    user: UserId,
+    source: &str,
+) -> egret_workflow::FlowRow {
+    let flow = egret_workflow::spec::parse(source).expect("parse draft source");
+    let plan = serde_json::to_value(&flow).expect("serialize draft plan");
+    repo.create(
+        ws,
+        user,
+        &egret_workflow::CreateFlowInput {
+            namespace: flow.namespace.clone(),
+            flow_id: flow.id.clone(),
+            source: source.to_string(),
+            plan,
+            folder_id: None,
+        },
+    )
+    .await
+    .expect("create draft")
+}

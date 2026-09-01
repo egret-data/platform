@@ -1,13 +1,11 @@
 /// What kind of egret object a task field names.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RefKind {
-    Database,
-    Notebook,
-    Dataset,
-    Chart,
-    DataApiEndpoint,
-    Subflow,
-}
+///
+/// Moved to `egret-workflow-api` in Task 6 (publish), so the port trait that
+/// names it (`WorkflowRefPort::workspace_of`) can live in that leaf crate
+/// without pulling this crate's engine dependencies along with it.
+/// Re-exported here under its old path so nothing importing
+/// `spec::registry::RefKind` had to change.
+pub use egret_workflow_api::RefKind;
 
 #[derive(Debug, Clone, Copy)]
 pub struct RefField {
