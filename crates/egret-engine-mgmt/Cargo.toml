@@ -24,7 +24,7 @@ egret-secrets.workspace = true
 # in egret-bin and only needed here as a dev-dep for test state construction.
 egret-policy-api.workspace = true
 egret-core = { workspace = true, features = ["http"] }
-egret-orchestrator.workspace = true
+egret-provisioner.workspace = true
 # Query seam (P1: assign-engine-to-workspace). `EngineAssignmentService`
 # materializes/removes a read-only delegated workspace connection through
 # `egret_query::DatabaseRepo`. Cycle-checked: egret-query does NOT depend on
@@ -93,7 +93,7 @@ http-body-util = "0.1"
 # dev-dependency, so the version is chosen by whichever final binary links
 # them in. Building/testing this crate standalone (`cargo test -p
 # egret-engine-mgmt`) needs one enabled here or k8s-openapi's build script
-# panics; egret-bin/egret-orchestrator pick the same version for the real
+# panics; egret-bin/egret-provisioner pick the same version for the real
 # binary via workspace feature unification.
 k8s-openapi.workspace = true
 # Parse the generated self-signed cert back to verify SANs in tls_cert's test.

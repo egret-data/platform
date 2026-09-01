@@ -14,7 +14,7 @@ use egret_auth::users::UserRepo;
 use egret_engine_mgmt::{engine_mgmt_router, EngineMgmtState};
 use egret_engine_mgmt_api::EngineProvisioningPort;
 use egret_metastore::Db;
-use egret_orchestrator::KubeClient;
+use egret_provisioner::KubeClient;
 use http_body_util::BodyExt;
 use std::sync::Arc;
 use tower::ServiceExt; // oneshot
@@ -379,7 +379,7 @@ async fn seed_unprovisioned_warehouse(f: &Fixture) -> Uuid {
 /// `restart` records `(namespace, name)` pairs (shared via `Arc` so a test can
 /// hold onto the fake and inspect it after the request completes). The
 /// kube-shaped ops (exec/pod-logs/coordinator-request) are NOT on this trait —
-/// `egret_orchestrator::kube_client::FakeKube` covers those, passed separately as the
+/// `egret_provisioner::kube_client::FakeKube` covers those, passed separately as the
 /// fixture's `kube` field.
 #[derive(Clone, Default)]
 struct FakeEnginePort {
@@ -424,7 +424,7 @@ impl EngineProvisioningPort for FakeEnginePort {
 
 #[tokio::test]
 async fn monitor_queries_maps_list_and_maps_bad_gateway() {
-    let fake = Arc::new(egret_orchestrator::kube_client::FakeKube::default());
+    let fake = Arc::new(egret_provisioner::kube_client::FakeKube::default());
     let Some(f) = setup_full(
         Some(Arc::new(FakeEnginePort::default())),
         Some(fake.clone()),
@@ -515,7 +515,7 @@ async fn monitor_queries_maps_list_and_maps_bad_gateway() {
 /// through `test_catalog`'s poll loop, not a multi-hop `nextUri` chase.
 #[tokio::test]
 async fn test_catalog_reports_ok_error_and_non_2xx() {
-    let fake = Arc::new(egret_orchestrator::kube_client::FakeKube::default());
+    let fake = Arc::new(egret_provisioner::kube_client::FakeKube::default());
     let Some(f) = setup_full(
         Some(Arc::new(FakeEnginePort::default())),
         Some(fake.clone()),
@@ -665,9 +665,7 @@ async fn test_catalog_reports_ok_error_and_non_2xx() {
 async fn pdp_backed_engine_reader_reads_but_cannot_create() {
     let Some(mut f) = setup_full(
         Some(Arc::new(FakeEnginePort::default())),
-        Some(Arc::new(
-            egret_orchestrator::kube_client::FakeKube::default(),
-        )),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
     )
     .await
     else {
@@ -722,9 +720,7 @@ async fn pdp_backed_engine_reader_reads_but_cannot_create() {
 async fn create_and_get_engine() {
     let Some(f) = setup_full(
         Some(Arc::new(FakeEnginePort::default())),
-        Some(Arc::new(
-            egret_orchestrator::kube_client::FakeKube::default(),
-        )),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
     )
     .await
     else {
@@ -803,9 +799,7 @@ async fn create_and_get_engine() {
 async fn create_engine_starrocks_persists_starrocks_type() {
     let Some(f) = setup_full(
         Some(Arc::new(FakeEnginePort::default())),
-        Some(Arc::new(
-            egret_orchestrator::kube_client::FakeKube::default(),
-        )),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
     )
     .await
     else {
@@ -953,9 +947,7 @@ async fn create_engine_starrocks_persists_starrocks_type() {
 async fn create_engine_unknown_kind_400() {
     let Some(f) = setup_full(
         Some(Arc::new(FakeEnginePort::default())),
-        Some(Arc::new(
-            egret_orchestrator::kube_client::FakeKube::default(),
-        )),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
     )
     .await
     else {
@@ -995,9 +987,7 @@ async fn create_engine_unknown_kind_400() {
 async fn pod_logs_known_pod_ok_unknown_pod_404() {
     let Some(f) = setup_full(
         Some(Arc::new(FakeEnginePort::default())),
-        Some(Arc::new(
-            egret_orchestrator::kube_client::FakeKube::default(),
-        )),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
     )
     .await
     else {
@@ -1079,15 +1069,13 @@ async fn pod_logs_known_pod_ok_unknown_pod_404() {
 /// namespace + name (from which the real egret-bin adapter derives BOTH the
 /// `{name}-coordinator` and `{name}-worker` Deployment names — see
 /// `fake_kube_restart_deployment_records_coordinator_and_worker` in
-/// `egret-orchestrator` for that fan-out). An unknown engine id is a 404.
+/// `egret-provisioner` for that fan-out). An unknown engine id is a 404.
 #[tokio::test]
 async fn restart_engine_calls_provisioner_unknown_404() {
     let fake = FakeEnginePort::default();
     let Some(f) = setup_full(
         Some(Arc::new(fake.clone())),
-        Some(Arc::new(
-            egret_orchestrator::kube_client::FakeKube::default(),
-        )),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
     )
     .await
     else {
@@ -1169,9 +1157,7 @@ async fn restart_engine_calls_provisioner_unknown_404() {
 async fn update_engine_per_role_trino_config_roundtrips() {
     let Some(f) = setup_full(
         Some(Arc::new(FakeEnginePort::default())),
-        Some(Arc::new(
-            egret_orchestrator::kube_client::FakeKube::default(),
-        )),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
     )
     .await
     else {
@@ -1298,9 +1284,7 @@ async fn seed_exchange_storage_conn(f: &Fixture) -> Uuid {
 async fn update_engine_resource_groups_and_fault_tolerant() {
     let Some(f) = setup_full(
         Some(Arc::new(FakeEnginePort::default())),
-        Some(Arc::new(
-            egret_orchestrator::kube_client::FakeKube::default(),
-        )),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
     )
     .await
     else {
@@ -1449,9 +1433,7 @@ async fn seed_secret(f: &Fixture, value: &str) -> Uuid {
 async fn update_engine_auth_and_ingress() {
     let Some(f) = setup_full(
         Some(Arc::new(FakeEnginePort::default())),
-        Some(Arc::new(
-            egret_orchestrator::kube_client::FakeKube::default(),
-        )),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
     )
     .await
     else {
@@ -1576,9 +1558,7 @@ async fn update_engine_auth_and_ingress() {
 async fn update_engine_pod_scheduling_roundtrips() {
     let Some(f) = setup_full(
         Some(Arc::new(FakeEnginePort::default())),
-        Some(Arc::new(
-            egret_orchestrator::kube_client::FakeKube::default(),
-        )),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
     )
     .await
     else {
@@ -1676,9 +1656,7 @@ async fn update_engine_pod_scheduling_roundtrips() {
 async fn update_engine_autoscaling_roundtrips() {
     let Some(f) = setup_full(
         Some(Arc::new(FakeEnginePort::default())),
-        Some(Arc::new(
-            egret_orchestrator::kube_client::FakeKube::default(),
-        )),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
     )
     .await
     else {
@@ -1807,9 +1785,7 @@ async fn update_engine_autoscaling_roundtrips() {
 async fn engine_catalog_routes() {
     let Some(f) = setup_full(
         Some(Arc::new(FakeEnginePort::default())),
-        Some(Arc::new(
-            egret_orchestrator::kube_client::FakeKube::default(),
-        )),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
     )
     .await
     else {
@@ -1929,9 +1905,7 @@ async fn engine_catalog_routes() {
 async fn add_catalog_with_client_id_inherits_role_and_mints_new_client() {
     let Some(f) = setup_full(
         Some(Arc::new(FakeEnginePort::default())),
-        Some(Arc::new(
-            egret_orchestrator::kube_client::FakeKube::default(),
-        )),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
     )
     .await
     else {
@@ -2099,9 +2073,7 @@ async fn add_catalog_with_client_id_inherits_role_and_mints_new_client() {
 async fn add_catalog_with_foreign_client_id_400() {
     let Some(f) = setup_full(
         Some(Arc::new(FakeEnginePort::default())),
-        Some(Arc::new(
-            egret_orchestrator::kube_client::FakeKube::default(),
-        )),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
     )
     .await
     else {
@@ -2207,9 +2179,7 @@ async fn add_catalog_with_foreign_client_id_400() {
 async fn create_engine_unprovisioned_warehouse_400() {
     let Some(f) = setup_full(
         Some(Arc::new(FakeEnginePort::default())),
-        Some(Arc::new(
-            egret_orchestrator::kube_client::FakeKube::default(),
-        )),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
     )
     .await
     else {
@@ -2249,9 +2219,7 @@ async fn create_engine_unprovisioned_warehouse_400() {
 async fn scoped_permission_engines_read_and_create() {
     let Some(mut f) = setup_full(
         Some(Arc::new(FakeEnginePort::default())),
-        Some(Arc::new(
-            egret_orchestrator::kube_client::FakeKube::default(),
-        )),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
     )
     .await
     else {
@@ -2332,7 +2300,7 @@ async fn scoped_permission_engines_read_and_create() {
 
 #[tokio::test]
 async fn scoped_permission_monitor_queries_and_cluster() {
-    let fake = Arc::new(egret_orchestrator::kube_client::FakeKube::default());
+    let fake = Arc::new(egret_provisioner::kube_client::FakeKube::default());
     let Some(mut f) = setup_full(
         Some(Arc::new(FakeEnginePort::default())),
         Some(fake.clone()),
@@ -2498,9 +2466,7 @@ async fn materialized_count(f: &Fixture, ws: Uuid, engine_id: Uuid) -> i64 {
 async fn cp_set_engine_workspaces_assigns_and_materializes() {
     let Some(f) = setup_full(
         Some(Arc::new(FakeEnginePort::default())),
-        Some(Arc::new(
-            egret_orchestrator::kube_client::FakeKube::default(),
-        )),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
     )
     .await
     else {
@@ -2609,9 +2575,7 @@ async fn cp_set_engine_workspaces_assigns_and_materializes() {
 async fn workspace_admin_assign_list_unassign_engine() {
     let Some(f) = setup_full(
         Some(Arc::new(FakeEnginePort::default())),
-        Some(Arc::new(
-            egret_orchestrator::kube_client::FakeKube::default(),
-        )),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
     )
     .await
     else {

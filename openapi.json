@@ -34309,7 +34309,7 @@
               "object",
               "null"
             ],
-            "description": "FE (`fe.conf`) override keys → merged over egret's managed base by the\norchestrator. egret-managed keys ([`egret_engine_mgmt_api::SR_PROTECTED_FE_KEYS`])\nare rejected up front by [`validate_sr_fe_config`]. Omitted ⇒ preserved on update.",
+            "description": "FE (`fe.conf`) override keys → merged over egret's managed base by the\nprovisioner. egret-managed keys ([`egret_engine_mgmt_api::SR_PROTECTED_FE_KEYS`])\nare rejected up front by [`validate_sr_fe_config`]. Omitted ⇒ preserved on update.",
             "default": null,
             "additionalProperties": {
               "type": "string"
@@ -34323,7 +34323,7 @@
               "object",
               "null"
             ],
-            "description": "CN (`cn.conf`) override keys → rendered into a ConfigMap by the orchestrator.\nOmitted ⇒ preserved on update.",
+            "description": "CN (`cn.conf`) override keys → rendered into a ConfigMap by the provisioner.\nOmitted ⇒ preserved on update.",
             "default": null,
             "additionalProperties": {
               "type": "string"

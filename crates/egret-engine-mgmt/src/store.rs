@@ -80,7 +80,7 @@ impl Engine {
     /// Whether the engine accepts a minted per-user engine JWT — a prerequisite
     /// for materializing a delegated (read-only) workspace connection.
     ///
-    /// Trino: mirrors the orchestrator's `spec.trinoConfig.auth.jwt` object
+    /// Trino: mirrors the provisioner's `spec.trinoConfig.auth.jwt` object
     /// check (`egret-engine-mgmt/src/engines.rs::resolve_auth`).
     /// StarRocks: has no `trinoConfig.auth.jwt` concept — jwt-capability is
     /// simply "the stored delegation mode is `jwt`" (see [`Self::delegation_mode`]).

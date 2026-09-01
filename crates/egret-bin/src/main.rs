@@ -583,26 +583,26 @@ impl egret_catalog_engine::WarehouseProvisioner for LakekeeperProvisioner {
 /// Provisions query engines (Phase 1: Trino, Phase 2: StarRocks) onto
 /// Kubernetes for the engine-mgmt seam. Adapts the kube-free
 /// `egret_engine_mgmt_api::EngineProvisioningPort` trait onto the
-/// `egret-orchestrator` provisioners, dispatching by engine kind. Since E1a
+/// `egret-provisioner` provisioners, dispatching by engine kind. Since E1a
 /// both traits' spec/status types are the SAME `egret-engine-mgmt-api` DTOs
 /// (aliased under different names on each side), so this is a pure
 /// pass-through — no translation between the two. The 4 kube-shaped ops
 /// (exec/pod-logs/coordinator-request) are NOT on the Port — the seam calls
-/// `egret_orchestrator::KubeClient` directly via `EngineMgmtState.kube`.
+/// `egret_provisioner::KubeClient` directly via `EngineMgmtState.kube`.
 struct EgretEngineProvisioningPort {
-    trino: std::sync::Arc<egret_orchestrator::TrinoProvisioner>,
-    starrocks: std::sync::Arc<egret_orchestrator::StarRocksProvisioner>,
+    trino: std::sync::Arc<egret_provisioner::TrinoProvisioner>,
+    starrocks: std::sync::Arc<egret_provisioner::StarRocksProvisioner>,
     /// The same KubeClient both provisioners hold, kept here so Trino's
     /// `restart` (which bypasses TrinoProvisioner's render/apply path) can
     /// reach it directly.
-    kube: std::sync::Arc<dyn egret_orchestrator::KubeClient>,
+    kube: std::sync::Arc<dyn egret_provisioner::KubeClient>,
 }
 
 impl EgretEngineProvisioningPort {
     fn new(
-        trino: std::sync::Arc<egret_orchestrator::TrinoProvisioner>,
-        starrocks: std::sync::Arc<egret_orchestrator::StarRocksProvisioner>,
-        kube: std::sync::Arc<dyn egret_orchestrator::KubeClient>,
+        trino: std::sync::Arc<egret_provisioner::TrinoProvisioner>,
+        starrocks: std::sync::Arc<egret_provisioner::StarRocksProvisioner>,
+        kube: std::sync::Arc<dyn egret_provisioner::KubeClient>,
     ) -> Self {
         Self {
             trino,
@@ -612,7 +612,7 @@ impl EgretEngineProvisioningPort {
     }
 
     /// Picks the provisioner for a given `EngineKind::as_str()` value.
-    fn for_kind(&self, kind: &str) -> &dyn egret_orchestrator::EngineProvisioner {
+    fn for_kind(&self, kind: &str) -> &dyn egret_provisioner::EngineProvisioner {
         match kind {
             "starrocks" => &*self.starrocks,
             _ => &*self.trino,
@@ -635,9 +635,9 @@ impl egret_engine_mgmt_api::EngineProvisioningPort for EgretEngineProvisioningPo
         namespace: &str,
         name: &str,
     ) -> Result<egret_engine_mgmt_api::EngineStatus, String> {
-        // `egret_engine_mgmt_api::EngineStatus` and `egret_orchestrator::EngineStatus`
+        // `egret_engine_mgmt_api::EngineStatus` and `egret_provisioner::EngineStatus`
         // are now the SAME type (both alias `egret_engine_mgmt_api::EngineStatus`), so
-        // the orchestrator's status passes straight through — no reverse mapping.
+        // the provisioner's status passes straight through — no reverse mapping.
         self.for_kind(kind)
             .status(namespace, name)
             .await
@@ -664,7 +664,7 @@ impl egret_engine_mgmt_api::EngineProvisioningPort for EgretEngineProvisioningPo
             // Deployments), so we roll them THROUGH the CR: merge-patch a fresh
             // restart-stamp annotation onto the FE + CN specs and let the operator
             // propagate it to the pod templates. The stamp is minted here because
-            // egret-bin has `std::time` (the orchestrator stays deterministic).
+            // egret-bin has `std::time` (the provisioner stays deterministic).
             // Use nanos (not millis) so two back-to-back restarts within the same
             // millisecond still produce a distinct value — an identical stamp would
             // leave the annotation unchanged and the operator wouldn't roll.
@@ -1793,10 +1793,10 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // Port (provision/status/update/delete/restart) and the raw `KubeClient`
     // (exec/pod-logs/coordinator-request, served straight off `EngineMgmtState`)
     // are derived from the SAME kube client.
-    let kube: Option<std::sync::Arc<dyn egret_orchestrator::KubeClient>> = {
-        let kube = match egret_orchestrator::LiveKube::in_cluster().await {
+    let kube: Option<std::sync::Arc<dyn egret_provisioner::KubeClient>> = {
+        let kube = match egret_provisioner::LiveKube::in_cluster().await {
             Ok(k) => Some(k),
-            Err(_) => egret_orchestrator::LiveKube::from_kubeconfig().await.ok(),
+            Err(_) => egret_provisioner::LiveKube::from_kubeconfig().await.ok(),
         };
         match kube {
             Some(k) => Some(std::sync::Arc::new(k)),
@@ -1809,9 +1809,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     let engine_provisioner: Option<
         std::sync::Arc<dyn egret_engine_mgmt_api::EngineProvisioningPort>,
     > = kube.clone().map(|kube| {
-        let trino = std::sync::Arc::new(egret_orchestrator::TrinoProvisioner::new(kube.clone()));
+        let trino = std::sync::Arc::new(egret_provisioner::TrinoProvisioner::new(kube.clone()));
         let starrocks =
-            std::sync::Arc::new(egret_orchestrator::StarRocksProvisioner::new(kube.clone()));
+            std::sync::Arc::new(egret_provisioner::StarRocksProvisioner::new(kube.clone()));
         std::sync::Arc::new(EgretEngineProvisioningPort::new(trino, starrocks, kube))
             as std::sync::Arc<dyn egret_engine_mgmt_api::EngineProvisioningPort>
     });

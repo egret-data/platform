@@ -36,7 +36,7 @@ egret-bi.workspace = true
 egret-automation.workspace = true
 egret-notebook.workspace = true
 egret-kernel.workspace = true
-egret-orchestrator.workspace = true
+egret-provisioner.workspace = true
 # `EgretEngineProvisioner::exec` names `kube::api::AttachedProcess` explicitly
 # to satisfy the `egret_controlplane::EngineProvisioner` trait signature.
 kube.workspace = true
@@ -46,7 +46,7 @@ tokio.workspace = true
 tokio-util.workspace = true
 # `EgretEngineProvisioner::pod_logs_stream` names the boxed byte-chunk stream
 # type explicitly to satisfy the `egret_controlplane::EngineProvisioner`
-# trait signature (same shape as `egret_orchestrator::KubeClient`'s).
+# trait signature (same shape as `egret_provisioner::KubeClient`'s).
 futures-util.workspace = true
 bytes.workspace = true
 # Pin a rustls crypto provider so kube-rs's TLS client has one to use (the tree

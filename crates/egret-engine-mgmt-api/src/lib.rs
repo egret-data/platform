@@ -1,6 +1,6 @@
 //! Canonical, dependency-free engine-provisioning spec DTOs (the E1 contract-crate
 //! seed). Both `egret-controlplane` (HTTP + secret resolution) and
-//! `egret-orchestrator` (k8s rendering) depend on these — neither owns the model.
+//! `egret-provisioner` (k8s rendering) depend on these — neither owns the model.
 //! Kube-free by construction: this crate has no dependencies.
 
 use serde::{Deserialize, Serialize};
@@ -228,7 +228,7 @@ pub struct WorkerRoleConfig {
 }
 
 /// One PASSWORD-authenticator user: username plus a bcrypt hash of the password.
-/// The control plane derives the hash; the orchestrator never sees plaintext.
+/// The control plane derives the hash; the provisioner never sees plaintext.
 #[derive(Clone, Debug, Default)]
 pub struct PasswordEntry {
     pub username: String,
@@ -269,7 +269,7 @@ pub struct Ingress {
     /// and points `tls_secret` at that projected name.
     pub tls_cert_secret_ref: Option<Uuid>,
     /// Resolved cert/key PEMs, injected at provision (NOT persisted). The
-    /// orchestrator renders the `{name}-ingress-tls` Secret from these. Like the
+    /// provisioner renders the `{name}-ingress-tls` Secret from these. Like the
     /// sibling `Tls` DTO these are plain runtime fields — this struct is not
     /// serde-serialized (its wire form is parsed/rendered by hand), so the PEMs
     /// never reach stored config.
@@ -360,7 +360,7 @@ pub struct TrinoConfig {
     /// `{name}-pull` k8s Secret, and appends that name to `image_pull_secrets`.
     pub image_pull_secret_ref: Option<Uuid>,
     /// Resolved `.dockerconfigjson` payload, injected at provision (NOT
-    /// persisted). The orchestrator renders the `{name}-pull` Secret from this.
+    /// persisted). The provisioner renders the `{name}-pull` Secret from this.
     /// Like the sibling runtime fields, this struct is not serde-serialized
     /// (its wire form is parsed/rendered by hand), so the payload never reaches
     /// stored config.
@@ -391,7 +391,7 @@ pub struct CatalogSpec {
 }
 
 /// Ranger tag/policy enforcement wiring (Access P3.2). `Some` when the engine is
-/// bound to a policy profile; the orchestrator then templates
+/// bound to a policy profile; the provisioner then templates
 /// `access-control.properties` + `ranger-trino-security.xml` so the bundled
 /// `apache-ranger` plugin polls egret's Ranger-Admin `/service` download API.
 #[derive(Clone, Debug)]
@@ -475,7 +475,7 @@ pub struct StarRocksPod {
 /// `fe.conf` keys egret manages itself (shared-data run mode, object-store
 /// coordinates, TLS keystore, and the wire ports). A user-supplied `feConfig`
 /// override for any of these is rejected up front so it can't clobber the
-/// provisioner's own wiring. Shared with the orchestrator (which renders the
+/// provisioner's own wiring. Shared with the provisioner (which renders the
 /// merged `fe.conf`) via this contract crate so both sides agree on the set.
 pub const SR_PROTECTED_FE_KEYS: &[&str] = &[
     "run_mode",
@@ -531,7 +531,7 @@ pub struct StarRocksConfig {
     /// Pod- and container-level scheduling / customization; `None` = defaults.
     pub pod: Option<StarRocksPod>,
     /// FE `root` account password set in-cluster via the operator-style
-    /// initpwd Secret/ConfigMap/Job (see egret-orchestrator's
+    /// initpwd Secret/ConfigMap/Job (see egret-provisioner's
     /// `starrocks_initpwd_*`). `None`/empty = legacy passwordless root (no
     /// initpwd resources templated). Minted by the create path (T3).
     pub root_password: Option<String>,
@@ -553,7 +553,7 @@ pub struct StarRocksDelegation {
     /// PEM of the FE TLS cert egret generated (also pinned on the connection).
     pub tls_cert_pem: String,
     /// Cert+key PEM bundle (`ensure_tls_cert`'s `keystore_pem`) — the source
-    /// material the orchestrator's init-container converts into the Java
+    /// material the provisioner's init-container converts into the Java
     /// keystore `ssl_keystore_location` points at. Contains the private key.
     pub tls_keystore_pem: String,
     /// Enable FE SSL on :9030.
@@ -638,7 +638,7 @@ use async_trait::async_trait;
 
 /// Provisions/updates/deletes a query engine on Kubernetes. Kube-free by
 /// construction (this crate has no kube dep). Implemented in the composition
-/// root (egret-bin) over `egret-orchestrator::TrinoProvisioner`.
+/// root (egret-bin) over `egret-provisioner::TrinoProvisioner`.
 #[async_trait]
 pub trait EngineProvisioningPort: Send + Sync {
     async fn provision(&self, req: &EngineSpec) -> Result<(), String>;
