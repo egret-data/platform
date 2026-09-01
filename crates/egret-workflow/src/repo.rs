@@ -15,9 +15,19 @@
 //! `WHERE id = $1 AND workspace_id = $2`, and there is no route-level
 //! pre-check to forget.
 //!
-//! **Four methods are deliberate exceptions** -- each keys off a bare id with
+//! **Two methods are deliberate exceptions** -- each keys off a bare id with
 //! no `workspace_id` predicate of its own, and each says so on its own doc
-//! comment below:
+//! comment below. (Task 6 fix round 2, Finding 2: [`FlowRepo::list_versions`]
+//! and [`FlowRepo::get_version`] used to be two more, undisclosed exceptions
+//! -- unlike the writes below, they were **reads**, and an unscoped read
+//! handed a foreign flow id returns that flow's version snapshots and notes
+//! with no error at all, the exact shape migration 0128 is this programme's
+//! recorded case of. "Nothing calls them yet, so the obligation stays with
+//! the first caller" was the reasoning that kept them unscoped one fix round
+//! ago; overruled, because a doc sentence must follow the code, not
+//! constrain it -- both now take `ws` and join `workflow.flows` to check it,
+//! same as every other read in this module, so there is no obligation left
+//! for a future caller to remember.)
 //!
 //! - [`FlowRepo::workspace_of`] -- the scoping PRIMITIVE itself; a caller
 //!   asks this before it knows which workspace an id belongs to, so it
@@ -25,15 +35,6 @@
 //! - [`FlowRepo::insert_version`] and [`FlowRepo::set_live`] -- writes whose
 //!   callers (Task 6's `publish`) have already confirmed containment via a
 //!   prior scoped [`FlowRepo::get`] before either is reached.
-//! - [`FlowRepo::list_versions`] and [`FlowRepo::get_version`] -- reads, and
-//!   the sharpest of the four: an unscoped **read** handed a foreign flow id
-//!   returns that flow's version snapshots and notes with no error at all,
-//!   which is the exact shape migration 0128 is this programme's recorded
-//!   case of. Nothing in this crate calls either yet (Task 6's `publish`
-//!   explicitly does not; see its own module doc), so the obligation to
-//!   scope-check before calling stays with whoever calls them first --
-//!   presently Task 7's route handlers, which will always have a scoped
-//!   [`FlowRepo::get`] of their own on the same request already.
 
 use chrono::{DateTime, Utc};
 use egret_core::{Error, Result, UserId};
@@ -331,42 +332,52 @@ impl FlowRepo {
         Ok(())
     }
 
-    /// Every version of `flow`, newest first -- the index migration 0132
-    /// adds (`flow_id, version DESC`) is for exactly this read.
+    /// Every version of `flow` in `ws`, newest first -- the index migration
+    /// 0132 adds (`flow_id, version DESC`) is for exactly this read.
     ///
-    /// UNSCOPED by workspace, and -- unlike [`Self::insert_version`] and
-    /// [`Self::set_live`] -- a READ: calling this with a flow id from another
-    /// workspace hands back that flow's version snapshots and notes with no
-    /// error, which is exactly the shape migration 0128 is this programme's
-    /// recorded case of. The caller MUST establish containment itself first
-    /// -- e.g. a preceding scoped [`Self::get`] on the same `flow` in the
-    /// caller's own `ws` -- before passing the id here. See the module doc
-    /// for the full list of this repository's unscoped exceptions.
-    pub async fn list_versions(&self, flow: Uuid) -> Result<Vec<FlowVersionRow>> {
+    /// SCOPED by `ws` since Task 6 fix round 2, Finding 2, via a join against
+    /// `workflow.flows` -- `flow_versions` carries no `workspace_id` column
+    /// of its own, so there is no bare predicate to add the way
+    /// [`FlowRepo::get`] has one; the join is what a bare predicate would
+    /// have been. A foreign `flow` (one that belongs to a different
+    /// workspace) and a `flow` that does not exist at all both answer an
+    /// empty `Vec`, indistinguishably -- neither joins a `workflow.flows` row
+    /// in `ws`.
+    ///
+    /// Previously unscoped, with the obligation to check left to the first
+    /// caller (Task 7's route handlers). Overruled in fix round 2: a doc
+    /// sentence describing an obligation is weaker than closing it in the
+    /// query, so nobody has to remember it.
+    pub async fn list_versions(&self, ws: Uuid, flow: Uuid) -> Result<Vec<FlowVersionRow>> {
         sqlx::query_as(
-            "SELECT id, flow_id, version, snapshot, note, created_by, created_at \
-             FROM workflow.flow_versions WHERE flow_id = $1 ORDER BY version DESC",
+            "SELECT v.id, v.flow_id, v.version, v.snapshot, v.note, v.created_by, v.created_at \
+             FROM workflow.flow_versions v \
+             JOIN workflow.flows f ON f.id = v.flow_id \
+             WHERE v.flow_id = $1 AND f.workspace_id = $2 \
+             ORDER BY v.version DESC",
         )
         .bind(flow)
+        .bind(ws)
         .fetch_all(&self.db.pool)
         .await
         .map_err(db_err)
     }
 
-    /// One version by its per-flow number.
+    /// One version of `flow` in `ws`, by its per-flow number.
     ///
-    /// UNSCOPED by workspace, for the same reason and with the same
-    /// obligation as [`Self::list_versions`] -- see that method's doc and the
-    /// module doc's list of unscoped exceptions. The caller must confirm
-    /// `flow` belongs to its own `ws` (e.g. via a preceding [`Self::get`])
-    /// before calling this.
-    pub async fn get_version(&self, flow: Uuid, version: i32) -> Result<FlowVersionRow> {
+    /// SCOPED by `ws`, same join and reasoning as [`Self::list_versions`]. A
+    /// foreign `flow`/`version` pair and a pair that does not exist at all
+    /// both answer `NotFound`, indistinguishably.
+    pub async fn get_version(&self, ws: Uuid, flow: Uuid, version: i32) -> Result<FlowVersionRow> {
         let row: Option<FlowVersionRow> = sqlx::query_as(
-            "SELECT id, flow_id, version, snapshot, note, created_by, created_at \
-             FROM workflow.flow_versions WHERE flow_id = $1 AND version = $2",
+            "SELECT v.id, v.flow_id, v.version, v.snapshot, v.note, v.created_by, v.created_at \
+             FROM workflow.flow_versions v \
+             JOIN workflow.flows f ON f.id = v.flow_id \
+             WHERE v.flow_id = $1 AND v.version = $2 AND f.workspace_id = $3",
         )
         .bind(flow)
         .bind(version)
+        .bind(ws)
         .fetch_optional(&self.db.pool)
         .await
         .map_err(db_err)?;

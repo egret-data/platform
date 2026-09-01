@@ -247,3 +247,58 @@ async fn a_subflow_naming_a_flow_in_the_callers_own_workspace_publishes_and_free
         "snapshot must carry the resolved subflow id: {s}"
     );
 }
+
+// -- Fix round 2, Finding 1: `namespace: "a/b"`, `flowId: "c"` used to encode
+// to "a/b/c" and decode, via split_once('/'), as ("a", "b/c") -- a different
+// pair than declared. `spec::validate` now refuses this at publish's step 3,
+// before the colliding string is ever built.
+
+/// The collision itself, end to end through `publish`: a namespace carrying
+/// its own `/` must not publish.
+#[tokio::test]
+async fn a_subflow_namespace_containing_a_slash_cannot_be_published() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    let f = common::draft(
+        &repo, ws, user,
+        "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: core.subflow\n    namespace: \"a/b\"\n    flowId: c\n",
+    )
+    .await;
+
+    let err = egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, f.id, "")
+        .await
+        .expect_err("a subflow namespace containing '/' must not publish");
+    assert!(matches!(err, egret_core::Error::InvalidInput(_)), "{err:?}");
+}
+
+/// Companion, through `publish` too: a legitimate, dotted namespace must
+/// still publish -- the fix must not reject every subflow with a `.` in it.
+#[tokio::test]
+async fn a_subflow_with_a_legitimate_dotted_namespace_still_publishes() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let target_id = Uuid::new_v4();
+
+    let mut refs = FakeRefs::default();
+    refs.objects.insert(
+        (RefKind::Subflow, "company.analytics/nightly_rollup".into()),
+        (target_id, ws),
+    );
+
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    let f = common::draft(
+        &repo, ws, user,
+        "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: core.subflow\n    namespace: company.analytics\n    flowId: nightly_rollup\n",
+    )
+    .await;
+
+    let v = egret_workflow::publish(&repo, &refs, ws, user, f.id, "")
+        .await
+        .expect("a legitimate dotted namespace must publish");
+    let s = v.snapshot.to_string();
+    assert!(
+        s.contains(&target_id.to_string()),
+        "snapshot must carry the resolved id: {s}"
+    );
+}

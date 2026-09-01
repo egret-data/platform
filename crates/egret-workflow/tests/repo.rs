@@ -43,8 +43,81 @@ async fn a_draft_round_trips_and_versions_are_ordered() {
         "versions must increment per flow, not globally"
     );
 
-    let versions = repo.list_versions(created.id).await.expect("list");
+    let versions = repo.list_versions(ws, created.id).await.expect("list");
     assert_eq!(versions[0].version, 2, "newest first");
+}
+
+/// Task 6 fix round 2, Finding 2: `list_versions`/`get_version` used to be
+/// unscoped reads -- a foreign flow id handed back that flow's version
+/// snapshots and notes with no error, the exact shape migration 0128 is this
+/// programme's recorded case of. Both now take `ws` and join
+/// `workflow.flows` to check it, so a foreign flow id and a never-existed one
+/// must be indistinguishable: an empty `Vec` from `list_versions`, `NotFound`
+/// from `get_version`.
+#[tokio::test]
+async fn list_versions_and_get_version_are_scoped_to_the_callers_workspace() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let (other_ws, other_user) = common::seed_workspace(&db).await;
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+
+    let f = repo
+        .create(
+            ws,
+            user,
+            &egret_workflow::CreateFlowInput {
+                namespace: "a.b".into(),
+                flow_id: "scoped".into(),
+                source: "id: scoped\n".into(),
+                plan: serde_json::json!({}),
+                folder_id: None,
+            },
+        )
+        .await
+        .expect("create");
+    repo.insert_version(f.id, user, &serde_json::json!({"v": 1}), "first")
+        .await
+        .expect("insert_version");
+
+    // The owning workspace sees it, same as before.
+    let owned = repo.list_versions(ws, f.id).await.expect("list_versions");
+    assert_eq!(owned.len(), 1, "the owning workspace must see its own version");
+    let owned_v1 = repo.get_version(ws, f.id, 1).await.expect("get_version");
+    assert_eq!(owned_v1.version, 1);
+
+    // A DIFFERENT, real workspace asking about the SAME flow id sees nothing --
+    // not an error naming the flow, an empty answer, indistinguishable from a
+    // flow id nobody has ever created.
+    let foreign = repo
+        .list_versions(other_ws, f.id)
+        .await
+        .expect("list_versions must not error, just answer empty");
+    assert!(
+        foreign.is_empty(),
+        "a foreign workspace must not see another workspace's versions: {foreign:?}"
+    );
+    let foreign_err = repo
+        .get_version(other_ws, f.id, 1)
+        .await
+        .expect_err("a foreign workspace must not be able to read a specific version either");
+    assert!(matches!(foreign_err, egret_core::Error::NotFound(_)));
+
+    // A never-existed flow id, from either workspace, answers exactly the same
+    // way as the foreign one above -- the indistinguishability this fix exists
+    // to guarantee.
+    let nope = Uuid::new_v4();
+    let never_existed = repo
+        .list_versions(other_ws, nope)
+        .await
+        .expect("list_versions must not error on an unknown id either");
+    assert!(never_existed.is_empty());
+    let never_existed_err = repo
+        .get_version(other_ws, nope, 1)
+        .await
+        .expect_err("must fail the same way as the foreign flow above");
+    assert!(matches!(never_existed_err, egret_core::Error::NotFound(_)));
+
+    let _ = other_user; // seeded only to get a distinct, real workspace id
 }
 
 /// The scoping obligation every port in this repo carries: answer with the

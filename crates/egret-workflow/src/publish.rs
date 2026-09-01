@@ -46,13 +46,13 @@
 //! -- or make live -- a row this function never confirmed belongs to `ws`.
 //! What makes both calls here safe is exactly step 1: `flow` only reaches
 //! either of them after `repo.get(ws, flow)` has already returned `Ok`, which
-//! is only possible when `flow` names a row in `ws`. This function calls
-//! neither `FlowRepo::list_versions` nor `FlowRepo::get_version` (both also
-//! unscoped, and — unlike `insert_version`/`set_live` — reads, so a caller of
-//! either that skips its own `ws` check would hand back another workspace's
-//! snapshots and notes with no error) -- that scoping obligation is
-//! unclaimed by this task; a future caller of either must repeat step 1's
-//! pattern for itself.
+//! is only possible when `flow` names a row in `ws`.
+//!
+//! `FlowRepo::list_versions` and `FlowRepo::get_version` are not called by
+//! this function at all; as of Task 6 fix round 2, that no longer leaves an
+//! obligation for a future caller to repeat step 1's pattern for -- both now
+//! take `ws` and check it themselves (see their own doc comments on
+//! `FlowRepo`).
 
 use std::future::Future;
 use std::pin::Pin;
