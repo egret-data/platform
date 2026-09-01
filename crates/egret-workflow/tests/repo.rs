@@ -81,7 +81,11 @@ async fn list_versions_and_get_version_are_scoped_to_the_callers_workspace() {
 
     // The owning workspace sees it, same as before.
     let owned = repo.list_versions(ws, f.id).await.expect("list_versions");
-    assert_eq!(owned.len(), 1, "the owning workspace must see its own version");
+    assert_eq!(
+        owned.len(),
+        1,
+        "the owning workspace must see its own version"
+    );
     let owned_v1 = repo.get_version(ws, f.id, 1).await.expect("get_version");
     assert_eq!(owned_v1.version, 1);
 

@@ -1591,7 +1591,9 @@ mod tests {
         .unwrap();
         let r = validate(&f);
         assert!(
-            r.errors.iter().any(|e| e.code == "subflow_namespace_invalid"),
+            r.errors
+                .iter()
+                .any(|e| e.code == "subflow_namespace_invalid"),
             "{r:?}"
         );
     }
