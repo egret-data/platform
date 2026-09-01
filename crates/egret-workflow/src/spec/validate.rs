@@ -665,6 +665,17 @@ fn walk_task(
         // ones whose namespace/flow_id happen to be present and match --
         // `self_subflow` is now a nested check, only reachable once both
         // are known to be `Some`.
+        //
+        // Task 6 fix round 2, Finding 1 (Important): presence alone was not
+        // enough. `publish::subflow_ref_name` encodes this pair into one
+        // string as `"{namespace}/{flowId}"`, and a `namespace` (or
+        // `flowId`) containing its OWN `/` decodes back into a DIFFERENT
+        // pair than the author wrote -- `namespace: "a/b", flowId: "c"`
+        // encoded to `"a/b/c"` and decoded, via `split_once('/')`, as
+        // `("a", "b/c")`. The character checks below close that: they
+        // reject anything that could never have been created as a real
+        // flow's `namespace`/`id` in the first place, `/` included, so the
+        // encoding's separator can never collide with a value it carries.
         TaskKind::Subflow(s) => {
             match &s.namespace {
                 None => report.errors.push(Finding {
@@ -672,6 +683,10 @@ fn walk_task(
                     message: format!("task '{}': namespace is required (explicit null)", task.id),
                     path: format!("{path}.namespace"),
                 }),
+                // Same grammar `Flow::namespace` itself is checked against --
+                // `validate_namespace`, above -- via the shared
+                // `is_valid_namespace`, so a subflow can never name a
+                // namespace no real flow could ever have.
                 Some(ns) if !is_valid_namespace(ns) => report.errors.push(Finding {
                     code: "subflow_namespace_invalid",
                     message: format!(
@@ -691,6 +706,8 @@ fn walk_task(
                     message: format!("task '{}': flowId is required (explicit null)", task.id),
                     path: format!("{path}.flowId"),
                 }),
+                // Kestra's own flow `id` pattern -- see `is_valid_flow_id`'s
+                // doc comment for the exact `AbstractFlow.java` citation.
                 Some(fid) if !is_valid_flow_id(fid) => report.errors.push(Finding {
                     code: "subflow_flow_id_invalid",
                     message: format!(
