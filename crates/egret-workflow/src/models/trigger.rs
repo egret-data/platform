@@ -608,4 +608,42 @@ mod tests {
         assert!(!t.fail_on_trigger_error);
         assert!(!t.allow_concurrent);
     }
+
+    // -- Fix round 2: an explicit `null` must parse exactly like an absent
+    // key (`AbstractTrigger.java:60`'s `disabled` is a primitive `boolean`
+    // with `@Builder.Default`; Jackson's default
+    // `FAIL_ON_NULL_FOR_PRIMITIVES = false` coerces an explicit `null` there
+    // to the type default rather than erroring) -- while a WRONG-TYPED,
+    // non-null value must still be rejected. Round 1 fixed the wrong-type
+    // case and broke the null case as a side effect; both need their own
+    // test or one regresses the other again.
+
+    #[test]
+    fn explicit_null_description_parses_like_an_absent_one() {
+        let yaml = "id: t\ntype: core.schedule\ncron: \"@daily\"\ndescription: null\n";
+        let t: Trigger = serde_norway::from_str(yaml).unwrap();
+        assert!(t.description.is_none());
+    }
+
+    #[test]
+    fn explicit_null_disabled_parses_like_an_absent_one() {
+        let yaml = "id: t\ntype: core.schedule\ncron: \"@daily\"\ndisabled: null\n";
+        let t: Trigger = serde_norway::from_str(yaml).unwrap();
+        assert!(!t.disabled);
+    }
+
+    /// Companion to the two tests above: `null` must parse, but a
+    /// wrong-typed non-null value must still be rejected -- the exact
+    /// distinction this round exists to draw.
+    #[test]
+    fn wrong_typed_non_null_disabled_is_still_rejected() {
+        assert!(serde_norway::from_str::<Trigger>(
+            "id: t\ntype: core.schedule\ncron: \"@daily\"\ndisabled: \"true\"\n"
+        )
+        .is_err());
+        assert!(serde_norway::from_str::<Trigger>(
+            "id: t\ntype: core.schedule\ncron: \"@daily\"\ndisabled: 1\n"
+        )
+        .is_err());
+    }
 }

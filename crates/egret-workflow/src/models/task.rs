@@ -973,4 +973,42 @@ inputs:
         let t: Task = serde_norway::from_str(yaml).unwrap();
         assert!(!t.disabled);
     }
+
+    // -- Fix round 2: an explicit `null` must parse exactly like an absent
+    // key (Kestra's own Jackson accepts `null` for these fields --
+    // `Task.java:48`'s `description` is a plain nullable reference,
+    // `Task.java:63`'s `disabled` is a boxed `Boolean` with
+    // `@Builder.Default`) -- while a WRONG-TYPED, non-null value must still
+    // be rejected. Round 1 fixed the wrong-type case and broke the null
+    // case as a side effect; both need their own test or one regresses the
+    // other again.
+
+    #[test]
+    fn explicit_null_description_parses_like_an_absent_one() {
+        let yaml = "id: t\ntype: egret.sql\nsql: SELECT 1\ndescription: null\n";
+        let t: Task = serde_norway::from_str(yaml).unwrap();
+        assert!(t.description.is_none());
+    }
+
+    #[test]
+    fn explicit_null_disabled_parses_like_an_absent_one() {
+        let yaml = "id: t\ntype: egret.sql\nsql: SELECT 1\ndisabled: null\n";
+        let t: Task = serde_norway::from_str(yaml).unwrap();
+        assert!(!t.disabled);
+    }
+
+    /// Companion to the two tests above: `null` must parse, but a
+    /// wrong-typed non-null value must still be rejected -- the exact
+    /// distinction this round exists to draw.
+    #[test]
+    fn wrong_typed_non_null_disabled_is_still_rejected() {
+        assert!(serde_norway::from_str::<Task>(
+            "id: t\ntype: egret.sql\nsql: SELECT 1\ndisabled: \"true\"\n"
+        )
+        .is_err());
+        assert!(serde_norway::from_str::<Task>(
+            "id: t\ntype: egret.sql\nsql: SELECT 1\ndisabled: 1\n"
+        )
+        .is_err());
+    }
 }
