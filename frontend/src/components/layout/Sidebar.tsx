@@ -4,7 +4,7 @@ import {
   Activity, Boxes, ChevronDown, ChevronRight, Compass,
   FolderKanban, Gauge, HardDrive, KeyRound, ListChecks, type LucideIcon,
   PanelLeftClose, PanelLeftOpen, Plug, ScrollText, Server, Settings, Share2, ShieldCheck,
-  Tags, UserCog, Users, UsersRound, Waypoints, Workflow,
+  Tags, UserCog, Users, UsersRound,
 } from "lucide-react";
 import {
   Tooltip,
@@ -42,16 +42,6 @@ const EXPLORE_GROUPS: NavGroup[] = [
       { label: "Clients", icon: KeyRound, to: "data-api/clients", feature: "data_api" },
       { label: "Activity", icon: Activity, to: "data-api/activity", feature: "data_api" },
     ],
-  },
-  {
-    heading: "Automate",
-    // Alerts moved to Explore (it is an entitlement-gated module now, listed in
-    // EXPLORE_MODULES); Workflows is what remains of the original pair.
-    items: [{ label: "Workflows", icon: Workflow }],
-  },
-  {
-    heading: "Data Engineering",
-    items: [{ label: "Pipelines", icon: Waypoints }],
   },
   {
     heading: "Manage",

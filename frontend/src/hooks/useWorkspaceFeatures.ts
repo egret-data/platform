@@ -13,7 +13,7 @@ import { EXPLORE_MODULES } from "@/lib/exploreModules";
  * Data Engineering item gated the same way (Sidebar.tsx's `Data API` entry) but
  * isn't a landing-page candidate, so it isn't part of `EXPLORE_MODULES` itself.
  */
-export const ALL_FEATURE_KEYS: string[] = [...EXPLORE_MODULES.map((m) => m.key), "data_api"];
+export const ALL_FEATURE_KEYS: string[] = [...EXPLORE_MODULES.map((m) => m.key), "data_api", "workflows"];
 
 /**
  * The module keys the *current route's* workspace has switched on — the

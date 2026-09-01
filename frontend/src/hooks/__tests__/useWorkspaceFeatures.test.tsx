@@ -40,6 +40,7 @@ describe("useWorkspaceFeatures", () => {
       "notebooks",
       "alerts",
       "data_api",
+      "workflows",
     ]);
   });
 
