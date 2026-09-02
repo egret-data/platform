@@ -1,0 +1,1908 @@
+// kestra: core/src/main/java/io/kestra/core/runners/pebble/AbstractDate.java
+// java: java.time.format.DateTimeFormatterBuilder#parsePattern
+// java: java.time.ZonedDateTime, java.time.ZoneId, java.time.temporal.WeekFields
+
+//! W2 Task 5 — Java's `DateTimeFormatter` pattern language, and the
+//! `ZonedDateTime` it formats.
+//!
+//! `{{ d | date("yyyy-MM-dd'T'HH:mm:ss") }}` is a
+//! `java.time.format.DateTimeFormatter` pattern. It is **not** strftime and
+//! not chrono's syntax: pattern letters repeat to select a width or a text
+//! style (`M`, `MM`, `MMM`, `MMMM`, `MMMMM` are five different things), single
+//! quotes fence literal text, `''` is one literal quote, and `[`/`]` open an
+//! optional section. No Rust crate provides it, so this module does.
+//!
+//! # Why this formats directly instead of emitting a chrono format string
+//!
+//! The task brief describes this module as translating the pattern *to
+//! chrono's*. It does not, and the reason is measurable rather than
+//! stylistic: chrono's `strftime` has no spelling for `k` (clock-hour 1-24),
+//! `K` (hour 0-11), `MMMMM` (narrow month), `X` (offset with `Z` for zero),
+//! `ZZZZ`/`O` (localized GMT offset), `VV` (zone id), `G` (era), `Q`/`q`
+//! (quarter), `W`/`F` (week-of-month), `e`/`c` (localized day-of-week), `Y`
+//! (week-based year), `A`/`N` (milli/nano-of-day), `g` (modified julian day),
+//! or `u` versus `y` (proleptic year versus year-of-era). A translation would
+//! have to fall back to formatting those itself for two thirds of the
+//! alphabet, so this walks the parsed pattern once and writes the output.
+//! [`Pattern::parse`] is still a translation in the sense that matters: the
+//! pattern is parsed **once, into a checked structure**, and Java's own
+//! `IllegalArgumentException` messages are reproduced for the counts it
+//! rejects.
+//!
+//! # What is deliberately NOT ported: text that lives in a locale database
+//!
+//! Two pattern letters and two of the four `FormatStyle`s need CLDR's zone
+//! and day-period text, which is a data set egret does not carry and cannot
+//! approximate without answering *plausibly wrong*:
+//!
+//! - **`z`/`zz`/`zzz`/`zzzz`** — the zone's display name. Measured through the
+//!   oracle: `Asia/Tokyo` is `JST`, `Asia/Ho_Chi_Minh` is `GMT+07:00`,
+//!   `Australia/Eucla` is `GMT+08:45`, `Europe/Moscow` is `GMT+03:00`. tzdb's
+//!   own abbreviations (which `chrono-tz` exposes) agree for the first and the
+//!   third but say `+07` for the second and `MSK` for the fourth. A rule that
+//!   is right for some zones and silently wrong for others is worse here than
+//!   a refusal, so [`Pattern::format`] refuses.
+//! - **`B`** — the day period as text (`in the morning`). Same reason.
+//! - **`full` and `long`** — their CLDR patterns end in `zzzz` and `z`, so
+//!   they inherit the refusal.
+//!
+//! Everything else in the alphabet is arithmetic or a fixed English word and
+//! is ported. See [`Locale`] for the one other locale-shaped limit.
+
+use std::fmt::Write as _;
+use std::str::FromStr;
+
+use chrono::{
+    DateTime, Datelike, Days, FixedOffset, LocalResult, Months, NaiveDate, NaiveDateTime,
+    NaiveTime, Offset, TimeZone, Timelike, Utc,
+};
+use chrono_tz::Tz;
+
+// ---------------------------------------------------------------------------
+// Locale
+// ---------------------------------------------------------------------------
+
+/// The locale `AbstractDate.format` resolves — `LocaleUtils.toLocale(arg)`, or
+/// the `EvaluationContext`'s own locale when no `locale` argument is given.
+///
+/// **egret is English-only, and refuses rather than approximating.** Kestra's
+/// month names, day names, era names and quarter names come from the JVM's
+/// CLDR data for whatever locale is in force. egret carries the English names
+/// and nothing else, so a `locale` argument naming another language is an
+/// explicit refusal: answering `January` for `locale='fr'` would be a silently
+/// wrong string in a renderer whose whole purpose is byte fidelity.
+///
+/// **The default is English too, and that is a second divergence.** Kestra's
+/// default is `Locale.getDefault()` — on the machine that generates
+/// `oracle/golden.json` that is `en_VN`, measured, and it is pinned in
+/// `oracle/README.md`. Every corpus entry whose output depends on the locale
+/// passes `locale='en'` explicitly for exactly that reason.
+///
+/// **Only `en` and `en_US` are accepted, not every English tag**, because
+/// `WeekFields.of(locale)` is resolved from the locale's *country*: `en` and
+/// `en_US` are Sunday-first with one minimal day, `en_GB` is Monday-first with
+/// four, and `en_VN` is Monday-first with one. Measured directly against the
+/// JDK. Accepting `en_GB` would answer `w`, `W`, `Y`, `e` and `c` wrongly
+/// while looking supported.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Locale;
+
+impl Locale {
+    /// `LocaleUtils.toLocale(spec)` followed by egret's own English-only gate.
+    ///
+    /// The first error is Kestra's own wording (commons-lang3 throws
+    /// `IllegalArgumentException: Invalid locale format: <spec>` for a string
+    /// that is not a locale at all); the second is egret's, and says so.
+    pub(super) fn resolve(spec: &str) -> Result<Self, String> {
+        if !is_locale_shaped(spec) {
+            return Err(format!("Invalid locale format: {spec}"));
+        }
+        if spec == "en" || spec == "en_US" {
+            return Ok(Locale);
+        }
+        Err(format!(
+            "the 'date' filters support locale 'en' and 'en_US' only; '{spec}' would need a \
+             locale database egret does not carry"
+        ))
+    }
+}
+
+/// `LocaleUtils.toLocale`'s shape check, narrowed to the forms a Kestra
+/// expression can plausibly pass: `ll`, `ll_CC`, `ll_CC_variant`.
+fn is_locale_shaped(spec: &str) -> bool {
+    let mut parts = spec.split('_');
+    let Some(language) = parts.next() else {
+        return false;
+    };
+    if !(language.len() == 2 || language.len() == 3)
+        || !language.chars().all(|c| c.is_ascii_lowercase())
+    {
+        return false;
+    }
+    match parts.next() {
+        None => true,
+        Some(country) => {
+            country.len() == 2 && country.chars().all(|c| c.is_ascii_uppercase())
+                || country.len() == 3 && country.chars().all(|c| c.is_ascii_digit())
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Zones
+// ---------------------------------------------------------------------------
+
+/// `ZoneId.of(id)` — either an IANA region or a fixed offset.
+///
+/// The two are kept apart because they answer `VV` (the zone id) differently
+/// and because only a region has transitions: `ZonedDateTime.plus` on a
+/// date-based unit re-resolves the local time against the region's rules, and
+/// that is what makes `+ 1 DAY` across a DST boundary keep its wall clock
+/// while `+ 24 HOURS` does not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum Zone {
+    /// An IANA region id, e.g. `Asia/Tokyo`.
+    Region(Tz),
+    /// A `ZoneOffset` (`Z`, `+05:30`) or one of Java's prefixed-offset
+    /// regions (`GMT+7`, whose `getId()` is `GMT+07:00`). Both have constant
+    /// rules; the string is the id `VV` prints.
+    Fixed(FixedOffset, String),
+}
+
+impl Zone {
+    /// `ZoneId.of(zone)`, or `ZoneId.systemDefault()` when Kestra was given no
+    /// `timeZone` argument.
+    ///
+    /// **egret's default is UTC where Kestra's is the host's zone.** Kestra
+    /// reads `ZoneId.systemDefault()`, which makes every unqualified `date`
+    /// call answer differently on a developer's laptop and on a cluster node —
+    /// `oracle/README.md` records that as a standing corpus rule (every date
+    /// entry passes `timeZone` explicitly) and it is a worse default for a
+    /// server that renders other people's workflows. Deliberate, and the only
+    /// divergence in this function.
+    pub(super) fn resolve(id: Option<&str>) -> Result<Self, String> {
+        let Some(id) = id else {
+            return Ok(Zone::Fixed(
+                FixedOffset::east_opt(0).expect("0 is a valid offset"),
+                "Z".to_string(),
+            ));
+        };
+        if id == "Z" {
+            return Ok(Zone::Fixed(
+                FixedOffset::east_opt(0).expect("0 is a valid offset"),
+                "Z".to_string(),
+            ));
+        }
+        if id.starts_with('+') || id.starts_with('-') {
+            let offset = parse_offset_id(id).ok_or_else(|| invalid_offset(id))?;
+            return Ok(Zone::Fixed(offset, offset_id(offset)));
+        }
+        for prefix in ["UTC", "GMT", "UT"] {
+            if let Some(rest) = id.strip_prefix(prefix) {
+                if rest.is_empty() {
+                    // `ZoneId.of("UTC")`/`("GMT")` are regions with those ids
+                    // and constant rules; `UT` is the same shape but has no
+                    // tzdb entry, so all three are built here rather than
+                    // looked up.
+                    return Ok(Zone::Fixed(
+                        FixedOffset::east_opt(0).expect("0 is a valid offset"),
+                        prefix.to_string(),
+                    ));
+                }
+                if rest.starts_with('+') || rest.starts_with('-') {
+                    let offset = parse_offset_id(rest).ok_or_else(|| invalid_offset(id))?;
+                    let suffix = offset_id(offset);
+                    let name = if suffix == "Z" {
+                        prefix.to_string()
+                    } else {
+                        format!("{prefix}{suffix}")
+                    };
+                    return Ok(Zone::Fixed(offset, name));
+                }
+            }
+        }
+        // `Tz`'s parser is not case-sensitive about every id, and Java's is:
+        // `ZoneId.of("utc")` throws. Requiring the canonical spelling back
+        // keeps the two agreeing about what is a zone.
+        match Tz::from_str(id) {
+            Ok(tz) if tz.name() == id => Ok(Zone::Region(tz)),
+            _ => Err(format!("Unknown time-zone ID: {id}")),
+        }
+    }
+
+    /// What `VV` prints: `ZoneId.getId()`.
+    pub(super) fn id(&self) -> String {
+        match self {
+            Zone::Region(tz) => tz.name().to_string(),
+            Zone::Fixed(_, id) => id.clone(),
+        }
+    }
+
+    fn offset_at(&self, instant: DateTime<Utc>) -> FixedOffset {
+        match self {
+            Zone::Region(tz) => tz.offset_from_utc_datetime(&instant.naive_utc()).fix(),
+            Zone::Fixed(offset, _) => *offset,
+        }
+    }
+
+    /// `ZonedDateTime.ofLocal(local, zone, null)` — resolve a wall clock
+    /// against this zone's rules.
+    ///
+    /// Java's three cases, reproduced: a normal local time keeps its offset,
+    /// an **overlap** (the hour repeated when a zone falls back) takes the
+    /// *earlier* offset, and a **gap** (the hour skipped when a zone springs
+    /// forward) moves the local time forward by the gap's own duration and
+    /// takes the offset after it — so 02:30 on a spring-forward day becomes
+    /// 03:30, not 03:00.
+    fn resolve_local(&self, local: NaiveDateTime) -> (NaiveDateTime, FixedOffset) {
+        match self {
+            Zone::Fixed(offset, _) => (local, *offset),
+            Zone::Region(tz) => match tz.from_local_datetime(&local) {
+                // `Ambiguous` is Java's overlap, and chrono's first value is
+                // the earlier offset -- which is the one Java keeps.
+                LocalResult::Single(dt) => (local, dt.offset().fix()),
+                LocalResult::Ambiguous(earlier, _) => (local, earlier.offset().fix()),
+                LocalResult::None => {
+                    // A gap. `chrono-tz` exposes no transition object, so the
+                    // gap's duration is read off the offsets a day either
+                    // side of it -- exact for every tzdb transition, which
+                    // are never less than a day apart.
+                    let before = self.offset_at(Utc.from_utc_datetime(&(local - Days::new(1))));
+                    let after = self.offset_at(Utc.from_utc_datetime(&(local + Days::new(1))));
+                    let gap = i64::from(after.local_minus_utc() - before.local_minus_utc());
+                    let shifted = local + chrono::TimeDelta::seconds(gap);
+                    (shifted, after)
+                }
+            },
+        }
+    }
+}
+
+fn invalid_offset(id: &str) -> String {
+    format!("Invalid ID for ZoneOffset, invalid format: {id}")
+}
+
+/// `ZoneOffset.of(id)` for the spellings Java accepts: `+HH`, `+HHMM`,
+/// `+HH:MM`, `+HHMMSS`, `+HH:MM:SS`.
+fn parse_offset_id(id: &str) -> Option<FixedOffset> {
+    let (sign, rest) = match id.as_bytes().first()? {
+        b'+' => (1i32, &id[1..]),
+        b'-' => (-1i32, &id[1..]),
+        _ => return None,
+    };
+    let digits: Vec<u32> = rest
+        .chars()
+        .filter(|c| *c != ':')
+        .map(|c| c.to_digit(10))
+        .collect::<Option<Vec<u32>>>()?;
+    let colons = rest.matches(':').count();
+    let (h, m, s) = match (digits.len(), colons) {
+        // `ZoneOffset.of` accepts `+h` as well as `+hh`, which is what makes
+        // `ZoneId.of("GMT+7")` a zone.
+        (1, 0) => (digits[0], 0, 0),
+        (2, 0) => (digits[0] * 10 + digits[1], 0, 0),
+        (4, 0) | (4, 1) => (digits[0] * 10 + digits[1], digits[2] * 10 + digits[3], 0),
+        (6, 0) | (6, 2) => (
+            digits[0] * 10 + digits[1],
+            digits[2] * 10 + digits[3],
+            digits[4] * 10 + digits[5],
+        ),
+        _ => return None,
+    };
+    if h > 18 || m > 59 || s > 59 {
+        return None;
+    }
+    let seconds = sign * (h * 3600 + m * 60 + s) as i32;
+    FixedOffset::east_opt(seconds)
+}
+
+/// `ZoneOffset.getId()`: `Z` for zero, else `+HH:MM[:SS]`.
+fn offset_id(offset: FixedOffset) -> String {
+    let total = offset.local_minus_utc();
+    if total == 0 {
+        return "Z".to_string();
+    }
+    let sign = if total < 0 { '-' } else { '+' };
+    let abs = total.abs();
+    let (h, m, s) = (abs / 3600, (abs % 3600) / 60, abs % 60);
+    if s == 0 {
+        format!("{sign}{h:02}:{m:02}")
+    } else {
+        format!("{sign}{h:02}:{m:02}:{s:02}")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The value being formatted
+// ---------------------------------------------------------------------------
+
+/// A `java.time.ZonedDateTime`: a wall clock, the offset in force, and the
+/// zone that produced it.
+///
+/// Kept as the local time rather than as an instant because that is what Java
+/// carries and what its date-based arithmetic operates on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Zdt {
+    local: NaiveDateTime,
+    offset: FixedOffset,
+    zone: Zone,
+}
+
+impl Zdt {
+    pub(super) fn new(local: NaiveDateTime, zone: Zone) -> Self {
+        let (local, offset) = zone.resolve_local(local);
+        Zdt {
+            local,
+            offset,
+            zone,
+        }
+    }
+
+    fn from_instant(instant: DateTime<Utc>, zone: Zone) -> Self {
+        let offset = zone.offset_at(instant);
+        Zdt {
+            local: instant.naive_utc()
+                + chrono::TimeDelta::seconds(i64::from(offset.local_minus_utc())),
+            offset,
+            zone,
+        }
+    }
+
+    /// `Instant.ofEpochSecond(seconds, nanos).atZone(zone)`.
+    pub(super) fn from_epoch(seconds: i64, nanos: u32, zone: Zone) -> Option<Self> {
+        let instant = DateTime::from_timestamp(seconds, nanos)?;
+        Some(Zdt::from_instant(instant, zone))
+    }
+
+    fn instant(&self) -> DateTime<Utc> {
+        Utc.from_utc_datetime(
+            &(self.local - chrono::TimeDelta::seconds(i64::from(self.offset.local_minus_utc()))),
+        )
+    }
+
+    /// `DateTimeFormatter.withZone(zone).format(this)` — the same instant seen
+    /// from another zone, which is what every `date`/`dateAdd` render does
+    /// just before writing.
+    pub(super) fn with_zone(&self, zone: &Zone) -> Self {
+        Zdt::from_instant(self.instant(), zone.clone())
+    }
+
+    /// `ZonedDateTime.toEpochSecond()`.
+    pub(super) fn epoch_second(&self) -> i64 {
+        self.instant().timestamp()
+    }
+
+    /// `ZonedDateTime.getNano()`.
+    pub(super) fn nano(&self) -> u32 {
+        self.local.and_utc().timestamp_subsec_nanos()
+    }
+
+    /// `ZonedDateTime.plus(amount, unit)`.
+    ///
+    /// **The split between the two arms is Java's `unit.isDateBased()`, and it
+    /// changes answers across a DST boundary.** A date-based unit is added to
+    /// the *local* date-time and the result re-resolved against the zone, so
+    /// `+ 1 DAYS` keeps the wall clock; a time-based unit is added to the
+    /// *instant*, so `+ 24 HOURS` does not. Measured through the oracle on
+    /// `America/New_York` either side of both 2024 transitions.
+    pub(super) fn plus(&self, amount: i64, unit: ChronoUnit) -> Result<Self, String> {
+        if unit.is_date_based() {
+            let local = unit.add_to_local(self.local, amount)?;
+            Ok(Zdt::new(local, self.zone.clone()))
+        } else {
+            let delta = unit.to_time_delta(amount)?;
+            let instant = self
+                .instant()
+                .checked_add_signed(delta)
+                .ok_or_else(|| "long overflow".to_string())?;
+            Ok(Zdt::from_instant(instant, self.zone.clone()))
+        }
+    }
+}
+
+/// `java.time.temporal.ChronoUnit`, the enum `dateAdd`'s `unit` argument
+/// names. `ChronoUnit.valueOf` is exact and case-sensitive, so `'days'` is an
+/// error where `'DAYS'` is not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ChronoUnit {
+    Nanos,
+    Micros,
+    Millis,
+    Seconds,
+    Minutes,
+    Hours,
+    HalfDays,
+    Days,
+    Weeks,
+    Months,
+    Years,
+    Decades,
+    Centuries,
+    Millennia,
+    Eras,
+    Forever,
+}
+
+impl ChronoUnit {
+    /// `ChronoUnit.valueOf(name)`, reproducing `java.lang.IllegalArgumentException`'s
+    /// wording for a name that is not one of the sixteen.
+    pub(super) fn resolve(name: &str) -> Result<Self, String> {
+        Ok(match name {
+            "NANOS" => ChronoUnit::Nanos,
+            "MICROS" => ChronoUnit::Micros,
+            "MILLIS" => ChronoUnit::Millis,
+            "SECONDS" => ChronoUnit::Seconds,
+            "MINUTES" => ChronoUnit::Minutes,
+            "HOURS" => ChronoUnit::Hours,
+            "HALF_DAYS" => ChronoUnit::HalfDays,
+            "DAYS" => ChronoUnit::Days,
+            "WEEKS" => ChronoUnit::Weeks,
+            "MONTHS" => ChronoUnit::Months,
+            "YEARS" => ChronoUnit::Years,
+            "DECADES" => ChronoUnit::Decades,
+            "CENTURIES" => ChronoUnit::Centuries,
+            "MILLENNIA" => ChronoUnit::Millennia,
+            "ERAS" => ChronoUnit::Eras,
+            "FOREVER" => ChronoUnit::Forever,
+            other => {
+                return Err(format!(
+                    "No enum constant java.time.temporal.ChronoUnit.{other}"
+                ))
+            }
+        })
+    }
+
+    fn is_date_based(self) -> bool {
+        matches!(
+            self,
+            ChronoUnit::Days
+                | ChronoUnit::Weeks
+                | ChronoUnit::Months
+                | ChronoUnit::Years
+                | ChronoUnit::Decades
+                | ChronoUnit::Centuries
+                | ChronoUnit::Millennia
+                | ChronoUnit::Eras
+                | ChronoUnit::Forever
+        )
+    }
+
+    fn to_time_delta(self, amount: i64) -> Result<chrono::TimeDelta, String> {
+        let nanos_each: i64 = match self {
+            ChronoUnit::Nanos => 1,
+            ChronoUnit::Micros => 1_000,
+            ChronoUnit::Millis => 1_000_000,
+            ChronoUnit::Seconds => 1_000_000_000,
+            ChronoUnit::Minutes => 60 * 1_000_000_000,
+            ChronoUnit::Hours => 3_600 * 1_000_000_000,
+            ChronoUnit::HalfDays => 43_200 * 1_000_000_000,
+            _ => unreachable!("only time-based units reach to_time_delta"),
+        };
+        let nanos = amount
+            .checked_mul(nanos_each)
+            .ok_or_else(|| "long overflow".to_string())?;
+        Ok(chrono::TimeDelta::nanoseconds(nanos))
+    }
+
+    fn add_to_local(self, local: NaiveDateTime, amount: i64) -> Result<NaiveDateTime, String> {
+        let overflow = || "long overflow".to_string();
+        let out_of_range = |years: i64| {
+            format!("Invalid value for Year (valid values -999999999 - 999999999): {years}")
+        };
+        match self {
+            ChronoUnit::Forever => Err("Unsupported unit: Forever".to_string()),
+            ChronoUnit::Eras => {
+                // `LocalDateTime.with(ERA, era + amount)`: ISO has exactly two
+                // eras, so anything but a no-op is out of range -- which is
+                // the error Kestra returns, verbatim.
+                let era = i64::from(local.year() > 0);
+                let target = era.checked_add(amount).ok_or_else(overflow)?;
+                if target == era {
+                    Ok(local)
+                } else {
+                    Err(format!(
+                        "Invalid value for Era (valid values 0 - 1): {target}"
+                    ))
+                }
+            }
+            ChronoUnit::Days => plus_days(local, amount).ok_or_else(overflow),
+            ChronoUnit::Weeks => {
+                plus_days(local, amount.checked_mul(7).ok_or_else(overflow)?).ok_or_else(overflow)
+            }
+            ChronoUnit::Months => plus_months(local, amount).ok_or_else(overflow),
+            ChronoUnit::Years
+            | ChronoUnit::Decades
+            | ChronoUnit::Centuries
+            | ChronoUnit::Millennia => {
+                let scale: i64 = match self {
+                    ChronoUnit::Years => 1,
+                    ChronoUnit::Decades => 10,
+                    ChronoUnit::Centuries => 100,
+                    _ => 1_000,
+                };
+                let years = amount.checked_mul(scale).ok_or_else(overflow)?;
+                let target = i64::from(local.year())
+                    .checked_add(years)
+                    .ok_or_else(overflow)?;
+                if !(-999_999_999..=999_999_999).contains(&target) {
+                    return Err(out_of_range(target));
+                }
+                let months = years.checked_mul(12).ok_or_else(overflow)?;
+                plus_months(local, months).ok_or_else(|| out_of_range(target))
+            }
+            _ => unreachable!("only date-based units reach add_to_local"),
+        }
+    }
+}
+
+fn plus_days(local: NaiveDateTime, amount: i64) -> Option<NaiveDateTime> {
+    if amount >= 0 {
+        local.checked_add_days(Days::new(u64::try_from(amount).ok()?))
+    } else {
+        local.checked_sub_days(Days::new(u64::try_from(amount.checked_neg()?).ok()?))
+    }
+}
+
+fn plus_months(local: NaiveDateTime, amount: i64) -> Option<NaiveDateTime> {
+    if amount >= 0 {
+        local.checked_add_months(Months::new(u32::try_from(amount).ok()?))
+    } else {
+        local.checked_sub_months(Months::new(u32::try_from(amount.checked_neg()?).ok()?))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The pattern
+// ---------------------------------------------------------------------------
+
+/// One piece of a parsed Java pattern.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Piece {
+    /// Literal text, with the quoting already resolved.
+    Literal(String),
+    /// A run of `count` copies of `letter`.
+    Field {
+        letter: char,
+        count: usize,
+    },
+    /// `p`, `pp`, ... — pad whatever comes next to this width with spaces.
+    Pad(usize),
+    /// `[` and `]`. An optional section only prints when every field inside it
+    /// is available; a `ZonedDateTime` has all of them, so for **formatting**
+    /// these are transparent. They still have to be recognised, because `]`
+    /// without a `[` is an error and `[`/`]` are not literal characters.
+    OptionalStart,
+    OptionalEnd,
+}
+
+/// A parsed `DateTimeFormatter.ofPattern` pattern.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Pattern {
+    pieces: Vec<Piece>,
+}
+
+/// The pattern letters `DateTimeFormatterBuilder.parsePattern` accepts, with
+/// the count range each allows. A letter outside this table is
+/// `Unknown pattern letter`; a count outside its range is one of the three
+/// messages below, all read off the JDK.
+fn letter_limits(letter: char) -> Option<(usize, usize)> {
+    Some(match letter {
+        'G' => (1, 5),
+        'y' | 'u' => (1, 19),
+        'M' | 'L' => (1, 5),
+        'd' => (1, 2),
+        'D' => (1, 3),
+        'E' => (1, 5),
+        'e' => (1, 5),
+        // `cc` is rejected by the JDK ("Invalid pattern") while `c`, `ccc`,
+        // `cccc` and `ccccc` are fine; handled at the call site.
+        'c' => (1, 5),
+        'w' => (1, 2),
+        // The week-BASED year, which is not `y`: for a date in the days that
+        // a locale's week rules push into the neighbouring year, `Y` and `y`
+        // disagree. 2023-12-31 is a Sunday, so under `en`'s Sunday-first
+        // rules it is week 1 of `Y` = 2024 while `y` is still 2023.
+        'Y' => (1, 19),
+        'W' | 'F' => (1, 1),
+        'Q' | 'q' => (1, 5),
+        'a' => (1, 1),
+        'h' | 'H' | 'k' | 'K' | 'm' | 's' => (1, 2),
+        'S' => (1, 9),
+        'A' | 'N' | 'n' | 'g' => (1, 19),
+        'V' => (2, 2),
+        'z' => (1, 4),
+        'O' => (1, 4),
+        'X' | 'x' | 'Z' => (1, 5),
+        'B' => (1, 5),
+        _ => return None,
+    })
+}
+
+impl Pattern {
+    /// `DateTimeFormatter.ofPattern(pattern)`.
+    ///
+    /// Reproduces the JDK's own `IllegalArgumentException` text for each way a
+    /// pattern can be rejected, because those are what Kestra surfaces to a
+    /// flow author:
+    ///
+    /// | pattern | message |
+    /// |---|---|
+    /// | `ddd` | `Too many pattern letters: d` |
+    /// | `yyyy'MM` | `Pattern ends with an incomplete string literal: yyyy'MM` |
+    /// | `yyyy#MM` | `Pattern includes reserved character: '#'` |
+    /// | `yyyy]` | `Pattern invalid as it contains ] without previous [` |
+    /// | `SSSSSSSSSS` | `Minimum width must be from 0 to 9 inclusive but was 10` |
+    /// | `y`×20 | `The minimum width must be from 1 to 19 inclusive but was 20` |
+    /// | `VVV` | `Pattern letter count must be 2: V` |
+    /// | `OO` | `Pattern letter count must be 1 or 4: O` |
+    ///
+    /// All eight measured through the oracle harness, not guessed.
+    pub(super) fn parse(pattern: &str) -> Result<Self, String> {
+        let chars: Vec<char> = pattern.chars().collect();
+        let mut pieces = Vec::new();
+        let mut depth = 0usize;
+        let mut i = 0usize;
+        while i < chars.len() {
+            let c = chars[i];
+            if c.is_ascii_alphabetic() {
+                let mut count = 1;
+                while i + count < chars.len() && chars[i + count] == c {
+                    count += 1;
+                }
+                i += count;
+                if c == 'p' {
+                    // `padNext` needs something to pad. A pattern that ends
+                    // in `p` is rejected by the JDK with the rest of the
+                    // pattern quoted back.
+                    if i >= chars.len() {
+                        let rest: String = chars[i - count..].iter().collect();
+                        return Err(format!(
+                            "Pad letter 'p' must be followed by valid pad pattern: {rest}"
+                        ));
+                    }
+                    pieces.push(Piece::Pad(count));
+                    continue;
+                }
+                let Some((min, max)) = letter_limits(c) else {
+                    return Err(format!("Unknown pattern letter: {c}"));
+                };
+                if c == 'V' && count != 2 {
+                    return Err("Pattern letter count must be 2: V".to_string());
+                }
+                if c == 'O' && count != 1 && count != 4 {
+                    return Err("Pattern letter count must be 1 or 4: O".to_string());
+                }
+                if c == 'c' && count == 2 {
+                    return Err(format!("Invalid pattern \"{pattern}\""));
+                }
+                if count > max {
+                    return Err(match c {
+                        'S' => {
+                            format!("Minimum width must be from 0 to 9 inclusive but was {count}")
+                        }
+                        'y' | 'u' | 'Y' | 'A' | 'N' | 'n' | 'g' => format!(
+                            "The minimum width must be from 1 to 19 inclusive but was {count}"
+                        ),
+                        _ => format!("Too many pattern letters: {c}"),
+                    });
+                }
+                debug_assert!(count >= min);
+                pieces.push(Piece::Field { letter: c, count });
+                continue;
+            }
+            match c {
+                '\'' => {
+                    let mut text = String::new();
+                    let mut j = i + 1;
+                    loop {
+                        let Some(&ch) = chars.get(j) else {
+                            return Err(format!(
+                                "Pattern ends with an incomplete string literal: {pattern}"
+                            ));
+                        };
+                        if ch == '\'' {
+                            // `''` inside a literal is one quote; `''` on its
+                            // own (an empty literal) is also one quote, which
+                            // is why this is checked before the close.
+                            if chars.get(j + 1) == Some(&'\'') {
+                                text.push('\'');
+                                j += 2;
+                                continue;
+                            }
+                            break;
+                        }
+                        text.push(ch);
+                        j += 1;
+                    }
+                    if text.is_empty() && j == i + 1 {
+                        // `''` -- a literal quote, not an empty literal.
+                        text.push('\'');
+                    }
+                    pieces.push(Piece::Literal(text));
+                    i = j + 1;
+                }
+                '[' => {
+                    depth += 1;
+                    pieces.push(Piece::OptionalStart);
+                    i += 1;
+                }
+                ']' => {
+                    if depth == 0 {
+                        return Err(
+                            "Pattern invalid as it contains ] without previous [".to_string()
+                        );
+                    }
+                    depth -= 1;
+                    pieces.push(Piece::OptionalEnd);
+                    i += 1;
+                }
+                '#' | '{' | '}' => {
+                    return Err(format!("Pattern includes reserved character: '{c}'"));
+                }
+                _ => {
+                    pieces.push(Piece::Literal(c.to_string()));
+                    i += 1;
+                }
+            }
+        }
+        Ok(Pattern { pieces })
+    }
+
+    /// Writes `zdt` through this pattern.
+    ///
+    /// `zdt` must already have been moved into `zone`
+    /// ([`Zdt::with_zone`]) -- Java's `DateTimeFormatter.withZone` does that
+    /// before formatting, which is why `{{ d | date('VV', timeZone='UTC') }}`
+    /// on an input carrying `[America/New_York]` prints `UTC` and not the
+    /// input's own zone. Measured.
+    fn format(&self, zdt: &Zdt, _locale: Locale) -> Result<String, String> {
+        let mut out = String::new();
+        let mut pad: Option<usize> = None;
+        for piece in &self.pieces {
+            match piece {
+                Piece::OptionalStart | Piece::OptionalEnd => {}
+                Piece::Pad(width) => {
+                    pad = Some(*width);
+                    continue;
+                }
+                Piece::Literal(text) => {
+                    push_padded(&mut out, text, pad.take());
+                }
+                Piece::Field { letter, count } => {
+                    let text = format_field(*letter, *count, zdt)?;
+                    push_padded(&mut out, &text, pad.take());
+                }
+            }
+        }
+        Ok(out)
+    }
+}
+
+fn push_padded(out: &mut String, text: &str, pad: Option<usize>) {
+    match pad {
+        Some(width) => {
+            for _ in text.chars().count()..width {
+                out.push(' ');
+            }
+            out.push_str(text);
+        }
+        None => out.push_str(text),
+    }
+}
+
+const MONTHS_FULL: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
+const MONTHS_SHORT: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+const MONTHS_NARROW: [&str; 12] = ["J", "F", "M", "A", "M", "J", "J", "A", "S", "O", "N", "D"];
+/// Indexed by `Weekday::num_days_from_monday()`.
+const DAYS_FULL: [&str; 7] = [
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+    "Sunday",
+];
+const DAYS_SHORT: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+const DAYS_NARROW: [&str; 7] = ["M", "T", "W", "T", "F", "S", "S"];
+const QUARTERS_FULL: [&str; 4] = ["1st quarter", "2nd quarter", "3rd quarter", "4th quarter"];
+
+/// `WeekFields.of(Locale("en"))` — **Sunday-first, one minimal day**.
+///
+/// Measured against the JDK rather than assumed: `WeekFields.of` reads the
+/// locale's *country*, so a language-only `en` falls back to Sunday/1 while
+/// `en_GB` is Monday/4 and the harness's own default `en_VN` is Monday/1.
+/// [`Locale`] refuses everything but `en` and `en_US` for exactly this reason.
+const FIRST_DAY_OF_WEEK: u32 = 7; // Sunday, as `num_days_from_monday() + 1`
+const MINIMAL_DAYS_IN_FIRST_WEEK: i32 = 1;
+
+fn format_field(letter: char, count: usize, zdt: &Zdt) -> Result<String, String> {
+    let local = zdt.local;
+    let date = local.date();
+    let nano = local.nanosecond().min(999_999_999);
+    Ok(match letter {
+        'G' => era_text(date.year(), count).to_string(),
+        // `y` is the year OF ERA (always positive); `u` is the proleptic year
+        // (negative before year 1). `-0044` prints `45` under `y` and `-44`
+        // under `u` -- the one place the two letters visibly disagree.
+        'y' => reduced_or_padded(i64::from(year_of_era(date.year())), count),
+        'u' => reduced_or_padded(i64::from(date.year()), count),
+        'M' | 'L' => month_text(date.month0() as usize, count),
+        'd' => zero_pad(i64::from(date.day()), count),
+        'D' => zero_pad(i64::from(date.ordinal()), count),
+        'E' => day_text(date.weekday().num_days_from_monday() as usize, count.max(3)),
+        'e' | 'c' if count <= 2 => zero_pad(i64::from(localized_day_of_week(&date)), count),
+        'e' | 'c' => day_text(date.weekday().num_days_from_monday() as usize, count),
+        'w' => zero_pad(i64::from(week_of_week_based_year(&date)), count),
+        'Y' => reduced_or_padded(i64::from(week_based_year(&date)), count),
+        'W' => zero_pad(i64::from(week_of_month(&date)), count),
+        'F' => zero_pad(i64::from((date.day() - 1) / 7 + 1), count),
+        'Q' | 'q' => quarter_text((date.month0() / 3) as usize, count),
+        'a' => (if local.hour() < 12 { "AM" } else { "PM" }).to_string(),
+        'h' => zero_pad(i64::from(clock_hour(local.hour() % 12, 12)), count),
+        'H' => zero_pad(i64::from(local.hour()), count),
+        'k' => zero_pad(i64::from(clock_hour(local.hour(), 24)), count),
+        'K' => zero_pad(i64::from(local.hour() % 12), count),
+        'm' => zero_pad(i64::from(local.minute()), count),
+        's' => zero_pad(i64::from(local.second()), count),
+        // `S` TRUNCATES rather than rounding: `.987654321` is `9`, `98`, `987`.
+        'S' => format!("{nano:09}")[..count].to_string(),
+        'A' => zero_pad(milli_of_day(&local), count),
+        'N' => zero_pad(nano_of_day(&local), count),
+        'n' => zero_pad(i64::from(nano), count),
+        // Modified Julian Day: the epoch day plus 40587.
+        'g' => zero_pad(
+            date.and_time(NaiveTime::MIN).and_utc().timestamp() / 86_400 + 40_587,
+            count,
+        ),
+        'V' => zdt.zone.id(),
+        'X' => offset_text(zdt.offset, count, true),
+        'x' => offset_text(zdt.offset, count, false),
+        'Z' => match count {
+            1..=3 => offset_text(zdt.offset, 2, false),
+            4 => localized_gmt(zdt.offset, 4),
+            _ => offset_text(zdt.offset, 5, true),
+        },
+        'O' => localized_gmt(zdt.offset, count),
+        'z' | 'B' => {
+            return Err(format!(
+                "the 'date' filters cannot render pattern letter '{letter}': it needs the locale's \
+                 zone/day-period names, which egret does not carry"
+            ))
+        }
+        other => return Err(format!("Unknown pattern letter: {other}")),
+    })
+}
+
+fn era_text(year: i32, count: usize) -> &'static str {
+    match (year > 0, count) {
+        (true, 1..=3) => "AD",
+        (true, 4) => "Anno Domini",
+        (true, _) => "A",
+        (false, 1..=3) => "BC",
+        (false, 4) => "Before Christ",
+        (false, _) => "B",
+    }
+}
+
+fn year_of_era(year: i32) -> i32 {
+    if year > 0 {
+        year
+    } else {
+        1 - year
+    }
+}
+
+fn month_text(month0: usize, count: usize) -> String {
+    match count {
+        1 | 2 => zero_pad(month0 as i64 + 1, count),
+        3 => MONTHS_SHORT[month0].to_string(),
+        4 => MONTHS_FULL[month0].to_string(),
+        _ => MONTHS_NARROW[month0].to_string(),
+    }
+}
+
+fn day_text(day0: usize, count: usize) -> String {
+    match count {
+        1..=3 => DAYS_SHORT[day0].to_string(),
+        4 => DAYS_FULL[day0].to_string(),
+        _ => DAYS_NARROW[day0].to_string(),
+    }
+}
+
+fn quarter_text(quarter0: usize, count: usize) -> String {
+    match count {
+        1 | 2 => zero_pad(quarter0 as i64 + 1, count),
+        3 => format!("Q{}", quarter0 + 1),
+        4 => QUARTERS_FULL[quarter0].to_string(),
+        _ => (quarter0 + 1).to_string(),
+    }
+}
+
+/// `hour == 0` prints as the wrap value: `h` is 1-12 and `k` is 1-24.
+fn clock_hour(hour: u32, wrap: u32) -> u32 {
+    if hour == 0 {
+        wrap
+    } else {
+        hour
+    }
+}
+
+fn milli_of_day(local: &NaiveDateTime) -> i64 {
+    i64::from(local.num_seconds_from_midnight()) * 1_000 + i64::from(local.nanosecond() / 1_000_000)
+}
+
+fn nano_of_day(local: &NaiveDateTime) -> i64 {
+    i64::from(local.num_seconds_from_midnight()) * 1_000_000_000
+        + i64::from(local.nanosecond().min(999_999_999))
+}
+
+/// `WeekFields.dayOfWeek()` — 1 for the locale's first day of the week.
+fn localized_day_of_week(date: &NaiveDate) -> u32 {
+    let iso = date.weekday().num_days_from_monday() + 1; // Monday = 1
+    (iso + 7 - FIRST_DAY_OF_WEEK) % 7 + 1
+}
+
+/// `WeekFields.startOfWeekOffset`, copied from the JDK.
+fn start_of_week_offset(day: i32, dow: i32) -> i32 {
+    let week_start = (day - dow).rem_euclid(7);
+    if week_start + 1 > MINIMAL_DAYS_IN_FIRST_WEEK {
+        7 - week_start
+    } else {
+        -week_start
+    }
+}
+
+fn compute_week(offset: i32, day: i32) -> i32 {
+    (7 + offset + (day - 1)) / 7
+}
+
+/// `WeekFields.weekOfMonth()`.
+fn week_of_month(date: &NaiveDate) -> i32 {
+    let dow = localized_day_of_week(date) as i32;
+    let dom = date.day() as i32;
+    compute_week(start_of_week_offset(dom, dow), dom)
+}
+
+/// `WeekFields.weekOfWeekBasedYear()`, including both of the JDK's rollover
+/// branches: a week 0 belongs to the previous year, and a week past 50 may be
+/// week 1 of the next.
+fn week_of_week_based_year(date: &NaiveDate) -> i32 {
+    let dow = localized_day_of_week(date) as i32;
+    let doy = date.ordinal() as i32;
+    let offset = start_of_week_offset(doy, dow);
+    let week = compute_week(offset, doy);
+    if week == 0 {
+        let last_of_previous = *date - Days::new(doy as u64);
+        return week_of_week_based_year(&last_of_previous);
+    }
+    if week > 50 {
+        let year_len = if date.leap_year() { 366 } else { 365 };
+        let new_year_week = compute_week(offset, year_len + MINIMAL_DAYS_IN_FIRST_WEEK);
+        if week >= new_year_week {
+            return week - new_year_week + 1;
+        }
+    }
+    week
+}
+
+/// `WeekFields.weekBasedYear()` — the year `w` counts within, which is not
+/// the calendar year at either end of it.
+fn week_based_year(date: &NaiveDate) -> i32 {
+    let dow = localized_day_of_week(date) as i32;
+    let doy = date.ordinal() as i32;
+    let offset = start_of_week_offset(doy, dow);
+    let week = compute_week(offset, doy);
+    if week == 0 {
+        return date.year() - 1;
+    }
+    if week > 50 {
+        let year_len = if date.leap_year() { 366 } else { 365 };
+        if week >= compute_week(offset, year_len + MINIMAL_DAYS_IN_FIRST_WEEK) {
+            return date.year() + 1;
+        }
+    }
+    date.year()
+}
+
+/// `X` (`zero_is_z`) and `x` — the ISO-8601 offset forms.
+///
+/// Count 1 prints the hour alone unless the minutes are non-zero, in which
+/// case it prints `+HHmm` with no separator. Measured on `Asia/Kathmandu`
+/// (`+05:45`), whose `X` is `+0545`.
+fn offset_text(offset: FixedOffset, count: usize, zero_is_z: bool) -> String {
+    let total = offset.local_minus_utc();
+    if total == 0 && zero_is_z {
+        return "Z".to_string();
+    }
+    let sign = if total < 0 { '-' } else { '+' };
+    let abs = total.abs();
+    let (h, m, s) = (abs / 3600, (abs % 3600) / 60, abs % 60);
+    let mut out = String::new();
+    let _ = write!(out, "{sign}{h:02}");
+    match count {
+        1 => {
+            if m != 0 || s != 0 {
+                let _ = write!(out, "{m:02}");
+            }
+        }
+        2 => {
+            let _ = write!(out, "{m:02}");
+        }
+        3 => {
+            let _ = write!(out, ":{m:02}");
+        }
+        4 => {
+            let _ = write!(out, "{m:02}");
+            if s != 0 {
+                let _ = write!(out, "{s:02}");
+            }
+        }
+        _ => {
+            let _ = write!(out, ":{m:02}");
+            if s != 0 {
+                let _ = write!(out, ":{s:02}");
+            }
+        }
+    }
+    out
+}
+
+/// `O`/`OOOO` and `ZZZZ` — the localized GMT offset. `GMT` alone at zero;
+/// `GMT+9` short and `GMT+09:00` long. The word `GMT` is the English form,
+/// which is the only one [`Locale`] admits.
+fn localized_gmt(offset: FixedOffset, count: usize) -> String {
+    let total = offset.local_minus_utc();
+    if total == 0 {
+        return "GMT".to_string();
+    }
+    let sign = if total < 0 { '-' } else { '+' };
+    let abs = total.abs();
+    let (h, m, s) = (abs / 3600, (abs % 3600) / 60, abs % 60);
+    if count == 1 {
+        let mut out = format!("GMT{sign}{h}");
+        if m != 0 || s != 0 {
+            let _ = write!(out, ":{m:02}");
+            if s != 0 {
+                let _ = write!(out, ":{s:02}");
+            }
+        }
+        out
+    } else {
+        let mut out = format!("GMT{sign}{h:02}:{m:02}");
+        if s != 0 {
+            let _ = write!(out, ":{s:02}");
+        }
+        out
+    }
+}
+
+fn zero_pad(value: i64, width: usize) -> String {
+    if value < 0 {
+        format!("-{:0>width$}", value.unsigned_abs(), width = width)
+    } else {
+        format!("{value:0>width$}")
+    }
+}
+
+/// `appendValueReduced(field, 2, 2, …)` for a count of 2, and a zero-padded
+/// value otherwise. Java's `yy` prints the last two digits; `yyyyy` pads.
+fn reduced_or_padded(value: i64, count: usize) -> String {
+    if count == 2 {
+        format!("{:02}", value.rem_euclid(100))
+    } else {
+        zero_pad(value, count)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Named formats
+// ---------------------------------------------------------------------------
+
+/// `AbstractDate.formatter(format)` — the STYLES map, then the FORMATTERS map,
+/// then `DateTimeFormatter.ofPattern`.
+///
+/// Both maps are read off `AbstractDate`'s static initialiser in the
+/// `io.kestra:core:2.0.0-rc13` artifact (`javap -p -c`), not off the checkout.
+/// Note the lookup order: a name in STYLES wins over the same name in
+/// FORMATTERS, and **an unknown name is not an error** — it falls through to
+/// `ofPattern`, which is why `date('nope_format')` fails with
+/// `Unknown pattern letter: o`.
+#[derive(Clone, Debug)]
+pub(super) struct Format {
+    name: String,
+    kind: FormatKind,
+}
+
+#[derive(Clone, Debug)]
+enum FormatKind {
+    /// The six FORMATTERS entries Kestra builds with `ofPattern`, the four
+    /// `FormatStyle`s (whose CLDR patterns are inlined, see [`Format::resolve`]),
+    /// and every user-written pattern.
+    Pattern(Pattern),
+    /// The twelve FORMATTERS entries that are `java.time` constants built by
+    /// `DateTimeFormatterBuilder`, which have no pattern spelling.
+    BuiltIn(BuiltIn),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BuiltIn {
+    IsoDateTime,
+    IsoDate,
+    IsoTime,
+    IsoLocalDate,
+    IsoInstant,
+    IsoLocalDateTime,
+    IsoLocalTime,
+    IsoOffsetTime,
+    IsoOrdinalDate,
+    IsoWeekDate,
+    IsoZonedDateTime,
+    Rfc1123DateTime,
+}
+
+impl Format {
+    pub(super) fn resolve(name: &str) -> Result<Self, String> {
+        // The four `FormatStyle`s. Kestra calls
+        // `DateTimeFormatter.ofLocalizedDateTime(style)`, whose pattern comes
+        // from CLDR; the English patterns are inlined here, measured with
+        // `DateTimeFormatterBuilder.getLocalizedDateTimePattern` on the same
+        // JDK the goldens are generated with (Corretto 25 / CLDR). The narrow
+        // no-break space before `a` is CLDR's, not a typo.
+        //
+        // `full` and `long` end in `zzzz`/`z`, so they are accepted here and
+        // refused by [`format_field`] with the reason -- rather than being
+        // special-cased into a different error that hides which letter is the
+        // problem.
+        let style = match name {
+            "full" => Some("EEEE, MMMM d, y, h:mm:ss\u{202f}a zzzz"),
+            "long" => Some("MMMM d, y, h:mm:ss\u{202f}a z"),
+            "medium" => Some("MMM d, y, h:mm:ss\u{202f}a"),
+            "short" => Some("M/d/yy, h:mm\u{202f}a"),
+            _ => None,
+        };
+        if let Some(pattern) = style {
+            return Ok(Format {
+                name: name.to_string(),
+                kind: FormatKind::Pattern(Pattern::parse(pattern)?),
+            });
+        }
+
+        let pattern = match name {
+            "iso" => Some("yyyy-MM-dd'T'HH:mm:ss.SSSSSSXXX"),
+            "iso_milli" => Some("yyyy-MM-dd'T'HH:mm:ss.SSSXXX"),
+            "iso_sec" => Some("yyyy-MM-dd'T'HH:mm:ssXXX"),
+            "sql" => Some("yyyy-MM-dd HH:mm:ss.SSSSSS"),
+            "sql_milli" => Some("yyyy-MM-dd HH:mm:ss.SSS"),
+            "sql_sec" => Some("yyyy-MM-dd HH:mm:ss"),
+            _ => None,
+        };
+        if let Some(pattern) = pattern {
+            return Ok(Format {
+                name: name.to_string(),
+                kind: FormatKind::Pattern(Pattern::parse(pattern)?),
+            });
+        }
+
+        let built_in = match name {
+            "iso_date_time" => Some(BuiltIn::IsoDateTime),
+            "iso_date" => Some(BuiltIn::IsoDate),
+            "iso_time" => Some(BuiltIn::IsoTime),
+            "iso_local_date" => Some(BuiltIn::IsoLocalDate),
+            "iso_instant" => Some(BuiltIn::IsoInstant),
+            "iso_local_date_time" => Some(BuiltIn::IsoLocalDateTime),
+            "iso_local_time" => Some(BuiltIn::IsoLocalTime),
+            "iso_offset_time" => Some(BuiltIn::IsoOffsetTime),
+            "iso_ordinal_date" => Some(BuiltIn::IsoOrdinalDate),
+            "iso_week_date" => Some(BuiltIn::IsoWeekDate),
+            "iso_zoned_date_time" => Some(BuiltIn::IsoZonedDateTime),
+            "rfc_1123_date_time" => Some(BuiltIn::Rfc1123DateTime),
+            _ => None,
+        };
+        if let Some(built_in) = built_in {
+            return Ok(Format {
+                name: name.to_string(),
+                kind: FormatKind::BuiltIn(built_in),
+            });
+        }
+
+        Ok(Format {
+            name: name.to_string(),
+            kind: FormatKind::Pattern(Pattern::parse(name)?),
+        })
+    }
+
+    /// `formatter.withLocale(locale).withZone(zone).format(zdt)`.
+    pub(super) fn format(&self, zdt: &Zdt, zone: &Zone, locale: Locale) -> Result<String, String> {
+        let shown = zdt.with_zone(zone);
+        match &self.kind {
+            FormatKind::Pattern(pattern) => pattern.format(&shown, locale),
+            // ISO_INSTANT formats INSTANT_SECONDS, so `withZone` cannot move
+            // it: it is always UTC. Measured -- `iso_instant` answers the same
+            // string for `timeZone='UTC'` and `timeZone='Asia/Tokyo'`.
+            FormatKind::BuiltIn(BuiltIn::IsoInstant) => Ok(format_iso_instant(&shown)),
+            FormatKind::BuiltIn(built_in) => Ok(format_built_in(*built_in, &shown)),
+        }
+    }
+
+    /// The `existingFormat` path: `ZonedDateTime.parse(text, formatter)` with
+    /// Kestra's two fallbacks.
+    ///
+    /// **The twelve `java.time` constants are refused as an `existingFormat`.**
+    /// They are `DateTimeFormatterBuilder` compositions with no pattern
+    /// spelling, and four of them (`iso_instant`, `iso_time`,
+    /// `iso_local_time`, `iso_offset_time`) fail in Kestra too, because they
+    /// yield no date. The other eight are a divergence, stated here and in
+    /// `oracle/README.md` rather than approximated.
+    pub(super) fn parse_text(&self, text: &str, zone: &Zone) -> Result<Zdt, String> {
+        match &self.kind {
+            FormatKind::Pattern(pattern) => pattern.parse_text(text, zone),
+            FormatKind::BuiltIn(_) => Err(format!(
+                "the 'date' filters cannot use '{}' as an 'existingFormat': it is a java.time \
+                 constant with no pattern spelling",
+                self.name
+            )),
+        }
+    }
+}
+
+/// The variable-width fraction the ISO_* formatters print:
+/// `appendFraction(NANO_OF_SECOND, 0, 9, true)` — nothing at all when the
+/// nanosecond is zero, and trailing zeros trimmed otherwise, so `.120` prints
+/// as `.12`.
+fn iso_fraction(nano: u32) -> String {
+    if nano == 0 {
+        return String::new();
+    }
+    let digits = format!("{nano:09}");
+    format!(".{}", digits.trim_end_matches('0'))
+}
+
+/// `DateTimeFormatterBuilder.appendInstant()` — groups of **three** digits,
+/// which is why `iso_instant` prints `.120` where `iso_local_time` prints
+/// `.12` for the same value.
+fn instant_fraction(nano: u32) -> String {
+    if nano == 0 {
+        return String::new();
+    }
+    let digits = format!("{nano:09}");
+    let keep = if nano.is_multiple_of(1_000_000) {
+        3
+    } else if nano.is_multiple_of(1_000) {
+        6
+    } else {
+        9
+    };
+    format!(".{}", &digits[..keep])
+}
+
+/// `appendValue(YEAR, 4, 10, EXCEEDS_PAD)`.
+fn iso_year(year: i32) -> String {
+    if year < 0 {
+        format!("-{:04}", year.unsigned_abs())
+    } else if year > 9999 {
+        format!("+{year}")
+    } else {
+        format!("{year:04}")
+    }
+}
+
+fn iso_local_date(zdt: &Zdt) -> String {
+    let d = zdt.local.date();
+    format!("{}-{:02}-{:02}", iso_year(d.year()), d.month(), d.day())
+}
+
+fn iso_local_time(zdt: &Zdt) -> String {
+    let t = zdt.local.time();
+    format!(
+        "{:02}:{:02}:{:02}{}",
+        t.hour(),
+        t.minute(),
+        t.second(),
+        iso_fraction(zdt.nano())
+    )
+}
+
+/// `['['VV']']` — appended only when the zone is a region. A bare
+/// `ZoneOffset` (`Z`, `+05:30`) has none, which is what separates
+/// `2024-01-15T10:30:00Z[UTC]` from `2024-01-15T15:30:00+05:30`.
+fn zone_suffix(zdt: &Zdt) -> String {
+    match &zdt.zone {
+        Zone::Region(_) => format!("[{}]", zdt.zone.id()),
+        Zone::Fixed(_, id) if id == "Z" || id.starts_with('+') || id.starts_with('-') => {
+            String::new()
+        }
+        Zone::Fixed(..) => format!("[{}]", zdt.zone.id()),
+    }
+}
+
+fn format_iso_instant(zdt: &Zdt) -> String {
+    let utc = zdt.with_zone(&Zone::Fixed(
+        FixedOffset::east_opt(0).expect("0 is a valid offset"),
+        "Z".to_string(),
+    ));
+    let d = utc.local.date();
+    let t = utc.local.time();
+    format!(
+        "{}-{:02}-{:02}T{:02}:{:02}:{:02}{}Z",
+        iso_year(d.year()),
+        d.month(),
+        d.day(),
+        t.hour(),
+        t.minute(),
+        t.second(),
+        instant_fraction(utc.nano())
+    )
+}
+
+fn format_built_in(built_in: BuiltIn, zdt: &Zdt) -> String {
+    let offset = offset_id(zdt.offset);
+    match built_in {
+        BuiltIn::IsoLocalDate => iso_local_date(zdt),
+        BuiltIn::IsoDate => format!("{}{offset}", iso_local_date(zdt)),
+        BuiltIn::IsoLocalTime => iso_local_time(zdt),
+        BuiltIn::IsoTime | BuiltIn::IsoOffsetTime => format!("{}{offset}", iso_local_time(zdt)),
+        BuiltIn::IsoLocalDateTime => format!("{}T{}", iso_local_date(zdt), iso_local_time(zdt)),
+        BuiltIn::IsoDateTime | BuiltIn::IsoZonedDateTime => format!(
+            "{}T{}{offset}{}",
+            iso_local_date(zdt),
+            iso_local_time(zdt),
+            zone_suffix(zdt)
+        ),
+        BuiltIn::IsoOrdinalDate => format!(
+            "{}-{:03}{offset}",
+            iso_year(zdt.local.year()),
+            zdt.local.date().ordinal()
+        ),
+        // ISO_WEEK_DATE is the ISO-8601 week, Monday-first with four minimal
+        // days -- NOT the locale's week fields that `w`/`Y` use.
+        BuiltIn::IsoWeekDate => {
+            let week = zdt.local.date().iso_week();
+            format!(
+                "{}-W{:02}-{}{offset}",
+                iso_year(week.year()),
+                week.week(),
+                zdt.local.date().weekday().num_days_from_monday() + 1
+            )
+        }
+        // RFC 1123 writes `GMT` at zero offset and `+0900` otherwise, and its
+        // day-of-month is NOT zero padded.
+        BuiltIn::Rfc1123DateTime => {
+            let d = zdt.local.date();
+            let t = zdt.local.time();
+            let zone = if zdt.offset.local_minus_utc() == 0 {
+                "GMT".to_string()
+            } else {
+                offset_text(zdt.offset, 2, false)
+            };
+            format!(
+                "{}, {} {} {} {:02}:{:02}:{:02} {zone}",
+                DAYS_SHORT[d.weekday().num_days_from_monday() as usize],
+                d.day(),
+                MONTHS_SHORT[d.month0() as usize],
+                iso_year(d.year()),
+                t.hour(),
+                t.minute(),
+                t.second()
+            )
+        }
+        BuiltIn::IsoInstant => format_iso_instant(zdt),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Parsing text into a ZonedDateTime
+// ---------------------------------------------------------------------------
+
+/// A cursor over the text being parsed, with Java's own error wording.
+struct Scan<'a> {
+    text: &'a str,
+    chars: Vec<char>,
+    at: usize,
+}
+
+impl<'a> Scan<'a> {
+    fn new(text: &'a str) -> Self {
+        Scan {
+            text,
+            chars: text.chars().collect(),
+            at: 0,
+        }
+    }
+
+    fn peek(&self) -> Option<char> {
+        self.chars.get(self.at).copied()
+    }
+
+    fn eat(&mut self, c: char) -> bool {
+        if self.peek() == Some(c) {
+            self.at += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Reads between `min` and `max` digits, greedily.
+    fn digits(&mut self, min: usize, max: usize) -> Option<(u32, usize)> {
+        let start = self.at;
+        let mut value: u32 = 0;
+        while self.at - start < max {
+            match self.peek().and_then(|c| c.to_digit(10)) {
+                Some(d) => {
+                    value = value.checked_mul(10)?.checked_add(d)?;
+                    self.at += 1;
+                }
+                None => break,
+            }
+        }
+        let taken = self.at - start;
+        if taken < min {
+            self.at = start;
+            return None;
+        }
+        Some((value, taken))
+    }
+
+    fn fail(&self) -> String {
+        format!(
+            "Text '{}' could not be parsed at index {}",
+            self.text, self.at
+        )
+    }
+
+    fn trailing(&self) -> String {
+        format!(
+            "Text '{}' could not be parsed, unparsed text found at index {}",
+            self.text, self.at
+        )
+    }
+}
+
+/// The fields a parse can produce, before they are assembled.
+#[derive(Default, Clone)]
+struct Parsed {
+    year: Option<i32>,
+    month: Option<u32>,
+    day: Option<u32>,
+    day_of_year: Option<u32>,
+    hour: Option<u32>,
+    hour_of_ampm: Option<u32>,
+    minute: Option<u32>,
+    second: Option<u32>,
+    nano: Option<u32>,
+    pm: Option<bool>,
+    offset: Option<FixedOffset>,
+    zone: Option<Zone>,
+}
+
+impl Parsed {
+    /// Kestra's three-step cascade, collapsed: a parse that produced an
+    /// offset is a `ZonedDateTime`; one that produced a date and a time is a
+    /// `LocalDateTime.atZone(zone)`; one that produced only a date is a
+    /// `LocalDate.atStartOfDay().atZone(zone)`.
+    fn build(self, text: &str, zone: &Zone) -> Result<Zdt, String> {
+        let unable = || {
+            format!("Text '{text}' could not be parsed: Unable to obtain ZonedDateTime from the parsed fields")
+        };
+        let year = self.year.ok_or_else(unable)?;
+        let date = match (self.month, self.day, self.day_of_year) {
+            (Some(month), Some(day), _) => NaiveDate::from_ymd_opt(year, month, day)
+                .ok_or_else(|| format!("Text '{text}' could not be parsed: Invalid date"))?,
+            (_, _, Some(ordinal)) => NaiveDate::from_yo_opt(year, ordinal)
+                .ok_or_else(|| format!("Text '{text}' could not be parsed: Invalid date"))?,
+            _ => return Err(unable()),
+        };
+        let hour = match (self.hour, self.hour_of_ampm, self.pm) {
+            (Some(h), _, _) => h,
+            (None, Some(h), Some(pm)) => (h % 12) + if pm { 12 } else { 0 },
+            (None, Some(h), None) => h,
+            (None, None, _) => 0,
+        };
+        let time = NaiveTime::from_hms_nano_opt(
+            hour,
+            self.minute.unwrap_or(0),
+            self.second.unwrap_or(0),
+            self.nano.unwrap_or(0),
+        )
+        .ok_or_else(|| format!("Text '{text}' could not be parsed: Invalid time"))?;
+        let local = date.and_time(time);
+
+        match (self.offset, self.zone) {
+            (Some(offset), Some(zone)) => Ok(Zdt {
+                local,
+                offset,
+                zone,
+            }),
+            (Some(offset), None) => Ok(Zdt {
+                local,
+                offset,
+                zone: Zone::Fixed(offset, offset_id(offset)),
+            }),
+            (None, Some(zone)) => Ok(Zdt::new(local, zone)),
+            (None, None) => Ok(Zdt::new(local, zone.clone())),
+        }
+    }
+}
+
+/// `ZonedDateTime.parse(text)`, then `LocalDateTime.parse(text).atZone(zone)`,
+/// then `LocalDate.parse(text).atStartOfDay().atZone(zone)` — the cascade
+/// `AbstractDate.convert` runs when no `existingFormat` is given.
+///
+/// The grammar is ISO_ZONED_DATE_TIME's, and it is stricter than it looks:
+/// `+0700` (no colon) does **not** parse where `+07` does, and a `[Zone]`
+/// suffix without an offset in front of it does not parse at all. Both
+/// measured through the harness.
+pub(super) fn parse_iso(text: &str, zone: &Zone) -> Result<Zdt, String> {
+    let mut scan = Scan::new(text);
+    let mut parsed = Parsed::default();
+
+    let negative = scan.eat('-');
+    let plus = !negative && scan.eat('+');
+    let (year, taken) = scan.digits(4, 10).ok_or_else(|| scan.fail())?;
+    if plus && taken <= 4 {
+        return Err(scan.fail());
+    }
+    let year = i32::try_from(year).map_err(|_| scan.fail())?;
+    parsed.year = Some(if negative { -year } else { year });
+    if !scan.eat('-') {
+        return Err(scan.fail());
+    }
+    parsed.month = Some(scan.digits(2, 2).ok_or_else(|| scan.fail())?.0);
+    if !scan.eat('-') {
+        return Err(scan.fail());
+    }
+    parsed.day = Some(scan.digits(2, 2).ok_or_else(|| scan.fail())?.0);
+
+    if scan.eat('T') {
+        parsed.hour = Some(scan.digits(2, 2).ok_or_else(|| scan.fail())?.0);
+        if !scan.eat(':') {
+            return Err(scan.fail());
+        }
+        parsed.minute = Some(scan.digits(2, 2).ok_or_else(|| scan.fail())?.0);
+        if scan.eat(':') {
+            parsed.second = Some(scan.digits(2, 2).ok_or_else(|| scan.fail())?.0);
+            if scan.eat('.') {
+                let (value, taken) = scan.digits(1, 9).ok_or_else(|| scan.fail())?;
+                parsed.nano = Some(value * 10u32.pow(9 - taken as u32));
+            }
+        }
+        parse_iso_offset(&mut scan, &mut parsed)?;
+    }
+
+    if scan.at != scan.chars.len() {
+        return Err(scan.trailing());
+    }
+    parsed.build(text, zone)
+}
+
+/// The offset and the optional `[Zone]` that follows it.
+fn parse_iso_offset(scan: &mut Scan<'_>, parsed: &mut Parsed) -> Result<(), String> {
+    if scan.eat('Z') {
+        parsed.offset = FixedOffset::east_opt(0);
+    } else if matches!(scan.peek(), Some('+') | Some('-')) {
+        let sign = if scan.eat('-') {
+            -1
+        } else {
+            scan.eat('+') as i32
+        };
+        let (h, _) = scan.digits(2, 2).ok_or_else(|| scan.fail())?;
+        let mut seconds = (h * 3600) as i32;
+        if scan.eat(':') {
+            let (m, _) = scan.digits(2, 2).ok_or_else(|| scan.fail())?;
+            seconds += (m * 60) as i32;
+            if scan.eat(':') {
+                let (s, _) = scan.digits(2, 2).ok_or_else(|| scan.fail())?;
+                seconds += s as i32;
+            }
+        }
+        parsed.offset = FixedOffset::east_opt(sign * seconds);
+        if parsed.offset.is_none() {
+            return Err(scan.fail());
+        }
+    } else {
+        return Ok(());
+    }
+
+    if scan.eat('[') {
+        let start = scan.at;
+        while scan.peek().is_some_and(|c| c != ']') {
+            scan.at += 1;
+        }
+        let id: String = scan.chars[start..scan.at].iter().collect();
+        if !scan.eat(']') {
+            return Err(scan.fail());
+        }
+        parsed.zone = Some(Zone::resolve(Some(&id))?);
+    }
+    Ok(())
+}
+
+impl Pattern {
+    /// Parses `text` against this pattern, strictly: every literal must match
+    /// and the whole input must be consumed.
+    ///
+    /// **Only the fields a date can be rebuilt from are parseable.** `G`, `Q`,
+    /// `q`, `w`, `W`, `F`, `A`, `N`, `n`, `g`, `B` and `z` are refused with
+    /// the letter named -- reading them would need a resolution pass egret
+    /// does not have, and answering *around* them would silently drop part of
+    /// the input.
+    fn parse_text(&self, text: &str, zone: &Zone) -> Result<Zdt, String> {
+        let mut scan = Scan::new(text);
+        let mut parsed = Parsed::default();
+        self.parse_pieces(&self.pieces, &mut scan, &mut parsed)?;
+        if scan.at != scan.chars.len() {
+            return Err(scan.trailing());
+        }
+        parsed.build(text, zone)
+    }
+
+    fn parse_pieces(
+        &self,
+        pieces: &[Piece],
+        scan: &mut Scan<'_>,
+        parsed: &mut Parsed,
+    ) -> Result<(), String> {
+        let mut i = 0;
+        while i < pieces.len() {
+            match &pieces[i] {
+                Piece::Pad(_) => {
+                    while scan.peek() == Some(' ') {
+                        scan.at += 1;
+                    }
+                    i += 1;
+                }
+                Piece::Literal(text) => {
+                    for c in text.chars() {
+                        if !scan.eat(c) {
+                            return Err(scan.fail());
+                        }
+                    }
+                    i += 1;
+                }
+                Piece::Field { letter, count } => {
+                    parse_field(*letter, *count, scan, parsed)?;
+                    i += 1;
+                }
+                // An optional section is attempted and rolled back whole --
+                // both the cursor and the fields, so a half-matched section
+                // cannot leave a stale value behind.
+                Piece::OptionalStart => {
+                    let end = matching_end(pieces, i);
+                    let saved_at = scan.at;
+                    let saved = parsed.clone();
+                    if self
+                        .parse_pieces(&pieces[i + 1..end], scan, parsed)
+                        .is_err()
+                    {
+                        scan.at = saved_at;
+                        *parsed = saved;
+                    }
+                    i = end + 1;
+                }
+                Piece::OptionalEnd => i += 1,
+            }
+        }
+        Ok(())
+    }
+}
+
+fn matching_end(pieces: &[Piece], start: usize) -> usize {
+    let mut depth = 0usize;
+    for (i, piece) in pieces.iter().enumerate().skip(start) {
+        match piece {
+            Piece::OptionalStart => depth += 1,
+            Piece::OptionalEnd => {
+                depth -= 1;
+                if depth == 0 {
+                    return i;
+                }
+            }
+            _ => {}
+        }
+    }
+    pieces.len()
+}
+
+fn parse_field(
+    letter: char,
+    count: usize,
+    scan: &mut Scan<'_>,
+    parsed: &mut Parsed,
+) -> Result<(), String> {
+    // A field written once parses one or two digits; written `n` times it
+    // parses exactly `n`, which is what makes `yyyy` refuse a two-digit year.
+    let numeric = |scan: &mut Scan<'_>, natural: usize| -> Result<u32, String> {
+        let (min, max) = if count == 1 {
+            (1, natural)
+        } else {
+            (count, count)
+        };
+        scan.digits(min, max)
+            .map(|(value, _)| value)
+            .ok_or_else(|| scan.fail())
+    };
+    match letter {
+        'y' | 'u' => {
+            if count == 2 {
+                // `appendValueReduced(field, 2, 2, 2000)`.
+                let value = scan.digits(2, 2).ok_or_else(|| scan.fail())?.0;
+                parsed.year = Some(2000 + value as i32);
+            } else {
+                let negative = scan.eat('-');
+                let value = scan.digits(count.max(1), 10).ok_or_else(|| scan.fail())?.0;
+                let value = i32::try_from(value).map_err(|_| scan.fail())?;
+                parsed.year = Some(if negative { -value } else { value });
+            }
+        }
+        'M' | 'L' if count <= 2 => parsed.month = Some(numeric(scan, 2)?),
+        'M' | 'L' if count == 3 || count == 4 => {
+            let names: &[&str; 12] = if count == 3 {
+                &MONTHS_SHORT
+            } else {
+                &MONTHS_FULL
+            };
+            let index = eat_one_of(scan, names).ok_or_else(|| scan.fail())?;
+            parsed.month = Some(index as u32 + 1);
+        }
+        'd' => parsed.day = Some(numeric(scan, 2)?),
+        'D' => parsed.day_of_year = Some(numeric(scan, 3)?),
+        'H' => parsed.hour = Some(numeric(scan, 2)?),
+        'k' => parsed.hour = Some(numeric(scan, 2)? % 24),
+        'h' => parsed.hour_of_ampm = Some(numeric(scan, 2)? % 12),
+        'K' => parsed.hour_of_ampm = Some(numeric(scan, 2)?),
+        'm' => parsed.minute = Some(numeric(scan, 2)?),
+        's' => parsed.second = Some(numeric(scan, 2)?),
+        'S' => {
+            let value = scan.digits(count, count).ok_or_else(|| scan.fail())?.0;
+            parsed.nano = Some(value * 10u32.pow(9 - count as u32));
+        }
+        'a' => {
+            let index = eat_one_of(scan, &["AM", "PM"]).ok_or_else(|| scan.fail())?;
+            parsed.pm = Some(index == 1);
+        }
+        // Day names carry no information the date does not already have;
+        // Java cross-checks them and egret consumes them.
+        'E' | 'e' | 'c' if count >= 3 => {
+            if eat_one_of(scan, &DAYS_FULL).is_none() && eat_one_of(scan, &DAYS_SHORT).is_none() {
+                return Err(scan.fail());
+            }
+        }
+        'e' | 'c' => {
+            numeric(scan, 1)?;
+        }
+        'X' | 'x' | 'Z' | 'O' => {
+            let mut probe = Parsed::default();
+            parse_iso_offset(scan, &mut probe)?;
+            if probe.offset.is_none() {
+                return Err(scan.fail());
+            }
+            parsed.offset = probe.offset;
+        }
+        'V' => {
+            let start = scan.at;
+            while scan
+                .peek()
+                .is_some_and(|c| c.is_ascii_alphanumeric() || "/_+-.".contains(c))
+            {
+                scan.at += 1;
+            }
+            let id: String = scan.chars[start..scan.at].iter().collect();
+            let zone = Zone::resolve(Some(&id))?;
+            parsed.offset = None;
+            parsed.zone = Some(zone);
+        }
+        other => {
+            return Err(format!(
+                "the 'date' filters cannot parse an 'existingFormat' containing pattern letter \
+                 '{other}'"
+            ))
+        }
+    }
+    Ok(())
+}
+
+/// Consumes the first of `names` that matches at the cursor, longest first so
+/// `January` is not shadowed by `Jan`.
+fn eat_one_of(scan: &mut Scan<'_>, names: &[&str]) -> Option<usize> {
+    let rest: String = scan.chars[scan.at..].iter().collect();
+    let mut best: Option<(usize, usize)> = None;
+    for (index, name) in names.iter().enumerate() {
+        if rest.starts_with(name) && best.is_none_or(|(_, len)| name.len() > len) {
+            best = Some((index, name.len()));
+        }
+    }
+    let (index, len) = best?;
+    scan.at += names[index].chars().count();
+    let _ = len;
+    Some(index)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `ZoneId.of` accepts five different shapes and they do **not** all
+    /// produce the same kind of zone: an offset has no transitions and prints
+    /// its own id under `VV`, a prefixed offset prints the prefix, and a
+    /// region prints its tzdb name. Measured against the JDK for each row.
+    #[test]
+    fn zone_ids_are_javas_five_shapes() {
+        for (input, id) in [
+            ("Z", "Z"),
+            ("+05:30", "+05:30"),
+            ("+05", "+05:00"),
+            ("-0330", "-03:30"),
+            ("UTC", "UTC"),
+            ("GMT", "GMT"),
+            ("GMT+7", "GMT+07:00"),
+            ("UT+5", "UT+05:00"),
+            ("UTC+00:00", "UTC"),
+            ("Etc/UTC", "Etc/UTC"),
+            ("Etc/GMT+7", "Etc/GMT+7"),
+            ("Asia/Tokyo", "Asia/Tokyo"),
+        ] {
+            let zone = Zone::resolve(Some(input))
+                .unwrap_or_else(|e| panic!("{input} should resolve: {e}"));
+            assert_eq!(zone.id(), id, "{input}");
+        }
+        // Case-sensitive, exactly like `ZoneId.of`.
+        assert!(Zone::resolve(Some("utc")).is_err());
+        assert!(Zone::resolve(Some("Not/AZone")).is_err());
+    }
+
+    /// The three `ZonedDateTime.ofLocal` cases. The **gap** is the one worth a
+    /// test of its own: Java moves the local time forward by the transition's
+    /// own duration, so 02:30 on a spring-forward day is 03:30, not 03:00 —
+    /// and `chrono` alone only tells you the local time does not exist.
+    #[test]
+    fn a_local_time_in_a_dst_gap_moves_forward_by_the_gaps_duration() {
+        let ny = Zone::resolve(Some("America/New_York")).expect("a real zone");
+        let gap = NaiveDate::from_ymd_opt(2024, 3, 10)
+            .and_then(|d| d.and_hms_opt(2, 30, 0))
+            .expect("a real local time");
+        let (local, offset) = ny.resolve_local(gap);
+        assert_eq!(local.time(), NaiveTime::from_hms_opt(3, 30, 0).unwrap());
+        assert_eq!(offset.local_minus_utc(), -4 * 3600);
+
+        // An overlap keeps the EARLIER offset, which is Java's rule too.
+        let overlap = NaiveDate::from_ymd_opt(2024, 11, 3)
+            .and_then(|d| d.and_hms_opt(1, 30, 0))
+            .expect("a real local time");
+        assert_eq!(ny.resolve_local(overlap).1.local_minus_utc(), -4 * 3600);
+    }
+
+    /// A pattern is parsed once into pieces, and the piece boundaries are
+    /// where the quoting rules actually live. `''` is a quote whether it
+    /// stands alone or sits inside a longer literal — the second case is what
+    /// mutation testing found missing from the corpus.
+    #[test]
+    fn quoting_resolves_at_parse_time() {
+        let pieces = |p: &str| Pattern::parse(p).expect("valid").pieces;
+        assert_eq!(pieces("'It''s'"), vec![Piece::Literal("It's".to_string())]);
+        assert_eq!(pieces("''"), vec![Piece::Literal("'".to_string())]);
+        assert_eq!(pieces("'T'"), vec![Piece::Literal("T".to_string())]);
+        assert_eq!(
+            pieces("y"),
+            vec![Piece::Field {
+                letter: 'y',
+                count: 1
+            }]
+        );
+    }
+}

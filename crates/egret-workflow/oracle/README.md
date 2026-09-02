@@ -19,6 +19,32 @@ never run automatically.
   `io.kestra:core:2.0.0-rc13` and `io.pebbletemplates:pebble:4.1.2` (see
   "Kestra checkout vs. Maven artifact" below for why the Pebble version is
   pinned explicitly rather than inherited).
+- **A JVM whose default locale has English as its language.** Measured on the
+  machine that generates this file: `Locale.getDefault()` is **`en_VN`**
+  (language `en`, country `VN`), `ZoneId.systemDefault()` is
+  `Asia/Ho_Chi_Minh`, `java.version` is `25.0.3`. Pebble's `EvaluationContext`
+  locale is `Locale.getDefault()` unless a template passes one, and
+  `AbstractDate.format` hands it straight to
+  `DateTimeFormatter.withLocale`, so **every** month name, day name, era name
+  and quarter name a `date` filter writes comes from it.
+
+  W2 Task 5 pins this rather than relying on it: every corpus entry whose
+  output depends on the locale passes `locale='en'` (or `locale='en_US'`)
+  explicitly, the same standing rule the `timeZone` note below states for
+  zones. Two things make that not merely tidy:
+
+  - `WeekFields.of(locale)` is resolved from the locale's **country**, and it
+    is what `w`, `W`, `Y`, `e` and `c` are printed through. Measured directly:
+    `en` and `en_US` are Sunday-first with one minimal day, `fr_FR` is
+    Monday-first with four, and **`en_VN` — this machine's own default — is
+    Monday-first with one**. So an entry using those letters without an
+    explicit locale would answer differently on a machine whose region is not
+    VN, even though the month names would look identical.
+  - a language-only locale falls back to Sunday/1 regardless of language, so
+    `fr` and `en` agree about `w` and `e` while `fr_FR` and `en` do not. An
+    earlier reading of two goldens suggested the week fields were not
+    locale-sensitive at all; they are, through the country.
+
 - A Unix-family OS (macOS or Linux), not Windows.
   `io.kestra.core.runners.pebble.filters.YamlFilter` configures its Jackson
   `YAMLFactory` with `YAMLGenerator.Feature.USE_PLATFORM_LINE_BREAKS` set to
@@ -100,7 +126,7 @@ Verified by deliberate breakage before committing: an unpaired new entry, a
 renamed paired test, a false `baselined` claim and a quietly-added
 `unported:` all fail, each naming the id.
 
-28 entries carry it today: the four `*-mixed` comparisons (Pebble throws on a
+**42** entries carry it today: the four `*-mixed` comparisons (Pebble throws on a
 String/Number mix), the eight registered-but-null-backed functions,
 `raw-multiline`, the three `isin-*` entries where an absent variable raises,
 and **twelve from W2 Task 4** — four wrong-typed inputs, five exceptions its
@@ -108,7 +134,9 @@ first fix round found, and three more from its third (`indent`'s own
 `MAX_AMOUNT`, and `number`'s two `type`-argument casts). **Every one of the
 twelve is separately backed by a unit test in `runners::filters` asserting
 egret's own message**, named alongside it in `error-class.txt`, so what carries
-them is the test and not the mode. Twelve is a lot, and it is a deliberate
+them is the test and not the mode. **W2 Task 5 added fourteen more** — eight of
+them the Java pattern compiler refusing a pattern — backed by nine tests, all
+named in `error-class-pairs.txt`. Twelve is a lot, and it is a deliberate
 trade: each records an exception Kestra actually throws, which is worth having
 in `golden.json`, at the cost of an entry the ratchet cannot fail. Note that
 marking an entry error-class does **not** make it pass: five of the 28 still
@@ -120,7 +148,8 @@ divergence and stays visible.
 `tests/oracle.rs` is not a pass/fail test while Tasks 4-8 are outstanding; it
 is a ratchet. `oracle/baseline.txt` lists the ids that do not match yet: 76 of
 138 at W2 Task 3, 57 of 241 after Task 4, 59 of 268 after its fix round,
-**60 of 291** after fix round 3. The test fails in **both** directions:
+60 of 291 after fix round 3, **59 of 426** after W2 Task 5. The test fails in
+**both** directions:
 
 - an id **not** in the baseline mismatches — a regression;
 - an id **in** the baseline now matches — progress that must be banked by
@@ -631,7 +660,7 @@ function.** Implemented in Task 3's fix round: `rewrite` now emits
 `runners::env::kestra_is_in` reproduces all four rows. All four entries
 match.
 
-## Corpus (`corpus.json`, 291 entries)
+## Corpus (`corpus.json`, 426 entries)
 
 - **37 operator cases**, taken verbatim from the task brief plus several
   follow-up fixes: the `??`/`???` pair (5 entries covering null vs. absent on
@@ -934,3 +963,138 @@ used to list as unimplemented are now both in `Oracle.render`:
   exactly like `VariableRenderer.renderRecursively`, stopping once output
   stops changing, capped at 100 iterations) even though no current corpus
   entry's output happens to look like another template.
+
+## What W2 Task 5's 135 new entries measured (read before touching `date`)
+
+Task 5 ported the six `AbstractDate` filters — `date`, `dateAdd`, `timestamp`,
+`timestampMicro`, `timestampMilli`, `timestampNano` — and with them Java's
+whole `DateTimeFormatter` pattern language, which lives in
+`runners::javafmt`. Everything below was read off a regenerated golden file,
+not reasoned about.
+
+### `AbstractDate` reads a number's DIGIT COUNT, not its magnitude
+
+`convert`'s `Long` branch switches on `digitCount(l)`: 13 digits is
+milliseconds, 19 digits ending in `000` is nanoseconds, any *other* 19 digits
+is `Instant.ofEpochMilli(l / 1e6)` followed by `withNano((l % 1e6) * 1000)`,
+and everything else is seconds. That third branch is the surprising one:
+`withNano` **replaces** the whole nanosecond field, so the millisecond part the
+first step just set is thrown away — `1705314600123456789` renders `.456789`,
+not `.123456`. `filter-date-epoch-nanos-truncating` pins it.
+
+### The same digits are a `Long` or an `Integer` depending on where they came from
+
+`convert` has branches for `Long` and for `String` and **none for `Integer`**.
+A context integer small enough to box as `java.lang.Integer` therefore falls
+through to `(String) input` and throws `ClassCastException` — while the same
+digits written as a template literal are a `Long` and are read as an epoch. So
+`{{ 1705314600 | date(…) }}` works and `{{ epoch | date(…) }}` with
+`epoch: 1705314600` does not, for the commonest number anyone would pipe in.
+Same shape of fact as `filter-classname-literal-int`, same cause, and
+`filter-date-epoch-seconds-context` is baselined with the reason.
+
+### `dateAdd` does its arithmetic in the INPUT's zone, not `timeZone`'s
+
+`timeZone` is only two things: the formatter's zone (`withZone`) and the
+fallback for an input that carries no offset. `ZonedDateTime.parse` keeps
+whatever the *string* carried, so
+`'2024-03-09T12:00:00-05:00' | dateAdd(1, 'DAYS', 'iso', 'America/New_York')`
+adds a day in a fixed `-05:00` offset that has no DST at all, and only then
+re-zones for display. The corpus entries spell their inputs
+`2024-03-09T12:00:00-05:00[America/New_York]` for exactly this reason — without
+the bracketed region there is no zone to be DST-aware about.
+
+Given a real region, the split between `plus`'s two arms is visible and it is
+Java's `unit.isDateBased()`: **`+ 1 DAYS` keeps the wall clock** (12:00 → 12:00)
+and **`+ 24 HOURS` does not** (12:00 → 13:00). `filter-dateadd-dst-days` and
+`filter-dateadd-dst-hours` are the pair. A local time that lands in the spring
+gap moves forward by the gap's own duration, so 02:30 becomes 03:30 and not
+03:00 (`filter-dateadd-dst-into-the-gap`).
+
+### An unknown format NAME is compiled as a PATTERN
+
+`AbstractDate.formatter` falls through the STYLES map and the FORMATTERS map to
+`DateTimeFormatter.ofPattern(name)`. So `date('nope_format')` is not an
+unknown-format error at all: it is `Unknown pattern letter: o`.
+`filter-date-unknown-named-format` records it. Note also that a **present but
+null** `format` is not the default — it is read with `containsKey`, so
+`date(null)` reaches `ofPattern(null)` and the message is the single word
+`pattern`.
+
+### The ISO_* constants and the `ofPattern` six write fractions differently
+
+Six of the eighteen FORMATTERS entries are `ofPattern` strings (`iso`,
+`iso_milli`, `iso_sec`, `sql`, `sql_milli`, `sql_sec`) and twelve are
+`java.time` constants. The two families disagree about the same value:
+`.120` seconds is `.12` through `ISO_LOCAL_TIME` (a variable-width fraction
+with trailing zeros trimmed) and `.120` through `ISO_INSTANT` (groups of
+three). `filter-date-format-iso-second-zero` and
+`filter-date-format-instant-groups-of-three` are the pair.
+
+`ISO_INSTANT` additionally **ignores `withZone`** — it formats
+`INSTANT_SECONDS`, so `iso_instant` answers the same string for
+`timeZone='UTC'` and `timeZone='Asia/Tokyo'`
+(`filter-date-format-iso-instant-ignores-zone`). And the `['['VV']']` suffix
+`iso_date_time`/`iso_zoned_date_time` write appears only when the zone is a
+*region*: `timeZone='UTC'` gets `[UTC]`, `timeZone='+05:30'` gets nothing.
+
+### The ISO parser is stricter than it looks
+
+`ZonedDateTime.parse` accepts `+07` and **rejects `+0700`**; it accepts
+`2024-01-15T10:30Z` (seconds optional) and rejects `2024-01-15 10:30:00` (a
+space for the `T`); a `[Zone]` suffix with no offset in front of it does not
+parse at all; and a fraction longer than nine digits is refused. All measured.
+
+### Two pattern letters are text out of a locale database, and egret refuses them
+
+`z`/`zz`/`zzz`/`zzzz` (the zone display name) and `B` (the day period as text)
+are CLDR data. Measured across zones: `Asia/Tokyo` is `JST`,
+`Asia/Ho_Chi_Minh` is `GMT+07:00`, `Australia/Eucla` is `GMT+08:45`,
+`Europe/Moscow` is `GMT+03:00`. tzdb's own abbreviations — the only zone text
+available to a Rust port, via `chrono-tz` — agree for the first and third and
+say `+07` and `MSK` for the other two, so **no rule is right for both halves**.
+`runners::javafmt` refuses with the letter named rather than answering
+plausibly, and `filter-date-pattern-zone-name` is baselined with that reason.
+`full` and `long` inherit the refusal because their CLDR patterns end in
+`zzzz` and `z`; `medium` and `short` do not and both pass.
+
+Everything else in the alphabet is arithmetic or a fixed English word and is
+ported, including the ones a reader might expect to be locale text: `O`/`OOOO`
+and `ZZZZ` (the localized GMT offset, `GMT+9` / `GMT+09:00`), `VV` (the zone
+id), `G` (era), `Q`/`q` (quarter) and the `w`/`W`/`Y`/`e`/`c` week fields.
+
+### Nothing here needed a `RenderLimits`-style bound, and that is fidelity
+
+`RenderLimits` has **exactly two call sites in the whole jar** — `AbstractIndent`
+and `BoundedRangeFunction` — re-confirmed for this task with
+`grep -rla RenderLimits` over every extracted class. `AbstractDate` is neither,
+and it does not need to be: `DateTimeFormatter.ofPattern` caps every repeatable
+letter itself (`d` at 2, `S` at 9, `y` at 19, and three *different* JDK messages
+for the three), so a pattern of a hundred thousand letters is an
+`IllegalArgumentException` rather than an allocation, in Kestra and in the port.
+Every letter that survives writes O(1) characters and the one padding construct
+(`p`) pads to a width that is itself bounded by the pattern's length, so a
+pattern's output is linear in its own input. A huge `dateAdd` amount is
+arithmetic, not allocation, and overflows into an error.
+
+So, unlike `indent` and `number(type='BIGDECIMAL')`, **this batch adds no
+divergent bound of its own**. `runners::filters::no_date_filter_can_be_made_to_allocate_out_of_proportion`
+is the pin for the claim.
+
+### egret's `date` is English-only, and its default zone is UTC
+
+Two stated divergences, both refusals rather than approximations:
+
+- **locale**: only `en` and `en_US` are accepted. Not every English tag,
+  because `WeekFields.of(locale)` reads the *country* — see the locale pin in
+  Requirements above. `filter-date-locale-french` is baselined.
+- **`timeZone`**: absent means UTC here and `ZoneId.systemDefault()` in Kestra.
+  No corpus entry can hold this one, because an entry that reached it would not
+  be reproducible on another machine — which is the whole reason for the
+  standing rule. `runners::filters::an_absent_time_zone_is_utc_here_and_the_hosts_zone_in_kestra`
+  is the pin.
+
+A third, smaller one: the twelve `java.time`-constant formats cannot be used as
+an `existingFormat`, since they have no pattern spelling for egret's parser to
+walk. Four of the twelve fail in Kestra too (they yield no date); the other
+eight are the divergence.

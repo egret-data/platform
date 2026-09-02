@@ -77,3 +77,19 @@ filter-number-int-overflow          test:number_int_really_is_thirty_two_bits
 filter-indent-amount-over-max       test:indent_reproduces_kestras_own_max_amount
 filter-number-type-not-string       test:number_reads_its_type_argument_strictly
 filter-number-type-null             test:number_reads_its_type_argument_strictly
+
+# --- W2 Task 5: the date/time batch.
+filter-date-pattern-too-many-letters   test:date_reproduces_javas_pattern_letter_limits
+filter-date-pattern-fraction-too-wide  test:date_reproduces_javas_pattern_letter_limits
+filter-date-pattern-year-too-wide      test:date_reproduces_javas_pattern_letter_limits
+filter-date-pattern-unclosed-literal   test:date_reproduces_javas_pattern_syntax_errors
+filter-date-pattern-reserved-char      test:date_reproduces_javas_pattern_syntax_errors
+filter-date-pattern-unmatched-bracket  test:date_reproduces_javas_pattern_syntax_errors
+filter-date-unknown-named-format       test:an_unknown_format_name_is_compiled_as_a_pattern
+filter-date-input-not-a-string         test:date_rejects_an_input_that_is_not_a_string
+filter-date-input-unparseable          test:date_refuses_an_unparseable_input
+filter-date-unknown-zone               test:date_refuses_an_unknown_time_zone
+filter-dateadd-unit-lowercase          test:date_add_refuses_a_unit_that_is_not_a_chrono_unit
+filter-dateadd-missing-unit            test:date_add_refuses_a_missing_unit
+filter-dateadd-amount-not-a-number     test:date_add_refuses_an_amount_that_is_not_a_number
+filter-dateadd-amount-not-numeric-text test:date_add_refuses_an_amount_that_is_not_a_number

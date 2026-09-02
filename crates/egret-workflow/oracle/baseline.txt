@@ -30,14 +30,6 @@ coalesce-or
 # minijinja's null test is spelled `none`; the corpus correctly keeps Kestra's name.
 coalesce-is-not-null
 
-# date/time filters, Task 5 (which owns javafmt.rs)
-filter-date
-filter-dateadd
-filter-timestamp
-filter-timestampmicro
-filter-timestampmilli
-filter-timestampnano
-
 # structured-data filters, Task 6
 filter-jq
 filter-tojson
@@ -155,3 +147,57 @@ filter-string-undefined-input
 # map path in this crate. Matching would mean porting Java's hash-bucket
 # layout into egret to imitate a bug. See runners::filters::escape_char.
 filter-escapechar-map-two-keys
+
+
+# W2 TASK 5, DELIBERATE (1 of 3): egret refuses the two pattern letters whose
+# output is TEXT OUT OF A LOCALE DATABASE, rather than answering plausibly.
+#
+# `z`/`zz`/`zzz`/`zzzz` is the zone's CLDR display name and `zzzz` its long
+# form. Measured through this harness: Asia/Tokyo is `JST`, Asia/Ho_Chi_Minh is
+# `GMT+07:00`, Australia/Eucla is `GMT+08:45`, Europe/Moscow is `GMT+03:00`.
+# tzdb's own abbreviations -- which `chrono-tz` exposes and which are the only
+# zone text available to egret -- agree for the first and the third and say
+# `+07` and `MSK` for the other two. There is no rule that is right for both
+# halves, so `runners::javafmt::format_field` refuses with the letter named.
+# `B` (the day period as text, `in the morning`) is refused for the same
+# reason and has no corpus entry of its own.
+#
+# `full` and `long` are the same fact once removed: their CLDR patterns end in
+# `zzzz` and `z`, so they inherit the refusal. `medium` and `short` do not and
+# both pass.
+filter-date-pattern-zone-name
+filter-date-style-full
+filter-date-style-long
+
+# W2 TASK 5, DELIBERATE (2 of 3): egret's `date` filters are English-only.
+#
+# Kestra's month, day, era and quarter names come from the JVM's CLDR data for
+# whatever locale is in force; egret carries the English names and refuses any
+# other `locale`, because answering `January` for `locale='fr'` is a silently
+# wrong string in a renderer whose whole job is byte fidelity.
+#
+# Only `en` and `en_US` are accepted, not every English tag, and that is
+# measured rather than cautious: `WeekFields.of(locale)` reads the locale's
+# COUNTRY, so `en`/`en_US` are Sunday-first with one minimal day while `en_GB`
+# is Monday-first with four and `en_VN` -- the harness machine's own default --
+# is Monday-first with one. Accepting `en_GB` would answer `w`, `W`, `Y`, `e`
+# and `c` wrongly while looking supported. See runners::javafmt::Locale.
+filter-date-locale-french
+
+# W2 TASK 5, DELIBERATE (3 of 3): a whole number is Kestra's `Long` here.
+#
+# `AbstractDate.convert` has branches for `Long` and for `String` and NONE for
+# `Integer`, so a context integer small enough to box as `java.lang.Integer`
+# falls through to `(String) input` and throws -- while the same digits as a
+# template LITERAL are a `Long` and are read as an epoch. `1705314600` is a
+# ten-digit epoch second, the commonest number anyone pipes into `date`, and it
+# is exactly the range that cannot work in Kestra.
+#
+# This is the same limit that baselines filter-classname-literal-int, and for
+# the same reason: minijinja carries the U64/I64 discriminant but exposes no
+# accessor for it, and the split is positive-versus-signed rather than
+# context-versus-literal. Given the choice of which side to be right on, egret
+# reads every whole number as a Long -- so filter-date-epoch-seconds-literal,
+# filter-date-epoch-millis-context, filter-date-epoch-nanos-context and
+# filter-date-epoch-nanos-truncating all pass, and this one records the cost.
+filter-date-epoch-seconds-context

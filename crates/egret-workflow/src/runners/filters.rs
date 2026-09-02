@@ -6,23 +6,27 @@
 //!
 //! `Extension.getFilters()` has **35** `filters.put` calls but only **32**
 //! string literals; the other three go through `RegexMatchFilter.NAME`,
-//! `RegexReplaceFilter.NAME` and `RegexExtractFilter.NAME`. This module owns
-//! 22 of the 35:
+//! `RegexReplaceFilter.NAME` and `RegexExtractFilter.NAME`. Confirmed against
+//! `host.Oracle dump`, which lists what the built engine actually carries:
+//! 35 filters, 34 functions, 1 test. This module owns **28** of the 35.
 //!
-//! `chunk`, `className`, `distinct`, `endsWith`, `escapeChar`, `flatten`,
-//! `indent`, `keys`, `md5`, `nindent`, `number`, `sha1`, `sha512`, `slugify`,
-//! `startsWith`, `string`, `substringAfter`, `substringAfterLast`,
-//! `substringBefore`, `substringBeforeLast`, `urldecode`, `values`.
+//! W2 Task 4 ported 22: `chunk`, `className`, `distinct`, `endsWith`,
+//! `escapeChar`, `flatten`, `indent`, `keys`, `md5`, `nindent`, `number`,
+//! `sha1`, `sha512`, `slugify`, `startsWith`, `string`, `substringAfter`,
+//! `substringAfterLast`, `substringBefore`, `substringBeforeLast`,
+//! `urldecode`, `values`.
 //!
-//! The remaining 13 belong to other tasks: the six date/time filters (`date`,
-//! `dateAdd`, `timestamp`, `timestampMicro`, `timestampMilli`,
-//! `timestampNano`) to Task 5, the four structured-data ones (`jq`, `toIon`,
-//! `toJson`, `yaml`) to Task 6, and the three constant-registered regex
-//! filters (`regexMatch`, `regexReplace`, `regexExtract`) to Task 6 as well —
-//! its batch is "`jq`, `toIon`, `toJson`, `yaml`, **and any remaining**", and
-//! after Tasks 4 and 5 those three are what remains. They are the only
-//! `getFilters()` names no brief enumerates by hand, so 22 + 6 + 4 + 3 = 35
-//! is what closes the count.
+//! W2 Task 5 ported the six date/time ones: `date`, `dateAdd`, `timestamp`,
+//! `timestampMicro`, `timestampMilli`, `timestampNano`. All six are
+//! `AbstractDate` subclasses and all six go through [`super::javafmt`], which
+//! is where Java's `DateTimeFormatter` pattern language lives.
+//!
+//! The remaining 7 belong to Task 6: the four structured-data filters (`jq`,
+//! `toIon`, `toJson`, `yaml`) and the three constant-registered regex ones
+//! (`regexMatch`, `regexReplace`, `regexExtract`) — its batch is "`jq`,
+//! `toIon`, `toJson`, `yaml`, **and any remaining**", and after Tasks 4 and 5
+//! those three are what remains. 22 + 6 + 4 + 3 = 35 is what closes the
+//! count.
 //!
 //! # Two of these names were already taken by minijinja
 //!
@@ -70,15 +74,25 @@ use minijinja::{Environment, Error as MjError, ErrorKind};
 use unicode_normalization::UnicodeNormalization;
 
 use super::env::{kestra_to_string, write_java_double, OrderedMap, MAX_OUTPUT_BYTES};
+use super::javafmt::{self, ChronoUnit, Format, Locale as JavaLocale, Zdt, Zone};
 
-/// Registers all 22 filters this task owns onto `env`.
+/// Registers all 28 filters this module owns onto `env`.
 ///
 /// **`indent` and `string` are overrides, not additions** — see this module's
 /// doc. `Environment::add_filter` replaces a built-in silently, so the only
 /// thing that makes the override visible is this comment and the oracle.
+///
+/// **None of Task 5's six collides with a minijinja built-in.** Checked
+/// against `defaults::build_builtin_filters` in the minijinja 2.24.0 the lock
+/// file resolves, at this workspace's feature set (`json` and `urlencode`
+/// off): 47 names, of which none is `date`, `dateAdd`, `timestamp`,
+/// `timestampMicro`, `timestampMilli` or `timestampNano`. Task 4 found
+/// `string` colliding invisibly, so this is verified rather than assumed.
 pub(super) fn register(env: &mut Environment<'static>) {
     env.add_filter("chunk", chunk);
     env.add_filter("className", class_name);
+    env.add_filter("date", date);
+    env.add_filter("dateAdd", date_add);
     env.add_filter("distinct", distinct);
     env.add_filter("endsWith", ends_with);
     env.add_filter("escapeChar", escape_char);
@@ -99,6 +113,10 @@ pub(super) fn register(env: &mut Environment<'static>) {
     env.add_filter("substringAfterLast", substring_after_last);
     env.add_filter("substringBefore", substring_before);
     env.add_filter("substringBeforeLast", substring_before_last);
+    env.add_filter("timestamp", timestamp);
+    env.add_filter("timestampMicro", timestamp_micro);
+    env.add_filter("timestampMilli", timestamp_milli);
+    env.add_filter("timestampNano", timestamp_nano);
     env.add_filter("urldecode", urldecode);
     env.add_filter("values", values);
 }
@@ -1753,6 +1771,319 @@ fn hash_with(value: &MjValue, digest: impl Fn(&[u8]) -> String) -> Result<MjValu
     Ok(MjValue::from(digest(input.as_bytes())))
 }
 
+// ---------------------------------------------------------------------------
+// Date and time (W2 Task 5)
+// ---------------------------------------------------------------------------
+
+/// The four arguments every date filter shares — `AbstractDate.getArgumentNames()`
+/// is `[format, timeZone, existingFormat, locale]`, and `DateAddFilter`
+/// prepends `[amount, unit]` to it.
+///
+/// `base` is where that shared block starts in the filter's own argument list:
+/// 0 for `date`, 2 for `dateAdd`. The `timestamp*` filters declare only
+/// `[timeZone, existingFormat]` and build this by hand.
+struct DateArgs {
+    format: String,
+    zone: Zone,
+    existing_format: Option<String>,
+    locale: JavaLocale,
+}
+
+impl DateArgs {
+    fn read(args: &Args, base: usize) -> Result<Self, MjError> {
+        // `args.containsKey("format") ? (String) args.get("format") : "iso"`.
+        // A *present but null* `format` is not the default: it reaches
+        // `DateTimeFormatter.ofPattern(null)`, which is an NPE whose message
+        // is the single word `pattern`.
+        let format = match args.get("format", base) {
+            None => "iso".to_string(),
+            Some(value) if is_java_null(&value) => return Err(pebble_error("pattern")),
+            Some(value) => cast_to_string(&value)?,
+        };
+        let zone = Zone::resolve(optional_string(args, "timeZone", base + 1)?.as_deref())
+            .map_err(pebble_error)?;
+        let existing_format = optional_string(args, "existingFormat", base + 2)?;
+        let locale = match optional_string(args, "locale", base + 3)? {
+            Some(spec) => JavaLocale::resolve(&spec).map_err(pebble_error)?,
+            None => JavaLocale,
+        };
+        Ok(DateArgs {
+            format,
+            zone,
+            existing_format,
+            locale,
+        })
+    }
+
+    /// `formatter(format).withLocale(locale).withZone(zone).format(zdt)`.
+    fn render(&self, zdt: &Zdt) -> Result<String, MjError> {
+        Format::resolve(&self.format)
+            .and_then(|format| format.format(zdt, &self.zone, self.locale))
+            .map_err(pebble_error)
+    }
+}
+
+/// `(String) args.get(name)` — absent and explicitly-null are the same thing
+/// here (Kestra uses a plain `get`, not `containsKey`), and a non-string is a
+/// `ClassCastException`.
+fn optional_string(args: &Args, name: &str, index: usize) -> Result<Option<String>, MjError> {
+    match args.get(name, index) {
+        None => Ok(None),
+        Some(value) if is_java_null(&value) => Ok(None),
+        Some(value) => Ok(Some(cast_to_string(&value)?)),
+    }
+}
+
+/// Java's `(String) x` on an argument that is not one.
+fn cast_to_string(value: &MjValue) -> Result<String, MjError> {
+    value.as_str().map(str::to_string).ok_or_else(|| {
+        pebble_error(format!(
+            "class {} cannot be cast to class java.lang.String",
+            java_class_name(value)
+        ))
+    })
+}
+
+/// `AbstractDate.convert(input, zone, existingFormat)`.
+///
+/// Kestra's branches are `Date`, `Instant`, `LocalDateTime`, `LocalDate`,
+/// `ZonedDateTime`, `Long`, and then a cast to `String`. Only the last two can
+/// arrive from a Pebble context, since Jackson deserialises JSON into boxed
+/// primitives, strings, lists and maps.
+///
+/// # A whole number is Kestra's `Long` here, and that is a chosen divergence
+///
+/// `convert` has **no `Integer` branch**: a context integer small enough for
+/// `java.lang.Integer` falls through to `(String) input` and throws
+/// `ClassCastException`, while the same digits written as a template literal
+/// are a `Long` and are read as an epoch. So `{{ 1705314600 | date(…) }}`
+/// works in Kestra and `{{ epoch | date(…) }}` with `epoch: 1705314600` in the
+/// context does not.
+///
+/// egret cannot tell the two apart — the same limit that baselines
+/// `filter-classname-literal-int`, and for the same reason (minijinja carries
+/// the `U64`/`I64` discriminant but exposes no accessor, and the split is
+/// positive-versus-signed rather than context-versus-literal). Given the
+/// choice, this reads **every** whole number as a `Long`, because the
+/// alternative is refusing a ten-digit epoch — the commonest number anyone
+/// pipes into `date` — to reproduce what is plainly a Kestra bug.
+/// `filter-date-epoch-seconds-context` is baselined with that reason.
+fn convert(value: &MjValue, zone: &Zone, existing_format: Option<&str>) -> Result<Zdt, MjError> {
+    if value.kind() == ValueKind::Number && value.is_integer() {
+        let epoch = i64::try_from(value.clone()).map_err(|_| pebble_error("long overflow"))?;
+        return epoch_to_zdt(epoch, zone.clone());
+    }
+    let Some(text) = value.as_str() else {
+        return Err(pebble_error(format!(
+            "class {} cannot be cast to class java.lang.String",
+            java_class_name(value)
+        )));
+    };
+    match existing_format {
+        Some(existing) => Format::resolve(existing)
+            .and_then(|format| format.parse_text(text, zone))
+            .map_err(pebble_error),
+        None => javafmt::parse_iso(text, zone).map_err(pebble_error),
+    }
+}
+
+/// The `Long` branch of `AbstractDate.convert`, which reads a number's
+/// **digit count** rather than its magnitude.
+///
+/// - 13 digits is milliseconds;
+/// - 19 digits ending in `000` is nanoseconds *(`l / 1e9` seconds, `l % 1e9`
+///   nanos)*;
+/// - 19 digits otherwise is `ofEpochMilli(l / 1e6)` and then
+///   `withNano((l % 1e6) * 1000)` — note `withNano` **replaces** the whole
+///   nanosecond field, so the millisecond part of the first step is discarded:
+///   `1705314600123456789` is `.456789`, not `.123456`. Measured.
+/// - anything else is seconds.
+///
+/// `digitCount` subtracts one for a leading `-`, so the rule is about the
+/// magnitude's digits, not the string's length.
+fn epoch_to_zdt(epoch: i64, zone: Zone) -> Result<Zdt, MjError> {
+    let digits = epoch.unsigned_abs().to_string().len();
+    let (seconds, nanos) = match digits {
+        13 => (
+            epoch.div_euclid(1_000),
+            (epoch.rem_euclid(1_000) * 1_000_000) as u32,
+        ),
+        19 if epoch.rem_euclid(1_000) == 0 => (
+            epoch.div_euclid(1_000_000_000),
+            epoch.rem_euclid(1_000_000_000) as u32,
+        ),
+        // `Instant.ofEpochMilli(l / 1e6)` -- MILLIseconds, so the division by
+        // a thousand below is `ofEpochMilli`'s own, not a second truncation.
+        // `withNano` then REPLACES the whole nanosecond field, discarding the
+        // millisecond part the first step just set.
+        19 => (
+            epoch.div_euclid(1_000_000).div_euclid(1_000),
+            (epoch.rem_euclid(1_000_000) * 1_000) as u32,
+        ),
+        _ => (epoch, 0),
+    };
+    Zdt::from_epoch(seconds, nanos, zone).ok_or_else(|| {
+        pebble_error(format!(
+            "Instant exceeds minimum or maximum instant: {epoch}"
+        ))
+    })
+}
+
+/// `DateFilter` — `AbstractDate.format(input, args, context)`.
+///
+/// `{{ d | date("yyyy-MM-dd'T'HH:mm:ss", timeZone='UTC') }}`. See
+/// [`super::javafmt`] for the pattern language and for the two pattern letters
+/// egret refuses.
+fn date(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
+    if is_java_null(&value) {
+        return Ok(MjValue::from(()));
+    }
+    let args = Args::new(rest);
+    let date_args = DateArgs::read(&args, 0)?;
+    let zdt = convert(
+        &value,
+        &date_args.zone,
+        date_args.existing_format.as_deref(),
+    )?;
+    Ok(MjValue::from(date_args.render(&zdt)?))
+}
+
+/// `DateAddFilter` — `convert(...).plus(amount, ChronoUnit.valueOf(unit))`,
+/// then the same `format` as `date`.
+///
+/// **The zone the arithmetic happens in is the input's, not `timeZone`'s.**
+/// `timeZone` is only the formatter's zone and the fallback for an input with
+/// no offset of its own, so `'2024-03-09T12:00:00-05:00' | dateAdd(1, 'DAYS',
+/// 'iso', 'America/New_York')` adds a day in the **fixed -05:00 offset** the
+/// string carried and only then re-zones for display. Measured; it is why the
+/// oracle entry for DST arithmetic spells its input
+/// `2024-03-09T12:00:00-05:00[America/New_York]`.
+fn date_add(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
+    if is_java_null(&value) {
+        return Ok(MjValue::from(()));
+    }
+    let args = Args::new(rest);
+    let amount = get_as_long(args.get("amount", 0).as_ref())?;
+    // `ChronoUnit.valueOf((String) args.get("unit"))` -- an absent `unit` is
+    // `valueOf(null)`, which is `NullPointerException: Name is null`, not a
+    // missing-argument error.
+    let unit = match optional_string(&args, "unit", 1)? {
+        Some(unit) => ChronoUnit::resolve(&unit).map_err(pebble_error)?,
+        None => return Err(pebble_error("Name is null")),
+    };
+    let date_args = DateArgs::read(&args, 2)?;
+    let zdt = convert(
+        &value,
+        &date_args.zone,
+        date_args.existing_format.as_deref(),
+    )?;
+    let moved = zdt.plus(amount, unit).map_err(pebble_error)?;
+    Ok(MjValue::from(date_args.render(&moved)?))
+}
+
+/// `DateAddFilter.getAsLong` — `Long`, `Integer`, any `Number` via
+/// `longValue()`, or a `String` via `Long.parseLong`.
+///
+/// Both refusals are Kestra's own wording, and they differ: a string that is
+/// not a number says `%s can't be converted to long`, while a non-number that
+/// is not a string at all says `Incorrect %s format, must be a number`. A
+/// `null` amount reaches the second, with the literal text `null` in it.
+fn get_as_long(value: Option<&MjValue>) -> Result<i64, MjError> {
+    let incorrect =
+        |text: String| pebble_error(format!("Incorrect {text} format, must be a number"));
+    let Some(value) = value else {
+        return Err(incorrect("null".to_string()));
+    };
+    if is_java_null(value) {
+        return Err(incorrect("null".to_string()));
+    }
+    if value.kind() == ValueKind::Number {
+        // `Number.longValue()` truncates toward zero for a floating-point
+        // value, which is why `dateAdd(2.9, 'DAYS')` adds two days.
+        return if value.is_integer() {
+            i64::try_from(value.clone()).map_err(|_| pebble_error("long overflow"))
+        } else {
+            f64::try_from(value.clone())
+                .map(|f| f as i64)
+                .map_err(|_| incorrect(kestra_to_string(value)))
+        };
+    }
+    if let Some(text) = value.as_str() {
+        return text
+            .parse::<i64>()
+            .map_err(|_| pebble_error(format!("{text} can't be converted to long")));
+    }
+    Err(incorrect(kestra_to_string(value)))
+}
+
+/// `TimestampFilter` — `convert(...).toEpochSecond()`, returning a **`Long`**.
+fn timestamp(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
+    let Some(zdt) = timestamp_input(&value, rest)? else {
+        return Ok(MjValue::from(()));
+    };
+    Ok(MjValue::from(zdt.epoch_second()))
+}
+
+/// `TimestampMicroFilter` — `SECONDS.toMicros(epochSecond) +
+/// NANOSECONDS.toMicros(nano)`, returning a **`String`**, not a number.
+///
+/// The four `timestamp*` filters do not agree about their return type:
+/// `timestamp` and `timestampMilli` return `Long`, `timestampMicro` and
+/// `timestampNano` return `String.valueOf(...)`. It renders the same digits
+/// either way, so the only thing that shows it is a second filter —
+/// `{{ d | timestampMicro | className }}` is `java.lang.String` where
+/// `{{ d | timestampMilli | className }}` is `java.lang.Long`. Both are corpus
+/// entries.
+fn timestamp_micro(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
+    let Some(zdt) = timestamp_input(&value, rest)? else {
+        return Ok(MjValue::from(()));
+    };
+    let micros = zdt
+        .epoch_second()
+        .saturating_mul(1_000_000)
+        .saturating_add(i64::from(zdt.nano() / 1_000));
+    Ok(MjValue::from(micros.to_string()))
+}
+
+/// `TimestampMilliFilter` — `toInstant().toEpochMilli()`, a **`Long`**.
+fn timestamp_milli(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
+    let Some(zdt) = timestamp_input(&value, rest)? else {
+        return Ok(MjValue::from(()));
+    };
+    let millis = zdt
+        .epoch_second()
+        .saturating_mul(1_000)
+        .saturating_add(i64::from(zdt.nano() / 1_000_000));
+    Ok(MjValue::from(millis))
+}
+
+/// `TimestampNanoFilter` — `SECONDS.toNanos(epochSecond) + nano`, a
+/// **`String`**. See [`timestamp_micro`].
+fn timestamp_nano(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
+    let Some(zdt) = timestamp_input(&value, rest)? else {
+        return Ok(MjValue::from(()));
+    };
+    let nanos = zdt
+        .epoch_second()
+        .saturating_mul(1_000_000_000)
+        .saturating_add(i64::from(zdt.nano()));
+    Ok(MjValue::from(nanos.to_string()))
+}
+
+/// The shared head of the four `timestamp*` filters: null passes through, and
+/// the only arguments they declare are `[timeZone, existingFormat]` — no
+/// `format` and no `locale`, because none of them formats anything.
+fn timestamp_input(value: &MjValue, rest: Rest<MjValue>) -> Result<Option<Zdt>, MjError> {
+    if is_java_null(value) {
+        return Ok(None);
+    }
+    let args = Args::new(rest);
+    let zone =
+        Zone::resolve(optional_string(&args, "timeZone", 0)?.as_deref()).map_err(pebble_error)?;
+    let existing_format = optional_string(&args, "existingFormat", 1)?;
+    convert(value, &zone, existing_format.as_deref()).map(Some)
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::env::{render_str, RenderContext};
@@ -2470,6 +2801,309 @@ mod tests {
         assert_eq!(
             ok("{{ s | slugify }}", r#"{"s": "Über Straße"}"#),
             "uber-strae"
+        );
+    }
+
+    // -- W2 Task 5: the fourteen date/time `error-class` entries ----------
+    //
+    // Same discipline as the four above: the oracle's error-class comparison
+    // is satisfied by any failure, so what actually holds these to account is
+    // egret's own message being asserted here. `oracle/error-class-pairs.txt`
+    // names each of these tests against its id, and
+    // `every_error_class_entry_is_paired_with_something_that_can_fail` fails
+    // by name if one is renamed away.
+
+    /// `DateTimeFormatter.ofPattern` bounds every repeatable letter itself,
+    /// and **that is why this task needed no `RenderLimits`-style guard of
+    /// its own.** `d` stops at 2, `S` at 9 and `y` at 19, so a pattern of ten
+    /// thousand letters is an `IllegalArgumentException` rather than an
+    /// allocation, in Kestra and here. The three messages are the JDK's own,
+    /// and they are three DIFFERENT sentences for what looks like one rule.
+    #[test]
+    fn date_reproduces_javas_pattern_letter_limits() {
+        let d = r#"{"d": "2024-01-15T10:30:00Z"}"#;
+        assert!(
+            err("{{ d | date('ddd', timeZone='UTC') }}", d).contains("Too many pattern letters: d")
+        );
+        assert!(err("{{ d | date('SSSSSSSSSS', timeZone='UTC') }}", d)
+            .contains("Minimum width must be from 0 to 9 inclusive but was 10"));
+        assert!(
+            err("{{ d | date('yyyyyyyyyyyyyyyyyyyy', timeZone='UTC') }}", d)
+                .contains("The minimum width must be from 1 to 19 inclusive but was 20")
+        );
+        // One under each limit still works, so the messages above are a
+        // boundary and not a blanket refusal.
+        assert_eq!(ok("{{ d | date('dd', timeZone='UTC') }}", d), "15");
+        assert_eq!(
+            ok("{{ d | date('yyyyyyyyyyyyyyyyyyy', timeZone='UTC') }}", d),
+            "0000000000000002024"
+        );
+    }
+
+    /// The three ways a pattern's *syntax* is rejected, as opposed to its
+    /// letter counts. Note `]` is an error but a dangling `[` is not, and
+    /// `#`/`{`/`}` are reserved rather than literal.
+    #[test]
+    fn date_reproduces_javas_pattern_syntax_errors() {
+        let d = r#"{"d": "2024-01-15T10:30:00Z"}"#;
+        assert!(err(r#"{{ d | date("yyyy'MM", timeZone='UTC') }}"#, d)
+            .contains("Pattern ends with an incomplete string literal: yyyy'MM"));
+        assert!(err("{{ d | date('yyyy#MM', timeZone='UTC') }}", d)
+            .contains("Pattern includes reserved character: '#'"));
+        assert!(err("{{ d | date('yyyy]', timeZone='UTC') }}", d)
+            .contains("Pattern invalid as it contains ] without previous ["));
+        assert_eq!(ok("{{ d | date('yyyy[MM', timeZone='UTC') }}", d), "202401");
+    }
+
+    /// **An unknown format NAME is not an unknown-format error.**
+    /// `AbstractDate.formatter` falls through the STYLES map and the
+    /// FORMATTERS map to `ofPattern(name)`, so the name is compiled as a
+    /// pattern and the message names the first character of it that is not a
+    /// pattern letter. `nope_format` fails on its `o`.
+    #[test]
+    fn an_unknown_format_name_is_compiled_as_a_pattern() {
+        let d = r#"{"d": "2024-01-15T10:30:00Z"}"#;
+        assert!(err("{{ d | date('nope_format', timeZone='UTC') }}", d)
+            .contains("Unknown pattern letter: o"));
+        // …and a name made only of pattern letters really does format.
+        assert_eq!(ok("{{ d | date('dd', timeZone='UTC') }}", d), "15");
+    }
+
+    /// `convert`'s last branch is a hard `(String) input` cast, so anything
+    /// that is neither a number nor a string is a `ClassCastException` naming
+    /// the Java class it would have been.
+    #[test]
+    fn date_rejects_an_input_that_is_not_a_string() {
+        assert!(
+            err("{{ d | date('iso', timeZone='UTC') }}", r#"{"d": true}"#)
+                .contains("class java.lang.Boolean cannot be cast to class java.lang.String")
+        );
+        assert!(
+            err("{{ d | date('iso', timeZone='UTC') }}", r#"{"d": [1, 2]}"#)
+                .contains("class java.util.ArrayList cannot be cast to class java.lang.String")
+        );
+        // A non-integer number is the same refusal -- `convert` has a `Long`
+        // branch and no `Double` one.
+        assert!(
+            err("{{ d | date('iso', timeZone='UTC') }}", r#"{"d": 1.5}"#)
+                .contains("class java.lang.Double cannot be cast to class java.lang.String")
+        );
+    }
+
+    #[test]
+    fn date_refuses_an_unparseable_input() {
+        for input in [
+            r#"{"d": "not-a-date"}"#,
+            r#"{"d": ""}"#,
+            r#"{"d": "2024-02-30"}"#,
+        ] {
+            let message = err("{{ d | date('iso', timeZone='UTC') }}", input);
+            assert!(message.contains("could not be parsed"), "{message}");
+        }
+    }
+
+    /// `ZoneId.of` is case-sensitive and rejects an unknown region, and so is
+    /// this: `utc` is not `UTC`.
+    #[test]
+    fn date_refuses_an_unknown_time_zone() {
+        let d = r#"{"d": "2024-01-15T10:30:00Z"}"#;
+        assert!(err("{{ d | date('iso', timeZone='Not/AZone') }}", d)
+            .contains("Unknown time-zone ID: Not/AZone"));
+        assert!(
+            err("{{ d | date('iso', timeZone='utc') }}", d).contains("Unknown time-zone ID: utc")
+        );
+    }
+
+    /// `ChronoUnit.valueOf` takes the enum's own spelling, so `'days'` is not
+    /// `'DAYS'` -- and the message is `java.lang.IllegalArgumentException`'s,
+    /// which names the fully-qualified enum.
+    #[test]
+    fn date_add_refuses_a_unit_that_is_not_a_chrono_unit() {
+        let d = r#"{"d": "2024-01-15T10:30:00Z"}"#;
+        assert!(err("{{ d | dateAdd(1, 'days', 'iso', 'UTC') }}", d)
+            .contains("No enum constant java.time.temporal.ChronoUnit.days"));
+        assert!(err("{{ d | dateAdd(1, 'FORTNIGHTS', 'iso', 'UTC') }}", d)
+            .contains("No enum constant java.time.temporal.ChronoUnit.FORTNIGHTS"));
+    }
+
+    /// An absent `unit` is `ChronoUnit.valueOf(null)`, whose message is the
+    /// three words `Name is null` -- not a missing-argument error, which is
+    /// what a reader would expect and what an invented message would say.
+    #[test]
+    fn date_add_refuses_a_missing_unit() {
+        let d = r#"{"d": "2024-01-15T10:30:00Z"}"#;
+        assert!(
+            err("{{ d | dateAdd(1, format='iso', timeZone='UTC') }}", d).contains("Name is null")
+        );
+    }
+
+    /// `getAsLong` has **two** refusals with different wording, and which one
+    /// you get depends on whether the value was a string.
+    #[test]
+    fn date_add_refuses_an_amount_that_is_not_a_number() {
+        let d = r#"{"d": "2024-01-15T10:30:00Z"}"#;
+        assert!(err("{{ d | dateAdd(true, 'DAYS', 'iso', 'UTC') }}", d)
+            .contains("Incorrect true format, must be a number"));
+        assert!(err("{{ d | dateAdd('x', 'DAYS', 'iso', 'UTC') }}", d)
+            .contains("x can't be converted to long"));
+        assert!(err(
+            "{{ d | dateAdd(unit='DAYS', format='iso', timeZone='UTC') }}",
+            d
+        )
+        .contains("Incorrect null format, must be a number"));
+        // A numeric STRING is fine, and a fractional number truncates through
+        // `Number.longValue()` rather than erroring.
+        assert_eq!(
+            ok("{{ d | dateAdd('3', 'DAYS', 'yyyy-MM-dd', 'UTC') }}", d),
+            "2024-01-18"
+        );
+        assert_eq!(
+            ok("{{ d | dateAdd(2.9, 'DAYS', 'yyyy-MM-dd', 'UTC') }}", d),
+            "2024-01-17"
+        );
+    }
+
+    // -- W2 Task 5: behaviours with no corpus entry ----------------------
+
+    /// **Nothing in this batch can be made to allocate disproportionately, so
+    /// nothing in it is bounded by egret.**
+    ///
+    /// `RenderLimits` has exactly two call sites in the whole
+    /// `io.kestra:core:2.0.0-rc13` jar — `AbstractIndent` and
+    /// `BoundedRangeFunction` — confirmed with `grep -rla RenderLimits` over
+    /// every extracted class, and `AbstractDate` is neither. That is fidelity
+    /// here rather than a gap, because the two vectors a date filter could
+    /// have are already closed upstream:
+    ///
+    /// - a **repeated pattern letter** is capped by the JDK's own compiler
+    ///   (see [`date_reproduces_javas_pattern_letter_limits`]), and every
+    ///   letter that survives writes O(1) characters, so a pattern's output is
+    ///   linear in the pattern's own length;
+    /// - a **huge `dateAdd` amount** is arithmetic, not allocation, and
+    ///   overflows into an error long before it costs anything.
+    ///
+    /// This test is the pin for that claim: both shapes refuse, and neither
+    /// takes measurable time.
+    #[test]
+    fn no_date_filter_can_be_made_to_allocate_out_of_proportion() {
+        let d = r#"{"d": "2024-01-15T10:30:00Z"}"#;
+        let huge = "y".repeat(100_000);
+        assert!(
+            err(&format!("{{{{ d | date('{huge}', timeZone='UTC') }}}}"), d)
+                .contains("The minimum width must be from 1 to 19 inclusive")
+        );
+        // The longest a pattern's output can be is a pad, and a pad's width is
+        // the pattern's own length -- linear, so `MAX_OUTPUT_BYTES` already
+        // measures it where it is written.
+        let pad = format!("{}H", "p".repeat(64));
+        assert_eq!(
+            ok(&format!("{{{{ d | date('{pad}', timeZone='UTC') }}}}"), d).len(),
+            64
+        );
+        assert!(err(
+            "{{ d | dateAdd(9223372036854775807, 'DAYS', 'iso', 'UTC') }}",
+            d
+        )
+        .contains("long overflow"));
+        assert!(
+            err("{{ d | dateAdd(1000000000, 'YEARS', 'iso', 'UTC') }}", d)
+                .contains("Invalid value for Year")
+        );
+    }
+
+    /// `ChronoUnit.ERAS` is a real unit and `plus(1, ERAS)` is a real call --
+    /// it just cannot succeed on an ISO date, because ISO has two eras. The
+    /// message is `DateTimeException`'s, and reproducing it is what stops the
+    /// unit looking unsupported.
+    #[test]
+    fn date_add_refuses_an_era_rollover_but_not_the_unit() {
+        let d = r#"{"d": "2024-01-15T10:30:00Z"}"#;
+        assert!(err("{{ d | dateAdd(1, 'ERAS', 'iso', 'UTC') }}", d)
+            .contains("Invalid value for Era (valid values 0 - 1): 2"));
+        assert!(err("{{ d | dateAdd(1, 'FOREVER', 'iso', 'UTC') }}", d)
+            .contains("Unsupported unit: Forever"));
+        // A zero-era shift is the identity and does NOT throw.
+        assert_eq!(
+            ok("{{ d | dateAdd(0, 'ERAS', 'yyyy-MM-dd', 'UTC') }}", d),
+            "2024-01-15"
+        );
+    }
+
+    /// A **present but null** `format` is not the default.
+    /// `AbstractDate.format` reads it with `containsKey`, so `date(null)`
+    /// reaches `DateTimeFormatter.ofPattern(null)` and the message is the
+    /// single word `pattern`, from the NPE. Omitting the argument entirely is
+    /// what selects `iso`.
+    #[test]
+    fn a_present_but_null_format_is_not_the_default() {
+        let d = r#"{"d": "2024-01-15T10:30:00Z"}"#;
+        assert!(err("{{ d | date(null, timeZone='UTC') }}", d).contains("pattern"));
+        assert_eq!(
+            ok("{{ d | date(timeZone='UTC') }}", d),
+            "2024-01-15T10:30:00.000000Z"
+        );
+    }
+
+    /// **egret's default zone is UTC where Kestra's is the host's.**
+    ///
+    /// `AbstractDate.zoneId(null)` is `ZoneId.systemDefault()`, which makes
+    /// every unqualified `date` call answer differently on a laptop and on a
+    /// cluster node — `oracle/README.md` records that as a standing rule for
+    /// the corpus (every date entry passes `timeZone` explicitly) and it is
+    /// the wrong default for a server rendering other people's workflows.
+    /// This is the one divergence in `Zone::resolve`, and no corpus entry can
+    /// hold it, because a corpus entry that reached it would not be
+    /// reproducible on another machine — which is the whole point.
+    #[test]
+    fn an_absent_time_zone_is_utc_here_and_the_hosts_zone_in_kestra() {
+        assert_eq!(
+            ok("{{ d | date('iso') }}", r#"{"d": "2024-01-15T10:30:00"}"#),
+            "2024-01-15T10:30:00.000000Z"
+        );
+    }
+
+    /// The twelve FORMATTERS entries that are `java.time` constants have no
+    /// pattern spelling, so they cannot drive egret's pattern PARSER. Four of
+    /// them fail in Kestra too (they yield no date); the rest are a stated
+    /// divergence rather than an approximation.
+    #[test]
+    fn a_java_constant_format_cannot_be_an_existing_format() {
+        let message = err(
+            "{{ d | date('iso', timeZone='UTC', existingFormat='iso_local_date') }}",
+            r#"{"d": "2024-01-15"}"#,
+        );
+        assert!(
+            message.contains("java.time constant with no pattern spelling"),
+            "{message}"
+        );
+        // The six FORMATTERS entries Kestra builds with `ofPattern` DO parse.
+        assert_eq!(
+            ok(
+                "{{ d | date('yyyy', timeZone='UTC', existingFormat='sql_sec') }}",
+                r#"{"d": "2024-01-15 10:30:00"}"#
+            ),
+            "2024"
+        );
+    }
+
+    /// The `timestamp*` filters declare `[timeZone, existingFormat]` and
+    /// nothing else — **no `format` and no `locale`** — so a positional
+    /// argument means `timeZone`, not a format.
+    #[test]
+    fn a_timestamp_filters_first_positional_argument_is_its_zone() {
+        assert_eq!(
+            ok(
+                "{{ d | timestamp('Asia/Tokyo') }}",
+                r#"{"d": "2024-01-15T10:30:00"}"#
+            ),
+            "1705282200"
+        );
+        assert_eq!(
+            ok(
+                "{{ d | timestamp('UTC') }}",
+                r#"{"d": "2024-01-15T10:30:00"}"#
+            ),
+            "1705314600"
         );
     }
 }

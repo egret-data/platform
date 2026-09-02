@@ -99,3 +99,49 @@ filter-number-int-overflow
 filter-indent-amount-over-max
 filter-number-type-not-string
 filter-number-type-null
+
+# W2 TASK 5 -- the date/time batch, fourteen. Every one of these is an
+# exception Kestra actually throws; none of them is a filter this task could
+# not finish. The pairing is in error-class-pairs.txt and is asserted.
+#
+# Eight of the fourteen are the JAVA PATTERN COMPILER refusing a pattern, and
+# they are the reason this task did not need a `RenderLimits`-style bound of
+# its own: `DateTimeFormatter.ofPattern` caps every repeatable letter itself
+# (`d` at 2, `S` at 9, `y` at 19), so a pattern of ten thousand letters is an
+# IllegalArgumentException in Kestra and in egret rather than an allocation.
+# `runners::javafmt` reproduces each message word for word.
+#
+#   filter-date-pattern-too-many-letters   -> date_reproduces_javas_pattern_letter_limits
+#   filter-date-pattern-fraction-too-wide  -> date_reproduces_javas_pattern_letter_limits
+#   filter-date-pattern-year-too-wide      -> date_reproduces_javas_pattern_letter_limits
+#   filter-date-pattern-unclosed-literal   -> date_reproduces_javas_pattern_syntax_errors
+#   filter-date-pattern-reserved-char      -> date_reproduces_javas_pattern_syntax_errors
+#   filter-date-pattern-unmatched-bracket  -> date_reproduces_javas_pattern_syntax_errors
+#   filter-date-unknown-named-format       -> an_unknown_format_name_is_compiled_as_a_pattern
+#   filter-date-input-not-a-string         -> date_rejects_an_input_that_is_not_a_string
+#   filter-date-input-unparseable          -> date_refuses_an_unparseable_input
+#   filter-date-unknown-zone               -> date_refuses_an_unknown_time_zone
+#   filter-dateadd-unit-lowercase          -> date_add_refuses_a_unit_that_is_not_a_chrono_unit
+#   filter-dateadd-missing-unit            -> date_add_refuses_a_missing_unit
+#   filter-dateadd-amount-not-a-number     -> date_add_refuses_an_amount_that_is_not_a_number
+#   filter-dateadd-amount-not-numeric-text -> date_add_refuses_an_amount_that_is_not_a_number
+#
+# `filter-date-unknown-named-format` is the sharpest of them: `date('nope_format')`
+# is NOT an unknown-format error at all. `AbstractDate.formatter` falls through
+# both of its maps to `ofPattern(name)`, so the name is compiled as a PATTERN
+# and the message names the first letter of it that is not a pattern letter --
+# `Unknown pattern letter: o`.
+filter-date-pattern-too-many-letters
+filter-date-pattern-fraction-too-wide
+filter-date-pattern-year-too-wide
+filter-date-pattern-unclosed-literal
+filter-date-pattern-reserved-char
+filter-date-pattern-unmatched-bracket
+filter-date-unknown-named-format
+filter-date-input-not-a-string
+filter-date-input-unparseable
+filter-date-unknown-zone
+filter-dateadd-unit-lowercase
+filter-dateadd-missing-unit
+filter-dateadd-amount-not-a-number
+filter-dateadd-amount-not-numeric-text
