@@ -75,8 +75,30 @@ an entry matches on any failure at all, so it is born matching, never enters
 `baseline.txt`, and can never fail. A task that could not reproduce a filter
 could mark its entry error-class and turn the oracle green on work it did not
 do. Keeping the set in its own short file makes adding one a one-line,
-reviewable diff instead of a field edit buried in a 138-entry JSON file — the
+reviewable diff instead of a field edit buried in a 291-entry JSON file — the
 same discipline `baseline.txt` applies to mismatches.
+
+**And `error-class-pairs.txt` says, per id, what CAN fail.** `error-class.txt`
+makes adding a free pass visible; it does not make the entry answerable —
+nothing notices if the refusal behind one turns into a success or into a
+different refusal for a different reason. Until W2 Task 4's last round that was
+closed by a convention ("each is paired with a unit test asserting egret's own
+message") written in prose. Tasks 6-8 add more entries — **Task 8's entire
+deliverable is refusals** — and a convention nobody checks is not a constraint.
+So the pairing is committed and asserted by
+`every_error_class_entry_is_paired_with_something_that_can_fail`:
+
+| justification | what is checked |
+|---|---|
+| `test:<name>` | `<name>` is a `#[test] fn` that **exists** in `src/runners/`, found by scanning the committed source with `include_str!` |
+| `baselined` | the id really is in `baseline.txt`, so it is not born matching at all and the ratchet already holds it |
+| `unported:<task>` | nothing is ported behind it; the **set** of these must equal `UNPORTED_ERROR_CLASS` in `tests/oracle.rs`, so a ninth cannot be added without editing a test |
+
+The two files must name exactly the same ids, in both directions. An entry
+added without a pair fails **by name**, the way a stale baseline line does.
+Verified by deliberate breakage before committing: an unpaired new entry, a
+renamed paired test, a false `baselined` claim and a quietly-added
+`unported:` all fail, each naming the id.
 
 28 entries carry it today: the four `*-mixed` comparisons (Pebble throws on a
 String/Number mix), the eight registered-but-null-backed functions,
@@ -115,14 +137,17 @@ a passing test**, so run it as
 cargo test -p egret-workflow --test oracle -- --nocapture
 ```
 
-**Run the whole target, not one test.** `--test oracle` carries five tests, and
-three of them guard the differential test rather than take part in it:
+**Run the whole target, not one test.** `--test oracle` carries **six** tests,
+and four of them guard the differential test rather than take part in it:
 `corpus_and_golden_describe_the_same_expressions` (the corpus and the golden
-file describe the same expressions), `error_class_entries_are_exactly_the_committed_allowlist`,
-and `a_panic_fails_even_when_the_ratchet_is_satisfied`. Filtering to
+file describe the same expressions),
+`error_class_entries_are_exactly_the_committed_allowlist`,
+`every_error_class_entry_is_paired_with_something_that_can_fail`, and
+`a_panic_fails_even_when_the_ratchet_is_satisfied`. Filtering to
 `-- render_corpus_matches_golden` — the natural thing to type while iterating —
-**skips all three**, so the ratchet will happily pass against a corpus that has
-drifted out of sync with the golden file it is being checked against.
+**skips all four**, so the ratchet will happily pass against a corpus that has
+drifted out of sync with the golden file it is being checked against, or
+against a free pass nothing can fail.
 
 `--nocapture` is what actually shows the count and the exclusion lists. Without `--nocapture`, a
 green run tells you nothing about how much of the corpus is still baselined.

@@ -1,0 +1,79 @@
+# What actually holds each `compare: "error-class"` entry to account.
+#
+# error-class comparison is a FREE PASS: the entry matches on any failure at
+# all, so it is born matching, never enters baseline.txt, and can never fail.
+# `error-class.txt` makes ADDING one a visible diff. This file makes each one
+# ANSWERABLE: it names, per id, the thing that would notice if egret stopped
+# refusing -- or says plainly that nothing does yet, and whose job that is.
+#
+# Until now the pairing was a convention written in prose. Tasks 6-8 will add
+# more entries (Task 8's whole deliverable is refusals), and a convention
+# nobody checks is not a constraint. `tests/oracle.rs`'s
+# `every_error_class_entry_is_paired_with_something_that_can_fail` asserts this
+# file against `error-class.txt` in BOTH directions, checks every named test
+# exists, and checks every `baselined` claim -- so an entry added without a
+# pair fails the suite by name.
+#
+# Format: `<corpus id> <justification>`. `#` starts a comment.
+#
+#   test:<name>       a `#[test] fn` in this crate that asserts egret's OWN
+#                     message for that input. The strongest form: it fails if
+#                     the refusal turns into a success OR changes meaning.
+#   baselined         the id is ALSO in baseline.txt, so it is not born
+#                     matching at all -- egret succeeds where Kestra throws and
+#                     the ratchet is already policing it. Verified against
+#                     baseline.txt, not taken on trust.
+#   unported:<task>   nothing is ported behind it. The entry matches only
+#                     because egret says "unknown function", exactly the
+#                     hollow pass B5 warns about. Named so it is a declared
+#                     debt with an owner rather than an omission. The set of
+#                     these is ALSO pinned, as a const in tests/oracle.rs, so
+#                     a new one cannot be added quietly here.
+
+# --- W2 Task 3: egret SUCCEEDS where Pebble throws on a String/Number mix, so
+# these are real mismatches and the ratchet holds them.
+gt-mixed                            baselined
+lt-mixed                            baselined
+lte-mixed                           baselined
+gte-mixed                           baselined
+
+# --- W2 Task 3: minijinja has a real multiline `{% raw %}` and Kestra's
+# RAW_PATTERN has no DOTALL. Deliberate divergence, and baselined.
+raw-multiline                       baselined
+
+# --- W2 Task 3: an ABSENT variable inside an isIn must raise, not answer
+# false. One test covers all three rows and asserts egret's own error.
+isin-undefined-left                 test:an_undefined_is_in_operand_raises_rather_than_answering_false
+isin-undefined-right                test:an_undefined_is_in_operand_raises_rather_than_answering_false
+isin-missing-attr-left              test:an_undefined_is_in_operand_raises_rather_than_answering_false
+
+# --- Registered but null-backed standalone. NOTHING IS PORTED behind these:
+# they match only because egret says "unknown function" where Kestra says
+# "Function or Macro [x] does not exist". Task 8 owns turning each into an
+# explicit refusal with asserted text.
+function-secret                     unported:task-8
+function-kv                         unported:task-8
+function-read                       unported:task-8
+function-fileuri                    unported:task-8
+function-filesize                   unported:task-8
+function-fileexists                 unported:task-8
+function-isfileempty                unported:task-8
+function-http                       unported:task-8
+
+# --- W2 Task 4: wrong-typed input.
+filter-chunk-not-list               test:chunk_rejects_a_non_list
+filter-distinct-not-list            test:distinct_rejects_a_non_list
+filter-values-not-map               test:values_rejects_a_non_map
+filter-number-not-string            test:number_rejects_a_non_string
+
+# --- W2 Task 4 fix round 1: exceptions where the first cut answered.
+filter-escapechar-map-null-value    test:escape_char_refuses_a_null_inside_a_container
+filter-escapechar-list-null-element test:escape_char_refuses_a_null_inside_a_container
+filter-chunk-size-truncated         test:chunk_narrows_its_size_to_an_int
+filter-indent-amount-overflow       test:indent_narrows_its_amount_to_an_int
+filter-number-int-overflow          test:number_int_really_is_thirty_two_bits
+
+# --- W2 Task 4 fix round 3.
+filter-indent-amount-over-max       test:indent_reproduces_kestras_own_max_amount
+filter-number-type-not-string       test:number_reads_its_type_argument_strictly
+filter-number-type-null             test:number_reads_its_type_argument_strictly

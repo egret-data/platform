@@ -49,12 +49,15 @@
 //! The error-class mode exists because a golden error value is a Java
 //! exception string (`io.pebbletemplates.pebble.error.PebbleException: …`)
 //! that no Rust port can ever reproduce byte for byte, so strict equality
-//! would make zero unreachable rather than merely distant. Two properties
+//! would make zero unreachable rather than merely distant. **Three** properties
 //! keep it from becoming a silent weakening: the mode is an explicit,
 //! reviewable property **of the corpus entry**, never inferred at comparison
-//! time from "the golden happens to look like an error"; and the ids are
-//! printed with a count on every run. The Java message stays in the golden
-//! file as documentation of what Kestra actually says.
+//! time from "the golden happens to look like an error"; the ids are printed
+//! with a count on every run; and every one of them is **paired**, in
+//! `oracle/error-class-pairs.txt`, with something that CAN fail — see
+//! [`every_error_class_entry_is_paired_with_something_that_can_fail`]. The
+//! Java message stays in the golden file as documentation of what Kestra
+//! actually says.
 //!
 //! # How to read a failure
 //!
@@ -430,6 +433,185 @@ fn error_class_entries_are_exactly_the_committed_allowlist() {
         "oracle/error-class.txt names {} id(s) that are no longer marked error-class in the \
          corpus -- delete them: {removed:?}",
         removed.len()
+    );
+}
+
+/// The eight error-class ids with **nothing ported behind them**.
+///
+/// Each matches only because egret says `unknown function` where Kestra says
+/// `Function or Macro [x] does not exist` — the hollow pass the whole
+/// error-class fence exists to make visible. `oracle/error-class-pairs.txt`
+/// marks them `unported:task-8`, and this constant is what stops a ninth
+/// being added there quietly: growing the list means editing this file, which
+/// is a diff in a test rather than in a data file.
+///
+/// Task 8 empties it by porting each as an explicit refusal with asserted
+/// text, and deleting its line here in the same commit.
+const UNPORTED_ERROR_CLASS: &[&str] = &[
+    "function-secret",
+    "function-kv",
+    "function-read",
+    "function-fileuri",
+    "function-filesize",
+    "function-fileexists",
+    "function-isfileempty",
+    "function-http",
+];
+
+/// Every `#[test] fn` name declared in the crate's own sources.
+///
+/// Read at compile time with `include_str!`, the same way the baseline and
+/// the allowlist are, so the check is against the committed text rather than
+/// against a runtime registry libtest does not expose to another binary.
+fn declared_test_names() -> BTreeSet<String> {
+    const SOURCES: &[&str] = &[
+        include_str!("../src/runners/filters.rs"),
+        include_str!("../src/runners/env.rs"),
+        include_str!("../src/runners/rewrite.rs"),
+    ];
+
+    let mut names = BTreeSet::new();
+    for source in SOURCES {
+        let mut rest: &str = source;
+        while let Some(at) = rest.find("#[test]") {
+            rest = &rest[at + "#[test]".len()..];
+            // Stop at the next attribute, so a `#[test]` that is somehow not
+            // followed by a function cannot claim the following one's name.
+            let window = match rest.find("#[test]") {
+                Some(next) => &rest[..next],
+                None => rest,
+            };
+            if let Some(fn_at) = window.find("fn ") {
+                let name: String = window[fn_at + 3..]
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                if !name.is_empty() {
+                    names.insert(name);
+                }
+            }
+        }
+    }
+    names
+}
+
+/// **The pairing is mechanical, not a convention.**
+///
+/// `oracle/error-class.txt` makes *adding* a free pass a visible diff. It does
+/// not make the entry answerable: an error-class entry matches on any failure
+/// at all, so nothing in the ratchet notices if the refusal behind it turns
+/// into a success, or into a different refusal for a different reason.
+///
+/// Until this test, what closed that was a convention — "each one is paired
+/// with a unit test asserting egret's own message" — written in prose in three
+/// places. Tasks 6-8 will add more entries (Task 8's entire deliverable is
+/// refusals), and a convention nobody checks is not a constraint. So
+/// `oracle/error-class-pairs.txt` commits the pairing and this asserts it:
+///
+/// - the two files name **exactly** the same ids, in both directions;
+/// - every `test:<name>` names a `#[test] fn` that **exists** in the crate;
+/// - every `baselined` claim is **true** of `oracle/baseline.txt`;
+/// - the `unported:` set is exactly [`UNPORTED_ERROR_CLASS`].
+///
+/// An error-class entry added without a pair fails here **by name**, the way a
+/// stale baseline line already does.
+#[test]
+fn every_error_class_entry_is_paired_with_something_that_can_fail() {
+    let pairs: Vec<(String, String)> = include_str!("../oracle/error-class-pairs.txt")
+        .lines()
+        .map(|line| line.split('#').next().unwrap_or("").trim())
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let mut parts = line.split_whitespace();
+            let id = parts.next().unwrap_or_default().to_string();
+            let justification = parts.next().unwrap_or_default().to_string();
+            assert!(
+                parts.next().is_none(),
+                "{id}: a pairing line is `<id> <justification>` and nothing else"
+            );
+            (id, justification)
+        })
+        .collect();
+
+    let paired: BTreeSet<String> = pairs.iter().map(|(id, _)| id.clone()).collect();
+    assert_eq!(
+        paired.len(),
+        pairs.len(),
+        "oracle/error-class-pairs.txt has duplicate ids"
+    );
+
+    let allowed = error_class_allowlist();
+    let unpaired: Vec<&String> = allowed.difference(&paired).collect();
+    let orphaned: Vec<&String> = paired.difference(&allowed).collect();
+    assert!(
+        unpaired.is_empty(),
+        "{} error-class entr(y/ies) have no line in oracle/error-class-pairs.txt. An \
+         error-class entry can never fail, so something else has to be able to -- name a \
+         test that asserts egret's own message for it: {unpaired:?}",
+        unpaired.len()
+    );
+    assert!(
+        orphaned.is_empty(),
+        "oracle/error-class-pairs.txt names {} id(s) that are no longer error-class -- \
+         delete them: {orphaned:?}",
+        orphaned.len()
+    );
+
+    let declared = declared_test_names();
+    // A canary plus a floor, so a scan that silently stops working is
+    // distinguishable from a test that was legitimately renamed. Without
+    // this, `declared` going empty would turn every `test:` pair below into a
+    // failure that reads like a rename, and a scan that returned everything
+    // would make them all pass vacuously.
+    assert!(
+        declared.contains("render_corpus_matches_golden_is_not_in_this_crates_lib")
+            || declared.contains("an_undefined_is_in_operand_raises_rather_than_answering_false"),
+        "the `#[test]` scan lost a name it is known to contain, so it has stopped working \
+         rather than the crate having lost its tests"
+    );
+    assert!(
+        declared.len() > 50,
+        "the `#[test]` scan found only {} names across the three `runners` modules; it \
+         found 93 when this was written",
+        declared.len()
+    );
+
+    let baseline = baseline();
+    let mut unported = BTreeSet::new();
+    for (id, justification) in &pairs {
+        match justification.split_once(':') {
+            Some(("test", name)) => assert!(
+                declared.contains(name),
+                "{id} is paired with `{name}`, which is not a `#[test] fn` anywhere in this \
+                 crate. A renamed or deleted test leaves the entry unanswerable"
+            ),
+            Some(("unported", task)) => {
+                assert!(
+                    !task.is_empty(),
+                    "{id}: `unported:` must name the task that owns it"
+                );
+                unported.insert(id.clone());
+            }
+            None if justification == "baselined" => assert!(
+                baseline.contains(id),
+                "{id} is paired as `baselined`, but it is not in oracle/baseline.txt -- so it \
+                 IS born matching and the claim is false"
+            ),
+            _ => panic!(
+                "{id}: unknown justification {justification:?}. Use `test:<name>`, \
+                 `baselined`, or `unported:<task>`"
+            ),
+        }
+    }
+
+    let expected_unported: BTreeSet<String> =
+        UNPORTED_ERROR_CLASS.iter().map(|s| s.to_string()).collect();
+    assert_eq!(
+        unported, expected_unported,
+        "the set of `unported:` error-class entries changed. These are the entries with \
+         NOTHING ported behind them, so growing the set is the one move that quietly weakens \
+         the oracle -- edit UNPORTED_ERROR_CLASS in this file, deliberately, if that is what \
+         you mean"
     );
 }
 
