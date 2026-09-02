@@ -401,6 +401,182 @@ async fn delete_soft_deletes_drops_it_from_the_list_but_not_from_a_direct_get() 
     assert_eq!(again.status(), StatusCode::NOT_FOUND);
 }
 
+// ---------- Whole-branch review, CRITICAL finding 1: `folder_id` scoping ----------
+//
+// Measured live by the reviewer against the pre-fix branch:
+//   create with a FOREIGN folder_id      -> 201 Created, folder_id stored
+//   create with a NONEXISTENT folder_id  -> 500
+// So a `workflow:manage` holder in workspace A could file a flow into
+// workspace B's folder, and 201-vs-500 was a free existence oracle for
+// folder ids in every other workspace. The folder used was
+// `entity_type = 'chart'` -- the polymorphic-type half was unchecked too.
+// All four cases below must now be a single, indistinguishable 404.
+
+#[tokio::test]
+async fn create_refuses_a_foreign_folder_id() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+    let (other_ws, other_user) = common::seed_workspace(&db).await;
+    let foreign_folder = common::create_folder(&db, other_ws, other_user, "flow").await;
+
+    let app = common::app(&db).await;
+    let res = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/flows"),
+        user,
+        serde_json::json!({ "source": minimal_flow("folder.foreign"), "folder_id": foreign_folder }),
+    )
+    .await;
+    assert_eq!(
+        res.status(),
+        StatusCode::NOT_FOUND,
+        "a folder in ANOTHER workspace must be refused, not silently accepted"
+    );
+}
+
+#[tokio::test]
+async fn create_refuses_a_nonexistent_folder_id() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+
+    let app = common::app(&db).await;
+    let res = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/flows"),
+        user,
+        serde_json::json!({ "source": minimal_flow("folder.nowhere"), "folder_id": Uuid::new_v4() }),
+    )
+    .await;
+    assert_eq!(
+        res.status(),
+        StatusCode::NOT_FOUND,
+        "a folder id that exists nowhere must be a 404, not a 500 quoting a constraint name"
+    );
+}
+
+/// A foreign folder and a nonexistent one must be INDISTINGUISHABLE, or the
+/// distinction itself becomes the oracle -- both bodies, not just both
+/// statuses.
+#[tokio::test]
+async fn a_foreign_folder_and_a_nonexistent_one_answer_identically() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+    let (other_ws, other_user) = common::seed_workspace(&db).await;
+    let foreign_folder = common::create_folder(&db, other_ws, other_user, "flow").await;
+
+    let app = common::app(&db).await;
+    let foreign = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/flows"),
+        user,
+        serde_json::json!({ "source": minimal_flow("folder.a"), "folder_id": foreign_folder }),
+    )
+    .await;
+    let nonexistent = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/flows"),
+        user,
+        serde_json::json!({ "source": minimal_flow("folder.b"), "folder_id": Uuid::new_v4() }),
+    )
+    .await;
+    assert_eq!(foreign.status(), nonexistent.status());
+    assert_eq!(foreign.status(), StatusCode::NOT_FOUND);
+    let (foreign_body, nonexistent_body) =
+        (common::json(foreign).await, common::json(nonexistent).await);
+    assert_eq!(
+        foreign_body, nonexistent_body,
+        "a distinguishable answer would let a caller probe which folder ids exist elsewhere"
+    );
+}
+
+/// The polymorphic-type half: a folder in the CALLER's own workspace, but of
+/// the wrong `entity_type` (a chart folder, not a flow one), must refuse the
+/// same way -- to a flow author, a folder that cannot hold flows is a folder
+/// that does not exist.
+#[tokio::test]
+async fn create_refuses_a_folder_of_the_wrong_entity_type() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+    let chart_folder = common::create_folder(&db, ws, user, "chart").await;
+
+    let app = common::app(&db).await;
+    let res = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/flows"),
+        user,
+        serde_json::json!({ "source": minimal_flow("folder.wrongtype"), "folder_id": chart_folder }),
+    )
+    .await;
+    assert_eq!(
+        res.status(),
+        StatusCode::NOT_FOUND,
+        "a same-workspace CHART folder must not silently hold a flow"
+    );
+}
+
+/// The positive control: a real, same-workspace, `flow`-typed folder is
+/// accepted and stored -- without this, the three refusals above could not
+/// distinguish "the guard works" from "the guard rejects everything".
+#[tokio::test]
+async fn create_accepts_a_legitimate_folder() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+    let folder = common::create_folder(&db, ws, user, "flow").await;
+
+    let app = common::app(&db).await;
+    let res = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/flows"),
+        user,
+        serde_json::json!({ "source": minimal_flow("folder.ok"), "folder_id": folder }),
+    )
+    .await;
+    assert_eq!(
+        res.status(),
+        StatusCode::CREATED,
+        "{}",
+        common::json(res).await
+    );
+}
+
+/// `update` repoints a flow's folder just as `create` sets one -- the
+/// identical hazard, one route over.
+#[tokio::test]
+async fn update_refuses_a_foreign_folder_id() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+    let (other_ws, other_user) = common::seed_workspace(&db).await;
+    let foreign_folder = common::create_folder(&db, other_ws, other_user, "flow").await;
+
+    let app = common::app(&db).await;
+    let created = common::json(
+        common::post(
+            &app,
+            &format!("/api/ws/{ws}/workflows/flows"),
+            user,
+            serde_json::json!({ "source": minimal_flow("folder.update") }),
+        )
+        .await,
+    )
+    .await;
+    let id = created["id"].as_str().unwrap();
+
+    let res = common::put(
+        &app,
+        &format!("/api/ws/{ws}/workflows/flows/{id}"),
+        user,
+        serde_json::json!({ "source": minimal_flow("folder.update"), "folder_id": foreign_folder }),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
+
 // ---------- `list()`'s filters (Task 5 flagged these as untested) ----------
 
 /// Folder, namespace, and state filters each narrow the list, and a filter

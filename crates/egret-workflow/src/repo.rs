@@ -50,6 +50,56 @@ fn db_err(e: sqlx::Error) -> Error {
     Error::Internal(anyhow::anyhow!("{e}"))
 }
 
+/// `None` unless `e` is the `UNIQUE (workspace_id, namespace, flow_id)`
+/// violation (migration 0132). Every other unique constraint on this table
+/// is the primary key, which a fresh `gen_random_uuid()` cannot collide
+/// with -- so this generic `is_unique_violation()` check is unambiguous,
+/// same reasoning `egret-dataapi`'s identically-named `is_path_conflict`
+/// gives for `dataapi.endpoints`.
+///
+/// Whole-branch review, IMPORTANT finding 3: before this, EVERY unique
+/// violation on this table mapped through [`db_err`] to `Error::Internal` --
+/// a bare 500 `{"error":"internal error"}` -- even though `openapi.json`
+/// documents a `409` on `POST /flows` and `PUT /flows/{id}`. Measured:
+/// creating a second flow with the same `(namespace, flow_id)` was a 500;
+/// recreating one after soft-deleting the original (which still holds the
+/// name -- `UNIQUE` has no `WHERE deleted_at IS NULL`, the same choice
+/// `dataapi.endpoints`' identical constraint makes) was ALSO a 500, with no
+/// way for an author to see why. Ported the resolution shape from
+/// `crates/egret-dataapi/src/endpoints.rs`'s `is_path_conflict` +
+/// `conflict()`/`trashed_conflict()` pair.
+fn is_namespace_conflict(e: &sqlx::Error) -> bool {
+    matches!(e, sqlx::Error::Database(d) if d.is_unique_violation())
+}
+
+/// The `UNIQUE (workspace_id, namespace, flow_id)` refusal, as an author
+/// reads it. Names the identity rather than the constraint -- a bare
+/// "conflict" on a screen with a dozen drafts is not actionable.
+fn conflict(namespace: &str, flow_id: &str) -> Error {
+    Error::Conflict(format!(
+        "a flow already exists at {namespace}/{flow_id} in this workspace"
+    ))
+}
+
+/// The same refusal when the row holding the name is IN THE TRASH -- the
+/// case a bare `db_err` could never distinguish from a live collision, and
+/// the one this fix EXISTS to name: a soft-deleted flow keeps its identity,
+/// so the author is told why, rather than reading an opaque 500 that gives
+/// no hint the name is burned by a row they cannot see on any list.
+///
+/// Unlike `egret-dataapi`'s `trashed_conflict` (its model for this
+/// function), this does NOT tell the author to "restore it" or "delete it
+/// permanently" -- W1's nine routes (spec §10) include neither a restore
+/// nor a hard-delete for a trashed flow, so promising either would name an
+/// action this API cannot yet perform. Restated as fact, not instruction.
+fn trashed_conflict(namespace: &str, flow_id: &str) -> Error {
+    Error::Conflict(format!(
+        "a trashed flow still holds {namespace}/{flow_id} in this workspace \
+         (soft-deleted, not currently restorable or permanently removable \
+         through this API)"
+    ))
+}
+
 /// The projection every read of `workflow.flows` shares.
 macro_rules! flow_cols {
     () => {
@@ -152,7 +202,7 @@ impl FlowRepo {
         by: UserId,
         input: &CreateFlowInput,
     ) -> Result<FlowRow> {
-        sqlx::query_as(concat!(
+        let row: std::result::Result<FlowRow, sqlx::Error> = sqlx::query_as(concat!(
             "INSERT INTO workflow.flows \
                (workspace_id, folder_id, namespace, flow_id, source, plan, created_by) \
              VALUES ($1, $2, $3, $4, $5, $6, $7) \
@@ -167,8 +217,44 @@ impl FlowRepo {
         .bind(&input.plan)
         .bind(by.0)
         .fetch_one(&self.db.pool)
-        .await
-        .map_err(db_err)
+        .await;
+        // A `match` rather than `map_err`: telling a trashed collision apart
+        // from a visible one needs a second query, and a query can only be
+        // awaited -- same reasoning `EndpointStore::create` gives for the
+        // identical shape.
+        match row {
+            Ok(row) => Ok(row),
+            Err(e) if is_namespace_conflict(&e) => Err(self
+                .namespace_conflict(workspace, &input.namespace, &input.flow_id)
+                .await),
+            Err(e) => Err(db_err(e)),
+        }
+    }
+
+    /// Which conflict this is: a visible flow holding the name, or a
+    /// trashed one the author cannot see. Called only after
+    /// [`is_namespace_conflict`] has already established that the `UNIQUE`
+    /// fired, so the row it looks for is there by construction. If it
+    /// somehow is not -- the holder was deleted between the failed write
+    /// and this read -- the answer falls back to [`conflict`], the message
+    /// that was correct before trash existed; a missing row must never
+    /// become "a trashed flow holds it", which would send the author
+    /// looking for a screen that shows nothing.
+    async fn namespace_conflict(&self, workspace: Uuid, namespace: &str, flow_id: &str) -> Error {
+        let holder: std::result::Result<Option<Option<DateTime<Utc>>>, sqlx::Error> =
+            sqlx::query_scalar(
+                "SELECT deleted_at FROM workflow.flows \
+                 WHERE workspace_id = $1 AND namespace = $2 AND flow_id = $3",
+            )
+            .bind(workspace)
+            .bind(namespace)
+            .bind(flow_id)
+            .fetch_optional(&self.db.pool)
+            .await;
+        match holder {
+            Ok(Some(Some(_))) => trashed_conflict(namespace, flow_id),
+            _ => conflict(namespace, flow_id),
+        }
     }
 
     /// One draft, if it belongs to `workspace`. `NotFound` otherwise -- see
@@ -224,7 +310,7 @@ impl FlowRepo {
         input: &UpdateFlowInput,
     ) -> Result<FlowRow> {
         let _ = by;
-        let row: Option<FlowRow> = sqlx::query_as(concat!(
+        let row: std::result::Result<Option<FlowRow>, sqlx::Error> = sqlx::query_as(concat!(
             "UPDATE workflow.flows SET \
                namespace = COALESCE($3, namespace), \
                flow_id   = COALESCE($4, flow_id), \
@@ -245,9 +331,52 @@ impl FlowRepo {
         .bind(input.folder_id.is_some())
         .bind(input.folder_id.flatten())
         .fetch_optional(&self.db.pool)
-        .await
-        .map_err(db_err)?;
+        .await;
+        // Whole-branch review, IMPORTANT finding 3: same `UNIQUE
+        // (workspace_id, namespace, flow_id)` this table's `create` can
+        // hit -- reachable here too, since an update may repoint a flow's
+        // own `namespace`/`flow_id` onto a name another (or the same,
+        // trashed) row already holds. `effective_identity` resolves what
+        // the WOULD-BE name is when the caller left one half `None` (a
+        // `PATCH`-shaped caller `create`'s `input.namespace`/`flow_id`
+        // pair never needs), mirroring `EndpointStore::update`'s
+        // `effective_route`.
+        let row = match row {
+            Ok(row) => row,
+            Err(e) if is_namespace_conflict(&e) => {
+                let (namespace, flow_id) = self.effective_identity(ws, id, input).await;
+                return Err(self.namespace_conflict(ws, &namespace, &flow_id).await);
+            }
+            Err(e) => return Err(db_err(e)),
+        };
         row.ok_or_else(|| Error::NotFound("flow".into()))
+    }
+
+    /// The effective `(namespace, flow_id)` an update WOULD have written,
+    /// for the conflict message -- only needed when `input` leaves one half
+    /// `None` (routes.rs's `PUT` always sends both, since it is a full
+    /// replace; this exists so the repository's own contract stays correct
+    /// for any future partial-update caller too).
+    async fn effective_identity(
+        &self,
+        ws: Uuid,
+        id: Uuid,
+        input: &UpdateFlowInput,
+    ) -> (String, String) {
+        let current: Option<(String, String)> = sqlx::query_as(
+            "SELECT namespace, flow_id FROM workflow.flows WHERE id = $1 AND workspace_id = $2",
+        )
+        .bind(id)
+        .bind(ws)
+        .fetch_optional(&self.db.pool)
+        .await
+        .ok()
+        .flatten();
+        let (cur_namespace, cur_flow_id) = current.unwrap_or_default();
+        (
+            input.namespace.clone().unwrap_or(cur_namespace),
+            input.flow_id.clone().unwrap_or(cur_flow_id),
+        )
     }
 
     /// Soft delete: `deleted_at = now()`. Idempotent-in-effect -- deleting an

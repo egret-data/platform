@@ -108,6 +108,25 @@ pub async fn disable_feature(db: &Db, ws: Uuid, feature: &str) {
     .expect("disable feature");
 }
 
+/// A real `analytics.folders` row, for the folder-scoping tests
+/// (whole-branch review, critical finding 1). `entity_type` is a parameter
+/// because the wrong type is one of the two ways a folder id can be
+/// illegitimate, and the guard has to refuse both -- mirrors
+/// `crates/egret-dataapi/tests/endpoints_routes.rs`'s identical helper.
+pub async fn create_folder(db: &Db, ws: Uuid, owner: UserId, entity_type: &str) -> Uuid {
+    sqlx::query_scalar(
+        "INSERT INTO analytics.folders (workspace_id, entity_type, name, created_by) \
+         VALUES ($1, $2, $3, $4) RETURNING id",
+    )
+    .bind(ws)
+    .bind(entity_type)
+    .bind(format!("f-{}", Uuid::new_v4().simple()))
+    .bind(owner.0)
+    .fetch_one(&db.pool)
+    .await
+    .expect("insert folder")
+}
+
 /// The composed HTTP app under test: `egret_workflow::management_router()`
 /// nested at `/api` exactly as `egret-server` mounts it (`build_router`), so
 /// `WsContext`'s feature gate sees the same `/api/ws/...` shape production
@@ -140,6 +159,7 @@ pub async fn app(db: &Db) -> App {
             .expect("build CedarPdp"),
     );
     let state = egret_workflow::WorkflowState {
+        db: db.clone(),
         repo: egret_workflow::FlowRepo::new(db.clone()),
         refs: std::sync::Arc::new(egret_workflow::WorkflowRefs {
             flows: egret_workflow::FlowRepo::new(db.clone()),

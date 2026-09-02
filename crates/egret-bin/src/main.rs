@@ -2037,6 +2037,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // instance is free, and it keeps this block constructible without caring
     // about `dataapi`'s construction order.
     let workflow = Some(egret_workflow::WorkflowState {
+        db: db.clone(),
         repo: egret_workflow::FlowRepo::new(db.clone()),
         refs: std::sync::Arc::new(egret_workflow::WorkflowRefs {
             flows: egret_workflow::FlowRepo::new(db.clone()),

@@ -409,3 +409,156 @@ async fn concurrent_publishes_do_not_collide_on_a_version_number() {
         successes.len()
     );
 }
+
+// ---------- Whole-branch review, IMPORTANT finding 3 ----------
+//
+// Before this fix round, EVERY `UNIQUE (workspace_id, namespace, flow_id)`
+// violation on `create`/`update` mapped through the generic `db_err` to
+// `Error::Internal` -- an opaque 500, even though `openapi.json` documents a
+// 409 on both routes. Measured live by the reviewer against the pre-fix
+// branch: a duplicate `create` was 500 `{"error":"internal error"}`, and
+// recreating a flow after soft-deleting the original (which still holds the
+// name) was ALSO 500, with no way for an author to see why. Both are 409s
+// below, and the trashed case names the cause.
+
+#[tokio::test]
+async fn a_duplicate_create_is_a_conflict_not_an_internal_error() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    let input = egret_workflow::CreateFlowInput {
+        namespace: "conflict.a".into(),
+        flow_id: "dup".into(),
+        source: "id: dup\n".into(),
+        plan: serde_json::json!({}),
+        folder_id: None,
+    };
+    repo.create(ws, user, &input).await.expect("first create");
+
+    let err = repo
+        .create(ws, user, &input)
+        .await
+        .expect_err("a second create with the same identity must be refused");
+    assert!(
+        matches!(err, egret_core::Error::Conflict(_)),
+        "expected Conflict (409), got {err:?} -- a bare 500 is exactly the defect this test \
+         exists to catch"
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("conflict.a") && msg.contains("dup"),
+        "the message must name the colliding identity, not just say \"conflict\": {msg}"
+    );
+}
+
+#[tokio::test]
+async fn recreating_a_soft_deleted_flow_is_a_conflict_that_says_so() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    let input = egret_workflow::CreateFlowInput {
+        namespace: "conflict.b".into(),
+        flow_id: "trashed".into(),
+        source: "id: trashed\n".into(),
+        plan: serde_json::json!({}),
+        folder_id: None,
+    };
+    let created = repo.create(ws, user, &input).await.expect("create");
+    repo.soft_delete(ws, created.id).await.expect("soft delete");
+
+    // The name is still burned -- `UNIQUE` has no `WHERE deleted_at IS
+    // NULL`, matching `dataapi.endpoints`' identical constraint.
+    let err = repo
+        .create(ws, user, &input)
+        .await
+        .expect_err("the trashed row still holds this identity");
+    assert!(
+        matches!(err, egret_core::Error::Conflict(_)),
+        "expected Conflict (409), got {err:?}"
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.to_lowercase().contains("trash") || msg.to_lowercase().contains("deleted"),
+        "the message must say the row is TRASHED, not just that a conflict happened \
+         (an author cannot see why otherwise): {msg}"
+    );
+}
+
+/// A visible (never-trashed) collision must NOT claim to be about the trash
+/// -- the two messages are meaningfully different and a caller reading one
+/// must be able to trust it.
+#[tokio::test]
+async fn a_visible_collision_does_not_mention_the_trash() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    let input = egret_workflow::CreateFlowInput {
+        namespace: "conflict.c".into(),
+        flow_id: "visible".into(),
+        source: "id: visible\n".into(),
+        plan: serde_json::json!({}),
+        folder_id: None,
+    };
+    repo.create(ws, user, &input).await.expect("first create");
+
+    let err = repo.create(ws, user, &input).await.expect_err("collision");
+    let msg = err.to_string().to_lowercase();
+    assert!(
+        !msg.contains("trash") && !msg.contains("deleted"),
+        "a LIVE collision must not read as a trash message: {msg}"
+    );
+}
+
+/// `update` can hit the same constraint by repointing a flow onto a name
+/// another (visible) row already holds -- the identical 500-vs-409 defect,
+/// one statement over.
+#[tokio::test]
+async fn update_onto_an_existing_name_is_a_conflict_not_an_internal_error() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    repo.create(
+        ws,
+        user,
+        &egret_workflow::CreateFlowInput {
+            namespace: "conflict.d".into(),
+            flow_id: "taken".into(),
+            source: "id: taken\n".into(),
+            plan: serde_json::json!({}),
+            folder_id: None,
+        },
+    )
+    .await
+    .expect("create taken");
+    let mover = repo
+        .create(
+            ws,
+            user,
+            &egret_workflow::CreateFlowInput {
+                namespace: "conflict.d".into(),
+                flow_id: "mover".into(),
+                source: "id: mover\n".into(),
+                plan: serde_json::json!({}),
+                folder_id: None,
+            },
+        )
+        .await
+        .expect("create mover");
+
+    let err = repo
+        .update(
+            ws,
+            mover.id,
+            user,
+            &egret_workflow::UpdateFlowInput {
+                flow_id: Some("taken".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("renaming onto an existing identity must be refused");
+    assert!(
+        matches!(err, egret_core::Error::Conflict(_)),
+        "expected Conflict (409), got {err:?}"
+    );
+}

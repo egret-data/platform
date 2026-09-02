@@ -172,6 +172,12 @@ pub struct FlowTrigger {
 }
 
 /// `Flow.Dependency` (inner class).
+///
+/// Names another flow by `(namespace, flowId)` -- structurally identical to
+/// `task.rs`'s `Subflow`, and resolved through the exact same seam: see
+/// [`Self::flow_ref`] below, and `publish::resolve_trigger_dependencies`
+/// (fix round, whole-branch review finding 2) for the resolution walk that
+/// fills it in.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Dependency {
@@ -188,6 +194,18 @@ pub struct Dependency {
     // same `Option<Property<T>>` + `default_when()` treatment as `Trigger::when`.
     #[serde(default = "default_when")]
     pub when: Option<Property<String>>,
+
+    // Mirrors `task.rs`'s `Subflow::flow_ref` field-for-field, including WHY
+    // it is a third field rather than an overwrite of `namespace`/`flow_id`:
+    // those are Kestra's own identity pair, plausibly still needed by an
+    // error message or an editor after publish, so the resolved id sits
+    // beside them rather than replacing either. `None` on every draft,
+    // `Some` only inside a frozen `FlowVersionRow::snapshot`, filled in by
+    // `publish::resolve_trigger_dependencies` once `namespace`/`flow_id`
+    // have been checked through `WorkflowRefPort` and confirmed to name a
+    // flow in the PUBLISHING workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow_ref: Option<uuid::Uuid>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

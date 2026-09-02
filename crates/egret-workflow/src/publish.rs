@@ -24,23 +24,35 @@
 //!    `WorkflowRefPort`'s doc comment for the `name_or_id` encoding that
 //!    pair uses;
 //! 6. rewrite the resolved id into the plan in place;
-//! 7. `insert_version` with a snapshot of `{ source, plan (resolved),
+//! 7. walk `flow.triggers`: a `core.trigger.flow`'s `dependsOn` list names
+//!    OTHER flows by the identical `(namespace, flowId)` pair a
+//!    `core.subflow` task does, and is resolved through the exact same
+//!    port call, same `ref_not_found()`, same frozen-id shape --
+//!    [`resolve_trigger_dependencies`]. Whole-branch review finding 2: this
+//!    step did not exist before that review -- `publish` walked
+//!    `tasks`/`errors`/`finally`/`afterExecution` and never `flow.triggers`
+//!    at all, so a trigger's `dependsOn` froze into the snapshot unresolved.
+//!    Same defect Task 6 already fixed once for `TaskKind`s; `TriggerKind`
+//!    was outside that sweep;
+//! 8. `insert_version` with a snapshot of `{ source, plan (resolved),
 //!    warnings }`;
-//! 8. `set_live`.
+//! 9. `set_live`.
 //!
-//! Steps 5 and 6 are the whole point: after 6, the snapshot contains no name
-//! that still has to be looked up. Migration 0128 is the recorded case of
-//! skipping this -- a plain FK with no workspace predicate, and a Cedar check
-//! that was told the CALLER's workspace, never the object's. A flow is a
-//! machine for creating more of those unless every reference it makes is
-//! checked HERE, before anything is frozen.
+//! Steps 5, 6 and 7 are the whole point: after them, the snapshot contains
+//! no name that still has to be looked up. Migration 0128 is the recorded
+//! case of skipping this -- a plain FK with no workspace predicate, and a
+//! Cedar check that was told the CALLER's workspace, never the object's. A
+//! flow is a machine for creating more of those unless every reference it
+//! makes is checked HERE, before anything is frozen -- "every reference"
+//! meaning every place ANY model type names another flow, not just the ones
+//! reachable from `Task::children()`.
 //!
 //! # Which `FlowRepo` calls this makes are unscoped, and what makes them safe
 //!
 //! `FlowRepo::get` (step 1) is the only READ this function does, and it IS
 //! scoped by `ws` -- `WHERE id = $1 AND workspace_id = $2`, `NotFound` for a
-//! missing or foreign flow. `insert_version(flow, ...)` (step 7) and
-//! `set_live(flow, version)` (step 8) both key off `flow` alone, with no
+//! missing or foreign flow. `insert_version(flow, ...)` (step 8) and
+//! `set_live(flow, version)` (step 9) both key off `flow` alone, with no
 //! workspace predicate of their own (each says so in its own doc comment on
 //! `FlowRepo`), so calling either with an unvalidated `flow` would write into
 //! -- or make live -- a row this function never confirmed belongs to `ws`.
@@ -60,7 +72,7 @@ use std::pin::Pin;
 use egret_core::{Error, Result, UserId};
 use uuid::Uuid;
 
-use crate::models::{Flow, Task, TaskKind};
+use crate::models::{Flow, Task, TaskKind, Trigger, TriggerKind};
 use crate::repo::{FlowRepo, FlowVersionRow};
 use crate::spec::{parse, registry, validate};
 use egret_workflow_api::{RefKind, WorkflowRefPort};
@@ -127,7 +139,11 @@ pub async fn publish(
         resolve_all(list, ws, refs).await?;
     }
 
-    // Step 7: self-contained on purpose -- W3's executor (and a reader of a
+    // Step 7: see the module doc and `resolve_trigger_dependencies`'s own
+    // comment.
+    resolve_trigger_dependencies(&mut parsed.triggers, ws, refs).await?;
+
+    // Step 8: self-contained on purpose -- W3's executor (and a reader of a
     // published version) must never need to re-read the draft or re-resolve
     // a name. `warnings` rides along so a declared-but-unimplemented feature
     // stays visible on the version that shipped it, not just on the draft
@@ -139,7 +155,7 @@ pub async fn publish(
     });
     let version = repo.insert_version(flow, by, &snapshot, note).await?;
 
-    // Step 8.
+    // Step 9.
     repo.set_live(flow, version.id).await?;
 
     Ok(version)
@@ -294,4 +310,55 @@ fn resolve_task<'a>(
 /// there.
 fn subflow_ref_name(namespace: &str, flow_id: &str) -> String {
     format!("{namespace}/{flow_id}")
+}
+
+/// Resolve every `core.trigger.flow`'s `dependsOn` list -- Kestra's `Flow`
+/// trigger names OTHER flows by the identical `(namespace, flowId)` pair a
+/// `core.subflow` task does (`models::trigger::Dependency`, structurally the
+/// same shape as `models::task::Subflow`), and is resolved through the exact
+/// same port call, [`ref_not_found`], and frozen-id shape as
+/// [`resolve_task`]'s `TaskKind::Subflow` arm above -- see that arm's own
+/// comment for why `namespace`/`flow_id` are kept rather than overwritten,
+/// and for `Dependency::flow_ref`'s identical third-field reasoning.
+///
+/// Whole-branch review finding 2: this function is what closes the gap --
+/// before it, `publish` never read `flow.triggers` at all, so a trigger's
+/// `dependsOn` pair reached [`FlowRepo::insert_version`] verbatim, unresolved
+/// and unchecked against the caller's workspace. The exact defect Task 6
+/// closed for `TaskKind`s/`RefKind`s, reopened one type over because
+/// `TriggerKind` was never in that sweep's scope.
+///
+/// A `Dependency` with `namespace`/`flow_id` still `None` is skipped rather
+/// than refused here -- `spec::validate`'s `dependency_namespace_required`/
+/// `dependency_flow_id_required` (added in the same fix round) already
+/// refused this flow at step 3, above, if either were absent on ANY
+/// dependency, so by the time this function runs every `Dependency` it sees
+/// is guaranteed to have both. The `let...else` is defensive, not
+/// load-bearing, same as `TaskKind::Subflow`'s identical guard.
+async fn resolve_trigger_dependencies(
+    triggers: &mut [Trigger],
+    ws: Uuid,
+    refs: &dyn WorkflowRefPort,
+) -> Result<()> {
+    for trigger in triggers.iter_mut() {
+        let TriggerKind::Flow(ft) = &mut trigger.kind else {
+            continue;
+        };
+        for dep in ft.depends_on.iter_mut() {
+            let (Some(namespace), Some(flow_id)) = (&dep.namespace, &dep.flow_id) else {
+                continue;
+            };
+            let name = subflow_ref_name(namespace, flow_id);
+            let resolved = refs.workspace_of(RefKind::Subflow, &name).await?;
+            let id = match resolved {
+                // Identical rule to every other reference resolved in this
+                // module: `None` and a foreign `owner` both refuse the same
+                // way.
+                Some((id, owner)) if owner == ws => id,
+                _ => return Err(ref_not_found()),
+            };
+            dep.flow_ref = Some(id);
+        }
+    }
+    Ok(())
 }

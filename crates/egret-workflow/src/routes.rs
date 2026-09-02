@@ -84,6 +84,13 @@ pub type WorkflowError = Error;
 /// State for [`management_router`].
 #[derive(Clone)]
 pub struct WorkflowState {
+    /// Whole-branch review, critical finding 1: `create_flow`/`update_flow`
+    /// need to run [`scoped_folder`]'s own query against `analytics.folders`
+    /// directly, the same reason `DataApiState` carries a `db` field beside
+    /// `EndpointStore` -- `folder_id` names a table this crate otherwise
+    /// never touches, so there is no repository method to route the check
+    /// through instead.
+    pub db: egret_metastore::Db,
     pub repo: FlowRepo,
     /// The seam `publish` resolves every reference through — see
     /// [`crate::refs::WorkflowRefs`] for the real implementation and which
@@ -336,6 +343,56 @@ fn parse_draft(source: &str) -> EgretResult<(String, String, serde_json::Value)>
     Ok((flow.namespace.clone(), flow.id.clone(), plan))
 }
 
+/// The `entity_type` a workflow flow's folder must carry. `analytics.folders`
+/// is polymorphic by convention (0021/0113), free-form `text`, no `CHECK` --
+/// so this is the ONE place the string is spelled, matching how
+/// `egret-dataapi`'s `FOLDER_ENTITY_TYPE` and `egret-bi`'s per-type entries
+/// (`'chart'`/`'dashboard'`/`'dataset'`) each pick their own resource noun.
+pub const FOLDER_ENTITY_TYPE: &str = "flow";
+
+fn db_err(e: sqlx::Error) -> Error {
+    Error::Internal(anyhow::anyhow!("{e}"))
+}
+
+/// `folder_id` arrives in the request BODY (`CreateFlowRequest`/
+/// `UpdateFlowRequest`), naming an object this crate does not otherwise
+/// touch at all -- so nothing else on the path to `INSERT`/`UPDATE`
+/// constrains it. Ported verbatim from `egret-dataapi`'s `scoped_folder`
+/// (`crates/egret-dataapi/src/routes.rs`), which states the same hazard in
+/// almost the same words:
+///
+/// Whole-branch review, CRITICAL finding 1, measured live before this fix:
+/// `POST /flows` with a folder_id belonging to ANOTHER workspace answered
+/// `201 Created` and stored it; the same request with a folder_id that
+/// exists nowhere answered `500`. The only thing behind
+/// `workflow.flows.folder_id` is a plain `REFERENCES analytics.folders(id)`
+/// (migration 0132) -- migration 0128's exact shape, the one spec §8 names
+/// as this programme's recorded failure, one column over. 201-versus-500 is
+/// a free existence oracle for folder ids in every other workspace; an
+/// unchecked workspace match lets a `workflow:manage` holder file a flow
+/// into a folder that belongs to someone else's workspace outright.
+///
+/// `entity_type` is checked too, not only the workspace, for the identical
+/// reason `scoped_folder`'s Data API original does: a workspace-local CHART
+/// folder is a perfectly valid uuid here, and a flow filed into one
+/// disappears from `GET /flows?folder_id=…` without ever erroring. The
+/// wrong TYPE reads as `NotFound`, same as a foreign or nonexistent one: to
+/// a flow author, a folder that cannot hold flows is a folder that does not
+/// exist -- a distinguishable answer would turn this check into the same
+/// kind of oracle it exists to close.
+async fn scoped_folder(st: &WorkflowState, ws: Uuid, folder: Uuid) -> EgretResult<()> {
+    let meta: Option<(Uuid, String)> =
+        sqlx::query_as("SELECT workspace_id, entity_type FROM analytics.folders WHERE id = $1")
+            .bind(folder)
+            .fetch_optional(&st.db.pool)
+            .await
+            .map_err(db_err)?;
+    match meta {
+        Some((owner, etype)) if owner == ws && etype == FOLDER_ENTITY_TYPE => Ok(()),
+        _ => Err(Error::NotFound("folder".into())),
+    }
+}
+
 // ---------- Handlers ----------
 
 #[utoipa::path(
@@ -393,6 +450,12 @@ async fn create_flow(
 ) -> EgretResult<(StatusCode, Json<FlowDto>)> {
     egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
     let (namespace, flow_id, plan) = parse_draft(&body.source)?;
+    // Before the insert, so a refused reference never reaches its FK — and
+    // so the answer is a 404 about the folder rather than a 500 about a
+    // constraint (whole-branch review, critical finding 1).
+    if let Some(folder_id) = body.folder_id {
+        scoped_folder(&st, ctx.workspace_id.0, folder_id).await?;
+    }
     let created = st
         .repo
         .create(
@@ -474,6 +537,12 @@ async fn update_flow(
 ) -> EgretResult<Json<FlowDto>> {
     egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
     let (namespace, flow_id, plan) = parse_draft(&body.source)?;
+    // Same containment as `create_flow`, and for the identical reason: a PUT
+    // may repoint the flow at a different folder, so the reference has to
+    // be checked before the write, not after.
+    if let Some(folder_id) = body.folder_id {
+        scoped_folder(&st, ctx.workspace_id.0, folder_id).await?;
+    }
     let updated = st
         .repo
         .update(

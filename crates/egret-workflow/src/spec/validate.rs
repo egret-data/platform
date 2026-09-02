@@ -13,18 +13,34 @@
 //! 2. **Semantic** -- fields left `Option<T>` (or, for a list, a plain
 //!    `Vec<T>` with `#[serde(default)]`) purely so parsing would accept
 //!    `null`/absent the way Kestra's Jackson layer does, deferring the
-//!    `@NotNull`/`@NotEmpty` bean-validation check to here. Every field
-//!    tagged "Task 4 owes ..." in `models/`, plus 11 control-flow fields
-//!    fix round 3 found still hard-required at parse
-//!    (`Sequential`/`Parallel`/`Dag`/`Loop`/`LoopUntil`/`AllowFailure`/
-//!    `WorkingDirectory`'s `tasks`, `If::condition`, `DagNode::task`,
-//!    `Subflow::namespace`/`flow_id`) and `Loop::concurrency_limit`, which
-//!    accepted absence but rejected an explicit `null`; see the task report
-//!    for the full pairing of field -> `walk_task` arm -> test codes.
-//!    `namespace`'s pattern; input ids unique; a `Switch` with neither
-//!    `cases` nor `defaults` (the statically-decidable half of "exhaustive-
-//!    or-defaulted" -- see the `Switch` arm in `walk_task` for why the
-//!    other half is an explicit, documented deferral rather than a check).
+//!    `@NotNull`/`@NotEmpty` bean-validation check to here. A field tagged
+//!    "Task 4 owes ..." in `models/` is where this layer's coverage STARTED,
+//!    plus 11 control-flow fields fix round 3 found still hard-required at
+//!    parse (`Sequential`/`Parallel`/`Dag`/`Loop`/`LoopUntil`/
+//!    `AllowFailure`/`WorkingDirectory`'s `tasks`, `If::condition`/`then`,
+//!    `DagNode::task`, `Subflow`/`Dependency`'s `namespace`/`flow_id`) and
+//!    `Loop::concurrency_limit`, which accepted absence but rejected an
+//!    explicit `null`; see the task report for the full pairing of field ->
+//!    `walk_task` arm -> test codes. `namespace`'s pattern (on `Flow`,
+//!    `Subflow`, and `Dependency` alike) and `Flow::id`'s; input ids
+//!    unique; a `Switch` with neither `cases` nor `defaults` (the
+//!    statically-decidable half of "exhaustive-or-defaulted" -- see the
+//!    `Switch` arm in `walk_task` for why the other half is an explicit,
+//!    documented deferral rather than a check); `Quota`'s and `Check`'s
+//!    `@NotNull` fields (`validate_flow_level_fields`).
+//!
+//!    **The "Task 4 owes" tag is a HISTORY marker, not a completeness
+//!    guarantee, and must not be read as one.** Whole-branch review, minor
+//!    finding 5: `Quota`'s and `Check`'s `@NotNull` fields were written up
+//!    in prose in `models/flow.rs` but never tagged, so this layer's own
+//!    coverage (built by walking tagged fields) silently excluded them --
+//!    the mitigation against silent omission reproduced silent omission.
+//!    The only claim this file's scope actually stands behind is what its
+//!    OWN test module exercises: a field with a `@NotNull`/`@NotEmpty`
+//!    debt is covered if and only if a test in `tests` (below) proves a
+//!    violating value is rejected. When you add a bean-validation debt to a
+//!    `models/` type, add its check here and a test for it in the SAME
+//!    change -- do not rely on a later "sweep" to find the tag.
 //! 3. **Not-yet-enforced** -- features that parse and validate cleanly but
 //!    that no package in this branch actually acts on yet
 //!    (`NOT_YET_ENFORCED` and, for Kestra control-flow classes this crate
@@ -172,6 +188,7 @@ pub fn validate(flow: &Flow) -> ValidationReport {
     let mut report = ValidationReport::default();
 
     validate_namespace(flow, &mut report);
+    validate_flow_id(flow, &mut report);
     validate_flow_level_fields(flow, &mut report);
 
     let mut features = FeaturePresence {
@@ -251,6 +268,32 @@ fn validate_namespace(flow: &Flow, report: &mut ValidationReport) {
                 flow.namespace
             ),
             path: "namespace".to_string(),
+        });
+    }
+}
+
+/// `Flow::id` against the SAME `is_valid_flow_id` a `Subflow::flow_id`
+/// (`TaskKind::Subflow`'s arm, below) and now a `Dependency::flow_id`
+/// (`validate_trigger`, above) are both already checked against -- Kestra's
+/// own flow `id` pattern, `AbstractFlow.java`'s `@Pattern`/`@Size`. Whole-
+/// branch review, minor finding 4: `Flow::id` was the ONE place in this
+/// crate that pattern was defined but never applied to the field it exists
+/// for -- `id: 'BAD ID/with slash'` and `id: ''` both validated clean before
+/// this. `flow.id` is `String`, not `Option<String>` (no separate
+/// `@NotBlank` debt to carry the way `Subflow::flow_id` has -- an absent
+/// `id` key is already a *parse* error, since the field has no
+/// `#[serde(default)]`), so this is a single pattern check, not a
+/// presence-then-pattern pair like the `Option`-wrapped fields this file
+/// otherwise checks.
+fn validate_flow_id(flow: &Flow, report: &mut ValidationReport) {
+    if !is_valid_flow_id(&flow.id) {
+        report.errors.push(Finding {
+            code: "invalid_flow_id",
+            message: format!(
+                "id '{}' must match ^[a-zA-Z0-9][a-zA-Z0-9._-]* and be 1-100 characters long",
+                flow.id
+            ),
+            path: "id".to_string(),
         });
     }
 }
@@ -355,6 +398,54 @@ fn validate_flow_level_fields(flow: &Flow, report: &mut ValidationReport) {
                     path: format!("sla[{i}].duration"),
                 });
             }
+        }
+    }
+
+    // Whole-branch review, minor finding 5: `Quota.java`'s `@NotNull
+    // Duration duration`, `@NotNull @Positive Long limit`, and `@NotNull
+    // Behavior behavior` -- `quotas: [{}]` validated with zero errors
+    // before this, the same "declared but never checked" gap `Check` below
+    // shares. See this file's module doc for why these were missed (a
+    // selector-coverage bug, not a one-off oversight) and why the fix is
+    // both the checks below AND that doc's reworded claim.
+    for (i, quota) in flow.quotas.iter().enumerate() {
+        if quota.duration.is_none() {
+            report.errors.push(Finding {
+                code: "quota_duration_required",
+                message: format!("quotas[{i}] is missing a required duration"),
+                path: format!("quotas[{i}].duration"),
+            });
+        }
+        if quota.limit.is_none() {
+            report.errors.push(Finding {
+                code: "quota_limit_required",
+                message: format!("quotas[{i}] is missing a required limit"),
+                path: format!("quotas[{i}].limit"),
+            });
+        }
+        if quota.behavior.is_none() {
+            report.errors.push(Finding {
+                code: "quota_behavior_required",
+                message: format!("quotas[{i}] is missing a required behavior"),
+                path: format!("quotas[{i}].behavior"),
+            });
+        }
+    }
+
+    // `Check.java`'s `@NotNull @NotEmpty String when` -- unlike `message`
+    // (genuinely optional, `@NotEmpty` only, no `@NotNull` stacked on it;
+    // `models/flow.rs`'s own comment on `Check::when` vs `Check::message`
+    // draws this exact distinction), `when` must be BOTH present and a
+    // non-empty rendered source, or a check with nothing to evaluate would
+    // validate clean.
+    for (i, check) in flow.checks.iter().enumerate() {
+        let blank = check.when.as_ref().is_none_or(|w| w.source().is_empty());
+        if blank {
+            report.errors.push(Finding {
+                code: "check_when_required",
+                message: format!("checks[{i}] is missing a required, non-empty `when`"),
+                path: format!("checks[{i}].when"),
+            });
         }
     }
 }
@@ -466,15 +557,33 @@ fn walk_task(
         }
         // Fix round 3: `If::condition` is `@NotNull` in Java, same bean-
         // validation-not-parsing principle as `Parallel::concurrent`. `then`
-        // is separately `@NotEmpty` -- found in the same sweep, NOT one of
-        // the 11 fields this round scoped, and deliberately left unfixed
-        // here; see the task report.
+        // is separately `@NotEmpty` in Java -- found in the same sweep, NOT
+        // one of the 11 fields that round scoped, and left unfixed at the
+        // time (see the task report). Closed here: whole-branch review,
+        // minor finding 6 -- the last member of that same 11-field set of
+        // `@NotEmpty`/`@NotNull` control-flow checks this file otherwise
+        // finished together (`Sequential`/`Parallel`/`Dag`/`Loop`/
+        // `LoopUntil`/`AllowFailure`/`WorkingDirectory`'s `tasks`,
+        // `DagNode::task`, `Subflow::namespace`/`flow_id`), left out is
+        // exactly how finding 5's `Quota`/`Check` gap happened too -- a
+        // completed sweep with one member missing reads, from the outside,
+        // identical to a finished one.
         TaskKind::If(i) => {
             if i.condition.is_none() {
                 report.errors.push(Finding {
                     code: "if_condition_required",
                     message: format!("task '{}': condition is required (explicit null)", task.id),
                     path: format!("{path}.condition"),
+                });
+            }
+            if i.then.is_empty() {
+                report.errors.push(Finding {
+                    code: "if_then_required",
+                    message: format!(
+                        "task '{}': if must declare at least one task in `then`",
+                        task.id
+                    ),
+                    path: format!("{path}.then"),
                 });
             }
         }
@@ -947,16 +1056,80 @@ fn check_retry(retry: &Option<Retry>, retry_path: &str, report: &mut ValidationR
     }
 }
 
-/// Task 4's `@NotNull` debt on `Schedule::cron`.
+/// Task 4's `@NotNull` debt on `Schedule::cron`, plus (whole-branch review
+/// finding 2) the `Flow` trigger's `dependsOn` list -- each `Dependency`
+/// names another flow by the SAME `(namespace, flowId)` pair `Subflow` does,
+/// so it is checked against the SAME grammar `is_valid_namespace`/
+/// `is_valid_flow_id`, for the identical reason: `publish::
+/// resolve_trigger_dependencies` encodes the pair into one
+/// `"{namespace}/{flowId}"` string via `publish::subflow_ref_name`, and a
+/// `/` smuggled into either half would decode back into a different pair
+/// than the author wrote. No `self_dependency` check to match `Subflow`'s
+/// `self_subflow`, deliberately: a flow trigger depending on its OWN past
+/// executions is a legitimate Kestra pattern (recursive/self-triggering),
+/// not a synchronous call that would deadlock the way a subflow calling
+/// itself would.
 fn validate_trigger(trigger: &Trigger, report: &mut ValidationReport) {
-    if let TriggerKind::Schedule(s) = &trigger.kind {
-        if s.cron.is_none() {
-            report.errors.push(Finding {
-                code: "schedule_cron_required",
-                message: format!("trigger '{}': cron is required (explicit null)", trigger.id),
-                path: format!("triggers.{}.cron", trigger.id),
-            });
+    match &trigger.kind {
+        TriggerKind::Schedule(s) => {
+            if s.cron.is_none() {
+                report.errors.push(Finding {
+                    code: "schedule_cron_required",
+                    message: format!("trigger '{}': cron is required (explicit null)", trigger.id),
+                    path: format!("triggers.{}.cron", trigger.id),
+                });
+            }
         }
+        TriggerKind::Flow(ft) => {
+            for (i, dep) in ft.depends_on.iter().enumerate() {
+                let path = format!("triggers.{}.dependsOn[{i}]", trigger.id);
+                match &dep.namespace {
+                    None => report.errors.push(Finding {
+                        code: "dependency_namespace_required",
+                        message: format!(
+                            "trigger '{}': dependsOn[{i}] is missing a required namespace",
+                            trigger.id
+                        ),
+                        path: format!("{path}.namespace"),
+                    }),
+                    Some(ns) if !is_valid_namespace(ns) => report.errors.push(Finding {
+                        code: "dependency_namespace_invalid",
+                        message: format!(
+                            "trigger '{}': dependsOn[{i}] namespace '{ns}' must match \
+                             ^[a-z0-9][a-z0-9._-]* and be 1-150 characters long -- the same \
+                             grammar `namespace:` itself uses, so a dependency can never encode \
+                             a `/` into `publish::subflow_ref_name`'s namespace half",
+                            trigger.id
+                        ),
+                        path: format!("{path}.namespace"),
+                    }),
+                    Some(_) => {}
+                }
+                match &dep.flow_id {
+                    None => report.errors.push(Finding {
+                        code: "dependency_flow_id_required",
+                        message: format!(
+                            "trigger '{}': dependsOn[{i}] is missing a required flowId",
+                            trigger.id
+                        ),
+                        path: format!("{path}.flowId"),
+                    }),
+                    Some(fid) if !is_valid_flow_id(fid) => report.errors.push(Finding {
+                        code: "dependency_flow_id_invalid",
+                        message: format!(
+                            "trigger '{}': dependsOn[{i}] flowId '{fid}' must match \
+                             ^[a-zA-Z0-9][a-zA-Z0-9._-]* and be 1-100 characters long -- \
+                             Kestra's own flow id pattern, so a dependency can never encode a \
+                             `/` into `publish::subflow_ref_name`'s flowId half",
+                            trigger.id
+                        ),
+                        path: format!("{path}.flowId"),
+                    }),
+                    Some(_) => {}
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -1736,5 +1909,234 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ---------- Whole-branch review, minor finding 4: `Flow::id` ----------
+
+    #[test]
+    fn flow_id_containing_a_slash_is_an_error() {
+        let f = parse("id: 'bad id/with slash'\nnamespace: a.b\ntasks:\n  - id: t\n    type: x\n")
+            .unwrap();
+        let r = validate(&f);
+        assert!(
+            r.errors.iter().any(|e| e.code == "invalid_flow_id"),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn flow_id_empty_is_an_error() {
+        let f = parse("id: ''\nnamespace: a.b\ntasks:\n  - id: t\n    type: x\n").unwrap();
+        let r = validate(&f);
+        assert!(
+            r.errors.iter().any(|e| e.code == "invalid_flow_id"),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn flow_id_valid_is_silent() {
+        let f = parse("id: nightly_rollup.v2\nnamespace: a.b\ntasks:\n  - id: t\n    type: x\n")
+            .unwrap();
+        let r = validate(&f);
+        assert!(
+            !r.errors.iter().any(|e| e.code == "invalid_flow_id"),
+            "{r:?}"
+        );
+    }
+
+    // ---------- Whole-branch review, minor finding 5: `Quota`/`Check` ----------
+
+    #[test]
+    fn quota_missing_fields_are_errors() {
+        let f = parse("id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: x\nquotas:\n  - {}\n")
+            .unwrap();
+        let r = validate(&f);
+        for code in [
+            "quota_duration_required",
+            "quota_limit_required",
+            "quota_behavior_required",
+        ] {
+            assert!(r.errors.iter().any(|e| e.code == code), "{code}: {r:?}");
+        }
+    }
+
+    #[test]
+    fn quota_present_fields_are_silent() {
+        let f = parse(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: x\n\
+             quotas:\n  - duration: PT1H\n    limit: 5\n    behavior: FAIL\n",
+        )
+        .unwrap();
+        let r = validate(&f);
+        assert!(
+            !r.errors.iter().any(|e| e.code.starts_with("quota_")),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn check_when_absent_is_an_error() {
+        let f = parse("id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: x\nchecks:\n  - {}\n")
+            .unwrap();
+        let r = validate(&f);
+        assert!(
+            r.errors.iter().any(|e| e.code == "check_when_required"),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn check_when_empty_string_is_an_error() {
+        let f = parse(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: x\nchecks:\n  - when: \"\"\n",
+        )
+        .unwrap();
+        let r = validate(&f);
+        assert!(
+            r.errors.iter().any(|e| e.code == "check_when_required"),
+            "an empty `when` is @NotEmpty, not just @NotNull: {r:?}"
+        );
+    }
+
+    #[test]
+    fn check_when_present_is_silent() {
+        let f = parse(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: x\n\
+             checks:\n  - when: \"{{ outputs.t.value == true }}\"\n",
+        )
+        .unwrap();
+        let r = validate(&f);
+        assert!(
+            !r.errors.iter().any(|e| e.code == "check_when_required"),
+            "{r:?}"
+        );
+    }
+
+    /// `Check::message` is `@NotEmpty` only (genuinely optional, no
+    /// `@NotNull` stacked on it) -- unlike `when`, its absence must not
+    /// error. Not itself a new check this fix round adds (message has no
+    /// `@NotNull`), but pinned so a future change cannot conflate the two
+    /// fields' bean-validation strength.
+    #[test]
+    fn check_message_absent_is_not_an_error() {
+        let f = parse(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: x\n\
+             checks:\n  - when: \"true\"\n",
+        )
+        .unwrap();
+        let r = validate(&f);
+        assert!(
+            !r.errors.iter().any(|e| e.code.starts_with("check_")),
+            "{r:?}"
+        );
+    }
+
+    // ---------- Whole-branch review, minor finding 6: `If::then` ----------
+
+    #[test]
+    fn if_then_empty_is_an_error() {
+        let f = parse(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: i\n    type: core.if\n    condition: \"true\"\n    then: []\n",
+        )
+        .unwrap();
+        let r = validate(&f);
+        assert!(
+            r.errors.iter().any(|e| e.code == "if_then_required"),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn if_then_present_is_silent() {
+        let f = parse(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: i\n    type: core.if\n    condition: \"true\"\n    then:\n      - id: t\n        type: x\n",
+        )
+        .unwrap();
+        let r = validate(&f);
+        assert!(
+            !r.errors.iter().any(|e| e.code == "if_then_required"),
+            "{r:?}"
+        );
+    }
+
+    // ---------- Whole-branch review, IMPORTANT finding 2: `Dependency` ----------
+
+    fn flow_with_dependency(dep_yaml: &str) -> String {
+        format!(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: x\n\
+             triggers:\n  - id: chain\n    type: core.flow\n    dependsOn:\n      - {dep_yaml}\n"
+        )
+    }
+
+    #[test]
+    fn dependency_namespace_absent_is_an_error() {
+        let f = parse(&flow_with_dependency("flowId: other")).unwrap();
+        let r = validate(&f);
+        assert!(
+            r.errors
+                .iter()
+                .any(|e| e.code == "dependency_namespace_required"),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn dependency_flow_id_absent_is_an_error() {
+        let f = parse(&flow_with_dependency("namespace: a.b")).unwrap();
+        let r = validate(&f);
+        assert!(
+            r.errors
+                .iter()
+                .any(|e| e.code == "dependency_flow_id_required"),
+            "{r:?}"
+        );
+    }
+
+    /// Same encoding hazard `subflow_namespace_containing_a_slash_is_an_error`
+    /// closes for `Subflow` -- a `/` inside `Dependency::namespace` would
+    /// otherwise decode ambiguously against `publish::subflow_ref_name`'s
+    /// `"{namespace}/{flowId}"` encoding.
+    #[test]
+    fn dependency_namespace_containing_a_slash_is_an_error() {
+        let f = parse(&flow_with_dependency(
+            "namespace: \"a/b\"\n        flowId: other",
+        ))
+        .unwrap();
+        let r = validate(&f);
+        assert!(
+            r.errors
+                .iter()
+                .any(|e| e.code == "dependency_namespace_invalid"),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn dependency_flow_id_containing_a_slash_is_an_error() {
+        let f = parse(&flow_with_dependency(
+            "namespace: a.b\n        flowId: \"c/d\"",
+        ))
+        .unwrap();
+        let r = validate(&f);
+        assert!(
+            r.errors
+                .iter()
+                .any(|e| e.code == "dependency_flow_id_invalid"),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn dependency_with_a_legitimate_namespace_and_flow_id_is_not_an_error() {
+        let f = parse(&flow_with_dependency(
+            "namespace: a.b\n        flowId: upstream",
+        ))
+        .unwrap();
+        let r = validate(&f);
+        assert!(
+            !r.errors.iter().any(|e| e.code.starts_with("dependency_")),
+            "{r:?}"
+        );
     }
 }

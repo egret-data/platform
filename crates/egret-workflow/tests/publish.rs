@@ -302,3 +302,110 @@ async fn a_subflow_with_a_legitimate_dotted_namespace_still_publishes() {
         "snapshot must carry the resolved id: {s}"
     );
 }
+
+// ---------- Whole-branch review, IMPORTANT finding 2 ----------
+//
+// A `core.trigger.flow`'s `dependsOn` list names another flow the same way
+// `core.subflow` does -- `(namespace, flowId)` -- and, before this fix,
+// `publish` never read `flow.triggers` at all: it walked `tasks`/`errors`/
+// `finally`/`afterExecution` and nothing else, so a trigger's `dependsOn`
+// reached `insert_version` verbatim, unresolved and unchecked against the
+// caller's workspace. Spec §8's invariant ("the published artifact contains
+// no unresolved id") was false for this one shape. These three tests are
+// the trigger twins of the `TaskKind::Subflow` tests just above, and prove
+// the identical three outcomes now hold for `dependsOn` too.
+
+fn flow_with_trigger_dependency(namespace: &str, flow_id: &str) -> String {
+    format!(
+        "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: core.log\n\
+         triggers:\n  - id: chain\n    type: core.flow\n    dependsOn:\n      \
+         - namespace: {namespace}\n        flowId: {flow_id}\n"
+    )
+}
+
+/// The trigger twin of
+/// `a_subflow_naming_a_flow_in_the_callers_own_workspace_publishes_and_freezes_its_id`.
+#[tokio::test]
+async fn a_trigger_dependency_naming_a_flow_in_the_callers_own_workspace_publishes_and_freezes_its_id(
+) {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let target_id = Uuid::new_v4();
+
+    let mut refs = FakeRefs::default();
+    refs.objects.insert(
+        (RefKind::Subflow, "company.analytics/nightly_rollup".into()),
+        (target_id, ws),
+    );
+
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    let f = common::draft(
+        &repo,
+        ws,
+        user,
+        &flow_with_trigger_dependency("company.analytics", "nightly_rollup"),
+    )
+    .await;
+
+    let v = egret_workflow::publish(&repo, &refs, ws, user, f.id, "")
+        .await
+        .expect("publish");
+    let s = v.snapshot.to_string();
+    assert!(
+        s.contains(&target_id.to_string()),
+        "snapshot must carry the resolved trigger dependency id, not the bare name: {s}"
+    );
+}
+
+/// The trigger twin of
+/// `a_subflow_naming_another_workspaces_flow_cannot_be_published`.
+#[tokio::test]
+async fn a_trigger_dependency_naming_another_workspaces_flow_cannot_be_published() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let other_ws = Uuid::new_v4();
+
+    let mut refs = FakeRefs::default();
+    refs.objects.insert(
+        (RefKind::Subflow, "company.analytics/nightly_rollup".into()),
+        (Uuid::new_v4(), other_ws), // owned by SOMEONE ELSE
+    );
+
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    let f = common::draft(
+        &repo,
+        ws,
+        user,
+        &flow_with_trigger_dependency("company.analytics", "nightly_rollup"),
+    )
+    .await;
+
+    let err = egret_workflow::publish(&repo, &refs, ws, user, f.id, "")
+        .await
+        .expect_err("a foreign trigger dependency must fail publish");
+    assert!(
+        matches!(err, egret_core::Error::NotFound(_)),
+        "expected NotFound, got {err:?} -- before this fix the flow published successfully \
+         with the dependency frozen UNRESOLVED"
+    );
+}
+
+/// The trigger twin of `a_subflow_naming_a_nonexistent_flow_fails_the_same_way`.
+#[tokio::test]
+async fn a_trigger_dependency_naming_a_nonexistent_flow_fails_the_same_way() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    let f = common::draft(
+        &repo,
+        ws,
+        user,
+        &flow_with_trigger_dependency("company.analytics", "nope"),
+    )
+    .await;
+
+    let err = egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, f.id, "")
+        .await
+        .expect_err("must fail");
+    assert!(matches!(err, egret_core::Error::NotFound(_)), "{err:?}");
+}
