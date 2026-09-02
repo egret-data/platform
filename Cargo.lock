@@ -3651,6 +3651,7 @@ dependencies = [
  "serde_json",
  "serde_norway",
  "sqlx",
+ "thiserror 2.0.20",
  "tokio",
  "tower",
  "utoipa",

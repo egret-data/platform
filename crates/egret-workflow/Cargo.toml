@@ -62,6 +62,11 @@ egret-analytics-api.workspace = true
 # `tests/publish.rs`'s `FakeRefs`.
 async-trait.workspace = true
 
+# W2 Task 2: `runners::rewrite::RewriteError` derives `thiserror::Error`,
+# following the rest of the workspace's error-type convention (see e.g.
+# `egret-core`, `egret-dataapi`).
+thiserror.workspace = true
+
 [dev-dependencies]
 # serde_json moved to [dependencies] in W1 (Property<T> uses it directly);
 # tests still reach it as `serde_json::...` via the crate's own dependency.

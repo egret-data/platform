@@ -26,12 +26,14 @@ pub mod publish;
 pub mod refs;
 pub mod repo;
 pub mod routes;
+pub mod runners;
 pub mod spec;
 
 pub use publish::publish;
 pub use refs::WorkflowRefs;
 pub use repo::{CreateFlowInput, FlowRepo, FlowRow, FlowVersionRow, ListFilter, UpdateFlowInput};
 pub use routes::{management_router, openapi, WorkflowState};
+pub use runners::{rewrite, RewriteError};
 // Task 6: `RefKind` moved to `egret-workflow-api` so `WorkflowRefPort` (also
 // re-exported here) can name it without this crate's engine dependencies.
 // Re-exported at the crate root -- not just via `spec::registry::RefKind` --
