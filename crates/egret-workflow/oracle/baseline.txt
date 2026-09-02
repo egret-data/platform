@@ -30,19 +30,6 @@ coalesce-or
 # minijinja's null test is spelled `none`; the corpus correctly keeps Kestra's name.
 coalesce-is-not-null
 
-# structured-data filters, Task 6
-filter-jq
-filter-tojson
-filter-yaml
-filter-toion
-
-# the three constant-registered filters (RegexMatchFilter.NAME etc.), Task 6:
-# its batch is "jq, toIon, toJson, yaml, and any remaining", and after Tasks 4
-# and 5 these three are what remains. 22 + 6 + 4 + 3 = 35.
-filter-regexmatch
-filter-regexreplace
-filter-regexextract
-
 # function not ported (Tasks 7-8)
 function-now
 function-fromjson
@@ -265,3 +252,80 @@ filter-date-pattern-day-period
 filter-date-existing-format-day-period-parse
 filter-date-existing-format-zone-name-parse
 filter-date-existing-format-generic-zone-parse
+
+# --- W2 Task 6. Seventeen recorded divergences, in four groups. None of them
+# is "not ported yet": all 35 filters are ported, and every one of these is a
+# place where the two engines answer DIFFERENTLY and egret says so out loud.
+
+# 1. Java regex constructs egret refuses rather than mis-answers.
+#
+# The `regex` crate is a linear-time automaton with no backtracking, so it
+# cannot express a lookaround, an atomic group, a possessive quantifier or a
+# backreference; and it carries Unicode scripts and categories but no BLOCK
+# tables and no `java.lang.Character` predicates. Kestra ACCEPTS all of these,
+# so there is no error class to compare against -- the entry stays here rather
+# than becoming a free pass in error-class.txt, and
+# `runners::filters::a_refused_construct_says_so_rather_than_claiming_the_pattern_is_invalid`
+# asserts that each refusal names its own construct.
+#
+# `runners::javare` translates everything it can instead of refusing: a
+# 265-probe sweep found 101 divergences between Java's pattern language and
+# the crate's, and after the translation the only ones left are these.
+filter-regexmatch-lookahead
+filter-regexmatch-lookbehind
+filter-regexmatch-backreference
+filter-regexmatch-possessive-quantifier
+filter-regexmatch-atomic-group
+filter-regexmatch-unicode-block
+filter-regexmatch-java-character-predicate
+filter-regexmatch-previous-match-anchor
+# Java's `$` outside MULTILINE is `\Z`: it matches before a FINAL line
+# terminator. The crate's `$` is end-of-haystack. `runners::javare` translates
+# `$` to `\z`, which is exact on every subject that does not end in a line
+# terminator, and refuses the subject that does -- the only input where the
+# two could differ. Consuming the terminator instead would answer `regexMatch`
+# right and then delete the newline in `regexReplace`.
+filter-regexmatch-dollar-before-a-trailing-newline
+
+# 2. minijinja's string-literal lexer is not Pebble's, and this is NOT a
+# filter's doing.
+#
+# Pebble does not process backslash escapes inside a single-quoted string:
+# `'(a)\1'` reaches the filter as six characters and `'\\'` as two. minijinja
+# reads `\1` as U+0001 and `\\` as one backslash. So a Kestra pattern or
+# replacement written with either spelling means something different here
+# before any filter sees it.
+#
+# `filter-regexreplace-escaped-backslash-from-a-variable` is the same
+# replacement supplied through the context, and it PASSES -- which is what
+# separates "the filter is wrong" from "the literal arrived different". The
+# fix belongs in `runners::rewrite` / the environment's lexing, not in
+# `runners::filters`.
+filter-regexmatch-numeric-escape-in-a-string-literal
+filter-regexreplace-escaped-backslash
+
+# 3. jq: `jaq` is not `jackson-jq`, in both directions.
+#
+# A 132-expression sweep of Kestra's jq surface agreed on 116. Three of the
+# five that remain are functions Kestra's `jackson-jq` at `Versions.JQ_1_6`
+# HAS and `jaq-std` does not; two are the other way round, where egret answers
+# and Kestra throws.
+filter-jq-at-csv
+filter-jq-leaf-paths
+# `jaq`'s `del` rebuilds the object sorted; `jackson-jq` keeps insertion order,
+# and Kestra's writer renders that order. Every other jq operation measured
+# preserves it on both sides, `keys_unsorted` included.
+filter-jq-del-loses-key-order
+# `todate`, `strftime`, `repeat`, `debug` and `1 / 0` are in `jaq` and not in
+# `jackson-jq` 1.6, so egret SUCCEEDS where Kestra throws. Two entries pin the
+# direction; the others are the same fact.
+filter-jq-todate-is-not-in-kestras-jq
+filter-jq-division-by-zero
+
+# 4. SnakeYAML folds a plain scalar across U+0085, U+2028 and U+2029, which it
+# reads as YAML 1.1 line breaks: the emitter re-indents after the break and
+# two spaces appear that were not in the input. egret writes the character
+# inside a double-quoted scalar instead. Not reproduced: Kestra's own output
+# does not round-trip back to the input either, so there is no value here to
+# be faithful to.
+filter-yaml-next-line-character-folds

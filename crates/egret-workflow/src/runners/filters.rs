@@ -8,7 +8,12 @@
 //! string literals; the other three go through `RegexMatchFilter.NAME`,
 //! `RegexReplaceFilter.NAME` and `RegexExtractFilter.NAME`. Confirmed against
 //! `host.Oracle dump`, which lists what the built engine actually carries:
-//! 35 filters, 34 functions, 1 test. This module owns **28** of the 35.
+//! 35 filters, 34 functions, 1 test. **This module owns all 35 of them.**
+//!
+//! `ReplaceFilter` is in the jar and is **not** registered — no `put` names
+//! it — so `{{ x | replace(…) }}` is Pebble's own built-in in Kestra and
+//! minijinja's own here, and neither is Kestra's class. Reconciling the
+//! built-in surface is Task 8's.
 //!
 //! W2 Task 4 ported 22: `chunk`, `className`, `distinct`, `endsWith`,
 //! `escapeChar`, `flatten`, `indent`, `keys`, `md5`, `nindent`, `number`,
@@ -21,12 +26,34 @@
 //! `AbstractDate` subclasses and all six go through [`super::javafmt`], which
 //! is where Java's `DateTimeFormatter` pattern language lives.
 //!
-//! The remaining 7 belong to Task 6: the four structured-data filters (`jq`,
+//! W2 Task 6 ported the last 7: the four structured-data filters (`jq`,
 //! `toIon`, `toJson`, `yaml`) and the three constant-registered regex ones
-//! (`regexMatch`, `regexReplace`, `regexExtract`) — its batch is "`jq`,
-//! `toIon`, `toJson`, `yaml`, **and any remaining**", and after Tasks 4 and 5
-//! those three are what remains. 22 + 6 + 4 + 3 = 35 is what closes the
-//! count.
+//! (`regexMatch`, `regexReplace`, `regexExtract`). 22 + 6 + 4 + 3 = 35 is
+//! what closes the count.
+//!
+//! Three of Task 6's seven do not fit in this file and have their own
+//! modules, for the same reason [`super::javafmt`] has one: they are ports of
+//! a foreign format, not of a Pebble filter. [`super::ionfmt`] is Ion text,
+//! [`super::yamlfmt`] is Jackson-YAML over SnakeYAML's emitter, and
+//! [`super::javare`] is `java.util.regex` translated onto the `regex` crate.
+//! Read `javare`'s module doc before touching any pattern: nine of Java's
+//! commonest constructs answer a DIFFERENT question in the crate, silently.
+//!
+//! # The null-input branch is not the same in all seven
+//!
+//! `toJson`, `toIon` and `yaml` return the four-character *string* `"null"`
+//! (the same branch `distinct` has); `regexMatch` returns `false`; `jq`,
+//! `regexReplace` and `regexExtract` return Java `null`, which renders as
+//! nothing. `the_null_input_branches_are_not_all_the_same` is the test.
+//!
+//! # And a null MAP VALUE splits them three ways
+//!
+//! `JacksonMapper.configure()` sets `NON_NULL`; `ofIon()` overrides it back
+//! to `ALWAYS`; and `YamlFilter` builds its own mapper that never sees
+//! `configure()` at all. So `{"a":null,"b":1}` is `{"b":1}` through `toJson`,
+//! `{a:null,b:1}` through `toIon` and `a: null\nb: 1` through `yaml` — and
+//! `jq` gets the `NON_NULL` treatment on the way **in**, so it never sees the
+//! key at all. Four filters, one batch, four answers.
 //!
 //! # Two of these names were already taken by minijinja
 //!
@@ -73,10 +100,13 @@ use minijinja::value::{Enumerator, Object, ObjectRepr, Rest, Value as MjValue, V
 use minijinja::{Environment, Error as MjError, ErrorKind};
 use unicode_normalization::UnicodeNormalization;
 
-use super::env::{kestra_to_string, write_java_double, OrderedMap, MAX_OUTPUT_BYTES};
+use super::env::{kestra_to_string, write_java_double, write_json, OrderedMap, MAX_OUTPUT_BYTES};
+use super::ionfmt::write_ion;
 use super::javafmt::{self, ChronoUnit, Format, Locale as JavaLocale, Zdt, Zone};
+use super::javare;
+use super::yamlfmt::to_yaml;
 
-/// Registers all 28 filters this module owns onto `env`.
+/// Registers all 35 of Kestra's filters onto `env`.
 ///
 /// **`indent` and `string` are overrides, not additions** — see this module's
 /// doc. `Environment::add_filter` replaces a built-in silently, so the only
@@ -99,9 +129,13 @@ pub(super) fn register(env: &mut Environment<'static>) {
     env.add_filter("flatten", flatten);
     // Overrides minijinja's own `indent`.
     env.add_filter("indent", indent);
+    env.add_filter("jq", jq);
     env.add_filter("keys", keys);
     env.add_filter("md5", md5);
     env.add_filter("nindent", nindent);
+    env.add_filter("regexExtract", regex_extract);
+    env.add_filter("regexMatch", regex_match);
+    env.add_filter("regexReplace", regex_replace);
     env.add_filter("number", number);
     env.add_filter("sha1", sha1);
     env.add_filter("sha512", sha512);
@@ -117,8 +151,11 @@ pub(super) fn register(env: &mut Environment<'static>) {
     env.add_filter("timestampMicro", timestamp_micro);
     env.add_filter("timestampMilli", timestamp_milli);
     env.add_filter("timestampNano", timestamp_nano);
+    env.add_filter("toIon", to_ion);
+    env.add_filter("toJson", to_json);
     env.add_filter("urldecode", urldecode);
     env.add_filter("values", values);
+    env.add_filter("yaml", yaml);
 }
 
 // ---------------------------------------------------------------------------
@@ -2084,6 +2121,429 @@ fn timestamp_input(value: &MjValue, rest: Rest<MjValue>) -> Result<Option<Zdt>, 
     convert(value, &zone, existing_format.as_deref()).map(Some)
 }
 
+// ---------------------------------------------------------------------------
+// Structured data and regular expressions (W2 Task 6)
+// ---------------------------------------------------------------------------
+
+/// `ToJsonFilter` — `JacksonMapper.ofJson().writeValueAsString(input)`.
+///
+/// **A null input is the four-character string `"null"`, not Java `null`**,
+/// so `{{ nothing | toJson }}` renders `null` where `{{ nothing | chunk(…) }}`
+/// renders nothing. `toIon` and `yaml` share that branch; `distinct` is the
+/// only filter outside this batch that has it.
+///
+/// The serialisation is `super::env::write_json` with `omit_nulls` on, which
+/// is the same writer the environment's own formatter uses, because
+/// `JacksonMapper.ofJson()` is the same mapper `JsonWriter` holds. **`toIon`
+/// and `yaml` are NOT the same mapper** — see the null-inclusion table in
+/// [`super::ionfmt`].
+fn to_json(value: MjValue) -> Result<MjValue, MjError> {
+    if is_java_null(&value) {
+        return Ok(MjValue::from("null"));
+    }
+    let mut out = String::new();
+    write_json(&mut out, &value, true);
+    Ok(MjValue::from(out))
+}
+
+/// `ToIonFilter` — `JacksonMapper.ofIon().writeValueAsString(input)`.
+///
+/// `createIonObjectMapper` calls the shared `configure()` and then
+/// **overrides its `NON_NULL` back to `ALWAYS`**, so this keeps a null map
+/// value where [`to_json`] drops it. Confirmed by `javap -p -c` on
+/// `JacksonMapper.class`, and pinned by `filter-toion-map-null-value` against
+/// `filter-tojson-map-null-value`.
+fn to_ion(value: MjValue) -> Result<MjValue, MjError> {
+    if is_java_null(&value) {
+        return Ok(MjValue::from("null"));
+    }
+    let mut out = String::new();
+    write_ion(&mut out, &value);
+    Ok(MjValue::from(out))
+}
+
+/// `YamlFilter` — its own `ObjectMapper` over a `YAMLFactory` with seven
+/// features set. See [`super::yamlfmt`] for what each of them does to the
+/// output.
+///
+/// That mapper is built in `YamlFilter`'s static initialiser and never sees
+/// `JacksonMapper.configure`, so it keeps null map values too.
+fn yaml(value: MjValue) -> Result<MjValue, MjError> {
+    if is_java_null(&value) {
+        return Ok(MjValue::from("null"));
+    }
+    Ok(MjValue::from(to_yaml(&value)))
+}
+
+/// `JqFilter` — a jq query, run over the input, **returning a LIST**.
+///
+/// Three things about it are not what the name suggests, and all three are
+/// measured:
+///
+/// - **the result is always a list.** `JsonQuery.apply` emits into an
+///   `ArrayList` and that list is the filter's return value, so
+///   `{{ json | jq('.a.b') }}` renders `[42]` and not `42`. A single match is
+///   still wrapped.
+/// - **a String input is PARSED as JSON, not treated as a string.**
+///   `ObjectMapper.readTree(input)` is the String branch, so
+///   `{{ '42' | jq('.') }}` is `[42]` and `{{ 'abc' | jq('.') }}` is an error.
+/// - **null map values are gone before jq sees them.** The non-String branch
+///   is `JacksonMapper.ofJson().valueToTree(input)` and that mapper is
+///   `NON_NULL`, so `{{ obj | jq('keys') }}` omits every key whose value is
+///   null. `filter-jq-keys-drops-null-values` is the entry.
+///
+/// Every failure — a bad query, a runtime error, an unparseable String input
+/// — comes back as the *same* sentence, because `JqFilter` catches
+/// `Exception` around the whole body and rebuilds the message from the input:
+/// `Unable to parse jq value '<input>' with type '<class>'`.
+fn jq(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
+    if is_java_null(&value) {
+        return Ok(MjValue::from(()));
+    }
+    let args = Args::new(rest);
+    let Some(expression) = args.get("expression", 0) else {
+        return Err(pebble_error(
+            "The 'jq' filter expects an argument 'expression'.",
+        ));
+    };
+    // `(String) args.get("expression")` -- a non-String is a
+    // ClassCastException, which Pebble does not wrap, so it is its own
+    // message rather than the catch-all one below.
+    if expression.kind() != ValueKind::String {
+        return Err(pebble_error(format!(
+            "class {} cannot be cast to class java.lang.String",
+            java_class_name(&expression)
+        )));
+    }
+    let expression = expression.as_str().unwrap_or_default().to_string();
+
+    let failed = || {
+        pebble_error(format!(
+            "Unable to parse jq value '{}' with type '{}'",
+            kestra_to_string(&value),
+            java_class_name(&value)
+        ))
+    };
+
+    let input = match value.as_str() {
+        Some(text) => read_tree(text).ok_or_else(failed)?,
+        None => {
+            let mut json = String::new();
+            write_json(&mut json, &value, true);
+            jaq_json::read::parse_single(json.as_bytes()).map_err(|_| failed())?
+        }
+    };
+
+    let outputs = run_jq(&expression, input).map_err(|_| failed())?;
+    Ok(MjValue::from(outputs))
+}
+
+/// Compiles and runs one jq program, collecting every output.
+///
+/// Split out so the filter above reads as Kestra's `apply` does, and so the
+/// three things this has to do that Kestra's four lines do not are in one
+/// place: **withhold `env`, refuse to let `halt` kill the process, and bound
+/// the output**.
+///
+/// # `env` is withheld
+///
+/// `jaq_std` registers `env`, which is `std::env::vars()` — the whole process
+/// environment of whatever is doing the rendering, `DATABASE_URL` and every
+/// secret in it included. `{{ x | jq('env') }}` would hand a flow author all
+/// of it.
+///
+/// Kestra's own jq (`jackson-jq` at `Versions.JQ_1_6`) **has no `env`**:
+/// measured through the harness, `{{ obj | jq('env | type') }}` is an error
+/// there. So withholding it is fidelity as well as the obvious thing to do.
+/// `$ENV` is unreachable for a different reason — it is a variable, and this
+/// binds none.
+///
+/// # `halt` must not reach `process::exit`
+///
+/// `jaq_core::unwrap_valr` — the function every example in the crate's own
+/// docs calls — ends in `std::process::exit(code)` when the program was
+/// `halt`. A rendered `Property` is author-supplied source on a request path,
+/// so `{{ x | jq('halt') }}` would **terminate the process**. This matches on
+/// [`jaq_core::Exn`] directly instead and turns a halt into an ordinary
+/// failure, which is what Kestra does with it anyway (jackson-jq 1.6 has no
+/// `halt` and errors).
+///
+/// # The output is bounded
+///
+/// jq generators are infinite: `1 | repeat(. + 1)` never stops, and Kestra
+/// collects into an `ArrayList` until the JVM dies. The accumulated size is
+/// checked against [`MAX_OUTPUT_BYTES`], the same 1 MiB ceiling
+/// `runners::env` already caps a render at — nothing that survives this loop
+/// could fit in the output anyway, so refusing here rather than after the
+/// allocation costs no reachable behaviour. Same call as `indent`'s prefix
+/// bound and `rewrite`'s nesting depth.
+fn run_jq(expression: &str, input: jaq_json::Val) -> Result<Vec<MjValue>, ()> {
+    let program = jaq_core::load::File {
+        code: expression,
+        path: (),
+    };
+    let defs = jaq_core::defs()
+        .chain(jaq_std::defs())
+        .chain(jaq_json::defs());
+    let funs = jaq_core::funs()
+        .chain(jaq_std::funs())
+        .chain(jaq_json::funs())
+        .filter(|fun| fun.0 != "env");
+    let loader = jaq_core::load::Loader::new(defs);
+    let arena = jaq_core::load::Arena::default();
+    let modules = loader.load(&arena, program).map_err(|_| ())?;
+    let filter = jaq_core::Compiler::default()
+        .with_funs(funs)
+        .compile(modules)
+        .map_err(|_| ())?;
+
+    let ctx = jaq_core::Ctx::<jaq_core::data::JustLut<jaq_json::Val>>::new(
+        &filter.lut,
+        jaq_core::Vars::new([]),
+    );
+    let mut outputs = Vec::new();
+    let mut bytes = 0usize;
+    for result in filter.id.run((ctx, input)) {
+        // Never `unwrap_valr`: see this function's doc. A halt and an error
+        // are both just "this jq program failed", which is the only thing
+        // `JqFilter`'s catch-all reports either.
+        let value = result.map_err(|_| ())?;
+        bytes = bytes
+            .saturating_add(value.to_string().len())
+            .saturating_add(1);
+        if bytes > MAX_OUTPUT_BYTES {
+            return Err(());
+        }
+        outputs.push(jaq_value(value));
+    }
+    Ok(outputs)
+}
+
+/// One `jaq_json::Val` as a minijinja value.
+///
+/// Objects become [`OrderedMap`], because `JqFilter`'s own output lambda
+/// converts an `ObjectNode` to a `Map` and Kestra's writer keeps insertion
+/// order — `keys_unsorted` is the entry that separates the two.
+fn jaq_value(value: jaq_json::Val) -> MjValue {
+    match value {
+        jaq_json::Val::Null => MjValue::from(()),
+        jaq_json::Val::Bool(b) => MjValue::from(b),
+        jaq_json::Val::Num(n) => match n {
+            jaq_json::Num::Int(i) => MjValue::from(i as i64),
+            jaq_json::Num::Float(f) => MjValue::from(f),
+            // A big integer or a decimal keeps its text; both are outside
+            // what an `i64` holds and neither has a corpus entry.
+            other => match other.to_string().parse::<i128>() {
+                Ok(i) => MjValue::from(i),
+                Err(_) => match other.to_string().parse::<f64>() {
+                    Ok(f) => MjValue::from(f),
+                    Err(_) => MjValue::from(other.to_string()),
+                },
+            },
+        },
+        jaq_json::Val::BStr(s) | jaq_json::Val::TStr(s) => {
+            MjValue::from(String::from_utf8_lossy(&s).into_owned())
+        }
+        jaq_json::Val::Arr(items) => {
+            MjValue::from(items.iter().cloned().map(jaq_value).collect::<Vec<_>>())
+        }
+        jaq_json::Val::Obj(entries) => MjValue::from_object(OrderedMap(
+            entries
+                .iter()
+                .map(|(k, v)| {
+                    let key = match k {
+                        jaq_json::Val::BStr(s) | jaq_json::Val::TStr(s) => {
+                            String::from_utf8_lossy(s).into_owned()
+                        }
+                        other => other.to_string(),
+                    };
+                    (key, jaq_value(v.clone()))
+                })
+                .collect(),
+        )),
+    }
+}
+
+/// `ObjectMapper.readTree(String)`, which is **not** "parse this whole string
+/// as JSON".
+///
+/// Two of its behaviours had to be reproduced deliberately, both measured:
+///
+/// - **an empty (or blank) input is not an error.** `readTree("")` returns a
+///   `MissingNode`, and `{{ '' | jq('.') }}` is `[null]`.
+/// - **it reads the FIRST value and stops.** `readTree("1 2")` is `1`, so
+///   `{{ '1 2' | jq('.') }}` is `[1]` and not an error. `jaq`'s
+///   `parse_single` refuses trailing input, which is the stricter and here
+///   the wrong answer.
+///
+/// A String input that is not JSON at all (`'abc'`) is still a failure on
+/// both sides.
+fn read_tree(text: &str) -> Option<jaq_json::Val> {
+    if text.trim().is_empty() {
+        return Some(jaq_json::Val::Null);
+    }
+    let mut stream = serde_json::Deserializer::from_str(text).into_iter::<serde_json::Value>();
+    let first = stream.next()?.ok()?;
+    jaq_json::read::parse_single(first.to_string().as_bytes()).ok()
+}
+
+/// The `regex` argument, which all three regex filters read the same way.
+///
+/// Kestra's guard is `args.get("regex") == null`, so an *explicitly null*
+/// argument fails exactly as an absent one does — and the message is
+/// `MessageFormat`'s, with the name already substituted into the `''{0}''`
+/// placeholder.
+fn regex_argument(args: &Args, index: usize) -> Result<javare::JavaRegex, MjError> {
+    let Some(regex) = args.get("regex", index).filter(|v| !is_java_null(v)) else {
+        return Err(pebble_error("The argument 'regex' is required."));
+    };
+    // `args.get("regex").toString()` -- a number or a boolean is stringified
+    // rather than refused, which is why this goes through `kestra_to_string`
+    // and not through an `as_str`.
+    let pattern = kestra_to_string(&regex);
+    javare::compile(&pattern).map_err(|e| match e {
+        // Kestra's own wording, from `MessageFormat.format("Invalid regex
+        // ''{0}'': {1}", pattern, e.getDescription())`.
+        javare::JavaRegexError::Syntax(_) => {
+            pebble_error(format!("Invalid regex '{pattern}': {e}"))
+        }
+        // egret's own: Kestra accepts this pattern and egret will not run it.
+        // Worded so it cannot be mistaken for the sentence above.
+        javare::JavaRegexError::Unsupported(_) => {
+            pebble_error(format!("Unsupported regex '{pattern}': {e}"))
+        }
+    })
+}
+
+/// Turns a haystack refusal into the same shape of message.
+fn regex_haystack_error(pattern: &str, e: javare::JavaRegexError) -> MjError {
+    pebble_error(format!("Unsupported regex '{pattern}': {e}"))
+}
+
+/// `RegexMatchFilter` — `Pattern.compile(regex).matcher(input).find()`.
+///
+/// **`find()`, not `matches()`**: the pattern is searched for anywhere in the
+/// input, so `'abc123' | regexMatch(regex='\\d+')` is `true` even though the
+/// pattern does not describe the whole string. A null input is `false` and
+/// not null, which is this filter alone in the batch.
+fn regex_match(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
+    if is_java_null(&value) {
+        return Ok(MjValue::from(false));
+    }
+    let args = Args::new(rest);
+    let pattern = regex_pattern_text(&args, 0)?;
+    let regex = regex_argument(&args, 0)?;
+    let subject = kestra_to_string(&value);
+    regex
+        .is_match(&subject)
+        .map(MjValue::from)
+        .map_err(|e| regex_haystack_error(&pattern, e))
+}
+
+/// `RegexReplaceFilter` — `Matcher.replaceAll(replacement)`.
+///
+/// The replacement is Java's language, not the `regex` crate's: `\$` is a
+/// literal dollar, `$2` against a one-group pattern throws, and `$10` backs
+/// off to group 1. [`super::javare::expand_replacement`]'s doc has the table.
+fn regex_replace(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
+    if is_java_null(&value) {
+        return Ok(MjValue::from(()));
+    }
+    let args = Args::new(rest);
+    let regex = regex_argument(&args, 0)?;
+    let Some(replacement) = args.get("replacement", 1).filter(|v| !is_java_null(v)) else {
+        return Err(pebble_error("The argument 'replacement' is required."));
+    };
+    let replacement = kestra_to_string(&replacement);
+    let subject = kestra_to_string(&value);
+    regex
+        .replace_all(&subject, &replacement)
+        .map(MjValue::from)
+        .map_err(|e| pebble_error(e.to_string()))
+}
+
+/// `RegexExtractFilter` — the first match's group `group`, or null.
+///
+/// Three ways it answers null and they are not the same thing: no match at
+/// all, a group that did not participate in the match, and a null input. Java
+/// returns `null` for each and Pebble renders all three as nothing.
+fn regex_extract(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
+    if is_java_null(&value) {
+        return Ok(MjValue::from(()));
+    }
+    let args = Args::new(rest);
+    let pattern = regex_pattern_text(&args, 0)?;
+    let regex = regex_argument(&args, 0)?;
+
+    // `args.containsKey("group") && args.get("group") != null
+    //     ? ((Number) args.get("group")).intValue() : 0`.
+    let group = match args.get("group", 1) {
+        None => 0,
+        Some(value) if is_java_null(&value) => 0,
+        Some(value) => java_int_value(&value).ok_or_else(|| {
+            pebble_error(format!(
+                "class {} cannot be cast to class java.lang.Number",
+                java_class_name(&value)
+            ))
+        })?,
+    };
+    if group < 0 {
+        return Err(pebble_error(format!(
+            "Group index {} is out of bounds: must be >= 0.",
+            grouped(group)
+        )));
+    }
+    let group = group as usize;
+    if group > regex.group_count() {
+        return Err(pebble_error(format!(
+            "Group index {} is out of bounds: the pattern has only {} capture group(s).",
+            grouped(group as i32),
+            grouped(regex.group_count() as i32)
+        )));
+    }
+
+    let subject = kestra_to_string(&value);
+    match regex
+        .find_group(&subject, group)
+        .map_err(|e| regex_haystack_error(&pattern, e))?
+    {
+        Some(Some(text)) => Ok(MjValue::from(text)),
+        _ => Ok(MjValue::from(())),
+    }
+}
+
+/// The `regex` argument's text, read once so an error message can quote it.
+fn regex_pattern_text(args: &Args, index: usize) -> Result<String, MjError> {
+    match args.get("regex", index).filter(|v| !is_java_null(v)) {
+        Some(value) => Ok(kestra_to_string(&value)),
+        None => Err(pebble_error("The argument 'regex' is required.")),
+    }
+}
+
+/// `MessageFormat`'s number placeholder, which is `NumberFormat.getInstance()`
+/// and therefore **groups thousands**: `{0}` on 12345 writes `12,345`.
+///
+/// It only shows above 999, which no plausible `group` argument reaches — but
+/// the alternative is a message that silently differs from Kestra's for a
+/// value that can be reached, and the whole point of quoting Kestra's wording
+/// is that it is Kestra's.
+fn grouped(n: i32) -> String {
+    let negative = n < 0;
+    let digits = n.unsigned_abs().to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    if negative {
+        format!("-{out}")
+    } else {
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::env::{render_str, RenderContext};
@@ -3794,6 +4254,295 @@ mod tests {
             r#"{"d": "2024-01-15t10:30:00"}"#
         )
         .contains("could not be parsed"));
+    }
+
+    // -- W2 Task 6's fourteen `compare: "error-class"` entries -------------
+    //
+    // Same standard as the blocks above: the oracle's error-class mode is
+    // satisfied by any failure at all, so what actually carries these entries
+    // is the message asserted here.
+
+    /// **C2: check every name you register against what minijinja already
+    /// binds.** Task 4 found `string` colliding invisibly — the built-in
+    /// resolved, ran, and answered minijinja's way, so nothing failed as
+    /// "unknown filter" and only the oracle disagreed.
+    ///
+    /// This asks the minijinja in the LOCK FILE rather than trusting a list
+    /// in a comment: it builds a bare `Environment` and renders through each
+    /// of W2 Task 6's seven names. A name minijinja does not bind fails with
+    /// its own "unknown filter" wording; a name it DOES bind renders or fails
+    /// some other way, and this test says which one.
+    ///
+    /// `indent` and `string` are included as the positive controls, because a
+    /// test that only ever sees "unknown filter" cannot tell "nothing
+    /// collides" from "this check is broken".
+    #[test]
+    fn task_sixs_seven_names_are_not_minijinja_built_ins() {
+        fn is_unknown_to_minijinja(name: &str) -> bool {
+            let env = minijinja::Environment::new();
+            match env.render_str(&format!("{{{{ 'x' | {name} }}}}"), ()) {
+                Ok(_) => false,
+                Err(e) => e.to_string().contains("unknown filter"),
+            }
+        }
+
+        for name in [
+            "jq",
+            "toIon",
+            "toJson",
+            "yaml",
+            "regexMatch",
+            "regexReplace",
+            "regexExtract",
+        ] {
+            assert!(
+                is_unknown_to_minijinja(name),
+                "{name} is already bound by minijinja -- registering it is an OVERRIDE, \
+                 and this module's doc has to say so"
+            );
+        }
+
+        // The two that ARE overrides, so the check above is known to be able
+        // to answer `false`.
+        assert!(!is_unknown_to_minijinja("indent"));
+        assert!(!is_unknown_to_minijinja("string"));
+    }
+
+    /// `JqFilter` catches `Exception` around its whole body and rebuilds the
+    /// message from the INPUT, so a bad query, a runtime error and an
+    /// unparseable String input all come back saying the same thing. The
+    /// value and the class name in it are Java's spellings — a `LinkedHashMap`
+    /// prints as `{a=1}`, not as `{"a": 1}`, which is why this goes through
+    /// `kestra_to_string` and not through `Display`.
+    #[test]
+    fn jq_reports_the_input_it_could_not_use() {
+        assert_eq!(
+            err("{{ s | jq('.') }}", r#"{"s": "abc"}"#),
+            "invalid operation: Unable to parse jq value 'abc' with type 'java.lang.String' \
+             (in <string>:1)"
+        );
+        assert_eq!(
+            err("{{ m | jq('.a[') }}", r#"{"m": {"a": 1}}"#),
+            "invalid operation: Unable to parse jq value '{a=1}' with type \
+             'java.util.LinkedHashMap' (in <string>:1)"
+        );
+        assert_eq!(
+            err("{{ m | jq() }}", r#"{"m": {"a": 1}}"#),
+            "invalid operation: The 'jq' filter expects an argument 'expression'. \
+             (in <string>:1)"
+        );
+        assert_eq!(
+            err("{{ m | jq(e) }}", r#"{"m": {"a": 1}, "e": 1}"#),
+            "invalid operation: class java.lang.Integer cannot be cast to class \
+             java.lang.String (in <string>:1)"
+        );
+    }
+
+    /// Kestra's own wording for a `PatternSyntaxException`
+    /// (`Invalid regex ''{0}'': {1}`), used only where **Java also rejects the
+    /// pattern**. A construct Java accepts and egret refuses says
+    /// `Unsupported regex` instead, and those entries are baselined rather
+    /// than error-class — see [`a_refused_construct_says_so_rather_than_
+    /// claiming_the_pattern_is_invalid`].
+    #[test]
+    fn an_invalid_java_pattern_is_reported_as_invalid() {
+        assert!(err("{{ s | regexMatch(regex='(a') }}", r#"{"s": "a"}"#)
+            .starts_with("invalid operation: Invalid regex '(a': "));
+        // A bare script name compiles in the `regex` crate and is
+        // `Unknown character property name {Greek}` in Java. egret refuses it
+        // so the two engines agree the pattern is invalid.
+        assert!(
+            err(r"{{ s | regexMatch(regex='\p{Greek}') }}", r#"{"s": "α"}"#)
+                .contains("Unknown character property name {Greek}")
+        );
+    }
+
+    /// `MessageFormat.format("The argument ''{0}'' is required.", name)` --
+    /// note the doubled quotes in the pattern collapse to single ones.
+    /// Reached both by an ABSENT argument and by an explicitly null one,
+    /// because Kestra's guard is `args.get(name) == null` and Pebble puts a
+    /// null in the map for a supplied-but-null argument.
+    #[test]
+    fn a_missing_regex_argument_is_reported_by_name() {
+        assert_eq!(
+            err("{{ s | regexMatch() }}", r#"{"s": "abc"}"#),
+            "invalid operation: The argument 'regex' is required. (in <string>:1)"
+        );
+        assert_eq!(
+            err(
+                "{{ s | regexMatch(regex=r) }}",
+                r#"{"s": "abc", "r": null}"#
+            ),
+            "invalid operation: The argument 'regex' is required. (in <string>:1)"
+        );
+        assert_eq!(
+            err("{{ s | regexReplace(regex='a') }}", r#"{"s": "a"}"#),
+            "invalid operation: The argument 'replacement' is required. (in <string>:1)"
+        );
+    }
+
+    /// Java raises these from `Matcher.appendExpandedReplacement`, not from
+    /// the pattern, and they are two different exception types with two
+    /// different sentences.
+    #[test]
+    fn a_bad_replacement_reference_is_reported() {
+        assert_eq!(
+            err(
+                "{{ s | regexReplace(regex='(a)', replacement='$2') }}",
+                r#"{"s": "a"}"#
+            ),
+            "invalid operation: No group 2 (in <string>:1)"
+        );
+        assert_eq!(
+            err(
+                "{{ s | regexReplace(regex='a', replacement='x$') }}",
+                r#"{"s": "a"}"#
+            ),
+            "invalid operation: Illegal group reference: group index is missing (in <string>:1)"
+        );
+    }
+
+    /// `RegexExtractFilter` checks the group index twice — once for
+    /// negativity before compiling, once against `groupCount` after finding —
+    /// with two different sentences, and casts a non-`Number` argument.
+    #[test]
+    fn a_bad_group_argument_is_reported() {
+        assert_eq!(
+            err(
+                r"{{ s | regexExtract(regex='(\d)', group=2) }}",
+                r#"{"s": "a1"}"#
+            ),
+            "invalid operation: Group index 2 is out of bounds: the pattern has only 1 capture \
+             group(s). (in <string>:1)"
+        );
+        assert_eq!(
+            err(
+                r"{{ s | regexExtract(regex='(\d)', group=-1) }}",
+                r#"{"s": "a1"}"#
+            ),
+            "invalid operation: Group index -1 is out of bounds: must be >= 0. (in <string>:1)"
+        );
+        assert_eq!(
+            err(
+                r"{{ s | regexExtract(regex='(\d)', group='1') }}",
+                r#"{"s": "a1"}"#
+            ),
+            "invalid operation: class java.lang.String cannot be cast to class \
+             java.lang.Number (in <string>:1)"
+        );
+    }
+
+    /// A construct Kestra ACCEPTS and egret refuses must say so in its own
+    /// words. These are the entries in `baseline.txt`, not in
+    /// `error-class.txt`: Kestra succeeds, so there is no error class to
+    /// compare against, and the only thing standing between an author and a
+    /// silently different answer is that egret refuses out loud.
+    #[test]
+    fn a_refused_construct_says_so_rather_than_claiming_the_pattern_is_invalid() {
+        for (template, needle) in [
+            ("{{ s | regexMatch(regex='a(?=b)') }}", "lookahead"),
+            ("{{ s | regexMatch(regex='(?<=a)b') }}", "lookbehind"),
+            // NOT a string literal: minijinja's lexer reads `\1` as the
+            // character U+0001, where Pebble passes it through. See
+            // `filter-regexmatch-numeric-escape-in-a-string-literal`.
+            ("{{ s | regexMatch(regex=p) }}", "backreference"),
+            (
+                "{{ s | regexMatch(regex='a++a') }}",
+                "possessive quantifier",
+            ),
+            ("{{ s | regexMatch(regex='(?>a+)b') }}", "atomic group"),
+            (
+                r"{{ s | regexMatch(regex='\p{InGreek}') }}",
+                "Unicode BLOCK",
+            ),
+            (r"{{ s | regexMatch(regex='\Ga') }}", "'\\G'"),
+        ] {
+            let message = err(template, r#"{"s": "ab", "p": "(a)\\1"}"#);
+            assert!(
+                message.contains("Unsupported regex"),
+                "{template}: {message:?}"
+            );
+            assert!(message.contains(needle), "{template}: {message:?}");
+        }
+        // The one that needs the subject as well as the pattern.
+        let message = err("{{ s | regexMatch(regex='c$') }}", r#"{"s": "abc\n"}"#);
+        assert!(message.contains("line terminator"), "{message:?}");
+    }
+
+    /// `jaq`'s standard library registers `env`, which is the WHOLE process
+    /// environment. Kestra's jq has no such function — measured through the
+    /// harness — so withholding it is fidelity, and it is also the difference
+    /// between a flow author reading a database URL out of a template and
+    /// not.
+    ///
+    /// This asserts the withholding, not merely that something failed: the
+    /// message is jq's own "unknown function", which is what a jq program
+    /// naming a filter that does not exist gets.
+    #[test]
+    fn jq_cannot_read_the_process_environment() {
+        std::env::set_var("W2_TASK_6_CANARY", "must-not-be-readable");
+        let message = err("{{ m | jq('env') }}", r#"{"m": {"a": 1}}"#);
+        assert!(!message.contains("must-not-be-readable"), "{message:?}");
+        // `$ENV` is a variable, and this renderer binds none.
+        let message = err("{{ m | jq('$ENV') }}", r#"{"m": {"a": 1}}"#);
+        assert!(!message.contains("must-not-be-readable"), "{message:?}");
+        std::env::remove_var("W2_TASK_6_CANARY");
+    }
+
+    /// `jaq_core::unwrap_valr` — the function the crate's own doc example
+    /// calls — ends in `std::process::exit` for a `halt`. A rendered
+    /// `Property` is author-supplied source, so reaching that would let a
+    /// flow kill the process.
+    ///
+    /// The test can only observe that this call RETURNS, which is exactly the
+    /// claim: a process that exited would take the test binary with it and
+    /// the whole suite would report a signal rather than a failure.
+    #[test]
+    fn jq_halt_does_not_terminate_the_process() {
+        assert!(render("{{ m | jq('halt') }}", r#"{"m": {"a": 1}}"#).is_err());
+        assert!(render("{{ m | jq('halt_error') }}", r#"{"m": {"a": 1}}"#).is_err());
+    }
+
+    /// An infinite jq generator is refused rather than collected until the
+    /// process dies. Kestra collects into an `ArrayList` and OOMs; the bound
+    /// here is `MAX_OUTPUT_BYTES`, the same 1 MiB ceiling `runners::env`
+    /// already caps a whole render at, so nothing that could have survived
+    /// the render is lost.
+    ///
+    /// Like the `halt` test above, the observable claim is that this
+    /// TERMINATES.
+    #[test]
+    fn an_infinite_jq_generator_is_bounded() {
+        assert!(render("{{ m | jq('1 | repeat(. + 1)') }}", r#"{"m": {"a": 1}}"#).is_err());
+        assert!(render("{{ m | jq('range(1e12)') }}", r#"{"m": {"a": 1}}"#).is_err());
+    }
+
+    /// The three filters that answer a null input with something other than
+    /// null, which is where a "they all return null" reading goes wrong.
+    #[test]
+    fn the_null_input_branches_are_not_all_the_same() {
+        // `"null"`, the four-character string.
+        assert_eq!(ok("<{{ n | toJson }}>", r#"{"n": null}"#), "<null>");
+        assert_eq!(ok("<{{ n | toIon }}>", r#"{"n": null}"#), "<null>");
+        assert_eq!(ok("<{{ n | yaml }}>", r#"{"n": null}"#), "<null>");
+        // `false`, not null.
+        assert_eq!(
+            ok("{{ n | regexMatch(regex='a') }}", r#"{"n": null}"#),
+            "false"
+        );
+        // Java null, which renders as nothing.
+        assert_eq!(ok("<{{ n | jq('.') }}>", r#"{"n": null}"#), "<>");
+        assert_eq!(
+            ok("<{{ n | regexExtract(regex='a') }}>", r#"{"n": null}"#),
+            "<>"
+        );
+        assert_eq!(
+            ok(
+                "<{{ n | regexReplace(regex='a', replacement='b') }}>",
+                r#"{"n": null}"#
+            ),
+            "<>"
+        );
     }
 
     /// The `timestamp*` filters declare `[timeZone, existingFormat]` and

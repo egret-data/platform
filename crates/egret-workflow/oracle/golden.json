@@ -2175,7 +2175,7 @@
   "id" : "function-now",
   "expr" : "{{ now() }}",
   "context" : { },
-  "result" : "2026-09-03T00:19:33.947479+07:00"
+  "result" : "2026-09-03T01:44:24.713097+07:00"
 }, {
   "id" : "function-fromjson",
   "expr" : "{{ fromJson(json=raw) }}",
@@ -2226,7 +2226,7 @@
   "context" : {
     "k" : "vWgkeuVCYm5x3qwIU19oyzGfKFRlzLPlisR3dsVwhvY="
   },
-  "result" : "5T3gLMshuGjU1DbgXZIpWNMDRFzQb32qtO4wEBmYZQtCl6jaaTr9tA=="
+  "result" : "bPt6ISBCiJN8YSyac4A0HSpMNyKdzLHAYgIg+3Le4RBm8AWDtmWLqA=="
 }, {
   "id" : "function-decrypt",
   "expr" : "{{ decrypt(key=k, encrypted=e) }}",
@@ -2260,17 +2260,17 @@
   "id" : "function-uuid",
   "expr" : "{{ uuid() }}",
   "context" : { },
-  "result" : "01a06322-186e-7a08-b767-1fbe6fecdfd5"
+  "result" : "01a0636f-c634-768f-b90d-7c59d8498466"
 }, {
   "id" : "function-id",
   "expr" : "{{ id() }}",
   "context" : { },
-  "result" : "1mi7m1NBXEboeJkuvmOmzr"
+  "result" : "6U66XRFaF27ZqHbygaZbHG"
 }, {
   "id" : "function-ksuid",
   "expr" : "{{ ksuid() }}",
   "context" : { },
-  "result" : "3ImV8uFNDGxS8ChRdlWqG6blB95"
+  "result" : "3ImfSZhPCXd3alAcQoJNC6MntKf"
 }, {
   "id" : "function-fromion",
   "expr" : "{{ fromIon(ion=i) }}",
@@ -2290,12 +2290,12 @@
   "id" : "function-randomint",
   "expr" : "{{ randomInt(lower=1, upper=10) }}",
   "context" : { },
-  "result" : "6"
+  "result" : "9"
 }, {
   "id" : "function-randomport",
   "expr" : "{{ randomPort() }}",
   "context" : { },
-  "result" : "63433"
+  "result" : "51581"
 }, {
   "id" : "function-fileexists",
   "expr" : "{{ fileExists(path='a/b.txt') }}",
@@ -2316,7 +2316,7 @@
   "id" : "function-nanoid",
   "expr" : "{{ nanoId() }}",
   "context" : { },
-  "result" : "HxKehpopwZp8CbtOv9qp9"
+  "result" : "m6RLui8ufcT444oLJL5WY"
 }, {
   "id" : "function-taskswithstate",
   "expr" : "{{ tasksWithState(state='FAILED') }}",
@@ -3794,4 +3794,974 @@
     "s" : "a\rb"
   },
   "result" : "\r  a\r  b"
+}, {
+  "id" : "filter-tojson-null",
+  "expr" : "<{{ nothing | toJson }}>",
+  "context" : {
+    "nothing" : null
+  },
+  "result" : "<null>"
+}, {
+  "id" : "filter-tojson-literal-null",
+  "expr" : "<{{ null | toJson }}>",
+  "context" : { },
+  "result" : "<null>"
+}, {
+  "id" : "filter-tojson-string",
+  "expr" : "{{ s | toJson }}",
+  "context" : {
+    "s" : "abc"
+  },
+  "result" : "\"abc\""
+}, {
+  "id" : "filter-tojson-bool",
+  "expr" : "{{ b | toJson }}",
+  "context" : {
+    "b" : true
+  },
+  "result" : "true"
+}, {
+  "id" : "filter-tojson-map-null-value",
+  "expr" : "{{ m | toJson }}",
+  "context" : {
+    "m" : {
+      "a" : null,
+      "b" : 1
+    }
+  },
+  "result" : "{\"b\":1}"
+}, {
+  "id" : "filter-tojson-list-null-element",
+  "expr" : "{{ l | toJson }}",
+  "context" : {
+    "l" : [ null, 1 ]
+  },
+  "result" : "[null,1]"
+}, {
+  "id" : "filter-tojson-nested-null",
+  "expr" : "{{ m | toJson }}",
+  "context" : {
+    "m" : {
+      "a" : [ {
+        "b" : null,
+        "c" : 1
+      } ]
+    }
+  },
+  "result" : "{\"a\":[{\"c\":1}]}"
+}, {
+  "id" : "filter-tojson-key-order",
+  "expr" : "{{ m | toJson }}",
+  "context" : {
+    "m" : {
+      "b" : 1,
+      "a" : 2,
+      "c" : 3
+    }
+  },
+  "result" : "{\"b\":1,\"a\":2,\"c\":3}"
+}, {
+  "id" : "filter-tojson-float",
+  "expr" : "{{ f | toJson }}",
+  "context" : {
+    "f" : 1.0E100
+  },
+  "result" : "1.0E100"
+}, {
+  "id" : "filter-tojson-empty-containers",
+  "expr" : "{{ m | toJson }}",
+  "context" : {
+    "m" : {
+      "a" : { },
+      "b" : [ ]
+    }
+  },
+  "result" : "{\"a\":{},\"b\":[]}"
+}, {
+  "id" : "filter-tojson-control-character",
+  "expr" : "{{ s | toJson }}",
+  "context" : {
+    "s" : "a\u000Bb"
+  },
+  "result" : "\"a\\u000Bb\""
+}, {
+  "id" : "filter-tojson-unicode-is-not-escaped",
+  "expr" : "{{ s | toJson }}",
+  "context" : {
+    "s" : "café 中"
+  },
+  "result" : "\"café 中\""
+}, {
+  "id" : "filter-toion-null",
+  "expr" : "<{{ nothing | toIon }}>",
+  "context" : {
+    "nothing" : null
+  },
+  "result" : "<null>"
+}, {
+  "id" : "filter-toion-string",
+  "expr" : "{{ s | toIon }}",
+  "context" : {
+    "s" : "abc"
+  },
+  "result" : "\"abc\""
+}, {
+  "id" : "filter-toion-map-null-value",
+  "expr" : "{{ m | toIon }}",
+  "context" : {
+    "m" : {
+      "a" : null,
+      "b" : 1
+    }
+  },
+  "result" : "{a:null,b:1}"
+}, {
+  "id" : "filter-toion-symbol-quoting",
+  "expr" : "{{ m | toIon }}",
+  "context" : {
+    "m" : {
+      "a b" : 1,
+      "42" : 2,
+      "$a" : 3,
+      "_a" : 4
+    }
+  },
+  "result" : "{'a b':1,'42':2,$a:3,_a:4}"
+}, {
+  "id" : "filter-toion-keyword-keys",
+  "expr" : "{{ m | toIon }}",
+  "context" : {
+    "m" : {
+      "true" : 1,
+      "True" : 2,
+      "null" : 3,
+      "yes" : 4
+    }
+  },
+  "result" : "{'true':1,True:2,'null':3,yes:4}"
+}, {
+  "id" : "filter-toion-floats",
+  "expr" : "{{ l | toIon }}",
+  "context" : {
+    "l" : [ 1.0, 2.5, 9999999.0, 1.0E100, 1.0E-7 ]
+  },
+  "result" : "[1e0,2.5e0,9999999e0,1.0e100,1.0e-7]"
+}, {
+  "id" : "filter-toion-escapes",
+  "expr" : "{{ s | toIon }}",
+  "context" : {
+    "s" : "a\u0001bcd e"
+  },
+  "result" : "\"a\\x01b\\x7fc\\x85d e\""
+}, {
+  "id" : "filter-toion-quote-in-string",
+  "expr" : "{{ s | toIon }}",
+  "context" : {
+    "s" : "a'b\"c"
+  },
+  "result" : "\"a'b\\\"c\""
+}, {
+  "id" : "filter-toion-quote-in-symbol",
+  "expr" : "{{ m | toIon }}",
+  "context" : {
+    "m" : {
+      "a'b\"c" : 1
+    }
+  },
+  "result" : "{'a\\'b\"c':1}"
+}, {
+  "id" : "filter-toion-nested",
+  "expr" : "{{ m | toIon }}",
+  "context" : {
+    "m" : {
+      "a" : [ {
+        "b" : [ 1, null ]
+      } ]
+    }
+  },
+  "result" : "{a:[{b:[1,null]}]}"
+}, {
+  "id" : "filter-yaml-null",
+  "expr" : "<{{ nothing | yaml }}>",
+  "context" : {
+    "nothing" : null
+  },
+  "result" : "<null>"
+}, {
+  "id" : "filter-yaml-scalar-keeps-its-newline",
+  "expr" : "<{{ s | yaml }}>",
+  "context" : {
+    "s" : "a"
+  },
+  "result" : "<a\n>"
+}, {
+  "id" : "filter-yaml-map-null-value",
+  "expr" : "{{ m | yaml }}",
+  "context" : {
+    "m" : {
+      "a" : null,
+      "b" : 1
+    }
+  },
+  "result" : "a: null\nb: 1\n"
+}, {
+  "id" : "filter-yaml-number-shaped-string",
+  "expr" : "{{ s | yaml }}",
+  "context" : {
+    "s" : "42"
+  },
+  "result" : "42\n"
+}, {
+  "id" : "filter-yaml-two-quoting-layers",
+  "expr" : "{{ l | yaml }}",
+  "context" : {
+    "l" : [ "yes", "&a", "a: b", "a:b", ",a" ]
+  },
+  "result" : " - \"yes\"\n - '&a'\n - \"a: b\"\n - a:b\n - \",a\"\n"
+}, {
+  "id" : "filter-yaml-leading-zero-run",
+  "expr" : "{{ l | yaml }}",
+  "context" : {
+    "l" : [ "007", "0789", "0x0", "0" ]
+  },
+  "result" : " - '007'\n - '0789'\n - 0x0\n - 0\n"
+}, {
+  "id" : "filter-yaml-literal-block",
+  "expr" : "{{ s | yaml }}",
+  "context" : {
+    "s" : "line1\nline2"
+  },
+  "result" : "|-\n  line1\n  line2\n"
+}, {
+  "id" : "filter-yaml-literal-block-clip",
+  "expr" : "{{ s | yaml }}",
+  "context" : {
+    "s" : "a\n"
+  },
+  "result" : "|\n  a\n"
+}, {
+  "id" : "filter-yaml-literal-block-keep",
+  "expr" : "{{ s | yaml }}",
+  "context" : {
+    "s" : "a\n\n"
+  },
+  "result" : "|+\n  a\n\n"
+}, {
+  "id" : "filter-yaml-literal-block-indent-indicator",
+  "expr" : "{{ s | yaml }}",
+  "context" : {
+    "s" : "  a\n  b"
+  },
+  "result" : "|2-\n    a\n    b\n"
+}, {
+  "id" : "filter-yaml-block-refused-for-a-trailing-blank",
+  "expr" : "{{ s | yaml }}",
+  "context" : {
+    "s" : "a \nb"
+  },
+  "result" : "\"a \\nb\"\n"
+}, {
+  "id" : "filter-yaml-indent-arrays",
+  "expr" : "{{ m | yaml }}",
+  "context" : {
+    "m" : {
+      "a" : [ {
+        "b" : [ {
+          "c" : 1
+        } ]
+      } ]
+    }
+  },
+  "result" : "a:\n -\n  b:\n   -\n    c: 1\n"
+}, {
+  "id" : "filter-yaml-nested-sequences",
+  "expr" : "{{ l | yaml }}",
+  "context" : {
+    "l" : [ [ [ 1 ] ] ]
+  },
+  "result" : " -\n   -\n     - 1\n"
+}, {
+  "id" : "filter-yaml-empty-containers",
+  "expr" : "{{ m | yaml }}",
+  "context" : {
+    "m" : {
+      "a" : { },
+      "b" : [ ]
+    }
+  },
+  "result" : "a: {}\nb: []\n"
+}, {
+  "id" : "filter-yaml-empty-string-root",
+  "expr" : "{{ s | yaml }}",
+  "context" : {
+    "s" : ""
+  },
+  "result" : "--- \"\"\n"
+}, {
+  "id" : "filter-yaml-name-quoting-is-not-value-quoting",
+  "expr" : "{{ m | yaml }}",
+  "context" : {
+    "m" : {
+      "42" : 1,
+      "a,b" : 2,
+      "-a" : 3
+    }
+  },
+  "result" : "\"42\": 1\na,b: 2\n\"-a\": 3\n"
+}, {
+  "id" : "filter-yaml-key-at-the-simple-limit",
+  "expr" : "{{ m | yaml }}",
+  "context" : {
+    "m" : {
+      "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk" : 1
+    }
+  },
+  "result" : "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk: 1\n"
+}, {
+  "id" : "filter-yaml-key-past-the-simple-limit",
+  "expr" : "{{ m | yaml }}",
+  "context" : {
+    "m" : {
+      "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk" : 1
+    }
+  },
+  "result" : "? kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk\n: 1\n"
+}, {
+  "id" : "filter-yaml-float",
+  "expr" : "{{ f | yaml }}",
+  "context" : {
+    "f" : 1.0E100
+  },
+  "result" : "1.0E100\n"
+}, {
+  "id" : "filter-jq-null-input",
+  "expr" : "<{{ nothing | jq('.') }}>",
+  "context" : {
+    "nothing" : null
+  },
+  "result" : "<>"
+}, {
+  "id" : "filter-jq-single-match-is-still-a-list",
+  "expr" : "{{ json | jq('.a.b') }}",
+  "context" : {
+    "json" : {
+      "a" : {
+        "b" : 42
+      }
+    }
+  },
+  "result" : "[42]"
+}, {
+  "id" : "filter-jq-many-matches",
+  "expr" : "{{ json | jq('.[]') }}",
+  "context" : {
+    "json" : [ 3, 1, 2 ]
+  },
+  "result" : "[3,1,2]"
+}, {
+  "id" : "filter-jq-no-matches",
+  "expr" : "{{ json | jq('empty') }}",
+  "context" : {
+    "json" : {
+      "a" : 1
+    }
+  },
+  "result" : "[]"
+}, {
+  "id" : "filter-jq-missing-key-is-a-null-element",
+  "expr" : "{{ json | jq('.nope') }}",
+  "context" : {
+    "json" : {
+      "a" : 1
+    }
+  },
+  "result" : "[null]"
+}, {
+  "id" : "filter-jq-keys-drops-null-values",
+  "expr" : "{{ json | jq('keys') }}",
+  "context" : {
+    "json" : {
+      "a" : 1,
+      "b" : null,
+      "c" : 3
+    }
+  },
+  "result" : "[[\"a\",\"c\"]]"
+}, {
+  "id" : "filter-jq-keys-unsorted-keeps-insertion-order",
+  "expr" : "{{ json | jq('keys_unsorted') }}",
+  "context" : {
+    "json" : {
+      "b" : 1,
+      "a" : 2,
+      "c" : 3
+    }
+  },
+  "result" : "[[\"b\",\"a\",\"c\"]]"
+}, {
+  "id" : "filter-jq-string-input-is-parsed",
+  "expr" : "{{ s | jq('.') }}",
+  "context" : {
+    "s" : "42"
+  },
+  "result" : "[42]"
+}, {
+  "id" : "filter-jq-string-input-object",
+  "expr" : "{{ s | jq('.a') }}",
+  "context" : {
+    "s" : "{\"a\": 1}"
+  },
+  "result" : "[1]"
+}, {
+  "id" : "filter-jq-string-input-empty",
+  "expr" : "{{ s | jq('.') }}",
+  "context" : {
+    "s" : ""
+  },
+  "result" : "[null]"
+}, {
+  "id" : "filter-jq-string-input-two-documents",
+  "expr" : "{{ s | jq('.') }}",
+  "context" : {
+    "s" : "1 2"
+  },
+  "result" : "[1]"
+}, {
+  "id" : "filter-jq-string-input-not-json",
+  "expr" : "{{ s | jq('.') }}",
+  "context" : {
+    "s" : "abc"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Unable to parse jq value 'abc' with type 'java.lang.String' ({{ s | jq('.') }}:1)"
+  }
+}, {
+  "id" : "filter-jq-missing-expression",
+  "expr" : "{{ json | jq() }}",
+  "context" : {
+    "json" : {
+      "a" : 1
+    }
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: The 'jq' filter expects an argument 'expression'. ({{ json | jq() }}:1)"
+  }
+}, {
+  "id" : "filter-jq-expression-not-a-string",
+  "expr" : "{{ json | jq(e) }}",
+  "context" : {
+    "json" : {
+      "a" : 1
+    },
+    "e" : 1
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.lang.ClassCastException: class java.lang.Integer cannot be cast to class java.lang.String (java.lang.Integer and java.lang.String are in module java.base of loader 'bootstrap')"
+  }
+}, {
+  "id" : "filter-jq-syntax-error",
+  "expr" : "{{ json | jq('.a[') }}",
+  "context" : {
+    "json" : {
+      "a" : 1
+    }
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Unable to parse jq value '{a=1}' with type 'java.util.LinkedHashMap' ({{ json | jq('.a[') }}:1)"
+  }
+}, {
+  "id" : "filter-jq-named-argument",
+  "expr" : "{{ json | jq(expression='.a') }}",
+  "context" : {
+    "json" : {
+      "a" : 1
+    }
+  },
+  "result" : "[1]"
+}, {
+  "id" : "filter-jq-map-output-is-a-map",
+  "expr" : "{{ json | jq('.a') }}",
+  "context" : {
+    "json" : {
+      "a" : {
+        "b" : 1
+      }
+    }
+  },
+  "result" : "[{\"b\":1}]"
+}, {
+  "id" : "filter-jq-alternative-operator",
+  "expr" : "{{ json | jq('.nope // \"dflt\"') }}",
+  "context" : {
+    "json" : {
+      "a" : 1
+    }
+  },
+  "result" : "[\"dflt\"]"
+}, {
+  "id" : "filter-jq-interpolation",
+  "expr" : "{{ json | jq('\"v=\\(.a)\"') }}",
+  "context" : {
+    "json" : {
+      "a" : 1
+    }
+  },
+  "result" : "[\"v=1\"]"
+}, {
+  "id" : "filter-jq-infinite-is-a-quoted-string",
+  "expr" : "{{ json | jq('infinite') }}",
+  "context" : {
+    "json" : {
+      "a" : 1
+    }
+  },
+  "result" : "[\"Infinity\"]"
+}, {
+  "id" : "filter-jq-big-integer",
+  "expr" : "{{ json | jq('.a') }}",
+  "context" : {
+    "json" : {
+      "a" : 9007199254740993
+    }
+  },
+  "result" : "[9007199254740993]"
+}, {
+  "id" : "filter-regexmatch-null-input",
+  "expr" : "{{ nothing | regexMatch(regex='a') }}",
+  "context" : {
+    "nothing" : null
+  },
+  "result" : "false"
+}, {
+  "id" : "filter-regexmatch-is-find-not-matches",
+  "expr" : "{{ s | regexMatch(regex='b') }}",
+  "context" : {
+    "s" : "abc"
+  },
+  "result" : "true"
+}, {
+  "id" : "filter-regexmatch-digit-is-ascii",
+  "expr" : "{{ s | regexMatch(regex='\\d') }}",
+  "context" : {
+    "s" : "٣"
+  },
+  "result" : "false"
+}, {
+  "id" : "filter-regexmatch-word-is-ascii",
+  "expr" : "{{ s | regexMatch(regex='\\w') }}",
+  "context" : {
+    "s" : "é"
+  },
+  "result" : "false"
+}, {
+  "id" : "filter-regexmatch-space-is-ascii",
+  "expr" : "{{ s | regexMatch(regex='\\s') }}",
+  "context" : {
+    "s" : " "
+  },
+  "result" : "false"
+}, {
+  "id" : "filter-regexmatch-vertical-whitespace",
+  "expr" : "{{ s | regexMatch(regex='\\v') }}",
+  "context" : {
+    "s" : "\n"
+  },
+  "result" : "true"
+}, {
+  "id" : "filter-regexmatch-dot-excludes-carriage-return",
+  "expr" : "{{ s | regexMatch(regex='a.b') }}",
+  "context" : {
+    "s" : "a\rb"
+  },
+  "result" : "false"
+}, {
+  "id" : "filter-regexmatch-boundary-is-ascii",
+  "expr" : "{{ s | regexMatch(regex='\\bcafé\\b') }}",
+  "context" : {
+    "s" : "le café noir"
+  },
+  "result" : "false"
+}, {
+  "id" : "filter-regexmatch-case-insensitivity-is-ascii",
+  "expr" : "{{ s | regexMatch(regex='(?i)k') }}",
+  "context" : {
+    "s" : "K"
+  },
+  "result" : "false"
+}, {
+  "id" : "filter-regexmatch-quoted-literal",
+  "expr" : "{{ s | regexMatch(regex='\\Qa+b\\E') }}",
+  "context" : {
+    "s" : "a+b"
+  },
+  "result" : "true"
+}, {
+  "id" : "filter-regexmatch-posix-class",
+  "expr" : "{{ s | regexMatch(regex='\\p{XDigit}') }}",
+  "context" : {
+    "s" : "f"
+  },
+  "result" : "true"
+}, {
+  "id" : "filter-regexmatch-bare-script-name",
+  "expr" : "{{ s | regexMatch(regex='\\p{Greek}') }}",
+  "context" : {
+    "s" : "α"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Invalid regex '\\p{Greek}': Unknown character property name {Greek} ({{ s | regexMatch(regex='\\p{Greek}') }}:1)"
+  }
+}, {
+  "id" : "filter-regexmatch-missing-regex",
+  "expr" : "{{ s | regexMatch() }}",
+  "context" : {
+    "s" : "abc"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: The argument 'regex' is required. ({{ s | regexMatch() }}:1)"
+  }
+}, {
+  "id" : "filter-regexmatch-null-regex",
+  "expr" : "{{ s | regexMatch(regex=r) }}",
+  "context" : {
+    "s" : "abc",
+    "r" : null
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: The argument 'regex' is required. ({{ s | regexMatch(regex=r) }}:1)"
+  }
+}, {
+  "id" : "filter-regexmatch-number-input",
+  "expr" : "{{ n | regexMatch(regex='2') }}",
+  "context" : {
+    "n" : 123
+  },
+  "result" : "true"
+}, {
+  "id" : "filter-regexmatch-bool-input",
+  "expr" : "{{ b | regexMatch(regex='true') }}",
+  "context" : {
+    "b" : true
+  },
+  "result" : "true"
+}, {
+  "id" : "filter-regexmatch-positional-argument",
+  "expr" : "{{ s | regexMatch('b') }}",
+  "context" : {
+    "s" : "abc"
+  },
+  "result" : "true"
+}, {
+  "id" : "filter-regexmatch-invalid-regex",
+  "expr" : "{{ s | regexMatch(regex='(a') }}",
+  "context" : {
+    "s" : "a"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Invalid regex '(a': Unclosed group ({{ s | regexMatch(regex='(a') }}:1)"
+  }
+}, {
+  "id" : "filter-regexreplace-null-input",
+  "expr" : "<{{ nothing | regexReplace(regex='a', replacement='b') }}>",
+  "context" : {
+    "nothing" : null
+  },
+  "result" : "<>"
+}, {
+  "id" : "filter-regexreplace-group-references",
+  "expr" : "{{ s | regexReplace(regex='(\\d)(\\d)', replacement='$2$1') }}",
+  "context" : {
+    "s" : "12"
+  },
+  "result" : "21"
+}, {
+  "id" : "filter-regexreplace-named-group",
+  "expr" : "{{ s | regexReplace(regex='(?<a>\\d)', replacement='[${a}]') }}",
+  "context" : {
+    "s" : "1"
+  },
+  "result" : "[1]"
+}, {
+  "id" : "filter-regexreplace-escaped-dollar",
+  "expr" : "{{ s | regexReplace(regex='a', replacement='\\$') }}",
+  "context" : {
+    "s" : "a"
+  },
+  "result" : "$"
+}, {
+  "id" : "filter-regexreplace-escaped-backslash",
+  "expr" : "{{ s | regexReplace(regex='a', replacement='\\\\') }}",
+  "context" : {
+    "s" : "a"
+  },
+  "result" : "\\"
+}, {
+  "id" : "filter-regexreplace-escaped-backslash-from-a-variable",
+  "expr" : "{{ s | regexReplace(regex='a', replacement=r) }}",
+  "context" : {
+    "s" : "a",
+    "r" : "\\\\"
+  },
+  "result" : "\\"
+}, {
+  "id" : "filter-regexreplace-two-digit-reference",
+  "expr" : "{{ s | regexReplace(regex='(a)', replacement='$10') }}",
+  "context" : {
+    "s" : "a"
+  },
+  "result" : "a0"
+}, {
+  "id" : "filter-regexreplace-group-out-of-range",
+  "expr" : "{{ s | regexReplace(regex='(a)', replacement='$2') }}",
+  "context" : {
+    "s" : "a"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.lang.IndexOutOfBoundsException: No group 2"
+  }
+}, {
+  "id" : "filter-regexreplace-trailing-dollar",
+  "expr" : "{{ s | regexReplace(regex='a', replacement='x$') }}",
+  "context" : {
+    "s" : "a"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.lang.IllegalArgumentException: Illegal group reference: group index is missing"
+  }
+}, {
+  "id" : "filter-regexreplace-empty-match",
+  "expr" : "{{ s | regexReplace(regex='x*', replacement='-') }}",
+  "context" : {
+    "s" : "ab"
+  },
+  "result" : "-a-b-"
+}, {
+  "id" : "filter-regexreplace-missing-replacement",
+  "expr" : "{{ s | regexReplace(regex='a') }}",
+  "context" : {
+    "s" : "a"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: The argument 'replacement' is required. ({{ s | regexReplace(regex='a') }}:1)"
+  }
+}, {
+  "id" : "filter-regexextract-default-group",
+  "expr" : "{{ s | regexExtract(regex='(\\d+)-(\\d+)') }}",
+  "context" : {
+    "s" : "a12-34"
+  },
+  "result" : "12-34"
+}, {
+  "id" : "filter-regexextract-group-one",
+  "expr" : "{{ s | regexExtract(regex='(\\d+)-(\\d+)', group=1) }}",
+  "context" : {
+    "s" : "a12-34"
+  },
+  "result" : "12"
+}, {
+  "id" : "filter-regexextract-group-two",
+  "expr" : "{{ s | regexExtract(regex='(\\d+)-(\\d+)', group=2) }}",
+  "context" : {
+    "s" : "a12-34"
+  },
+  "result" : "34"
+}, {
+  "id" : "filter-regexextract-no-match",
+  "expr" : "<{{ s | regexExtract(regex='z(\\d)') }}>",
+  "context" : {
+    "s" : "abc"
+  },
+  "result" : "<>"
+}, {
+  "id" : "filter-regexextract-group-did-not-participate",
+  "expr" : "<{{ s | regexExtract(regex='(a)|(b)', group=1) }}>",
+  "context" : {
+    "s" : "b"
+  },
+  "result" : "<>"
+}, {
+  "id" : "filter-regexextract-group-out-of-range",
+  "expr" : "{{ s | regexExtract(regex='(\\d)', group=2) }}",
+  "context" : {
+    "s" : "a1"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Group index 2 is out of bounds: the pattern has only 1 capture group(s). ({{ s | regexExtract(regex='(\\d)', group=2) }}:1)"
+  }
+}, {
+  "id" : "filter-regexextract-negative-group",
+  "expr" : "{{ s | regexExtract(regex='(\\d)', group=-1) }}",
+  "context" : {
+    "s" : "a1"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Group index -1 is out of bounds: must be >= 0. ({{ s | regexExtract(regex='(\\d)', group=-1) }}:1)"
+  }
+}, {
+  "id" : "filter-regexextract-group-not-a-number",
+  "expr" : "{{ s | regexExtract(regex='(\\d)', group='1') }}",
+  "context" : {
+    "s" : "a1"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.lang.ClassCastException: class java.lang.String cannot be cast to class java.lang.Number (java.lang.String and java.lang.Number are in module java.base of loader 'bootstrap')"
+  }
+}, {
+  "id" : "filter-regexextract-null-group",
+  "expr" : "{{ s | regexExtract(regex='(\\d)', group=g) }}",
+  "context" : {
+    "s" : "a1",
+    "g" : null
+  },
+  "result" : "1"
+}, {
+  "id" : "filter-regexextract-null-input",
+  "expr" : "<{{ nothing | regexExtract(regex='a') }}>",
+  "context" : {
+    "nothing" : null
+  },
+  "result" : "<>"
+}, {
+  "id" : "filter-regexmatch-lookahead",
+  "expr" : "{{ s | regexMatch(regex='a(?=b)') }}",
+  "context" : {
+    "s" : "ab"
+  },
+  "result" : "true"
+}, {
+  "id" : "filter-regexmatch-lookbehind",
+  "expr" : "{{ s | regexMatch(regex='(?<=a)b') }}",
+  "context" : {
+    "s" : "ab"
+  },
+  "result" : "true"
+}, {
+  "id" : "filter-regexmatch-backreference",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "aa",
+    "p" : "(a)\\1"
+  },
+  "result" : "true"
+}, {
+  "id" : "filter-regexmatch-numeric-escape-in-a-string-literal",
+  "expr" : "{{ s | regexMatch(regex='(a)\\1') }}",
+  "context" : {
+    "s" : "aa"
+  },
+  "result" : "true"
+}, {
+  "id" : "filter-regexmatch-possessive-quantifier",
+  "expr" : "{{ s | regexMatch(regex='a++a') }}",
+  "context" : {
+    "s" : "aaa"
+  },
+  "result" : "false"
+}, {
+  "id" : "filter-regexmatch-atomic-group",
+  "expr" : "{{ s | regexMatch(regex='(?>a+)b') }}",
+  "context" : {
+    "s" : "aaab"
+  },
+  "result" : "true"
+}, {
+  "id" : "filter-regexmatch-unicode-block",
+  "expr" : "{{ s | regexMatch(regex='\\p{InGreek}') }}",
+  "context" : {
+    "s" : "α"
+  },
+  "result" : "true"
+}, {
+  "id" : "filter-regexmatch-java-character-predicate",
+  "expr" : "{{ s | regexMatch(regex='\\p{javaLowerCase}') }}",
+  "context" : {
+    "s" : "a"
+  },
+  "result" : "true"
+}, {
+  "id" : "filter-regexmatch-dollar-before-a-trailing-newline",
+  "expr" : "{{ s | regexMatch(regex='c$') }}",
+  "context" : {
+    "s" : "abc\n"
+  },
+  "result" : "true"
+}, {
+  "id" : "filter-regexmatch-previous-match-anchor",
+  "expr" : "{{ s | regexMatch(regex='\\Ga') }}",
+  "context" : {
+    "s" : "aab"
+  },
+  "result" : "true"
+}, {
+  "id" : "filter-jq-at-csv",
+  "expr" : "{{ json | jq('.[] | @csv') }}",
+  "context" : {
+    "json" : [ [ 1, 2 ] ]
+  },
+  "result" : "[\"1,2\"]"
+}, {
+  "id" : "filter-jq-leaf-paths",
+  "expr" : "{{ json | jq('[leaf_paths]') }}",
+  "context" : {
+    "json" : {
+      "a" : {
+        "b" : 1
+      }
+    }
+  },
+  "result" : "[[[\"a\",\"b\"]]]"
+}, {
+  "id" : "filter-jq-del-loses-key-order",
+  "expr" : "{{ json | jq('del(.a)') }}",
+  "context" : {
+    "json" : {
+      "a" : 1,
+      "c" : 2,
+      "b" : 3
+    }
+  },
+  "result" : "[{\"c\":2,\"b\":3}]"
+}, {
+  "id" : "filter-jq-todate-is-not-in-kestras-jq",
+  "expr" : "{{ json | jq('0 | todate') }}",
+  "context" : {
+    "json" : {
+      "a" : 1
+    }
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Unable to parse jq value '{a=1}' with type 'java.util.LinkedHashMap' ({{ json | jq('0 | todate') }}:1)"
+  }
+}, {
+  "id" : "filter-jq-division-by-zero",
+  "expr" : "{{ json | jq('1 / 0') }}",
+  "context" : {
+    "json" : {
+      "a" : 1
+    }
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Unable to parse jq value '{a=1}' with type 'java.util.LinkedHashMap' ({{ json | jq('1 / 0') }}:1)"
+  }
+}, {
+  "id" : "filter-yaml-next-line-character-folds",
+  "expr" : "{{ s | yaml }}",
+  "context" : {
+    "s" : "ab"
+  },
+  "result" : "a  b\n"
 } ]

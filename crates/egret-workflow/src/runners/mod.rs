@@ -7,14 +7,20 @@
 //!   `? :`, `isIn`) into syntax minijinja already understands, or into calls
 //!   to functions `env` registers. It has no context and evaluates nothing —
 //!   see `rewrite`'s module doc for why a regex cannot do this job.
-//! - `filters` is the 28 filters of W2 Tasks 4 and 5, registered onto that
-//!   engine. Two of its names (`indent`, `string`) override minijinja
-//!   built-ins rather than adding to them.
+//! - `filters` is all 35 of Kestra's filters, registered onto that engine.
+//!   Two of its names (`indent`, `string`) override minijinja built-ins
+//!   rather than adding to them.
 //! - `javafmt` is Java's `DateTimeFormatter` pattern language, which the six
 //!   date/time filters in `filters` are written against. It is its own module
 //!   because no Rust crate provides that pattern language and because it is
 //!   the only part of this crate that is about `java.time` rather than about
 //!   Pebble.
+//! - `ionfmt`, `yamlfmt` and `javare` are the same shape of thing for W2
+//!   Task 6's filters: Amazon Ion text as `JacksonMapper.ofIon()` writes it,
+//!   YAML as Jackson's `YAMLGenerator` over SnakeYAML's emitter writes it,
+//!   and `java.util.regex` translated onto the `regex` crate. Each is a
+//!   foreign format with no Rust equivalent that answers the same way, and
+//!   `javare`'s doc is required reading before touching a pattern.
 //! - `env` is the engine that evaluates the reshaped source, wrapped in the
 //!   same pre/post-processing `VariableRenderer` does (the `{% raw %}`
 //!   protection, the re-render loop). `Property<T>::render` is `env`'s
@@ -22,8 +28,11 @@
 
 pub mod env;
 mod filters;
+mod ionfmt;
 mod javafmt;
+mod javare;
 pub mod rewrite;
+mod yamlfmt;
 
 pub use env::{environment, render_str, RenderContext, RenderError};
 pub use rewrite::{rewrite, RewriteError};

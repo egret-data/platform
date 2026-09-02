@@ -246,3 +246,43 @@ filter-date-existing-format-repeated-field-conflicts
 filter-date-existing-format-clock-hour-of-ampm-thirteen
 filter-date-existing-format-wide-year-needs-the-sign
 filter-date-existing-format-optional-year-absent
+
+# --- W2 Task 6: the four structured-data filters and the three regex ones.
+#
+# Fourteen entries, each an exception Kestra actually throws and each backed
+# by a unit test in `runners::filters` asserting egret's OWN message:
+#
+#   filter-jq-string-input-not-json        -> jq_reports_the_input_it_could_not_use
+#   filter-jq-missing-expression           -> jq_reports_the_input_it_could_not_use
+#   filter-jq-expression-not-a-string      -> jq_reports_the_input_it_could_not_use
+#   filter-jq-syntax-error                 -> jq_reports_the_input_it_could_not_use
+#   filter-regexmatch-bare-script-name     -> an_invalid_java_pattern_is_reported_as_invalid
+#   filter-regexmatch-invalid-regex        -> an_invalid_java_pattern_is_reported_as_invalid
+#   filter-regexmatch-missing-regex        -> a_missing_regex_argument_is_reported_by_name
+#   filter-regexmatch-null-regex           -> a_missing_regex_argument_is_reported_by_name
+#   filter-regexreplace-missing-replacement-> a_missing_regex_argument_is_reported_by_name
+#   filter-regexreplace-group-out-of-range -> a_bad_replacement_reference_is_reported
+#   filter-regexreplace-trailing-dollar    -> a_bad_replacement_reference_is_reported
+#   filter-regexextract-group-out-of-range -> a_bad_group_argument_is_reported
+#   filter-regexextract-negative-group     -> a_bad_group_argument_is_reported
+#   filter-regexextract-group-not-a-number -> a_bad_group_argument_is_reported
+#
+# Note what is NOT here. Every construct egret refuses and Kestra accepts
+# (a lookahead, a backreference, a possessive quantifier, a Unicode block)
+# is in `baseline.txt` instead: Kestra SUCCEEDS on those, so there is no
+# error to compare classes with, and marking them error-class would be the
+# free pass this file exists to make visible.
+filter-jq-string-input-not-json
+filter-jq-missing-expression
+filter-jq-expression-not-a-string
+filter-jq-syntax-error
+filter-regexmatch-bare-script-name
+filter-regexmatch-missing-regex
+filter-regexmatch-null-regex
+filter-regexmatch-invalid-regex
+filter-regexreplace-group-out-of-range
+filter-regexreplace-trailing-dollar
+filter-regexreplace-missing-replacement
+filter-regexextract-group-out-of-range
+filter-regexextract-negative-group
+filter-regexextract-group-not-a-number

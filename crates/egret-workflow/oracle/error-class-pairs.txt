@@ -125,3 +125,20 @@ filter-date-existing-format-repeated-field-conflicts    test:java_cross_checks_t
 filter-date-existing-format-clock-hour-of-ampm-thirteen test:smart_exempts_a_zero_clock_hour_but_not_a_thirteenth
 filter-date-existing-format-wide-year-needs-the-sign    test:a_wide_year_is_read_back_only_with_its_sign
 filter-date-existing-format-optional-year-absent        test:an_optional_section_that_fails_leaves_no_year
+
+# --- W2 Task 6. Four filters' argument and syntax failures. Each paired test
+# asserts egret's own sentence, not merely that something failed.
+filter-jq-string-input-not-json         test:jq_reports_the_input_it_could_not_use
+filter-jq-missing-expression            test:jq_reports_the_input_it_could_not_use
+filter-jq-expression-not-a-string       test:jq_reports_the_input_it_could_not_use
+filter-jq-syntax-error                  test:jq_reports_the_input_it_could_not_use
+filter-regexmatch-bare-script-name      test:an_invalid_java_pattern_is_reported_as_invalid
+filter-regexmatch-invalid-regex         test:an_invalid_java_pattern_is_reported_as_invalid
+filter-regexmatch-missing-regex         test:a_missing_regex_argument_is_reported_by_name
+filter-regexmatch-null-regex            test:a_missing_regex_argument_is_reported_by_name
+filter-regexreplace-missing-replacement test:a_missing_regex_argument_is_reported_by_name
+filter-regexreplace-group-out-of-range  test:a_bad_replacement_reference_is_reported
+filter-regexreplace-trailing-dollar     test:a_bad_replacement_reference_is_reported
+filter-regexextract-group-out-of-range  test:a_bad_group_argument_is_reported
+filter-regexextract-negative-group      test:a_bad_group_argument_is_reported
+filter-regexextract-group-not-a-number  test:a_bad_group_argument_is_reported

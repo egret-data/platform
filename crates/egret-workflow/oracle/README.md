@@ -126,7 +126,7 @@ Verified by deliberate breakage before committing: an unpaired new entry, a
 renamed paired test, a false `baselined` claim and a quietly-added
 `unported:` all fail, each naming the id.
 
-**64** entries carry it today, counted out of `golden.json` rather than added
+**78** entries carry it today, counted out of `golden.json` rather than added
 up: the four `*-mixed` comparisons (Pebble throws on a String/Number mix), the
 eight registered-but-null-backed functions, `raw-multiline`, the three `isin-*`
 entries where an absent variable raises, **twelve from W2 Task 4** — four
@@ -136,7 +136,10 @@ casts) — **fourteen from W2 Task 5** (eight of them the Java pattern compiler
 refusing a pattern), **nine more from Task 5's fix round**, which its probe
 sweep earned, and **five from its second round**, from the `existingFormat`
 parse sweep, and **eight from its third**, every one of which was shown to
-fail against the pre-fix implementation before it was written down. **Every one of them is separately backed by a unit test in
+fail against the pre-fix implementation before it was written down, and
+**fourteen from W2 Task 6** (four `jq` argument and query failures, four
+regex-argument ones, three replacement-string ones and three `group`-argument
+ones). **Every one of them is separately backed by a unit test in
 `runners::filters` asserting egret's own message**, named alongside it in
 `error-class.txt` and mechanically checked against `error-class-pairs.txt`, so
 what carries them is the test and not the mode.
@@ -145,7 +148,7 @@ That is a lot, and it is a deliberate trade: each records an exception Kestra
 actually throws, which is worth having in `golden.json`, at the cost of an
 entry the ratchet cannot fail. **The ratio deserves a look before Task 8**,
 whose whole deliverable is refusals. Note that marking an entry error-class
-does **not** make it pass: 5 of the 64 are *also* in `baseline.txt`, because
+does **not** make it pass: 5 of the 78 are *also* in `baseline.txt`, because
 egret *succeeds* where Kestra throws — a real divergence, and it stays
 visible.
 
@@ -155,7 +158,10 @@ visible.
 is a ratchet. `oracle/baseline.txt` lists the ids that do not match yet: 76 of
 138 at W2 Task 3, 57 of 241 after Task 4, 59 of 268 after its fix round,
 60 of 291 after fix round 3, 59 of 426 after W2 Task 5, 62 of 457 after that
-task's fix round, 62 of 486 after its second, **66 of 513** after its third.
+task's fix round, 62 of 486 after its second, 66 of 513 after its third,
+**76 of 630** after W2 Task 6 -- which BANKED seven (its whole batch of
+filters) and RECORDED seventeen, every one of them a place the two engines
+answer differently rather than a filter that is not ported.
 The test fails in **both** directions:
 
 - an id **not** in the baseline mismatches — a regression;
@@ -667,7 +673,7 @@ function.** Implemented in Task 3's fix round: `rewrite` now emits
 `runners::env::kestra_is_in` reproduces all four rows. All four entries
 match.
 
-## Corpus (`corpus.json`, 513 entries)
+## Corpus (`corpus.json`, 630 entries)
 
 - **37 operator cases**, taken verbatim from the task brief plus several
   follow-up fixes: the `??`/`???` pair (5 entries covering null vs. absent on
@@ -1253,6 +1259,8 @@ this list first, or they will read a moved golden as a regression in egret.
 
 | 4 | **`AbstractDate.convert`'s 19-digit branch throws away the milliseconds it just read.** It is `Instant.ofEpochMilli(l / 1_000_000).atZone(zone).withNano((int)(l % 1_000_000) * 1000)`, and `withNano` **replaces** the whole nanosecond field — so `ofEpochMilli`'s `.123` is discarded and `1705314600123456789` renders `.456789`, not `.123456789`. | `javap -p -c AbstractDate.class`, the `digitCount == 19` branch: `ldiv` by `1000000`, `Instant.ofEpochMilli`, `atZone`, then `ZonedDateTime.withNano` | `filter-date-epoch-nanos-truncating` |
 
+| 5 | **`jq` never sees a null-valued key.** `JqFilter`'s non-String branch is `JacksonMapper.ofJson().valueToTree(input)`, and that mapper is `NON_NULL`, so a map's null-valued entries are dropped on the way IN: `{{ obj \| jq('keys') }}` on `{a:1,b:null,c:3}` answers `["a","c"]`. A flow author reading `keys` gets fewer keys than the object has, and nothing says so. | `javap -p -c JacksonMapper.class`: `configure()` calls `setDefaultPropertyInclusion(NON_NULL)`, and `JqFilter.apply` calls `ofJson().valueToTree` | `filter-jq-keys-drops-null-values` |
+
 ### What is NOT on that list, and why the distinction matters
 
 **`LessThanExpression`'s `comparisonPebb` typo is recorded, not reproduced.**
@@ -1527,3 +1535,309 @@ refusal (`z` answering with tzdb's id), widening the parse refusal (`w`
 consumed rather than refused, as in fix round 2), narrowing a non-refusal (`O`
 refusing), deleting a divergent row's reason, deleting a row, and adding a
 reason to a row that has no divergence.
+
+## What W2 Task 6's 116 new entries measured (read before touching `jq`, `toJson`, `toIon`, `yaml` or the three `regex*` filters)
+
+Task 6 ported the last seven filters — the four structured-data ones (`jq`,
+`toIon`, `toJson`, `yaml`) and the three registered through a constant
+(`regexMatch`, `regexReplace`, `regexExtract`) — which closes the count at
+**35 of 35**. It ran four sweeps first, before writing a line of Rust, and
+everything below was read off a regenerated golden file or off `javap -p -c`.
+
+The sweeps, and what each one is:
+
+| sweep | probes | what it compared |
+|---|---:|---|
+| structured values | 258 | 86 values × `toJson`/`toIon`/`yaml`, Kestra vs egret |
+| the Java pattern language | 265 | Java's constructs against the **raw `regex` crate** |
+| jq's surface | 132 | Kestra's `jackson-jq` against **raw `jaq`** |
+| YAML scalar styling | 857 | strings and map keys, as values and as names |
+
+### The four filters split THREE ways on a null map value
+
+`JacksonMapper`'s shared `configure()` sets
+`setDefaultPropertyInclusion(NON_NULL)`. Three things then happen to it, and
+all three are in this one batch:
+
+| filter | mapper | `{"a":null,"b":1}` |
+|---|---|---|
+| `toJson` | `JacksonMapper.ofJson()` — inherits `NON_NULL` | `{"b":1}` |
+| `toIon` | `JacksonMapper.ofIon()` — `createIonObjectMapper` **overrides it back to `ALWAYS`** | `{a:null,b:1}` |
+| `yaml` | `YamlFilter`'s OWN mapper, built in its static initialiser, never sees `configure()` | `a: null\nb: 1\n` |
+| `jq` | `ofJson().valueToTree(input)` — `NON_NULL` on the way **IN** | `{{ obj \| jq('keys') }}` never sees `b` |
+
+The `jq` row is the surprising one: it is not about output at all.
+`{{ obj | jq('keys') }}` omits every key whose value is null, because the
+value was already dropped when the `Map` was turned into a `JsonNode`.
+`filter-jq-keys-drops-null-values` is the entry.
+
+Confirmed by `javap -p -c` on `JacksonMapper.class` — `createIonObjectMapper`
+calls `configure(...)` and then `setDefaultPropertyInclusion(ALWAYS)` on the
+next four instructions.
+
+### `jq` returns a LIST, a String input is PARSED, and every failure says the same sentence
+
+- **The result is always a list.** `JsonQuery.apply` emits into an
+  `ArrayList` and that list is the return value, so `{{ json | jq('.a.b') }}`
+  is `[42]`. `filter-jq-single-match-is-still-a-list`.
+- **A String input goes through `ObjectMapper.readTree`, which is not "parse
+  this whole string".** `readTree("")` is a `MissingNode` (`[null]`, not an
+  error) and `readTree("1 2")` reads the **first value and stops** (`[1]`).
+  `jaq`'s `parse_single` refuses both. Two entries, and both were shown to
+  fail against the first cut.
+- **Every failure is one sentence.** `JqFilter` catches `Exception` around its
+  whole body and rebuilds the message from the *input*:
+  `Unable to parse jq value '<String.valueOf(input)>' with type '<class>'`.
+  A syntax error, a runtime error and an unparseable String input are
+  indistinguishable. The value in it is Java's `toString`, so a map prints as
+  `{a=1}` — `runners::env::kestra_to_string`, not `Display`.
+
+### `jaq` is not `jackson-jq`, and the differences run both ways
+
+116 of 132 probes agreed. The 16 that did not:
+
+- **three functions Kestra has and `jaq` does not**: `@csv`, `@tsv`,
+  `leaf_paths`;
+- **five `jaq` has and Kestra's 1.6 does not**: `todate`, `strftime`,
+  `repeat`, `debug`, and `1 / 0` (which is `Infinity` in `jaq` and a throw in
+  `jackson-jq`);
+- **`del` re-sorts an object's keys** in `jaq` and preserves them in
+  `jackson-jq`. Every other operation measured preserves insertion order on
+  both sides, `keys_unsorted` included;
+- the rest were the `NON_NULL`-on-the-way-in and `readTree` facts above, now
+  reproduced.
+
+Five entries record what is left, in `baseline.txt`.
+
+### Three things `jaq` does that a renderer on a request path must not
+
+None of these is a fidelity question and none of them has a golden.
+
+1. **`jq('env')` returns the whole process environment.** `jaq_std::funs()`
+   registers `env` as `std::env::vars()` — `DATABASE_URL` and every secret in
+   it. Kestra's jq has no `env` at all (measured: it errors), so withholding
+   it is fidelity as well as the obvious call. `runners::filters::run_jq`
+   filters it out of the function list by name;
+   `jq_cannot_read_the_process_environment` is the test, and it sets a canary
+   variable rather than asserting on a message.
+2. **`jq('halt')` calls `std::process::exit`.** Not through anything exotic:
+   `jaq_core::unwrap_valr`, the function the crate's own doc example calls,
+   ends in `exit(code)` for a halt. A rendered `Property` is author-supplied
+   source, so that is a flow terminating the process. `run_jq` matches on
+   `Exn` directly instead and never calls `unwrap_valr`.
+3. **jq generators are infinite.** `1 | repeat(. + 1)` never stops and Kestra
+   collects into an `ArrayList` until the JVM dies. `run_jq` bounds the
+   accumulated output against `MAX_OUTPUT_BYTES`, the same 1 MiB ceiling
+   `runners::env` caps a whole render at — the same call `indent`'s prefix
+   bound and `rewrite`'s `MAX_NESTING_DEPTH` make.
+
+### Java's regex is not Rust's, and 101 of 265 probes proved it
+
+The sweep ran Java's pattern constructs against the **raw `regex` crate**, and
+the dangerous half is not the half that errors:
+
+| pattern | subject | Java | crate, untranslated |
+|---|---|---|---|
+| `\d` | `٣` | no match | **match** |
+| `\w` | `é` | no match | **match** |
+| `\s` | `\u00a0` | no match | **match** |
+| `\v` | `\n` | match | **no match** (it is a vertical TAB there) |
+| `a.b` | `a\rb` | no match | **match** |
+| `\bcafé\b` | `le café noir` | no match | **match** |
+| `(?i)k` | `K` (U+212A) | no match | **match** |
+| `c$` | `abc\n` | match | **no match** |
+| `a++a` | `aaa` | no match | **match** |
+
+Not one of those raises anything on either side. `runners::javare` translates
+every one of them — `\d \D \w \W \s \S \h \H \v \V \R`, `.` under `s` and `d`,
+`\b`/`\B` as Java's ASCII boundaries, `\Q…\E`, the numeric escapes, Java's
+POSIX `\p{Alpha}` family, categories and scripts, class intersection and
+nesting, and case-insensitivity **expanded per literal** because Java's `(?i)`
+is ASCII-only and the crate's is not.
+
+**Nine constructs are refused instead, each naming itself**: lookahead,
+lookbehind, atomic groups, possessive quantifiers, backreferences, `\G`,
+`\b{g}`, Unicode *blocks* and `\p{java…}` predicates. After the translation
+the whole 265-probe sweep leaves exactly those and nothing silent.
+
+Two further facts came out of it:
+
+- **`$` needs the subject, not just the pattern.** Java's `$` outside
+  `MULTILINE` is `\Z` — it matches before a *final* line terminator. The
+  crate's is end-of-haystack. `$` is translated to `\z`, which is exact on
+  every subject that does not end in a terminator, and the subject that does
+  is refused. Consuming an optional terminator instead answers `regexMatch`
+  correctly and then **deletes the newline** in `regexReplace`.
+- **the replacement string is a third language.** Java's `\$` is a literal
+  dollar and the crate's `\` is not an escape at all; `$2` against a one-group
+  pattern throws in Java and yields `""` in the crate; and `$10` against a
+  one-group pattern is group 1 followed by a literal `0`, because Java reads
+  digits greedily and backs off at the group count. `expand_replacement` is
+  Java's, not the crate's.
+
+### `RegexUtils`' ten-second timeout is not ported, and that is the C7 call
+
+All three filters go through `RegexUtils.matcher`, which wraps the subject in
+a `TimeoutCharSequence` whose `charAt` throws after `Duration.ofSeconds(10)`
+(`javap -p -c RegexUtils.class`; `MAX_USER_REGEX_LENGTH = 250` is on the same
+class and is **not** on this path). That bound exists because
+`java.util.regex` backtracks.
+
+The `regex` crate cannot. `(a+)+b` against 40 `a`s and a `!` is answered here
+in the time one linear scan takes, and Kestra spends ten seconds and throws.
+egret is strictly better and cheaper, so there is nothing to bound and nothing
+to reproduce; `runners::javare::a_catastrophic_java_pattern_is_answered_instead_of_timed_out`
+is the pin. Note this is the opposite direction from `indent`'s `MAX_AMOUNT`:
+there, Kestra had a bound and egret had to grow one.
+
+### `ion-rs` cannot write Kestra's Ion, measured before it was refused
+
+Task 6's brief names `ion-rs` 1.0 for `toIon`. It was tried first. On
+`ion-rs` 1.0.1, against the same value:
+
+| | Kestra | `ion-rs` 1.0.1 |
+|---|---|---|
+| `{a:1}` | `{a:1}` | `{a: 1}` — a space after every `:` and `,` |
+| a list | `[1,2]` | `[1, 2, ]` — a trailing comma |
+| `1e100` | `1.0e100` | `1e100` |
+| `"a\x01b"` | `"a\x01b"` | the raw control byte, unescaped |
+
+and none of it is configurable: `ion_rs::Writer`, `ValueWriter` and the
+`v1_0::Text` layout options are `pub(crate)` in 1.0.1, so `Element::to_string`
+and `encode_as` are the only public routes and both produce the right column.
+Post-processing that into Kestra's form is a second serialiser wrapped around
+the first, so `runners::ionfmt` is the first one instead. **No `ion-rs` in the
+lock file.**
+
+Its two non-obvious rules, both measured over 27 floats and 130 strings:
+
+- **the float text starts from `Double.toString` and then diverges by whether
+  there is an exponent.** With one, lowercase the `E` and keep the mantissa
+  (`1.0E100` -> `1.0e100`); without one, drop a trailing `.0` and append `e0`
+  (`1.0` -> `1e0`, `9999999.0` -> `9999999e0`, `-0.0` -> `-0e0`). So `1.0` and
+  `1.0e100` disagree about whether the `.0` survives.
+- **Ion's keyword set is case-sensitive and tiny.** `true`, `false`, `null`
+  and `nan` are quoted as field names; `True`, `TRUE`, `Null`, `yes`, `on`,
+  `y` are **bare** — the exact opposite of what the `yaml` filter in the same
+  batch does with the same keys.
+
+### `yaml` is TWO layers, and they pick different quote characters
+
+Jackson's `YAMLGenerator.writeString` requests a style and SnakeYAML's
+`Emitter` downgrades it. Everything Jackson forces comes out **double**-quoted;
+everything SnakeYAML downgrades comes out **single**-quoted. So
+`{{ 'yes' | yaml }}` is `"yes"` and `{{ '&a' | yaml }}` is `'&a'`, from the
+same filter on the same shape of input.
+
+Jackson's half, off the bytecode:
+
+```text
+if (text.isEmpty())                  -> DOUBLE
+if (text.indexOf('\n') >= 0)         -> LITERAL
+if (needToQuoteValue(text))          -> DOUBLE
+else                                 -> PLAIN
+```
+
+with `needToQuoteValue = isReservedKeyword || valueHasQuotableChar`, and
+`looksLikeYAMLNumber` **not** in it. That is why:
+
+- **`{{ '42' | yaml }}` is `42`** — an unquoted scalar that reads back as a
+  number. `ALWAYS_QUOTE_NUMBERS_AS_STRINGS` is off and nothing else looks at
+  numbers on the value side. This is upstream's configuration, not a defect of
+  the port.
+- **a NAME is quoted by a different rule.** `needToQuoteName` is
+  `isReservedKeyword || looksLikeYAMLNumber` and **drops**
+  `valueHasQuotableChar`, so `{'a,b': 1}` is `a,b: 1` (a comma is quotable in
+  a value and not in a name) and `{'-a': 1}` is `"-a": 1` (a leading `-` makes
+  a name look like a number and does nothing to a value). And
+  `_looksLikeYAMLNumber` is a switch on the **first character only**, which is
+  why `2024-01-15` and `.inf` are quoted as names.
+
+Three rules came only out of the 857-probe styling sweep:
+
+- **`^0[0-9_]+$` is not plain.** `007`, `01`, `00`, `0789` and `010` are
+  single-quoted; `0`, `0x0`, `0b1`, `0.7`, `0e7`, `08.5`, `+007` and `-007`
+  are plain. `0789` is not octal and is quoted anyway, so no reading of "it
+  looks octal" predicts the set.
+- **the simple-key limit is 127, not 128.** `'k' * 127` is `k…: 1` and
+  `'k' * 128` is `? k…\n: 1`. SnakeYAML's constant is 128 and its comparison
+  is `>=`; an earlier cut of `runners::yamlfmt` read the constant and got the
+  boundary wrong, and one probe out of 857 sat on it.
+- **the root empty string brings the document marker back.**
+  `{{ '' | yaml }}` is `--- ""\n` even though `WRITE_DOC_START_MARKER` is off.
+
+`INDENT_ARRAYS` is what makes the layout unlike every other YAML writer's: a
+sequence's `-` sits at *parent + 1* and a sequence under a map key keeps the
+**map's** indent, so `{"a":[1]}` is `a:\n - 1\n` and `[[[1]]]` is
+` -\n   -\n     - 1\n`.
+
+### The re-render loop was eating a trailing newline, and only `yaml` could see it
+
+`render_str` feeds each pass's OUTPUT back in as the next pass's SOURCE, and
+minijinja's default `keep_trailing_newline(false)` drops one trailing newline
+from a template source. So any rendered value ending in a newline lost it on
+the pass after the one that produced it — silently, in a loop that is not
+about newlines at all.
+
+Pebble is configured `newLineTrimming(false)` and the environment now matches
+it (`env.set_keep_trailing_newline(true)`). **Every `yaml` output ends in a
+newline**, which is why this filter is the first thing in the crate that could
+see it: reverting the one line makes 18 entries fail, `filter-yaml` included.
+`a_multiline_raw_region_is_not_protected_by_the_pattern`'s expectation moved
+from `"\nV"` to `"\nV\n"` with it, and `"\nV\n"` is the faithful value.
+
+### minijinja's string-literal lexer is not Pebble's
+
+Pebble does **not** process backslash escapes inside a single-quoted string:
+`'(a)\1'` reaches a filter as six characters and `'\\'` as two. minijinja
+reads `\1` as U+0001 and `\\` as one backslash. `\d`, `\G`, `\p` and `\$` pass
+through both.
+
+So a Kestra pattern or replacement written with either spelling means
+something different in egret **before any filter sees it**, and no filter can
+fix it. Two entries record it and both are baselined;
+`filter-regexreplace-escaped-backslash-from-a-variable` is the same
+replacement supplied through the context and it passes, which is what
+separates "the filter is wrong" from "the literal arrived different". The fix
+belongs in `runners::rewrite` / the environment's lexing.
+
+### Two formatter rows moved, and both moved zero entries
+
+`runners::env::write_json` is the `JsonWriter` port and W2 Task 6's brief says
+not to touch it, because a change there moves ~20 entries at once. Two changes
+were still necessary, and the mismatch count was measured either side of each:
+
+- **`\uXXXX` escapes are UPPER case in Jackson and lower case in
+  `serde_json`.** Only reachable for the control characters whose code point
+  contains a hex letter — `0x0B`, `0x0E`, `0x0F`, `0x1A`-`0x1F`, since
+  `\b \t \n \f \r` have named escapes. `filter-tojson-control-character` is
+  the entry and it is the only one that moves.
+- **a non-finite double is QUOTED.** JSON has no infinity, so Jackson writes
+  `["Infinity"]`. Only reachable through `jq` (a JSON context cannot carry
+  one); `filter-jq-infinite-is-a-quoted-string` is the entry.
+
+Both were verified by reverting them one at a time: each makes exactly its own
+entry fail and nothing else.
+
+### The registration count closes at 35
+
+`Extension.getFilters()`' 35 `Map.put` call sites, read out of the artifact's
+bytecode and sorted:
+
+```
+chunk className date dateAdd distinct endsWith escapeChar flatten indent jq
+keys md5 nindent number regexExtract regexMatch regexReplace sha1 sha512
+slugify startsWith string substringAfter substringAfterLast substringBefore
+substringBeforeLast timestamp timestampMicro timestampMilli timestampNano
+toIon toJson urldecode values yaml
+```
+
+22 (Task 4) + 6 (Task 5) + 7 (Task 6) = 35, and `runners::filters::register`
+now has 35 `add_filter` calls against them.
+
+**`ReplaceFilter` is in the jar and is not registered.** `javap` finds
+`io/kestra/core/runners/pebble/filters/ReplaceFilter.class` next to the other
+38 class files, and no `put` names it — so `{{ x | replace(…) }}` in a Kestra
+flow reaches **minijinja's own `replace`** in egret and Pebble's built-in in
+Kestra, and neither is Kestra's class. Worth knowing before Task 8 reconciles
+the built-in surface.

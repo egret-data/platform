@@ -114,6 +114,24 @@ hex.workspace = true
 # the entry that fails without it.
 unicode-normalization = "0.1"
 
+# W2 Task 6: the `jq` filter is Kestra's `JqFilter`, which compiles the query
+# with `net.thisptr:jackson-jq` at `Versions.JQ_1_6`. `jaq` is the Rust
+# implementation of the same language; the three crates are its library split
+# (`jaq-core` the interpreter, `jaq-std` the standard library, `jaq-json` the
+# JSON value type and reader). A 132-expression sweep of Kestra's jq surface
+# against these agreed on 116 -- the 16 that differ are enumerated in
+# `oracle/README.md`.
+#
+# `ion-rs` is deliberately NOT here, though W2 Task 6's brief names it:
+# measured on 1.0.1, its text writer emits `{a: 1}` where Kestra emits `{a:1}`,
+# a trailing comma inside sequences, `1e100` for `1.0e100`, and unescaped
+# control characters -- and its `Writer`/`ValueWriter` are `pub(crate)`, so
+# none of that is configurable. `runners::ionfmt` writes the format directly
+# instead; its module doc carries the table.
+jaq-core = "3.1"
+jaq-std = "3.0"
+jaq-json = "2.0"
+
 [dev-dependencies]
 # minijinja moved to [dependencies] in W2 Task 3 (`runners::env` builds the
 # real environment). `runners::rewrite`'s tests still reach it as

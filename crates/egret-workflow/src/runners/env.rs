@@ -851,7 +851,7 @@ fn json_writer_formatter(
 ///
 /// `omit_nulls` is `false` only for [`RenderContext`]'s `Display`, which is
 /// diagnostics and must not hide the null a reader is trying to explain.
-fn write_json(out: &mut String, value: &MjValue, omit_nulls: bool) {
+pub(super) fn write_json(out: &mut String, value: &MjValue, omit_nulls: bool) {
     match value.kind() {
         ValueKind::Undefined | ValueKind::None => out.push_str("null"),
         ValueKind::Bool => out.push_str(if value.is_true() { "true" } else { "false" }),
@@ -860,6 +860,15 @@ fn write_json(out: &mut String, value: &MjValue, omit_nulls: bool) {
                 out.push_str(&value.to_string());
             } else {
                 match f64::try_from(value.clone()) {
+                    // JSON has no infinity and no NaN, so Jackson writes them
+                    // as QUOTED strings -- `[Infinity]` is `["Infinity"]`.
+                    // Reachable only through `jq` (a JSON context cannot carry
+                    // one), which is why no golden moved when this was added.
+                    Ok(f) if !f.is_finite() => {
+                        let mut text = String::new();
+                        write_java_double(&mut text, f);
+                        write_json_string(out, &text);
+                    }
                     Ok(f) => write_java_double(out, f),
                     Err(_) => out.push_str(&value.to_string()),
                 }
@@ -909,9 +918,18 @@ fn write_json(out: &mut String, value: &MjValue, omit_nulls: bool) {
 /// A JSON string literal. Delegated to `serde_json` so the escape set is the
 /// library's and not a hand-rolled one; Jackson's default escaping is the
 /// same (quote, backslash, control characters, and non-ASCII left as UTF-8).
+///
+/// **One byte-level difference had to be fixed on top of it**: Jackson writes
+/// the four hex digits of a `\uXXXX` escape in UPPER case and `serde_json`
+/// writes them in lower case, so `"a\u000Bb"` in Kestra was `"a\u000bb"`
+/// here. It is only reachable for the control characters whose code point
+/// has a hex letter in it — `0x0B`, `0x0E`, `0x0F` and `0x1A`-`0x1F`, since
+/// `\b \t \n \f \r` have named escapes — which is why no existing golden
+/// moved when this was fixed and why only W2 Task 6's `toJson` sweep found
+/// it. Verified: the mismatch count is unchanged either side of this fix.
 fn write_json_string(out: &mut String, s: &str) {
     match serde_json::to_string(s) {
-        Ok(quoted) => out.push_str(&quoted),
+        Ok(quoted) => out.push_str(&uppercase_unicode_escapes(&quoted)),
         // `to_string` on a `&str` cannot fail; this arm keeps the writer
         // total rather than panicking in a formatter.
         Err(_) => {
@@ -919,6 +937,40 @@ fn write_json_string(out: &mut String, s: &str) {
             out.push('"');
         }
     }
+}
+
+/// Uppercases the hex digits of every `\uXXXX` escape in an already-quoted
+/// JSON string, which is the one thing `serde_json`'s escaping spells
+/// differently from Jackson's.
+fn uppercase_unicode_escapes(quoted: &str) -> String {
+    if !quoted.contains("\\u") {
+        return quoted.to_string();
+    }
+    let bytes: Vec<char> = quoted.chars().collect();
+    let mut out = String::with_capacity(quoted.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        // A `\\` consumes both characters, so the `u` of a literal `\\u` in
+        // the source is never read as the start of an escape.
+        if bytes[i] == '\\' && i + 1 < bytes.len() {
+            if bytes[i + 1] == 'u' && i + 5 < bytes.len() {
+                out.push('\\');
+                out.push('u');
+                for c in &bytes[i + 2..i + 6] {
+                    out.push(c.to_ascii_uppercase());
+                }
+                i += 6;
+                continue;
+            }
+            out.push(bytes[i]);
+            out.push(bytes[i + 1]);
+            i += 2;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    out
 }
 
 /// Java's `Double.toString`, which is what `JsonWriter` reaches through
@@ -1031,6 +1083,19 @@ pub fn environment() -> Environment<'static> {
 
     env.set_fuel(Some(FUEL));
     env.set_recursion_limit(RECURSION_LIMIT);
+
+    // `PebbleEngineFactory.newPebbleEngineBuilder().newLineTrimming(false)`.
+    // minijinja's default is the OPPOSITE: it drops one trailing newline from
+    // every template source.
+    //
+    // That default is not merely cosmetic here, because [`render_str`] feeds
+    // each pass's OUTPUT back in as the next pass's SOURCE. A value whose
+    // last character is a newline therefore loses it on the pass after the
+    // one that produced it -- silently, in a loop nothing else in this file
+    // is about. W2 Task 6's `yaml` filter is the first thing in this crate
+    // whose output ends in a newline, and `filter-yaml` is the entry that
+    // found it; every earlier filter's value happened not to.
+    env.set_keep_trailing_newline(true);
 
     // Two minijinja built-ins that have no Pebble counterpart and both dump
     // internal state: `debug` is `format!("{state:#?}")`, which recovers the
@@ -1591,15 +1656,23 @@ mod tests {
     ///   loop renders it AGAIN — and this time there is no `raw` left to
     ///   protect it, so `{{ var }}` resolves.
     ///
-    /// The result is `"\nV"`, which is neither Kestra's error nor the
+    /// The result is `"\nV\n"`, which is neither Kestra's error nor the
     /// preserved literal a reader would expect from "minijinja supports raw".
+    ///
+    /// **The trailing newline is part of the value and used not to be.** It
+    /// was eaten by minijinja's default `keep_trailing_newline(false)` acting
+    /// on the SECOND pass of the re-render loop, where the first pass's output
+    /// is the template source. Pebble is configured `newLineTrimming(false)`
+    /// and this environment now matches it; W2 Task 6's `yaml` filter is what
+    /// made that visible, since it is the first filter whose value ends in a
+    /// newline.
     #[test]
     fn a_multiline_raw_region_is_not_protected_by_the_pattern() {
         let source = "{% raw %}\n{{ var }}\n{% endraw %}";
         let (protected, replacers) = replace_raw_tags(source);
         assert!(replacers.is_empty(), "the pattern must not match a newline");
         assert_eq!(protected, source);
-        assert_eq!(render(source, json!({ "var": "V" })).unwrap(), "\nV");
+        assert_eq!(render(source, json!({ "var": "V" })).unwrap(), "\nV\n");
     }
 
     /// The re-render loop: an output that is itself a template renders again,
