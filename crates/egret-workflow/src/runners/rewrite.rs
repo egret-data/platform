@@ -7,6 +7,58 @@
 //! context to evaluate against — the values live in the caller's render call,
 //! not here.
 //!
+//! # Design overview — read this first
+//!
+//! **Shape.** `rewrite` walks the input for `{{ }}`/`{% %}` regions
+//! ([`split_whitespace_control`] strips any `{{- -}}`/`{%- -%}` markers
+//! first). Each region is tokenized ([`tokenize`]), then resolved by two
+//! mutually recursive functions: [`expand`] collapses every
+//! `(...)`/`[...]`/`{...}` group into one opaque, already-resolved atom
+//! (calling [`resolve_flat`], which calls `expand` again for what's inside —
+//! this is the recursion that nesting depth grows through), and
+//! [`resolve_pieces`] resolves what's left at each flat level by trying a
+//! fixed sequence of syntactic boundaries, lowest-precedence first — see its
+//! own doc comment for the exact sequence and the full operator-precedence
+//! table read from Pebble's bytecode. Both `expand` and `resolve_pieces`
+//! share one recursion-depth budget ([`MAX_NESTING_DEPTH`]) because both
+//! recurse unboundedly on adversarial input (deep nesting through `expand`,
+//! a long flat operator chain through `resolve_pieces`'s own
+//! rightmost-split-and-recurse-left pattern) and neither is safe to leave
+//! unbounded over `pub` `rewrite`'s user-supplied input.
+//!
+//! **The constraints that shaped it, in one place:**
+//!
+//! - *Tokenize, don't regex* — string literals, `???` overlapping `??`,
+//!   nested ternaries, and `,`/`{'k':v}` boundaries all defeat a
+//!   string-substitution rewrite; see "Why a tokenizer, not a regex" below.
+//! - *`??` and `???` differ*, and Kestra registers both as lazy-right-side
+//!   operators, not functions — see "The two coalescing operators" below
+//!   for why that makes them plain function calls in the output, not
+//!   filters.
+//! - *A string literal's unterminated-ness is bounded by physical line, not
+//!   by the region's own close delimiter* — bounding by `close` broke every
+//!   literal that legitimately contains `close`-looking text (e.g. a `jq`
+//!   query with `}}` in it); see [`scan_string_literal_line_bounded`].
+//! - *`{{ }}` is one expression; `{% %}` is a tag body with its own
+//!   structure* (`for`'s `in`, `set`'s `=`), and a ternary spliced into
+//!   either needs the whole conditional wrapped in parens or it fails to
+//!   parse — but only when a ternary is actually present, since some tag
+//!   bodies (`{% filter %}`) are not expression positions at all; see
+//!   "`{{ }}` expressions vs. `{% %}` tags" below and [`rewrite_tag_body`].
+//! - *Precedence tiers below and at 30 need boundary-awareness even where
+//!   this rewrite never touches the operator itself* (`and`/`or`, the
+//!   comparison operators, `equals`), or a coalesce search swallows across
+//!   them — and `is`/`is not` specifically can only ever extend LEFT
+//!   (Pebble's `BinaryOperatorType.TEST`), never right, unlike every other
+//!   tier; see [`resolve_pieces`] and [`find_rightmost_tier20`].
+//! - *`{% raw %}`/`{% verbatim %}` are not a real, working capability to
+//!   port* — measured against the pinned Pebble jar, not assumed; see the
+//!   comment at the raw/verbatim handling that used to exist in [`rewrite`].
+//! - *`isIn` → `in` is provisional*; the four comparison operators are left
+//!   untouched entirely — both are Task 3 measurements this rewrite does
+//!   not attempt to settle. See "`isIn` — provisional" and "Comparison
+//!   operators are left alone" below.
+//!
 //! # The two coalescing operators are not the same
 //!
 //! Read from `core/src/main/java/io/kestra/core/runners/pebble/expression/`
@@ -202,27 +254,19 @@ pub fn rewrite(expr: &str) -> Result<String, RewriteError> {
                 let (leading_ws_ctrl, inner, trailing_ws_ctrl) =
                     split_whitespace_control(raw_inner);
 
-                // NOTE: an earlier version of this match arm special-cased
-                // `{% raw %}...{% endraw %}` here, skipping its body
-                // entirely. Removed -- measured, not assumed, to be built on
-                // a false premise: `"raw"` is not a registered Pebble tag
-                // name at all (`{% raw %}` fails to PARSE in real Pebble
-                // 4.1.2 with `ParserException: Unexpected tag name "raw"`),
-                // Kestra's own `Extension.getTokenParsers()` returns `null`
-                // (it registers zero custom tags, confirmed reading the
-                // checkout), and Pebble's OWN differently-named `verbatim`
-                // tag -- confirmed via `javap` on the pinned
-                // `pebble-4.1.2.jar`, `VerbatimTokenParser.getTag()` returns
-                // `"verbatim"` -- does not actually suppress evaluation of
-                // its body in this Pebble version either: measured directly
-                // through the oracle harness, `{% verbatim %}{{ a ?? b
-                // }}{% endverbatim %}` with `a=null, b='should-not-appear'`
-                // renders `should-not-appear`, i.e. it evaluated the
-                // coalesce normally rather than treating it as literal
-                // text. There is no real Kestra/Pebble capability here to
-                // port faithfully -- special-casing either spelling would
-                // make this rewriter MORE correct than the engine it is
-                // porting, which is not the goal.
+                // No special case for `{% raw %}`/`{% verbatim %}`:
+                // neither is a real, working capability to port. `"raw"` is
+                // not a registered Pebble tag at all (fails to PARSE:
+                // `Unexpected tag name "raw"`); Kestra registers zero custom
+                // tags of its own (`Extension.getTokenParsers()` returns
+                // `null`); and Pebble's own differently-named `verbatim` tag
+                // (confirmed via `javap` on the pinned jar) does not
+                // actually suppress evaluation of its body in this Pebble
+                // version either (measured through the oracle harness:
+                // `{% verbatim %}{{ a ?? b }}{% endverbatim %}` evaluates
+                // the coalesce normally, rather than treating it as
+                // literal text). Special-casing either spelling would make
+                // this rewriter MORE correct than the engine it ports.
                 let rewritten = if open == "{{" {
                     rewrite_expression(inner)?
                 } else {
@@ -289,32 +333,22 @@ fn split_whitespace_control(content: &str) -> (&'static str, &str, &'static str)
 }
 
 /// Scans forward from `start` for `close` (`"}}"` or `"%}"`), skipping over
-/// string-literal contents (line-bounded -- see [`scan_string_literal_line_bounded`])
-/// and brace-literal nesting, so a map literal's own closing `}` immediately
-/// followed by the region's `}}` cannot terminate the region early. Returns
-/// the byte offset where `close` begins, or `Ok(None)` if `close` never
-/// appears before the end of input.
+/// string-literal contents and brace-literal nesting, so a map literal's own
+/// closing `}` immediately followed by the region's `}}` cannot terminate
+/// the region early. Returns the byte offset where `close` begins, or
+/// `Ok(None)` if `close` never appears before the end of input.
 ///
 /// **A string literal's content is never inspected for `close` at all** --
-/// only for its own closing quote (or a newline, or end of input; see
-/// [`scan_string_literal_line_bounded`]). A quoted `}}` (or `%}`) is exactly
-/// as inert as any other character inside a literal, matching real Pebble
-/// (`{{ 'a}}b' }}` renders `a}}b`; `{{ json | jq('{a: {b: .c}}') }}` is not
-/// contrived -- the same nested-object shape the corpus's `filter-jq` entry
-/// already exercises). An EARLIER version of this function bailed out the
-/// moment `close` appeared while scanning a string body, which broke exactly
-/// those cases -- a *terminated* literal that merely contains `close`-looking
-/// text became a hard `UnterminatedString` error. That bound has been
-/// removed; only [`scan_string_literal_line_bounded`]'s own newline/EOF bound
-/// remains, which is what keeps an accidental quote several lines away from
-/// "rescuing" a literal that never actually closes (see that function's doc).
-///
-/// This is also where an unterminated string literal is actually caught for
-/// anything reachable through the public `rewrite` entry point: by the time
-/// a region's content is handed to `tokenize`, every quote inside it is
-/// already known to be balanced. `tokenize`'s own check stays as defense in
-/// depth (and documents the invariant), but it is this function's `Err` that
-/// a caller of `rewrite` actually observes for `{{ a ?? 'unterminated }}`.
+/// only for its own closing quote, per [`scan_string_literal_line_bounded`]
+/// (see that function's doc for why bounding by physical line, not by
+/// `close`, is what makes `{{ 'a}}b' }}` and a `jq` query containing `}}`
+/// both work). This is also where an unterminated string literal is
+/// actually caught for anything reachable through the public `rewrite`
+/// entry point: by the time a region's content is handed to `tokenize`,
+/// every quote inside it is already known to be balanced. `tokenize`'s own
+/// check stays as defense in depth (and documents the invariant), but it is
+/// this function's `Err` that a caller of `rewrite` actually observes for
+/// `{{ a ?? 'unterminated }}`.
 fn find_region_close(src: &str, start: usize, close: &str) -> Result<Option<usize>, RewriteError> {
     let len = src.len();
     let mut i = start;
@@ -1097,38 +1131,27 @@ fn is_tier30_trigger(p: &Piece) -> bool {
 
 /// Finds the rightmost tier-20 boundary (`is`/`is not`/`contains`) among
 /// `pieces` -- but, unlike every other precedence step in this module, NOT
-/// simply "rightmost among all occurrences of these words."
+/// simply "rightmost among all occurrences of these words." `contains`
+/// (`BinaryOperatorType.NORMAL`) is ordinary rightmost-among-the-tier, same
+/// as `or`/`and`/tier-30; `is`/`is not` (`BinaryOperatorType.TEST`) can only
+/// ever extend LEFT, never right -- see [`resolve_pieces`]'s doc comment for
+/// the full precedence table and why (this rewrite's I1 regression was
+/// exactly this asymmetry: `{{ a is defined ?? b }}` rewritten with `is`
+/// treated as symmetric hoists the following coalesce into TEST-NAME
+/// position, `a is kestra_null_coalesce(defined, b)`, not valid minijinja).
 ///
-/// Read from Pebble 4.1.2's `CoreExtension` bytecode directly (not assumed
-/// from precedence numbers alone): `is`/`is not` are
-/// `BinaryOperatorType.TEST`; `contains` is `BinaryOperatorType.NORMAL`.
-/// `ExpressionParser.parseExpression(int)` dispatches a TEST operator to
-/// `parseTestInvocationExpression()`, whose right side is a fixed
-/// test-name-plus-optional-arguments grammar -- NEVER a recursive call back
-/// into the general expression parser. So precedence 20 governs only how
-/// far an `is`/`is not` node's LEFT operand reaches (exactly like every
-/// other tier here); its right side can never absorb anything, regardless
-/// of what precedence that following content has.
-///
-/// This asymmetry was measured as a real regression, not a hypothetical:
-/// treating `is` as an ordinary symmetric tier-20 boundary (as an earlier
-/// version of this rewrite did) turns `{{ a is defined ?? b }}` --
-/// `(a is defined) ?? b` in real Pebble -- into
-/// `a is kestra_null_coalesce(defined, b)`, hoisting the following coalesce
-/// into TEST-NAME position, which is not valid minijinja at all
-/// (`unknown test: kestra_null_coalesce`). Fixed by disqualifying an `is`
-/// candidate whenever a tier-30 trigger (see [`is_tier30_trigger`]) appears
-/// anywhere to its right in this slice -- `find_map`'s "keep searching on
-/// `None`" is what lets a disqualified `is` fall through to a further-left,
-/// still-eligible one, or to no tier-20 match at all (deferring to
-/// [`find_rightmost_tier30`], which then correctly becomes the OUTER split,
-/// with the disqualified `is` ending up embedded in whichever operand it
-/// falls into once that split recurses).
-///
-/// `contains` needs none of this -- confirmed against the harness,
-/// `{{ list contains a ?? b }}` groups as `list contains (a ?? b)`, exactly
-/// the ordinary rightmost-among-the-tier behavior every other step in this
-/// module uses, so it is never excluded here.
+/// Implementation: an explicit loop, not `find_map`, and deliberately NOT
+/// equivalent to one. Scanning right to left, a disqualified `is` (a
+/// tier-30 trigger -- see [`is_tier30_trigger`] -- appears anywhere to its
+/// right) `return`s `None` immediately, suppressing the WHOLE tier-20 step
+/// here rather than letting the scan continue further left. A `find_map`
+/// version, which treats a disqualified candidate as merely "not a match,
+/// keep looking," can walk past it onto a DIFFERENT tier-20 word that is
+/// actually part of the disqualified `is`'s own left operand rather than a
+/// sibling split point -- measured: `{{ l contains x is defined ?? y }}` is
+/// `((l contains x) is defined) ?? y` in Pebble (`true` for a non-empty
+/// `l`/matching `x`); the `find_map` version instead accepted the earlier
+/// `contains`, grouping it as the OUTER operation (`false`).
 fn find_rightmost_tier20(pieces: &[Piece]) -> Option<usize> {
     for (i, p) in pieces.iter().enumerate().rev() {
         match p {
