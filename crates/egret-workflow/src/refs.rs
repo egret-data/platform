@@ -24,7 +24,14 @@
 //! module's own test) pins exactly this, specifically so a future change
 //! that "fixes" the gap by returning `Some` for an untrusted kind — silently
 //! reopening the cross-workspace hole this whole programme exists to close
-//! (migration 0128) — fails a test instead of shipping quietly.
+//! (migration 0128) — fails a test instead of shipping quietly. **The test
+//! that actually carries that property is
+//! `a_kind_with_no_port_refuses_even_a_well_formed_reference`** (a
+//! syntactically valid `Uuid`, not a string that merely fails to parse) —
+//! whoever next wires a real port for `Database`/`Dataset`/`Chart` should
+//! expect to UPDATE that test (to route the newly-ported kind through its
+//! real port instead of asserting `None`), not delete it, and should add an
+//! equivalent one for whichever kind(s) remain unported.
 //!
 //! # Why this lives in `egret-workflow`, not `egret-workflow-api`
 //!
@@ -155,14 +162,21 @@ mod tests {
         }
     }
 
-    /// THE test this module exists to carry, per the Task 7 brief: an
-    /// unresolvable kind must refuse (`Ok(None)`), not resolve vacuously —
-    /// pinned here so a future change cannot "fix" `Database`/`Dataset`/
-    /// `Chart` into a permissive `Some` without a port to back it, and
-    /// silently reopen the cross-workspace hole migration 0128 is this
-    /// programme's recorded case of. `Unreachable*` ports above assert the
-    /// stronger property: these three kinds must not even ASK a port —
-    /// there is nothing to ask.
+    /// Named for what it actually proves: `workspace_of("anything-at-all")`
+    /// for `Database`/`Dataset`/`Chart` refuses -- but `"anything-at-all"`
+    /// fails `Uuid` parsing, so this only pins the MALFORMED-input property,
+    /// which [`a_non_uuid_value_for_an_id_based_kind_refuses_without_asking_the_port`]
+    /// already covers for the id-based kinds. It does NOT, on its own, prove
+    /// these three kinds refuse a well-formed reference for lack of a port —
+    /// [`a_kind_with_no_port_refuses_even_a_well_formed_reference`] (below)
+    /// is the test that carries that property, and is the one to keep
+    /// green: fix round 1 review found that a future permissive change to
+    /// the `RefKind::Database | RefKind::Dataset | RefKind::Chart` arm above
+    /// (say, wiring a real port using the same `as_uuid`-then-look-up shape
+    /// the other kinds use) would leave THIS test passing unchanged, because
+    /// a non-`Uuid` string never reaches a port either way. Kept anyway,
+    /// alongside the new one, because malformed- and well-formed-input are
+    /// two different properties and both are worth pinning.
     #[tokio::test]
     async fn an_unresolvable_kind_refuses_rather_than_resolving_vacuously() {
         let refs = WorkflowRefs {
@@ -179,6 +193,42 @@ mod tests {
                 .await
                 .expect("must not error, just refuse");
             assert_eq!(got, None, "{kind:?} must resolve to None, not Some");
+        }
+    }
+
+    /// THE test this module exists to carry, per fix round 1: a
+    /// SYNTACTICALLY VALID reference (a real `Uuid`, not a string that fails
+    /// to parse) for `Database`/`Dataset`/`Chart` still refuses, because no
+    /// port exists for any of the three — not because the input happened to
+    /// be malformed. `Unreachable*` ports (above) assert the stronger
+    /// property this test rides on: these three kinds must not even ASK a
+    /// port, well-formed input or not — there is nothing to ask. Pinned here
+    /// so a future change cannot "fix" one of the three into a permissive
+    /// `Some` (by wiring a real port behind the same `as_uuid`-then-look-up
+    /// shape the other kinds use) without this test going red first, and
+    /// silently reopen the cross-workspace hole migration 0128 is this
+    /// programme's recorded case of.
+    #[tokio::test]
+    async fn a_kind_with_no_port_refuses_even_a_well_formed_reference() {
+        let refs = WorkflowRefs {
+            flows: FlowRepo::new(
+                egret_metastore::Db::connect_lazy("postgres://unused/unused")
+                    .expect("parse a lazy, never-connected pool"),
+            ),
+            dataapi_endpoints: Arc::new(UnreachableDataApi),
+            notebooks: Arc::new(UnreachableNotebooks),
+        };
+        let well_formed = Uuid::new_v4().to_string();
+        for kind in [RefKind::Database, RefKind::Dataset, RefKind::Chart] {
+            let got = refs
+                .workspace_of(kind, &well_formed)
+                .await
+                .expect("must not error, just refuse");
+            assert_eq!(
+                got, None,
+                "{kind:?} must refuse a WELL-FORMED reference too -- no port exists, \
+                 so a syntactically valid id must not sneak through"
+            );
         }
     }
 
