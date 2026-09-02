@@ -4,9 +4,13 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.UUID;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -35,6 +39,25 @@ import io.pebbletemplates.pebble.template.PebbleTemplate;
  * </ul>
  */
 public final class Oracle {
+    /**
+     * VariableRenderer.RAW_PATTERN, copied verbatim from
+     * core/src/main/java/io/kestra/core/runners/VariableRenderer.java:23.
+     *
+     * <p>{@code raw} is NOT a Pebble tag -- Pebble 4.1.2 throws
+     * {@code ParserException: Unexpected tag name "raw"} -- and Kestra registers no
+     * custom tags (Extension.getTokenParsers() returns null). Kestra supports it one
+     * layer ABOVE Pebble, in VariableRenderer, by substituting raw regions out of the
+     * string before compiling and putting them back after evaluating. This harness
+     * originally omitted that (documented at the time as "no corpus entry needs it");
+     * the corpus now has raw entries, so the protection is reproduced here.
+     *
+     * <p>Note there is no DOTALL flag, so {@code .} does not match a newline: a raw
+     * region spanning lines is NOT protected, and Pebble then fails on the unknown
+     * tag. That is real Kestra behaviour, pinned by the {@code raw-multiline} entry.
+     */
+    private static final Pattern RAW_PATTERN =
+        Pattern.compile("(\\{%-*\\s*raw\\s*-*%}(.*?)\\{%-*\\s*endraw\\s*-*%})");
+
     private Oracle() {
     }
 
@@ -190,31 +213,68 @@ public final class Oracle {
     }
 
     /**
-     * Mirrors VariableRenderer.render(String, Map)'s default path: recursive
-     * re-render (stop once output stops changing, matching MAX_RENDERING_AMOUNT=100)
-     * through a JsonWriter (stringify=true), which is why a filter/function
-     * returning a Map/List/array renders as its JSON string form rather than a raw
-     * toString() -- see the jq finding in oracle/README.md. Does NOT reproduce
-     * VariableRenderer's {% raw %}/{% endraw %} tag protection; no corpus entry
-     * needs it (documented simplification, see README).
+     * Mirrors VariableRenderer.render(String, Map)'s default path:
+     *
+     * <ol>
+     *   <li>the {@code inlineStr.indexOf('{') == -1} short-circuit
+     *       (VariableRenderer.java:76-79) -- a source with no brace at all is not a
+     *       template and is returned unchanged;</li>
+     *   <li>recursive re-render (stop once output stops changing, matching
+     *       MAX_RENDERING_AMOUNT=100) through a JsonWriter (stringify=true), which is
+     *       why a filter/function returning a Map/List/array renders as its JSON string
+     *       form rather than a raw toString() -- see the jq finding in
+     *       oracle/README.md;</li>
+     *   <li>{@code RAW_PATTERN.matcher(x).replaceAll("$2")} (VariableRenderer.java:85-87),
+     *       which strips the raw markers and keeps the body.</li>
+     * </ol>
+     *
+     * <p>Each pass is renderOnce (VariableRenderer.java:93-140): protect raw regions
+     * with UUID placeholders, evaluate, put them back WITH their markers so the next
+     * pass protects them again.
      */
     private static String render(PebbleEngine engine, String expr, Map<String, Object> variables) throws IOException {
+        if (expr.indexOf('{') == -1) {
+            return expr;
+        }
+
         Object inline = expr;
         for (int i = 0; i < 100; i++) {
-            PebbleTemplate compiled = engine.getLiteralTemplate((String) inline);
-            JsonWriter writer = new JsonWriter();
-            compiled.evaluate(writer, variables);
-            Object result = writer.output();
+            Object result = renderOnce(engine, (String) inline, variables);
 
             if (result == null) {
                 return "";
             }
             if (Objects.equals(result, inline)) {
-                return (String) result;
+                return RAW_PATTERN.matcher((String) result).replaceAll("$2");
             }
             inline = result;
         }
         throw new IllegalStateException("Too many rendering attempts (>100) for: " + expr);
+    }
+
+    /** VariableRenderer.renderOnce, stringify=true. */
+    private static Object renderOnce(PebbleEngine engine, String inline, Map<String, Object> variables) throws IOException {
+        Matcher rawMatcher = RAW_PATTERN.matcher(inline);
+        Map<String, String> replacers = new HashMap<>();
+        String protectedSource = rawMatcher.replaceAll(matchResult -> {
+            String uuid = UUID.randomUUID().toString();
+            replacers.put(uuid, matchResult.group(1));
+            return uuid;
+        });
+
+        PebbleTemplate compiled = engine.getLiteralTemplate(protectedSource);
+        JsonWriter writer = new JsonWriter();
+        compiled.evaluate(writer, variables);
+        Object result = writer.output();
+
+        if (result instanceof String stringValue) {
+            for (Map.Entry<String, String> entry : replacers.entrySet()) {
+                stringValue = stringValue.replace(entry.getKey(), entry.getValue());
+            }
+            return stringValue;
+        }
+
+        return result;
     }
 
     @SuppressWarnings("unchecked")

@@ -513,7 +513,7 @@
   "id" : "function-now",
   "expr" : "{{ now() }}",
   "context" : { },
-  "result" : "2026-09-02T16:25:25.696200+07:00"
+  "result" : "2026-09-02T17:38:43.786911+07:00"
 }, {
   "id" : "function-fromjson",
   "expr" : "{{ fromJson(json=raw) }}",
@@ -560,7 +560,7 @@
   "context" : {
     "k" : "vWgkeuVCYm5x3qwIU19oyzGfKFRlzLPlisR3dsVwhvY="
   },
-  "result" : "regEsbc1aUbZSsd7NDJRcTuS2pMeizSXLIgmXnm3TqAs1JmfHFb/tQ=="
+  "result" : "lbXWKsw7fxw6Ph1/xXFdAL7QdHj7Jie8TU7gXQ2Bn43yvpPThYDuug=="
 }, {
   "id" : "function-decrypt",
   "expr" : "{{ decrypt(key=k, encrypted=e) }}",
@@ -594,17 +594,17 @@
   "id" : "function-uuid",
   "expr" : "{{ uuid() }}",
   "context" : { },
-  "result" : "01a06170-028e-7639-bb3b-a75fec1117d5"
+  "result" : "01a061b3-1e72-7b81-9e93-cd4558787601"
 }, {
   "id" : "function-id",
   "expr" : "{{ id() }}",
   "context" : { },
-  "result" : "3YwsrTewoGVghzHxJl2IOo"
+  "result" : "1Q6ZdqiP2FcLnkNWCdKXA"
 }, {
   "id" : "function-ksuid",
   "expr" : "{{ ksuid() }}",
   "context" : { },
-  "result" : "3IlZTk0gd1uQoXQ0LBTiIdFUtU1"
+  "result" : "3IliOQCimdmoXrhx8Uvxo1QhXW3"
 }, {
   "id" : "function-fromion",
   "expr" : "{{ fromIon(ion=i) }}",
@@ -623,12 +623,12 @@
   "id" : "function-randomint",
   "expr" : "{{ randomInt(lower=1, upper=10) }}",
   "context" : { },
-  "result" : "6"
+  "result" : "4"
 }, {
   "id" : "function-randomport",
   "expr" : "{{ randomPort() }}",
   "context" : { },
-  "result" : "50002"
+  "result" : "54939"
 }, {
   "id" : "function-fileexists",
   "expr" : "{{ fileExists(path='a/b.txt') }}",
@@ -647,7 +647,7 @@
   "id" : "function-nanoid",
   "expr" : "{{ nanoId() }}",
   "context" : { },
-  "result" : "kWQz6bZTQUsUN5LZD9Idf"
+  "result" : "J0gBlLNEnR2fjkZZ2Egda"
 }, {
   "id" : "function-taskswithstate",
   "expr" : "{{ tasksWithState(state='FAILED') }}",
@@ -756,4 +756,104 @@
     "s" : "not json"
   },
   "result" : "false"
+}, {
+  "id" : "raw-spaced",
+  "expr" : "See some code {% raw %}{{ var }}{% endraw %}",
+  "context" : {
+    "var" : "V"
+  },
+  "result" : "See some code {{ var }}"
+}, {
+  "id" : "raw-no-spaces",
+  "expr" : "See some code {%raw%}{{ var }}{%endraw%}",
+  "context" : {
+    "var" : "V"
+  },
+  "result" : "See some code {{ var }}"
+}, {
+  "id" : "raw-uneven",
+  "expr" : "See some code {%-  raw%}{{ var }}{%endraw -%}",
+  "context" : {
+    "var" : "V"
+  },
+  "result" : "See some code {{ var }}"
+}, {
+  "id" : "raw-two-regions",
+  "expr" : "{% raw %}{{ var }}{% endraw %} {{ var }} {% raw %}{{ var }}{% endraw %}",
+  "context" : {
+    "var" : "V"
+  },
+  "result" : "{{ var }} V {{ var }}"
+}, {
+  "id" : "raw-multiline",
+  "expr" : "{% raw %}\n{{ var }}\n{% endraw %}",
+  "context" : {
+    "var" : "V"
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.ParserException: Unexpected tag name \"raw\" ({% raw %}\n{{ var }}\n{% endraw %}:1)"
+  }
+}, {
+  "id" : "op-equals",
+  "expr" : "{{ a equals b }}",
+  "context" : {
+    "a" : 1,
+    "b" : 1
+  },
+  "result" : "true"
+}, {
+  "id" : "op-contains",
+  "expr" : "{{ list contains 'a' }}",
+  "context" : {
+    "list" : [ "a", "b" ]
+  },
+  "result" : "true"
+}, {
+  "id" : "op-contains-boxed-int",
+  "expr" : "{{ list contains 2 }}",
+  "context" : {
+    "list" : [ 1, 2 ]
+  },
+  "result" : "false"
+}, {
+  "id" : "op-contains-literal",
+  "expr" : "{{ [1,2] contains 2 }}",
+  "context" : { },
+  "result" : "true"
+}, {
+  "id" : "op-range",
+  "expr" : "{{ a .. b }}",
+  "context" : {
+    "a" : 1,
+    "b" : 3
+  },
+  "result" : "[1,2,3]"
+}, {
+  "id" : "isin-number-in-strings",
+  "expr" : "{{ 1 isIn ['1','2'] }}",
+  "context" : { },
+  "result" : "true"
+}, {
+  "id" : "isin-map-value",
+  "expr" : "{{ 'v' isIn m }}",
+  "context" : {
+    "m" : {
+      "k" : "v"
+    }
+  },
+  "result" : "true"
+}, {
+  "id" : "isin-string-rhs",
+  "expr" : "{{ 'b' isIn 'abc' }}",
+  "context" : { },
+  "result" : "false"
+}, {
+  "id" : "coalesce-nested-absent",
+  "expr" : "{{ obj.missing.deeper ?? 'fallback' }}",
+  "context" : {
+    "obj" : {
+      "a" : 1
+    }
+  },
+  "result" : "fallback"
 } ]

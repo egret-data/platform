@@ -67,14 +67,29 @@ async-trait.workspace = true
 # `egret-core`, `egret-dataapi`).
 thiserror.workspace = true
 
-[dev-dependencies]
-# runners::rewrite's tests parse every rewritten output through a real
-# minijinja Environment (not just assert a string) -- a test that pins a
-# shape minijinja rejects is worse than no test, since it certifies a bug.
-# Same version as the workspace's runtime minijinja (Cargo.toml:154), used
-# here only to parse, never to render (no functions/filters need registering
-# for `template_from_str` to succeed).
+# W2 Task 3: `runners::env` builds the real render environment, so minijinja
+# moves out of [dev-dependencies] (where Task 2 kept it, only to parse-check
+# its rewrites) and becomes a runtime dependency. The workspace entry's
+# feature list is taken AS-IS -- `default-features = false` plus six named
+# features, with `macros` and `multi_template` deliberately OFF so
+# `{% macro %}`, `{% call %}`, `{% include %}` and `{% extends %}` do not
+# parse at all. Nothing added here needs them: Kestra's Pebble extension
+# registers no tags of its own (`Extension.getTokenParsers()` returns null),
+# and a `Property` is a single literal template with no loader behind it.
 minijinja.workspace = true
+
+# W2 Task 3: `VariableRenderer`'s `{% raw %}` protection is a regex in Kestra
+# (`VariableRenderer.java:23`) and is ported as that same regex here -- see
+# `runners::env::RAW_PATTERN`. Already in this workspace's tree, so this adds
+# no new transitive crates.
+regex.workspace = true
+
+[dev-dependencies]
+# minijinja moved to [dependencies] in W2 Task 3 (`runners::env` builds the
+# real environment). `runners::rewrite`'s tests still reach it as
+# `minijinja::...` through the crate's own dependency, to parse-check every
+# rewritten output -- a test that pins a shape minijinja rejects is worse
+# than no test, since it certifies a bug.
 
 # serde_json moved to [dependencies] in W1 (Property<T> uses it directly);
 # tests still reach it as `serde_json::...` via the crate's own dependency.

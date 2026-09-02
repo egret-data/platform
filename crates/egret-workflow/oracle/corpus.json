@@ -109,5 +109,23 @@
   {"id": "function-loopoutputs",      "expr": "{{ loopOutputs(outputs=o, name='x') }}",                  "context": {"o": [{"outputs": {"x": 1}}, {"outputs": {"x": 2}}]}},
 
   {"id": "test-json-true",  "expr": "{{ (s is json) }}",  "context": {"s": "{\"a\": 1}"}},
-  {"id": "test-json-false", "expr": "{{ (s is json) }}",  "context": {"s": "not json"}}
+  {"id": "test-json-false", "expr": "{{ (s is json) }}",  "context": {"s": "not json"}},
+
+  {"id": "raw-spaced",             "expr": "See some code {% raw %}{{ var }}{% endraw %}",   "context": {"var": "V"}},
+  {"id": "raw-no-spaces",          "expr": "See some code {%raw%}{{ var }}{%endraw%}",       "context": {"var": "V"}},
+  {"id": "raw-uneven",             "expr": "See some code {%-  raw%}{{ var }}{%endraw -%}",  "context": {"var": "V"}},
+  {"id": "raw-two-regions",        "expr": "{% raw %}{{ var }}{% endraw %} {{ var }} {% raw %}{{ var }}{% endraw %}", "context": {"var": "V"}},
+  {"id": "raw-multiline",          "expr": "{% raw %}\n{{ var }}\n{% endraw %}",            "context": {"var": "V"}},
+
+  {"id": "op-equals",              "expr": "{{ a equals b }}",                               "context": {"a": 1, "b": 1}},
+  {"id": "op-contains",            "expr": "{{ list contains 'a' }}",                        "context": {"list": ["a", "b"]}},
+  {"id": "op-contains-boxed-int",  "expr": "{{ list contains 2 }}",                          "context": {"list": [1, 2]}},
+  {"id": "op-contains-literal",    "expr": "{{ [1,2] contains 2 }}",                         "context": {}},
+  {"id": "op-range",               "expr": "{{ a .. b }}",                                   "context": {"a": 1, "b": 3}},
+
+  {"id": "isin-number-in-strings", "expr": "{{ 1 isIn ['1','2'] }}",                         "context": {}},
+  {"id": "isin-map-value",         "expr": "{{ 'v' isIn m }}",                               "context": {"m": {"k": "v"}}},
+  {"id": "isin-string-rhs",        "expr": "{{ 'b' isIn 'abc' }}",                           "context": {}},
+
+  {"id": "coalesce-nested-absent", "expr": "{{ obj.missing.deeper ?? 'fallback' }}",         "context": {"obj": {"a": 1}}}
 ]

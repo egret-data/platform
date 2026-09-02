@@ -3648,6 +3648,7 @@ dependencies = [
  "egret-workflow-api",
  "egret-workspace",
  "minijinja",
+ "regex",
  "serde",
  "serde_json",
  "serde_norway",

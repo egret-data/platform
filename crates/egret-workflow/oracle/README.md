@@ -336,7 +336,88 @@ ciphertext generated once (via a throwaway harness against the same fixed
 key used in `function-encrypt`'s entry) rather than depending on that other
 entry's non-deterministic output within the same run.
 
-## Corpus (`corpus.json`, 108 entries)
+**Task 3 resolved this**: `tests/oracle.rs` now carries a
+`const NON_DETERMINISTIC: &[&str]` naming exactly those eight ids, with a
+per-id comment. They are compared for *shape* (length, numeric range, error
+vs. success), never for value, and the test prints the eight names on every
+run — pass or fail — so the exclusion can never be silent. **Every other entry
+is compared for exact byte equality**: no trimming, no normalisation.
+
+## Raw tags (W2 Task 3)
+
+`{% raw %}` is **not** a Pebble tag — Pebble 4.1.2 throws
+`ParserException: Unexpected tag name "raw"` — and Kestra registers no custom
+tags (`Extension.getTokenParsers()` returns `null`). Kestra supports it one
+layer *above* Pebble, in `VariableRenderer`, which substitutes raw regions out
+of the string before compiling and puts them back after evaluating. Both this
+harness and `crates/egret-workflow/src/runners/env.rs` copy that structure and
+that exact regex.
+
+Five entries pin it. The first three are the spellings Kestra's own
+`PebbleVariableRendererTest.raw` asserts; every body is `{{ var }}` with `var`
+BOUND in the context, so an implementation that renders instead of preserving
+emits `V` and the entry fails visibly:
+
+| id | expr | golden |
+|---|---|---|
+| `raw-spaced` | `See some code {% raw %}{{ var }}{% endraw %}` | `See some code {{ var }}` |
+| `raw-no-spaces` | `See some code {%raw%}{{ var }}{%endraw%}` | `See some code {{ var }}` |
+| `raw-uneven` | `See some code {%-  raw%}{{ var }}{%endraw -%}` | `See some code {{ var }}` |
+| `raw-two-regions` | two regions with a live `{{ var }}` between them | `{{ var }} V {{ var }}` |
+| `raw-multiline` | `{% raw %}\n{{ var }}\n{% endraw %}` | **a `ParserException`** |
+
+- **`raw-multiline` is the surprising one.** `RAW_PATTERN` sets no DOTALL
+  flag, so `.` does not match a newline and **a raw region spanning lines is
+  not protected at all**; Pebble then chokes on the unknown `raw` tag. That is
+  real Kestra behaviour, not a harness artifact. egret does **not** reproduce
+  it — minijinja has a real, multiline `{% raw %}` tag of its own, so egret
+  renders `"\nV"` where Kestra errors. Recorded as a permanent divergence, not
+  a defect to fix: making egret error here would mean special-casing a
+  construct minijinja handles correctly.
+- **`raw-two-regions` proves the pattern is non-greedy**: each region ends at
+  its own `endraw`, and the `{{ var }}` between them still renders.
+
+## `contains` does not work on a number that came from the context (W2 Task 3)
+
+`{{ list contains 2 }}` with `list = [1, 2]` renders **`false`**. The same
+expression with a template-literal list — `{{ [1,2] contains 2 }}` — renders
+`true`, and `{{ list contains 'a' }}` with `list = ["a","b"]` renders `true`.
+Measured, all three, through this harness.
+
+The explanation the evidence supports: a context value arrives through
+`ObjectMapper.convertValue(..., Map.class)` as a boxed `Integer`, a numeric
+literal in a template is a `Long`, and `Integer(2).equals(Long(2))` is
+`false`. Strings are unaffected, and so is `isIn` — `InExpression` calls
+`toString()` on both sides before comparing, which is exactly the difference
+`isin-number-in-strings` records. Kestra's own variables come from
+Jackson-deserialized YAML/JSON too, so this is production behaviour, not a
+property of the harness.
+
+Three entries pin it: `op-contains` (strings, `true`),
+`op-contains-boxed-int` (context list, `false`), `op-contains-literal`
+(literal list, `true`). Whoever ports `contains` must reproduce all three or
+they have ported a *different*, more sensible operator.
+
+## `isIn` is not minijinja's `in` (W2 Task 3, addendum A3)
+
+`InExpression.evaluate` stringifies **both** sides before comparing, walks a
+`Map`'s keys **and** its values, and returns `false` for any other right-hand
+type. minijinja's `in` does none of the three. Measured:
+
+| id | expr | Kestra | minijinja `in` |
+|---|---|---|---|
+| `isin` | `{{ 'b' isIn ['a','b'] }}` | `true` | `True` (agrees) |
+| `isin-number-in-strings` | `{{ 1 isIn ['1','2'] }}` | `true` | **`False`** |
+| `isin-map-value` | `{{ 'v' isIn m }}`, `m = {"k":"v"}` | `true` | **`False`** (keys only) |
+| `isin-string-rhs` | `{{ 'b' isIn 'abc' }}` | `false` | **`True`** (substring) |
+
+The existing `isin` entry agrees by luck — same types on both sides, list
+right-hand — and cannot separate the two. **The verdict is that `isIn` needs
+its own function**, `kestra_is_in`, the same shape as `kestra_null_coalesce`;
+`rewrite`'s current `x isIn y` -> `(x in y)` is wrong in three measurable
+ways.
+
+## Corpus (`corpus.json`, 122 entries)
 
 - **37 operator cases**, taken verbatim from the task brief plus several
   follow-up fixes: the `??`/`???` pair (5 entries covering null vs. absent on
@@ -392,15 +473,39 @@ entry's non-deterministic output within the same run.
 - **2 test entries** for the one registered Pebble test (`json`): a
   true case and a false case, since a single-direction test proves nothing
   about the false branch.
+- **14 W2 Task 3 additions** (the corpus went 108 -> 122), covering the three
+  controller addenda that could not be written before the oracle existed:
+  5 `{% raw %}` entries (addendum A5, see "Raw tags" above), 5 operator
+  entries for the three Pebble operators with no minijinja spelling at all
+  (addendum A6: `op-equals`, `op-contains`, `op-contains-boxed-int`,
+  `op-contains-literal`, `op-range`), 3 `isIn` entries that actually separate
+  `InExpression` from minijinja's `in` (addendum A3, see above), and
+  `coalesce-nested-absent` (`{{ obj.missing.deeper ?? 'fallback' }}` — the
+  shape a real flow writes most often, and the one place
+  `UndefinedBehavior::Strict` diverges from Kestra's `??`).
+- **`op-range` records that `..` is inclusive**: `{{ a .. b }}` with `a=1,
+  b=3` renders `[1,2,3]`, and `{% for i in 1 .. 3 %}` iterates three times.
+  minijinja's `range(1, 3)` is `[1, 2]` — exclusive, and printed with spaces.
+  Whoever ports `range` (Task 7's `BoundedRangeFunction`) owns both
+  differences.
 
 ## What this harness does **not** reproduce
 
-- `VariableRenderer`'s `{% raw %}...{% endraw %}` tag protection (pre/post
-  UUID-substitution around raw blocks) — no corpus entry uses `{% raw %}`,
-  so this was not implemented. If a future task adds one, this harness needs
-  the same protection `VariableRenderer.renderOnce` has, or the golden value
-  will be wrong.
-- Recursive re-rendering *is* reproduced (`Oracle.render()` loops exactly
-  like `VariableRenderer.renderRecursively`, stopping once output stops
-  changing, capped at 100 iterations) even though no current corpus entry's
-  output happens to look like another template.
+Nothing, as of W2 Task 3. The two `VariableRenderer` behaviours this section
+used to list as unimplemented are now both in `Oracle.render`:
+
+- **`{% raw %}...{% endraw %}` tag protection is now reproduced.** Task 1
+  left it out and said so ("no corpus entry uses `{% raw %}`"); Task 3 added
+  five raw entries, so `Oracle.renderOnce` now does the same UUID
+  substitution `VariableRenderer.renderOnce` does, and `Oracle.render` does
+  the final `RAW_PATTERN.replaceAll("$2")` that strips the markers. See "Raw
+  tags" below.
+- **The `indexOf('{') == -1` short-circuit is now reproduced**
+  (`VariableRenderer.java:76-79`): a source with no brace at all is not a
+  template and is returned unchanged. No current corpus entry reaches it, but
+  it is the identity `Property<T>::render` is built on, so the harness and the
+  port must agree about it rather than differ silently.
+- Recursive re-rendering was already reproduced (`Oracle.render()` loops
+  exactly like `VariableRenderer.renderRecursively`, stopping once output
+  stops changing, capped at 100 iterations) even though no current corpus
+  entry's output happens to look like another template.
