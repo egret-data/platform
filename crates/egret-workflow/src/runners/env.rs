@@ -240,11 +240,16 @@ pub enum RenderError {
 
 /// The variables an expression renders against.
 ///
-/// A thin wrapper over `BTreeMap<String, serde_json::Value>` rather than a
-/// bare alias, so the render seam has one type to name and W3 has one place to
-/// build `{{ inputs.* }}` / `{{ outputs.* }}` / `{{ trigger.* }}` into.
-/// `BTreeMap`, not `HashMap`: iteration order is deterministic, which matters
-/// the moment an error message or a debug dump names the keys.
+/// A `Vec<(String, minijinja::Value)>` rather than a map, because **the order
+/// is part of the contract**: Kestra's variables are `LinkedHashMap`s and
+/// Jackson writes them in insertion order (`oracle/corpus.json`'s
+/// `map-key-order`), and every map type available here — `BTreeMap`,
+/// `serde_json::Map` without `preserve_order`, minijinja's own `ValueMap` —
+/// sorts. See [`OrderedMap`], which is the same decision one level down.
+///
+/// A named type rather than a bare alias so the render seam has one thing to
+/// name, and so W3 has one place to build `{{ inputs.* }}` / `{{ outputs.* }}`
+/// / `{{ trigger.* }}` into.
 ///
 /// W2 does not build an execution context — that is W3's job (see the crate
 /// doc). This type is the shape W3 will fill.
@@ -581,6 +586,14 @@ fn kestra_undefined_coalesce(_state: &State, left: MjValue, right: MjValue) -> M
 /// - **any other** right-hand type is `false` — `'b' isIn 'abc'` is `false`,
 ///   where minijinja's `in` does substring containment and says `true`.
 ///
+/// Two divergences are known, measured, and **deliberately left alone,
+/// because egret is the better of the two**: Kestra calls `Object::toString()`
+/// on every element with no null check, so `{{ 'a' isIn l }}` with
+/// `l = [null, "a"]` and `{{ 'v' isIn m }}` with `m = {"k": null}` both throw
+/// a `NullPointerException` in real Pebble, where egret answers `true` and
+/// `false`. Do not "fix" this into a panic to match: a port that reproduces
+/// an upstream NPE has turned a working answer into a crash.
+///
 /// All four rows are corpus entries (`isin`, `isin-number-in-strings`,
 /// `isin-map-value`, `isin-string-rhs`). The first agreed with minijinja's
 /// `in` by luck — same types on both sides, list right-hand — which is why the
@@ -617,20 +630,26 @@ fn kestra_is_in(_state: &State, left: MjValue, right: MjValue) -> Result<MjValue
         return Ok(MjValue::from(false));
     }
 
-    let needle = left.to_string();
+    // `kestra_to_string`, NOT `MjValue::to_string`. See that function: the
+    // `Display` impl is not routed through `env.set_formatter`, so using it
+    // here compares `"True"` against Kestra's `"true"` and silently flips
+    // the answer.
+    let needle = kestra_to_string(&left);
 
     match right.kind() {
         ValueKind::Seq | ValueKind::Iterable => {
             let mut items = right.try_iter()?;
-            Ok(MjValue::from(items.any(|item| item.to_string() == needle)))
+            Ok(MjValue::from(
+                items.any(|item| kestra_to_string(&item) == needle),
+            ))
         }
         ValueKind::Map => {
             for key in right.try_iter()? {
-                if key.to_string() == needle {
+                if kestra_to_string(&key) == needle {
                     return Ok(MjValue::from(true));
                 }
                 if let Ok(value) = right.get_item(&key) {
-                    if value.to_string() == needle {
+                    if kestra_to_string(&value) == needle {
                         return Ok(MjValue::from(true));
                     }
                 }
@@ -640,6 +659,45 @@ fn kestra_is_in(_state: &State, left: MjValue, right: MjValue) -> Result<MjValue
         // `InExpression`'s `default -> return false`. A string right-hand side
         // lands here, which is the row minijinja's `in` gets backwards.
         _ => Ok(MjValue::from(false)),
+    }
+}
+
+/// Java's `Object::toString()` for the values that reach an expression —
+/// **not** minijinja's `Display`.
+///
+/// `Display for Value` does not go through [`environment`]'s formatter, so
+/// everything [`json_writer_formatter`] fixes is undone by any code that
+/// reaches for `.to_string()`. Measured on minijinja 2.24:
+///
+/// | value | `Value::to_string()` | Java `toString()` |
+/// |---|---|---|
+/// | `true` | `True` | **`true`** |
+/// | `1e100` | `1000000…0.0` (101 digits) | **`1.0E100`** |
+///
+/// Not academic: `InExpression` compares **stringified** operands, so the
+/// wrong spelling silently flips the answer. No corpus entry caught it until
+/// `isin-bool-lowercase`, `isin-bool-uppercase`, `isin-float-scientific`,
+/// `isin-float-plain` and `isin-int` were added for exactly this. Anything
+/// that stringifies a value for comparison against Kestra's own must come
+/// through here.
+///
+/// A `none` becomes minijinja's `"none"`, not Java's `"null"` — but
+/// `InExpression` never reaches a stringification with a null operand (its
+/// first guard returns `false`), so the two engines cannot be made to
+/// disagree through this path. `isin-null-vs-none` pins that it is the guard,
+/// not the spelling, that answers.
+fn kestra_to_string(value: &MjValue) -> String {
+    match value.kind() {
+        ValueKind::Bool => (if value.is_true() { "true" } else { "false" }).to_string(),
+        ValueKind::Number if !value.is_integer() => match f64::try_from(value.clone()) {
+            Ok(f) => {
+                let mut buf = String::new();
+                write_java_double(&mut buf, f);
+                buf
+            }
+            Err(_) => value.to_string(),
+        },
+        _ => value.to_string(),
     }
 }
 
@@ -655,6 +713,11 @@ fn kestra_is_in(_state: &State, left: MjValue, right: MjValue) -> Result<MjValue
 /// | `null` | writes nothing (early `return`) | `None` | `""` |
 /// | `Map`/`Collection`/array | `MAPPER.writeValueAsString(o)` — compact JSON | `{"a": 1}` / `[1, 2]` (spaces) | compact JSON |
 /// | `Boolean` | `toString()` → `true`/`false` | `True`/`False` | `true`/`false` |
+///
+/// **This formatter is not the only place a value becomes text.** `Display for
+/// Value` bypasses it entirely, so anything that stringifies for comparison
+/// (`kestra_is_in`) must use [`kestra_to_string`] instead — see that function
+/// for the two spellings that flip an answer.
 /// | anything else | appended as-is | as-is | as-is |
 ///
 /// Three of the four differ from minijinja's default, and none of the three is
@@ -806,8 +869,15 @@ fn write_json_string(out: &mut String, s: &str) {
 /// what Java does.
 ///
 /// Rust's `{:e}` supplies the shortest round-tripping digits and the base-10
-/// exponent, which is the same digit sequence Java picks, so this only has to
-/// re-lay-out what that gives.
+/// exponent, and for every value in the normal range that is the same digit
+/// sequence Java picks, so this only has to re-lay-out what it gives.
+///
+/// **The digit sequences diverge at subnormals.** `5e-324` (the smallest
+/// positive double) is `4.9E-324` in Java and `5.0E-324` here: both round-trip
+/// to the same bit pattern, but Java's shortest-decimal algorithm and Rust's
+/// break the tie differently down there. No corpus entry reaches it and no
+/// plausible flow does; recorded so the claim above is not read as
+/// unconditional.
 fn write_java_double(out: &mut String, x: f64) {
     if x.is_nan() {
         out.push_str("NaN");
@@ -1346,6 +1416,38 @@ mod tests {
         assert_eq!(
             render("{{ 'a' isIn n }}", json!({ "n": null })).unwrap(),
             "false"
+        );
+        // **The assertion that makes the null guard falsifiable.** The two
+        // `['a']` cases above pass with the guard DELETED -- whatever a
+        // `none` stringifies to, it is not `"a"` -- so they were not the test
+        // they looked like. This needle IS what a `none` stringifies to:
+        // `Display for Value` gives `"None"`, capital N, measured (NOT
+        // `"none"`, which would leave this test just as unfalsifiable as the
+        // ones above). Kestra answers `false` here via `InExpression`'s null
+        // guard; unguarded egret answers `true`.
+        assert_eq!(
+            render("{{ n isIn ['None'] }}", json!({ "n": null })).unwrap(),
+            "false"
+        );
+
+        // Operands are stringified Kestra's way, not minijinja's. Without
+        // `kestra_to_string` a bool compares as `"True"` and a large float as
+        // its 101-digit plain form, and every one of these flips.
+        assert_eq!(
+            render("{{ b isIn ['true'] }}", json!({ "b": true })).unwrap(),
+            "true"
+        );
+        assert_eq!(
+            render("{{ b isIn ['True'] }}", json!({ "b": true })).unwrap(),
+            "false"
+        );
+        assert_eq!(
+            render_ordered("{{ f isIn ['1.0E100'] }}", r#"{"f": 1e100}"#).unwrap(),
+            "true"
+        );
+        assert_eq!(
+            render("{{ i isIn ['42'] }}", json!({ "i": 42 })).unwrap(),
+            "true"
         );
     }
 

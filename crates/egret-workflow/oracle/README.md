@@ -69,11 +69,21 @@ both are deliberate:
 - `tests/oracle.rs` **prints the marked ids with a count on every run**, pass
   or fail, alongside the eight shape-compared non-deterministic ones.
 
-13 entries carry it today: the four `*-mixed` comparisons (Pebble throws on a
-String/Number mix), the eight registered-but-null-backed functions, and
-`raw-multiline`. Note that marking an entry error-class does **not** make it
-pass: five of the 13 still mismatch, because egret *succeeds* where Kestra
-throws — which is a real divergence and stays visible.
+**The set is committed as `error-class.txt`** and asserted to equal the
+corpus's markers exactly, because error-class comparison is a *free pass*: such
+an entry matches on any failure at all, so it is born matching, never enters
+`baseline.txt`, and can never fail. A task that could not reproduce a filter
+could mark its entry error-class and turn the oracle green on work it did not
+do. Keeping the set in its own short file makes adding one a one-line,
+reviewable diff instead of a field edit buried in a 138-entry JSON file — the
+same discipline `baseline.txt` applies to mismatches.
+
+16 entries carry it today: the four `*-mixed` comparisons (Pebble throws on a
+String/Number mix), the eight registered-but-null-backed functions,
+`raw-multiline`, and the three `isin-*` entries where an absent variable
+raises. Note that marking an entry error-class does **not** make it pass: five
+of the 16 still mismatch, because egret *succeeds* where Kestra throws — which
+is a real divergence and stays visible.
 
 ## `baseline.txt` — the ratchet
 
@@ -96,7 +106,16 @@ a passing test**, so run it as
 cargo test -p egret-workflow --test oracle -- --nocapture
 ```
 
-to actually see the count and the exclusion lists. Without `--nocapture`, a
+**Run the whole target, not one test.** `--test oracle` carries five tests, and
+three of them guard the differential test rather than take part in it:
+`corpus_and_golden_describe_the_same_expressions` (the corpus and the golden
+file describe the same expressions), `error_class_entries_are_exactly_the_committed_allowlist`,
+and `a_panic_fails_even_when_the_ratchet_is_satisfied`. Filtering to
+`-- render_corpus_matches_golden` — the natural thing to type while iterating —
+**skips all three**, so the ratchet will happily pass against a corpus that has
+drifted out of sync with the golden file it is being checked against.
+
+`--nocapture` is what actually shows the count and the exclusion lists. Without `--nocapture`, a
 green run tells you nothing about how much of the corpus is still baselined.
 
 Both directions were verified by deliberate breakage before this was
@@ -511,6 +530,39 @@ into Task 4.
   Neither Rust's `{}` nor its `{:?}` produces that. Integers stay plain
   (`int-list`).
 
+## Stringification is a SECOND formatting path (W2 Task 3, fix round 3)
+
+`env.set_formatter` governs what a value looks like in **output**. It does not
+govern `Display for Value`, which is what `.to_string()` calls — so the
+boolean-casing and float-format fixes above are undone by any code that
+stringifies a value some other way. Measured on minijinja 2.24:
+
+| value | `Value::to_string()` | Java `toString()` |
+|---|---|---|
+| `true` | `True` | `true` |
+| `1e100` | `1000000…0.0` (101 digits) | `1.0E100` |
+| `none` | `None` | (never reached — see below) |
+
+`InExpression` compares **stringified** operands, so `kestra_is_in` was
+silently answering with minijinja's spellings:
+
+| id | expr | context | Kestra | egret before |
+|---|---|---|---|---|
+| `isin-bool-lowercase` | `{{ b isIn ['true'] }}` | `b=true` | `true` | **`false`** |
+| `isin-bool-uppercase` | `{{ b isIn ['True'] }}` | `b=true` | `false` | **`true`** |
+| `isin-float-scientific` | `{{ f isIn ['1.0E100'] }}` | `f=1e100` | `true` | **`false`** |
+
+No entry caught it, because none had a boolean or float `isIn` operand.
+`runners::env::kestra_to_string` is now the single place a value becomes text
+for comparison, and anything added later that compares against Kestra's own
+stringification must go through it.
+
+`isin-null-vs-none` is the entry that makes `InExpression`'s null guard
+falsifiable, and its needle is `'None'` **with a capital N** — measured, not
+assumed. `Value::from(()).to_string()` is `"None"`, so `['none']` would leave
+the test exactly as unfalsifiable as `['a']`: neither matches, guard or no
+guard.
+
 ## `isIn` and an ABSENT variable are two different questions (W2 Task 3, fix round 2)
 
 `InExpression`'s first guard is `leftValue == null || rightValue == null ->
@@ -545,7 +597,7 @@ function.** Implemented in Task 3's fix round: `rewrite` now emits
 `runners::env::kestra_is_in` reproduces all four rows. All four entries
 match.
 
-## Corpus (`corpus.json`, 122 entries)
+## Corpus (`corpus.json`, 138 entries)
 
 - **37 operator cases**, taken verbatim from the task brief plus several
   follow-up fixes: the `??`/`???` pair (5 entries covering null vs. absent on
@@ -601,7 +653,8 @@ match.
 - **2 test entries** for the one registered Pebble test (`json`): a
   true case and a false case, since a single-direction test proves nothing
   about the false branch.
-- **14 W2 Task 3 additions** (the corpus went 108 -> 122), covering the three
+- **30 W2 Task 3 additions** (the corpus went 108 -> 138 across three fix
+  rounds), covering the three
   controller addenda that could not be written before the oracle existed:
   5 `{% raw %}` entries (addendum A5, see "Raw tags" above), 5 operator
   entries for the three Pebble operators with no minijinja spelling at all

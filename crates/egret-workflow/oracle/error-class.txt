@@ -1,0 +1,47 @@
+# Every corpus entry compared by ERROR CLASS instead of by value.
+#
+# `compare: "error-class"` means tests/oracle.rs checks only that egret ALSO
+# fails, never what it says -- because the golden value is a Java exception
+# string no Rust port can reproduce byte for byte.
+#
+# It is also a FREE PASS: such an entry matches on any error at all, including
+# `unknown function`, so it is born matching, never enters oracle/baseline.txt,
+# and can never fail. A task that cannot reproduce a filter could mark its
+# entry error-class and the oracle would go green on work that was not done.
+#
+# So adding one is a deliberate, reviewable act: this file is asserted to equal
+# the set of markers in corpus.json EXACTLY, which makes a new error-class
+# entry a one-line diff here rather than a field edit buried in a 138-entry
+# JSON file. The same discipline oracle/baseline.txt applies to mismatches.
+#
+# One id per line. `#` starts a comment. Corpus order.
+
+# Pebble THROWS on a String/Number comparison; egret coerces. Still
+# mismatching -- error-class forgives the message, not the outcome.
+gt-mixed
+lt-mixed
+lte-mixed
+gte-mixed
+
+# Registered but null-backed standalone: Pebble reports "Function or Macro
+# [x] does not exist". These match today only because egret says "unknown
+# function" -- NOTHING IS PORTED. Task 8 must assert the refusal TEXT
+# separately; error-class by construction cannot.
+function-secret
+function-kv
+function-read
+function-fileuri
+function-filesize
+function-fileexists
+function-isfileempty
+function-http
+
+# Kestra's RAW_PATTERN has no DOTALL, so Pebble rejects the unknown tag.
+# egret's own raw tag handles it, so this still mismatches -- deliberate.
+raw-multiline
+
+# strictVariables(true): an ABSENT variable in an isIn raises, and is a
+# different state from a bound null. See runners::env::kestra_is_in.
+isin-undefined-left
+isin-undefined-right
+isin-missing-attr-left

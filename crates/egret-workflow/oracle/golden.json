@@ -517,7 +517,7 @@
   "id" : "function-now",
   "expr" : "{{ now() }}",
   "context" : { },
-  "result" : "2026-09-02T18:54:01.903950+07:00"
+  "result" : "2026-09-02T19:32:46.018152+07:00"
 }, {
   "id" : "function-fromjson",
   "expr" : "{{ fromJson(json=raw) }}",
@@ -568,7 +568,7 @@
   "context" : {
     "k" : "vWgkeuVCYm5x3qwIU19oyzGfKFRlzLPlisR3dsVwhvY="
   },
-  "result" : "Ejfsk57xy69tQzEWIycaEJlmQpp7DoD3SMmSb6z9QDDaDhuc5t/usg=="
+  "result" : "4yNBHqNq0Ndxpq/fdyXHFfKddt+vZRlPNudjhNJUD/UWp26okQ1frg=="
 }, {
   "id" : "function-decrypt",
   "expr" : "{{ decrypt(key=k, encrypted=e) }}",
@@ -602,17 +602,17 @@
   "id" : "function-uuid",
   "expr" : "{{ uuid() }}",
   "context" : { },
-  "result" : "01a061f8-0f64-76cd-a3b5-4dc0efe220e5"
+  "result" : "01a0621b-8616-7fa8-84b6-9c51ff4f202f"
 }, {
   "id" : "function-id",
   "expr" : "{{ id() }}",
   "context" : { },
-  "result" : "4LV44AO2JSYCvTtWc3ZsaA"
+  "result" : "L1qZ2UBh2I6ai67ZyuWnX"
 }, {
   "id" : "function-ksuid",
   "expr" : "{{ ksuid() }}",
   "context" : { },
-  "result" : "3IlrYDpXh0x0YxU6N8tW4jt6thU"
+  "result" : "3IlwGPy0meFoa5JrkmC0uNEzGY9"
 }, {
   "id" : "function-fromion",
   "expr" : "{{ fromIon(ion=i) }}",
@@ -632,12 +632,12 @@
   "id" : "function-randomint",
   "expr" : "{{ randomInt(lower=1, upper=10) }}",
   "context" : { },
-  "result" : "8"
+  "result" : "2"
 }, {
   "id" : "function-randomport",
   "expr" : "{{ randomPort() }}",
   "context" : { },
-  "result" : "58990"
+  "result" : "61492"
 }, {
   "id" : "function-fileexists",
   "expr" : "{{ fileExists(path='a/b.txt') }}",
@@ -658,7 +658,7 @@
   "id" : "function-nanoid",
   "expr" : "{{ nanoId() }}",
   "context" : { },
-  "result" : "ihmNyVnr3tIia15lC-54d"
+  "result" : "Qhs4cSZ6NSufFTBXEMS2m"
 }, {
   "id" : "function-taskswithstate",
   "expr" : "{{ tasksWithState(state='FAILED') }}",
@@ -959,4 +959,46 @@
     "ns" : [ 0, 1, -1, 1000000 ]
   },
   "result" : "[0,1,-1,1000000]"
+}, {
+  "id" : "isin-bool-lowercase",
+  "expr" : "{{ b isIn ['true'] }}",
+  "context" : {
+    "b" : true
+  },
+  "result" : "true"
+}, {
+  "id" : "isin-bool-uppercase",
+  "expr" : "{{ b isIn ['True'] }}",
+  "context" : {
+    "b" : true
+  },
+  "result" : "false"
+}, {
+  "id" : "isin-float-scientific",
+  "expr" : "{{ f isIn ['1.0E100'] }}",
+  "context" : {
+    "f" : 1.0E100
+  },
+  "result" : "true"
+}, {
+  "id" : "isin-float-plain",
+  "expr" : "{{ f isIn ['1.0'] }}",
+  "context" : {
+    "f" : 1.0
+  },
+  "result" : "true"
+}, {
+  "id" : "isin-int",
+  "expr" : "{{ i isIn ['42'] }}",
+  "context" : {
+    "i" : 42
+  },
+  "result" : "true"
+}, {
+  "id" : "isin-null-vs-none",
+  "expr" : "{{ n isIn ['None'] }}",
+  "context" : {
+    "n" : null
+  },
+  "result" : "false"
 } ]

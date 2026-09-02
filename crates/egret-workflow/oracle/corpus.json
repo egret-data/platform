@@ -140,5 +140,12 @@
   {"id": "float-scalar-small",     "expr": "{{ f }}",                                         "context": {"f": 1.0}},
   {"id": "float-scalar-huge",      "expr": "{{ f }}",                                         "context": {"f": 1e100}},
   {"id": "float-list",             "expr": "{{ fs }}",                                        "context": {"fs": [1.0, 0.1, 2.5, 1e100, 1e-7, 12345678.0, 0.001, 0.0001, 9999999.0, -1.5]}},
-  {"id": "int-list",               "expr": "{{ ns }}",                                        "context": {"ns": [0, 1, -1, 1000000]}}
+  {"id": "int-list",               "expr": "{{ ns }}",                                        "context": {"ns": [0, 1, -1, 1000000]}},
+
+  {"id": "isin-bool-lowercase",    "expr": "{{ b isIn ['true'] }}",                           "context": {"b": true}},
+  {"id": "isin-bool-uppercase",    "expr": "{{ b isIn ['True'] }}",                           "context": {"b": true}},
+  {"id": "isin-float-scientific",  "expr": "{{ f isIn ['1.0E100'] }}",                        "context": {"f": 1e100}},
+  {"id": "isin-float-plain",       "expr": "{{ f isIn ['1.0'] }}",                            "context": {"f": 1.0}},
+  {"id": "isin-int",               "expr": "{{ i isIn ['42'] }}",                             "context": {"i": 42}},
+  {"id": "isin-null-vs-none",      "expr": "{{ n isIn ['None'] }}",                           "context": {"n": null}}
 ]

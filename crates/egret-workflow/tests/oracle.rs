@@ -72,7 +72,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use egret_workflow::{render_str, RenderContext};
 use serde::Deserialize;
-use serde_json::Value;
 
 /// The eight corpus entries no implementation — Kestra's own included — can
 /// reproduce on a second run, and why. Committed as a list rather than
@@ -313,14 +312,34 @@ fn a_panicking_renderer_is_a_mismatch_in_every_mode() {
 /// the harness's output and is deliberately not compared to anything.
 #[test]
 fn corpus_and_golden_describe_the_same_expressions() {
-    #[derive(Debug, Deserialize, PartialEq)]
+    #[derive(Debug, Deserialize)]
     struct Described {
         id: String,
         expr: String,
+        /// **Not `serde_json::Map`.** `serde_json`'s `preserve_order` is on
+        /// workspace-wide (transitively, via `utoipa` and
+        /// `cedar-policy-core`), which makes that type an `IndexMap` — and
+        /// **`IndexMap`'s `PartialEq` is order-independent**. Comparing
+        /// contexts that way let a corpus entry's keys be REORDERED with no
+        /// regeneration and every test still pass, on `map-key-order`, whose
+        /// entire purpose is key order.
+        ///
+        /// [`RenderContext`] keeps document order and its `Display` writes it
+        /// back as ordered JSON, so comparing those strings is order-sensitive
+        /// by construction rather than by a property of whichever map type a
+        /// dependency's feature flags happen to select.
         #[serde(default)]
-        context: serde_json::Map<String, Value>,
+        context: RenderContext,
         #[serde(default)]
         compare: CompareMode,
+    }
+
+    impl Described {
+        /// Everything the harness copies through and the comparison depends
+        /// on, as one comparable, order-sensitive value.
+        fn comparable(&self) -> (&str, &str, String, CompareMode) {
+            (&self.id, &self.expr, self.context.to_string(), self.compare)
+        }
     }
 
     let corpus: Vec<Described> = serde_json::from_str(include_str!("../oracle/corpus.json"))
@@ -339,8 +358,12 @@ fn corpus_and_golden_describe_the_same_expressions() {
 
     let mut drifted = Vec::new();
     for (c, g) in corpus.iter().zip(golden.iter()) {
-        if c != g {
-            drifted.push(format!("  corpus: {c:?}\n  golden: {g:?}"));
+        if c.comparable() != g.comparable() {
+            drifted.push(format!(
+                "  corpus: {:?}\n  golden: {:?}",
+                c.comparable(),
+                g.comparable()
+            ));
         }
     }
     assert!(
@@ -350,6 +373,191 @@ fn corpus_and_golden_describe_the_same_expressions() {
         drifted.len(),
         drifted.join("\n")
     );
+}
+
+/// The committed set of ids allowed to be compared by error class.
+///
+/// Same shape as [`baseline`]: one id per line, `#` comments, blank lines
+/// ignored.
+fn error_class_allowlist() -> BTreeSet<String> {
+    include_str!("../oracle/error-class.txt")
+        .lines()
+        .map(|line| line.split('#').next().unwrap_or("").trim())
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// `compare: "error-class"` is a **free pass**, so adding one must be a
+/// deliberate, reviewable act rather than a field edit.
+///
+/// An error-class entry matches on any error at all — including egret's
+/// `unknown function` against Kestra's `PebbleException` — so it is born
+/// matching, never enters `oracle/baseline.txt`, and can never fail. Eleven
+/// entries match that way today and eight of them only because nothing is
+/// ported. A task that could not reproduce a filter could mark its entry
+/// error-class and turn the oracle green on work it did not do; nothing in
+/// the ratchet would notice, because the entry never reaches the ratchet.
+///
+/// `oracle/error-class.txt` is that set, committed. A new error-class entry is
+/// now a one-line diff in a 16-line file next to `baseline.txt`, instead of
+/// one field among 138 JSON objects — the same discipline the ratchet already
+/// applies to mismatches.
+#[test]
+fn error_class_entries_are_exactly_the_committed_allowlist() {
+    let golden: Vec<GoldenEntry> = serde_json::from_str(include_str!("../oracle/golden.json"))
+        .expect("oracle/golden.json must parse");
+
+    let marked: BTreeSet<String> = golden
+        .iter()
+        .filter(|e| e.compare == CompareMode::ErrorClass)
+        .map(|e| e.id.clone())
+        .collect();
+    let allowed = error_class_allowlist();
+
+    let added: Vec<&String> = marked.difference(&allowed).collect();
+    let removed: Vec<&String> = allowed.difference(&marked).collect();
+
+    assert!(
+        added.is_empty(),
+        "{} entr(y/ies) are marked \"compare\": \"error-class\" but are not in \
+         oracle/error-class.txt. Error-class comparison forgives ANY failure, so it can hide \
+         unported work -- add the id there deliberately, or use exact comparison: {added:?}",
+        added.len()
+    );
+    assert!(
+        removed.is_empty(),
+        "oracle/error-class.txt names {} id(s) that are no longer marked error-class in the \
+         corpus -- delete them: {removed:?}",
+        removed.len()
+    );
+}
+
+/// What one oracle run found wrong, before it is turned into a message.
+struct Findings<'a> {
+    /// Ids whose render panicked. **Not** covered by the baseline.
+    panics: &'a [String],
+    /// Baseline ids that are not in `golden.json` at all.
+    stale: &'a [&'a String],
+    /// Mismatching ids that are not in the baseline.
+    regressions: &'a [&'a String],
+    /// Baseline ids that now match and must be deleted from the file.
+    banked: &'a [&'a String],
+    /// Per-id expected/actual detail, for the ones that have it.
+    detail: &'a BTreeMap<String, String>,
+}
+
+/// Turns [`Findings`] into the failure message, or an empty string.
+///
+/// A pure function on purpose. The differential test's own assertion is
+/// `assert!(failures.is_empty())`, so **every** rule about what fails lives
+/// here and can be exercised without a renderer — in particular the rule that
+/// a panic fails outside the baseline, which is otherwise unreachable by any
+/// test: deleting that block leaves the whole suite green while restoring a
+/// silent exit-0 on a panic over any baselined entry.
+fn assemble_failures(f: &Findings<'_>) -> String {
+    let detail_for = |ids: &[&String]| {
+        ids.iter()
+            .filter_map(|id| f.detail.get(*id).map(String::as_str))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let mut failures = String::new();
+
+    // Unconditional, and NOT subject to the baseline. A baselined id means
+    // "egret does not reproduce this value yet"; it never means "egret may
+    // crash here". Without this, a panic on an already-baselined entry is
+    // reported in the printed summary and still exits 0 -- the same class of
+    // silence the `Outcome::Panic` variant was introduced to end.
+    if !f.panics.is_empty() {
+        failures.push_str(&format!(
+            "\nPANIC: the renderer panicked on {} entr(y/ies). A panic is never an acceptable \
+             outcome, baselined or not:\n{}\n",
+            f.panics.len(),
+            f.panics
+                .iter()
+                .filter_map(|id| f.detail.get(id).map(String::as_str))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+    }
+    if !f.stale.is_empty() {
+        failures.push_str(&format!(
+            "\noracle/baseline.txt names {} id(s) that are not in golden.json at all -- \
+             delete them: {:?}\n",
+            f.stale.len(),
+            f.stale
+        ));
+    }
+    if !f.regressions.is_empty() {
+        failures.push_str(&format!(
+            "\nREGRESSION: {} entr(y/ies) mismatch that were NOT in oracle/baseline.txt. \
+             Fix them, do not add them to the baseline:\n{}\n",
+            f.regressions.len(),
+            detail_for(f.regressions)
+        ));
+    }
+    if !f.banked.is_empty() {
+        failures.push_str(&format!(
+            "\nPROGRESS NOT BANKED: {} entr(y/ies) in oracle/baseline.txt now MATCH. \
+             Delete these lines from oracle/baseline.txt in the same commit that fixed \
+             them:\n  {}\n",
+            f.banked.len(),
+            f.banked
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join("\n  ")
+        ));
+    }
+
+    failures
+}
+
+/// **The rule that a panic fails OUTSIDE the ratchet**, which nothing else
+/// reaches.
+///
+/// `a_panicking_renderer_is_a_mismatch_in_every_mode` covers `entry_matches`
+/// — the *mode* half. This covers the other half: with no regressions, no
+/// stale lines and nothing banked (i.e. a run that is green by the ratchet's
+/// own reckoning, because every panicking id was already baselined), a panic
+/// must still produce a failure. Deleting the `panics` block in
+/// [`assemble_failures`] compiles cleanly and leaves every other test green;
+/// this is what dies.
+#[test]
+fn a_panic_fails_even_when_the_ratchet_is_satisfied() {
+    let panicked = vec!["gt-mixed".to_string()];
+    let mut detail = BTreeMap::new();
+    detail.insert("gt-mixed".to_string(), "  gt-mixed: PANIC(...)".to_string());
+
+    let ratchet_is_happy = Findings {
+        panics: &panicked,
+        stale: &[],
+        regressions: &[],
+        banked: &[],
+        detail: &detail,
+    };
+    let message = assemble_failures(&ratchet_is_happy);
+    assert!(
+        message.contains("PANIC"),
+        "a panic on a baselined id must fail the run; got: {message:?}"
+    );
+    assert!(
+        message.contains("gt-mixed"),
+        "the failure must name the entry; got: {message:?}"
+    );
+
+    // And the same findings without the panic are a pass, so the assertion
+    // above is about the panic and not about the function always complaining.
+    let clean = Findings {
+        panics: &[],
+        stale: &[],
+        regressions: &[],
+        banked: &[],
+        detail: &detail,
+    };
+    assert_eq!(assemble_failures(&clean), "");
 }
 
 /// The baseline: the ids that do not match yet.
@@ -486,56 +694,13 @@ fn render_corpus_matches_golden() {
     let regressions: Vec<&String> = mismatching.difference(&baseline).collect();
     let banked: Vec<&String> = baseline.difference(&mismatching).collect();
 
-    let mut failures = String::new();
-    // Unconditional, and NOT subject to the baseline. A baselined id means
-    // "egret does not reproduce this value yet"; it never means "egret may
-    // crash here". Without this, a panic on an already-baselined entry is
-    // reported in the printed summary and still exits 0 -- which is the same
-    // class of silence the [`Outcome::Panic`] variant was introduced to end.
-    if !panics.is_empty() {
-        failures.push_str(&format!(
-            "\nPANIC: the renderer panicked on {} entr(y/ies). A panic is never an acceptable \
-             outcome, baselined or not:\n{}\n",
-            panics.len(),
-            panics
-                .iter()
-                .map(|id| detail[id].as_str())
-                .collect::<Vec<_>>()
-                .join("\n")
-        ));
-    }
-    if !stale.is_empty() {
-        failures.push_str(&format!(
-            "\noracle/baseline.txt names {} id(s) that are not in golden.json at all -- \
-             delete them: {stale:?}\n",
-            stale.len()
-        ));
-    }
-    if !regressions.is_empty() {
-        failures.push_str(&format!(
-            "\nREGRESSION: {} entr(y/ies) mismatch that were NOT in oracle/baseline.txt. \
-             Fix them, do not add them to the baseline:\n{}\n",
-            regressions.len(),
-            regressions
-                .iter()
-                .map(|id| detail[*id].as_str())
-                .collect::<Vec<_>>()
-                .join("\n")
-        ));
-    }
-    if !banked.is_empty() {
-        failures.push_str(&format!(
-            "\nPROGRESS NOT BANKED: {} entr(y/ies) in oracle/baseline.txt now MATCH. \
-             Delete these lines from oracle/baseline.txt in the same commit that fixed \
-             them:\n  {}\n",
-            banked.len(),
-            banked
-                .iter()
-                .map(|s| s.as_str())
-                .collect::<Vec<_>>()
-                .join("\n  ")
-        ));
-    }
+    let failures = assemble_failures(&Findings {
+        panics: &panics,
+        stale: &stale,
+        regressions: &regressions,
+        banked: &banked,
+        detail: &detail,
+    });
 
     assert!(failures.is_empty(), "{failures}");
 }
